@@ -1,0 +1,27 @@
+<!doctype html>
+<!-- Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+     SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · intelligent-release-image-staging — Console</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="login-wrap">
+    <form class="login-card" id="login-form">
+      <h1>◈ intelligent-release-image-staging — Console</h1>
+      <p class="sub">Sign in to administer the fleet</p>
+      <label for="u">Username</label>
+      <input id="u" name="username" autocomplete="username" autofocus>
+      <label for="p">Password</label>
+      <input id="p" name="password" type="password" autocomplete="current-password">
+      <button class="btn" type="submit">Sign in</button>
+      <div class="err" id="err"></div>
+    </form>
+  </div>
+  <script src="/login.js"></script>
+</body>
+</html>

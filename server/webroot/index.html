@@ -1,0 +1,190 @@
+<!doctype html>
+<!-- Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+     SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>intelligent-release-image-staging — Console</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="top">
+    <span>◈ intelligent-release-image-staging <span class="tag">IRIS</span></span>
+    <span class="spacer"></span>
+    <span class="who" id="who"></span>
+    <button class="btn ghost" id="logout">Sign out</button>
+  </div>
+  <div class="stripe"></div>
+  <div class="shell">
+    <nav class="side">
+      <a href="#overview" class="nav" id="nav-overview">Overview</a>
+      <a href="#images" class="nav" id="nav-images">Images</a>
+      <a href="#devices" class="nav" id="nav-devices">Devices</a>
+      <a href="#swarm" class="nav" id="nav-swarm">Swarm</a>
+      <div class="nav-group">System</div>
+      <a href="#settings" class="nav sub" id="nav-settings">Settings</a>
+      <a href="#monitoring" class="nav sub" id="nav-monitoring">Monitoring</a>
+    </nav>
+    <main class="main">
+      <section id="view-overview" hidden>
+        <h2>Fleet Overview</h2>
+        <div class="cards" id="ov-cards"></div>
+        <h3>Rollout</h3>
+        <table class="tbl" id="ov-rollout">
+          <thead><tr><th>Image</th><th>Assigned</th><th>Staged</th><th>Progress</th></tr></thead>
+          <tbody id="ov-rows"></tbody>
+        </table>
+      </section>
+      <section id="view-images" hidden>
+        <h2>Images</h2>
+        <div class="upload" id="drop">
+          <input type="file" id="file" accept=".bin,.SPA.bin" hidden>
+          <p><button class="btn" id="pick">Choose a file</button> or drag an image here</p>
+          <div class="progress" id="prog" hidden><div class="bar" id="bar"></div></div>
+          <p class="muted" id="status"></p>
+        </div>
+        <table class="tbl" id="images">
+          <thead><tr><th>Image ID</th><th>File</th><th>Size</th><th>SHA-256</th><th>Published</th><th></th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </section>
+      <section id="view-devices" hidden>
+        <h2>Devices</h2>
+        <div class="toolbar">
+          <button class="btn" id="add-dev">+ Add device</button>
+          <button class="btn ghost" id="import-csv">Import CSV</button>
+          <input type="file" id="csv-file" accept=".csv" hidden>
+          <button class="btn ghost" id="export-csv">Export CSV</button>
+          <button class="btn ghost" id="example-csv">Example CSV</button>
+          <button class="btn ghost" id="manage-creds">Credentials</button>
+          <button class="btn" id="onboard-selected">Onboard selected</button>
+          <button class="btn ghost" id="undeploy-selected">Undeploy selected</button>
+          <span class="muted" id="dev-status"></span>
+        </div>
+        <form class="inline-form" id="dev-form" hidden>
+          <input id="df-id" placeholder="Device ID / IP">
+          <input id="df-ip" placeholder="Management IP">
+          <input id="df-vlan" placeholder="VLAN" value="666">
+          <input id="df-svi" placeholder="SVI IP">
+          <input id="df-mask" placeholder="SVI mask" value="255.255.255.252">
+          <input id="df-guest" placeholder="Guest IP">
+          <input id="df-model" placeholder="model (e.g. C9300-48UXM / IE-3400) — optional, auto-detected on onboard">
+          <select id="df-cred"><option value="">— no credential —</option></select>
+          <button class="btn" type="submit">Save device</button>
+          <button class="btn ghost" type="button" id="df-cancel">Cancel</button>
+          <span class="err" id="df-err"></span>
+        </form>
+        <div class="inline-form" id="cred-panel" hidden>
+          <table class="tbl"><tbody id="cred-rows"></tbody></table>
+          <form id="cred-form">
+            <input id="cf-id" placeholder="Profile id (e.g. lab-switches)">
+            <input id="cf-name" placeholder="Display name">
+            <input id="cf-user" placeholder="Device username" value="admin">
+            <input id="cf-pass" type="password" placeholder="Device password" autocomplete="new-password">
+            <input id="cf-pass2" type="password" placeholder="Confirm password" autocomplete="new-password">
+            <input id="cf-en" type="password" placeholder="Enable secret (blank = same)" autocomplete="new-password">
+            <button class="btn" type="submit">Save profile</button>
+            <button class="btn ghost" type="button" id="cf-close">Close</button>
+            <span class="err" id="cf-err"></span>
+          </form>
+        </div>
+        <table class="tbl" id="devices">
+          <thead><tr><th><input type="checkbox" id="mark-all"></th><th>Device</th><th>IP</th><th>Model</th><th>VLAN/SVI</th><th>Credential</th><th>Assigned image</th><th>Status</th><th></th></tr></thead>
+          <tbody id="dev-rows"></tbody>
+        </table>
+        <div id="batch-panel" hidden>
+          <h3>Onboarding batch <span id="batch-summary" class="muted"></span></h3>
+          <table class="tbl">
+            <thead><tr><th>Device</th><th>State</th><th>Duration</th><th>Last output</th><th></th></tr></thead>
+            <tbody id="batch-rows"></tbody>
+          </table>
+          <button class="btn ghost" id="batch-cancel">Cancel queued</button>
+          <button class="btn ghost" id="batch-close">Close</button>
+        </div>
+        <div id="onboard-panel" hidden>
+          <h3>Onboarding <span id="onboard-dev" class="muted"></span></h3>
+          <pre class="log" id="onboard-log"></pre>
+          <button class="btn ghost" id="onboard-close">Close</button>
+        </div>
+      </section>
+      <section id="view-swarm" hidden>
+        <h2>Swarm</h2>
+        <p class="muted" id="swarm-summary"></p>
+        <iframe id="swarm-frame" class="swarm-frame" title="Live swarm map"></iframe>
+        <p><a class="btn" id="swarm-open" target="_blank" rel="noopener">Open the swarm map full-screen ↗</a></p>
+      </section>
+      <section id="view-settings" hidden>
+        <h2>Settings</h2>
+        <h3>Server &amp; build</h3>
+        <table class="tbl" id="settings-info"><tbody></tbody></table>
+        <h3>Change admin password</h3>
+        <form class="inline-form" id="pw-form">
+          <input id="pw-cur" type="password" placeholder="Current password" autocomplete="current-password">
+          <input id="pw-new" type="password" placeholder="New password (min 8)" autocomplete="new-password">
+          <input id="pw-confirm" type="password" placeholder="Confirm new password" autocomplete="new-password">
+          <button class="btn" type="submit">Change password</button>
+          <span class="err" id="pw-msg"></span>
+        </form>
+        <h3>Stage host (Docker onboarding)</h3>
+        <p class="muted" id="sh-status"></p>
+        <form class="inline-form" id="sh-form">
+          <input id="sh-user" placeholder="Stage host username" autocomplete="username">
+          <input id="sh-pass" type="password" placeholder="Stage host password" autocomplete="new-password">
+          <input id="sh-pass2" type="password" placeholder="Confirm password" autocomplete="new-password">
+          <button class="btn" type="submit">Save</button>
+          <button class="btn ghost" type="button" id="sh-clear">Clear</button>
+          <span class="err" id="sh-msg"></span>
+        </form>
+        <h3>Sessions</h3>
+        <p class="muted" id="sessions-info"></p>
+        <p>
+          <button class="btn ghost" id="revoke-others">Sign out other sessions</button>
+          <span class="muted" id="revoke-msg"></span>
+        </p>
+      </section>
+      <section id="view-monitoring" hidden>
+        <h2>Monitoring</h2>
+        <h3>Audit trail (90-day circular)</h3>
+        <div class="toolbar">
+          <select id="audit-category">
+            <option value="">All categories</option>
+            <option value="auth">auth</option>
+            <option value="device">device</option>
+            <option value="image">image</option>
+            <option value="onboard">onboard</option>
+            <option value="settings">settings</option>
+            <option value="telemetry">telemetry</option>
+            <option value="token">token</option>
+          </select>
+          <button class="btn ghost" id="audit-refresh">Refresh</button>
+        </div>
+        <div id="audit-timeline">
+          <div class="toolbar" id="audit-range-chips">
+            <button class="chip active" data-range="24h">24h</button>
+            <button class="chip" data-range="7d">7d</button>
+            <button class="chip" data-range="30d">30d</button>
+            <button class="chip" data-range="90d">90d</button>
+            <button class="chip" data-range="all">All</button>
+          </div>
+          <svg id="audit-histogram" viewBox="0 0 600 64" preserveAspectRatio="none">
+            <g id="audit-bars"></g>
+            <g id="audit-brush"></g>
+          </svg>
+          <p class="muted">
+            <span id="audit-window-label"></span>
+            <button class="linkish" id="audit-clear-selection" hidden>× clear</button>
+          </p>
+        </div>
+        <table class="tbl" id="audit-tbl">
+          <thead><tr><th>Time</th><th>Actor</th><th>Message</th><th>Result</th></tr></thead>
+          <tbody id="audit-rows"></tbody>
+        </table>
+        <p><button class="btn ghost" id="audit-load-older">Load older</button></p>
+      </section>
+    </main>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

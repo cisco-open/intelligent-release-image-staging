@@ -1,0 +1,32 @@
+[Unit]
+Description=intelligent-release-image-staging (IRIS) — aria2c seeder
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=iris
+Group=iris
+Environment=IRIS_ROOT=/opt/iris
+Environment=IRIS_STATE=/var/lib/iris
+Environment=IRIS_CONFIG=/etc/iris
+Environment=IRIS_RUN=/run/iris
+Environment=IRIS_LOG=/var/log/iris
+Environment=IMAGES_DIR=/opt/images/iosxe/c9300
+Environment=IRIS_RPC_SECRET_FILE=/run/iris/rpc-secret
+# Decrypt the *.age ciphertext to the tmpfs RuntimeDirectory before the
+# seeder starts, so aria2c gets the real rpc-secret (not an empty one).
+RuntimeDirectory=iris
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+ExecStartPre=/opt/iris/server/iris-secretfs
+ExecStart=/opt/iris/server/seed-launch.sh
+Restart=on-failure
+RestartSec=5
+ProtectSystem=strict
+ReadWritePaths=/var/lib/iris /var/log/iris /run/iris
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""Assign images to devices (sets the catalog policy the devices poll).
+
+Usage:
+  iris-assign                          show published images + current assignments
+  iris-assign <device_id> <image_id>   assign; the device picks it up within ~60s
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import catalog  # noqa: E402
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    store = catalog.CatalogStore(os.environ.get("IRIS_STATE", "/var/lib/iris"))
+
+    if not argv:
+        print("published images:")
+        images = store.list_images()
+        for i in images:
+            print("  %-40s sha256 %s..." % (i["id"], i["sha256"][:12]))
+        if not images:
+            print("  (none — publish one with iris-publish)")
+        print("assignments:")
+        policies = store.list_policies()
+        for sid in sorted(policies):
+            print("  %-20s -> %s" % (sid, policies[sid].get("approved_image_id")))
+        if not policies:
+            print("  (none)")
+        return 0
+
+    if len(argv) != 2:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+
+    device_id, image_id = argv
+    if store.get_image(image_id) is None:
+        published = ", ".join(i["id"] for i in store.list_images()) or "(none)"
+        print("error: image '%s' is not published. Published: %s"
+              % (image_id, published), file=sys.stderr)
+        return 1
+    store.set_policy(device_id, approved_image_id=image_id)
+    print("assigned %s -> %s  (the device picks it up within ~60s; if it had a "
+          "different image, it cleans that up first)" % (device_id, image_id))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

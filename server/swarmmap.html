@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<!-- IRIS Swarm Map — self-contained live swarm visualizer. Served by the IRIS
+     tracker telemetry server at /swarmmap; polls /swarm (same origin) for live
+     per-peer state. No external dependencies (works air-gapped). Default view is
+     ALL images at once (every device across every torrent); the selector filters
+     to a single image. The server seeder is the central hub, deduped out of the
+     peer ring. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>intelligent-release-image-staging — Swarm Map</title>
+<style>
+  :root{
+    --bg:#0b0f17; --bg2:#111726; --panel:#151c2c; --line:#243049;
+    --txt:#e7ecf5; --muted:#8a96ad; --accent:#4ea1ff; --seed:#ffcf4d;
+    --leech:#46d0a0; --warn:#ff6b6b; --glow:#1b2a44;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:radial-gradient(1200px 800px at 70% -10%,#16223b 0%,var(--bg) 55%);
+    color:var(--txt);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  header{display:flex;align-items:center;gap:18px;padding:14px 22px;border-bottom:1px solid var(--line);
+    background:rgba(10,14,22,.6);backdrop-filter:blur(8px);position:sticky;top:0;z-index:5}
+  .brand{display:flex;flex-direction:column;gap:2px}
+  .brand h1{margin:0;font-size:17px;letter-spacing:.4px}
+  .brand .sub{color:var(--muted);font-size:12px}
+  .live{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted)}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--leech);box-shadow:0 0 0 0 rgba(70,208,160,.6);
+    animation:pulse 1.8s infinite}
+  .dot.down{background:var(--warn);animation:none}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(70,208,160,.5)}70%{box-shadow:0 0 0 9px rgba(70,208,160,0)}100%{box-shadow:0 0 0 0 rgba(70,208,160,0)}}
+  .spacer{flex:1}
+  .stats{display:flex;gap:10px;flex-wrap:wrap}
+  .chip{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:7px 12px;min-width:74px}
+  .chip .k{color:var(--muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.6px}
+  .chip .v{font-size:16px;font-weight:600;font-variant-numeric:tabular-nums}
+  select,button{background:var(--panel);color:var(--txt);border:1px solid var(--line);border-radius:8px;
+    padding:7px 10px;font-size:13px;cursor:pointer}
+  button:hover,select:hover{border-color:var(--accent)}
+  #wrap{position:relative;height:calc(100% - 64px)}
+  svg{width:100%;height:100%;display:block}
+  .edge{stroke:var(--line);stroke-width:1.4;fill:none;opacity:.55}
+  .edge.active{stroke:var(--accent);stroke-width:2;opacity:.9;stroke-dasharray:5 7;animation:flow 1s linear infinite}
+  .edge.up{stroke:var(--leech);stroke-width:1.8;opacity:.9;stroke-dasharray:4 7;animation:flow .9s linear infinite}
+  .serve-pulse{fill:none;stroke:var(--leech);stroke-width:2.5;transform-box:fill-box;transform-origin:center;animation:serve 1.7s ease-out infinite}
+  @keyframes flow{to{stroke-dashoffset:-24}}
+  @keyframes serve{0%{transform:scale(.62);opacity:.7}100%{transform:scale(1.55);opacity:0}}
+  .node{cursor:pointer}
+  .node:hover .ring-bg{stroke:#33415e}
+  .node .label{fill:var(--txt);font-size:11px;text-anchor:middle;font-variant-numeric:tabular-nums}
+  .node .pct{fill:var(--muted);font-size:9.5px;text-anchor:middle}
+  .hub-label{fill:var(--seed);font-size:12px;font-weight:600;text-anchor:middle}
+  .legend{position:absolute;left:18px;bottom:16px;background:rgba(17,23,38,.8);border:1px solid var(--line);
+    border-radius:10px;padding:10px 13px;font-size:12px;color:var(--muted);display:flex;gap:16px;flex-wrap:wrap;max-width:60%}
+  .legend i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:-1px}
+  #tip{position:absolute;pointer-events:none;background:rgba(8,12,20,.96);border:1px solid var(--line);
+    border-radius:8px;padding:8px 10px;font-size:12px;opacity:0;transition:opacity .12s;max-width:240px;z-index:8}
+  #tip .ip{font-weight:600;color:var(--txt)}
+  #tip .row{color:var(--muted);display:flex;justify-content:space-between;gap:14px}
+  #empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);
+    flex-direction:column;gap:8px;text-align:center}
+  /* detail drawer */
+  #drawer{position:absolute;top:0;right:0;height:100%;width:440px;max-width:92vw;
+    background:linear-gradient(180deg,#10172700,#101727),
+    var(--panel);border-left:1px solid var(--line);transform:translateX(100%);transition:transform .28s cubic-bezier(.2,.7,.2,1);
+    z-index:9;padding:18px 22px;overflow:auto}
+  #drawer.open{transform:translateX(0)}
+  #drawer h2{margin:2px 0 2px;font-size:16px;display:flex;align-items:center;gap:9px}
+  #drawer .role{font-size:11px;padding:3px 8px;border-radius:20px;border:1px solid var(--line)}
+  #drawer .close{position:absolute;top:14px;right:14px;border:none;background:none;color:var(--muted);font-size:20px;padding:0;cursor:pointer}
+  #drawer .big{font-size:30px;font-weight:700;margin:14px 0 2px;font-variant-numeric:tabular-nums}
+  #drawer .bar{height:9px;border-radius:6px;background:#222c44;overflow:hidden;margin:8px 0 18px}
+  #drawer .bar > i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--leech))}
+  #drawer dl{display:grid;grid-template-columns:auto 1fr;gap:8px 14px;margin:0 0 18px}
+  #drawer dt{color:var(--muted)}
+  #drawer dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
+  #drawer table.reptbl{width:100%;border-collapse:collapse;font-size:12px;margin:4px 0 14px}
+  #drawer table.reptbl th{color:var(--muted);text-align:left;font-weight:500;padding:3px 4px;border-bottom:1px solid var(--line)}
+  #drawer table.reptbl td{padding:4px;border-bottom:1px solid var(--glow);font-variant-numeric:tabular-nums}
+  #drawer a.btn{display:block;text-align:center;text-decoration:none;color:var(--txt);background:#1c2740;
+    border:1px solid var(--line);border-radius:9px;padding:10px;margin-top:6px}
+  #drawer a.btn:hover{border-color:var(--accent)}
+  .err{position:absolute;top:10px;left:50%;transform:translateX(-50%);background:rgba(120,30,30,.9);
+    border:1px solid var(--warn);padding:6px 12px;border-radius:8px;font-size:12px;opacity:0;transition:opacity .2s}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <h1>intelligent-release-image-staging — Swarm Map</h1>
+    <div class="sub">live image-distribution swarm · double-click a peer for detail</div>
+  </div>
+  <div class="live"><span class="dot" id="livedot"></span><span id="livetxt">connecting…</span></div>
+  <div class="spacer"></div>
+  <select id="imgsel" title="image"></select>
+  <div class="stats" id="stats"></div>
+  <button id="pause" title="pause/resume live updates">⏸ pause</button>
+</header>
+<div id="wrap">
+  <svg id="svg" viewBox="0 0 1000 720" preserveAspectRatio="xMidYMid meet"></svg>
+  <div id="empty">⌛<div>waiting for peers to join the swarm…</div></div>
+  <div class="legend" id="legend"></div>
+  <div id="tip"></div>
+  <div class="err" id="err"></div>
+  <aside id="drawer"></aside>
+</div>
+<script>
+const SVGNS="http://www.w3.org/2000/svg";
+// Injected by the console (gui_server GET /swarmmap) — swarmUrl + pull flag.
+// The bare file keeps read-only defaults and never calls /api/*.
+window.IRIS_MAP_CFG = null;
+const MAP = window.IRIS_MAP_CFG || {swarmUrl: "/swarm", pull: false};
+const CFG={lokiUID:"P8E80F9AEF21F6940",grafanaPort:3000};
+// Console mode only: CSRF for the pull POST comes from the same session-info
+// bootstrap the console shell (app.js) uses — never from the injected CFG.
+let CSRF=null;
+if(MAP.pull){
+  fetch("/api/session").then(r=>r.ok?r.json():null)
+    .then(j=>{CSRF=(j&&j.csrf)||null;}).catch(()=>{});
+}
+// stable per-image palette for the "All images" view (color === which torrent)
+const IMG_PALETTE=["#4ea1ff","#ffcf4d","#46d0a0","#c792ea","#ff8f6b","#7ee787","#f78fb3","#56d4dd","#b0bec5"];
+const svg=document.getElementById("svg"), tip=document.getElementById("tip"),
+      drawer=document.getElementById("drawer"), errEl=document.getElementById("err"),
+      legendEl=document.getElementById("legend");
+let DATA=null, curHash="all", paused=false, selPeer=null;
+let selDev=null, pullReq=null;   // open drawer's device_id + pull-request state
+let selTeleOff=false;   // open drawer's peer has telemetry_enabled===false (#13)
+
+function el(tag,attrs={},parent){const e=document.createElementNS(SVGNS,tag);
+  for(const k in attrs)e.setAttribute(k,attrs[k]);if(parent)parent.appendChild(e);return e;}
+function fmtBytes(n){if(n==null)return "—";const u=["B","KB","MB","GB","TB"];let i=0;n=+n;
+  while(n>=1024&&i<u.length-1){n/=1024;i++;}return n.toFixed(n<10&&i>0?1:0)+" "+u[i];}
+function fmtBps(n){return fmtBytes(n)+"/s";}
+function ago(sec){if(sec==null)return "—";sec=Math.max(0,Math.round(sec));
+  return sec<60?sec+"s ago":Math.round(sec/60)+"m ago";}
+function fmtDur(sec){if(sec==null)return "—";sec=Math.max(0,Math.round(sec));
+  if(sec<60)return sec+"s";const m=Math.floor(sec/60),s=sec%60;
+  if(m<60)return m+"m "+(s?s+"s":"00s");
+  const h=Math.floor(m/60),mm=m%60;return h+"h "+(mm<10?"0":"")+mm+"m";}
+function downloadSeconds(p, now){
+  if(p==null||p.joined_at==null)return null;
+  if(p.completed_at!=null)return p.completed_at - p.joined_at;
+  return now - p.joined_at;}
+// Escape device-supplied strings before inserting into innerHTML so that a
+// malicious model/image/ip value cannot inject script or markup.
+function escapeHtml(s){
+  return String(s==null?"":s).replace(/[&<>"']/g,c=>(
+    {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
+
+// Lead a peer's identity with its CONSOLE device IP (device_id, resolved
+// server-side by the heartbeat swarm_ip join) rather than its raw announce/
+// guest IP (p.ip). Falls back to p.ip when there's no device identity (e.g. the
+// hub/server, or a peer with no heartbeat yet). Used by the ring node label,
+// the tooltip, and the drawer title so operators read one consistent identity.
+function peerLabel(p){return (p&&(p.device_id||p.ip))||"";}
+// The announce/guest IP, shown as a secondary detail — but only when it differs
+// from the leading console IP (no point echoing the same value twice).
+function peerAnnounceSub(p){
+  if(!p||!p.device_id||p.device_id===p.ip)return "";
+  return p.ip||"";}
+
+// the server's own IP (the seeder/hub) — deduped out of the peer ring.
+function serverIP(){return (DATA&&DATA.host)||location.hostname;}
+// stable info_hash -> color (palette index by image order)
+function imageColorMap(){const m={};((DATA&&DATA.images)||[]).forEach((im,i)=>{
+  m[im.info_hash]=IMG_PALETTE[i%IMG_PALETTE.length];});return m;}
+
+// The selected view: all images merged, or one image. Peers are annotated with
+// their image (_img/_hash/_total) so tooltip/drawer/color work uniformly, and the
+// server hub IP is filtered out (it's drawn as the central hub, never a node).
+// One node per ip: a device that re-announced with a fresh key (e.g. right
+// after a re-onboard, while its stale entry awaits the tracker prune) or that
+// carries several images must not render as duplicate icons. Keep the entry
+// with a resolved device_id (heartbeat-known) over an anonymous one, then the
+// one with the most progress.
+function dedupePeers(list){
+  const by={},order=[];
+  list.forEach(p=>{
+    const k=p.ip;
+    if(!(k in by)){by[k]=p;order.push(k);return;}
+    const cur=by[k];
+    if((p.device_id&&!cur.device_id)||
+       (!!p.device_id===!!cur.device_id&&(p.progress||0)>(cur.progress||0)))by[k]=p;
+  });
+  return order.map(k=>by[k]);
+}
+
+function currentView(){
+  const imgs=(DATA&&DATA.images)||[];
+  const host=serverIP();
+  const annotate=im=>im.peers.filter(p=>p.ip!==host)
+    .map(p=>({...p,_img:im.image,_hash:im.info_hash,_total:im.total_bytes}));
+  if(curHash!=="all" && imgs.find(i=>i.info_hash===curHash)){
+    const im=imgs.find(i=>i.info_hash===curHash);
+    return {all:false,label:im.image,hash:im.info_hash,peers:dedupePeers(annotate(im)),images:[im]};
+  }
+  // default: all images, peers grouped by image (sorted) so colors cluster
+  let peers=[]; imgs.forEach(im=>{peers=peers.concat(annotate(im));});
+  peers.sort((a,b)=>a._hash<b._hash?-1:a._hash>b._hash?1:0);
+  return {all:true,label:"All images",hash:"all",peers:dedupePeers(peers),images:imgs};
+}
+
+function color(p,allView,cmap){
+  if(allView)return cmap[p._hash]||"var(--accent)";
+  if(p.is_seeder)return "var(--seed)";
+  if(p.progress!=null&&p.progress>=1)return "var(--leech)"; return "var(--accent)";}
+
+async function poll(){
+  try{
+    const r=await fetch(MAP.swarmUrl,{cache:"no-store"});
+    DATA=await r.json(); errEl.style.opacity=0;
+    document.getElementById("livedot").classList.toggle("down",!(DATA.seeder&&DATA.seeder.rpc_up));
+    document.getElementById("livetxt").textContent=(DATA.seeder&&DATA.seeder.rpc_up)?"live":"seeder RPC down";
+    render();
+    refreshDrawerReport();
+  }catch(e){ errEl.textContent="cannot reach /swarm — "+e; errEl.style.opacity=1; }
+}
+
+function syncSelector(){
+  const sel=document.getElementById("imgsel");
+  const imgs=(DATA&&DATA.images)||[];
+  // always show the selector when there's at least one image (so "All" + per-image
+  // are reachable); hide only when there are none.
+  sel.style.display=imgs.length?"":"none";
+  const want="all|"+imgs.map(i=>i.info_hash).join("|");
+  if(sel.dataset.k!==want){sel.dataset.k=want;sel.innerHTML="";
+    const tot=imgs.reduce((n,i)=>n+i.peers.length,0);
+    const oAll=document.createElement("option");oAll.value="all";
+    oAll.textContent="All images ("+tot+" peers)";sel.appendChild(oAll);
+    imgs.forEach(i=>{const o=document.createElement("option");o.value=i.info_hash;
+      o.textContent=i.image+"  ("+i.peers.length+" peers)";sel.appendChild(o);});}
+  if(!imgs.find(i=>i.info_hash===curHash))curHash="all";   // selected image gone -> All
+  sel.value=curHash;
+}
+
+function renderStats(view){
+  const s=(DATA&&DATA.seeder)||{};
+  const seeders=view.peers.filter(p=>p.is_seeder).length;
+  const downloading=view.peers.filter(p=>!p.is_seeder).length;
+  const torrents=view.all?((DATA&&DATA.images)||[]).length:1;
+  const cells=[["devices",view.peers.length],["seeders",seeders],["downloading",downloading],
+    ["serve rate",fmtBps(s.upload_bps||0)],["torrents",torrents]];
+  document.getElementById("stats").innerHTML=cells.map(c=>
+    `<div class="chip"><div class="k">${c[0]}</div><div class="v">${c[1]}</div></div>`).join("");
+}
+
+function renderLegend(view,cmap){
+  if(view.all){
+    const imgs=(DATA&&DATA.images)||[];
+    legendEl.innerHTML=`<span><i style="background:var(--seed)"></i>centre = seed server${DATA.host?" ("+escapeHtml(DATA.host)+")":""}</span>`+
+      imgs.map(im=>
+      `<span><i style="background:${cmap[im.info_hash]}"></i>${escapeHtml(im.image)} `+
+      `<span style="color:var(--muted)">(${im.peers.filter(p=>p.ip!==serverIP()).length})</span></span>`
+    ).join("")+`<span><i style="background:var(--leech)"></i>server &#8594; device upload</span>`;
+  }else{
+    legendEl.innerHTML=
+      `<span><i style="background:var(--seed)"></i>seeder / source</span>`+
+      `<span><i style="background:var(--accent)"></i>downloading</span>`+
+      `<span><i style="background:var(--leech)"></i>server &#8594; device upload (with rate)</span>`;
+  }
+}
+
+function render(){
+  syncSelector();
+  const view=currentView();
+  renderStats(view); renderLegend(view, imageColorMap());
+  while(svg.firstChild)svg.removeChild(svg.firstChild);
+  const peers=view.peers.slice();
+  document.getElementById("empty").style.display=peers.length?"none":"flex";
+  if(!peers.length)return;
+  const cmap=imageColorMap();
+  const W=1000,H=720,cx=W/2,cy=H/2;
+  const R=Math.min(W,H)/2 - 120;
+  const pos=peers.map((_,i)=>{const a=-Math.PI/2+2*Math.PI*i/peers.length;
+    return {x:cx+R*Math.cos(a), y:cy+R*Math.sin(a)};});
+  const defs=el("defs",{},svg);
+  const g=el("radialGradient",{id:"hubg"},defs);
+  el("stop",{offset:"0%","stop-color":"#ffe7a0"},g);el("stop",{offset:"100%","stop-color":"#caa02e"},g);
+  const mk=el("marker",{id:"flow",viewBox:"0 0 10 10",refX:9,refY:5,
+    markerWidth:7,markerHeight:7,orient:"auto"},defs);
+  el("path",{d:"M0,0 L10,5 L0,10 z",fill:"var(--leech)"},mk);
+
+  // edges: server hub -> each device (animated + rate-labelled when serving)
+  let serverServing=false;
+  peers.forEach((p,i)=>{
+    const ub=p.server_up_bps||0;
+    if(ub>0){
+      serverServing=true;
+      const w=Math.max(2.5,Math.min(8,2+Math.log2(1+ub/50000)));
+      const dx=pos[i].x-cx, dy=pos[i].y-cy, d=Math.hypot(dx,dy)||1;
+      const ex=pos[i].x-(dx/d)*34, ey=pos[i].y-(dy/d)*34;
+      el("line",{x1:cx,y1:cy,x2:ex,y2:ey,class:"edge up","stroke-width":w,"marker-end":"url(#flow)"},svg);
+      const mx=cx+(pos[i].x-cx)*0.5, my=cy+(pos[i].y-cy)*0.5;
+      el("text",{x:mx,y:my,"text-anchor":"middle","font-size":11,fill:"var(--leech)",
+        style:"paint-order:stroke;stroke:#0b0f17;stroke-width:3px"},svg).textContent=fmtBps(ub);
+    } else {
+      el("line",{x1:cx,y1:cy,x2:pos[i].x,y2:pos[i].y,class:"edge"},svg);
+    }
+  });
+
+  // hub = the SEED SERVER (origin). Deduped out of the peer ring (it's the
+  // source, not a leecher) and shown here as the centre — identified by its IP
+  // and hoverable/clickable for its seeder stats, so it's unmistakably the
+  // server, not a generic blob.
+  const hub=el("g",{class:"node"},svg);
+  hub.style.cursor="pointer";
+  el("circle",{cx,cy,r:40,fill:"url(#hubg)","fill-opacity":.18,stroke:"var(--seed)","stroke-width":2},hub);
+  if(serverServing) el("circle",{cx,cy,r:33,class:"serve-pulse"},hub);
+  el("circle",{cx,cy,r:26,fill:"url(#hubg)"},hub);
+  el("text",{x:cx,y:cy+5,class:"hub-label",style:"fill:#1a1306"},hub).textContent="SEED";
+  el("text",{x:cx,y:cy+56,class:"hub-label"},hub).textContent=(DATA.host||"seed server");
+  el("text",{x:cx,y:cy+71,"text-anchor":"middle","font-size":11,fill:"var(--muted)"},hub).textContent=
+    view.all?("origin · "+view.images.length+" torrents"):(view.label||"").slice(0,34);
+  const upbps=(DATA.seeder&&DATA.seeder.upload_bps)||0;
+  if(upbps>0) el("text",{x:cx,y:cy+86,"text-anchor":"middle","font-size":11,fill:"var(--leech)"},hub).textContent="serving "+fmtBps(upbps);
+  hub.addEventListener("mousemove",ev=>showHubTip(ev));
+  hub.addEventListener("mouseleave",()=>tip.style.opacity=0);
+  hub.addEventListener("dblclick",()=>openHubDrawer());
+
+  // peer nodes
+  const rad=24, circ=2*Math.PI*rad;
+  peers.forEach((p,i)=>{
+    const c=color(p,view.all,cmap);
+    const node=el("g",{class:"node",transform:`translate(${pos[i].x},${pos[i].y})`},svg);
+    node.style.animation="fadein .4s ease both"; node.style.animationDelay=(i*0.03)+"s";
+    el("circle",{r:rad+5,fill:"#0d1422"},node);
+    if((p.server_up_bps||0)>0) el("circle",{r:rad,class:"serve-pulse"},node);
+    el("circle",{class:"ring-bg",r:rad,fill:"#101a2e",stroke:"#22304c","stroke-width":5},node);
+    const prog=p.is_seeder?1:(p.progress||0);
+    if(prog>0){
+      el("circle",{r:rad,fill:"none",stroke:c,"stroke-width":5,"stroke-linecap":"round",
+        "stroke-dasharray":`${circ*prog} ${circ}`,transform:"rotate(-90)"},node);
+    }
+    // core glyph encodes DEVICE TYPE (routers = diamond); color = image (all view)
+    // or role (single-image view).
+    const isRtr=/^(ISR|ASR|C8|CSR|IR1|IR8)/i.test(p.model||"");
+    el("rect",{x:-7,y:-7,width:14,height:14,rx:isRtr?2:3,fill:c,
+      transform:isRtr?"rotate(45)":""},node);
+    // label leads with the CONSOLE device IP (device_id); the announce/guest IP
+    // rides below as a smaller detail so both stay visible.
+    el("text",{y:rad+16,class:"label"},node).textContent=peerLabel(p);
+    el("text",{y:rad+28,class:"pct"},node).textContent=p.is_seeder?"seed":Math.round(prog*100)+"%";
+    let yoff=rad+40;
+    if(p.model){el("text",{y:yoff,class:"pct",style:"fill:var(--accent)"},node).textContent=p.model;yoff+=12;}
+    const asub=peerAnnounceSub(p);
+    if(asub) el("text",{y:yoff,class:"pct",style:"fill:var(--muted)"},node).textContent="peer "+asub;
+    node.addEventListener("mousemove",ev=>showTip(ev,p));
+    node.addEventListener("mouseleave",()=>tip.style.opacity=0);
+    node.addEventListener("dblclick",()=>openDrawer(p));
+  });
+  if(!document.getElementById("fadekf")){const st=document.createElement("style");st.id="fadekf";
+    st.textContent="@keyframes fadein{from{opacity:0;transform-box:fill-box}to{opacity:1}}";document.head.appendChild(st);}
+}
+
+function showTip(ev,p){
+  const left=p.left, total=p._total;
+  const dlSec=downloadSeconds(p, DATA.now);
+  const dlLabel=(dlSec==null||dlSec<=0)?null
+    : fmtDur(dlSec)+(p.completed_at!=null?" (done)":" (running)");
+  // lead with the console device IP (peerLabel); the announce/guest IP is a
+  // secondary row when it differs.
+  const asub=peerAnnounceSub(p);
+  tip.innerHTML=`<div class="ip">${escapeHtml(peerLabel(p))}:${escapeHtml(p.port||"")}</div>`+
+    (asub?`<div class="row"><span>announce ip</span><span>${escapeHtml(asub)}</span></div>`:"")+
+    (p._img?`<div class="row"><span>image</span><span>${escapeHtml(p._img)}</span></div>`:"")+
+    (p.model?`<div class="row"><span>model</span><span>${escapeHtml(p.model)}</span></div>`:"")+
+    `<div class="row"><span>role</span><span>${p.is_seeder?"seeder":"leecher"}</span></div>`+
+    `<div class="row"><span>progress</span><span>${p.is_seeder?"100%":(p.progress!=null?Math.round(p.progress*100)+"%":"—")}</span></div>`+
+    `<div class="row"><span>remaining</span><span>${p.is_seeder?"0 B":fmtBytes(left)}</span></div>`+
+    `<div class="row"><span>of</span><span>${fmtBytes(total)}</span></div>`+
+    `<div class="row"><span>from this server</span><span>${(p.server_up_bps||0)>0?fmtBps(p.server_up_bps):"idle"}</span></div>`+
+    `<div class="row"><span>sent by server</span><span>~${fmtBytes(p.server_sent_bytes||0)}</span></div>`+
+    (dlLabel?`<div class="row"><span>torrent download</span><span>${dlLabel}</span></div>`:"");
+  const wrap=document.getElementById("wrap").getBoundingClientRect();
+  tip.style.left=(ev.clientX-wrap.left+14)+"px";
+  tip.style.top=(ev.clientY-wrap.top+14)+"px"; tip.style.opacity=1;
+}
+
+function openDrawer(p){
+  selPeer=p.ip; selDev=p.device_id||null; pullReq=null;
+  selTeleOff=(p.telemetry_enabled===false);
+  const total=p._total, pct=p.is_seeder?100:(p.progress!=null?Math.round(p.progress*100):0);
+  const done=total!=null?(p.is_seeder?total:total-(p.left||0)):null;
+  const roleColor=p.is_seeder?"var(--seed)":(pct>=100?"var(--leech)":"var(--accent)");
+  const ghost=`http://${location.hostname}:${CFG.grafanaPort}`;
+  // p.ip goes into a Loki LogQL string — encode it so a crafted IP cannot
+  // escape the quoted filter value or inject extra LogQL.
+  const safeIp=encodeURIComponent(p.ip||"");
+  const expr=`{service_name="iris-tracker"} | ip="${safeIp}"`;
+  const panes=encodeURIComponent(JSON.stringify({iris:{datasource:CFG.lokiUID,
+    queries:[{refId:"A",expr,datasource:{type:"loki",uid:CFG.lokiUID}}],
+    range:{from:"now-6h",to:"now"}}}));
+  const explore=`${ghost}/explore?schemaVersion=1&orgId=1&panes=${panes}`;
+  // title leads with the CONSOLE device IP (peerLabel); the announce/guest IP
+  // rides in the sub-line only when it differs.
+  const asub=peerAnnounceSub(p);
+  drawer.innerHTML=`<button class="close">×</button>
+    <h2><span style="color:${roleColor}">●</span> ${escapeHtml(peerLabel(p))}
+      <span class="role" style="border-color:${roleColor};color:${roleColor}">${p.is_seeder?"SEEDER":"LEECHER"}</span></h2>
+    <div style="color:var(--muted);font-size:12px">${p.model?escapeHtml(p.model)+" · ":""}${asub?"peer "+escapeHtml(asub)+" · ":""}port ${escapeHtml(p.port||"—")} · image ${escapeHtml(p._img||"—")}</div>
+    <div class="big">${pct}%</div>
+    <div class="bar"><i style="width:${pct}%"></i></div>
+    <dl>
+      <dt>model</dt><dd>${escapeHtml(p.model||"—")}</dd>
+      <dt>downloaded</dt><dd>${done!=null?fmtBytes(done):"—"}</dd>
+      <dt>remaining</dt><dd>${p.is_seeder?"0 B":fmtBytes(p.left)}</dd>
+      <dt>image size</dt><dd>${fmtBytes(total)}</dd>
+      <dt>from this server</dt><dd style="color:var(--leech)">${(p.server_up_bps||0)>0?fmtBps(p.server_up_bps):"idle"}</dd>
+      <dt>sent by server</dt><dd>~${fmtBytes(p.server_sent_bytes||0)}</dd>
+      ${(()=>{const s=downloadSeconds(p,DATA.now);
+              if(s==null||s<=0)return "";
+              const tag=p.completed_at!=null?"done":"running";
+              return `<dt>torrent download</dt><dd>${fmtDur(s)} <span style="color:var(--muted);font-size:11px">(${tag})</span></dd>`;})()}
+      <dt>last seen</dt><dd>${ago(p.age!=null?p.age:(DATA.now&&p.last_seen?DATA.now-p.last_seen:null))}</dd>
+      <dt>info hash</dt><dd style="font-size:11px">${escapeHtml((p._hash||"").slice(0,16))}…</dd>
+    </dl>
+    ${MAP.pull?`<h3 style="margin:14px 0 6px;font-size:13px">Device report</h3>
+    ${!selDev?`<div style="color:var(--muted);font-size:12px">no device identity for this peer (no heartbeat yet) — pull unavailable</div>`
+      :selTeleOff?`<div style="color:var(--muted);font-size:12px">telemetry is disabled on this device (telemetry = off in iris-agent.conf) — pull unavailable</div>`
+      :`<button id="pullbtn" style="width:100%">⇣ Pull fresh data from device</button>`}
+    <div id="repbox"><p style="color:var(--muted);font-size:12px">loading report…</p></div>`:""}
+    <a class="btn" href="${explore}" target="_blank">↗ View this device's events in Grafana / Loki</a>`;
+  drawer.querySelector(".close").addEventListener("click", closeDrawer);
+  const pb=document.getElementById("pullbtn");
+  if(pb)pb.addEventListener("click",requestPull);
+  refreshDrawerReport();
+  drawer.classList.add("open");
+}
+function closeDrawer(){drawer.classList.remove("open");selPeer=null;selDev=null;pullReq=null;selTeleOff=false;}
+
+// ---- device report drawer section (#13) -----------------------------------
+// Latest stored report for the device + per-peer ~bytes table, plus the
+// manual pull. Console mode only (MAP.pull) — the bare file has no /api.
+// ip -> device identity for the per-peer report rows. Two sources, in
+// priority order: the LIVE swarm (has model from heartbeats), then the FLEET
+// inventory (guest_ip/device_ip of every registered device) — so a peer that
+// finished and LEFT the swarm still resolves to its device id instead of
+// degrading to a bare guest IP. Fleet is fetched once per page (console mode
+// only; the bare tracker file has no /api).
+let FLEET=null;
+async function loadFleet(){
+  if(!MAP.pull)return {};
+  if(FLEET)return FLEET;
+  try{
+    const r=await fetch("/api/devices",{cache:"no-store"});
+    if(!r.ok)return {};
+    const m={};
+    ((((await r.json())||{}).devices)||[]).forEach(d=>{
+      const ent={device_id:d.device_id,ip:d.guest_ip||d.device_ip,
+                 model:d.model||d.heartbeat_model};
+      if(d.guest_ip)m[d.guest_ip]=ent;
+      if(d.device_ip&&!m[d.device_ip])m[d.device_ip]=ent;
+    });
+    FLEET=m;return m;
+  }catch(e){return {};}
+}
+function ipToDevice(){const m={...(FLEET||{})};(((DATA&&DATA.images)||[])).forEach(im=>
+  im.peers.forEach(p=>{if(p.device_id)m[p.ip]=p;}));return m;}
+
+async function loadReports(devId){
+  try{
+    const r=await fetch("/api/devices/"+encodeURIComponent(devId)+"/reports",
+                        {cache:"no-store"});
+    if(!r.ok)return [];
+    return ((await r.json())||{}).reports||[];
+  }catch(e){return [];}
+}
+
+function reportHtml(reports){
+  if(!reports.length){
+    if(selTeleOff)
+      return `<p style="color:var(--muted);font-size:12px">telemetry is disabled on this device `+
+             `(telemetry = off in iris-agent.conf)</p>`;
+    return `<p style="color:var(--muted);font-size:12px">no report from this device yet — `+
+           `it reports after staging, or on a pull</p>`;
+  }
+  const rep=reports[reports.length-1];
+  const byIp=ipToDevice();
+  const age=(rep.received_at||rep.ts)?ago((DATA&&DATA.now?DATA.now:Date.now()/1000)-(rep.received_at||rep.ts)):"—";
+  const l=rep.link||{}, t=rep.transfer||{};
+  // Each peer row: WHO served me (resolve the announce ip -> its console
+  // device_id/model via byIp; lead with device_id when known), HOW MUCH I
+  // received (rx_bytes, ↓) + its avg download speed, and HOW MUCH I sent that
+  // peer (tx_bytes, ↑). Both are THIS device's own numbers over its own
+  // transfer window (tx accrues only while downloading/seeding-sampling or on
+  // a pull), so they don't reconcile with another device's report — the
+  // legend under the table spells that out.
+  const rows=(rep.peers||[]).map(row=>{
+    const isSeed=row.ip===serverIP();
+    const dev=isSeed?null:byIp[row.ip];
+    // console device id when known (live swarm OR fleet inventory), the seed
+    // host labeled as such — a bare announce IP is the last resort only
+    const lead=isSeed?"seed server":(dev?dev.device_id:row.ip);
+    const detail=[];
+    if(isSeed)detail.push(row.ip);
+    if(dev){if(dev.ip&&dev.ip!==dev.device_id)detail.push("peer "+dev.ip);
+            if(dev.model)detail.push(dev.model);}
+    const sub=detail.join(" · ");
+    const tx=row.tx_bytes||0;
+    return `<tr><td>${escapeHtml(lead)}`+
+      (sub?`<div style="color:var(--muted);font-size:10px">${escapeHtml(sub)}</div>`:"")+
+      `</td><td>~${fmtBytes(row.rx_bytes||0)}</td><td>${row.avg_bps?fmtBps(row.avg_bps):"—"}</td>`+
+      `<td>${tx>0?"~"+fmtBytes(tx):"—"}</td></tr>`;
+  }).join("");
+  return `<dl>
+      <dt>event</dt><dd>${escapeHtml(rep.event)||"—"}</dd>
+      <dt>link tier</dt><dd>${escapeHtml((l.tier||"—"))}${l.trimmed?" (trimmed)":""}</dd>
+      <dt>rtt median</dt><dd>${l.rtt_ms_median!=null?l.rtt_ms_median+" ms":"—"}</dd>
+      <dt>avg download</dt><dd>${t.avg_bps?fmtBps(t.avg_bps):"—"}</dd>
+      <dt>transferred</dt><dd>${fmtBytes(t.total_bytes||0)} in ${fmtDur(t.elapsed_s)}</dd>
+      <dt>reported</dt><dd>${age}</dd>
+    </dl>`+
+    (rows?`<table class="reptbl"><thead><tr><th>peer</th><th>↓ received</th><th>↓ avg speed</th><th>↑ sent</th></tr></thead>`+
+          `<tbody>${rows}</tbody></table>`+
+          `<p style="color:var(--muted);font-size:11px;margin:2px 0 14px;line-height:1.5">`+
+          `<b>↓</b> received / avg speed = what this device pulled from the peer (rescaled to its true `+
+          `total). <b>↑</b> sent = what it uploaded to the peer during its own transfer window. `+
+          `Each device only measures its own traffic while it was transferring, so a peer that served `+
+          `this one earlier can show <b>0 sent</b> in its own report — that is expected, not missing data.</p>`
+         :`<p style="color:var(--muted);font-size:12px">no per-peer rows (trimmed on a constrained link, or the download finished within one agent tick)</p>`);
+}
+
+function pullStatusHtml(){
+  if(!pullReq)return "";
+  const now=(DATA&&DATA.now)?DATA.now:Date.now()/1000;
+  let txt="", col="var(--muted)";
+  if(pullReq.status==="arrived"){txt="fresh report arrived";col="var(--leech)";}
+  else if(pullReq.status==="expired"){txt="request expired (device silent) — try again";col="var(--warn)";}
+  else if(pullReq.status==="error"){txt="request failed (HTTP "+pullReq.code+")";col="var(--warn)";}
+  else txt="requested — arrives on the device's next poll (≤60 s)";
+  return `<div id="pull-status" style="font-size:12px;color:${col};margin:6px 0">${escapeHtml(txt)}</div>`;
+}
+
+async function requestPull(){
+  if(!selDev)return;
+  try{
+    const r=await fetch("/api/devices/"+encodeURIComponent(selDev)+"/request-report",
+      {method:"POST",headers:{"X-CSRF-Token":CSRF||""}});
+    const now=(DATA&&DATA.now)?DATA.now:Date.now()/1000;
+    if(r.ok){const j=await r.json();
+      pullReq={status:"pending",requested_at:now,expires_at:j.expires_at||now+600};}
+    else if(r.status===429){pullReq={status:"pending",requested_at:now,expires_at:now+600};}
+    else pullReq={status:"error",code:r.status};
+  }catch(e){pullReq={status:"error",code:"network"};}
+  refreshDrawerReport();
+}
+
+async function refreshDrawerReport(){
+  // Live-refresh for the OPEN drawer: re-pulls the stored reports every poll
+  // tick and walks the pull status pending -> arrived/expired.
+  if(!MAP.pull||!drawer.classList.contains("open")||!selDev)return;
+  const box=document.getElementById("repbox");
+  if(!box)return;
+  await loadFleet();   // once per page: lets report rows resolve departed peers
+  const reports=await loadReports(selDev);
+  const now=(DATA&&DATA.now)?DATA.now:Date.now()/1000;
+  if(pullReq&&(pullReq.status==="pending")){
+    const latest=reports.length?reports[reports.length-1]:null;
+    // received_at is stamped by the SERVER on ingest (same clock domain as
+    // requested_at/DATA.now); the device-stamped ts is only a fallback and
+    // can lag behind on devices without NTP.
+    if(latest&&((latest.received_at||latest.ts||0)>=pullReq.requested_at-1))pullReq.status="arrived";
+    else if(now>(pullReq.expires_at||0))pullReq.status="expired";
+  }
+  box.innerHTML=pullStatusHtml()+reportHtml(reports);
+}
+
+// the seed server (central hub) — its own tooltip + detail drawer, so it reads
+// as a real swarm participant (the origin seeder), not an anonymous centre dot.
+function showHubTip(ev){
+  const s=DATA.seeder||{}, imgs=(DATA.images||[]);
+  tip.innerHTML=`<div class="ip">${escapeHtml(DATA.host||"seed server")} · <span style="color:var(--seed)">SEED</span></div>`+
+    `<div class="row"><span>role</span><span>origin seeder</span></div>`+
+    `<div class="row"><span>serving now</span><span>${(s.upload_bps||0)>0?fmtBps(s.upload_bps):"idle"}</span></div>`+
+    `<div class="row"><span>connections</span><span>${s.connections||0}</span></div>`+
+    `<div class="row"><span>torrents seeded</span><span>${s.active_torrents!=null?s.active_torrents:imgs.length}</span></div>`+
+    `<div class="row"><span>seeder RPC</span><span>${s.rpc_up?"up":"down"}</span></div>`;
+  const wrap=document.getElementById("wrap").getBoundingClientRect();
+  tip.style.left=(ev.clientX-wrap.left+14)+"px";
+  tip.style.top=(ev.clientY-wrap.top+14)+"px"; tip.style.opacity=1;
+}
+function openHubDrawer(){
+  selPeer=DATA.host||"seed";
+  const s=DATA.seeder||{}, imgs=(DATA.images||[]);
+  const rows=imgs.map(im=>`<dt style="font-size:12px">${escapeHtml(im.image)}</dt>`+
+    `<dd>${im.seeders} seed · ${im.leechers} dl</dd>`).join("");
+  const sent=[];(((DATA&&DATA.images)||[])).forEach(im=>im.peers.forEach(p=>{
+    if((p.server_sent_bytes||0)>0)sent.push({ip:p.ip,img:im.image,sent:p.server_sent_bytes});}));
+  sent.sort((a,b)=>b.sent-a.sent);
+  const sentRows=sent.slice(0,15).map(h=>
+    `<tr><td>${escapeHtml(h.ip)}<div style="color:var(--muted);font-size:10px">${escapeHtml(h.img)}</div></td>`+
+    `<td>~${fmtBytes(h.sent)}</td></tr>`).join("");
+  drawer.innerHTML=`<button class="close">×</button>
+    <h2><span style="color:var(--seed)">●</span> ${escapeHtml(DATA.host||"seed server")}
+      <span class="role" style="border-color:var(--seed);color:var(--seed)">SEED SERVER</span></h2>
+    <div style="color:var(--muted);font-size:12px">origin seeder · serves every image torrent</div>
+    <div class="big">${(s.upload_bps||0)>0?fmtBps(s.upload_bps):"idle"}</div>
+    <div class="bar"><i style="width:${(s.upload_bps||0)>0?100:0}%"></i></div>
+    <dl>
+      <dt>connections</dt><dd>${s.connections||0}</dd>
+      <dt>torrents seeded</dt><dd>${s.active_torrents!=null?s.active_torrents:imgs.length}</dd>
+      <dt>seeder RPC</dt><dd>${s.rpc_up?"up":"down"}</dd>
+      ${rows}
+    </dl>
+    ${sentRows?`<h3 style="margin:12px 0 6px;font-size:13px">Sent by this server (per device)</h3>
+    <table class="reptbl"><thead><tr><th>device</th><th>~sent</th></tr></thead><tbody>${sentRows}</tbody></table>`:""}`;
+  drawer.querySelector(".close").addEventListener("click", closeDrawer);
+  drawer.classList.add("open");
+}
+
+document.getElementById("imgsel").addEventListener("change",e=>{curHash=e.target.value;render();});
+document.getElementById("pause").addEventListener("click",e=>{paused=!paused;
+  e.target.textContent=paused?"▶ resume":"⏸ pause";});
+window.addEventListener("keydown",e=>{if(e.key==="Escape")closeDrawer();});
+
+poll();
+setInterval(()=>{if(!paused)poll();},3000);
+</script>
+</body>
+</html>

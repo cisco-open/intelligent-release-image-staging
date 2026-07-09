@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""Revoke all secrets for a device (sets revoked=True on every record).
+
+Usage:
+  iris-revoke <device_id>
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import secretfs       # noqa: E402
+import secrets_store  # noqa: E402
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+
+    if len(argv) != 1:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+
+    device_id = argv[0]
+    secrets_path = os.environ.get("IRIS_SECRETS", "/run/iris/secrets.json")
+
+    # Hold the same advisory lock the catalog server's token-refresh takes, so
+    # a concurrent rotation can't load a pre-revoke snapshot and write it back
+    # over our revoke (which would silently re-arm a revoked device's token).
+    with secrets_store.store_lock(secrets_path):
+        store = secrets_store.load(secrets_path)
+
+        if device_id not in store.get("devices", {}):
+            print("error: device '%s' not found in secrets store" % device_id,
+                  file=sys.stderr)
+            return 1
+
+        secrets_store.revoke(store, device_id)
+
+        # Persist durable-FIRST: the at-rest .age ciphertext is the only copy
+        # that survives a restart.  If we wrote the tmpfs plaintext first and the
+        # durable encrypt then failed, a routine restart would decrypt the stale
+        # ciphertext and re-arm the device we just revoked — a silent security
+        # regression.  persist_store writes (and confirms) the durable copy
+        # BEFORE swapping the live plaintext, so a durable failure raises here
+        # and we report the error instead of a phantom revoke.
+        recipients = os.environ.get("IRIS_AGE_RECIPIENTS", "")
+        enc_path = os.environ.get(
+            "IRIS_SECRETS_ENC", "/etc/iris/secrets.json.age")
+        try:
+            secretfs.persist_store(
+                store, secrets_path,
+                recipients_csv=recipients, enc_path=enc_path)
+        except Exception as exc:
+            print("error: durable persist failed, revoke NOT applied: %s" % exc,
+                  file=sys.stderr)
+            return 1
+
+    print("revoked all secrets for device '%s'" % device_id)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

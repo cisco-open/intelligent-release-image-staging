@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# One-shot, idempotent bootstrap for the IRIS secrets broker.
+# Creates the initial encrypted secret material on the iris-config volume so
+# docker-entrypoint.sh / install.sh can start without pre-existing .age files.
+#
+# Designed to run INSIDE the iris image (which has age, age-keygen if available,
+# openssl, python3, and the secretfs/secrets_store modules) as a one-shot:
+#
+#   docker compose run --rm iris iris-bootstrap
+#
+# or bare-metal:
+#
+#   IRIS_HOST_IP=10.0.0.5 IRIS_CONFIG=/etc/iris iris-bootstrap
+#
+# Idempotent: existing .age files are NOT overwritten unless --force is given.
+# Plaintext is written to a tmpfs (TMPDIR or /dev/shm or /tmp) and wiped
+# immediately after encryption — it never lands on the persistent volume.
+#
+# Usage:
+#   iris-bootstrap [--force]
+#     --force  overwrite existing .age files (re-key / disaster recovery)
+
+set -euo pipefail
+
+IRIS_CONFIG="${IRIS_CONFIG:-/etc/iris}"
+IRIS_AGE_KEY_FILE="${IRIS_AGE_KEY_FILE:-/run/secrets/iris_age_key}"
+IRIS_AGE_BIN="${IRIS_AGE_BIN:-age}"
+IRIS_HOST_IP="${IRIS_HOST_IP:-127.0.0.1}"
+FORCE=0
+
+# ---- parse args ----
+for arg in "$@"; do
+  case "$arg" in
+    --force) FORCE=1 ;;
+    *) echo "usage: iris-bootstrap [--force]" >&2; exit 2 ;;
+  esac
+done
+
+# ---- locate script dir so we can find secretfs/secrets_store ----
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+log()  { printf '[iris-bootstrap] %s\n' "$*"; }
+die()  { printf '[iris-bootstrap] FATAL: %s\n' "$*" >&2; exit 1; }
+
+# ---- ensure config dirs ----
+mkdir -p "$IRIS_CONFIG/tls"
+
+# ---- idempotency: check whether all three .age files exist ----
+AGE_SECRETS="$IRIS_CONFIG/secrets.json.age"
+AGE_RPC="$IRIS_CONFIG/rpc-secret.age"
+AGE_KEY="$IRIS_CONFIG/tls/key.pem.age"
+
+all_present() {
+  [ -f "$AGE_SECRETS" ] && [ -f "$AGE_RPC" ] && [ -f "$AGE_KEY" ]
+}
+
+if all_present && [ "$FORCE" -eq 0 ]; then
+  log "all .age files already exist — nothing to do (use --force to overwrite)"
+  exit 0
+fi
+
+# ---- 1. ensure an age identity ----
+umask 077
+if [ ! -f "$IRIS_AGE_KEY_FILE" ]; then
+  log "generating age identity at $IRIS_AGE_KEY_FILE"
+  KEY_DIR="$(dirname "$IRIS_AGE_KEY_FILE")"
+  mkdir -p "$KEY_DIR"
+  chmod 700 "$KEY_DIR" 2>/dev/null || true
+  if command -v age-keygen >/dev/null 2>&1; then
+    age-keygen -o "$IRIS_AGE_KEY_FILE"
+  elif "$IRIS_AGE_BIN"-keygen --version >/dev/null 2>&1; then
+    "$IRIS_AGE_BIN"-keygen -o "$IRIS_AGE_KEY_FILE"
+  else
+    die "age-keygen not found — install age (apt install age) or supply $IRIS_AGE_KEY_FILE manually"
+  fi
+  chmod 600 "$IRIS_AGE_KEY_FILE"
+  log "age identity written to $IRIS_AGE_KEY_FILE"
+fi
+
+# Derive the public recipient from the identity file.
+# age-keygen output: "# created: ...\n# public key: age1...\nAGE-SECRET-KEY-..."
+# We grab the 'public key:' comment line.
+_derived_pubkey="$(grep '^# public key:' "$IRIS_AGE_KEY_FILE" | awk '{print $NF}')"
+[ -n "$_derived_pubkey" ] || die "could not derive public key from $IRIS_AGE_KEY_FILE (expected '# public key: age1...' header)"
+
+# Use IRIS_AGE_RECIPIENTS if already set; otherwise use the derived primary key.
+if [ -z "${IRIS_AGE_RECIPIENTS:-}" ]; then
+  IRIS_AGE_RECIPIENTS="$_derived_pubkey"
+fi
+
+log "encrypting to recipient(s): $IRIS_AGE_RECIPIENTS"
+
+# ---- 2. create a tmpfs scratch area ----
+# Prefer /dev/shm (always tmpfs on Linux), then TMPDIR, then /tmp.
+# Write plaintext there and wipe immediately after encryption.
+if [ -d "/dev/shm" ] && [ -w "/dev/shm" ]; then
+  SCRATCH_BASE="/dev/shm"
+else
+  SCRATCH_BASE="${TMPDIR:-/tmp}"
+fi
+SCRATCH="$(mktemp -d "$SCRATCH_BASE/iris-bootstrap-XXXXXX")"
+chmod 700 "$SCRATCH"
+trap 'rm -rf "$SCRATCH"' EXIT
+
+mkdir -p "$SCRATCH/tls"
+
+# ---- 3. generate rpc-secret ----
+log "generating rpc-secret"
+openssl rand -hex 32 > "$SCRATCH/rpc-secret"
+chmod 600 "$SCRATCH/rpc-secret"
+
+# ---- 4. generate TLS key + self-signed cert with IP SAN ----
+log "generating TLS key + self-signed cert (CN=iris SAN=IP:$IRIS_HOST_IP)"
+openssl req -x509 -newkey rsa:4096 -nodes -days 3650 \
+  -keyout "$SCRATCH/tls/key.pem" \
+  -out    "$SCRATCH/tls/crt.pem" \
+  -subj   "/CN=iris" \
+  -addext "subjectAltName=IP:$IRIS_HOST_IP" \
+  2>/dev/null
+chmod 600 "$SCRATCH/tls/key.pem"
+
+# ---- 5. generate initial secrets.json with a seeder announce token ----
+log "minting seeder announce token"
+PYTHONPATH="$SCRIPT_DIR" python3 - "$SCRATCH/secrets.json" <<'PY'
+import sys, time
+import secrets_store
+
+path = sys.argv[1]
+store = secrets_store.load(path)     # returns skeleton if missing
+secrets_store.mint(store, "seeder", "announce_token", int(time.time()))
+secrets_store.save(store, path)
+print("[iris-bootstrap] secrets.json written")
+PY
+chmod 600 "$SCRATCH/secrets.json"
+
+# ---- 6. encrypt to the age recipient(s) ----
+log "encrypting secrets.json -> $AGE_SECRETS"
+IRIS_AGE_BIN="$IRIS_AGE_BIN" PYTHONPATH="$SCRIPT_DIR" python3 - \
+  "$SCRATCH/secrets.json" "$AGE_SECRETS" "$IRIS_AGE_RECIPIENTS" <<'PY'
+import os, sys
+import secretfs
+secretfs.encrypt_from(sys.argv[1], sys.argv[2], sys.argv[3],
+                      age_bin=os.environ["IRIS_AGE_BIN"])
+PY
+
+log "encrypting rpc-secret -> $AGE_RPC"
+IRIS_AGE_BIN="$IRIS_AGE_BIN" PYTHONPATH="$SCRIPT_DIR" python3 - \
+  "$SCRATCH/rpc-secret" "$AGE_RPC" "$IRIS_AGE_RECIPIENTS" <<'PY'
+import os, sys
+import secretfs
+secretfs.encrypt_from(sys.argv[1], sys.argv[2], sys.argv[3],
+                      age_bin=os.environ["IRIS_AGE_BIN"])
+PY
+
+log "encrypting tls/key.pem -> $AGE_KEY"
+IRIS_AGE_BIN="$IRIS_AGE_BIN" PYTHONPATH="$SCRIPT_DIR" python3 - \
+  "$SCRATCH/tls/key.pem" "$AGE_KEY" "$IRIS_AGE_RECIPIENTS" <<'PY'
+import os, sys
+import secretfs
+secretfs.encrypt_from(sys.argv[1], sys.argv[2], sys.argv[3],
+                      age_bin=os.environ["IRIS_AGE_BIN"])
+PY
+
+# ---- 7. copy public cert (not secret) to the volume ----
+cp "$SCRATCH/tls/crt.pem" "$IRIS_CONFIG/tls/crt.pem"
+log "tls/crt.pem written (public, plaintext — this is the cert agents pin)"
+
+# ---- 8. plaintext wipe (already covered by EXIT trap; explicit here for clarity) ----
+rm -rf "$SCRATCH"
+# Prevent the EXIT trap from failing on already-removed dir
+trap - EXIT
+log "plaintext scratch dir wiped"
+
+# ---- 9. next-step guidance ----
+cat <<GUIDANCE
+
+[iris-bootstrap] Bootstrap complete.
+
+Files written to $IRIS_CONFIG:
+  secrets.json.age   — encrypted secrets store (seeder announce token)
+  rpc-secret.age     — encrypted aria2 RPC secret
+  tls/key.pem.age    — encrypted TLS private key
+  tls/crt.pem        — TLS certificate (public; distribute to devices for pinning)
+
+Master key: $IRIS_AGE_KEY_FILE
+  * PROTECT AND BACK UP this file — without it the store is unrecoverable.
+  * Never commit it; never store it on the iris-config volume.
+  * Recommended: add a break-glass recipient (offline age key) so a lost primary
+    key does not permanently lock out the store.  Generate one with:
+      age-keygen -o break-glass.age-key
+    then re-run bootstrap with:
+      IRIS_AGE_RECIPIENTS="$_derived_pubkey,<break-glass-pubkey>" iris-bootstrap --force
+
+Age recipient(s) used: $IRIS_AGE_RECIPIENTS
+  * Set IRIS_AGE_RECIPIENTS in your docker-compose.yml / environment to this
+    value (primary) plus your break-glass public key so re-encrypt-on-write
+    also targets the break-glass key.
+
+GUIDANCE

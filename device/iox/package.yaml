@@ -1,0 +1,26 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+descriptor-schema-version: "2.8"
+
+info:
+  name: iris
+  description: "intelligent-release-image-staging (IRIS) torrent-swarm image agent (aarch64 IOx Docker app) for IE-3x00"
+  version: "1.0"
+  author-name: "IRIS"
+  author-link: "http://localhost"
+
+app:
+  type: docker
+  cpuarch: aarch64          # IE3400 = ARM Cortex-A53
+  resources:
+    profile: custom
+    cpu: 400                # units (IE3400 ceiling ~1400 => ~33% CPU quota)
+    memory: 768             # MB (quota ceiling 1248)
+    disk: 2048              # MB persist-disk (room for a ~1.2 GB staged image)
+    network:
+      - interface-name: eth0   # maps to the device app-vnic guest-interface 0
+  startup:
+    rootfs: rootfs.tar      # ioxclient generates this from the docker image
+    target: ["/entrypoint.sh"]

@@ -1,0 +1,35 @@
+[Unit]
+Description=intelligent-release-image-staging (IRIS) — HTTPS catalog API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=iris
+Group=iris
+Environment=IRIS_CONFIG=/etc/iris
+Environment=IRIS_RUN=/run/iris
+Environment=IRIS_CATALOG_PORT=8443
+Environment=IRIS_STATE=/var/lib/iris
+Environment=IRIS_SECRETS=/run/iris/secrets.json
+Environment=IRIS_CERT=/run/iris/tls/cert.pem
+# Mirror the container entrypoint: decrypt the *.age ciphertext from
+# /etc/iris to the tmpfs RuntimeDirectory (/run/iris) BEFORE catalog starts,
+# so it has a secrets store + a combined cert.pem and never serves plain HTTP.
+RuntimeDirectory=iris
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+ExecStartPre=/opt/iris/server/iris-secretfs
+ExecStart=/usr/bin/python3 /opt/iris/server/catalog.py
+Restart=on-failure
+RestartSec=5
+ProtectSystem=strict
+# /etc/iris: catalog appends the audit log and re-encrypts the rotated
+# secrets store (*.age) here on every device token refresh; /run/iris is the
+# tmpfs the unseal step writes the plaintext store + cert to.
+ReadWritePaths=/var/lib/iris /etc/iris /run/iris
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

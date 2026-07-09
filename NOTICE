@@ -1,0 +1,37 @@
+intelligent-release-image-staging (IRIS)
+Copyright 2026 Cisco Systems, Inc.
+
+This product includes software developed at Cisco Systems, Inc.
+(https://www.cisco.com/).
+
+Licensed under the Apache License, Version 2.0.
+
+------------------------------------------------------------------------------
+Third-party tools invoked at runtime (NOT part of this source distribution)
+------------------------------------------------------------------------------
+
+intelligent-release-image-staging distributes and stages software images by INVOKING the following tools as
+separate, independent programs (subprocesses). It does not link against, embed,
+include, or derive from their source code. Each tool is executed via its own
+command-line / RPC interface and remains under its own license:
+
+  * aria2c   — GNU General Public License, version 2 (GPLv2).
+               A fully-static binary is FETCHED AND VERIFIED AT BUILD TIME
+               (see tools/get-aria2c.sh and server/Dockerfile); it is NOT part
+               of this source repository and is NOT redistributed in source
+               form here. The server communicates with it only over its JSON-RPC
+               interface and command line.
+
+  * mktorrent — GNU General Public License, version 2 (GPLv2).
+               Installed as a system package and invoked as a subprocess to
+               create .torrent metadata.
+
+  * openssl  — Apache License, Version 2.0 (OpenSSL 3.x).
+               Installed as a system package and invoked as a subprocess
+               (e.g. to generate secrets and TLS material).
+
+Because these tools are invoked as separate programs and are not linked into or
+derived from this project's source code, the project's own code is licensed under the
+Apache License, Version 2.0, while each tool above remains governed solely by
+its respective license. The mention of GPLv2 above pertains ONLY to those
+external tools; the project itself is not licensed under the GPL.

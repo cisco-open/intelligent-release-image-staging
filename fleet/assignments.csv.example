@@ -1,0 +1,8 @@
+device_id,image_id
+# Which device should have which image. Apply with: tools/apply-assignments.sh
+# Changing a device's row to a different image makes that device clean up the old
+# image and pull the new one automatically (within ~60s of applying).
+100.92.9.3,cat9k_iosxe.26.01.01
+100.92.9.1,cat9k_iosxe.26.01.01
+100.92.9.129,cat9k_iosxe.26.01.01
+100.92.9.131,cat9k_iosxe.26.01.01

@@ -1,0 +1,29 @@
+[Unit]
+Description=intelligent-release-image-staging (IRIS) — private tracker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=iris
+Group=iris
+Environment=IRIS_CONFIG=/etc/iris
+Environment=IRIS_RUN=/run/iris
+Environment=IRIS_TRACKER_PORT=6969
+Environment=IRIS_SECRETS=/run/iris/secrets.json
+# Decrypt the *.age ciphertext to the tmpfs RuntimeDirectory before the
+# tracker starts, so it can validate device announce tokens from the store.
+RuntimeDirectory=iris
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+ExecStartPre=/opt/iris/server/iris-secretfs
+ExecStart=/usr/bin/python3 /opt/iris/server/tracker.py
+Restart=on-failure
+RestartSec=5
+ProtectSystem=strict
+ReadWritePaths=/run/iris
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

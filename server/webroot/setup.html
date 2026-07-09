@@ -1,0 +1,29 @@
+<!doctype html>
+<!-- Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+     SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Set up · intelligent-release-image-staging — Console</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="login-wrap">
+    <form class="login-card" id="setup-form">
+      <h1>◈ Welcome to intelligent-release-image-staging</h1>
+      <p class="sub">First-run setup — create the admin account for this console.</p>
+      <label for="u">Admin username</label>
+      <input id="u" name="username" autocomplete="username" autofocus>
+      <label for="p">Password</label>
+      <input id="p" name="password" type="password" autocomplete="new-password">
+      <label for="p2">Confirm password</label>
+      <input id="p2" name="confirm" type="password" autocomplete="new-password">
+      <button class="btn" type="submit">Create admin &amp; continue</button>
+      <div class="err" id="err"></div>
+    </form>
+  </div>
+  <script src="/setup.js"></script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+# Shared iris-fleet settings (consumed by tools/gen-device-installers.sh).
+# Copy to iris-fleet.conf and fill in. Secrets here -> keep out of version control.
+CATALOG_URL=https://<server-ip>:8443      # the coordination server's catalog (bare-metal or docker)
+STAGE_HOST=<server-ip>                     # host serving the agent bundle on :8000 (make-agent-bundle.sh)
+RPC_SECRET=<aria2-rpc-secret>              # /etc/iris/rpc-secret (docker) or ~/irisrun/rpc-secret (bare-metal)
+HOST_USER=admin                            # ssh user on STAGE_HOST (to stage the per-device conf)
+HOST_PASS=changeme

@@ -1,0 +1,107 @@
+/* Copyright 2026 Cisco Systems, Inc. and its affiliates
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+:root { --navy:#0b2545; --navy2:#12395f; --blue:#0b5cd6; --bg:#f5f7fa; --line:#e5e9f0; }
+* { box-sizing:border-box; }
+body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; color:#1a2b45; background:var(--bg); }
+.top { background:linear-gradient(90deg,var(--navy),var(--navy2)); color:#fff; height:48px; display:flex; align-items:center; padding:0 18px; font-weight:600; }
+.top .spacer { flex:1; }
+.top .who { font-size:13px; font-weight:400; opacity:.9; }
+.top .tag { font-size:11px; font-weight:400; opacity:.7; border:1px solid rgba(255,255,255,.4); border-radius:4px; padding:1px 6px; margin-left:6px; vertical-align:1px; }
+.stripe { height:3px; background:linear-gradient(90deg,#00bceb,#0d6efd,#7b61ff,#e5308a,#f7961d); }
+.shell { display:flex; min-height:calc(100vh - 51px); }
+.side { width:180px; background:#fff; border-right:1px solid var(--line); padding:10px 0; }
+.side a { display:block; padding:9px 18px; color:#334; text-decoration:none; font-size:14px; }
+.side a.active { background:#e7f1ff; color:var(--blue); font-weight:600; border-left:3px solid var(--blue); padding-left:15px; }
+.main { flex:1; padding:24px; }
+.btn { background:var(--blue); color:#fff; border:0; border-radius:6px; padding:9px 16px; font-size:14px; cursor:pointer;
+  box-shadow:0 1px 2px rgba(11,37,69,.18); transition:background .12s ease, box-shadow .12s ease, transform .06s ease; }
+.btn:hover { background:#0a52c2; }
+.btn:active { transform:translateY(1px); box-shadow:inset 0 1px 3px rgba(0,0,0,.25); }
+.btn:focus-visible { outline:none; box-shadow:0 0 0 3px rgba(11,92,214,.35); }
+.btn.ghost { background:#fff; color:var(--blue); border:1px solid #c7d0e0; box-shadow:0 1px 2px rgba(11,37,69,.06); }
+.btn.ghost:hover { background:#f2f7ff; border-color:var(--blue); }
+.btn.ghost:active { transform:translateY(1px); box-shadow:inset 0 1px 2px rgba(11,37,69,.12); }
+.btn.ghost:focus-visible { outline:none; box-shadow:0 0 0 3px rgba(11,92,214,.35); }
+.chip { background:#fff; color:#334; border:1px solid #c7d0e0; border-radius:999px; padding:6px 14px; font-size:13px;
+  cursor:pointer; transition:background .12s ease, box-shadow .12s ease, transform .06s ease, border-color .12s ease; }
+.chip:hover { background:#f2f7ff; border-color:var(--blue); }
+.chip:active { transform:translateY(1px); }
+.chip:focus-visible { outline:none; box-shadow:0 0 0 3px rgba(11,92,214,.35); }
+.chip.active { background:var(--blue); color:#fff; border-color:var(--blue); }
+.login-wrap { min-height:100vh; display:flex; align-items:center; justify-content:center; }
+.login-card { background:#fff; border:1px solid var(--line); border-radius:10px; padding:28px; width:320px; box-shadow:0 4px 20px rgba(0,0,0,.08); }
+.login-card h1 { font-size:20px; margin:0 0 4px; }
+.login-card .sub { color:#67728a; font-size:13px; margin:0 0 18px; }
+.login-card label { display:block; font-size:12px; color:#67728a; margin:12px 0 4px; }
+.login-card input { width:100%; padding:9px; border:1px solid #c7d0e0; border-radius:6px; font-size:14px; }
+.login-card .btn { width:100%; margin-top:18px; }
+.err { color:#c0362c; font-size:13px; margin-top:12px; min-height:18px; }
+#logout { margin-left:14px; }
+.upload { border:2px dashed #c7d0e0; border-radius:10px; padding:22px; text-align:center; margin:8px 0 20px; color:#334; }
+.upload.drag { border-color:var(--blue); background:#f2f7ff; }
+.muted { color:#67728a; font-size:13px; }
+.progress { height:8px; background:#e5e9f0; border-radius:5px; overflow:hidden; margin:12px auto; max-width:420px; }
+.progress .bar { height:100%; width:0; background:var(--blue); transition:width .15s; }
+.tbl { width:100%; border-collapse:collapse; font-size:13px; }
+.tbl th { text-align:left; color:#67728a; font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:.3px; border-bottom:1px solid var(--line); padding:8px 10px; }
+.tbl td { border-bottom:1px solid #f0f2f6; padding:8px 10px; color:#334; font-family:ui-monospace,Menlo,Consolas,monospace; }
+.toolbar { display:flex; gap:8px; align-items:center; margin:8px 0 16px; flex-wrap:wrap; }
+.nav { display:block; padding:9px 18px; color:#334; text-decoration:none; font-size:14px; cursor:pointer; }
+.nav.active { background:#e7f1ff; color:var(--blue); font-weight:600; border-left:3px solid var(--blue); padding-left:15px; }
+.nav-group { padding:14px 18px 2px; font-size:11px; text-transform:uppercase; letter-spacing:.4px; color:#889; }
+.nav.sub { padding-left:30px; font-size:13px; }
+.nav.sub.active { padding-left:27px; }
+.tbl .act { font-family:inherit; }
+.linkish { color:var(--blue); background:none; border:0; cursor:pointer; font:inherit; padding:0; }
+.log { background:#0b1626; color:#cfe3ff; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px; padding:12px; border-radius:8px; max-height:340px; overflow:auto; white-space:pre-wrap; }
+#onboard-panel { margin-top:18px; }
+.cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin:8px 0 20px; }
+.card { border:1px solid var(--line); border-radius:8px; padding:14px; }
+.card .lbl { font-size:11px; text-transform:uppercase; letter-spacing:.4px; color:#67728a; }
+.card .num { font-size:30px; font-weight:300; color:var(--blue); line-height:1.2; }
+.pbar { height:8px; background:#e5e9f0; border-radius:5px; overflow:hidden; min-width:80px; }
+.pbar > span { display:block; height:100%; background:#1a7f43; }
+.inline-form:not([hidden]) { display:flex; flex-wrap:wrap; gap:8px; align-items:center; background:#f7f9fc; border:1px solid var(--line); border-radius:8px; padding:12px; margin:0 0 16px; }
+.inline-form input, .inline-form select { padding:7px 9px; border:1px solid #c7d0e0; border-radius:6px; font-size:13px; }
+.inline-form .err { color:#c0362c; font-size:13px; }
+#cred-panel:not([hidden]) { display:block; }
+#cred-rows td { padding:6px 10px; }
+.inline-form .err.ok { color:#1a7f43; }
+.swarm-frame { width:100%; height:640px; border:1px solid #243049; border-radius:10px; background:#0b0f17; }
+#settings-info td:first-child { width:160px; }
+#audit-timeline { margin:4px 0 16px; }
+#audit-histogram { width:100%; height:64px; display:block; margin:6px 0; }
+#audit-histogram .axis { stroke:var(--line); stroke-width:1; }
+#audit-histogram .bar { fill:#9fc0f0; cursor:pointer; transition:fill .12s ease; }
+#audit-histogram .bar:hover { fill:var(--blue); }
+/* time brush: selection overlay lives in its own pointer-events-free layer;
+   all hit-testing is numeric on the svg itself */
+#audit-histogram { cursor:crosshair; touch-action:none; user-select:none; -webkit-user-select:none; }
+#audit-brush { pointer-events:none; }
+#audit-brush .brush-sel { fill:rgba(11,92,214,.14); stroke:var(--blue); stroke-width:1; }
+#audit-brush .brush-handle { fill:var(--blue); }
+#audit-clear-selection { margin-left:6px; }
+/* audit table: composed messages, category tags, result badges */
+#audit-tbl td.msg { font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; }
+#audit-tbl td.nowrap { white-space:nowrap; }
+#audit-tbl .detail { color:#67728a; }
+.badge { display:inline-block; font-size:11px; font-weight:600; border-radius:4px; padding:1px 7px; line-height:1.5; }
+.badge-ok { background:#e3f4e8; color:#1a7f43; }
+.badge-fail { background:#fbe9e7; color:#c0362c; }
+/* batch-onboard job states (done/error reuse badge-ok/badge-fail) */
+.badge-queued { background:#eef1f6; color:#67728a; }
+.badge-running { background:#e3edfb; color:#0b5cd6; }
+.badge-cancelled { background:#f7efdc; color:#8a6d1a; }
+#batch-panel td.out { color:#67728a; max-width:420px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.cat-tag { display:inline-block; font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.3px;
+  border-radius:4px; padding:1px 6px; margin-right:4px; background:#eef1f6; color:#556; }
+.cat-auth { background:#f0e9fb; color:#6b3fa0; }
+.cat-device { background:#e7f1ff; color:#0b5cd6; }
+.cat-image { background:#e0f5f3; color:#0f766e; }
+.cat-onboard { background:#fdeedd; color:#b45309; }
+.cat-settings { background:#eef1f6; color:#556; }
+.cat-telemetry { background:#e3f4e8; color:#1a7f43; }
+.cat-token { background:#faf3d9; color:#8a6d1a; }

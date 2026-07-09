@@ -1,0 +1,74 @@
+# IRIS — Intelligent Release & Image Staging
+# Keep credentials, device images, and generated artifacts OUT of the repo.
+# NOTE: *.example files are intentionally tracked (they are templates, not real config).
+
+# --- credentials / secrets (NEVER commit) ---
+creds/*
+# the template IS tracked (real creds/deploy.env is not — matched by creds/* above)
+!creds/deploy.env.example
+.env
+*.env
+server/.env
+tokens.txt
+rpc-secret
+*.pem
+*.key
+*.crt
+*.p12
+id_rsa*
+
+# --- device images / large firmware binaries ---
+*.bin
+*.pkg
+*.SPA.bin
+images/ios-xe/
+
+# --- torrents / aria2 download state ---
+*.torrent
+*.aria2
+
+# --- vendored binaries (refetched by tools/get-aria2c.sh) ---
+bin/*
+!bin/.gitkeep
+
+# --- generated release artifacts (rebuilt by tools/make-release.sh) ---
+release/
+*.tgz
+iris-agent.tgz
+
+# --- generated per-device installers + secret-bearing fleet files ---
+# (the *.example templates above these are kept)
+fleet/dist/
+fleet/iris-fleet.conf
+fleet/devices.csv
+fleet/switches.csv
+fleet/assignments.csv
+
+# --- runtime output ---
+artifacts/*
+!artifacts/.gitkeep
+
+# --- python / test / OS junk ---
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.DS_Store
+
+# --- local opencode / AI-agent tooling (not part of the IRIS deliverable) ---
+.opencode/
+AGENTS.md
+
+# --- internal docs (planning, research, migration runbook) — not part of the public deliverable ---
+docs/
+
+# --- local status / handoff notes (contain lab IPs + credentials) ---
+HANDOFF.md
+lab/evidence/
+
+# --- IOx app build output (generated iris.tar / packaging) ---
+device/iox/out/
+HANDOFF-*.md
+
+# --- superpowers brainstorm/visual-companion scratch (local only) ---
+.superpowers/
