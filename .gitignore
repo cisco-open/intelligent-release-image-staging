@@ -59,8 +59,10 @@ __pycache__/
 .opencode/
 AGENTS.md
 
-# --- internal docs (planning, research, migration runbook) — not part of the public deliverable ---
-docs/
+# --- generated documentation output ---
+# Public source docs live in docs/ and are intentionally tracked.
+site/
+deploy/
 
 # --- local status / handoff notes (contain lab IPs + credentials) ---
 HANDOFF.md

@@ -1,0 +1,58 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+name: Build and deploy documentation
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/docs.yml"
+      - "docs/**"
+      - "requirements-docs.txt"
+      - "zensical.toml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+          cache: "pip"
+          cache-dependency-path: "requirements-docs.txt"
+
+      - name: Install documentation dependencies
+        run: pip install -r requirements-docs.txt
+
+      - name: Build Zensical documentation
+        run: zensical build
+
+      - name: Combine website and documentation
+        run: |
+          mkdir -p deploy/docs
+          cp docs/index.html docs/styles.css docs/app.js deploy/
+          cp -R site/. deploy/docs/
+          rm -f deploy/docs/404.html
+
+      - name: Publish to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./deploy
+          publish_branch: gh-pages
+          force_orphan: true
