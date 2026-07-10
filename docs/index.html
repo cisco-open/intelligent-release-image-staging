@@ -1,0 +1,239 @@
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>IRIS | Intelligent Release and Image Staging</title>
+    <meta name="description" content="IRIS stages Cisco IOS-XE images safely across a fleet with a private swarm, catalog policy, and device-side verification.">
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <canvas id="swarm-canvas" aria-hidden="true"></canvas>
+
+    <header class="site-header" data-elevated="false">
+      <a class="brand" href="#top" aria-label="IRIS home">
+        <span class="brand-mark">IR</span>
+        <span>IRIS</span>
+      </a>
+      <nav class="nav-links" aria-label="Primary navigation">
+        <a href="#architecture">How it works</a>
+        <a href="#workflow">Workflow</a>
+        <a href="#operators">Platforms</a>
+        <a href="#ports">Ports</a>
+        <a href="docs/">Docs</a>
+      </nav>
+    </header>
+
+    <main id="top">
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="eyebrow">Cisco IOS-XE image staging with private peer delivery</p>
+          <h1 id="hero-title">IRIS</h1>
+          <p class="hero-lede">
+            IRIS gets large Cisco IOS-XE images onto routers and switches faster by letting devices share downloaded image chunks with each other. Each device verifies the image and stops at staging.
+          </p>
+          <div class="hero-actions" aria-label="Primary actions">
+            <a class="button primary" href="docs/">Read the docs</a>
+            <a class="button secondary" href="#architecture">See how it works</a>
+          </div>
+        </div>
+
+        <div class="delivery-card" aria-label="IRIS delivery summary">
+          <div class="delivery-card-header">
+            <span>Private swarm delivery</span>
+            <strong>1 image -> many devices</strong>
+          </div>
+          <ol class="delivery-steps">
+            <li><span>Publish</span><p>The server publishes image metadata and a private torrent.</p></li>
+            <li><span>Share</span><p>Devices download pieces from the server and from each other.</p></li>
+            <li><span>Stage</span><p>Each device verifies the image, stages it, and waits for the operator.</p></li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="metrics-strip" aria-label="Core guarantees">
+        <div>
+          <strong>P2P</strong>
+          <span>devices help distribute image pieces</span>
+        </div>
+        <div>
+          <strong>Less</strong>
+          <span>server bottleneck during fleet waves</span>
+        </div>
+        <div>
+          <strong>More</strong>
+          <span>resilience through resumable piece downloads</span>
+        </div>
+        <div>
+          <strong>Safe</strong>
+          <span>verified staging with no reload</span>
+        </div>
+      </section>
+
+      <section id="architecture" class="section-grid architecture-section">
+        <div class="section-copy">
+          <p class="eyebrow">How it works</p>
+          <h2>The simple idea: devices help each other download.</h2>
+          <p>
+            With a normal file server, every device asks the server for the whole image. With IRIS, the server introduces the image and devices exchange the pieces they already have. The more devices participate, the more download capacity the fleet can contribute.
+          </p>
+        </div>
+        <div class="distribution-visual" aria-label="Traditional download compared with IRIS swarm delivery">
+          <div class="compare-card">
+            <h3>Traditional pull</h3>
+            <div class="simple-flow">
+              <div class="server-box">File server</div>
+              <div class="flow-arrows" aria-hidden="true">
+                <span></span><span></span><span></span>
+              </div>
+              <div class="device-column">
+                <div>Device A</div>
+                <div>Device B</div>
+                <div>Device C</div>
+              </div>
+            </div>
+            <p>Every device pulls the full image from one place. Large rollouts can bottleneck on the server or uplink.</p>
+          </div>
+          <div class="compare-card highlight">
+            <h3>IRIS private swarm</h3>
+            <div class="swarm-flow">
+              <div class="server-box">IRIS server</div>
+              <div class="swarm-devices">
+                <div>Device A</div>
+                <div>Device B</div>
+                <div>Device C</div>
+              </div>
+              <div class="peer-ring" aria-hidden="true"></div>
+            </div>
+            <p>Devices fetch missing pieces from the server and from peers. Transfers resume, load spreads out, and each device verifies the final staged image.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="benefits-grid" aria-label="IRIS benefits">
+        <article>
+          <span>01</span>
+          <h3>Faster fleet distribution</h3>
+          <p>The server no longer has to send every byte of a multi-gigabyte image to every device. Devices that have pieces can help other devices catch up.</p>
+        </article>
+        <article>
+          <span>02</span>
+          <h3>Better fault tolerance</h3>
+          <p>BitTorrent-style piece transfers can resume after interruption, and devices can fill missing pieces from more than one source once the swarm has content.</p>
+        </article>
+        <article>
+          <span>03</span>
+          <h3>Safer change control</h3>
+          <p>IRIS only stages the approved image. Install, activation, boot changes, and reloads stay outside the tool and under operator control.</p>
+        </article>
+      </section>
+
+      <section id="workflow" class="section">
+        <div class="section-heading">
+          <p class="eyebrow">Workflow</p>
+          <h2>Publish, assign, stage, stop.</h2>
+        </div>
+        <div class="flow-shell">
+          <div class="step-list" role="tablist" aria-label="IRIS workflow steps">
+            <button class="step active" type="button" role="tab" aria-selected="true" data-step="publish">Publish</button>
+            <button class="step" type="button" role="tab" aria-selected="false" data-step="assign">Assign</button>
+            <button class="step" type="button" role="tab" aria-selected="false" data-step="download">Download</button>
+            <button class="step" type="button" role="tab" aria-selected="false" data-step="verify">Verify</button>
+            <button class="step" type="button" role="tab" aria-selected="false" data-step="report">Report</button>
+          </div>
+          <article class="flow-detail" aria-live="polite">
+            <h3 id="flow-title">Publish an image</h3>
+            <p id="flow-body">The operator publishes one IOS-XE image. IRIS records the hashes and creates private swarm metadata for the fleet.</p>
+            <code id="flow-command">iris-publish /opt/images/iosxe/c9300/&lt;image&gt;.bin</code>
+          </article>
+        </div>
+      </section>
+
+      <section id="operators" class="section-grid reverse">
+        <div class="path-panel">
+          <div class="path-tabs" role="tablist" aria-label="Operator paths">
+            <button class="path-tab active" type="button" role="tab" aria-selected="true" data-path="guest">C9300</button>
+            <button class="path-tab" type="button" role="tab" aria-selected="false" data-path="iox">IE-3400</button>
+            <button class="path-tab" type="button" role="tab" aria-selected="false" data-path="server">Server</button>
+          </div>
+          <div class="path-body" aria-live="polite">
+            <h3 id="path-title">Catalyst 9300 Guest Shell</h3>
+            <p id="path-copy">Generate a per-device installer, bootstrap Guest Shell, and let EEM keep the staging agent alive.</p>
+            <ul id="path-list">
+              <li>Installs catalog trust material.</li>
+              <li>Runs the agent every 60 seconds.</li>
+              <li>Stages approved images to `flash:`.</li>
+            </ul>
+          </div>
+        </div>
+        <div class="section-copy">
+          <p class="eyebrow">Platforms</p>
+          <h2>Same delivery model, platform-specific staging.</h2>
+          <p>
+            Catalyst 9300 devices use Guest Shell and stage to `flash:`. IE platforms use an IOx app and stage to `sdflash:`. Both paths download by swarm, verify on the device, and stop before activation.
+          </p>
+        </div>
+      </section>
+
+      <section id="ports" class="section">
+        <div class="section-heading row-heading">
+          <div>
+            <p class="eyebrow">Ports</p>
+            <h2>Know what must be reachable.</h2>
+          </div>
+          <div class="filters" aria-label="Port filters">
+            <button class="filter active" type="button" data-filter="all">All</button>
+            <button class="filter" type="button" data-filter="device">Device</button>
+            <button class="filter" type="button" data-filter="operator">Operator</button>
+            <button class="filter" type="button" data-filter="local">Local</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Port</th>
+                <th>Service</th>
+                <th>Traffic</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr data-scope="device"><td>6969</td><td>Private tracker</td><td>Device announces</td></tr>
+              <tr data-scope="device"><td>8443</td><td>Catalog</td><td>Policy, metadata, token refresh</td></tr>
+              <tr data-scope="device"><td>8000</td><td>Artifact server</td><td>Bootstrap, bundle, certificates</td></tr>
+              <tr data-scope="device"><td>6881</td><td>Seeder data</td><td>BitTorrent pieces</td></tr>
+              <tr data-scope="operator"><td>8080</td><td>Console</td><td>Admin browser workflow</td></tr>
+              <tr data-scope="operator"><td>9101</td><td>Telemetry</td><td>Health, swarm, metrics</td></tr>
+              <tr data-scope="local"><td>6800</td><td>aria2 RPC</td><td>Local-only inside container</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="docs-band">
+        <div>
+          <p class="eyebrow">Documentation</p>
+          <h2>Deep details live in the generated Zensical site.</h2>
+        </div>
+        <div class="doc-links">
+          <a href="docs/getting-started/">Getting started</a>
+          <a href="docs/architecture/">Architecture</a>
+          <a href="docs/security/">Security</a>
+          <a href="docs/operations/">Operations</a>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span>IRIS stages images. Operators decide when to install.</span>
+      <a href="docs/">Open full documentation</a>
+    </footer>
+
+    <script src="app.js" defer></script>
+  </body>
+</html>

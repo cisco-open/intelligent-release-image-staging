@@ -30,8 +30,27 @@ command-line / RPC interface and remains under its own license:
                Installed as a system package and invoked as a subprocess
                (e.g. to generate secrets and TLS material).
 
-Because these tools are invoked as separate programs and are not linked into or
-derived from this project's source code, the project's own code is licensed under the
-Apache License, Version 2.0, while each tool above remains governed solely by
-its respective license. The mention of GPLv2 above pertains ONLY to those
-external tools; the project itself is not licensed under the GPL.
+------------------------------------------------------------------------------
+Documentation tooling and runtime assets
+------------------------------------------------------------------------------
+
+The documentation build and published documentation site may use the following
+third-party tools or runtime assets. They are not linked into the IRIS runtime:
+
+  * Zensical — MIT License.
+               Copyright (c) 2025-2026 Zensical and contributors.
+               Used as a documentation build tool to turn docs/zensical Markdown
+               into a static site.
+
+  * Mermaid  — MIT License.
+               Copyright (c) 2014-2022 Knut Sveidqvist.
+               Loaded by the generated documentation site to render diagrams
+               from Mermaid code blocks.
+
+The runtime tools listed above are invoked as separate programs and are not
+linked into or derived from this project's source code. The documentation tools
+and assets listed above are used only for documentation build or rendering. The
+project's own code is licensed under the Apache License, Version 2.0, while each
+tool above remains governed solely by its respective license. The mention of
+GPLv2 above pertains ONLY to those external tools; the project itself is not
+licensed under the GPL.

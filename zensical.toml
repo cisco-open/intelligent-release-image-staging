@@ -1,0 +1,42 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+[project]
+site_name = "IRIS Documentation"
+site_description = "Intelligent Release and Image Staging documentation"
+site_author = "Cisco Systems, Inc."
+docs_dir = "docs/zensical"
+site_dir = "site"
+dev_addr = "127.0.0.1:8091"
+use_directory_urls = true
+extra_javascript = ["javascripts/mermaid.mjs"]
+copyright = "Copyright &copy; 2026 Cisco Systems, Inc."
+nav = [
+  { "Overview" = "index.md" },
+  { "Getting Started" = "getting-started.md" },
+  { "Architecture" = "architecture.md" },
+  { "Server" = "server.md" },
+  { "Device Agents" = "device-agents.md" },
+  { "Web Console" = "console.md" },
+  { "Fleet Workflows" = "fleet-workflows.md" },
+  { "IOx App" = "iox.md" },
+  { "Security Model" = "security.md" },
+  { "Observability" = "observability.md" },
+  { "Operations" = "operations.md" },
+  { "Validation" = "validation.md" },
+  { "Development" = "development.md" },
+  { "Reference" = "reference.md" },
+]
+
+[project.theme]
+variant = "modern"
+
+[project.markdown_extensions.admonition]
+
+[project.markdown_extensions.tables]
+
+[project.markdown_extensions.pymdownx.superfences]
+custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
+]
