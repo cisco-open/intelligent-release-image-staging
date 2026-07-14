@@ -26,11 +26,17 @@ software state of a device.
    - **bats** (for the shell test suite)
    - **Docker** and **Docker Compose** (for the server stack)
 3. **Run the server stack** (tracker / catalog / seeder) locally with Docker
-   Compose:
+   Compose from the repository root. Bootstrap is needed once per fresh config
+   volume:
    ```
-   cd server/
-   docker compose up
+   docker compose -f server/docker-compose.yml build
+   docker compose -f server/docker-compose.yml run --rm iris iris-bootstrap
+   docker compose -f server/docker-compose.yml up
    ```
+
+The seed-server Dockerfile uses the repository root as its build context so the
+image can carry the device installers and console onboarding helper. Build it
+directly with `docker build --platform linux/amd64 -f server/Dockerfile .`.
 
 ## Commit message format
 

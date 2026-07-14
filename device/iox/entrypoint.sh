@@ -4,28 +4,35 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# PID 1 for the IRIS aarch64 IOx Docker app on the IE-3400.
+# PID 1 for the IRIS arm64/amd64 IOx Docker app.
 # Replaces the Guest Shell trio (EEM 60s timer + bootstrap.sh + guestshell-start.sh):
 #   1. ensure the stage dir + a config file exist (generate conf from env on first
 #      boot if the persistent mount has none — robust to ephemeral storage),
 #   2. keep aria2c running as the BT RPC daemon, re-seeding its rpc-secret when the
 #      agent rotates it (mirrors bootstrap.sh),
 #   3. run the agent control plane once every tick (the existing --once path).
-set -u
+set -eu
+umask 077
 
-STAGE_DIR="${IRIS_STAGE_DIR:-/data/iris}"
+PERSIST_ROOT="${CAF_APP_PERSISTENT_DIR:-/data}"
+STAGE_DIR="${IRIS_STAGE_DIR:-$PERSIST_ROOT/iris}"
 CONF="${IRIS_AGENT_CONF:-$STAGE_DIR/iris-agent.conf}"
+STATE="${IRIS_AGENT_STATE:-$STAGE_DIR/iris-agent.state}"
 RPC_PORT="${IRIS_RPC_PORT:-6800}"
 TICK="${IRIS_TICK_SECONDS:-60}"
 MAX_PEERS="${IRIS_MAX_PEERS:-10}"
+TARGET_FS="${IRIS_TARGET_FS:-}"
 ARIA2="/opt/iris/bin/aria2c"
 AGENT="/opt/iris/agent/iris_agent.py"
 
-# IOx blocks bind-mounting sdflash: into the app, so the agent can't write the
-# IOS-visible SD directly. It instead scp-PUSHES the staged image to
-# sdflash:guest-share/iris via the device's SCP server (container -> device), then
-# IOS `copy /verify`s it onto sdflash: — see iris_agent.build_deps copy_to_root.
-mkdir -p "$STAGE_DIR"
+export IRIS_STAGE_DIR="$STAGE_DIR"
+export IRIS_AGENT_CONF="$CONF"
+export IRIS_AGENT_STATE="$STATE"
+
+# IOx cannot bind-mount an IOS filesystem into the app. The agent therefore
+# scp-pushes the staged image to <target>guest-share/iris through the device's
+# SCP server, then IOS `copy /verify`s it onto the selected filesystem root.
+mkdir -p "$STAGE_DIR" "$(dirname "$CONF")" "$(dirname "$STATE")"
 
 # --- 1. config: use a dropped conf if present, else synthesize from env ---------
 # A conf dropped onto a persistent mount wins (and the agent rewrites it in place
@@ -33,24 +40,51 @@ mkdir -p "$STAGE_DIR"
 # from the app-hosting --env knobs. SECRETS (catalog_token, device_ssh_pass) come
 # from the environment at deploy time; they are never baked into the image.
 if [ ! -f "$CONF" ]; then
+  : "${IRIS_CATALOG_URL:?set IRIS_CATALOG_URL to the reachable IRIS catalog URL}"
+  : "${IRIS_CATALOG_TOKEN:?set IRIS_CATALOG_TOKEN to this device enrollment token}"
+  : "${IRIS_DEVICE_ID:?set IRIS_DEVICE_ID to the catalog device id}"
+  : "${IRIS_DEVICE_SSH_HOST:?set IRIS_DEVICE_SSH_HOST to the IOS SSH-to-self address}"
+  : "${IRIS_DEVICE_SSH_USER:?set IRIS_DEVICE_SSH_USER to the IOS SSH user}"
+  : "${IRIS_DEVICE_SSH_PASS:?set IRIS_DEVICE_SSH_PASS to the IOS SSH password}"
   echo "IRIS-ENTRYPOINT: no conf at $CONF; generating from environment"
+  tmp="${CONF}.tmp.$$"
   {
-    echo "catalog_url = ${IRIS_CATALOG_URL:-https://100.90.168.20:8443}"
-    echo "catalog_token = ${IRIS_CATALOG_TOKEN:-}"
-    echo "device_id = ${IRIS_DEVICE_ID:-}"
+    echo "catalog_url = ${IRIS_CATALOG_URL}"
+    echo "catalog_token = ${IRIS_CATALOG_TOKEN}"
+    echo "device_id = ${IRIS_DEVICE_ID}"
     echo "stage_dir = ${STAGE_DIR}"
+    echo "target_fs = ${TARGET_FS}"
     echo "rpc_secret = "
     echo "catalog_ca = ${IRIS_CATALOG_CA:-/opt/iris/iris-catalog.pem}"
     echo "token_expires_at = 0"
     echo "runtime_mode = container"
-    echo "device_ssh_host = ${IRIS_DEVICE_SSH_HOST:-100.92.100.253}"
-    echo "device_ssh_user = ${IRIS_DEVICE_SSH_USER:-dnac}"
-    echo "device_ssh_pass = ${IRIS_DEVICE_SSH_PASS:-}"
-    echo "device_ssh_enable = ${IRIS_DEVICE_SSH_ENABLE:-${IRIS_DEVICE_SSH_PASS:-}}"
+    echo "device_ssh_host = ${IRIS_DEVICE_SSH_HOST}"
+    echo "device_ssh_user = ${IRIS_DEVICE_SSH_USER}"
+    echo "device_ssh_pass = ${IRIS_DEVICE_SSH_PASS}"
+    echo "device_ssh_enable = ${IRIS_DEVICE_SSH_ENABLE:-${IRIS_DEVICE_SSH_PASS}}"
     echo "max_peers = ${MAX_PEERS}"
     echo "telemetry = ${IRIS_TELEMETRY:-on}"
     echo "rpc_port = ${RPC_PORT}"
-  } > "$CONF"
+  } > "$tmp"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$CONF"
+fi
+chmod 600 "$CONF" 2>/dev/null || true
+
+# A persistent config normally wins, but an explicit deployment-time target is
+# an operator intent and must also take effect after an app restart/redeploy.
+if [ -n "$TARGET_FS" ]; then
+  PYTHONPATH=/opt/iris/agent python3 - "$CONF" "$TARGET_FS" <<'PY'
+import sys
+import agent_config
+
+path, target = sys.argv[1:]
+cfg = agent_config.load(path)
+agent_config.validate_target_fs(target)
+if cfg.get("target_fs") != target:
+    cfg["target_fs"] = target
+    agent_config.write_conf(path, cfg)
+PY
 fi
 
 # --- 2/3. aria2c supervisor + agent tick loop ----------------------------------
@@ -73,6 +107,23 @@ start_aria2c() {
     && echo "IRIS-ENTRYPOINT: aria2c (re)started on :$RPC_PORT"
 }
 
+AGENT_PID=""
+SLEEP_PID=""
+
+stop_agent() {
+  trap - TERM INT
+  for pid in "$AGENT_PID" "$SLEEP_PID"; do
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+  done
+  pkill -f 'aria2c.*enable-rpc' 2>/dev/null || true
+  for pid in "$AGENT_PID" "$SLEEP_PID"; do
+    [ -n "$pid" ] && wait "$pid" 2>/dev/null || true
+  done
+  exit 0
+}
+
+trap stop_agent TERM INT
+
 echo "IRIS-ENTRYPOINT: starting; stage=$STAGE_DIR conf=$CONF tick=${TICK}s"
 cur=""
 while true; do
@@ -81,6 +132,18 @@ while true; do
   if [ "$want" != "$cur" ] || ! pgrep -f 'aria2c.*enable-rpc' >/dev/null 2>&1; then
     start_aria2c "$want" && cur="$want"
   fi
-  python3 "$AGENT" --once || echo "IRIS-ENTRYPOINT: agent tick returned non-zero"
-  sleep "$TICK"
+  # Keep foreground work as tracked children. POSIX shells defer traps while a
+  # foreground command runs; waiting on a background child lets PID 1 handle
+  # TERM immediately instead of making the container wait for the full tick.
+  python3 "$AGENT" --once &
+  AGENT_PID=$!
+  if ! wait "$AGENT_PID"; then
+    echo "IRIS-ENTRYPOINT: agent tick returned non-zero"
+  fi
+  AGENT_PID=""
+
+  sleep "$TICK" &
+  SLEEP_PID=$!
+  wait "$SLEEP_PID" || true
+  SLEEP_PID=""
 done

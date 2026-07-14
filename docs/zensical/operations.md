@@ -19,9 +19,20 @@ This page collects the actions operators perform after the first deployment.
 | Apply assignments | `tools/apply-assignments.sh fleet/assignments.csv` |
 | Create or reset admin | `docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin` |
 
+For Kubernetes, the equivalent process and logs are available through the
+single deployment:
+
+```bash
+kubectl -n iris exec deployment/iris-seed-server -- iris-assign
+kubectl -n iris logs deployment/iris-seed-server -c iris
+```
+
 ## Backups
 
 Back up the Docker volumes that hold `/var/lib/iris` and `/etc/iris`, plus the offline age recipient material required to decrypt secrets. Keep image binaries and generated artifacts in their normal external storage path.
+
+For Kubernetes, snapshot the `iris-data` PVC and back up the age identity stored
+outside that PVC. Both are required for recovery.
 
 ## Scaling notes
 
@@ -39,4 +50,3 @@ Use `device/device-uninstall.sh` or the IOx uninstall path for device cleanup. C
 4. Confirm the published image exists under `/opt/images` on the server host.
 5. Check the console audit and latest device report.
 6. Re-run the generated installer only after confirming the device inventory row is still correct.
-

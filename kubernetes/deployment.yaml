@@ -1,0 +1,147 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iris-seed-server
+  labels:
+    app.kubernetes.io/name: iris-seed-server
+    app.kubernetes.io/part-of: iris
+spec:
+  # The tracker registry is in memory and aria2 RPC is pod-local. Keep one
+  # replica until those stateful components gain an external coordination layer.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: iris-seed-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: iris-seed-server
+        app.kubernetes.io/part-of: iris
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: bootstrap
+          image: iris:docker-alpha
+          imagePullPolicy: IfNotPresent
+          args:
+            - iris-bootstrap
+          envFrom:
+            - configMapRef:
+                name: iris-seed-server
+          env:
+            - name: IRIS_AGE_KEY_FILE
+              value: /run/secrets/iris_age_key
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: age-key
+              mountPath: /run/secrets
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+      containers:
+        - name: iris
+          image: iris:docker-alpha
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: iris-seed-server
+          env:
+            - name: IRIS_AGE_KEY_FILE
+              value: /run/secrets/iris_age_key
+          ports:
+            - name: tracker
+              containerPort: 6969
+              protocol: TCP
+            - name: catalog
+              containerPort: 8443
+              protocol: TCP
+            - name: artifacts
+              containerPort: 8000
+              protocol: TCP
+            - name: bittorrent
+              containerPort: 6881
+              protocol: TCP
+            - name: console
+              containerPort: 8080
+              protocol: TCP
+            - name: health
+              containerPort: 9101
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: runtime-secrets
+              mountPath: /run/iris
+            - name: age-key
+              mountPath: /run/secrets
+              readOnly: true
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: iris-data
+        - name: runtime-secrets
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Mi
+        - name: age-key
+          secret:
+            secretName: iris-age
+            defaultMode: 0400
+            items:
+              - key: identity
+                path: iris_age_key

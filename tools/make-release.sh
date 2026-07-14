@@ -17,7 +17,7 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 # top-level docs + build version (the VERSION file is the single source of truth)
 cp "$REPO/README.md" "$REPO/VERSION" "$OUT/"
 cp "$REPO/LICENSE" "$REPO/NOTICE" "$REPO/SECURITY.md" "$REPO/CODE_OF_CONDUCT.md" "$OUT/"
-cp "$REPO/.gitignore" "$OUT/"
+cp "$REPO/.gitignore" "$REPO/.dockerignore" "$OUT/"
 
 # server (everything; tests included — no secrets live here)
 mkdir -p "$OUT/server"
@@ -39,6 +39,10 @@ mkdir -p "$OUT/lab"
 for f in device-run.sh gsrun.sh device-copy.sh; do
   cp "$REPO/lab/$f" "$OUT/lab/"
 done
+
+# optional Kubernetes seed-server deployment
+mkdir -p "$OUT/kubernetes"
+cp -R "$REPO/kubernetes/." "$OUT/kubernetes/"
 
 # fleet: EXAMPLES ONLY (the real csv/conf carry tokens + passwords)
 mkdir -p "$OUT/fleet"

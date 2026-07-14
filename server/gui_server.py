@@ -83,9 +83,8 @@ def _default_swarm_fetch():
 
 def _read_version():
     """Best-effort IRIS version: IRIS_VERSION env, else a VERSION file near this
-    module (present in a source checkout / the demo), else 'unknown'. The Docker
-    build context is server/ only, so the repo-root VERSION is absent there and
-    this returns 'unknown' unless the IRIS_VERSION build arg / env is set."""
+    module (present in a source checkout and the self-contained image), else
+    'unknown'. A non-empty IRIS_VERSION build arg / env takes precedence."""
     v = os.environ.get("IRIS_VERSION", "").strip()
     if v:            # empty/blank env (compose's "${IRIS_VERSION:-}") = unset
         return v

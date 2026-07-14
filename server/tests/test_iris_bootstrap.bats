@@ -222,3 +222,13 @@ run_bootstrap() {
   run env IRIS_CONFIG="$IRIS_CONFIG" bash "$BOOTSTRAP" --bad-arg
   [ "$status" -eq 2 ]
 }
+
+@test "invalid public host fails before bootstrap writes state" {
+  BAD_CONFIG="$TMP/bad-config"
+  run env IRIS_CONFIG="$BAD_CONFIG" IRIS_HOST_IP="REPLACE_WITH_STATIC_EXTERNAL_IP" \
+      IRIS_AGE_KEY_FILE="$TMP/iris_age_key" IRIS_AGE_BIN="$TMP/fake-age" \
+      IRIS_AGE_RECIPIENTS="age1testrecipient" bash "$BOOTSTRAP"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"valid device-reachable IPv4"* ]]
+  [ ! -e "$BAD_CONFIG/secrets.json.age" ]
+}

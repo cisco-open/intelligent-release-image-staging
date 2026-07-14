@@ -4,6 +4,10 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+file_size() {
+  stat -c%s "$1" 2>/dev/null || stat -f%z "$1"
+}
+
 @test "bootstrap.sh invokes rotate-logs.sh each tick (wired into cadence)" {
   # Structural guard: bootstrap.sh must reference rotate-logs.sh so aria2c.log
   # is trimmed on every 60s EEM tick and cannot grow unbounded on flash.
@@ -24,6 +28,6 @@
   head -c 100 /dev/zero > "$small"
   run env MAX_BYTES=1024 bash "$BATS_TEST_DIRNAME/../rotate-logs.sh" "$big" "$small"
   [ "$status" -eq 0 ]
-  [ "$(stat -c%s "$big")" -lt 200000 ]   # truncated
-  [ "$(stat -c%s "$small")" -eq 100 ]    # untouched
+  [ "$(file_size "$big")" -lt 200000 ]   # truncated
+  [ "$(file_size "$small")" -eq 100 ]    # untouched
 }

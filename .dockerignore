@@ -1,0 +1,49 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Keep the seed-server build context small and, more importantly, keep local
+# credentials, images, generated artifacts, and lab state out of image layers.
+.git/
+.cache/
+.pytest_cache/
+.opencode/
+.superpowers/
+AGENTS.md
+**/__pycache__/
+**/*.pyc
+**/.DS_Store
+
+creds/
+artifacts/
+bin/
+images/
+fleet/*.csv
+fleet/*.conf
+fleet/dist/
+lab/evidence/
+
+.env
+*.env
+*.pem
+*.key
+*.crt
+*.p12
+*.bin
+*.pkg
+*.torrent
+*.aria2
+
+deploy/
+site/
+release/
+device/iox/out/
+HANDOFF*.md
+
+# Tests and generated documentation are not needed by either runtime role.
+server/tests/
+device/tests/
+device/agent/tests/
+device/iox/tests/
+lab/tests/
+docs/

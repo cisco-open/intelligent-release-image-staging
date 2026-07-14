@@ -26,21 +26,21 @@ setup() {
     CATALOG_TOKEN=tok123 DEVICE_ID=switch-01 \
     STAGE_HOST=198.51.100.1 DEVICE_SSH_PASS=p4ss \
     DEVICE_SSH_USER=iosadmin \
-    CATALOG_URL=https://198.51.100.1:8443
+    CATALOG_URL=https://198.51.100.1:8443 TARGET_FS=sdflash:
 }
 
 # Extract and evaluate only the variable defaults + appid_block function from
 # install.sh, without triggering the imperative install steps.  This is the
 # cleanest way to unit-test the IOS config block without a live device.
 _appid_block_output() {
-  local svi="${1:-$SVI_IP}" user="${2:-$DEVICE_SSH_USER}"
+  local svi="${1:-$SVI_IP}" user="${2:-$DEVICE_SSH_USER}" target="${3:-$TARGET_FS}"
   # Re-export with overrides so the heredoc substitutions inside appid_block pick
   # them up correctly.
-  SVI_IP="$svi" DEVICE_SSH_USER="$user" \
+  SVI_IP="$svi" DEVICE_SSH_USER="$user" TARGET_FS="$target" \
   bash -c '
     # Source only the variable defaults (lines that assign defaults not the
     # mandatory parameter checks) and the appid_block() function body.
-    eval "$(awk "/^CATALOG_URL=|^APP_INTF=|^GW_IP=|^CPU=|^MEM=|^DISK=|^PKG=|^DEVICE_SSH_USER=|^APPID=/" "'"$INSTALL"'")"
+    eval "$(awk "/^CATALOG_URL=|^APP_INTF=|^GW_IP=|^CPU=|^MEM=|^DISK=|^PKG=|^DEVICE_SSH_USER=|^TARGET_FS=|^IRIS_TELEMETRY=|^APPID=/" "'"$INSTALL"'")"
     eval "$(awk "/^appid_block\(\)/,/^\}/" "'"$INSTALL"'")"
     appid_block
   '
@@ -68,6 +68,25 @@ _appid_block_output() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"-e IRIS_DEVICE_SSH_HOST=10.20.30.40"* ]]
   [[ "$output" != *"100.92.100.253"* ]]
+}
+
+@test "install.sh passes the selected IOS target filesystem to the app" {
+  run _appid_block_output "$SVI_IP" "$DEVICE_SSH_USER" "bootflash:"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"-e IRIS_TARGET_FS=bootflash:"* ]]
+}
+
+@test "install.sh uses one numbered run-opts line per environment variable" {
+  run _appid_block_output
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c '^  run-opts [1-8] ' | tr -d ' ')" -eq 8 ]
+  ! printf '%s\n' "$output" | grep -Eq 'run-opts.* -e .* -e '
+}
+
+@test "install.sh explicitly passes the telemetry setting" {
+  run _appid_block_output
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'run-opts 8 "-e IRIS_TELEMETRY=on"'* ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -104,6 +123,9 @@ _appid_block_output() {
 
     # Stub start_aria2c so it logs the call without launching a real daemon.
     start_aria2c() { echo "started:$1" >> "$CALL_LOG_FILE"; }
+    # Make the daemon-absent precondition deterministic. A test runner command
+    # line can itself mention aria2c and otherwise produce a false pgrep match.
+    pgrep() { return 1; }
 
     # Simulate: cur already equals want (secret did not change).
     cur=mysecret
@@ -126,6 +148,15 @@ _appid_block_output() {
   # Static analysis: the loop body must contain a pgrep (or kill -0) check so
   # that a dead daemon triggers start_aria2c independently of secret rotation.
   grep -q 'pgrep\|kill -0' "$ENTRYPOINT"
+}
+
+@test "entrypoint.sh tracks agent and sleep children for prompt TERM handling" {
+  grep -q 'python3 "\$AGENT" --once &' "$ENTRYPOINT"
+  grep -q 'AGENT_PID=\$!' "$ENTRYPOINT"
+  grep -q 'sleep "\$TICK" &' "$ENTRYPOINT"
+  grep -q 'SLEEP_PID=\$!' "$ENTRYPOINT"
+  grep -q 'kill "\$pid"' "$ENTRYPOINT"
+  grep -q 'wait "\$pid"' "$ENTRYPOINT"
 }
 
 # ---------------------------------------------------------------------------
@@ -223,4 +254,20 @@ _appid_block_output() {
   # The comment incorrectly says 'Fetch WITHOUT -k' while the code uses --insecure
   # which IS -k. The corrected comment must not make the false claim.
   ! grep -q 'Fetch WITHOUT -k' "$BUILD"
+}
+
+@test "build.sh supports arm64 and amd64 IOx images" {
+  grep -q 'arm64|aarch64)' "$BUILD"
+  grep -q 'amd64|x86_64)' "$BUILD"
+  grep -q 'linux/arm64' "$BUILD"
+  grep -q 'linux/amd64' "$BUILD"
+}
+
+@test "amd64 package descriptor declares x86_64" {
+  grep -q '^  cpuarch: x86_64$' "$IOX_DIR/package-amd64.yaml"
+}
+
+@test "IOx Dockerfile uses a multi-architecture Python base" {
+  grep -q '^FROM python:3.12-slim-bookworm$' "$IOX_DIR/Dockerfile"
+  ! grep -q '^FROM arm64v8/' "$IOX_DIR/Dockerfile"
 }

@@ -754,11 +754,9 @@ def _copy_to_root_impl(fname, target_prefix, cli_configure_fn, cli_execute_fn,
 
     `copy_source` (optional) overrides the `copy /verify` SOURCE. Default (None)
     is the Guest Shell scratch on the staging FS (`<FS>/guest-share/iris/<fname>`)
-    — the C9300 path, unchanged. In the IE3x00 IOx-app (container) the staged file
-    is NOT reachable that way (IOx blocks bind-mounting sdflash:), so the agent
-    serves it over HTTP and injects an `http://<guest-ip>:<port>/<fname>` source;
-    IOS then `copy /verify`s that onto sdflash:. The destination is always the
-    target-FS root."""
+    — the C9300 path, unchanged. The IOx path SCP-pushes its local scratch to
+    that same IOS-visible location before using the direct SSH copy helper. The
+    destination is always the target-FS root."""
     src = (copy_source(fname, target_prefix) if copy_source
            else "%s/guest-share/iris/%s" % (target_prefix, fname))
     cli_configure_fn([
@@ -843,7 +841,7 @@ def build_deps(cfg, conf_path):  # pragma: no cover
     # to the container is blocked, so the agent can't write the IOS-visible SD
     # directly. Instead it scp-PUSHES the downloaded scratch to sdflash:guest-share/
     # iris via the device's SCP server (container -> device, the proven direction —
-    # same as the SSH-to-self CLI), then the existing IRIS-COPYROOT applet runs
+    # same as the SSH-to-self CLI), then the SSH vty runs
     # `copy /verify sdflash:guest-share/iris/<img> sdflash:<img>` — byte-identical
     # to the C9300 flash:guest-share -> flash: flow. Guest Shell (C9300) writes its
     # scratch via the in-VM mount, so it pushes nothing here.
@@ -1060,9 +1058,16 @@ def build_deps(cfg, conf_path):  # pragma: no cover
         fss = flash_target.parse_file_systems(_show("show file systems"))
         gsf = _guest_share_fs(fss)
         mdl = flash_target.device_model(_show("show version"))
-        prefix = (flash_target.choose_stage_fs(fss, model=mdl, guest_share_fs=gsf)
+        preferred = cfg.get("target_fs", "").strip()
+        prefix = (flash_target.choose_stage_fs(
+                      fss, model=mdl, guest_share_fs=gsf,
+                      preferred_fs=preferred)
                   or flash_target.choose_target_fs(fss, flash_target.boot_path(sb))
                   or "flash:")
+        if preferred and prefix != preferred:
+            emit("TARGET-FS",
+                 "configured %s is not a writable IOS disk; using %s"
+                 % (preferred, prefix))
         free = next((f["free"] for f in fss
                      if prefix in f["prefixes"] and f["free"] is not None), None)
         if free is None:                       # fallback: dir <prefix>

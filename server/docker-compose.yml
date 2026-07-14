@@ -2,39 +2,37 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# IRIS coordination server — one-command stand-up.
-#   IRIS_HOST_IP=<this server's IP> docker compose -f server/docker-compose.yml up -d --build
+# IRIS coordination and seed server.
+#   docker compose -f server/docker-compose.yml run --rm iris iris-bootstrap
+#   docker compose -f server/docker-compose.yml up -d --build
 #
 # IRIS_HOST_IP is ALWAYS the machine running docker (the devices must be able to
 # reach it). It is baked into the catalog's self-signed TLS certificate, which is
 # generated on first start — if you change it later, delete the config volume so
 # the cert regenerates.
 #
-# Publish an image (run INSIDE the container; /opt/images is mounted from the host).
-# Secrets (tokens, rpc-secret) are age-encrypted on the iris-config volume and
-# decrypted to /run/iris tmpfs at start — there are no plaintext tokens.txt or
-# rpc-secret files on the volume; read them from the tmpfs instead:
-#   docker compose -f server/docker-compose.yml exec iris sh -c '
-#     SEED_TOK=$(grep -v "^#" /run/iris/secrets.json | python3 -c "import sys,json; d=json.load(sys.stdin); print(next(iter(d[\"devices\"].values()))[\"token\"])")
-#     IRIS_RPC_SECRET=$(cat /run/iris/rpc-secret) \
-#       /opt/iris/server/iris-publish /opt/images/iosxe/c9300/<image>.bin \
-#       --tracker-url "http://'$IRIS_HOST_IP':6969/announce?key=$SEED_TOK"'
+# Publish an image (run inside the container; IRIS_IMAGE_ROOT is mounted at
+# /opt/images). Runtime secret paths are declared in the container environment,
+# so docker compose exec can use iris-publish without repeating them.
 services:
   iris:
+    platform: linux/amd64
     build:
-      context: .          # only server/ is needed — the build fetches aria2c itself
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: server/Dockerfile
       args:
         # Bake the release version into the image (console Settings page).
         # OPTIONAL: set it at build time, e.g.
         #   IRIS_VERSION="$(cat VERSION)" docker compose -f server/docker-compose.yml up -d --build
-        # or add IRIS_VERSION=<version> to server/.env. Unset => "unknown".
+        # or add IRIS_VERSION=<version> to server/.env. When unset, the console
+        # reads the VERSION file baked into the image.
         # Deliberately NOT mirrored under `environment:` — a runtime entry
         # would override the baked value with "" whenever the var is unset
         # at `up` time (e.g. a restart), losing the version.
         IRIS_VERSION: "${IRIS_VERSION:-}"
     image: iris:latest
     container_name: iris
+    init: true
     environment:
       # the docker host's IP, used in the TLS cert SAN — REQUIRED, no default
       IRIS_HOST_IP: "${IRIS_HOST_IP:?Set IRIS_HOST_IP to this server's IP, e.g. IRIS_HOST_IP=10.0.0.5 docker compose up}"
@@ -45,7 +43,7 @@ services:
       # leave unset otherwise.
       IRIS_OBSERVABILITY: "${IRIS_OBSERVABILITY:-}"
       # When observability is on, point at your OTel collector's OTLP/HTTP
-      # endpoint, e.g. IRIS_OTLP_ENDPOINT=http://100.90.168.20:4318. Inert
+      # endpoint, e.g. IRIS_OTLP_ENDPOINT=http://<collector-ip>:4318. Inert
       # unless IRIS_OBSERVABILITY=1.
       IRIS_OTLP_ENDPOINT: "${IRIS_OTLP_ENDPOINT:-}"
       # Overrides the :9101 pointer page's console link verbatim (e.g. on a
@@ -59,6 +57,21 @@ services:
       # Comma-separated age PUBLIC keys: primary + an offline break-glass
       # recipient so a lost primary key doesn't make the store unrecoverable.
       IRIS_AGE_RECIPIENTS: "${IRIS_AGE_RECIPIENTS:?Set IRIS_AGE_RECIPIENTS to primary,break-glass age public keys}"
+      # Declare every persistent/runtime path in the container environment so
+      # one-shot commands launched with `docker compose exec` see the same paths
+      # as the supervised services.
+      IRIS_STATE: "/var/lib/iris"
+      IRIS_CONFIG: "/etc/iris"
+      IRIS_RUN: "/run/iris"
+      IRIS_SECRETS: "/run/iris/secrets.json"
+      IRIS_RPC_SECRET_FILE: "/run/iris/rpc-secret"
+      IRIS_CERT: "/run/iris/tls/cert.pem"
+      IRIS_SECRETS_ENC: "/etc/iris/secrets.json.age"
+      IRIS_AUDIT: "/etc/iris/audit.jsonl"
+      IRIS_IMAGES_DIR: "/var/lib/iris-images"
+      IRIS_ARTIFACTS_DIR: "/srv/artifacts"
+      IMAGES_ROOT: "/opt/images"
+      IMAGES_DIR: "/opt/images/iosxe/c9300"
     ports:
       - "6969:6969"     # tracker (http)
       - "8443:8443"     # catalog (https)
@@ -74,12 +87,12 @@ services:
     volumes:
       - iris-state:/var/lib/iris
       - iris-config:/etc/iris
-      - /opt/images:/opt/images:ro
+      - "${IRIS_IMAGE_ROOT:-/opt/images}:/opt/images:ro"
       # artifacts the devices download during install (agent bundle, bootstrap,
       # pinned cert, per-device configs). READ-WRITE: the container
       # self-provisions the derivable served files at startup
       # (docker-entrypoint.sh -> provision-served.sh: rebuilds iris-agent.tgz
-      # from the bind-mounted device/ sources, copies bootstrap.sh, and refreshes
+      # from the image-baked device sources, copies bootstrap.sh, and refreshes
       # iris-catalog.pem from the server cert) so a fresh deploy doesn't fail
       # onboarding on an empty artifacts/. The container writes only content it
       # generates itself; the sole operator-supplied file is iris.tar (the IOx
@@ -87,12 +100,7 @@ services:
       # (gui_onboard.py, IRIS_STAGE_LOCAL=1) live under staging/ and are swept
       # after STAGING_MAX_AGE_SECONDS. This dir is gitignored — not tracked
       # source — so self-provisioning it is expected.
-      - ../artifacts:/srv/artifacts
-      # device-install.sh + its SSH helper (lab/device-run.sh) aren't baked into the
-      # image (build context is server/); mount them read-only from the checkout so
-      # GUI-driven onboarding can shell out to them (see gui_onboard.py).
-      - ../device:/opt/iris/device:ro
-      - ../lab:/opt/iris/lab:ro
+      - "${IRIS_ARTIFACTS_HOST_DIR:-../artifacts}:/srv/artifacts"
       - iris-images:/var/lib/iris-images
     # plaintext secrets live ONLY here, in RAM — never on the iris-config volume
     tmpfs:

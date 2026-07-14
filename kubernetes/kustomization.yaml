@@ -1,0 +1,19 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: iris
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+
+# Change this mapping to an image reachable by every amd64 cluster node.
+images:
+  - name: iris
+    newName: iris
+    newTag: docker-alpha

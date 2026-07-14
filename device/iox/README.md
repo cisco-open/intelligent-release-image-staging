@@ -1,13 +1,14 @@
-# intelligent-release-image-staging on the IE-3x00 (aarch64 IOx Docker app)
+# intelligent-release-image-staging as a Cisco IOx Docker app
 
-The Catalyst IE-3400 cannot run Guest Shell (removed from IOS-XE ≥17.9), so
-intelligent-release-image-staging (IRIS) runs as a plain **aarch64 IOx Docker app**
-instead of inside Guest Shell. The only functional difference from the C9300 build
-is the CLI transport:
+IRIS can run as an architecture-matched IOx Docker app on supported Cisco
+devices. ARM64 packages target IE-3x00/IE-3400 style platforms; x86_64 packages
+target Catalyst 9000 app hosting, including C9300. Guest Shell remains an
+alternative on platforms where it is supported. The container path reaches IOS
+through SSH-to-self:
 
-| | C9300 (Guest Shell) | IE-3x00 (this app) |
+| | Guest Shell agent | IOx app agent |
 |---|---|---|
-| reach IOS | in-process `cli` module | **SSH-to-self** (`cli_ssh`) to the Vlan666 SVI |
+| reach IOS | in-process `cli` module | **SSH-to-self** (`cli_ssh`) to the app VLAN SVI |
 | runtime gate | default | `IRIS_RUNTIME_MODE=container` (baked in the image) |
 
 `device/agent/cli_ssh.py` re-binds `cli_execute`/`cli_configure` behind a runtime
@@ -17,29 +18,39 @@ unchanged (default mode still does `from cli import execute, configure`).
 ## Build
 
 ```
-./build.sh [OUTPUT_DIR]      # -> OUTPUT_DIR/iris.tar  (default device/iox/out/)
+# ARM64 is the default
+CATALOG_PEM=/path/to/iris-catalog.pem ./build.sh --image-only
+CATALOG_PEM=/path/to/iris-catalog.pem ./build.sh [OUTPUT_DIR]
+
+# x86_64 Catalyst package
+IOX_ARCH=amd64 PACKAGE_NAME=iris-amd64.tar \
+  CATALOG_PEM=/path/to/iris-catalog.pem ./build.sh [OUTPUT_DIR]
 ```
-Needs Docker (Apple-silicon builds linux/arm64 natively) and a configured
-`ioxclient` (v1.18 darwin_arm64; first run drives its profile wizard). The
-aarch64 `aria2c` is extracted from `artifacts/iris-agent-arm.tgz`; the pinned
-catalog cert is fetched from the artifacts server (override via `ARIA2C_BIN` /
-`CATALOG_PEM`).
+The default output is `device/iox/out/iris.tar`. Packaging also needs a
+configured `ioxclient`; `--image-only` does not. The build uses an
+architecture-matched `aria2c` from `ARIA2C_BIN` or a local agent bundle when
+available, otherwise it downloads a pinned static build and verifies its SHA-256
+digest. Supply the pinned catalog cert with `CATALOG_PEM`, or set both
+`CATALOG_PEM_URL` and `CATALOG_PEM_FINGERPRINT`.
 
 ## Config delivery
 
-`entrypoint.sh` (PID 1) generates `/data/iris/iris-agent.conf` from environment
-on first boot (a conf dropped on a persistent mount wins), starts `aria2c` as the
-BT RPC daemon, and runs `iris_agent.py --once` every `IRIS_TICK_SECONDS`. Secrets
-are passed at deploy time via app-hosting docker `run-opts -e`, never baked in:
+`entrypoint.sh` (PID 1) generates `iris/iris-agent.conf` under the CAF persistent
+directory (`/iox_data` on the validated C9300 runtime, with `/data` as fallback)
+on first boot, starts `aria2c` as the BT RPC daemon, and runs
+`iris_agent.py --once` every `IRIS_TICK_SECONDS`. The generated secret-bearing
+config is mode `0600`. Environment-specific values are required at deployment
+time via numbered app-hosting Docker `run-opts -e` entries, never baked in:
 
 | env | conf key | notes |
 |---|---|---|
 | `IRIS_CATALOG_TOKEN` | `catalog_token` | **secret** — `iris-mint-enrollment <device_id>` on the server |
 | `IRIS_DEVICE_ID` | `device_id` | the device's mgmt IP (convention), e.g. `100.90.168.99` |
 | `IRIS_DEVICE_SSH_PASS` | `device_ssh_pass` | **secret** — login for SSH-to-self |
-| `IRIS_DEVICE_SSH_HOST` | `device_ssh_host` | default `100.92.100.253` (Vlan666 SVI) |
-| `IRIS_DEVICE_SSH_USER` | `device_ssh_user` | default `dnac` |
-| `IRIS_CATALOG_URL` | `catalog_url` | default `https://100.90.168.20:8443` (must be the IP — cert SAN) |
+| `IRIS_DEVICE_SSH_HOST` | `device_ssh_host` | required IOS SVI for SSH-to-self |
+| `IRIS_DEVICE_SSH_USER` | `device_ssh_user` | required scoped IOS user |
+| `IRIS_CATALOG_URL` | `catalog_url` | required reachable URL covered by the pinned cert |
+| `IRIS_TARGET_FS` | `target_fs` | optional writable IOS disk prefix; installer default `sdflash:` |
 | `IRIS_TELEMETRY` | `telemetry` | default `on` — post-staging telemetry reports + pull (set `off` to silence) |
 
 > **Security follow-up:** the device login is held in cleartext in the conf on SD.
@@ -52,19 +63,16 @@ are passed at deploy time via app-hosting docker `run-opts -e`, never baked in:
 1. **Publish + assign an IE image** (server) — required for the device to join a
    swarm and appear on the map:
    ```
-   KEY=$(docker exec iris sh -c 'python3 -c "import json;print(json.load(open(\"/run/iris/secrets.json\"))[\"seeder\"][\"announce_token\"][\"value\"])"')
-   docker exec -e IRIS_RPC_SECRET_FILE=/run/iris/rpc-secret iris \
-     iris-publish /opt/images/iosxe/IE3400/ie3x00-universalk9.17.18.03.SPA.bin \
-     --tracker-url "http://100.90.168.20:6969/announce?key=$KEY"
-   docker exec iris iris-assign 100.90.168.99 ie3x00-universalk9.17.18.03
+   docker compose -f server/docker-compose.yml exec iris \
+     iris-publish /opt/images/iosxe/IE3400/<image>.bin
+   docker compose -f server/docker-compose.yml exec iris \
+     iris-assign <device-id> <image-id>
    ```
-   (`-e IRIS_RPC_SECRET_FILE=/run/iris/rpc-secret` is required — `docker exec`
-   does not inherit the entrypoint's exported env, so the seeder RPC secret must
-   be pointed at the tmpfs copy or the seed step fails HTTP 400.)
 
-2. **Mint the device token** (server): `docker exec iris iris-mint-enrollment 100.90.168.99`
+2. **Mint the device token** (server):
+   `docker compose -f server/docker-compose.yml exec iris iris-mint-enrollment <device-id>`
 
-3. **Get iris.tar onto the device flash**: drop the built `iris.tar` into the
+3. **Get the package onto the device flash**: drop the architecture-matched tar into the
    server's `artifacts/` directory — the `iris` container already serves it on
    `:8000` over HTTPS, so there is no throwaway web server to start. The device
    pulls it over verified HTTPS (against the server cert, via the per-device PKI
@@ -84,38 +92,52 @@ are passed at deploy time via app-hosting docker `run-opts -e`, never baked in:
      `app-hosting verification disable`
    - The `app-hosting appid iris` block **must** include an `app-vnic` interface,
      and is applied with **no explicit `exit` lines** (IOS auto-pops; explicit
-     exits silently drop the app-vnic). Networking = VLAN 666 / guest
-     `100.92.100.254` / gw `100.92.100.253` (see the block below).
-   - `app-hosting install appid iris package flash:iris.tar` → `activate` → `start`
+     exits silently drop the app-vnic). Use the VLAN, guest address, and SVI
+     selected for this device (see the block below).
+   - `app-hosting install appid iris package flash:<package>.tar` → `activate` → `start`
      (DEPLOYED → ACTIVATED → RUNNING).
 
    ```
    app-hosting appid iris
     app-vnic AppGigabitEthernet trunk
-     vlan 666 guest-interface 0
-      guest-ipaddress 100.92.100.254 netmask 255.255.255.252
-    app-default-gateway 100.92.100.253 guest-interface 0
+     vlan <vlan> guest-interface 0
+      guest-ipaddress <guest-ip> netmask <mask>
+    app-default-gateway <svi-ip> guest-interface 0
     app-resource profile custom
      cpu 400
      memory 768
      persist-disk 2048
      vcpu 1
     app-resource docker
-     run-opts 1 "-e IRIS_DEVICE_ID=100.90.168.99 -e IRIS_DEVICE_SSH_PASS=<pw> -e IRIS_CATALOG_TOKEN=<token>"
+     run-opts 1 "-e IRIS_DEVICE_ID=<device-id>"
+     run-opts 2 "-e IRIS_DEVICE_SSH_PASS=<pw>"
+     run-opts 3 "-e IRIS_CATALOG_TOKEN=<token>"
+     run-opts 4 "-e IRIS_CATALOG_URL=https://<server-ip>:8443"
+     run-opts 5 "-e IRIS_DEVICE_SSH_HOST=<svi-ip>"
+     run-opts 6 "-e IRIS_DEVICE_SSH_USER=<user>"
+     run-opts 7 "-e IRIS_TARGET_FS=<ios-filesystem>:"
+     run-opts 8 "-e IRIS_TELEMETRY=on"
    ```
+
+   `install.sh` emits separate numbered `run-opts` lines because Catalyst app
+   hosting limits each option line. For the validated C9300-24UX path, use the
+   amd64 package, `APP_INTF=AppGigabitEthernet1/0/1`, and
+   `TARGET_FS=usbflash1:`. IE-3x00 defaults remain ARM64,
+   `AppGigabitEthernet1/1`, and `sdflash:`.
 
 5. **Verify**: `show app-hosting list` (RUNNING), `show app-hosting detail appid
    iris` (Status 0). The device then refreshes its token, downloads the assigned
    image over the swarm, and appears on the Console swarm map
-   (`https://100.90.168.20:8080/`, Swarm tab) labeled `IE-3400-8T2S`; the
+   (`https://<server-ip>:8080/`, Swarm tab) labeled with its model; the
    heartbeat carries model/version/free read over SSH-to-self.
 
-## On-box staging to sdflash:
+## On-box staging target
 
-The agent stages the downloaded image to the IOS-visible `sdflash:` (the IE3x00 analog
-of the C9300's `flash:`). IOx can't bind-mount `sdflash:` into the container and inbound
-to the container is blocked, so the agent **scp-pushes** the image to
-`sdflash:guest-share/iris/` via the device's SCP server (`ip scp server enable`, set by
-`install.sh`), then the `IRIS-COPYROOT` applet runs `copy /verify
-sdflash:guest-share/iris/<img> sdflash:<img>`. See `../../HANDOFF-iris-iox-app.md` for the
-current verification status of that final copy step.
+The agent stages the downloaded image to the selected IOS filesystem (`sdflash:`
+by installer default; use a writable platform disk such as `usbflash1:` on the
+validated C9300). IOx can't bind-mount that filesystem into the container, so
+the agent **scp-pushes** the image to
+`<target>guest-share/iris/` through the device's SCP server (`ip scp server
+enable`, set by `install.sh`). It then runs `copy /verify
+<target>guest-share/iris/<img> <target><img>` directly over the SSH-to-self IOS
+session and confirms the destination appears before reporting `ready`.

@@ -4,15 +4,15 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# Repeatable IRIS installer for the Catalyst IE-3x00, which CANNOT run Guest Shell
-# (removed from IOS-XE >=17.9). It deploys the agent as an aarch64 IOx Docker app
-# (iris.tar) instead of into Guest Shell, but uses the SAME transport as
+# Repeatable IRIS installer for Catalyst devices with IOx app hosting. It
+# deploys the agent as an architecture-matched IOx Docker app (iris.tar) instead
+# of into Guest Shell, but uses the SAME transport as
 # device/device-install.sh: push the IRIS PKI trustpoint over SSH FIRST, then
 # `copy https://STAGE_HOST:8000/<pkg>` from the always-on container artifact
 # server (no throwaway HTTP server). The agent then pulls its assigned image over
-# the swarm and copies it to sdflash: (IOS-visible) via `copy /verify` — the
-# IE3x00 analog of the C9300 placing its image on flash:. Distribute/stage ONLY;
-# never install/activate/reload the IOS image.
+# the swarm and copies it to an IOS-visible disk via `copy /verify`, such as
+# sdflash: on IE-3x00 or usbflash1: on C9300. Distribute/stage
+# ONLY; never install/activate/reload the IOS image.
 #
 # Idempotent: re-running tears down any existing iris app and redeploys (cert
 # rotation, fresh package, fresh token) — safe to run repeatedly.
@@ -26,7 +26,7 @@
 # Optional (defaults):
 #   CATALOG_URL=https://STAGE_HOST:8443  APP_INTF=AppGigabitEthernet1/1
 #   GW_IP=$SVI_IP  CPU=400  MEM=768  DISK=2048  PKG=iris.tar  PKG_FS=flash:
-#   DEVICE_SSH_USER=dnac  PKG_FS=flash:
+#   DEVICE_SSH_USER=dnac  TARGET_FS=sdflash:  IRIS_TELEMETRY=on
 set -euo pipefail
 
 : "${DEVICE_IP:?set DEVICE_IP}"; : "${VLAN:?set VLAN}"
@@ -42,6 +42,10 @@ GW_IP="${GW_IP:-$SVI_IP}"
 CPU="${CPU:-400}"; MEM="${MEM:-768}"; DISK="${DISK:-2048}"
 PKG="${PKG:-iris.tar}"; PKG_FS="${PKG_FS:-flash:}"
 DEVICE_SSH_USER="${DEVICE_SSH_USER:-dnac}"
+TARGET_FS="${TARGET_FS:-sdflash:}"
+IRIS_TELEMETRY="${IRIS_TELEMETRY:-on}"
+[[ "$TARGET_FS" =~ ^[A-Za-z][A-Za-z0-9_-]*:$ ]] \
+  || { echo "ERROR: TARGET_FS must be an IOS filesystem prefix such as sdflash:" >&2; exit 2; }
 APPID=iris
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RUN() { "$HERE/../../lab/device-run.sh" "$DEVICE_IP"; }   # IOS cmds on stdin
@@ -98,7 +102,14 @@ app-hosting appid $APPID
   persist-disk $DISK
   vcpu 1
  app-resource docker
-  run-opts 1 "-e IRIS_DEVICE_ID=$DEVICE_ID -e IRIS_DEVICE_SSH_PASS=$DEVICE_SSH_PASS -e IRIS_CATALOG_TOKEN=$CATALOG_TOKEN -e IRIS_CATALOG_URL=$CATALOG_URL -e IRIS_DEVICE_SSH_HOST=$SVI_IP -e IRIS_DEVICE_SSH_USER=$DEVICE_SSH_USER${IRIS_TELEMETRY:+ -e IRIS_TELEMETRY=$IRIS_TELEMETRY}"
+  run-opts 1 "-e IRIS_DEVICE_ID=$DEVICE_ID"
+  run-opts 2 "-e IRIS_DEVICE_SSH_PASS=$DEVICE_SSH_PASS"
+  run-opts 3 "-e IRIS_CATALOG_TOKEN=$CATALOG_TOKEN"
+  run-opts 4 "-e IRIS_CATALOG_URL=$CATALOG_URL"
+  run-opts 5 "-e IRIS_DEVICE_SSH_HOST=$SVI_IP"
+  run-opts 6 "-e IRIS_DEVICE_SSH_USER=$DEVICE_SSH_USER"
+  run-opts 7 "-e IRIS_TARGET_FS=$TARGET_FS"
+  run-opts 8 "-e IRIS_TELEMETRY=$IRIS_TELEMETRY"
 end
 EOF
 }
@@ -156,6 +167,6 @@ printf 'app-hosting start appid %s\n' "$APPID" | RUN >/dev/null 2>&1
 wait_state RUNNING 90 || { echo "  ERROR: start did not reach RUNNING" >&2; exit 1; }
 
 echo "[8/8] $APPID RUNNING. The agent refreshes its token, downloads $DEVICE_ID's"
-echo "      assigned image over the swarm, and copies it to sdflash: via copy /verify."
-echo "      Watch:  printf 'dir sdflash:\\n' | lab/device-run.sh $DEVICE_IP"
+echo "      assigned image over the swarm, and copies it to $TARGET_FS via copy /verify."
+echo "      Watch:  printf 'dir $TARGET_FS\\n' | lab/device-run.sh $DEVICE_IP"
 echo "      Swarm:  https://$STAGE_HOST:8080/  (Console -> Swarm tab)"

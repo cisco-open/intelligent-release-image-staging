@@ -11,7 +11,7 @@ set -euo pipefail
 MAX_BYTES="${MAX_BYTES:-52428800}"     # 50 MB default
 for f in "$@"; do
   [ -f "$f" ] || continue
-  size="$(stat -c%s "$f" 2>/dev/null || echo 0)"
+  size="$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null || echo 0)"
   if [ "$size" -gt "$MAX_BYTES" ]; then
     tail -c "$MAX_BYTES" "$f" > "$f.tmp" && mv -f "$f.tmp" "$f"
   fi

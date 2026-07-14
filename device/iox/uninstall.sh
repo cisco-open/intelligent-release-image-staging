@@ -4,9 +4,9 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# Undeploy IRIS from a Catalyst IE-3x00 / IR1101 / IR18xx — the inverse of
-# device/iox/install.sh. IRIS runs there as an aarch64 IOx Docker app (not
-# Guest Shell), so teardown is app-hosting, not guestshell:
+# Undeploy IRIS from a Cisco IOx app-hosting device — the inverse of
+# device/iox/install.sh. IRIS runs there as an architecture-matched IOx Docker
+# app (not Guest Shell), so teardown is app-hosting, not guestshell:
 #   - stop -> deactivate -> uninstall the 'iris' app (frees its persist-disk)
 #   - remove the app-hosting appid + the IRIS VLAN/SVI
 #   - remove any IRIS-COPYROOT / IRIS-AGENT EEM applet the agent created at
@@ -16,7 +16,8 @@
 # Deliberately LEFT IN PLACE (the installer re-applies the first three
 # idempotently; the last two are generic + a delivered artifact):
 #   iox, file prompt quiet, the AppGigabitEthernet trunk, ip scp server enable,
-#   the staged OS image on sdflash:, and startup-config (never written here).
+#   the staged OS image on the selected IOS disk, and startup-config (never
+#   written here).
 #
 # Env (subset of the installer's, supplied by OnboardService._build_env):
 #   DEVICE_IP DEVICE_USER DEVICE_PASS [DEVICE_ENABLE] [VLAN=666]

@@ -8,7 +8,7 @@
 # startup, so a fresh deploy no longer fails onboarding on missing files. The
 # three files a device downloads that the container can produce itself:
 #   iris-agent.tgz    the Guest Shell agent bundle (rebuilt every start from the
-#                     bind-mounted device/ sources, so it always matches the
+#                     image-baked device/ sources, so it always matches the
 #                     deployed agent code)
 #   bootstrap.sh      the on-device launcher (device/bootstrap.sh)
 #   iris-catalog.pem  the pinned CA the agent trusts = the server's PUBLIC cert

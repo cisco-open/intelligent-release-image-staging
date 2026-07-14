@@ -11,6 +11,8 @@ The detailed manual now lives in the Zensical documentation tree:
 - [Documentation overview](docs/zensical/index.md)
 - [Getting started](docs/zensical/getting-started.md)
 - [Architecture](docs/zensical/architecture.md)
+- [Container deployments](docs/zensical/containers.md)
+- [Kubernetes](docs/zensical/kubernetes.md)
 - [Security model](docs/zensical/security.md)
 - [Operations](docs/zensical/operations.md)
 - [Validation](docs/zensical/validation.md)
@@ -22,8 +24,9 @@ The public website source is in [docs/](docs/index.html). The GitHub Pages workf
 | Area | Purpose |
 | --- | --- |
 | `server/` | Tracker, catalog, seeder, artifact server, console, telemetry, encrypted state, and server tests. |
-| `device/` | Catalyst 9300 Guest Shell installer, EEM applets, bootstrap, agent code, and device tests. |
-| `device/iox/` | IOx app packaging and install path for IE-3x00/IE-3400 style platforms. |
+| `device/` | Catalyst Guest Shell installer, EEM applets, bootstrap, agent code, and device tests. |
+| `device/iox/` | ARM64 and x86_64 IOx app packaging and install path for supported Cisco platforms. |
+| `kubernetes/` | Optional single-replica seed-server deployment with persistent storage. |
 | `fleet/` | CSV templates for device inventory and image assignments. |
 | `tools/` | Operator helpers for agent bundles, per-device installers, assignments, torrents, and releases. |
 | `docs/` | Dynamic public website and Zensical documentation source. |
@@ -42,11 +45,17 @@ export IRIS_AGE_KEY_FILE_HOST=$HOME/.config/iris/age.txt
 export IRIS_AGE_RECIPIENTS=<primary-age-public-key>,<break-glass-age-public-key>
 ```
 
-Start the server from the repository root:
+Build and bootstrap the server from the repository root, then start it:
 
 ```bash
-docker compose -f server/docker-compose.yml up -d --build
+docker compose -f server/docker-compose.yml build
+docker compose -f server/docker-compose.yml run --rm iris iris-bootstrap
+docker compose -f server/docker-compose.yml up -d
 ```
+
+`iris-bootstrap` is idempotent. It initializes encrypted server state and the
+TLS certificate on a fresh config volume; subsequent runs leave existing state
+untouched.
 
 Create the console admin:
 
@@ -71,6 +80,13 @@ cp fleet/assignments.csv.example fleet/assignments.csv
 tools/apply-assignments.sh fleet/assignments.csv
 ```
 
+Each generated installer contains a short-lived enrollment token. On first
+contact, the agent exchanges it for rotating catalog, announce, and local RPC
+credentials; no permanent fleet token is baked into the installer. Re-provision
+a device when replacing its bootstrap configuration or enrollment material.
+That cutover still only changes the staging agent and never installs or reloads
+an IOS-XE image.
+
 Open the console at:
 
 ```text
@@ -78,6 +94,36 @@ https://<server-ip>:8080/
 ```
 
 For the complete deployment flow, see [Getting started](docs/zensical/getting-started.md).
+
+## Container Targets
+
+The seed-server image is self-contained and built from the repository root:
+
+```bash
+docker build --platform linux/amd64 -f server/Dockerfile -t iris:docker-alpha .
+```
+
+The Cisco app-hosting agent supports ARM64 IE platforms and x86_64 Catalyst 9000
+platforms. It downloads into the CAF persistent directory, then uses SSH-to-self
+plus IOS `copy /verify` to place the image on the selected IOS filesystem. Build
+an image for inspection, or package it with `ioxclient`:
+
+```bash
+# ARM64 package (default)
+CATALOG_PEM=/path/to/iris-catalog.pem device/iox/build.sh --image-only
+CATALOG_PEM=/path/to/iris-catalog.pem device/iox/build.sh device/iox/out
+
+# x86_64 package for Catalyst 9000 app hosting
+IOX_ARCH=amd64 PACKAGE_NAME=iris-amd64.tar \
+  CATALOG_PEM=/path/to/iris-catalog.pem device/iox/build.sh device/iox/out
+```
+
+Set `TARGET_FS=sdflash:` (the installer default), `usbflash1:`, or another
+writable IOS disk when running `device/iox/install.sh`. C9300 deployments also
+typically set `APP_INTF=AppGigabitEthernet1/0/1` and use the amd64 package. See
+[Container deployments](docs/zensical/containers.md) for the complete data path
+and [Kubernetes](docs/zensical/kubernetes.md) for the optional seed-server
+manifests.
 
 ## Network Surfaces
 

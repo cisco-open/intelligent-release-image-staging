@@ -32,13 +32,20 @@ export IRIS_AGE_KEY_FILE_HOST=$HOME/.config/iris/age.txt
 export IRIS_AGE_RECIPIENTS=<primary-age-public-key>,<break-glass-age-public-key>
 ```
 
-Start the stack from the repository root:
+Build the image, initialize a fresh encrypted config volume, and start the stack
+from the repository root:
 
 ```bash
-docker compose -f server/docker-compose.yml up -d --build
+docker compose -f server/docker-compose.yml build
+docker compose -f server/docker-compose.yml run --rm iris iris-bootstrap
+docker compose -f server/docker-compose.yml up -d
 ```
 
-The container exposes the tracker, catalog, artifact server, seeder data port, console, and telemetry endpoints. Plaintext secrets are decrypted into `/run/iris` tmpfs at runtime and encrypted under the `iris-config` volume at rest.
+`iris-bootstrap` is idempotent and does not overwrite existing encrypted state.
+The running container exposes the tracker, catalog, artifact server, seeder data
+port, console, and telemetry endpoints. Plaintext secrets are decrypted into
+`/run/iris` tmpfs at runtime and encrypted under the `iris-config` volume at
+rest.
 
 ## Create the console admin
 
@@ -52,7 +59,9 @@ For scripted setup, provide the password with `IRIS_GUI_ADMIN_PASSWORD`.
 
 ## Publish an image
 
-The Compose file mounts `/opt/images` from the host into the container. Publish from inside the container so the seeder RPC remains local-only:
+The Compose file mounts `IRIS_IMAGE_ROOT` from the host at `/opt/images`
+(`IRIS_IMAGE_ROOT` defaults to `/opt/images`). Publish from inside the container
+so the seeder RPC remains local-only:
 
 ```bash
 docker compose -f server/docker-compose.yml exec iris \
@@ -108,4 +117,3 @@ Agents poll the catalog on a short interval, download the approved image, verify
 ## Open the console
 
 Use `https://<server-ip>:8080/` for image status, device state, onboarding jobs, swarm information, settings, and audit data.
-
