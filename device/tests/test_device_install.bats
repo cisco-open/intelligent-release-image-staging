@@ -79,6 +79,11 @@ setup() {
   [[ "$output" == *"event manager applet IRIS-AGENT authorization bypass"* ]]
 }
 
+@test "dry-run persists successful Guest Shell onboarding" {
+  run bash "$INSTALL" --dry-run
+  [[ "$output" == *"copy running-config startup-config"* ]]
+}
+
 @test "dry-run does NOT define IRIS-COPYROOT (agent templates it at runtime)" {
   # the agent templates IRIS-COPYROOT at runtime; the installer must NOT define it
   run bash "$INSTALL" --dry-run

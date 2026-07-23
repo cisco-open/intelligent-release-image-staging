@@ -9,6 +9,22 @@ This project uses **Calendar Versioning (CalVer)**: `YYYY.0M.0D` with an optiona
 `2026.06.11.1`). Releases are tagged `vYYYY.0M.0D`. The current version is in the
 top-level `VERSION` file.
 
+## [2026.07.23]
+
+### Added
+- **Catalyst 9300 IOx Console onboarding**: select IOx per device in the
+  Console or fleet CSV to deploy the amd64 IOx app and stage images to
+  `usbflash1:`. C9k devices now resolve `iris-amd64.tar`; IE-3x00 and IR devices
+  retain the arm64 `iris.tar` path. An explicit IOx override on an unknown model
+  now fails before touching the device instead of selecting an unsafe default.
+- **IOx package staging helper**: `tools/stage-iox-package.sh` builds and
+  places the per-deployment arm64 or amd64 package into the Compose artifacts
+  bind mount without touching a device.
+
+### Changed
+- `device/iox/build.sh --amd64` produces `iris-amd64.tar` by default, avoiding
+  collisions with the arm64 package when both are served.
+
 ## [2026.07.10]
 
 The container deployment alpha makes the existing seed-server and Cisco IOx

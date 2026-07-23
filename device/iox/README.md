@@ -26,7 +26,7 @@ CATALOG_PEM=/path/to/iris-catalog.pem ./build.sh [OUTPUT_DIR]
 IOX_ARCH=amd64 PACKAGE_NAME=iris-amd64.tar \
   CATALOG_PEM=/path/to/iris-catalog.pem ./build.sh [OUTPUT_DIR]
 ```
-The default output is `device/iox/out/iris.tar`. Packaging also needs a
+The default output is `device/iox/out/iris-arm64.tar`. Packaging also needs a
 configured `ioxclient`; `--image-only` does not. The build uses an
 architecture-matched `aria2c` from `ARIA2C_BIN` or a local agent bundle when
 available, otherwise it downloads a pinned static build and verifies its SHA-256
@@ -53,6 +53,10 @@ time via numbered app-hosting Docker `run-opts -e` entries, never baked in:
 | `IRIS_TARGET_FS` | `target_fs` | optional writable IOS disk prefix; installer default `sdflash:` |
 | `IRIS_TELEMETRY` | `telemetry` | default `on` — post-staging telemetry reports + pull (set `off` to silence) |
 
+The IOx agent reuses one short-lived SSH control connection for CLI and SCP
+work. This avoids opening a new VTY login for every filesystem check, transfer,
+and verification call during an agent tick.
+
 > **Security follow-up:** the device login is held in cleartext in the conf on SD.
 > Scope it (AAA `parser view` / command-authorization to `copy`/`dir`/`event
 > manager`), restrict the VTY ACL to VLAN 666, prefer SSH **key** auth, and issue
@@ -76,15 +80,15 @@ time via numbered app-hosting Docker `run-opts -e` entries, never baked in:
    server's `artifacts/` directory — the `iris` container already serves it on
    `:8000` over HTTPS, so there is no throwaway web server to start. The device
    pulls it over verified HTTPS (against the server cert, via the per-device PKI
-   trustpoint configured first), landing it at `flash:iris.tar`. This is exactly
+   trustpoint configured first), landing it at `flash:iris-arm64.tar`. This is exactly
    what `install.sh` automates; do it by hand only if you are not using the
    one-shot installer.
 
    This is also the only manual prerequisite for **Console one-click onboarding**:
-   once `iris.tar` is staged in `artifacts/`, the Console picks this installer
+    once `iris-arm64.tar` is staged in `artifacts/`, the Console picks this installer
    automatically for IE-3x00/IR1101/IR18xx devices (by `model`/`platform`, or by
    live auto-detection) — see the Console's Devices section in the top-level
-   README. Onboarding fails fast, before touching the device, if `iris.tar` is
+    README. Onboarding fails fast, before touching the device, if `iris-arm64.tar` is
    missing.
 
 4. **On the device** — 3 gotchas, all required:

@@ -63,13 +63,13 @@ teardown() { rm -rf "$TMP"; }
   [[ "$output" == *"cert"* ]]
 }
 
-@test "notes when the IOx iris.tar is absent (the one external build)" {
+@test "notes when the IOx iris-arm64.tar is absent (the one external build)" {
   run run_prov
-  [[ "$output" == *"iris.tar"* ]]
+  [[ "$output" == *"iris-arm64.tar"* ]]
 }
 
-@test "does not flag iris.tar when it is already staged" {
-  printf 'IOXPKG\n' > "$ART/iris.tar"
+@test "does not flag iris-arm64.tar when it is already staged" {
+  printf 'IOXPKG\n' > "$ART/iris-arm64.tar"
   run run_prov
   [[ "$output" != *"build device/iox/build.sh"* ]]
 }

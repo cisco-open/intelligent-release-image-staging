@@ -59,6 +59,34 @@ _MODEL_PLATFORMS = (          # first match wins; case-insensitive prefix regexe
     (r"^(ISR|ASR|CSR|C8[0-9]{3})", "guestshell"),  # router families run Guest Shell
 )
 
+# Model families that take the arm64 IOx package (installer defaults: iris-arm64.tar,
+# AppGigabitEthernet1/1, sdflash:). Used ONLY after platform has resolved to iox.
+_ARM_IOX_MODELS = (r"^IE-?3", r"^IR1[018]")
+# Catalyst 9000 -> amd64 IOx package on an SSD (usbflash1:), stacked-member-
+# overridable APP_INTF.
+_C9K_MODEL = r"^C9[0-9]{3}"
+_C9K_IOX_ENV = {
+    "PKG": "iris-amd64.tar",
+    "APP_INTF": "AppGigabitEthernet1/0/1",
+    "TARGET_FS": "usbflash1:",
+}
+
+
+def _iox_arch_env(device_id, model):
+    """Given a device that has ALREADY resolved to the iox platform, return the
+    env overrides for its architecture. C9k -> the amd64 mapping; IE-3k/IR ->
+    an EMPTY mapping (installer arm64 defaults apply); blank/unclassifiable ->
+    raise ValueError with guidance (NO silent arm fallback). No probe-for-arch."""
+    model = (model or "").strip()
+    if model and re.match(_C9K_MODEL, model, re.IGNORECASE):
+        return dict(_C9K_IOX_ENV)
+    if model and any(re.match(p, model, re.IGNORECASE) for p in _ARM_IOX_MODELS):
+        return {}
+    raise ValueError(
+        "IOx onboarding for %s needs a recognized device model to select the "
+        "package/architecture (C9k->amd64, IE-3k/IR->arm). Set the device model."
+        % device_id)
+
 
 def resolve_platform(dev, probe=None):
     """Resolve which onboarding platform drives a device.
@@ -255,6 +283,14 @@ class OnboardService:
             return model
 
         platform = resolve_platform(dev, probe=probe)
+        # For iox, derive the arch env (C9k->amd64, IE-3k/IR->arm defaults,
+        # blank/unclassifiable -> raise). Runs for BOTH onboard and undeploy so
+        # teardown deletes the RESOLVED package (iris-arm64.tar vs iris-amd64.tar).
+        # setdefault so an explicit operator/env override (e.g. a stacked
+        # member's APP_INTF) always wins.
+        if platform == "iox":
+            for k, v in _iox_arch_env(device_id, dev.get("model")).items():
+                env.setdefault(k, v)
         if action == "undeploy":
             return platform, os.path.join(self.repo_root,
                                           _UNINSTALL_RECIPES[platform])
@@ -327,11 +363,12 @@ class OnboardService:
             self._append(job_id, "platform: %s (model %s) -> %s" % (
                 platform, dev.get("model") or "?", recipe))
             if action == "onboard" and platform == "iox":
-                pkg = env.get("PKG", "iris.tar")
+                pkg = env.get("PKG", "iris-arm64.tar")
                 if not os.path.isfile(os.path.join(self.artifacts_dir, pkg)):
-                    self._append(job_id, "ERROR: iris.tar not found in artifacts "
-                                 "dir -- build device/iox/build.sh and place it "
-                                 "in artifacts/ (device untouched)")
+                    flag = " --amd64" if pkg == "iris-amd64.tar" else ""
+                    self._append(job_id, "ERROR: %s not found in artifacts dir "
+                                 "-- build device/iox/build.sh%s and place it in "
+                                 "artifacts/ (device untouched)" % (pkg, flag))
                     self._finish(job_id, "error", None)
                     return
             try:

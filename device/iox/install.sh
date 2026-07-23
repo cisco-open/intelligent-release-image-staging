@@ -5,7 +5,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Repeatable IRIS installer for Catalyst devices with IOx app hosting. It
-# deploys the agent as an architecture-matched IOx Docker app (iris.tar) instead
+# deploys the agent as an architecture-matched IOx Docker app (iris-arm64.tar) instead
 # of into Guest Shell, but uses the SAME transport as
 # device/device-install.sh: push the IRIS PKI trustpoint over SSH FIRST, then
 # `copy https://STAGE_HOST:8000/<pkg>` from the always-on container artifact
@@ -25,7 +25,7 @@
 #   DEVICE_USER (+ DEVICE_PASS) — for lab/device-run.sh; export or 'source' creds/
 # Optional (defaults):
 #   CATALOG_URL=https://STAGE_HOST:8443  APP_INTF=AppGigabitEthernet1/1
-#   GW_IP=$SVI_IP  CPU=400  MEM=768  DISK=2048  PKG=iris.tar  PKG_FS=flash:
+#   GW_IP=$SVI_IP  CPU=400  MEM=768  DISK=2048  PKG=iris-arm64.tar  PKG_FS=flash:
 #   DEVICE_SSH_USER=dnac  TARGET_FS=sdflash:  IRIS_TELEMETRY=on
 set -euo pipefail
 
@@ -40,7 +40,7 @@ CATALOG_URL="${CATALOG_URL:-https://$STAGE_HOST:8443}"
 APP_INTF="${APP_INTF:-AppGigabitEthernet1/1}"
 GW_IP="${GW_IP:-$SVI_IP}"
 CPU="${CPU:-400}"; MEM="${MEM:-768}"; DISK="${DISK:-2048}"
-PKG="${PKG:-iris.tar}"; PKG_FS="${PKG_FS:-flash:}"
+PKG="${PKG:-iris-arm64.tar}"; PKG_FS="${PKG_FS:-flash:}"
 DEVICE_SSH_USER="${DEVICE_SSH_USER:-dnac}"
 TARGET_FS="${TARGET_FS:-sdflash:}"
 IRIS_TELEMETRY="${IRIS_TELEMETRY:-on}"
@@ -114,11 +114,48 @@ end
 EOF
 }
 
-app_state() { printf 'show app-hosting list\n' | RUN 2>/dev/null | awk -v a="$APPID" '$1==a{print $2}'; }
+iox_ready() {
+  printf 'show iox\n' | RUN 2>/dev/null | grep -q \
+    'IOx service (CAF).*Running' \
+    && printf 'show iox\n' | RUN 2>/dev/null | grep -q 'Dockerd.*Running'
+}
+
+wait_iox_ready() {  # $1=timeout_s
+  local t=0
+  while [ "$t" -lt "$1" ]; do
+    if iox_ready; then
+      echo "    IOx app-hosting service is ready"
+      return 0
+    fi
+    sleep 5; t=$((t + 5))
+    echo "    [$t s] waiting for IOx app-hosting service (CAF/Dockerd)"
+  done
+  return 1
+}
+
+app_state() {
+  printf 'show app-hosting list\n' | RUN 2>/dev/null \
+    | awk -v a="$APPID" '$1==a{print $2}'
+}
+
 wait_state() {  # $1=target state, $2=timeout_s
-  local t=0; while [ "$t" -lt "$2" ]; do sleep 5; t=$((t+5));
-    local s; s="$(app_state)"; echo "    [$t s] $APPID=$s";
-    [ "$s" = "$1" ] && return 0; done; return 1; }
+  local t=0 s
+  while [ "$t" -lt "$2" ]; do
+    sleep 5; t=$((t + 5)); s="$(app_state)"
+    if [ -n "$s" ]; then
+      echo "    [$t s] $APPID state: $s"
+    else
+      echo "    [$t s] app-hosting has not reported '$APPID' yet"
+    fi
+    [ "$s" = "$1" ] && return 0
+  done
+  return 1
+}
+
+clear_partial_app_config() {
+  printf 'configure terminal\nno app-hosting appid %s\nend\n' "$APPID" \
+    | RUN >/dev/null 2>&1 || true
+}
 
 echo "[1/8] teardown any existing '$APPID' app (idempotent re-install)"
 printf 'app-hosting stop appid %s\napp-hosting deactivate appid %s\napp-hosting uninstall appid %s\n' \
@@ -128,6 +165,13 @@ printf 'configure terminal\nno app-hosting appid %s\nend\n' "$APPID" | RUN >/dev
 
 echo "[2/8] apply IOx networking (IOx enable, VLAN $VLAN, $APP_INTF, Vlan$VLAN SVI)"
 { echo "configure terminal"; ios_net; } | RUN >/dev/null
+
+echo "    waiting for IOx app-hosting services after enable"
+wait_iox_ready 180 || {
+  echo "  ERROR: IOx app-hosting services did not become ready within 180 seconds." >&2
+  echo "         Check 'show iox' for CAF and Dockerd status, then retry." >&2
+  exit 1
+}
 
 echo "[3/8] disable app-hosting signature verification (EXEC)"
 printf 'app-hosting verification disable\n' | RUN 2>/dev/null | grep -i 'signature' || true
@@ -158,15 +202,40 @@ done
 
 echo "[7/8] configure app-hosting appid $APPID + install/activate/start"
 { echo "configure terminal"; appid_block; } | RUN >/dev/null
-printf 'app-hosting install appid %s package %s%s\n' "$APPID" "$PKG_FS" "$PKG" | RUN >/dev/null 2>&1
-wait_state DEPLOYED 120 || { echo "  ERROR: install did not reach DEPLOYED" >&2; exit 1; }
+install_out="$(printf 'app-hosting install appid %s package %s%s\n' "$APPID" "$PKG_FS" "$PKG" | RUN 2>&1 || true)"
+# RUN redacts device secrets. Print only the IOS lifecycle response, not the
+# interactive SSH prompt/command echo that surrounds it.
+printf '%s\n' "$install_out" | grep -E 'Installing package|Failed to install|%IOX|%APP' || true
+wait_state DEPLOYED 120 || {
+  echo "  ERROR: app installation did not reach DEPLOYED within 120 seconds." >&2
+  echo "         The partial app-hosting configuration has been removed; IOx/VLAN/trust setup remains for retry." >&2
+  clear_partial_app_config
+  exit 1
+}
 sleep 8                                       # let the install op fully settle
-printf 'app-hosting activate appid %s\n' "$APPID" | RUN >/dev/null 2>&1
-wait_state ACTIVATED 90 || { echo "  ERROR: activate failed" >&2; exit 1; }
-printf 'app-hosting start appid %s\n' "$APPID" | RUN >/dev/null 2>&1
-wait_state RUNNING 90 || { echo "  ERROR: start did not reach RUNNING" >&2; exit 1; }
+activate_out="$(printf 'app-hosting activate appid %s\n' "$APPID" | RUN 2>&1 || true)"
+printf '%s\n' "$activate_out" | grep -E 'Activating|Failed to activate|%IOX|%APP' || true
+wait_state ACTIVATED 90 || {
+  echo "  ERROR: app activation did not reach ACTIVATED within 90 seconds." >&2
+  exit 1
+}
+start_out="$(printf 'app-hosting start appid %s\n' "$APPID" | RUN 2>&1 || true)"
+printf '%s\n' "$start_out" | grep -E 'Starting|Failed to start|%IOX|%APP' || true
+wait_state RUNNING 90 || {
+  echo "  ERROR: app start did not reach RUNNING within 90 seconds." >&2
+  exit 1
+}
 
-echo "[8/8] $APPID RUNNING. The agent refreshes its token, downloads $DEVICE_ID's"
+echo "[8/9] persist successful onboarding to startup-config"
+save_out="$(printf 'copy running-config startup-config\n' | RUN 2>&1 || true)"
+case "$save_out" in
+  *"[OK]"*|*"bytes copied"*) echo "  startup-config saved" ;;
+  *) echo "  ERROR: failed to save startup-config after onboarding:" >&2
+     printf '%s\n' "$save_out" >&2
+     exit 1 ;;
+esac
+
+echo "[9/9] $APPID RUNNING. The agent refreshes its token, downloads $DEVICE_ID's"
 echo "      assigned image over the swarm, and copies it to $TARGET_FS via copy /verify."
 echo "      Watch:  printf 'dir $TARGET_FS\\n' | lab/device-run.sh $DEVICE_IP"
 echo "      Swarm:  https://$STAGE_HOST:8080/  (Console -> Swarm tab)"

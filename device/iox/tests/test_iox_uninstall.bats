@@ -51,7 +51,7 @@ setup() {
 
 @test "dry-run deletes the staged app package" {
   run bash "$UNINSTALL" --dry-run
-  [[ "$output" == *"delete flash:iris.tar"* ]]
+  [[ "$output" == *"delete flash:iris-arm64.tar"* ]]
 }
 
 @test "dry-run leaves generic config and the sdflash image in place" {
@@ -61,10 +61,15 @@ setup() {
   [[ "$output" == *"sdflash image"* ]]
 }
 
+@test "dry-run persists successful IOx cleanup" {
+  run bash "$UNINSTALL" --dry-run
+  [[ "$output" == *"copy running-config startup-config"* ]]
+}
+
 @test "custom VLAN and PKG_FS flow into the removal" {
   VLAN=42 PKG_FS=sdflash: run bash "$UNINSTALL" --dry-run
   [[ "$output" == *"no interface Vlan42"* ]] && \
-  [[ "$output" == *"delete sdflash:iris.tar"* ]]
+  [[ "$output" == *"delete sdflash:iris-arm64.tar"* ]]
 }
 
 @test "real run refuses to start without DEVICE_PASS" {

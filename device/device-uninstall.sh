@@ -19,7 +19,8 @@
 # Deliberately LEFT IN PLACE: `iox`, `file prompt quiet`, the AppGig trunk
 # (the installer re-applies all three idempotently on the next onboard), any
 # staged image at flash root (a delivered artifact, never IRIS machinery),
-# and startup-config (this script never writes memory).
+# and staged images at the filesystem root. Successful cleanup is persisted to
+# startup-config so a reload cannot restore IRIS configuration.
 #
 # Env (same contract as device-install.sh):
 #   DEVICE_IP DEVICE_USER DEVICE_PASS [DEVICE_ENABLE] VLAN
@@ -74,7 +75,8 @@ if [ "$DRY" -eq 1 ]; then
   echo "===== [4/5] config footprint removal ====="
   config_cleanup
   echo "===== [5/5] delete /force /recursive $IOS_ROOT ====="
-  echo "===== LEFT IN PLACE: iox, file prompt quiet, AppGig trunk, flash-root image ====="
+   echo "===== PERSIST: copy running-config startup-config (after successful cleanup) ====="
+   echo "===== LEFT IN PLACE: iox, file prompt quiet, AppGig trunk, flash-root image ====="
   exit 0
 fi
 
@@ -129,4 +131,11 @@ if [ -n "$left" ]; then
   printf '%s\n' "$left" >&2
   exit 1
 fi
-echo "undeploy complete: $DEVICE_IP is clean (iox/file-prompt/trunk left for the next onboard)"
+echo "persist cleanup to startup-config"
+save_out="$(printf 'copy running-config startup-config\n' | "$RUN" "$DEVICE_IP" 2>&1 || true)"
+case "$save_out" in
+  *"[OK]"*|*"bytes copied"*) echo "undeploy complete: $DEVICE_IP is clean and persisted" ;;
+  *) echo "ERROR: cleanup succeeded but saving startup-config failed:" >&2
+     printf '%s\n' "$save_out" >&2
+     exit 1 ;;
+esac

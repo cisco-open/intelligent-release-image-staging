@@ -70,7 +70,7 @@ body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-
 #cred-panel:not([hidden]) { display:block; }
 #cred-rows td { padding:6px 10px; }
 .inline-form .err.ok { color:#1a7f43; }
-.swarm-frame { width:100%; height:640px; border:1px solid #243049; border-radius:10px; background:#0b0f17; }
+.swarm-frame { width:100%; height:clamp(680px,78vh,980px); border:1px solid #243049; border-radius:10px; background:#0b0f17; }
 #settings-info td:first-child { width:160px; }
 #audit-timeline { margin:4px 0 16px; }
 #audit-histogram { width:100%; height:64px; display:block; margin:6px 0; }

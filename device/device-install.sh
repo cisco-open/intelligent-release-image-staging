@@ -176,6 +176,7 @@ if [ "$DRY" -eq 1 ]; then
     printf 'copy https://%s:8000/%s %s/%s\n' "$STAGE_HOST" "$src" "$IOS_ROOT" "$dst"
   done
   echo "===== guestshell enable + stage $BUNDLE + launch aria2c (see script) ====="
+  echo "===== PERSIST: copy running-config startup-config (after successful onboarding) ====="
   exit 0
 fi
 
@@ -285,7 +286,17 @@ for pair in "bootstrap.sh:bootstrap.sh" "staging/$CONF:iris-agent.conf" \
   [ "$ok" -eq 1 ] || { echo "  ERROR: copy of $src failed after 3 attempts" >&2; exit 1; }
 done
 
-echo "[6/6] done. Within ~60s the IRIS-AGENT timer bootstraps the agent (unpack bundle,"
+echo "[6/7] persist successful onboarding to startup-config"
+save_out="$(printf 'copy running-config startup-config\n' \
+           | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>&1 || true)"
+case "$save_out" in
+  *"[OK]"*|*"bytes copied"*) echo "  startup-config saved" ;;
+  *) echo "  ERROR: failed to save startup-config after onboarding:" >&2
+     printf '%s\n' "$save_out" >&2
+     exit 1 ;;
+esac
+
+echo "[7/7] done. Within ~60s the IRIS-AGENT timer bootstraps the agent (unpack bundle,"
 echo "      start aria2c), pulls '$DEVICE_ID's assigned image, verifies it, and places"
 echo "      it at flash root via native EEM. Watch with:"
 echo "      printf 'show logging | include IRIS\\n' | lab/device-run.sh $DEVICE_IP"

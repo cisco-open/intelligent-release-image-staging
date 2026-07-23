@@ -19,8 +19,12 @@ cp fleet/devices.csv.example fleet/devices.csv
 The inventory file describes how to reach and configure each device for the agent:
 
 ```text
-device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip
+device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip,model,platform
 ```
+
+`model` and `platform` are optional trailing fields. Set a model when known;
+leave `platform` blank for automatic selection, or explicitly choose
+`guestshell` or `iox` for Console onboarding.
 
 Generate per-device installers:
 
@@ -67,4 +71,3 @@ flowchart LR
 ## Review guidance
 
 Review `fleet/devices.csv` for network correctness and `fleet/assignments.csv` for release correctness. Do not mix credentials, operator passwords, or image binaries into either file.
-

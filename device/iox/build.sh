@@ -7,7 +7,7 @@
 # Build an IRIS IOx Docker app for arm64 IE-3x00/IR devices or amd64
 # Catalyst 9000 devices.
 #
-#   ./build.sh [--image-only] [OUTPUT_DIR]
+#   ./build.sh [--image-only] [--amd64|--arm64] [OUTPUT_DIR]
 #
 # Assembles a build context (the agent python + an architecture-matched aria2c +
 # the pinned catalog cert), builds the selected platform image, and packages it
@@ -15,7 +15,7 @@
 #
 # Inputs (env overridable):
 #   IOX_ARCH       arm64 (default) or amd64.
-#   PACKAGE_NAME   output filename (default iris.tar). Use architecture-specific
+#   PACKAGE_NAME   output filename (default iris-arm64.tar). Use architecture-specific
 #                  names when serving both packages, such as iris-amd64.tar.
 #   PACKAGE_DESCRIPTOR  package.yaml override for custom platform metadata.
 #   ARIA2C_BIN     architecture-matched aria2c. Default: use the matching local
@@ -38,18 +38,21 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 PACKAGE=1
 OUT="$HERE/out"
+ARCH_FLAG=""
 for arg in "$@"; do
   case "$arg" in
     --image-only) PACKAGE=0 ;;
+    --amd64) ARCH_FLAG=amd64 ;;
+    --arm64) ARCH_FLAG=arm64 ;;
     -h|--help)
-      echo "usage: $0 [--image-only] [OUTPUT_DIR]"
+      echo "usage: $0 [--image-only] [--amd64|--arm64] [OUTPUT_DIR]"
       exit 0
       ;;
     -*) echo "unknown option: $arg" >&2; exit 2 ;;
     *) OUT="$arg" ;;
   esac
 done
-IOX_ARCH="${IOX_ARCH:-arm64}"
+IOX_ARCH="${ARCH_FLAG:-${IOX_ARCH:-arm64}}"
 case "$IOX_ARCH" in
   arm64|aarch64)
     IOX_ARCH=arm64
@@ -61,6 +64,7 @@ case "$IOX_ARCH" in
     DEFAULT_ARIA2_ASSET=aria2-aarch64-linux-musl_static.zip
     DEFAULT_PACKAGE_DESCRIPTOR="$HERE/package.yaml"
     LOCAL_BUNDLE="$REPO/artifacts/iris-agent-arm.tgz"
+    DEFAULT_PACKAGE_NAME=iris-arm64.tar
     ;;
   amd64|x86_64)
     IOX_ARCH=amd64
@@ -72,6 +76,7 @@ case "$IOX_ARCH" in
     DEFAULT_ARIA2_ASSET=aria2-x86_64-linux-musl_static.zip
     DEFAULT_PACKAGE_DESCRIPTOR="$HERE/package-amd64.yaml"
     LOCAL_BUNDLE="$REPO/artifacts/iris-agent.tgz"
+    DEFAULT_PACKAGE_NAME=iris-amd64.tar
     ;;
   *)
     echo "!! IOX_ARCH must be arm64 or amd64 (got $IOX_ARCH)" >&2
@@ -80,7 +85,7 @@ case "$IOX_ARCH" in
 esac
 
 IMAGE_TAG="${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
-PACKAGE_NAME="${PACKAGE_NAME:-iris.tar}"
+PACKAGE_NAME="${PACKAGE_NAME:-$DEFAULT_PACKAGE_NAME}"
 PACKAGE_DESCRIPTOR="${PACKAGE_DESCRIPTOR:-$DEFAULT_PACKAGE_DESCRIPTOR}"
 CATALOG_PEM_URL="${CATALOG_PEM_URL:-}"
 IOXCLIENT="${IOXCLIENT:-ioxclient}"

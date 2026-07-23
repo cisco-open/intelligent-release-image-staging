@@ -12,16 +12,16 @@
 #   - remove any IRIS-COPYROOT / IRIS-AGENT EEM applet the agent created at
 #     runtime for its copy /verify (no-op if absent — IOx has no 60s timer)
 #   - remove crypto pki trustpoint IRIS + ip http client secure-trustpoint IRIS
-#   - delete the staged app package (<pkg-fs>iris.tar)
+#   - delete the staged app package (<pkg-fs>iris-arm64.tar)
 # Deliberately LEFT IN PLACE (the installer re-applies the first three
 # idempotently; the last two are generic + a delivered artifact):
 #   iox, file prompt quiet, the AppGigabitEthernet trunk, ip scp server enable,
-#   the staged OS image on the selected IOS disk, and startup-config (never
-#   written here).
+#   the staged OS image on the selected IOS disk. Successful cleanup is
+#   persisted to startup-config so a reload cannot restore IRIS configuration.
 #
 # Env (subset of the installer's, supplied by OnboardService._build_env):
 #   DEVICE_IP DEVICE_USER DEVICE_PASS [DEVICE_ENABLE] [VLAN=666]
-#   [PKG=iris.tar] [PKG_FS=flash:]
+#   [PKG=iris-arm64.tar] [PKG_FS=flash:]
 # Usage:  iox/uninstall.sh [--dry-run]
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -32,7 +32,7 @@ DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
 # never tear down the wrong SVI/VLAN and then falsely verify clean.
 VLAN_IN="${VLAN:-}"
 VLAN="${VLAN:-666}"
-PKG="${PKG:-iris.tar}"; PKG_FS="${PKG_FS:-flash:}"
+PKG="${PKG:-iris-arm64.tar}"; PKG_FS="${PKG_FS:-flash:}"
 APPID=iris
 
 config_cleanup() {
@@ -63,7 +63,8 @@ if [ "$DRY" -eq 1 ]; then
   config_cleanup
   echo "===== [3/4] delete ${PKG_FS}${PKG} ====="
   echo "===== [4/4] verify no '$APPID' app / config footprint remains ====="
-  echo "===== LEFT IN PLACE: iox, file prompt quiet, AppGig trunk, ip scp server, sdflash image ====="
+   echo "===== PERSIST: copy running-config startup-config (after successful cleanup) ====="
+   echo "===== LEFT IN PLACE: iox, file prompt quiet, AppGig trunk, ip scp server, sdflash image ====="
   exit 0
 fi
 
@@ -106,4 +107,11 @@ if [ -n "$left" ]; then
   printf '%s\n' "$left" >&2
   exit 1
 fi
-echo "undeploy complete: $DEVICE_IP is clean (iox/scp/trunk/sdflash image left for the next onboard)"
+echo "persist cleanup to startup-config"
+save_out="$(printf 'copy running-config startup-config\n' | RUN 2>&1 || true)"
+case "$save_out" in
+  *"[OK]"*|*"bytes copied"*) echo "undeploy complete: $DEVICE_IP is clean and persisted" ;;
+  *) echo "ERROR: cleanup succeeded but saving startup-config failed:" >&2
+     printf '%s\n' "$save_out" >&2
+     exit 1 ;;
+esac

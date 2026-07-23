@@ -95,7 +95,7 @@ services:
       # from the image-baked device sources, copies bootstrap.sh, and refreshes
       # iris-catalog.pem from the server cert) so a fresh deploy doesn't fail
       # onboarding on an empty artifacts/. The container writes only content it
-      # generates itself; the sole operator-supplied file is iris.tar (the IOx
+      # generates itself; the sole operator-supplied file is iris-arm64.tar (the IOx
       # agent), which the container never modifies. Per-device staging configs
       # (gui_onboard.py, IRIS_STAGE_LOCAL=1) live under staging/ and are swept
       # after STAGING_MAX_AGE_SECONDS. This dir is gitignored — not tracked

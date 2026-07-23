@@ -12,6 +12,7 @@ SPDX-License-Identifier: Apache-2.0
 | --- | --- |
 | `docker compose -f server/docker-compose.yml run --rm iris iris-bootstrap` | Initialize a fresh encrypted server config volume. |
 | `docker compose -f server/docker-compose.yml up -d --build` | Build and start the IRIS server. |
+| `tools/start-compose-server.sh` | Bootstrap/start Compose and automatically stage both IOx packages. |
 | `docker compose -f server/docker-compose.yml exec iris iris-publish /opt/images/<image>.bin` | Publish an image into the catalog and seeder. |
 | `docker compose -f server/docker-compose.yml exec iris iris-assign` | Show images and assignments. |
 | `docker compose -f server/docker-compose.yml exec iris iris-assign <device> <image>` | Assign one image to one device. |
@@ -40,9 +41,9 @@ SPDX-License-Identifier: Apache-2.0
 
 | Area | Pages |
 | --- | --- |
-| Start | [Overview](index.md), [Getting Started](getting-started.md) |
+| Start | [Overview](index.md), [Getting Started](getting-started.md), [AI-Guided PoC](aiagent.md) |
 | Design | [Architecture](architecture.md), [Container Deployments](containers.md), [Security Model](security.md), [Observability](observability.md) |
-| Components | [Server](server.md), [Kubernetes](kubernetes.md), [Device Agents](device-agents.md), [IOx App](iox.md), [Web Console](console.md) |
+| Components | [Server](server.md), [Network Ports and Flows](network-ports.md), [Kubernetes](kubernetes.md), [Device Agents](device-agents.md), [IOx App](iox.md), [Web Console](console.md) |
 | Workflows | [Fleet Workflows](fleet-workflows.md), [Operations](operations.md), [Validation](validation.md), [Development](development.md) |
 | Reference | [Reference](reference.md) |
 

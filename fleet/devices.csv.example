@@ -1,12 +1,16 @@
-device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip,model
+device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip,model,platform
 # One row per device — NETWORK INFO ONLY. Tokens and secrets are handled
 # automatically by tools/gen-device-installers.sh (it talks to the running IRIS server).
-# 'model' is OPTIONAL and LAST. Leave it blank to let Console onboarding
-# auto-detect the platform (Guest Shell / IOx) from a live 'show version';
-# set it (e.g. C9300-48UXM, IE-3400) to pick the installer deterministically.
+# 'model' is OPTIONAL. Leave it blank to let Console onboarding auto-detect the
+# platform (Guest Shell / IOx) from a live 'show version'; set it (e.g.
+# C9300-48UXM, IE-3400) to pick the installer deterministically.
+# 'platform' is OPTIONAL and LAST: blank = auto (by model), or force 'guestshell'
+# or 'iox'. Set a C9300 to 'iox' to onboard it as an amd64 IOx Docker app
+# (needs iris-amd64.tar staged) instead of Guest Shell.
 # SDA deployment (IS-IS underlay) is assumed. svi_ip/guest_ip are a /30 at the
 # back end of the device's subnet.
-100.92.9.3,100.92.9.3,666,100.92.9.125,255.255.255.252,100.92.9.126,C9300-48UXM
-100.92.9.1,100.92.9.1,666,100.92.9.121,255.255.255.252,100.92.9.122,
-100.92.9.129,100.92.9.129,666,100.92.9.253,255.255.255.252,100.92.9.254,
-100.92.9.131,100.92.9.131,666,100.92.9.249,255.255.255.252,100.92.9.250,
+100.92.9.3,100.92.9.3,666,100.92.9.125,255.255.255.252,100.92.9.126,C9300-48UXM,
+100.92.9.4,100.92.9.4,666,100.92.9.117,255.255.255.252,100.92.9.118,C9300-48UXM,iox
+100.92.9.1,100.92.9.1,666,100.92.9.121,255.255.255.252,100.92.9.122,,
+100.92.9.129,100.92.9.129,666,100.92.9.253,255.255.255.252,100.92.9.254,,
+100.92.9.131,100.92.9.131,666,100.92.9.249,255.255.255.252,100.92.9.250,,

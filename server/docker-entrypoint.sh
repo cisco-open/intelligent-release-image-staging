@@ -90,7 +90,7 @@ mkdir -p "$IRIS_ARTIFACTS_DIR/staging" 2>/dev/null || true
 # Self-provision the derivable served artifacts (Guest Shell bundle,
 # bootstrap.sh, iris-catalog.pem) into the artifacts dir so a fresh deploy
 # doesn't fail onboarding on missing files. Best-effort (never blocks startup);
-# only iris.tar (the aarch64 IOx package) still has to be built out-of-band.
+# only iris-arm64.tar (the aarch64 IOx package) still has to be built out-of-band.
 bash /opt/iris/server/provision-served.sh "$IRIS_ARTIFACTS_DIR" || true
 
 if [ "${SKIP_SUPERVISE:-0}" = "1" ]; then

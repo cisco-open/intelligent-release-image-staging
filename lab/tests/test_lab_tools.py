@@ -203,5 +203,15 @@ class TestAddRpcToken(unittest.TestCase):
         self.assertEqual(captured["params"][0], f"token:{secret}")
 
 
+class TestDeviceRunSecretRedaction(unittest.TestCase):
+    """Terminal output must not expose device or enable credentials."""
+
+    def test_redacts_device_and_enable_secrets(self):
+        with open(os.path.join(LAB_DIR, "device-run.sh")) as f:
+            text = f.read()
+        self.assertIn("DEVICE_PASS DEVICE_ENABLE", text)
+        self.assertIn("[REDACTED]", text)
+
+
 if __name__ == "__main__":
     unittest.main()

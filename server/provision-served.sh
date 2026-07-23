@@ -12,8 +12,9 @@
 #                     deployed agent code)
 #   bootstrap.sh      the on-device launcher (device/bootstrap.sh)
 #   iris-catalog.pem  the pinned CA the agent trusts = the server's PUBLIC cert
-# The one served artifact this CANNOT produce is iris.tar (the aarch64 IOx
-# package — needs device/iox/build.sh); it just notes when that is absent.
+# The served artifacts this CANNOT produce are the IOx packages iris-arm64.tar
+# (aarch64, IE-3x00/IR) and iris-amd64.tar (x86_64, Catalyst 9300) — both need
+# device/iox/build.sh; it just notes when they are absent.
 #
 # BEST-EFFORT by design: it logs and returns 0 even when it can't stage (e.g. a
 # read-only artifacts mount, or the cert not minted yet) so it NEVER blocks the
@@ -70,10 +71,17 @@ else
   echo "provision-served: server cert $CRT not found — run iris-bootstrap first" >&2
 fi
 
-# The IOx package is the one served artifact we cannot build here (aarch64 +
-# ioxclient). Note its absence so an operator onboarding IE-3400s knows.
-if [ ! -f "$ART/iris.tar" ]; then
-  echo "provision-served: note — iris.tar (IE-3400 IOx agent) not staged;" \
-       "build device/iox/build.sh to onboard IE-3400s (Guest Shell C9300s are ready)"
+# The IOx packages are the served artifacts we cannot build here (need
+# ioxclient + a docker builder). Note absence so an operator knows what to
+# stage. A Catalyst 9300 can onboard as Guest Shell today OR as an amd64 IOx
+# Docker app once iris-amd64.tar is staged.
+if [ ! -f "$ART/iris-arm64.tar" ]; then
+  echo "provision-served: note — iris-arm64.tar (arm64 IOx agent for IE-3x00/IR) not" \
+       "staged; build device/iox/build.sh to onboard IE-3x00/IR"
+fi
+if [ ! -f "$ART/iris-amd64.tar" ]; then
+  echo "provision-served: note — iris-amd64.tar (amd64 IOx agent for Catalyst" \
+       "9300) not staged; run tools/stage-iox-package.sh --arch amd64 to onboard" \
+       "a 9300 as an IOx app (a 9300 can also onboard as Guest Shell without it)"
 fi
 exit 0

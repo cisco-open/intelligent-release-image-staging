@@ -31,4 +31,9 @@ DEVICE_ENABLE="${DEVICE_ENABLE:-$DEVICE_PASS}"
       -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa \
       -o Ciphers=+aes128-cbc,aes256-cbc,3des-cbc \
       "${DEVICE_USER}@${HOST}" 2>/dev/null \
-  | sed -e 's/\r$//'
+  | perl -pe '
+      s/\r$//;
+      for my $secret (grep { defined && length } @ENV{qw(DEVICE_PASS DEVICE_ENABLE)}) {
+        s/\Q$secret\E/[REDACTED]/g;
+      }
+    '

@@ -429,6 +429,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 row["assigned_image_id"] = pol.get("approved_image_id")
                 row["last_seen"] = h.get("last_seen")
                 row["stage_state"] = h.get("stage_state")
+                row["stage_error"] = h.get("stage_error")
                 row["current_image_id"] = h.get("current_image_id")
                 row["heartbeat_model"] = h.get("model")
                 j = jobs.get(did)
@@ -797,6 +798,29 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                            target=did,
                            detail="profile %s -> %s" % (old or "(none)",
                                                         pid or "(cleared)"),
+                           actor=actor)
+                self._json(200, {"ok": True}); return
+            if path.startswith("/api/devices/") and path.endswith("/platform"):
+                if fleet is None:
+                    self._json(404, {"error": "not found"}); return
+                did = unquote(path[len("/api/devices/"):-len("/platform")])
+                dev = fleet.get_device(did)
+                if dev is None:
+                    self._json(404, {"error": "no such device"}); return
+                body = self._json_body(raw)
+                if body is None:
+                    return
+                plat = str(body.get("platform", "")).strip()
+                if plat and plat not in ("guestshell", "iox"):
+                    self._json(400, {"error": "platform must be empty, "
+                                     "guestshell, or iox"}); return
+                old = dev.get("platform") or ""
+                # Empty value CLEARS the override (falls back to Auto/model).
+                fleet.upsert({"device_id": did, "platform": plat})
+                self._audit("device_platform_change", "device", action="platform",
+                           target=did,
+                           detail="platform %s -> %s" % (old or "(auto)",
+                                                         plat or "(auto)"),
                            actor=actor)
                 self._json(200, {"ok": True}); return
             if path.startswith("/api/devices/") and path.endswith("/request-report"):

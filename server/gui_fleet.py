@@ -15,12 +15,14 @@ import tempfile
 
 import secrets_store
 
-# Canonical devices.csv columns (network info only — no secrets). "model" is
-# LAST and optional (used to auto-select the onboarding platform; see
-# gui_onboard.resolve_platform) so older 6-column CSVs/exports keep importing.
-CSV_COLS = ["device_id", "device_ip", "vlan", "svi_ip", "svi_mask", "guest_ip", "model"]
+# Canonical devices.csv columns (network info only — no secrets). "model" and
+# the trailing "platform" override are BOTH optional and last: model auto-selects
+# the onboarding platform, platform (blank|guestshell|iox) forces it (see
+# gui_onboard.resolve_platform). Keeping both last means older 6-column (no
+# model) and 7-column (model, no platform) CSVs/exports keep importing.
+CSV_COLS = ["device_id", "device_ip", "vlan", "svi_ip", "svi_mask", "guest_ip", "model", "platform"]
 _REQUIRED = ("device_id", "device_ip")
-_REQUIRED_CSV_COLS = CSV_COLS[:-1]  # model is optional; short (6-col) rows are OK
+_REQUIRED_CSV_COLS = CSV_COLS[:-2]  # model + platform optional; 6-col rows are OK
 
 
 def _atomic_write_json(path, obj):
@@ -104,7 +106,7 @@ class FleetStore:
                 skipped += 1
                 continue
             cells = [c.strip() for c in raw]
-            if cells == CSV_COLS or cells == _REQUIRED_CSV_COLS:  # header row (new or pre-model)
+            if cells in (CSV_COLS, CSV_COLS[:-1], _REQUIRED_CSV_COLS):  # header (8/7/6-col)
                 skipped += 1
                 continue
             if len(cells) < len(_REQUIRED_CSV_COLS):
@@ -155,9 +157,13 @@ class FleetStore:
             "# 'model' is optional -- if left blank, console onboarding will",
             "# auto-detect the platform (guestshell/IOx) from a live 'show version'",
             "# probe the first time you onboard the device.",
+            "# 'platform' is optional and LAST: blank = auto (by model), or force",
+            "# 'guestshell' or 'iox'. Set a C9300 to 'iox' to onboard it as an amd64",
+            "# IOx Docker app (needs iris-amd64.tar staged) instead of Guest Shell.",
             "# Replace the examples below with your devices (delete the leading #).",
             ",".join(CSV_COLS),
-            "# 100.92.9.11,100.92.9.11,666,100.92.9.10,255.255.255.252,100.92.9.9,C9300-48UXM",
-            "# 100.92.9.12,100.92.9.12,666,100.92.9.13,255.255.255.252,100.92.9.14,",
-            "# 100.90.168.99,100.90.168.99,666,100.90.168.98,255.255.255.252,100.90.168.97,IE-3400",
+            "# 100.92.9.11,100.92.9.11,666,100.92.9.10,255.255.255.252,100.92.9.9,C9300-48UXM,",
+            "# 100.92.9.12,100.92.9.12,666,100.92.9.13,255.255.255.252,100.92.9.14,C9300-48UXM,iox",
+            "# 100.92.9.13,100.92.9.13,666,100.92.9.15,255.255.255.252,100.92.9.16,,",
+            "# 100.90.168.99,100.90.168.99,666,100.90.168.98,255.255.255.252,100.90.168.97,IE-3400,",
         ]) + "\n"

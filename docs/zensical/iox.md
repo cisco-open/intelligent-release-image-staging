@@ -27,7 +27,7 @@ model. Select a writable IOS filesystem appropriate to the platform, such as
 | `device/iox/build.sh` | Builds the IOx package. |
 | `device/iox/install.sh` | Installs the IOx app on a target device. |
 | `device/iox/uninstall.sh` | Removes the IOx app. |
-| `device/iox/rebake_iris_tar.py` | Updates `iris.tar` packaging content. |
+| `device/iox/rebake_iris_tar.py` | Updates an existing IOx package's content. |
 
 ## Runtime behavior
 
@@ -50,7 +50,7 @@ defaults it to `sdflash:`.
 # Docker image only
 CATALOG_PEM=/path/to/iris-catalog.pem device/iox/build.sh --image-only
 
-# Docker image plus Cisco iris.tar package (requires ioxclient)
+# Docker image plus Cisco iris-arm64.tar package (requires ioxclient)
 CATALOG_PEM=/path/to/iris-catalog.pem device/iox/build.sh device/iox/out
 
 # x86_64 Catalyst package
@@ -60,8 +60,43 @@ IOX_ARCH=amd64 PACKAGE_NAME=iris-amd64.tar \
 
 The clean-clone build path downloads a pinned architecture-matched static
 `aria2c` when no local bundle is available and fails if its SHA-256 digest
-differs.
+differs. For package builds, `tools/stage-iox-package.sh` downloads Cisco's
+pinned Linux amd64 `ioxclient` release to git-ignored `tools/bin/` on first use;
+set `IOXCLIENT` to use an existing installation instead.
+
+## Build and stage for Console onboarding
+
+Run this on the Linux Compose host after the IRIS container is healthy. The same
+Linux amd64 `ioxclient` package tool builds both architecture-specific packages;
+the `--arch` choice selects the Docker image, package descriptor, and output
+name.
+
+```bash
+# Build and stage both packages during server bring-up (recommended).
+tools/provision-iox-packages.sh
+
+# IE-3x00 / IE-3400 / IR: arm64 package served as iris-arm64.tar
+tools/stage-iox-package.sh --arch arm64
+
+# SSD-equipped C9300 IOx: amd64 package served as iris-amd64.tar
+tools/stage-iox-package.sh --arch amd64
+```
+
+On first use the helper downloads Cisco's pinned `ioxclient` 1.18.0.0 to
+`tools/bin/ioxclient`; that binary is git-ignored and not embedded in the
+repository or seed-server image. The helper retrieves the live catalog
+certificate from the running `iris` container, builds a package that pins it,
+and places the result in `/srv/artifacts`. If Docker created the default bind
+mount as root, the helper uses `docker cp` rather than requiring a host ownership
+change. On an amd64 server, the arm64 build automatically registers Docker's
+ARM64 emulation handler when it is missing.
+
+Rebuild both packages after rotating the server certificate, because each
+package contains the pinned catalog certificate. The helper only builds and
+places artifacts; it never contacts or changes a device.
 
 ## Artifact handling
 
-`iris.tar` is an operator-built artifact and belongs under `artifacts/` for serving. The server container serves the artifact but does not rebuild or mutate it automatically.
+`iris-arm64.tar` and `iris-amd64.tar` are operator-built artifacts and belong under
+`artifacts/` for serving. The server container serves them but does not rebuild
+or mutate them automatically.

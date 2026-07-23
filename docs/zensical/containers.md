@@ -66,16 +66,23 @@ CATALOG_PEM=/path/to/iris-catalog.pem \
   device/iox/build.sh --image-only
 ```
 
-Build the Cisco IOx package when `ioxclient` is available:
+Build the Cisco IOx package directly when `ioxclient` is available:
 
 ```bash
 CATALOG_PEM=/path/to/iris-catalog.pem \
-  device/iox/build.sh device/iox/out
+device/iox/build.sh device/iox/out
 
 IOX_ARCH=amd64 PACKAGE_NAME=iris-amd64.tar \
   CATALOG_PEM=/path/to/iris-catalog.pem \
   device/iox/build.sh device/iox/out
 ```
+
+For the normal Compose workflow, run `tools/provision-iox-packages.sh` after
+the server becomes healthy. It obtains the pinned Cisco `ioxclient` tool on the
+Linux server when needed, uses the running server certificate, and places both
+architecture-specific packages in served artifacts. Use
+`tools/stage-iox-package.sh --arch arm64` or `--arch amd64` only when rebuilding
+one package.
 
 If no matching local agent bundle is present, the build downloads a pinned
 architecture-matched static `aria2c` and verifies its SHA-256 digest. The catalog certificate

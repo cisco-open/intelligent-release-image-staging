@@ -78,4 +78,4 @@ for the address and scaling constraints.
 
 ## Self-provisioned artifacts
 
-On startup, the container refreshes derivable served files such as the Guest Shell agent bundle, bootstrap script, and catalog certificate. Operator-supplied IOx packaging artifacts, such as `iris.tar`, remain operator-owned; the container serves them but does not modify them.
+On startup, the container refreshes derivable served files such as the Guest Shell agent bundle, bootstrap script, and catalog certificate. Operator-supplied IOx packaging artifacts, such as `iris-arm64.tar`, remain operator-owned; the container serves them but does not modify them.

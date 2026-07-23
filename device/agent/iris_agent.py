@@ -37,18 +37,19 @@ _FILENAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 Deps = collections.namedtuple(
     "Deps", "catalog emit ios aria_add file_size verify free_bytes version "
             "copy_to_root purge_others reclaim root_present remove_stage "
-            "aria_remove detect_mode target_fs running_image reclaimable "
-            "reclaim_bundle model refresh aria_stats aria_peers")
+             "aria_remove detect_mode target_fs running_image reclaimable "
+             "reclaim_bundle model refresh aria_stats aria_peers io_transfer")
 
 
 def _heartbeat(image, deps, stage_state="staging", target_fs=None,
-               tele_on=True):
+               tele_on=True, stage_error=None):
     return {"current_image_id": image["id"],
             "free_flash_bytes": deps.free_bytes(target_fs or "flash:"),
             "version": deps.version(),
-            "model": deps.model(),
-            "stage_state": stage_state,
-            "target_fs": target_fs,
+             "model": deps.model(),
+             "stage_state": stage_state,
+             "stage_error": stage_error,
+             "target_fs": target_fs,
             "telemetry_enabled": bool(tele_on)}
 
 
@@ -436,17 +437,31 @@ def run_once(cfg, deps, state):
                                         "seeding-only", hb, time.time())
                         return "seeding-only"
                 st.pop("blocked_no_space", None)
+                # Container-mode IOx devices must SCP the completed image into
+                # IOS-visible storage before the final copy /verify. That large
+                # transfer blocks this agent process, so publish its state first
+                # instead of leaving the Console on ambiguous "staging".
+                if deps.io_transfer:
+                    _send_heartbeat(
+                        deps, sid, _heartbeat(image, deps, "transferring_to_ios",
+                                              target_fs=target_prefix,
+                                              tele_on=tele_on))
                 if deps.copy_to_root(image["filename"], target_prefix):
                     st["copied"] = True
                     state["root_file"] = image["filename"]   # ours; safe to replace later
+                    st.pop("stage_error", None)
+                else:
+                    st["stage_error"] = (
+                        "final IOS placement failed; inspect IRIS ROOTCOPY-FAIL")
             # "ready" only when the flash-root copy is actually placed; a failed
             # copy_to_root (signature fail / never appeared) keeps "staging" so
             # the heartbeat never claims a verified root copy that isn't there.
             hb = _send_heartbeat(
                 deps, sid, _heartbeat(image, deps,
-                                      "ready" if st.get("copied") else "staging",
-                                      target_fs=state.get("stage_fs"),
-                                      tele_on=tele_on))
+                                       "ready" if st.get("copied") else "staging",
+                                       target_fs=state.get("stage_fs"),
+                                       tele_on=tele_on,
+                                       stage_error=st.get("stage_error")))
             _telemetry_tick(cfg, deps, state, img_id, stage, "copied",
                             hb, time.time())
             return "complete"
@@ -1133,7 +1148,8 @@ def build_deps(cfg, conf_path):  # pragma: no cover
                 detect_mode=detect_mode, target_fs=target_fs,
                 running_image=running_image, reclaimable=reclaimable,
                 reclaim_bundle=reclaim_bundle, model=model, refresh=refresh,
-                aria_stats=aria_stats, aria_peers=aria_peers)
+                aria_stats=aria_stats, aria_peers=aria_peers,
+                io_transfer=(_mode == "container"))
 
 
 def main():  # pragma: no cover

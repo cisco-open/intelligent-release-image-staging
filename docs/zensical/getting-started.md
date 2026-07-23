@@ -32,13 +32,11 @@ export IRIS_AGE_KEY_FILE_HOST=$HOME/.config/iris/age.txt
 export IRIS_AGE_RECIPIENTS=<primary-age-public-key>,<break-glass-age-public-key>
 ```
 
-Build the image, initialize a fresh encrypted config volume, and start the stack
-from the repository root:
+Build the image, initialize a fresh encrypted config volume, start the stack,
+and prepare both IOx packages from the repository root:
 
 ```bash
-docker compose -f server/docker-compose.yml build
-docker compose -f server/docker-compose.yml run --rm iris iris-bootstrap
-docker compose -f server/docker-compose.yml up -d
+tools/start-compose-server.sh
 ```
 
 `iris-bootstrap` is idempotent and does not overwrite existing encrypted state.
@@ -46,6 +44,10 @@ The running container exposes the tracker, catalog, artifact server, seeder data
 port, console, and telemetry endpoints. Plaintext secrets are decrypted into
 `/run/iris` tmpfs at runtime and encrypted under the `iris-config` volume at
 rest.
+
+`start-compose-server.sh` runs `tools/provision-iox-packages.sh` after the
+container becomes healthy. It produces `iris-arm64.tar` for IE-3x00/IR and
+`iris-amd64.tar` for C9300 IOx, both pinned to the current server certificate.
 
 ## Create the console admin
 
@@ -81,8 +83,12 @@ cp fleet/devices.csv.example fleet/devices.csv
 The inventory contains network onboarding information only:
 
 ```text
-device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip
+device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip,model,platform
 ```
+
+`model` and `platform` are optional trailing fields. Set a model for deterministic
+Console platform selection; leave `platform` blank for automatic selection, use
+`guestshell` for the standard C9300 path, or use `iox` for supported IOx devices.
 
 Generate one self-contained installer per device:
 
