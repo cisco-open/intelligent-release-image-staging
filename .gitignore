@@ -30,6 +30,7 @@ images/ios-xe/
 # --- vendored binaries (refetched by tools/get-aria2c.sh) ---
 bin/*
 !bin/.gitkeep
+tools/bin/
 
 # --- generated release artifacts (rebuilt by tools/make-release.sh) ---
 release/

@@ -32,13 +32,22 @@ export IRIS_AGE_KEY_FILE_HOST=$HOME/.config/iris/age.txt
 export IRIS_AGE_RECIPIENTS=<primary-age-public-key>,<break-glass-age-public-key>
 ```
 
-Start the stack from the repository root:
+Build the image, initialize a fresh encrypted config volume, start the stack,
+and prepare both IOx packages from the repository root:
 
 ```bash
-docker compose -f server/docker-compose.yml up -d --build
+tools/start-compose-server.sh
 ```
 
-The container exposes the tracker, catalog, artifact server, seeder data port, console, and telemetry endpoints. Plaintext secrets are decrypted into `/run/iris` tmpfs at runtime and encrypted under the `iris-config` volume at rest.
+`iris-bootstrap` is idempotent and does not overwrite existing encrypted state.
+The running container exposes the tracker, catalog, artifact server, seeder data
+port, console, and telemetry endpoints. Plaintext secrets are decrypted into
+`/run/iris` tmpfs at runtime and encrypted under the `iris-config` volume at
+rest.
+
+`start-compose-server.sh` runs `tools/provision-iox-packages.sh` after the
+container becomes healthy. It produces `iris-arm64.tar` for IE-3x00/IR and
+`iris-amd64.tar` for C9300 IOx, both pinned to the current server certificate.
 
 ## Create the console admin
 
@@ -52,7 +61,9 @@ For scripted setup, provide the password with `IRIS_GUI_ADMIN_PASSWORD`.
 
 ## Publish an image
 
-The Compose file mounts `/opt/images` from the host into the container. Publish from inside the container so the seeder RPC remains local-only:
+The Compose file mounts `IRIS_IMAGE_ROOT` from the host at `/opt/images`
+(`IRIS_IMAGE_ROOT` defaults to `/opt/images`). Publish from inside the container
+so the seeder RPC remains local-only:
 
 ```bash
 docker compose -f server/docker-compose.yml exec iris \
@@ -72,8 +83,12 @@ cp fleet/devices.csv.example fleet/devices.csv
 The inventory contains network onboarding information only:
 
 ```text
-device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip
+device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip,model,platform
 ```
+
+`model` and `platform` are optional trailing fields. Set a model for deterministic
+Console platform selection; leave `platform` blank for automatic selection, use
+`guestshell` for the standard C9300 path, or use `iox` for supported IOx devices.
 
 Generate one self-contained installer per device:
 
@@ -108,4 +123,3 @@ Agents poll the catalog on a short interval, download the approved image, verify
 ## Open the console
 
 Use `https://<server-ip>:8080/` for image status, device state, onboarding jobs, swarm information, settings, and audit data.
-

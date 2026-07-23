@@ -2,6 +2,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import stat
+
 import agent_config
 
 
@@ -78,6 +80,28 @@ def test_token_expires_at_parsed_when_present(tmp_path):
     assert cfg["token_expires_at"] == "1750000000"
 
 
+def test_target_fs_defaults_to_auto_detection(tmp_path):
+    p = tmp_path / "agent.conf"
+    p.write_text(
+        "catalog_url = https://x\ncatalog_token = t\ndevice_id = d\n")
+    assert agent_config.load(str(p))["target_fs"] == ""
+
+
+def test_target_fs_accepts_ios_prefix_and_rejects_paths(tmp_path):
+    import pytest
+
+    p = tmp_path / "agent.conf"
+    p.write_text(
+        "catalog_url = https://x\ncatalog_token = t\ndevice_id = d\n"
+        "target_fs = sdflash:\n")
+    assert agent_config.load(str(p))["target_fs"] == "sdflash:"
+    p.write_text(
+        "catalog_url = https://x\ncatalog_token = t\ndevice_id = d\n"
+        "target_fs = /data/images\n")
+    with pytest.raises(ValueError, match="invalid target_fs"):
+        agent_config.load(str(p))
+
+
 def test_write_conf_round_trips_through_load(tmp_path):
     # write_conf emits key = value lines that load() reads back unchanged.
     # Include all DEFAULTS keys to confirm none are silently dropped on round-trip.
@@ -118,3 +142,10 @@ def test_write_conf_overwrites_existing(tmp_path):
     agent_config.write_conf(str(p), {
         "catalog_url": "https://x", "catalog_token": "NEW", "device_id": "d"})
     assert agent_config.load(str(p))["catalog_token"] == "NEW"
+
+
+def test_write_conf_restricts_secret_bearing_file_to_owner(tmp_path):
+    p = tmp_path / "iris-agent.conf"
+    agent_config.write_conf(str(p), {
+        "catalog_url": "https://x", "catalog_token": "secret", "device_id": "d"})
+    assert stat.S_IMODE(p.stat().st_mode) == 0o600

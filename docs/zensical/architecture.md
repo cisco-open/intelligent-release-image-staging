@@ -95,3 +95,8 @@ The public story is peer-assisted staging. The server implements that with a few
 The server keeps durable state under `/var/lib/iris`. Catalog records are small JSON documents written atomically with advisory locks so concurrent GUI and CLI operations do not corrupt state. Secret material is encrypted at rest under `/etc/iris` with age recipients and decrypted to `/run/iris` tmpfs only while the container is running.
 
 Generated artifacts live under `artifacts/` on the host and are served by the artifact server. IOS-XE image files stay outside the repository, commonly under `/opt/images`, and are mounted read-only into the container.
+
+On an IOx device, `/data/iris` is persistent application scratch rather than an
+IOS-visible image destination. After swarm verification, the app pushes the file
+to the selected IOS filesystem and IOS performs the final `copy /verify`. This
+keeps signature enforcement and the final filesystem write inside IOS.

@@ -70,6 +70,11 @@ setup() {
   [[ "$output" == *"LEFT IN PLACE"* ]] && [[ "$output" == *"iox"* ]]
 }
 
+@test "dry-run persists successful Guest Shell cleanup" {
+  run bash "$UNINSTALL" --dry-run
+  [[ "$output" == *"copy running-config startup-config"* ]]
+}
+
 @test "custom VLAN flows into the removal lines" {
   VLAN=42 run bash "$UNINSTALL" --dry-run
   [[ "$output" == *"no interface Vlan42"* ]] && [[ "$output" == *"no vlan 42"* ]]

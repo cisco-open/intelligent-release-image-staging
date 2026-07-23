@@ -46,7 +46,7 @@ const paths = {
     title: "IE-3x00 and IE-3400 IOx",
     copy: "Package the same staging model as an IOx Docker app and use SSH-to-self for IOS copy and verify commands.",
     items: [
-      "Serves operator-built `iris.tar` from artifacts.",
+      "Serves operator-built `iris-arm64.tar` from artifacts.",
       "Downloads image pieces through the private swarm.",
       "Stages approved images to `sdflash:`.",
     ],

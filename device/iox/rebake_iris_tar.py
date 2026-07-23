@@ -4,9 +4,9 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Replace files inside an already-built IOx package (iris.tar) offline.
+"""Replace files inside an already-built IOx package offline.
 
-Why this exists: iris.tar bakes the catalog CA (iris-catalog.pem) and the
+Why this exists: an IOx package bakes the catalog CA (iris-catalog.pem) and the
 agent code into the image at BUILD time, and building a fresh package needs an
 arm64 Docker build + Cisco's ioxclient. When the server is re-keyed (new TLS
 cert) or the agent code gets a fix, an environment WITHOUT that toolchain is
@@ -15,7 +15,7 @@ catalog again. The package format itself carries no signatures — it is tar +
 gzip + SHA256 manifests all the way down — so a rebuild-in-place is possible
 anywhere Python runs:
 
-    outer iris.tar
+    outer IOx package tar
       package.yaml / artifacts.mf / .package.metadata / package.mf
       envelope_package.tar.gz      (copies of the above four)
       artifacts.tar.gz -> rootfs.tar   (an OCI image archive)
@@ -34,7 +34,7 @@ the aarch64 parts never need rebuilding.
 Usage:
     rebake_iris_tar.py <in.tar> <out.tar> <container-path>=<local-file> ...
 e.g.
-    rebake_iris_tar.py iris.tar iris-new.tar \
+    rebake_iris_tar.py iris-arm64.tar iris-arm64-new.tar \
         opt/iris/iris-catalog.pem=/etc/iris/tls/crt.pem \
         opt/iris/agent/iris_agent.py=device/agent/iris_agent.py
 

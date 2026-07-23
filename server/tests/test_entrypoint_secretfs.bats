@@ -6,7 +6,10 @@
 
 setup() {
   TMP="$(mktemp -d)"
-  mkdir -p "$TMP/config/tls" "$TMP/run" "$TMP/state" "$TMP/log"
+  mkdir -p "$TMP/config/tls" "$TMP/run" "$TMP/state" "$TMP/log" \
+    "$TMP/images" "$TMP/artifacts"
+  export IRIS_IMAGES_DIR="$TMP/images"
+  export IRIS_ARTIFACTS_DIR="$TMP/artifacts"
   # fake age: encrypt prepends AGEFAKE, decrypt strips it / fails on bad header
   cat > "$TMP/fake-age" <<'EOF'
 #!/usr/bin/env bash

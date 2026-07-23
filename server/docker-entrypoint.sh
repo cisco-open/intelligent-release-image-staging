@@ -82,12 +82,16 @@ export IRIS_AGE_BIN IRIS_AGE_KEY_FILE
 export IRIS_IMAGES_DIR="${IRIS_IMAGES_DIR:-/var/lib/iris-images}"
 mkdir -p "$IRIS_IMAGES_DIR"
 
+# Served bootstrap/package artifacts may live anywhere on a container volume.
+# Compose uses /srv/artifacts; Kubernetes uses a directory on its data PVC.
+export IRIS_ARTIFACTS_DIR="${IRIS_ARTIFACTS_DIR:-/srv/artifacts}"
+mkdir -p "$IRIS_ARTIFACTS_DIR/staging" 2>/dev/null || true
+
 # Self-provision the derivable served artifacts (Guest Shell bundle,
 # bootstrap.sh, iris-catalog.pem) into the artifacts dir so a fresh deploy
 # doesn't fail onboarding on missing files. Best-effort (never blocks startup);
-# only iris.tar (the aarch64 IOx package) still has to be built out-of-band.
-IRIS_ARTIFACTS_DIR="${IRIS_ARTIFACTS_DIR:-/srv/artifacts}" \
-  bash /opt/iris/server/provision-served.sh "${IRIS_ARTIFACTS_DIR:-/srv/artifacts}" || true
+# only iris-arm64.tar (the aarch64 IOx package) still has to be built out-of-band.
+bash /opt/iris/server/provision-served.sh "$IRIS_ARTIFACTS_DIR" || true
 
 if [ "${SKIP_SUPERVISE:-0}" = "1" ]; then
   echo "iris entrypoint: secrets decrypted to $IRIS_RUN (SKIP_SUPERVISE=1, not launching services)"
@@ -95,6 +99,24 @@ if [ "${SKIP_SUPERVISE:-0}" = "1" ]; then
 fi
 
 cd /opt/iris/server
+PIDS=()
+
+stop_services() {
+  if [ "${#PIDS[@]}" -gt 0 ]; then
+    kill "${PIDS[@]}" 2>/dev/null || true
+    wait "${PIDS[@]}" 2>/dev/null || true
+  fi
+}
+
+on_shutdown() {
+  trap - TERM INT
+  echo "iris container stopping"
+  stop_services
+  exit 0
+}
+
+trap on_shutdown TERM INT
+
 python3 tracker.py & T=$!
 python3 catalog.py & C=$!
 RPC_PORT="${RPC_PORT:-6800}" IRIS_ROOT=/opt/iris IRIS_LOG="$IRIS_LOG" \
@@ -103,13 +125,12 @@ RPC_PORT="${RPC_PORT:-6800}" IRIS_ROOT=/opt/iris IRIS_LOG="$IRIS_LOG" \
   SEEDER_LOG=- \
   ARIA2=/opt/iris/bin/aria2c bash seed-launch.sh & S=$!
 # artifact server (HTTPS): devices `copy https://<host>:8000/...` the agent bundle
-# + per-device configs from here (the ../artifacts dir, mounted read-write so
-# provision-served.sh above could stage the served files). Serves over TLS with
+# + per-device configs from the configured artifacts volume. Serves over TLS with
 # the SAME combined cert (IRIS_CERT) the catalog uses; the device trusts it via
 # the per-device PKI trustpoint the installer pushes first. No auth here — the
 # trustpoint gives confidentiality + server-auth and the payload IS the
 # credential bundle (transport-security only; nothing installed/activated/reloaded).
-mkdir -p /srv/artifacts 2>/dev/null || true
+mkdir -p "$IRIS_ARTIFACTS_DIR" 2>/dev/null || true
 # staging/ holds the ephemeral per-device configs gui_onboard.py
 # (IRIS_STAGE_LOCAL=1) writes when the console is co-located with this artifact
 # server; artifact_server.py sweeps them after STAGING_MAX_AGE_SECONDS.
@@ -117,16 +138,21 @@ mkdir -p "${IRIS_ARTIFACTS_DIR:-/srv/artifacts}/staging" 2>/dev/null || true
 # Log to the container log like the other services — discarding stdout/stderr
 # here hides artifact-server startup/serving failures (the device fetches its
 # agent bundle + per-device conf from this port, so silent failures matter).
-IRIS_ARTIFACTS_DIR=/srv/artifacts python3 artifact_server.py & A=$!
+python3 artifact_server.py & A=$!
 
 # web console (HTTPS :8080): single-admin GUI to run IRIS end-to-end. Serves
 # with the SAME combined cert (IRIS_CERT) as the catalog. Persists the admin
 # credential + credential profiles into the age-encrypted store (IRIS_SECRETS_ENC),
 # re-encrypting via IRIS_AGE_RECIPIENTS on write.
 python3 gui_server.py & G=$!
+PIDS=("$T" "$C" "$S" "$A" "$G")
 
 echo "iris container up: tracker :6969  catalog :8443 (https)  artifacts :8000 (https)  console :8080 (https)  seeder rpc :6800"
-wait -n "$T" "$C" "$S" "$A" "$G"
+if wait -n "$T" "$C" "$S" "$A" "$G"; then
+  :
+else
+  :
+fi
 echo "an iris service exited — stopping container" >&2
-kill "$T" "$C" "$S" "$A" "$G" 2>/dev/null || true
+stop_services
 exit 1

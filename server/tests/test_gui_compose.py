@@ -49,10 +49,20 @@ def test_dockerfile_installs_ssh_deps():
     assert "sshpass" in txt and "openssh-client" in txt
 
 
-def test_compose_mounts_device_and_lab():
+def test_server_image_bakes_device_and_lab_sources():
+    df = _read("Dockerfile")
+    assert "COPY device/ /opt/iris/device/" in df
+    assert "COPY lab/ /opt/iris/lab/" in df
     txt = _read("docker-compose.yml")
-    assert "../device:/opt/iris/device:ro" in txt
-    assert "../lab:/opt/iris/lab:ro" in txt
+    assert ":/opt/iris/device" not in txt
+    assert ":/opt/iris/lab" not in txt
+
+
+def test_compose_builds_self_contained_image_from_repo_root():
+    import yaml
+    build = yaml.safe_load(_read("docker-compose.yml"))["services"]["iris"]["build"]
+    assert build["context"] == ".."
+    assert build["dockerfile"] == "server/Dockerfile"
 
 
 def test_compose_artifacts_is_read_write_for_self_provisioning():
@@ -62,8 +72,8 @@ def test_compose_artifacts_is_read_write_for_self_provisioning():
     import yaml
     svc = yaml.safe_load(_read("docker-compose.yml"))["services"]["iris"]
     volumes = svc["volumes"]
-    assert "../artifacts:/srv/artifacts" in volumes
-    assert "../artifacts:/srv/artifacts:ro" not in volumes
+    assert any(v.endswith(":/srv/artifacts") for v in volumes)
+    assert not any(v.endswith(":/srv/artifacts:ro") for v in volumes)
 
 
 def test_compose_drops_redundant_staging_submount():
@@ -84,6 +94,30 @@ def test_entrypoint_self_provisions_served_artifacts():
 def test_entrypoint_creates_writable_staging_dir():
     txt = _read("docker-entrypoint.sh")
     assert 'mkdir -p "${IRIS_ARTIFACTS_DIR:-/srv/artifacts}/staging"' in txt
+
+
+def test_dockerfile_exposes_artifacts_seed_data_and_healthcheck():
+    df = _read("Dockerfile")
+    assert "EXPOSE 6969 8443 8000 6881 8080 9101" in df
+    assert "EXPOSE 6800" not in df
+    assert "HEALTHCHECK" in df and "9101/healthz" in df
+
+
+def test_dockerfile_rejects_non_amd64_server_builds():
+    df = _read("Dockerfile")
+    assert "TARGETARCH" in df
+    assert "supports linux/amd64 only" in df
+
+
+def test_dockerfile_uses_emulation_safe_go_crypto_for_age():
+    assert "GODEBUG=cpu.all=off" in _read("Dockerfile")
+
+
+def test_compose_declares_runtime_secret_paths_for_exec_commands():
+    import yaml
+    env = yaml.safe_load(_read("docker-compose.yml"))["services"]["iris"]["environment"]
+    assert env["IRIS_RPC_SECRET_FILE"] == "/run/iris/rpc-secret"
+    assert env["IRIS_SECRETS"] == "/run/iris/secrets.json"
 
 
 def test_version_baked_as_optional_build_arg():

@@ -101,6 +101,12 @@
       var credSel = ['<option value="">— no credential —</option>'].concat(credOpts.map(function (c) {
         return '<option value="' + esc(c.id) + '"' + (c.id === d.credential_profile_id ? ' selected' : '') + '>' + esc(c.id) + '</option>';
       })).join('');
+      var platVal = d.platform || '';
+      var platSel = [
+        ['', '— auto —'], ['guestshell', 'Guest Shell'], ['iox', 'IOx']
+      ].map(function (o) {
+        return '<option value="' + esc(o[0]) + '"' + (o[0] === platVal ? ' selected' : '') + '>' + esc(o[1]) + '</option>';
+      }).join('');
       // "deployed" = the assigned image is staged and verified on the box;
       // anything else shows the raw stage_state, or enrollment/liveness.
       // Job-aware states come FIRST: right after an onboard the agent needs
@@ -121,6 +127,11 @@
           (d.onboard_action === 'undeploy' ? 'undeploy' : 'onboard') + ' failed</span>';
       } else if (d.stage_state === 'ready' && d.current_image_id && d.current_image_id === d.assigned_image_id) {
         status = '<span class="badge badge-ok">deployed</span>';
+      } else if (d.stage_error) {
+        status = '<span class="badge badge-fail" title="' + esc(d.stage_error) + '">placement failed</span>' +
+          ' <span class="muted" title="' + esc(d.stage_error) + '">' + esc(d.stage_error) + '</span>';
+      } else if (d.stage_state === 'transferring_to_ios') {
+        status = '<span class="badge badge-running">copying to ' + esc(d.target_fs || 'IOS storage') + '</span>';
       } else if (d.stage_state) {
         status = '<span class="badge badge-running">' + esc(d.stage_state) + '</span>';
       } else if (d.last_seen) {
@@ -134,6 +145,7 @@
         '<td>' + esc(d.device_id) + '</td><td>' + esc(d.device_ip || '') + '</td>' +
         '<td>' + esc(d.model || d.heartbeat_model || '') + '</td>' +
         '<td>' + esc(d.vlan || '') + ' / ' + esc(d.svi_ip || '') + '</td>' +
+        '<td><select class="platform">' + platSel + '</select></td>' +
         '<td><select class="cred">' + credSel + '</select></td>' +
         '<td><select class="assign">' + opts + '</select></td>' +
         '<td>' + status + '</td>' +
@@ -152,6 +164,13 @@
         var id = sel.closest('tr').getAttribute('data-id');
         var r = await jpost('/api/devices/' + encodeURIComponent(id) + '/credential', { credential_profile_id: sel.value });
         devStatus.textContent = r.ok ? ('Credential updated for ' + id) : 'Credential update failed';
+      });
+    });
+    document.querySelectorAll('#dev-rows .platform').forEach(function (sel) {
+      sel.addEventListener('change', async function () {
+        var id = sel.closest('tr').getAttribute('data-id');
+        var r = await jpost('/api/devices/' + encodeURIComponent(id) + '/platform', { platform: sel.value });
+        devStatus.textContent = r.ok ? ('Platform updated for ' + id) : 'Platform update failed';
       });
     });
     document.querySelectorAll('#dev-rows .del').forEach(function (btn) {
@@ -650,6 +669,7 @@
                 e.action === 'update' ? 'updated device ' : 'saved device ') + t;
       case 'device_assign': return 'assigned an image to ' + t;
       case 'device_credential_change': return 'changed the credential profile of ' + t;
+      case 'device_platform_change': return 'changed the platform of ' + t;
       case 'device_delete': return 'deleted device ' + t;
       case 'request_report': return 'requested a fresh report from ' + t;
       case 'onboard_start': return 'started onboarding ' + t;

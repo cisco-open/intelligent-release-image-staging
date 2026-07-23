@@ -1,0 +1,32 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: iris-seed-server
+data:
+  # Replace both sentinel values before deployment. IRIS_HOST_IP must be the
+  # stable, device-reachable IPv4 address on the LoadBalancer Service.
+  IRIS_HOST_IP: "REPLACE_WITH_STATIC_EXTERNAL_IP"
+  IRIS_AGE_RECIPIENTS: "REPLACE_WITH_AGE_RECIPIENTS"
+
+  IRIS_STATE: "/data/state"
+  IRIS_CONFIG: "/data/config"
+  IRIS_LOG: "/data/log"
+  IRIS_RUN: "/run/iris"
+  IRIS_SECRETS: "/run/iris/secrets.json"
+  IRIS_RPC_SECRET_FILE: "/run/iris/rpc-secret"
+  IRIS_CERT: "/run/iris/tls/cert.pem"
+  IRIS_SECRETS_ENC: "/data/config/secrets.json.age"
+  IRIS_AUDIT: "/data/config/audit.jsonl"
+  IRIS_IMAGES_DIR: "/data/images"
+  IRIS_ARTIFACTS_DIR: "/data/artifacts"
+  IMAGES_ROOT: "/data/images"
+  IMAGES_DIR: "/data/images"
+
+  IRIS_OBSERVABILITY: ""
+  IRIS_OTLP_ENDPOINT: ""
+  IRIS_CONSOLE_URL: ""
+  PYTHONDONTWRITEBYTECODE: "1"

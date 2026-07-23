@@ -67,11 +67,11 @@ def extract_output(transcript, command):
 class SSHCli(object):
     """Guest-Shell-`cli`-compatible transport over an SSH-to-self IOS session.
 
-    One `ssh -tt` invocation per call (stateless, mirrors lab/device-run.sh).
-    The login may land at priv-1 or priv-15; we always send `enable` + the
-    enable secret first, so we end privileged either way. The enable password
-    echoes as a bogus exec command when already privileged, but that noise
-    precedes the real command's echo and is dropped by `extract_output`.
+    Commands and SCP transfers reuse an OpenSSH control connection for a short
+    time. A single agent tick makes several IOS calls (filesystem checks,
+    transfer, copy /verify, telemetry); reconnecting per call creates a login
+    storm on the device. The login may land at priv-1 or priv-15; each CLI
+    channel still sends `enable` + the enable secret before its command.
 
     `runner(script:str) -> transcript:str` is injectable for unit tests; the
     default shells out to sshpass+ssh with the legacy kex/cipher options these
@@ -79,7 +79,7 @@ class SSHCli(object):
 
     def __init__(self, host, user, password=None, enable=None, port=22,
                  runner=None, scp_runner=None, connect_timeout=15,
-                 exec_timeout=900):
+                 exec_timeout=900, control_path=None):
         self.host = host
         self.user = user
         self.password = password
@@ -88,8 +88,18 @@ class SSHCli(object):
         self.port = int(port)
         self.connect_timeout = int(connect_timeout)
         self.exec_timeout = int(exec_timeout)
+        stage_dir = os.environ.get("IRIS_STAGE_DIR", "/tmp")
+        self.control_path = control_path or os.path.join(
+            stage_dir, "ios-ssh-%r@%h:%p")
         self._runner = runner or self._default_runner
         self._scp = scp_runner or self._default_scp
+
+    def _control_options(self):
+        # ControlPath substitutions (%r/%h/%p) keep each IOS target separate.
+        # ControlPersist reaps the master after the agent has been idle, so an
+        # app restart or target change does not leave a permanent connection.
+        return ["-o", "ControlMaster=auto", "-o", "ControlPersist=120",
+                "-o", "ControlPath=" + self.control_path]
 
     def _exec_script(self, cmd):
         # enable -> secret -> disable paging/wrapping -> the command -> log out.
@@ -146,8 +156,7 @@ class SSHCli(object):
             "-o", "PubkeyAcceptedAlgorithms=+ssh-rsa",
             "-o", "Ciphers=+aes128-cbc,aes256-cbc,3des-cbc",
             "-P", str(self.port),
-            local_path, target,
-        ]
+        ] + self._control_options() + [local_path, target]
         env = dict(os.environ, SSHPASS=self.password or "")
         subprocess.run(cmd, env=env, check=True, stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL, timeout=self.exec_timeout)
@@ -164,8 +173,7 @@ class SSHCli(object):
             "-o", "PubkeyAcceptedAlgorithms=+ssh-rsa",
             "-o", "Ciphers=+aes128-cbc,aes256-cbc,3des-cbc",
             "-p", str(self.port),
-            "%s@%s" % (self.user, self.host),
-        ]
+        ] + self._control_options() + ["%s@%s" % (self.user, self.host)]
         env = dict(os.environ, SSHPASS=self.password or "")
         proc = subprocess.run(
             cmd, input=script, env=env,

@@ -49,7 +49,7 @@ def test_import_export_csv_roundtrip(tmp_path):
     assert stats["skipped"] == 2                       # header + comment line
     assert {d["device_id"] for d in fs.list_devices()} == {"d1", "d2"}
     out = fs.export_csv()
-    assert out.splitlines()[0] == "device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip,model"
+    assert out.splitlines()[0] == "device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip,model,platform"
     assert "d1,10.0.0.1,666,10.0.0.2,255.255.255.252,10.0.0.3," in out
     # re-importing the export reproduces the same fleet
     fs2 = gui_fleet.FleetStore(str(tmp_path / "b"))
@@ -76,8 +76,10 @@ def test_example_csv_is_a_safe_importable_template(tmp_path):
     assert "platform" in tpl.lower()                    # auto-detection mentioned
 
 
-def test_model_is_last_csv_column():
-    assert gui_fleet.CSV_COLS[-1] == "model"
+def test_platform_is_last_csv_column():
+    assert gui_fleet.CSV_COLS[-1] == "platform"
+    assert gui_fleet.CSV_COLS[-2] == "model"
+    assert gui_fleet._REQUIRED_CSV_COLS == gui_fleet.CSV_COLS[:-2]
 
 
 def test_import_csv_stats_new_updated_skipped(tmp_path):
@@ -105,7 +107,7 @@ def test_import_export_csv_roundtrip_with_model(tmp_path):
     assert fs.get_device("d1")["model"] == "C9300-48UXM"
     assert fs.get_device("d2")["model"] == "IE-3400"
     out = fs.export_csv()
-    assert out.splitlines()[0] == "device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip,model"
+    assert out.splitlines()[0] == "device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip,model,platform"
     assert "d1,10.0.0.1,666,10.0.0.2,255.255.255.252,10.0.0.3,C9300-48UXM" in out
 
 
@@ -119,3 +121,40 @@ def test_import_old_six_column_csv_still_works(tmp_path):
     dev = fs.get_device("d1")
     assert dev["device_ip"] == "10.0.0.1"
     assert dev.get("model", "") == ""
+
+
+def test_platform_column_roundtrip_and_backcompat(tmp_path):
+    """The optional trailing 'platform' column persists, blank = absent/Auto,
+    and legacy 6-col (no model) and 7-col (model, no platform) CSVs still import."""
+    fs = _fs(tmp_path)
+    csv_in = ("device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip,model,platform\n"
+              "d1,10.0.0.1,666,10.0.0.2,255.255.255.252,10.0.0.3,C9300-48UXM,iox\n"
+              "d2,10.0.0.5,777,10.0.0.6,255.255.255.252,10.0.0.7,C9300-48UXM,\n")
+    assert fs.import_csv(csv_in)["imported"] == 2
+    assert fs.get_device("d1")["platform"] == "iox"
+    # blank platform -> stored empty (Auto), never a stray non-empty value
+    assert fs.get_device("d2").get("platform", "") == ""
+    out = fs.export_csv()
+    assert out.splitlines()[0].endswith(",model,platform")
+    assert "d1,10.0.0.1,666,10.0.0.2,255.255.255.252,10.0.0.3,C9300-48UXM,iox" in out
+
+    # legacy 7-column CSV (model, no platform) still imports
+    fs7 = gui_fleet.FleetStore(str(tmp_path / "seven"))
+    csv7 = ("device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip,model\n"
+            "d1,10.0.0.1,666,10.0.0.2,255.255.255.252,10.0.0.3,C9300-48UXM\n")
+    assert fs7.import_csv(csv7)["imported"] == 1
+    assert fs7.get_device("d1")["model"] == "C9300-48UXM"
+    assert fs7.get_device("d1").get("platform", "") == ""
+
+    # legacy 6-column CSV (no model, no platform) still imports
+    fs6 = gui_fleet.FleetStore(str(tmp_path / "six"))
+    csv6 = ("device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip\n"
+            "d1,10.0.0.1,666,10.0.0.2,255.255.255.252,10.0.0.3\n")
+    assert fs6.import_csv(csv6)["imported"] == 1
+    assert fs6.get_device("d1").get("model", "") == ""
+
+
+def test_example_csv_mentions_iox_platform():
+    tpl = gui_fleet.FleetStore.example_csv()
+    assert ",".join(gui_fleet.CSV_COLS) in tpl        # 8-col canonical header
+    assert "iox" in tpl                               # platform guidance/example

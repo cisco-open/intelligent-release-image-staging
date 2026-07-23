@@ -225,6 +225,19 @@ def test_choose_stage_fs_guest_share_fs_wins_over_model():
                               guest_share_fs="flash:") == "flash:"
 
 
+def test_choose_stage_fs_operator_preference_wins_when_writable():
+    fss = ft.parse_file_systems(_IE3400_FS_SD)
+    assert ft.choose_stage_fs(fss, model="IE-3400-8T2S",
+                              guest_share_fs="sdflash:",
+                              preferred_fs="flash:") == "flash:"
+
+
+def test_choose_stage_fs_ignores_unavailable_or_readonly_preference():
+    fss = ft.parse_file_systems(_IE3400_FS_SD)
+    assert ft.choose_stage_fs(fss, preferred_fs="usbflash1:") is None
+    assert ft.choose_stage_fs(fss, preferred_fs="webui:") is None
+
+
 def test_choose_stage_fs_cat9k_defers_to_boot_fs():
     fss = ft.parse_file_systems(_C9300_FS)
     assert ft.choose_stage_fs(fss, model="C9300-48UXM") is None

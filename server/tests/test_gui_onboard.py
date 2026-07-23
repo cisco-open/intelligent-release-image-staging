@@ -331,7 +331,7 @@ def _iox_creds():
 
 def test_probe_resolves_iox_and_caches_model(tmp_path):
     art_dir = tmp_path
-    (art_dir / "iris.tar").write_text("fake")
+    (art_dir / "iris-arm64.tar").write_text("fake")
     fleet = _iox_fleet()  # no explicit platform/model -> falls to probe
     creds = _iox_creds()
     seen = {}
@@ -372,8 +372,8 @@ def test_probe_returning_none_errors_without_running(tmp_path):
 
 def test_iox_env_has_ssh_creds(tmp_path):
     art_dir = tmp_path
-    (art_dir / "iris.tar").write_text("fake")
-    fleet = _iox_fleet(platform="iox")
+    (art_dir / "iris-arm64.tar").write_text("fake")
+    fleet = _iox_fleet(platform="iox", model="IE-3400")
     creds = _iox_creds()
     seen = {}
 
@@ -405,7 +405,7 @@ def test_guestshell_env_unchanged_no_ssh_keys(tmp_path):
 
 
 def test_iox_missing_iris_tar_errors_before_run(tmp_path):
-    fleet = _iox_fleet(platform="iox")
+    fleet = _iox_fleet(platform="iox", model="IE-3400")
     creds = _iox_creds()
     called = []
 
@@ -415,16 +415,16 @@ def test_iox_missing_iris_tar_errors_before_run(tmp_path):
 
     svc = gui_onboard.OnboardService(
         fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
-        run_fn=fake_run, artifacts_dir=str(tmp_path))  # no iris.tar written
+  run_fn=fake_run, artifacts_dir=str(tmp_path))  # no iris-arm64.tar written
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "error"
     assert called == []
-    assert any("iris.tar not found" in l for l in job["lines"])
+    assert any("iris-arm64.tar not found" in l for l in job["lines"])
 
 
 def test_iox_present_iris_tar_proceeds(tmp_path):
-    (tmp_path / "iris.tar").write_text("fake")
-    fleet = _iox_fleet(platform="iox")
+    (tmp_path / "iris-arm64.tar").write_text("fake")
+    fleet = _iox_fleet(platform="iox", model="IE-3400")
     creds = _iox_creds()
     seen = {}
 
@@ -441,7 +441,7 @@ def test_iox_present_iris_tar_proceeds(tmp_path):
 
 
 def test_job_lines_note_platform_and_recipe(tmp_path):
-    (tmp_path / "iris.tar").write_text("fake")
+    (tmp_path / "iris-arm64.tar").write_text("fake")
     fleet = _iox_fleet(platform="iox", model="IE-3400")
     creds = _iox_creds()
     svc = gui_onboard.OnboardService(
@@ -927,3 +927,125 @@ def test_guestshell_device_install_override_still_applies(tmp_path):
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done"
     assert seen["install_path"] == "/fake/device-install.sh"
+
+
+# --- C9300 amd64 IOx arch derivation ------------------------------------
+
+def _run_capture(seen):
+    def fake_run(install_path, env, on_line):
+        seen["install_path"] = install_path
+        seen["env"] = env
+        return 0
+    return fake_run
+
+
+def test_c9k_iox_gets_amd64_env(tmp_path):
+    (tmp_path / "iris-amd64.tar").write_text("fake")
+    fleet = _iox_fleet(platform="iox", model="C9300-48UXM")
+    seen = {}
+    svc = gui_onboard.OnboardService(
+        fleet, _iox_creds(), host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
+        run_fn=_run_capture(seen), artifacts_dir=str(tmp_path))
+    job = _wait(svc, svc.start("d1"))
+    assert job["state"] == "done"
+    env = seen["env"]
+    assert env["PKG"] == "iris-amd64.tar"
+    assert env["APP_INTF"] == "AppGigabitEthernet1/0/1"
+    assert env["TARGET_FS"] == "usbflash1:"
+
+
+def test_ie3k_iox_keeps_arm_defaults(tmp_path):
+    (tmp_path / "iris-arm64.tar").write_text("fake")
+    fleet = _iox_fleet(model="IE-3400")   # model regex -> iox, arm
+    seen = {}
+    svc = gui_onboard.OnboardService(
+        fleet, _iox_creds(), host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
+        run_fn=_run_capture(seen), artifacts_dir=str(tmp_path))
+    job = _wait(svc, svc.start("d1"))
+    assert job["state"] == "done"
+    env = seen["env"]
+    # arm case leaves these unset so install.sh's own defaults apply
+    assert "PKG" not in env
+    assert "APP_INTF" not in env
+    assert "TARGET_FS" not in env
+
+
+def test_c9k_guestshell_override_runs_guestshell(tmp_path):
+    fleet = _iox_fleet(platform="guestshell", model="C9300-48UXM")
+    seen = {}
+    svc = gui_onboard.OnboardService(
+        fleet, _iox_creds(), host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
+        run_fn=_run_capture(seen), device_install="/fake/device-install.sh",
+        artifacts_dir=str(tmp_path))
+    job = _wait(svc, svc.start("d1"))
+    assert job["state"] == "done"
+    assert seen["install_path"] == "/fake/device-install.sh"
+    assert "PKG" not in seen["env"] and "DEVICE_SSH_PASS" not in seen["env"]
+
+
+def test_c9k_stacked_member_app_intf_override_wins(tmp_path):
+    (tmp_path / "iris-amd64.tar").write_text("fake")
+    fleet = _iox_fleet(platform="iox", model="C9300-48UXM")
+    seen = {}
+    svc = gui_onboard.OnboardService(
+        fleet, _iox_creds(), host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
+        run_fn=_run_capture(seen), artifacts_dir=str(tmp_path))
+    # simulate an operator/env override for a stacked member 2/0/1
+    import os as _os
+    old = _os.environ.get("APP_INTF")
+    _os.environ["APP_INTF"] = "AppGigabitEthernet2/0/1"
+    try:
+        job = _wait(svc, svc.start("d1"))
+    finally:
+        if old is None:
+            _os.environ.pop("APP_INTF", None)
+        else:
+            _os.environ["APP_INTF"] = old
+    assert job["state"] == "done"
+    # setdefault must not clobber the explicit override
+    assert seen["env"]["APP_INTF"] == "AppGigabitEthernet2/0/1"
+    assert seen["env"]["PKG"] == "iris-amd64.tar"
+
+
+def test_iox_unclassifiable_model_raises_guard(tmp_path):
+    (tmp_path / "iris-arm64.tar").write_text("fake")
+    (tmp_path / "iris-amd64.tar").write_text("fake")
+    fleet = _iox_fleet(platform="iox", model="ISR4451")  # forced iox, non-IOx family
+    called = []
+    def fake_run(p, e, on):
+        called.append(p)
+        return 0
+    svc = gui_onboard.OnboardService(
+        fleet, _iox_creds(), host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
+        run_fn=fake_run, artifacts_dir=str(tmp_path))
+    job = _wait(svc, svc.start("d1"))
+    assert job["state"] == "error"
+    assert called == []                       # device untouched
+    msg = " ".join(job["lines"])
+    assert "d1" in msg and "C9k" in msg and "arm" in msg
+
+
+def test_undeploy_c9k_uses_resolved_amd64_pkg(tmp_path):
+    fleet = _iox_fleet(platform="iox", model="C9300-48UXM")
+    seen = {}
+    svc = gui_onboard.OnboardService(
+        fleet, _iox_creds(), host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
+        run_fn=_run_capture(seen), artifacts_dir=str(tmp_path))
+    job = _wait(svc, svc.start("d1", action="undeploy"))
+    assert job["state"] == "done"
+    # undeploy never checks the artifacts guard, but _resolve populates PKG so
+    # uninstall.sh deletes flash:iris-amd64.tar
+    assert seen["env"]["PKG"] == "iris-amd64.tar"
+
+
+def test_c9k_iox_notfound_names_amd64_tar(tmp_path):
+    # no package staged
+    fleet = _iox_fleet(platform="iox", model="C9300-48UXM")
+    called = []
+    svc = gui_onboard.OnboardService(
+        fleet, _iox_creds(), host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
+        run_fn=lambda p, e, on: called.append(p) or 0, artifacts_dir=str(tmp_path))
+    job = _wait(svc, svc.start("d1"))
+    assert job["state"] == "error"
+    assert called == []
+    assert any("iris-amd64.tar" in l for l in job["lines"])

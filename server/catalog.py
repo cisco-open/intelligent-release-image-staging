@@ -326,6 +326,7 @@ class Catalog:
                 "free_flash_bytes": data.get("free_flash_bytes"),
                 "version": data.get("version"),
                 "stage_state": data.get("stage_state"),
+                "stage_error": data.get("stage_error"),
                 "target_fs": data.get("target_fs"),
                 "model": data.get("model"),
                 "telemetry_enabled": data.get("telemetry_enabled"),

@@ -869,12 +869,31 @@ def test_swarmmap_per_peer_table_received_and_avg_speed():
 
 
 def test_swarmmap_drawer_widened():
-    # The drawer was cramped at 340px; #18 widens it to ~440px so the richer
-    # per-peer table fits without column overflow.
+    # The drawer was cramped at 340px. It is now responsive and substantially
+    # wider on desktop so the per-peer table is readable without overflow.
     html = _swarmmap_html()
     assert "width:340px" not in html, "old 340px drawer width still present"
-    assert "#drawer{" in html and "width:440px" in html, \
-        "#drawer must be widened to 440px"
+    assert "#drawer{" in html and "width:min(560px,52vw)" in html, \
+        "#drawer must use the responsive wide layout"
+
+
+def test_swarmmap_has_fleet_scale_controls():
+    html = _swarmmap_html()
+    assert 'id="peerfind"' in html
+    assert 'id="zoom-out"' in html
+    assert 'id="zoom-in"' in html
+    assert 'id="fit"' in html
+    assert 'id="legend-toggle"' in html
+    assert "filterPeers" in html
+    assert 'svg.addEventListener("wheel"' not in html
+    assert 'svg.addEventListener("pointerdown"' in html
+
+
+def test_swarmmap_hides_legend_and_labels_in_dense_view():
+    html = _swarmmap_html()
+    assert 'id="legend" hidden' in html
+    assert "const dense=peers.length>40" in html
+    assert "if(!dense || peerFilter)" in html
 
 
 def test_index_html_embeds_swarmmap_iframe_lazily():

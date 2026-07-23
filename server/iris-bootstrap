@@ -47,6 +47,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 log()  { printf '[iris-bootstrap] %s\n' "$*"; }
 die()  { printf '[iris-bootstrap] FATAL: %s\n' "$*" >&2; exit 1; }
 
+# IRIS tracker peer addresses and the generated certificate SAN are IPv4-only.
+# Fail with a useful message before OpenSSL/age create any partial state.
+python3 -c 'import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1])' \
+  "$IRIS_HOST_IP" 2>/dev/null \
+  || die "IRIS_HOST_IP must be a valid device-reachable IPv4 address"
+
 # ---- ensure config dirs ----
 mkdir -p "$IRIS_CONFIG/tls"
 

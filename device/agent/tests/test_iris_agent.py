@@ -104,6 +104,7 @@ def make_deps(catalog, sizes, verify_ok=True, free=9_000_000_000,
         refresh=lambda: None,     # default: no refresh wired (token still fresh)
         aria_stats=lambda stage_path: None,   # telemetry: no aria2 stats wired
         aria_peers=lambda stage_path: [],     # telemetry: no peer rows wired
+        io_transfer=False,
     )
     return (deps, emitted, ios_cmds, aria_calls, copied, purged, reclaimed,
             bundle_reclaimed)
@@ -1056,6 +1057,21 @@ def test_heartbeat_not_ready_when_copy_failed():
     assert iris_agent.run_once(CFG, deps, {}) == "complete"
     assert copied == []
     assert sent[-1]["stage_state"] == "staging"          # NOT "ready"
+    assert sent[-1]["stage_error"] == "final IOS placement failed; inspect IRIS ROOTCOPY-FAIL"
+
+
+def test_iox_reports_transfer_to_ios_before_blocking_copy():
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 5,
+                       "sha256": "abc"})
+    sent = []
+    deps, _, _, _, _, _, _, _ = make_deps(cat, {"/stage/img1.bin": 5})
+    deps = deps._replace(
+        catalog=_HeartbeatSpy(cat, sent), io_transfer=True,
+        target_fs=lambda: ("usbflash1:", 9_000_000_000))
+    assert iris_agent.run_once(CFG, deps, {}) == "complete"
+    assert any(h["stage_state"] == "transferring_to_ios"
+               and h["target_fs"] == "usbflash1:" for h in sent)
 
 
 # --- Task 5 behavioral guards: IE3k sdflash staging + install-mode + C9300 ---
@@ -1686,16 +1702,16 @@ def test_aria_peers_never_raises_on_rpc_error():
         assert iris_agent._aria_peers_impl(rpc, _TELE_STAGE) == []
 
 
-def test_deps_gains_aria_stats_and_aria_peers_appended_at_end():
-    # Contract: exactly TWO new fields, APPENDED at the END (so positional
-    # construction and index-based code stay valid). make_deps defaults them
-    # to the inert no-data answers (None / []) so every existing scenario is
-    # unchanged.
-    assert iris_agent.Deps._fields[-2:] == ("aria_stats", "aria_peers")
+def test_deps_gains_telemetry_and_io_transfer_fields_appended_at_end():
+    # Contract: these fields are appended (so pre-existing positional
+    # construction and index-based code stay valid). The defaults keep legacy
+    # test scenarios on the Guest Shell path unchanged.
+    assert iris_agent.Deps._fields[-3:] == ("aria_stats", "aria_peers", "io_transfer")
     cat = FakeCatalog({"approved_image_id": None}, None)
     deps, _, _, _, _, _, _, _ = make_deps(cat, {})
     assert deps.aria_stats("/stage/img1.bin") is None
     assert deps.aria_peers("/stage/img1.bin") == []
+    assert deps.io_transfer is False
 
 
 # ---------------------------------------------------------------------------

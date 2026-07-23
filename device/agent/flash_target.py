@@ -113,7 +113,8 @@ def _is_ie3k(model):
     return bool(model) and model.upper().startswith("IE-3")
 
 
-def choose_stage_fs(file_systems, model=None, guest_share_fs=None):
+def choose_stage_fs(file_systems, model=None, guest_share_fs=None,
+                    preferred_fs=None):
     """Prefix of the filesystem IRIS should STAGE on — download the scratch and
     place the image copy — or None to defer to choose_target_fs (the boot FS).
 
@@ -122,6 +123,8 @@ def choose_stage_fs(file_systems, model=None, guest_share_fs=None):
     boot FS). On the IE3k, IOx runs from sdflash:, so the scratch and copy live
     there.
 
+      preferred_fs   : operator-selected IOS prefix. Used only when it names a
+                       writable non-crash disk returned by `show file systems`.
       guest_share_fs : IOS prefix actually containing guest-share/ (probed on-box).
                        Authoritative when it names a writable disk.
       model          : device model; an IE3k selects sdflash: when present — a
@@ -132,6 +135,8 @@ def choose_stage_fs(file_systems, model=None, guest_share_fs=None):
              if f["type"] == "disk" and "rw" in f["flags"]
              and "crashinfo:" not in f["prefixes"]]
     prefixes = {p for f in disks for p in f["prefixes"]}
+    if preferred_fs and preferred_fs in prefixes:
+        return preferred_fs
     if guest_share_fs and guest_share_fs in prefixes:
         return guest_share_fs
     if _is_ie3k(model) and "sdflash:" in prefixes:

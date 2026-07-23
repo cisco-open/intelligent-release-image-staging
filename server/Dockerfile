@@ -1,7 +1,27 @@
-# IRIS coordination server — fully self-contained build (P6).
-# Everything the image needs is fetched and verified RIGHT HERE; no pre-downloads.
-#   docker build -t iris:latest server/
-FROM python:3.12-slim
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# IRIS coordination and seed server. Build from the repository root so the
+# image contains the device installers and lab transport used by console-driven
+# onboarding; no checkout bind mounts are required at runtime.
+#
+#   docker build --platform linux/amd64 -f server/Dockerfile -t iris:latest .
+#
+# The alpha server image is intentionally amd64: the static aria2c copied into
+# the Guest Shell bundle must match the x86_64 Catalyst platforms it serves.
+FROM python:3.12-slim-bookworm
+
+ARG TARGETARCH
+RUN case "${TARGETARCH:-amd64}" in \
+      amd64) ;; \
+      *) echo "IRIS seed server alpha supports linux/amd64 only (got ${TARGETARCH})" >&2; exit 1 ;; \
+    esac
+
+LABEL org.opencontainers.image.title="IRIS seed server" \
+      org.opencontainers.image.description="Private image staging coordinator, tracker, catalog, and seeder" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.source="https://github.com/cisco-open/intelligent-release-image-staging"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends mktorrent openssl curl ca-certificates unzip age openssh-client sshpass iproute2 \
@@ -20,8 +40,19 @@ RUN set -eux; \
     rm -rf /tmp/aria2.zip /tmp/aria2
 
 WORKDIR /opt/iris
-COPY . /opt/iris/server/
-ENV PATH="/opt/iris/server:${PATH}"
+COPY server/ /opt/iris/server/
+COPY device/ /opt/iris/device/
+COPY lab/ /opt/iris/lab/
+COPY VERSION /opt/iris/VERSION
+
+# Docker Desktop's amd64 emulation on Apple Silicon can advertise Go crypto CPU
+# features that Rosetta does not implement correctly. age handles only small
+# secret files here, so its generic path is a cheap cross-platform safeguard.
+ARG IRIS_VERSION=
+ENV PATH="/opt/iris/server:${PATH}" \
+    PYTHONUNBUFFERED=1 \
+    GODEBUG=cpu.all=off
+ENV IRIS_VERSION=${IRIS_VERSION}
 
 RUN chmod +x /opt/iris/server/seed-launch.sh \
     /opt/iris/server/iris-publish \
@@ -29,19 +60,16 @@ RUN chmod +x /opt/iris/server/seed-launch.sh \
     /opt/iris/server/iris-bootstrap \
     /opt/iris/server/pack-agent-bundle.sh \
     /opt/iris/server/provision-served.sh \
-    /opt/iris/server/docker-entrypoint.sh
+    /opt/iris/server/docker-entrypoint.sh \
+    /opt/iris/device/*.sh \
+    /opt/iris/device/iox/*.sh \
+    /opt/iris/lab/*.sh
 
-# Release version, baked at BUILD time and shown on the console's Settings
-# page (gui_server._read_version reads IRIS_VERSION first). OPTIONAL — the
-# empty default keeps plain `docker build server/` working; without it the
-# console shows "unknown" (the repo-root VERSION file is outside this build
-# context, so it can never be COPY'd here).
-#   IRIS_VERSION="$(cat VERSION)" docker compose -f server/docker-compose.yml up -d --build
-ARG IRIS_VERSION=
-ENV IRIS_VERSION=${IRIS_VERSION}
+# Device/operator-facing ports. aria2 RPC (:6800) is loopback-only and omitted.
+EXPOSE 6969 8443 8000 6881 8080 9101
+VOLUME ["/var/lib/iris", "/etc/iris", "/opt/images", "/srv/artifacts"]
 
-# tracker / catalog / seeder-rpc / telemetry metrics / web console
-EXPOSE 6969 8443 6800 9101 8080
-VOLUME ["/var/lib/iris", "/etc/iris", "/opt/images"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:9101/healthz || exit 1
 
 ENTRYPOINT ["/opt/iris/server/docker-entrypoint.sh"]

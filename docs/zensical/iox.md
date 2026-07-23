@@ -6,29 +6,97 @@ SPDX-License-Identifier: Apache-2.0
 
 # IOx App
 
-The IOx path targets Catalyst IE-3x00 and IE-3400 style platforms where the agent runs as a Docker-based IOx application instead of a Guest Shell process.
+The IOx path runs the agent as a Docker-based IOx application. It supports
+ARM64 IE-3x00/IE-3400 style platforms and x86_64 Catalyst 9000 app hosting.
 
 ## When to use it
 
-Use the IOx app when the platform expects an IOx application lifecycle and stages images to `sdflash:`. Use the Guest Shell path for Catalyst 9300 devices that support the Guest Shell agent model.
+Use the IOx app when the platform expects an IOx application lifecycle. The
+Guest Shell path remains available for Catalyst devices that support that agent
+model. Select a writable IOS filesystem appropriate to the platform, such as
+`sdflash:` on IE-3x00 or `usbflash1:` on C9300.
 
 ## Files
 
 | File | Purpose |
 | --- | --- |
-| `device/iox/Dockerfile` | Builds the aarch64 IOx agent container. |
-| `device/iox/package.yaml` | IOx package metadata. |
+| `device/iox/Dockerfile` | Builds the multi-architecture IOx agent container. |
+| `device/iox/package.yaml` | ARM64 IOx package metadata. |
+| `device/iox/package-amd64.yaml` | x86_64 IOx package metadata. |
 | `device/iox/entrypoint.sh` | Starts the agent inside the application container. |
 | `device/iox/build.sh` | Builds the IOx package. |
 | `device/iox/install.sh` | Installs the IOx app on a target device. |
 | `device/iox/uninstall.sh` | Removes the IOx app. |
-| `device/iox/rebake_iris_tar.py` | Updates `iris.tar` packaging content. |
+| `device/iox/rebake_iris_tar.py` | Updates an existing IOx package's content. |
 
 ## Runtime behavior
 
-The IOx agent follows the same catalog and staging model as the Guest Shell agent. The platform-specific difference is the IOS command path: the container reaches IOS through SSH-to-self and stages the final verified image to `sdflash:`.
+The IOx agent follows the same catalog and staging model as the Guest Shell
+agent. It downloads resumable swarm data under the CAF persistent directory
+(`/iox_data/iris` on the validated C9300 runtime). Because that disk is not an
+IOS filesystem root, the
+container reaches IOS through SSH-to-self, SCP-pushes the verified scratch file
+to `guest-share/iris`, and runs IOS `copy /verify` for the final placement.
+
+`IRIS_TARGET_FS` optionally selects a filesystem prefix such as `sdflash:` or
+`bootflash:`. The agent accepts it only when `show file systems` reports a
+writable non-crash disk; otherwise it logs the fallback and retains automatic
+platform selection. `device/iox/install.sh` exposes this as `TARGET_FS` and
+defaults it to `sdflash:`.
+
+## Build modes
+
+```bash
+# Docker image only
+CATALOG_PEM=/path/to/iris-catalog.pem device/iox/build.sh --image-only
+
+# Docker image plus Cisco iris-arm64.tar package (requires ioxclient)
+CATALOG_PEM=/path/to/iris-catalog.pem device/iox/build.sh device/iox/out
+
+# x86_64 Catalyst package
+IOX_ARCH=amd64 PACKAGE_NAME=iris-amd64.tar \
+  CATALOG_PEM=/path/to/iris-catalog.pem device/iox/build.sh device/iox/out
+```
+
+The clean-clone build path downloads a pinned architecture-matched static
+`aria2c` when no local bundle is available and fails if its SHA-256 digest
+differs. For package builds, `tools/stage-iox-package.sh` downloads Cisco's
+pinned Linux amd64 `ioxclient` release to git-ignored `tools/bin/` on first use;
+set `IOXCLIENT` to use an existing installation instead.
+
+## Build and stage for Console onboarding
+
+Run this on the Linux Compose host after the IRIS container is healthy. The same
+Linux amd64 `ioxclient` package tool builds both architecture-specific packages;
+the `--arch` choice selects the Docker image, package descriptor, and output
+name.
+
+```bash
+# Build and stage both packages during server bring-up (recommended).
+tools/provision-iox-packages.sh
+
+# IE-3x00 / IE-3400 / IR: arm64 package served as iris-arm64.tar
+tools/stage-iox-package.sh --arch arm64
+
+# SSD-equipped C9300 IOx: amd64 package served as iris-amd64.tar
+tools/stage-iox-package.sh --arch amd64
+```
+
+On first use the helper downloads Cisco's pinned `ioxclient` 1.18.0.0 to
+`tools/bin/ioxclient`; that binary is git-ignored and not embedded in the
+repository or seed-server image. The helper retrieves the live catalog
+certificate from the running `iris` container, builds a package that pins it,
+and places the result in `/srv/artifacts`. If Docker created the default bind
+mount as root, the helper uses `docker cp` rather than requiring a host ownership
+change. On an amd64 server, the arm64 build automatically registers Docker's
+ARM64 emulation handler when it is missing.
+
+Rebuild both packages after rotating the server certificate, because each
+package contains the pinned catalog certificate. The helper only builds and
+places artifacts; it never contacts or changes a device.
 
 ## Artifact handling
 
-`iris.tar` is an operator-built artifact and belongs under `artifacts/` for serving. The server container serves the artifact but does not rebuild or mutate it automatically.
-
+`iris-arm64.tar` and `iris-amd64.tar` are operator-built artifacts and belong under
+`artifacts/` for serving. The server container serves them but does not rebuild
+or mutate them automatically.

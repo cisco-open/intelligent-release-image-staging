@@ -3,10 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for device/iox/rebake_iris_tar.py — the offline IOx-package file
 replacer (swaps files like the pinned catalog cert or the agent code inside an
-already-built iris.tar and recomputes the full OCI + package hash chain, so a
+already-built IOx package and recomputes the full OCI + package hash chain, so a
 server re-key doesn't require ioxclient/aarch64 to fix the fleet package).
 
-The fixture synthesizes a miniature but structurally-faithful iris.tar:
+The fixture synthesizes a miniature but structurally-faithful arm64 package:
 OCI rootfs (index.json -> manifest blob -> config blob + plain-tar layers,
 plus docker-compat manifest.json/repositories), wrapped in artifacts.tar.gz +
 SHA256 manifests + envelope, in the exact member order ioxclient produces.
@@ -43,7 +43,7 @@ def _tar_bytes(members, gz=False):
 
 
 def _mini_package(tmp_path, layer_gz=False):
-    """Build a structurally-faithful miniature iris.tar. Returns its path."""
+    """Build a structurally-faithful miniature IOx package. Returns its path."""
     cert = b"OLD-CERT\n"
     agent = b"OLD_AGENT_CODE = 1\n"
     layer1 = _tar_bytes([("opt/iris/iris-catalog.pem", cert),
@@ -116,7 +116,7 @@ def _mini_package(tmp_path, layer_gz=False):
                    ("artifacts.tar.gz", art_gz),
                    ("envelope_package.tar.gz", envelope),
                    ("package.yaml", pkg_yaml)])
-    pkg = tmp_path / "iris.tar"
+    pkg = tmp_path / "iris-arm64.tar"
     with tarfile.open(pkg, "w") as t:
         for name, data in [("package.yaml", pkg_yaml), ("artifacts.mf", art_mf),
                            (".package.metadata", meta_outer),

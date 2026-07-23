@@ -244,3 +244,12 @@ def test_sshcli_put_raises_on_scp_failure():
     except cli_ssh.CliTransportError:
         return
     assert False, "expected CliTransportError when scp fails"
+
+
+def test_sshcli_uses_shared_control_connection_for_cli_and_scp():
+    cli = cli_ssh.SSHCli(host="h", user="u", password="p",
+                          control_path="/data/iris/ios-%r@%h:%p")
+    opts = cli._control_options()
+    assert "ControlMaster=auto" in opts
+    assert "ControlPersist=120" in opts
+    assert "ControlPath=/data/iris/ios-%r@%h:%p" in opts

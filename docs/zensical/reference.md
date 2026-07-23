@@ -10,7 +10,9 @@ SPDX-License-Identifier: Apache-2.0
 
 | Command | Use |
 | --- | --- |
+| `docker compose -f server/docker-compose.yml run --rm iris iris-bootstrap` | Initialize a fresh encrypted server config volume. |
 | `docker compose -f server/docker-compose.yml up -d --build` | Build and start the IRIS server. |
+| `tools/start-compose-server.sh` | Bootstrap/start Compose and automatically stage both IOx packages. |
 | `docker compose -f server/docker-compose.yml exec iris iris-publish /opt/images/<image>.bin` | Publish an image into the catalog and seeder. |
 | `docker compose -f server/docker-compose.yml exec iris iris-assign` | Show images and assignments. |
 | `docker compose -f server/docker-compose.yml exec iris iris-assign <device> <image>` | Assign one image to one device. |
@@ -20,6 +22,8 @@ SPDX-License-Identifier: Apache-2.0
 | `device/device-uninstall.sh` | Remove Guest Shell IRIS wiring from a device. |
 | `device/iox/install.sh` | Install the IOx app path. |
 | `device/iox/uninstall.sh` | Remove the IOx app path. |
+| `device/iox/build.sh --image-only` | Build the ARM64 app-hosting image; set `IOX_ARCH=amd64` for x86_64. |
+| `kubectl apply -k kubernetes` | Deploy the optional single-replica Kubernetes seed server. |
 
 ## Port quick reference
 
@@ -37,9 +41,9 @@ SPDX-License-Identifier: Apache-2.0
 
 | Area | Pages |
 | --- | --- |
-| Start | [Overview](index.md), [Getting Started](getting-started.md) |
-| Design | [Architecture](architecture.md), [Security Model](security.md), [Observability](observability.md) |
-| Components | [Server](server.md), [Device Agents](device-agents.md), [IOx App](iox.md), [Web Console](console.md) |
+| Start | [Overview](index.md), [Getting Started](getting-started.md), [AI-Guided PoC](aiagent.md) |
+| Design | [Architecture](architecture.md), [Container Deployments](containers.md), [Security Model](security.md), [Observability](observability.md) |
+| Components | [Server](server.md), [Network Ports and Flows](network-ports.md), [Kubernetes](kubernetes.md), [Device Agents](device-agents.md), [IOx App](iox.md), [Web Console](console.md) |
 | Workflows | [Fleet Workflows](fleet-workflows.md), [Operations](operations.md), [Validation](validation.md), [Development](development.md) |
 | Reference | [Reference](reference.md) |
 

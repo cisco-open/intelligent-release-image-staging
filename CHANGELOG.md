@@ -9,6 +9,51 @@ This project uses **Calendar Versioning (CalVer)**: `YYYY.0M.0D` with an optiona
 `2026.06.11.1`). Releases are tagged `vYYYY.0M.0D`. The current version is in the
 top-level `VERSION` file.
 
+## [2026.07.23]
+
+### Added
+- **Catalyst 9300 IOx Console onboarding**: select IOx per device in the
+  Console or fleet CSV to deploy the amd64 IOx app and stage images to
+  `usbflash1:`. C9k devices now resolve `iris-amd64.tar`; IE-3x00 and IR devices
+  retain the arm64 `iris.tar` path. An explicit IOx override on an unknown model
+  now fails before touching the device instead of selecting an unsafe default.
+- **IOx package staging helper**: `tools/stage-iox-package.sh` builds and
+  places the per-deployment arm64 or amd64 package into the Compose artifacts
+  bind mount without touching a device.
+
+### Changed
+- `device/iox/build.sh --amd64` produces `iris-amd64.tar` by default, avoiding
+  collisions with the arm64 package when both are served.
+
+## [2026.07.10]
+
+The container deployment alpha makes the existing seed-server and Cisco IOx
+paths portable beyond the original lab checkout.
+
+### Added
+- **Optional Kubernetes seed server**: a Kustomize deployment with one amd64
+  replica, a persistent data PVC, idempotent bootstrap init container, age-key
+  Secret mount, memory-backed plaintext runtime secrets, health probes, and a
+  source-IP-preserving LoadBalancer that keeps aria2 RPC private.
+- **Configurable IOx filesystem placement**: `IRIS_TARGET_FS` / installer
+  `TARGET_FS` selects a writable IOS disk such as `sdflash:` or `bootflash:`.
+  The agent validates it against `show file systems`, safely falls back to
+  platform detection, and still delegates the final write to IOS `copy /verify`.
+- **IOx image-only build mode**: `device/iox/build.sh --image-only` builds the
+  arm64 Docker image without requiring `ioxclient`. Clean clones can fetch a
+  pinned aarch64 static `aria2c` with SHA-256 verification.
+
+### Changed
+- The amd64 seed-server image now builds from the repository root and contains
+  its device installers and onboarding helper, removing runtime checkout bind
+  mounts. A root `.dockerignore` excludes credentials, firmware, fleet state,
+  and generated artifacts from the build context.
+- Server and IOx entrypoints now handle termination cleanly. The server image
+  exposes every real service port and provides a `/healthz` Docker health check;
+  IOx config creation is atomic and mode `0600` with no baked lab addresses.
+- Docker Compose declares runtime secret paths for one-shot `exec` commands and
+  supports configurable host image/artifact mount locations.
+
 ## [2026.07.04.8]
 
 ### Fixed

@@ -50,8 +50,9 @@
   .node .label{fill:var(--txt);font-size:11px;text-anchor:middle;font-variant-numeric:tabular-nums}
   .node .pct{fill:var(--muted);font-size:9.5px;text-anchor:middle}
   .hub-label{fill:var(--seed);font-size:12px;font-weight:600;text-anchor:middle}
-  .legend{position:absolute;left:18px;bottom:16px;background:rgba(17,23,38,.8);border:1px solid var(--line);
-    border-radius:10px;padding:10px 13px;font-size:12px;color:var(--muted);display:flex;gap:16px;flex-wrap:wrap;max-width:60%}
+   .legend{position:absolute;left:18px;bottom:16px;background:rgba(17,23,38,.92);border:1px solid var(--line);
+     border-radius:10px;padding:10px 13px;font-size:12px;color:var(--muted);display:flex;gap:16px;flex-wrap:wrap;max-width:60%}
+   .legend[hidden]{display:none}
   .legend i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:-1px}
   #tip{position:absolute;pointer-events:none;background:rgba(8,12,20,.96);border:1px solid var(--line);
     border-radius:8px;padding:8px 10px;font-size:12px;opacity:0;transition:opacity .12s;max-width:240px;z-index:8}
@@ -60,46 +61,63 @@
   #empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);
     flex-direction:column;gap:8px;text-align:center}
   /* detail drawer */
-  #drawer{position:absolute;top:0;right:0;height:100%;width:440px;max-width:92vw;
+   #drawer{position:absolute;top:0;right:0;height:100%;width:min(560px,52vw);max-width:94vw;
     background:linear-gradient(180deg,#10172700,#101727),
     var(--panel);border-left:1px solid var(--line);transform:translateX(100%);transition:transform .28s cubic-bezier(.2,.7,.2,1);
     z-index:9;padding:18px 22px;overflow:auto}
   #drawer.open{transform:translateX(0)}
-  #drawer h2{margin:2px 0 2px;font-size:16px;display:flex;align-items:center;gap:9px}
+   #drawer h2{margin:2px 0 4px;font-size:20px;display:flex;align-items:center;gap:9px}
   #drawer .role{font-size:11px;padding:3px 8px;border-radius:20px;border:1px solid var(--line)}
   #drawer .close{position:absolute;top:14px;right:14px;border:none;background:none;color:var(--muted);font-size:20px;padding:0;cursor:pointer}
-  #drawer .big{font-size:30px;font-weight:700;margin:14px 0 2px;font-variant-numeric:tabular-nums}
+   #drawer .big{font-size:38px;font-weight:700;margin:16px 0 4px;font-variant-numeric:tabular-nums}
   #drawer .bar{height:9px;border-radius:6px;background:#222c44;overflow:hidden;margin:8px 0 18px}
   #drawer .bar > i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--leech))}
-  #drawer dl{display:grid;grid-template-columns:auto 1fr;gap:8px 14px;margin:0 0 18px}
+   #drawer dl{display:grid;grid-template-columns:auto 1fr;gap:10px 18px;margin:0 0 20px;font-size:14px}
   #drawer dt{color:var(--muted)}
   #drawer dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
-  #drawer table.reptbl{width:100%;border-collapse:collapse;font-size:12px;margin:4px 0 14px}
+   #drawer table.reptbl{width:100%;border-collapse:collapse;font-size:13px;margin:6px 0 16px}
   #drawer table.reptbl th{color:var(--muted);text-align:left;font-weight:500;padding:3px 4px;border-bottom:1px solid var(--line)}
   #drawer table.reptbl td{padding:4px;border-bottom:1px solid var(--glow);font-variant-numeric:tabular-nums}
   #drawer a.btn{display:block;text-align:center;text-decoration:none;color:var(--txt);background:#1c2740;
     border:1px solid var(--line);border-radius:9px;padding:10px;margin-top:6px}
   #drawer a.btn:hover{border-color:var(--accent)}
-  .err{position:absolute;top:10px;left:50%;transform:translateX(-50%);background:rgba(120,30,30,.9);
-    border:1px solid var(--warn);padding:6px 12px;border-radius:8px;font-size:12px;opacity:0;transition:opacity .2s}
+   .err{position:absolute;top:10px;left:50%;transform:translateX(-50%);background:rgba(120,30,30,.9);
+     border:1px solid var(--warn);padding:6px 12px;border-radius:8px;font-size:12px;opacity:0;transition:opacity .2s}
+   .map-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+   .map-controls input{background:var(--panel);color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size:13px;width:210px}
+   .map-controls .guide{font-size:12px;color:var(--muted)}
+   @media (max-width:760px){
+     header{padding:10px 12px;gap:10px;align-items:flex-start;flex-wrap:wrap}
+     .brand h1{font-size:15px}.stats{display:none}.map-controls{width:100%}
+     .map-controls input{flex:1;min-width:140px}.legend{max-width:calc(100% - 36px);left:18px;bottom:12px}
+     #drawer{width:100%;max-width:100%;border-left:0}
+   }
 </style>
 </head>
 <body>
 <header>
   <div class="brand">
     <h1>intelligent-release-image-staging — Swarm Map</h1>
-    <div class="sub">live image-distribution swarm · double-click a peer for detail</div>
+    <div class="sub">live image-distribution swarm</div>
   </div>
   <div class="live"><span class="dot" id="livedot"></span><span id="livetxt">connecting…</span></div>
   <div class="spacer"></div>
   <select id="imgsel" title="image"></select>
+  <div class="map-controls">
+    <input id="peerfind" type="search" placeholder="Find device, model, or IP" autocomplete="off">
+    <button id="zoom-out" title="Zoom out">−</button>
+    <button id="zoom-in" title="Zoom in">+</button>
+    <button id="fit" title="Reset pan and zoom">fit</button>
+    <button id="legend-toggle" title="Show or hide map legend">legend</button>
+    <span class="guide">use − / + to zoom · drag to pan · double-click for detail</span>
+  </div>
   <div class="stats" id="stats"></div>
   <button id="pause" title="pause/resume live updates">⏸ pause</button>
 </header>
 <div id="wrap">
   <svg id="svg" viewBox="0 0 1000 720" preserveAspectRatio="xMidYMid meet"></svg>
   <div id="empty">⌛<div>waiting for peers to join the swarm…</div></div>
-  <div class="legend" id="legend"></div>
+  <div class="legend" id="legend" hidden></div>
   <div id="tip"></div>
   <div class="err" id="err"></div>
   <aside id="drawer"></aside>
@@ -123,9 +141,10 @@ const IMG_PALETTE=["#4ea1ff","#ffcf4d","#46d0a0","#c792ea","#ff8f6b","#7ee787","
 const svg=document.getElementById("svg"), tip=document.getElementById("tip"),
       drawer=document.getElementById("drawer"), errEl=document.getElementById("err"),
       legendEl=document.getElementById("legend");
-let DATA=null, curHash="all", paused=false, selPeer=null;
+let DATA=null, curHash="all", paused=false, selPeer=null, peerFilter="";
 let selDev=null, pullReq=null;   // open drawer's device_id + pull-request state
 let selTeleOff=false;   // open drawer's peer has telemetry_enabled===false (#13)
+let zoom=1, panX=0, panY=0, panning=null;
 
 function el(tag,attrs={},parent){const e=document.createElementNS(SVGNS,tag);
   for(const k in attrs)e.setAttribute(k,attrs[k]);if(parent)parent.appendChild(e);return e;}
@@ -193,12 +212,19 @@ function currentView(){
     .map(p=>({...p,_img:im.image,_hash:im.info_hash,_total:im.total_bytes}));
   if(curHash!=="all" && imgs.find(i=>i.info_hash===curHash)){
     const im=imgs.find(i=>i.info_hash===curHash);
-    return {all:false,label:im.image,hash:im.info_hash,peers:dedupePeers(annotate(im)),images:[im]};
+    return {all:false,label:im.image,hash:im.info_hash,peers:filterPeers(dedupePeers(annotate(im))),images:[im]};
   }
   // default: all images, peers grouped by image (sorted) so colors cluster
   let peers=[]; imgs.forEach(im=>{peers=peers.concat(annotate(im));});
   peers.sort((a,b)=>a._hash<b._hash?-1:a._hash>b._hash?1:0);
-  return {all:true,label:"All images",hash:"all",peers:dedupePeers(peers),images:imgs};
+  return {all:true,label:"All images",hash:"all",peers:filterPeers(dedupePeers(peers)),images:imgs};
+}
+
+function filterPeers(peers){
+  const q=peerFilter.trim().toLowerCase();
+  if(!q)return peers;
+  return peers.filter(p=>[peerLabel(p),p.ip,p.model,p._img].some(v=>
+    String(v||"").toLowerCase().includes(q)));
 }
 
 function color(p,allView,cmap){
@@ -271,9 +297,17 @@ function render(){
   if(!peers.length)return;
   const cmap=imageColorMap();
   const W=1000,H=720,cx=W/2,cy=H/2;
-  const R=Math.min(W,H)/2 - 120;
-  const pos=peers.map((_,i)=>{const a=-Math.PI/2+2*Math.PI*i/peers.length;
-    return {x:cx+R*Math.cos(a), y:cy+R*Math.sin(a)};});
+  const dense=peers.length>40;
+  const inner=dense?92:150, outer=Math.min(W,H)/2-90, ringGap=dense?42:64;
+  const rings=[]; let left=peers.length, radius=inner;
+  while(left>0){
+    const cap=Math.max(12,Math.floor(2*Math.PI*radius/(dense?42:70)));
+    const count=Math.min(left,cap); rings.push({radius,count}); left-=count;
+    radius=Math.min(outer,radius+ringGap);
+  }
+  const pos=[];
+  rings.forEach(r=>{for(let i=0;i<r.count;i++){const a=-Math.PI/2+2*Math.PI*i/r.count;
+    pos.push({x:cx+r.radius*Math.cos(a),y:cy+r.radius*Math.sin(a)});}});
   const defs=el("defs",{},svg);
   const g=el("radialGradient",{id:"hubg"},defs);
   el("stop",{offset:"0%","stop-color":"#ffe7a0"},g);el("stop",{offset:"100%","stop-color":"#caa02e"},g);
@@ -281,6 +315,7 @@ function render(){
     markerWidth:7,markerHeight:7,orient:"auto"},defs);
   el("path",{d:"M0,0 L10,5 L0,10 z",fill:"var(--leech)"},mk);
 
+  const scene=el("g",{transform:`translate(${panX} ${panY}) scale(${zoom})`},svg);
   // edges: server hub -> each device (animated + rate-labelled when serving)
   let serverServing=false;
   peers.forEach((p,i)=>{
@@ -290,12 +325,12 @@ function render(){
       const w=Math.max(2.5,Math.min(8,2+Math.log2(1+ub/50000)));
       const dx=pos[i].x-cx, dy=pos[i].y-cy, d=Math.hypot(dx,dy)||1;
       const ex=pos[i].x-(dx/d)*34, ey=pos[i].y-(dy/d)*34;
-      el("line",{x1:cx,y1:cy,x2:ex,y2:ey,class:"edge up","stroke-width":w,"marker-end":"url(#flow)"},svg);
+       el("line",{x1:cx,y1:cy,x2:ex,y2:ey,class:"edge up","stroke-width":w,"marker-end":"url(#flow)"},scene);
       const mx=cx+(pos[i].x-cx)*0.5, my=cy+(pos[i].y-cy)*0.5;
       el("text",{x:mx,y:my,"text-anchor":"middle","font-size":11,fill:"var(--leech)",
-        style:"paint-order:stroke;stroke:#0b0f17;stroke-width:3px"},svg).textContent=fmtBps(ub);
+         style:"paint-order:stroke;stroke:#0b0f17;stroke-width:3px"},scene).textContent=fmtBps(ub);
     } else {
-      el("line",{x1:cx,y1:cy,x2:pos[i].x,y2:pos[i].y,class:"edge"},svg);
+       el("line",{x1:cx,y1:cy,x2:pos[i].x,y2:pos[i].y,class:"edge"},scene);
     }
   });
 
@@ -303,7 +338,7 @@ function render(){
   // source, not a leecher) and shown here as the centre — identified by its IP
   // and hoverable/clickable for its seeder stats, so it's unmistakably the
   // server, not a generic blob.
-  const hub=el("g",{class:"node"},svg);
+  const hub=el("g",{class:"node"},scene);
   hub.style.cursor="pointer";
   el("circle",{cx,cy,r:40,fill:"url(#hubg)","fill-opacity":.18,stroke:"var(--seed)","stroke-width":2},hub);
   if(serverServing) el("circle",{cx,cy,r:33,class:"serve-pulse"},hub);
@@ -319,10 +354,10 @@ function render(){
   hub.addEventListener("dblclick",()=>openHubDrawer());
 
   // peer nodes
-  const rad=24, circ=2*Math.PI*rad;
+   const rad=dense?16:24, circ=2*Math.PI*rad;
   peers.forEach((p,i)=>{
     const c=color(p,view.all,cmap);
-    const node=el("g",{class:"node",transform:`translate(${pos[i].x},${pos[i].y})`},svg);
+     const node=el("g",{class:"node",transform:`translate(${pos[i].x},${pos[i].y})`},scene);
     node.style.animation="fadein .4s ease both"; node.style.animationDelay=(i*0.03)+"s";
     el("circle",{r:rad+5,fill:"#0d1422"},node);
     if((p.server_up_bps||0)>0) el("circle",{r:rad,class:"serve-pulse"},node);
@@ -339,12 +374,14 @@ function render(){
       transform:isRtr?"rotate(45)":""},node);
     // label leads with the CONSOLE device IP (device_id); the announce/guest IP
     // rides below as a smaller detail so both stay visible.
-    el("text",{y:rad+16,class:"label"},node).textContent=peerLabel(p);
-    el("text",{y:rad+28,class:"pct"},node).textContent=p.is_seeder?"seed":Math.round(prog*100)+"%";
-    let yoff=rad+40;
-    if(p.model){el("text",{y:yoff,class:"pct",style:"fill:var(--accent)"},node).textContent=p.model;yoff+=12;}
-    const asub=peerAnnounceSub(p);
-    if(asub) el("text",{y:yoff,class:"pct",style:"fill:var(--muted)"},node).textContent="peer "+asub;
+     if(!dense || peerFilter){
+       el("text",{y:rad+16,class:"label"},node).textContent=peerLabel(p);
+       el("text",{y:rad+28,class:"pct"},node).textContent=p.is_seeder?"seed":Math.round(prog*100)+"%";
+       let yoff=rad+40;
+       if(p.model){el("text",{y:yoff,class:"pct",style:"fill:var(--accent)"},node).textContent=p.model;yoff+=12;}
+       const asub=peerAnnounceSub(p);
+       if(asub) el("text",{y:yoff,class:"pct",style:"fill:var(--muted)"},node).textContent="peer "+asub;
+     }
     node.addEventListener("mousemove",ev=>showTip(ev,p));
     node.addEventListener("mouseleave",()=>tip.style.opacity=0);
     node.addEventListener("dblclick",()=>openDrawer(p));
@@ -611,7 +648,16 @@ function openHubDrawer(){
 
 document.getElementById("imgsel").addEventListener("change",e=>{curHash=e.target.value;render();});
 document.getElementById("pause").addEventListener("click",e=>{paused=!paused;
-  e.target.textContent=paused?"▶ resume":"⏸ pause";});
+   e.target.textContent=paused?"▶ resume":"⏸ pause";});
+document.getElementById("peerfind").addEventListener("input",e=>{peerFilter=e.target.value;render();});
+document.getElementById("legend-toggle").addEventListener("click",()=>{legendEl.hidden=!legendEl.hidden;});
+document.getElementById("fit").addEventListener("click",()=>{zoom=1;panX=0;panY=0;render();});
+function changeZoom(factor){zoom=Math.max(.5,Math.min(3,zoom*factor));render();}
+document.getElementById("zoom-out").addEventListener("click",()=>changeZoom(.8));
+document.getElementById("zoom-in").addEventListener("click",()=>changeZoom(1.25));
+svg.addEventListener("pointerdown",e=>{if(e.target===svg){panning={x:e.clientX,y:e.clientY};svg.setPointerCapture(e.pointerId);}});
+svg.addEventListener("pointermove",e=>{if(!panning)return;panX+=e.clientX-panning.x;panY+=e.clientY-panning.y;panning={x:e.clientX,y:e.clientY};render();});
+svg.addEventListener("pointerup",()=>{panning=null;});
 window.addEventListener("keydown",e=>{if(e.key==="Escape")closeDrawer();});
 
 poll();

@@ -661,7 +661,7 @@ def test_csv_import_export(tmp_path):
                          headers={"Cookie": ck})
         assert st == 200 and "text/csv" in hd.get("Content-Type", "")
         assert b.decode().splitlines()[0] == \
-            "device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip,model"
+            "device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip,model,platform"
         assert "d9,10.9.9.1" in b.decode()
     finally:
         stop()
@@ -734,11 +734,12 @@ def test_device_view_merges_policy_and_heartbeat(tmp_path):
         _req(host, port, "POST", "/api/devices",
              {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
         cat.set_policy("d1", approved_image_id="img1")
-        cat.record_heartbeat("d1", {"stage_state": "verified", "model": "C9300"}, now=123)
+        cat.record_heartbeat("d1", {"stage_state": "verified", "stage_error": "copy denied", "model": "C9300"}, now=123)
         st, _, b = _req(host, port, "GET", "/api/devices", headers={"Cookie": ck})
         row = [d for d in json.loads(b)["devices"] if d["device_id"] == "d1"][0]
         assert row["assigned_image_id"] == "img1"
         assert row["stage_state"] == "verified"
+        assert row["stage_error"] == "copy denied"
         assert row["last_seen"] == 123
         assert row["heartbeat_model"] == "C9300"
     finally:
@@ -1678,6 +1679,76 @@ def test_device_credential_empty_string_clears_profile(tmp_path):
         dev = json.loads(b)["devices"][0]
         assert dev.get("credential_profile_id") == ""
         assert dev["device_ip"] == "10.0.0.1"   # untouched
+    finally:
+        stop()
+
+
+# ---- per-device platform override selection ----
+
+def test_device_platform_requires_session_and_csrf(tmp_path):
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, _cat = deps
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/platform",
+                        {"platform": "iox"})
+        assert st == 401
+        ck, _csrf = _auth(host, port)
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/platform",
+                        {"platform": "iox"}, headers={"Cookie": ck})
+        assert st == 403
+    finally:
+        stop()
+
+
+def test_device_platform_unknown_device_404(tmp_path):
+    host, port, _deps, stop = _serve_full(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, _ = _req(host, port, "POST", "/api/devices/nope/platform",
+                        {"platform": "iox"}, headers=hh)
+        assert st == 404
+    finally:
+        stop()
+
+
+def test_device_platform_invalid_value_400(tmp_path):
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, _cat = deps
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/platform",
+                        {"platform": "bogus"}, headers=hh)
+        assert st == 400
+    finally:
+        stop()
+
+
+def test_device_platform_happy_path_and_clear(tmp_path):
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, _cat = deps
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1", "vlan": "666"})
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        # set iox
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/platform",
+                        {"platform": "iox"}, headers=hh)
+        assert st == 200
+        st, _, b = _req(host, port, "GET", "/api/devices", headers={"Cookie": ck})
+        dev = json.loads(b)["devices"][0]
+        assert dev["platform"] == "iox"
+        assert dev["vlan"] == "666"          # other fields untouched
+        # empty clears back to auto
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/platform",
+                        {"platform": ""}, headers=hh)
+        assert st == 200
+        st, _, b = _req(host, port, "GET", "/api/devices", headers={"Cookie": ck})
+        dev = json.loads(b)["devices"][0]
+        assert dev.get("platform") == ""
     finally:
         stop()
 
