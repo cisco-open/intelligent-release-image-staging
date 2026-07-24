@@ -45,11 +45,20 @@ Serve it locally during authoring:
 | Server starts | Console, catalog, tracker, artifact server, and telemetry ports are reachable. |
 | Admin exists | Console login succeeds. |
 | Image publishes | Catalog lists image id, hashes, and info hash. |
+| Attachment recorded | Device shows its network attachment (routed or inband); onboarding records an applied receipt. |
 | Installer runs | Device has trustpoint, Guest Shell or IOx app, bootstrap, and agent config. |
+| Inband preserves network | For inband, before/after `show running-config` shows the existing VLAN/SVI/gateway/VRF unchanged. |
 | Assignment applies | Device reports the approved image id. |
 | Download completes | Swarm state shows completed pieces. |
 | Verification passes | Agent reports the staged file and IOS verify success. |
+| Undeploy from receipt | Teardown targets only receipt-owned resources; a pre-receipt device is adopted first. |
 | No activation occurs | Boot variables, install state, and reload state remain operator-controlled. |
+
+Automated coverage for the attachment/receipt behavior lives in
+`server/tests/test_deployment_receipts.py`, `server/tests/test_gui_fleet.py`,
+and the inband command-stream assertions in
+`device/tests/test_device_uninstall.bats`. See
+[Network Attachment and VLAN Ownership](network-attachment.md).
 
 ## Reporting bugs
 

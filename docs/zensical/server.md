@@ -35,11 +35,16 @@ artifacts, and test output from the build context.
 
 | Path | Role |
 | --- | --- |
-| `/var/lib/iris` | Catalog state, policies, torrent metadata, audit state. |
+| `/var/lib/iris` | Catalog state, policies, torrent metadata, audit state, and deployment receipts. |
 | `/etc/iris` | Encrypted secrets and generated TLS material. |
 | `/run/iris` | Plaintext runtime secrets on tmpfs. |
 | `/opt/images` | Read-only image mount used by publish operations. |
 | `/srv/artifacts` | Served bootstrap and agent artifacts. |
+
+Deployment receipts (`deployment_receipts.json`, the applied-lifecycle state
+that drives undeploy) live under `IRIS_STATE` — `/var/lib/iris` on Compose,
+`/data/state` on the Kubernetes PVC — and hold no secrets. See
+[Network Attachment and VLAN Ownership](network-attachment.md).
 
 Docker Compose uses separate named volumes for state, encrypted config, and GUI
 image uploads. The Kubernetes alpha maps all durable paths into one ReadWriteOnce

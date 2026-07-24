@@ -42,6 +42,15 @@ Private BitTorrent reduces server load by letting devices exchange pieces after 
 
 Use `device/device-uninstall.sh` or the IOx uninstall path for device cleanup. Cleanup removes IRIS-owned EEM applets, Guest Shell or IOx agent wiring, trustpoint binding, and staged agent artifacts. It still does not reload the device.
 
+Undeploy is driven by the device's applied **receipt**, not its editable
+inventory row, so a later inventory edit cannot retarget cleanup. An
+**inband** device's teardown removes only the app footprint and preserves the
+operator-owned VLAN/SVI/routes/VRF. A device deployed before receipts existed
+has no active receipt and must be **adopted** (an explicit, audited, no-change
+recording of ownership) before it can be undeployed; a missing, drifted, or
+uncertain receipt stops cleanup in `needs-reconcile` rather than guessing. See
+[Network Attachment and VLAN Ownership](network-attachment.md).
+
 ## Recovery checklist
 
 1. Confirm `docker ps` shows the `iris` container.

@@ -1,27 +1,124 @@
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Network Attachment And VLAN Ownership
 
-IRIS supports two explicit network attachment models for the staging agent.
+IRIS supports two explicit network attachment models for the staging agent. The
+choice is per device, recorded in inventory, and — critically — determines what
+IRIS is allowed to create and remove on the device.
 
-## Routed - IRIS-managed app network
+> **Stage-only, network-preserving.** IRIS distributes, verifies, and stages
+> images. It never installs, activates, reloads, changes boot variables, or
+> mutates running software state. Inband additionally never creates, changes, or
+> removes the operator's network.
 
-Routed attachment uses a dedicated IRIS VLAN and SVI. Deployment requires a
-clean-device preflight and records the resources IRIS created in an applied
-receipt. IRIS never silently adopts an existing VLAN or SVI.
+## Routed — IRIS-managed app network
 
-## Inband - existing management VLAN
+Routed attachment uses a **dedicated IRIS VLAN and SVI**. Onboarding is
+create-only: preflight requires the proposed VLAN/SVI to be absent, the applied
+receipt records the resources IRIS created, and teardown removes exactly those.
+IRIS never silently adopts a pre-existing VLAN or SVI.
 
-Inband attachment connects Guest Shell to an existing management VLAN. IRIS
-does not create, configure, select, claim, or remove that VLAN, its SVI,
-gateway, routes, or VRF. The operator must confirm the exact plan before the
-onboarding action starts.
+## Inband — existing management VLAN
 
-The initial implementation targets static IPv4 Guest Shell. It remains
-fail-closed until physical preflight captures verify the target VLAN/SVI,
-gateway reachability, and dedicated AppGig ownership on the supported IOS-XE
-release. IOx, DHCP, VRF selection, and shared AppGig mutation are not
-supported. If a receipt is missing, uncertain, or drifted, cleanup stops for
-reconciliation instead of guessing at ownership.
+Inband attachment connects Guest Shell to an **existing management VLAN**. IRIS
+does not create, configure, select, claim ownership of, or delete that VLAN, its
+SVI, gateway, routes, or VRF. The operator-owned SVI (and any VRF it belongs to)
+supplies routing; preflight only proves the existing topology can reach IRIS.
 
-Applied receipts live beneath `IRIS_STATE`, so the same lifecycle survives
-Docker Compose state volumes and the Kubernetes PVC. They contain no passwords,
-tokens, certificates, or raw device configuration.
+The supported inband cell is intentionally narrow:
+
+| Attachment | Addressing | Platform | Status |
+| --- | --- | --- | --- |
+| Routed | static | Guest Shell / IOx | supported (receipt/preflight hardened) |
+| Inband | static | Guest Shell | implemented, **fail-closed pending physical preflight evidence** |
+| Inband | static | IOx | rejected — separate capability gate |
+| Inband | DHCP | any | rejected — separate capability gate |
+
+Inband install and teardown command streams never contain `vlan`,
+`interface Vlan`, `no vlan`, `no interface Vlan`, VRF, `ip route`, IS-IS, DHCP,
+or AppGigabitEthernet trunk configuration. Teardown removes only the app
+footprint (Guest Shell, IRIS EEM applets, agent files); it deliberately leaves
+shared globals (logging discriminator, PKI trustpoint, HTTP-client settings) in
+place because a receipt cannot prove those remain uniquely IRIS-owned.
+
+## Inventory (CSV v2)
+
+Inventory is an attachment-aware, named-header CSV. The header is required and
+validated; extra, missing, or misplaced columns are rejected.
+
+```text
+device_id,device_ip,network_attachment,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,platform
+```
+
+- **routed** rows fill `iris_vlan`, `svi_ip`, `svi_mask`, `app_ip`, `app_mask`,
+  `app_gateway`.
+- **inband** rows fill `inband_vlan`, `app_ip`, `app_mask`, `app_gateway`, and
+  must not carry routed VLAN/SVI fields. There is no IRIS VRF field.
+- `ios_ssh_host` is reserved for a future IOx capability gate.
+
+The same server-side validator is applied to the Console, the API, and CSV
+import: strict IDs, IPv4 addresses and contiguous masks, VLAN range 1–4094, and
+static host/subnet consistency. Older positional CSVs still import but are
+classified `legacy_routed`; they are never inferred as inband.
+
+## Deployment plans and applied receipts
+
+IRIS separates three concepts that were previously conflated:
+
+1. **Desired inventory** — editable operator intent (`fleet.json`).
+2. **Deployment plan** — an immutable, resolved plan for one action, including
+   the resolved platform and a `plan_hash`. Computed before any device contact.
+3. **Applied receipt** — a durable, non-secret record of what IRIS actually
+   applied, its resource ownership, and lifecycle state.
+
+Receipts live under `IRIS_STATE` (see below) and contain no passwords, tokens,
+certificates, or raw device configuration. Their lifecycle is fail-closed:
+
+```text
+planned → applying → active → (applying) → removed
+                 ↘ unknown / needs-reconcile / drifted
+```
+
+A controller restart converts any non-terminal (`planned`/`applying`) receipt to
+`unknown`; in-flight device work is never silently resumed.
+
+Undeploy renders **exclusively from an active receipt**, never from the editable
+inventory — so changing a VLAN, model, or CSV import after onboarding cannot
+retarget a device's cleanup. If a receipt is missing, uncertain, drifted, or
+legacy, cleanup stops in `needs-reconcile` instead of guessing.
+
+### Adopting a pre-existing deployment
+
+Devices deployed before receipts existed have no active receipt, so undeploy is
+refused. An explicit, audited **Adopt** action records an `active` receipt from
+the device's current validated inventory, after which undeploy can proceed.
+Adoption records ownership; it makes no changes to the device.
+
+## Console and CLI
+
+The Console Add Device flow has an explicit **Network attachment** choice —
+*Routed - IRIS-managed app network* or *Inband - existing management VLAN* — and
+the device table shows each device's **Attachment**, not a bare VLAN/SVI value.
+Routed onboarding is one-click; inband requires an ownership acknowledgement and
+is currently held closed pending lab preflight. See [Web Console](console.md).
+
+The legacy `tools/gen-device-installers.sh` generator is routed-only and refuses
+a v2 (`network_attachment`) header: a self-contained installer cannot record a
+receipt or run preflight before minting an enrollment token.
+
+## Deployment environments
+
+Receipts use the same contract on both deployments:
+
+- **Docker Compose** persists them under `IRIS_STATE` on the `iris-state`
+  volume; Console artifact staging is the host-bind-mounted `/srv/artifacts`.
+- **Kubernetes** persists them under `/data/state` on the RWO PVC; Console
+  artifact staging is `/data/artifacts` on the same PVC. Kubernetes runs one
+  replica with `Recreate`; a pod restart marks in-flight work `unknown` and
+  requires reconciliation rather than blind retry.
+
+See [Container Deployments](containers.md) and [Kubernetes](kubernetes.md).

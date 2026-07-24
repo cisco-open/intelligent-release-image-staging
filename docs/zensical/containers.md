@@ -57,6 +57,10 @@ Docker Compose mounts operator images read-only from `IRIS_IMAGE_ROOT` (default
 `/opt/images`) and served artifacts from `IRIS_ARTIFACTS_HOST_DIR` (default
 `artifacts/`). Run `iris-bootstrap` once before the normal service startup.
 
+Deployment receipts persist under `IRIS_STATE` on the `iris-state` volume, so
+undeploy-from-receipt and restart recovery behave identically to the Kubernetes
+PVC layout. See [Network Attachment and VLAN Ownership](network-attachment.md).
+
 ## App-hosting image
 
 Build only the Docker image when iterating locally:

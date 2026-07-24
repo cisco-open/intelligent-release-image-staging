@@ -16,19 +16,41 @@ Start from the template:
 cp fleet/devices.csv.example fleet/devices.csv
 ```
 
-The inventory file describes how to reach and configure each device for the agent:
+The inventory is an attachment-aware, named-header **CSV v2**. Every device
+declares a `network_attachment` — either `routed` (IRIS creates a dedicated
+VLAN and SVI) or `inband` (the agent attaches to an existing, operator-owned
+management VLAN that IRIS never creates, changes, or removes):
 
 ```text
-device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip,model,platform
+device_id,device_ip,network_attachment,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,platform
 ```
 
-`model` and `platform` are optional trailing fields. Set a model when known;
-leave `platform` blank for automatic selection, or explicitly choose
-`guestshell` or `iox` for Console onboarding.
+- **routed** — fill `iris_vlan`, `svi_ip`, `svi_mask`, `app_ip`, `app_mask`,
+  `app_gateway`; leave `inband_vlan` blank.
+- **inband** — fill `inband_vlan`, `app_ip`, `app_mask`, `app_gateway`; leave
+  `iris_vlan`/`svi_*` blank. Guest Shell + static IPv4 only; IOx and DHCP are
+  rejected. `ios_ssh_host` is reserved for a future capability gate.
+- `model`/`platform` are optional; blank `platform` auto-selects from the model.
 
-Generate per-device installers:
+See [Network Attachment and VLAN Ownership](network-attachment.md) for the full
+ownership rules. Older positional CSVs (e.g. `device_id,device_ip,vlan,...`)
+still import, but are classified `legacy_routed` and must be adopted before they
+can be undeployed — they are never inferred as inband.
+
+### Onboarding path
+
+Attachment-aware onboarding runs through the **Console / API**, which resolves
+an immutable plan, records a durable *receipt* of what was applied, and drives
+teardown from that receipt (not from the editable inventory). Routed onboarding
+is one-click; inband onboarding is held closed until physical preflight evidence
+is captured. See [Web Console](console.md).
+
+The legacy CLI generator is **routed-only** and deliberately refuses a v2
+(`network_attachment`) header, because a self-contained installer cannot record
+a receipt or run preflight before minting an enrollment token:
 
 ```bash
+# legacy routed inventory only (old positional columns)
 tools/gen-device-installers.sh fleet/devices.csv
 ```
 
@@ -70,4 +92,8 @@ flowchart LR
 
 ## Review guidance
 
-Review `fleet/devices.csv` for network correctness and `fleet/assignments.csv` for release correctness. Do not mix credentials, operator passwords, or image binaries into either file.
+Review `fleet/devices.csv` for network correctness — including the
+`network_attachment` of each device and, for inband rows, that the existing
+VLAN/SVI/gateway are operator-owned and correct — and `fleet/assignments.csv`
+for release correctness. Do not mix credentials, operator passwords, or image
+binaries into either file.

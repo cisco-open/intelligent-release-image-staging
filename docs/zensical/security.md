@@ -15,8 +15,15 @@ IRIS is designed around least surprise: it moves images, verifies images, and re
 | No install | IRIS does not run install, activate, or package commit commands. |
 | No reload | IRIS does not reload or schedule reloads. |
 | No boot mutation | IRIS does not change boot variables or running software state. |
+| No inband network mutation | For inband devices, IRIS never creates, changes, or removes the existing VLAN, SVI, gateway, routes, or VRF. |
 | Device-side verification | The device verifies the staged copy before reporting success. |
 | Private swarm | Torrents use private metadata and authenticated announces. |
+
+Deployment lifecycle state is recorded in durable, non-secret **receipts** under
+`IRIS_STATE`, and teardown is driven from a device's active receipt rather than
+its editable inventory. Receipts contain no passwords, tokens, certificate keys,
+or raw device configuration. See
+[Network Attachment and VLAN Ownership](network-attachment.md).
 
 ## Trust boundaries
 

@@ -26,6 +26,14 @@ registry is in memory, catalog state is file-backed, and the seeder RPC is local
 to the container. More replicas would split coordination state rather than add
 capacity.
 
+Deployment receipts (the applied-lifecycle state that drives undeploy) are
+file-backed under `IRIS_STATE` (`/data/state`) on the PVC, and Console artifact
+staging uses `/data/artifacts` on the same PVC. Because there is a single
+replica, a pod restart marks any in-flight (`planned`/`applying`) receipt
+`unknown` and requires reconciliation instead of blindly retrying a device
+operation. See
+[Network Attachment and VLAN Ownership](network-attachment.md).
+
 ## External address
 
 Reserve a stable, device-reachable IPv4 address before bootstrapping. Put that
