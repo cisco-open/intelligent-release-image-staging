@@ -22,8 +22,9 @@ additionally never creates, changes, or removes the operator's existing network.
   VLAN, its SVI, gateway, routes, or VRF. The Console Add Device flow has an
   explicit **Management type** choice and onboards inband one-click, exactly
   like routed. Inband works for both **Guest Shell and IOx** (IE-3x00, C9300);
-  inband IOx additionally needs `ios_ssh_host` (the existing IOS management SVI
-  the app SSHes to for `copy /verify`). DHCP is not supported.
+  inband IOx SSHes to the device's management IP (`device_ip`) for its
+  `copy /verify` by default, with `ios_ssh_host` as an optional advanced
+  override. DHCP is not supported.
 - **Durable deployment receipts**: a lock-protected, atomic, non-secret store
   under `IRIS_STATE` records the applied lifecycle of each deployment. Undeploy
   renders exclusively from a device's active receipt, so editing inventory after
@@ -48,11 +49,15 @@ additionally never creates, changes, or removes the operator's existing network.
   exact rendered plan.
 - Both the Guest Shell and IOx installers/uninstallers render an inband path that
   structurally preserves the existing network — the inband command stream never
-  contains `vlan`, `interface Vlan`, VRF, `ip route`, IS-IS, DHCP, or
-  AppGigabitEthernet trunk configuration. Inband teardown removes only the app
-  footprint and leaves shared globals (logging discriminator, PKI trustpoint,
-  HTTP-client settings) in place. Routed teardown is unchanged. The IOx installer
-  also gains a `--dry-run` mode to preview its rendered configuration.
+  contains `vlan`, `interface Vlan`, VRF, `ip route`, IS-IS, or DHCP. The one
+  inband interface touch is the AppGigabitEthernet app-hosting port: install
+  sets it to trunk mode and **adds** the inband VLAN with
+  `switchport trunk allowed vlan add` — additive only, so an existing allowed
+  list is never replaced, and teardown never removes it. Inband teardown removes
+  only the app footprint and leaves shared globals (logging discriminator, PKI
+  trustpoint, HTTP-client settings) in place. Routed teardown is unchanged. The
+  IOx installer also gains a `--dry-run` mode to preview its rendered
+  configuration.
 - The legacy `tools/gen-device-installers.sh` generator is routed-only and
   refuses a v2 (`network_attachment`) header, because a self-contained installer
   cannot record a receipt before minting an enrollment token.

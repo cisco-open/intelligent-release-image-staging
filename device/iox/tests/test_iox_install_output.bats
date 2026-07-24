@@ -43,15 +43,24 @@ setup() {
   INSTALL="$BATS_TEST_DIRNAME/../install.sh"
 }
 
-@test "inband dry-run emits no VLAN/SVI/AppGig-trunk mutation" {
+@test "inband dry-run creates no VLAN/SVI and never replaces the AppGig allowed list" {
   NETWORK_ATTACHMENT=inband INBAND_VLAN=120 APP_IP=192.0.2.21 APP_MASK=255.255.255.0 \
     APP_GATEWAY=192.0.2.1 IOS_SSH_HOST=192.0.2.1 \
     run bash "$INSTALL" --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" != *$'\nvlan '* ]] && \
   [[ "$output" != *"interface Vlan"* ]] && \
-  [[ "$output" != *"switchport trunk allowed vlan"* ]] && \
+  ! grep -Eq 'switchport trunk allowed vlan [0-9]' <<<"$output" && \
   [[ "$output" != *"ip address 192.0.2"* ]]
+}
+
+@test "inband dry-run trunks the AppGig additively (allowed vlan add)" {
+  NETWORK_ATTACHMENT=inband INBAND_VLAN=120 APP_IP=192.0.2.21 APP_MASK=255.255.255.0 \
+    APP_GATEWAY=192.0.2.1 IOS_SSH_HOST=192.0.2.1 \
+    run bash "$INSTALL" --dry-run
+  [[ "$output" == *"interface AppGigabitEthernet1/1"* ]] && \
+  [[ "$output" == *"switchport mode trunk"* ]] && \
+  [[ "$output" == *"switchport trunk allowed vlan add 120"* ]]
 }
 
 @test "inband dry-run points the app SSH-to-IOS at the existing management SVI" {

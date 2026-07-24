@@ -40,12 +40,17 @@ The supported inband cells:
 | Inband | DHCP | any | rejected — separate capability gate |
 
 Inband install and teardown command streams never contain `vlan`,
-`interface Vlan`, `no vlan`, `no interface Vlan`, VRF, `ip route`, IS-IS, DHCP,
-or AppGigabitEthernet trunk configuration. Teardown removes only the app
-footprint (Guest Shell or the IOx app, IRIS EEM applets, agent files); it
-deliberately leaves shared globals (logging discriminator, PKI trustpoint,
-HTTP-client settings) in place because a receipt cannot prove those remain
-uniquely IRIS-owned.
+`interface Vlan`, `no vlan`, `no interface Vlan`, VRF, `ip route`, IS-IS, or
+DHCP. The one interface IRIS does touch inband is the AppGigabitEthernet
+app-hosting port: install sets `switchport mode trunk` and **adds** the inband
+VLAN with `switchport trunk allowed vlan add` — the additive form only, so an
+existing allowed list is never replaced — because without it the agent's
+traffic has no L2 path off the box. Teardown never removes the VLAN from the
+trunk (it is operator-owned and the trunk may carry other apps) and removes
+only the app footprint (Guest Shell or the IOx app, IRIS EEM applets, agent
+files); it deliberately leaves shared globals (logging discriminator, PKI
+trustpoint, HTTP-client settings) in place because a receipt cannot prove those
+remain uniquely IRIS-owned.
 
 ### Inband IOx and the IOS SSH endpoint
 
@@ -53,8 +58,9 @@ Guest Shell runs inside IOS, so it configures the device locally. An **IOx** app
 runs in a container and reaches IOS by SSH-ing to an IOS IP to run `copy /verify`.
 For a routed IOx device that is the IRIS-managed SVI; for an **inband** IOx
 device there is no IRIS SVI, the app connects to the switch's management IP (`device_ip`) by default; an
-optional `ios_ssh_host` overrides that for asymmetric topologies. The AppGigabitEthernet
-trunk must already allow the inband VLAN, because IRIS never modifies it inband.
+optional `ios_ssh_host` overrides that for asymmetric topologies. IRIS adds the
+inband VLAN to the AppGigabitEthernet trunk's allowed list additively at
+install time (see above), so no manual trunk preparation is required.
 The IOx app carries a device SSH credential in its run options exactly as the
 routed IOx path already does; hardening that credential path is a separate
 improvement that applies equally to both.

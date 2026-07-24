@@ -43,8 +43,9 @@ fi
 # Attachment model. routed: IRIS creates a dedicated VLAN/SVI and the app SSHes
 # to that SVI. inband: the app attaches to an EXISTING operator-owned VLAN that
 # IRIS never creates/changes/removes, and SSHes to the existing IOS management
-# SVI (IOS_SSH_HOST) for its copy /verify. The AppGig trunk must already allow
-# the inband VLAN (IRIS does not modify it inband).
+# SVI (IOS_SSH_HOST) for its copy /verify. The AppGig trunk is the one inband
+# touch: IRIS ADDs the inband VLAN to its allowed list (additive only, never
+# replaced, never removed on uninstall).
 NETWORK_ATTACHMENT="${NETWORK_ATTACHMENT:-routed}"
 case "$NETWORK_ATTACHMENT" in
   routed)
@@ -91,10 +92,16 @@ trustpoint_block() {
 ios_net() {           # networking + IOx enable (idempotent)
 if [ "$NETWORK_ATTACHMENT" = "inband" ]; then
 # Inband: attach to the EXISTING operator-owned VLAN. IRIS creates NO vlan, SVI,
-# or AppGig trunk config — the operator's network already carries the app, and
-# the AppGig must already allow the inband VLAN.
+# route, or VRF. The ONE allowed touch is the AppGig trunk, and only ADDITIVELY —
+# `allowed vlan add` never replaces the allowed list (the bare form would), and
+# uninstall never removes it (operator-owned VLAN; the trunk may be shared).
+# Without it the app's traffic has no L2 path off the box.
 cat <<EOF
 iox
+!
+interface $APP_INTF
+ switchport mode trunk
+ switchport trunk allowed vlan add $VLAN
 !
 file prompt quiet
 !
@@ -209,7 +216,7 @@ if [ "$DRY" -eq 1 ]; then
   printf 'copy https://%s:8000/%s %s%s\n' "$STAGE_HOST" "$PKG" "$PKG_FS" "$PKG"
   echo "===== app-hosting install -> activate -> start appid $APPID, then persist ====="
   if [ "$NETWORK_ATTACHMENT" = "inband" ]; then
-    echo "===== LEFT UNTOUCHED (inband): existing VLAN/SVI, AppGig trunk, routes, VRF ====="
+    echo "===== LEFT UNTOUCHED (inband): existing VLAN/SVI, routes, VRF (AppGig allowed list only ever ADDs) ====="
   fi
   exit 0
 fi

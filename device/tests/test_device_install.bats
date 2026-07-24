@@ -415,11 +415,18 @@ _inband() {
   [[ "$output" == *"app-hosting appid guestshell"* ]]
 }
 
-@test "inband dry-run preserves the existing network (no vlan/SVI/trunk/isis)" {
+@test "inband dry-run preserves the existing network (no vlan/SVI/bare-trunk/isis)" {
   run _inband
   [[ "$output" != *$'\nvlan '* ]] && [[ "$output" != *"interface Vlan"* ]] && \
-  [[ "$output" != *"switchport trunk allowed vlan"* ]] && \
+  ! grep -Eq 'switchport trunk allowed vlan [0-9]' <<<"$output" && \
   [[ "$output" != *"ip router isis"* ]]
+}
+
+@test "inband dry-run trunks the AppGig additively (mode trunk + allowed vlan add)" {
+  run _inband
+  [[ "$output" == *"interface AppGigabitEthernet1/0/1"* ]] && \
+  [[ "$output" == *"switchport mode trunk"* ]] && \
+  [[ "$output" == *"switchport trunk allowed vlan add 120"* ]]
 }
 
 @test "inband Guest Shell does NOT disable app signature verification (IOx/SSD only)" {

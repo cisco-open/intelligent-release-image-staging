@@ -83,8 +83,17 @@ IOS_STAGE="${IOS_FS}${STAGE#/flash}"
 # (event syslog/$_arg1 proved unreliable on 17.18; the agent's cli.configure does it).
 ios_config() {
 if [ "$NETWORK_ATTACHMENT" = "inband" ]; then
+# Inband keeps the operator's network intact: no vlan/SVI/route/VRF/IS-IS. The
+# ONE allowed touch is the AppGig trunk, and only ADDITIVELY — `allowed vlan add`
+# never replaces the allowed list (the bare form would), and uninstall never
+# removes it (the VLAN is operator-owned; other apps may ride the same trunk).
+# Without it the app's traffic has no L2 path to the catalog.
 cat <<EOF
 iox
+!
+interface $APP_INTF
+ switchport mode trunk
+ switchport trunk allowed vlan add $VLAN
 !
 app-hosting appid guestshell
  app-vnic AppGigabitEthernet trunk
