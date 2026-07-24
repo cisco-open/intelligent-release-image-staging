@@ -38,6 +38,8 @@ outside that PVC. Both are required for recovery.
 
 Private BitTorrent reduces server load by letting devices exchange pieces after the seeder introduces the content. The server remains important for tracker announces, catalog policy, initial seeding, and telemetry. Watch the seeder data port, tracker health, and device storage pressure during large fleet waves.
 
+On IOx devices, the final agent-to-IOS transfer is capped by the platform's default control-plane policing at roughly 1.4 MB/s on Catalyst 9300; see [Transfer throughput and CoPP](iox.md#transfer-throughput-and-copp) for measurements and the operator-side mitigation.
+
 ## Cleanup
 
 Use `device/device-uninstall.sh` or the IOx uninstall path for device cleanup. Cleanup removes IRIS-owned EEM applets, Guest Shell or IOx agent wiring, trustpoint binding, and staged agent artifacts. It still does not reload the device.
