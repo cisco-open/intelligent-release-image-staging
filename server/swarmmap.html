@@ -489,8 +489,9 @@ async function loadFleet(){
     if(!r.ok)return {};
     const m={};
     ((((await r.json())||{}).devices)||[]).forEach(d=>{
-      const ent={device_id:d.device_id,ip:d.guest_ip||d.device_ip,
+      const ent={device_id:d.device_id,ip:d.app_ip||d.guest_ip||d.device_ip,
                  model:d.model||d.heartbeat_model};
+      if(d.app_ip)m[d.app_ip]=ent;
       if(d.guest_ip)m[d.guest_ip]=ent;
       if(d.device_ip&&!m[d.device_ip])m[d.device_ip]=ent;
     });

@@ -69,6 +69,7 @@ if [ ! -f "$CONF" ]; then
     echo "rpc_port = ${RPC_PORT}"
     echo "share_dir = ${IRIS_SHARE_DIR:-}"
     echo "share_ios_path = ${IRIS_SHARE_IOS_PATH:-}"
+    echo "agent_version = $(cat /opt/iris/agent/VERSION 2>/dev/null || echo unknown)"
   } > "$tmp"
   chmod 600 "$tmp"
   mv -f "$tmp" "$CONF"

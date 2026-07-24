@@ -166,7 +166,7 @@ python3 -m pytest server/tests/ device/agent/tests/ device/iox/tests/ device/tes
 Run the Bats suite:
 
 ```bash
-bats device/test_guestshell_start.bats device/tests/ device/iox/tests/ server/tests/*.bats
+bats device/test_guestshell_start.bats device/test_bootstrap.bats device/tests/ device/iox/tests/ server/tests/*.bats
 ```
 
 ## Security, Conduct, and License

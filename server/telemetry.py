@@ -531,19 +531,6 @@ def metrics_port(env=None):
     return int(raw) if raw and raw != "0" else None
 
 
-def load_swarmmap_html():
-    """The self-contained swarm-map page shipped next to this module. The
-    map moved into the console, so the gui server (:8080) is its consumer;
-    :9101 serves moved_page() instead."""
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        "swarmmap.html")
-    try:
-        with open(path) as f:
-            return f.read()
-    except OSError:
-        return None
-
-
 def moved_page():
     """Static pointer page for the retired :9101 map URLs (/swarmmap and /).
     The live swarm map is inside the authenticated console — this keeps old

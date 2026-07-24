@@ -198,6 +198,29 @@ def test_scrape_reports_counts(tmp_path):
         srv.shutdown()
 
 
+def test_scrape_accepts_binary_info_hash(tmp_path):
+    # A real info_hash is 20 RAW SHA-1 bytes, percent-escaped — not UTF-8.
+    # parse_qs decodes escapes as UTF-8 (errors=replace), so high bytes became
+    # U+FFFD and .encode('latin1') blew the connection up with no response;
+    # valid-UTF-8 multibyte sequences silently corrupted to different bytes so
+    # the registry could never match. Scrape must parse the raw query exactly
+    # like announce does.
+    from urllib.parse import quote_from_bytes
+    raw_hash = bytes(range(0xA0, 0xB4))              # 20 high bytes, not UTF-8
+    quoted = quote_from_bytes(raw_hash)
+    srv, port, tok = _serve(tmp_path)
+    try:
+        _get(port, "/announce?info_hash=%s&peer_id=p1&port=6881&left=0&key=%s"
+             % (quoted, tok))
+        status, body = _get(port, "/scrape?info_hash=%s&key=%s" % (quoted, tok))
+        assert status == 200
+        files = bencode.decode(body)[b"files"]
+        stats = list(files.values())[0]
+        assert stats[b"complete"] == 1               # matches the announce
+    finally:
+        srv.shutdown()
+
+
 def test_announce_feeds_telemetry_counter_and_swarm(tmp_path):
     # a Telemetry hub owns a registry wired to its on_event hook; make_server
     # uses that registry and calls note_announce() on every announce.

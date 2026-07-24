@@ -496,6 +496,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 row["stage_error"] = h.get("stage_error")
                 row["current_image_id"] = h.get("current_image_id")
                 row["heartbeat_model"] = h.get("model")
+                # the "copying to <fs>" badge needs the heartbeat's target FS
+                row["target_fs"] = h.get("target_fs")
                 j = jobs.get(did)
                 if j:
                     row["onboard_action"] = j["action"]
@@ -796,7 +798,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if prev is None:
                     action = "create"
                     detail = "ip %s, vlan %s, model %s" % (
-                        saved.get("device_ip"), saved.get("vlan") or "-",
+                        saved.get("device_ip"),
+                        saved.get("iris_vlan") or saved.get("inband_vlan")
+                        or saved.get("vlan") or "-",
                         saved.get("model") or "-")
                 else:
                     action = "update"

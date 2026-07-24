@@ -67,4 +67,5 @@ If verification fails, the agent reports the failure and leaves installation dec
 | Platform path | Storage target | Control path |
 | --- | --- | --- |
 | Catalyst 9300 Guest Shell | `flash:` | EEM timer and Guest Shell process. |
+| Catalyst 9300 IOx | `flash:` (via the SSD share) | IOx Docker app and SSH-to-self IOS commands. |
 | IE-3x00/IE-3400 IOx | `sdflash:` | IOx Docker app and SSH-to-self IOS commands. |

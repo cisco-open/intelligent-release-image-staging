@@ -76,6 +76,35 @@ additionally never creates, changes, or removes the operator's existing network.
   bare VLAN/SVI value.
 
 ### Fixed
+- Tracker `/scrape` now parses the raw query like `/announce`, so a real
+  binary info_hash works: it previously crashed the connection on non-UTF-8
+  bytes and silently corrupted accidentally-valid UTF-8 sequences (only
+  all-ASCII test hashes ever matched).
+- The Console devices view carries the heartbeat's `target_fs`, so the
+  "copying to <fs>" badge names the real filesystem; the swarm map resolves
+  peers by the v2 `app_ip` field (it only knew the legacy `guest_ip`); the
+  device-create audit line reads `iris_vlan`/`inband_vlan` (it logged "-" for
+  every v2 row).
+- The agent verifies a replaced image is actually gone before logging CLEANUP
+  (AAA nodes silently no-op raw exec deletes); unverified deletes are queued
+  and retried every tick. Telemetry now reports the real packaged
+  `agent_version` (both Guest Shell conf and the IOx image bake it in).
+- Bare-metal systemd deployments gain `iris-artifacts` (:8000) and `iris-gui`
+  (:8080) units — previously only 3 of the 5 container services existed as
+  units, so device onboarding had nothing to `copy https://…:8000` from — and
+  all units read optional operator env (e.g. `IRIS_AGE_RECIPIENTS`) from
+  `/etc/iris/iris.env`.
+- `tools/gen-device-installers.sh` refuses a CSV v2 header in its current
+  `management_type` spelling too (the guard only knew the old
+  `network_attachment` name and was silently bypassed).
+- Dead code removed: legacy token-set auth shims (`load_tokens`,
+  `check_bearer`), `telemetry.load_swarmmap_html`, `publish.sha256_file`,
+  `flashcheck.reclaim_plan`, and the unused `lab/gsrun.sh` /
+  `lab/device-copy.sh` helpers; the three drifted aria2 RPC iteration copies
+  in the agent are consolidated into one helper (the gid lookup now checks
+  queued downloads, as its docstring always claimed). Installer step counters
+  no longer switch denominators mid-run; `device/test_bootstrap.bats` joined
+  the documented test commands.
 - Re-onboarding a device no longer accumulates duplicate `active` deployment
   receipts (which made a later undeploy fail to start with no visible reason):
   a receipt reaching `active` — or an adopt — now retires any previous active

@@ -8,12 +8,6 @@ Tests cover:
   - rpc() helper in iris-diag.py prepends the token:<secret> param
   - iris-add.py arg guard emits usage instead of IndexError on missing argv
   - iris-add.py RPC call body includes token:<secret> as first param
-
-device-copy.sh exit-code fix is a shell script; behaviour is verified by
-reasoning rather than unit test (the expect block is non-trivially
-emulatable without a real IOS SSH session and without expect(1) on the
-test host).  The fix is a one-line change to each failure branch — see
-the report for the rationale.
 """
 import base64
 import importlib.util

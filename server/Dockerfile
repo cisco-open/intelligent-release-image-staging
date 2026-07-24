@@ -67,7 +67,7 @@ RUN chmod +x /opt/iris/server/seed-launch.sh \
 
 # Device/operator-facing ports. aria2 RPC (:6800) is loopback-only and omitted.
 EXPOSE 6969 8443 8000 6881 8080 9101
-VOLUME ["/var/lib/iris", "/etc/iris", "/opt/images", "/srv/artifacts"]
+VOLUME ["/var/lib/iris", "/etc/iris", "/opt/images", "/srv/artifacts", "/var/lib/iris-images"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD curl -fsS http://127.0.0.1:9101/healthz || exit 1

@@ -13,6 +13,9 @@ Environment=IRIS_CATALOG_PORT=8443
 Environment=IRIS_STATE=/var/lib/iris
 Environment=IRIS_SECRETS=/run/iris/secrets.json
 Environment=IRIS_CERT=/run/iris/tls/cert.pem
+# Optional operator overrides — notably IRIS_AGE_RECIPIENTS, which the catalog
+# needs to re-encrypt the rotated secrets store on device token refresh.
+EnvironmentFile=-/etc/iris/iris.env
 # Mirror the container entrypoint: decrypt the *.age ciphertext from
 # /etc/iris to the tmpfs RuntimeDirectory (/run/iris) BEFORE catalog starts,
 # so it has a secrets store + a combined cert.pem and never serves plain HTTP.

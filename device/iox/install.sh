@@ -116,8 +116,8 @@ interface $APP_INTF
 !
 file prompt quiet
 !
-! SCP server: the IOx-app agent scp-pushes its downloaded scratch to the target
-! disk (it can't bind-mount it nor receive inbound), then copy /verify places it.
+! SCP server: the scp fallback hand-off (primary on IE-3x00; C9k uses the
+! bind-mounted SSD share) pushes the scratch here, then copy /verify places it.
 ip scp server enable
 !
 end
@@ -140,8 +140,9 @@ interface Vlan$VLAN
 !
 file prompt quiet
 !
-! SCP server: the IOx-app agent scp-pushes its downloaded scratch to sdflash:
-! (it can't bind-mount sdflash: nor receive inbound), then copy /verify places it.
+! SCP server: the scp hand-off (primary on IE-3x00, where IOx cannot
+! bind-mount sdflash:; the C9k default is the SSD share) pushes the scratch to
+! guest-share, then copy /verify places it.
 ip scp server enable
 !
 end
@@ -243,13 +244,13 @@ if [ "$DRY" -eq 1 ]; then
   exit 0
 fi
 
-echo "[1/8] teardown any existing '$APPID' app (idempotent re-install)"
+echo "[1/9] teardown any existing '$APPID' app (idempotent re-install)"
 printf 'app-hosting stop appid %s\napp-hosting deactivate appid %s\napp-hosting uninstall appid %s\n' \
   "$APPID" "$APPID" "$APPID" | RUN >/dev/null 2>&1 || true
 sleep 6
 printf 'configure terminal\nno app-hosting appid %s\nend\n' "$APPID" | RUN >/dev/null 2>&1 || true
 
-echo "[2/8] apply IOx networking ($NETWORK_ATTACHMENT: IOx enable$([ "$NETWORK_ATTACHMENT" = inband ] && echo ", existing VLAN preserved" || echo ", VLAN $VLAN, $APP_INTF, Vlan$VLAN SVI"))"
+echo "[2/9] apply IOx networking ($NETWORK_ATTACHMENT: IOx enable$([ "$NETWORK_ATTACHMENT" = inband ] && echo ", existing VLAN preserved" || echo ", VLAN $VLAN, $APP_INTF, Vlan$VLAN SVI"))"
 { echo "configure terminal"; ios_net; } | RUN >/dev/null
 
 # The share dir must exist BEFORE activation binds it into the container.
@@ -273,7 +274,7 @@ wait_iox_ready 180 || {
   exit 1
 }
 
-echo "[3/8] disable app-hosting signature verification (EXEC; required for the unsigned agent app on SSD-backed IOx)"
+echo "[3/9] disable app-hosting signature verification (EXEC; required for the unsigned agent app on SSD-backed IOx)"
 # Even after `show iox` reports CAF/Dockerd Running, the app-hosting EXEC layer
 # can still answer "The process for the command is not responding or is
 # otherwise unavailable" for a few more seconds. Retry until it reports success
@@ -289,10 +290,10 @@ for _ in $(seq 1 24); do
 done
 [ "$vok" -eq 1 ] || { echo "  ERROR: could not disable app-hosting signature verification (app-hosting not responding)" >&2; exit 1; }
 
-echo "[4/8] push PKI trustpoint over SSH (so 'copy https:' validates the server cert)"
+echo "[4/9] push PKI trustpoint over SSH (so 'copy https:' validates the server cert)"
 { echo "configure terminal"; trustpoint_block; echo "end"; } | RUN >/dev/null
 
-echo "[5/8] preflight: is https://$STAGE_HOST:8000/$PKG reachable? (HEAD, advisory)"
+echo "[5/9] preflight: is https://$STAGE_HOST:8000/$PKG reachable? (HEAD, advisory)"
 # HEAD only (-I) so we don't pull the whole package; -k because the DEVICE (not us)
 # validates the cert against the trustpoint we just pasted. Advisory: a flaky
 # operator->server link must not block a deploy the DEVICE can complete — the
@@ -303,7 +304,7 @@ else
   echo "    WARN: preflight inconclusive from here; relying on the device copy"
 fi
 
-echo "[6/8] copy $PKG -> ${PKG_FS} over verified https (retry x3)"
+echo "[6/9] copy $PKG -> ${PKG_FS} over verified https (retry x3)"
 printf 'delete /force %s%s\n' "$PKG_FS" "$PKG" | RUN >/dev/null 2>&1 || true
 ok=0
 for a in 1 2 3; do
@@ -313,7 +314,7 @@ for a in 1 2 3; do
 done
 [ "$ok" -eq 1 ] || { echo "  ERROR: copy of $PKG failed after 3 attempts" >&2; exit 1; }
 
-echo "[7/8] configure app-hosting appid $APPID + install/activate/start"
+echo "[7/9] configure app-hosting appid $APPID + install/activate/start"
 { echo "configure terminal"; appid_block; } | RUN >/dev/null
 install_out="$(printf 'app-hosting install appid %s package %s%s\n' "$APPID" "$PKG_FS" "$PKG" | RUN 2>&1 || true)"
 # RUN redacts device secrets. Print only the IOS lifecycle response, not the

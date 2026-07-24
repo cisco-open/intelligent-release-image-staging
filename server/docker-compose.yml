@@ -36,9 +36,10 @@ services:
     environment:
       # the docker host's IP, used in the TLS cert SAN — REQUIRED, no default
       IRIS_HOST_IP: "${IRIS_HOST_IP:?Set IRIS_HOST_IP to this server's IP, e.g. IRIS_HOST_IP=10.0.0.5 docker compose up}"
-      # External observability is OPT-IN. The swarm map on :9101/swarmmap is
-      # always served from inside the container; the Prometheus /metrics
-      # endpoint + OTLP/Loki push only turn on when IRIS_OBSERVABILITY=1.
+      # External observability is OPT-IN. The swarm map lives in the Console
+      # (:8080 -> Swarm tab; the old :9101/swarmmap now serves a pointer page);
+      # the Prometheus /metrics endpoint + OTLP/Loki push only turn on when
+      # IRIS_OBSERVABILITY=1.
       # Use this if you already run a Grafana/Prometheus/Loki/OTel stack;
       # leave unset otherwise.
       IRIS_OBSERVABILITY: "${IRIS_OBSERVABILITY:-}"

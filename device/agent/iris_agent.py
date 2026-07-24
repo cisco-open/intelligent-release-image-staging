@@ -368,18 +368,41 @@ def run_once(cfg, deps, state):
     prev = state.get("image_id")
     if prev and prev != img_id:
         deps.purge_others(image["filename"], img_id)
-        old_root = state.get("root_file")
-        # Re-check the whitelist before interpolating into a destructive delete,
-        # in case the state file was hand-edited.
-        if old_root and old_root != image["filename"] \
-                and _FILENAME_RE.match(old_root):
-            deps.ios("delete /force %s%s"
-                     % (state.get("stage_fs", "flash:"), old_root))
-            deps.emit("CLEANUP", "removed replaced image %s (now %s)"
-                      % (old_root, img_id))
-            state.pop("root_file", None)
+        old_root = state.pop("root_file", None)
+        if old_root and old_root != image["filename"]:
+            pending = state.setdefault("pending_root_deletes", [])
+            if old_root not in pending:
+                pending.append(old_root)
         state.pop(prev, None)             # old image's done/copied flags
     state["image_id"] = img_id
+
+    # Delete replaced flash-root images, VERIFYING each is actually gone
+    # before claiming CLEANUP: AAA nodes silently no-op a raw exec `delete`
+    # (the reclaim/copyroot EEM applets exist for exactly that), and an
+    # unverified claim strands the old image on flash forever. Unverified
+    # entries stay on the list and are retried every tick. The whitelist
+    # re-check guards the destructive interpolation against a hand-edited
+    # state file.
+    pending = state.get("pending_root_deletes") or []
+    if pending:
+        fs = state.get("stage_fs", "flash:")
+        still = []
+        for old_root in pending:
+            if old_root == image["filename"] or not _FILENAME_RE.match(old_root):
+                continue
+            deps.ios("delete /force %s%s" % (fs, old_root))
+            if deps.root_present(old_root, fs):
+                still.append(old_root)
+                deps.emit("CLEANUP-PENDING",
+                          "replaced image %s still present after delete; "
+                          "will retry" % old_root)
+            else:
+                deps.emit("CLEANUP", "removed replaced image %s (now %s)"
+                          % (old_root, img_id))
+        if still:
+            state["pending_root_deletes"] = still
+        else:
+            state.pop("pending_root_deletes", None)
 
     # already downloaded AND aria2 finished? aria2 keeps a "<file>.aria2" control
     # file until the download is fully done; checking it avoids hashing a file that
@@ -646,21 +669,43 @@ def _emit_impl(cli_execute_fn, mnemonic, msg):
 # discard persisted state and force a ~1.2 GB re-copy. ----
 
 
+def _aria_downloads(rpc):
+    """Yield (gid, file-basenames) for every download aria2 knows about —
+    active first (live download / seed), then queued, then finished. The ONE
+    iteration idiom shared by gid lookup, purge_others, and aria_remove (they
+    had drifted into three near-identical copies, one of which skipped the
+    queued view its own docstring claimed to check). Per-call failures are
+    swallowed so one unavailable view doesn't hide the others."""
+    for call, extra in (("aria2.tellActive", []),
+                        ("aria2.tellWaiting", [0, 100]),
+                        ("aria2.tellStopped", [0, 100])):
+        try:
+            downloads = rpc(call, extra + [["gid", "files"]])
+        except Exception:
+            continue
+        for d in downloads:
+            yield d.get("gid"), [os.path.basename(f.get("path", ""))
+                                 for f in d.get("files", [])]
+
+
+def _aria_drop(rpc, gid):
+    """Remove a download AND its stopped-result entry, both best-effort —
+    aria2 refuses a duplicate info_hash while either survives."""
+    for method in ("aria2.forceRemove", "aria2.removeDownloadResult"):
+        try:
+            rpc(method, [gid])
+        except Exception:
+            pass
+
+
 def _find_aria_gid(rpc, stage_path):
     """Locate the aria2 gid whose download owns the staged file at stage_path.
-
-    Basename match against each download's files paths — the same idiom
-    purge_others uses — checking tellActive first (live download / seed), then
-    tellStopped (finished). Returns the gid string or None when no download
-    matches. May raise on rpc failure (callers wrap)."""
+    Basename match against each download's files paths. Returns the gid
+    string or None when no download matches (including on rpc failure)."""
     fname = os.path.basename(stage_path)
-    for call, extra in (("aria2.tellActive", []),
-                        ("aria2.tellStopped", [0, 100])):
-        for d in rpc(call, extra + [["gid", "files"]]):
-            names = [os.path.basename(f.get("path", ""))
-                     for f in d.get("files", [])]
-            if fname in names:
-                return d["gid"]
+    for gid, names in _aria_downloads(rpc):
+        if fname in names:
+            return gid
     return None
 
 
@@ -1093,22 +1138,9 @@ def build_deps(cfg, conf_path):  # pragma: no cover
 
     def purge_others(keep_filename, keep_id):
         # 1. drop every download except the current image from aria2c
-        downloads = []
-        for call, extra in (("aria2.tellActive", []),
-                            ("aria2.tellWaiting", [0, 100]),
-                            ("aria2.tellStopped", [0, 100])):
-            try:
-                downloads += _rpc(call, extra + [["gid", "files"]])
-            except Exception:
-                pass
-        for d in downloads:
-            names = [os.path.basename(f.get("path", "")) for f in d.get("files", [])]
+        for gid, names in _aria_downloads(_rpc):
             if keep_filename not in names:
-                for m in ("aria2.forceRemove", "aria2.removeDownloadResult"):
-                    try:
-                        _rpc(m, [d["gid"]])
-                    except Exception:
-                        pass
+                _aria_drop(_rpc, gid)
         # 2. delete stale staged image artifacts (never the agent's own files)
         import glob
         keep = {keep_filename, keep_filename + ".aria2", keep_id + ".torrent"}
@@ -1147,22 +1179,9 @@ def build_deps(cfg, conf_path):  # pragma: no cover
         # completed/seeding entry (e.g. after the staged file was deleted)
         # silently swallows the re-add. Mirrors purge_others' removal, but
         # targets the kept image instead of the others.
-        for call, extra in (("aria2.tellActive", []),
-                            ("aria2.tellWaiting", [0, 100]),
-                            ("aria2.tellStopped", [0, 100])):
-            try:
-                for d in _rpc(call, extra + [["gid", "files"]]):
-                    names = [os.path.basename(f.get("path", ""))
-                             for f in d.get("files", [])]
-                    if filename in names:
-                        for m in ("aria2.forceRemove",
-                                  "aria2.removeDownloadResult"):
-                            try:
-                                _rpc(m, [d["gid"]])
-                            except Exception:
-                                pass
-            except Exception:
-                pass
+        for gid, names in _aria_downloads(_rpc):
+            if filename in names:
+                _aria_drop(_rpc, gid)
 
     def _show(cmd):
         try:

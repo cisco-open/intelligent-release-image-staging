@@ -34,14 +34,6 @@ def derive_id(filename):
     return name
 
 
-def sha256_file(path, chunk=1 << 20):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for block in iter(lambda: f.read(chunk), b""):
-            h.update(block)
-    return h.hexdigest()
-
-
 def digests_file(path, chunk=1 << 20):
     """Return (sha256_hex, sha512_hex) in one pass.
 

@@ -24,6 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY agent_bin/aria2c /opt/iris/bin/aria2c
 # the agent control plane (includes cli_ssh.py — the container CLI transport)
 COPY agent/*.py /opt/iris/agent/
+COPY agent/VERSION /opt/iris/agent/VERSION
 # pinned catalog server cert (public; used to VERIFY catalog TLS)
 COPY iris-catalog.pem /opt/iris/iris-catalog.pem
 COPY entrypoint.sh /entrypoint.sh

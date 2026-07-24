@@ -22,12 +22,3 @@ def parse_free_bytes(dir_output):
 
 def has_room(free_bytes, image_size, headroom=HEADROOM):
     return free_bytes >= image_size + headroom
-
-
-def reclaim_plan(free_bytes, image_size, headroom=HEADROOM):
-    """Reclaim steps to try when short on space. Returns [] if there is already
-    room. The ONLY automated reclaim is `install remove inactive` — the agent
-    never deletes image files; if still short after this, it just syslogs."""
-    if has_room(free_bytes, image_size, headroom):
-        return []
-    return ["install remove inactive"]

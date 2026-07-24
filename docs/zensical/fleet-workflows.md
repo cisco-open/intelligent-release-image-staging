@@ -29,8 +29,9 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
   `app_gateway`; leave `inband_vlan` blank.
 - **inband** — fill `inband_vlan`, `app_ip`, `app_mask`, `app_gateway`; leave
   `iris_vlan`/`svi_*` blank. Static IPv4 on Guest Shell or IOx (IE-3x00, C9300);
-  DHCP is not supported. For inband **IOx**, also set `ios_ssh_host` to the
-  existing IOS management SVI the app SSHes to (Guest Shell leaves it blank).
+  DHCP is not supported. For inband **IOx**, `ios_ssh_host` (the IOS endpoint
+  the app SSHes to) defaults to the device's management IP — only set it for
+  an asymmetric topology (Guest Shell leaves it blank).
 - `model`/`platform` are optional; blank `platform` auto-selects from the model.
 
 See [Management Type and VLAN Ownership](network-attachment.md) for the full

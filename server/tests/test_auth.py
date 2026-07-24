@@ -6,31 +6,6 @@ import auth
 import secrets_store
 
 
-def test_load_tokens_ignores_comments_and_blanks(tmp_path):
-    p = tmp_path / "tokens.txt"
-    p.write_text("# a comment\n\nabc123\n  def456  \n")
-    assert auth.load_tokens(str(p)) == {"abc123", "def456"}
-
-
-def test_load_tokens_missing_file_is_empty(tmp_path):
-    assert auth.load_tokens(str(tmp_path / "nope.txt")) == set()
-
-
-def test_check_announce_key():
-    tokens = {"abc123"}
-    assert auth.check_announce_key("info_hash=x&key=abc123&port=1", tokens)
-    assert not auth.check_announce_key("info_hash=x&key=wrong", tokens)
-    assert not auth.check_announce_key("info_hash=x", tokens)  # no key
-
-
-def test_check_bearer():
-    tokens = {"abc123"}
-    assert auth.check_bearer({"Authorization": "Bearer abc123"}, tokens) == "abc123"
-    assert auth.check_bearer({"Authorization": "Bearer wrong"}, tokens) is None
-    assert auth.check_bearer({}, tokens) is None
-    assert auth.check_bearer({"Authorization": "abc123"}, tokens) is None
-
-
 # ---------------------------------------------------------------------------
 # Helpers for Task 5/6 authorize / check_announce_key (store-backed)
 # ---------------------------------------------------------------------------
@@ -162,12 +137,7 @@ def test_check_announce_key_store_seeder_token_accepted():
     assert auth.check_announce_key(query, index, store, now + 1, 0)
 
 
-# ---------------------------------------------------------------------------
-# Task 6: check_announce_key legacy (tokens set) — back-compat
-# ---------------------------------------------------------------------------
-
-def test_check_announce_key_legacy_still_works():
-    tokens = {"abc123"}
-    assert auth.check_announce_key("info_hash=x&key=abc123&port=1", tokens)
-    assert not auth.check_announce_key("info_hash=x&key=wrong", tokens)
-    assert not auth.check_announce_key("info_hash=x", tokens)  # no key
+def test_check_announce_key_without_key_is_denied(tmp_path):
+    now = 1000
+    store, index, _ = _make_store_and_index("seeder", "announce_token", now)
+    assert not auth.check_announce_key("info_hash=x", index, store, now, 0)

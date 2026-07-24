@@ -21,7 +21,9 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 CSV="${1:-$REPO/fleet/devices.csv}"
 OUT="${OUT:-$REPO/fleet/dist}"
 [ -f "$CSV" ] || { echo "no CSV inventory: $CSV (copy fleet/devices.csv.example)" >&2; exit 1; }
-if IFS= read -r first_line < "$CSV" && [[ "$first_line" == *"network_attachment"* ]]; then
+if IFS= read -r first_line < "$CSV" && \
+   { [[ "$first_line" == *"management_type"* ]] || \
+     [[ "$first_line" == *"network_attachment"* ]]; }; then
   echo "ERROR: CSV v2 requires Console/API onboarding so IRIS can persist a receipt,"
   echo "plan, and preflight before minting an enrollment token." >&2
   exit 1

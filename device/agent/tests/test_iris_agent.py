@@ -175,6 +175,43 @@ def test_state_is_per_image_so_reassignment_recopies():
     assert copied == ["img2.bin"]
 
 
+def test_replaced_image_cleanup_claim_gated_on_actual_absence():
+    # AAA nodes silently no-op a raw exec `delete` (the reclaim/copyroot EEM
+    # applets exist for exactly that reason) — so the CLEANUP log and the
+    # root_file bookkeeping must be gated on the file actually being gone,
+    # else the replaced image is stranded on flash while IRIS claims otherwise
+    cat = FakeCatalog({"approved_image_id": "img2"},
+                      {"id": "img2", "filename": "img2.bin", "size": 7,
+                       "sha256": "def"})
+    deps, emitted, ios_cmds, _, _, _, _, _ = make_deps(
+        cat, {"/stage/img2.bin": 7}, verify_ok=True)
+    deps = deps._replace(                       # the old root REFUSES to die
+        root_present=lambda fname, prefix="flash:": fname == "old.bin")
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "image_id": "img1", "root_file": "old.bin"}
+    iris_agent.run_once(CFG, deps, state)
+    assert any("delete /force flash:old.bin" in c for c in ios_cmds)
+    # queued for retry every tick — NOT silently forgotten
+    assert state.get("pending_root_deletes") == ["old.bin"]
+    assert any(m == "CLEANUP-PENDING" for m, _ in emitted)
+    assert all(not (m == "CLEANUP" and "old.bin" in msg) for m, msg in emitted)
+
+
+def test_replaced_image_cleanup_confirmed_when_gone():
+    cat = FakeCatalog({"approved_image_id": "img2"},
+                      {"id": "img2", "filename": "img2.bin", "size": 7,
+                       "sha256": "def"})
+    deps, emitted, ios_cmds, _, _, _, _, _ = make_deps(
+        cat, {"/stage/img2.bin": 7}, verify_ok=True)
+    deps = deps._replace(                        # old root really deleted
+        root_present=lambda fname, prefix="flash:": fname != "old.bin")
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "image_id": "img1", "root_file": "old.bin"}
+    iris_agent.run_once(CFG, deps, state)
+    assert "pending_root_deletes" not in state
+    assert any(m == "CLEANUP" and "old.bin" in msg for m, msg in emitted)
+
+
 def test_complete_but_sha_mismatch_errors_no_done():
     cat = FakeCatalog({"approved_image_id": "img1"},
                       {"id": "img1", "filename": "img1.bin", "size": 5,
@@ -339,6 +376,8 @@ def test_reassignment_purges_old_image_everywhere():
                       {"id": "img2", "filename": "img2.bin",
                        "size": 1000, "sha256": "def"})
     deps, emitted, ios_cmds, _, _, purged, _, _ = make_deps(cat, {}, free=9_000_000_000)
+    deps = deps._replace(   # the delete genuinely lands: old root reads absent
+        root_present=lambda fname, prefix="flash:": fname != "img1.bin")
     state = {"schema_version": iris_agent._STATE_SCHEMA,
              "image_id": "img1", "root_file": "img1.bin",
              "img1": {"done": True, "copied": True}}
@@ -1837,10 +1876,11 @@ def test_aria_stats_falls_back_to_tellstopped():
     out = iris_agent._aria_stats_impl(rpc, _TELE_STAGE)
     assert out == status_s
     methods = [m for m, _ in calls]
-    assert methods == ["aria2.tellActive", "aria2.tellStopped",
-                       "aria2.tellStatus"]
+    # the consolidated iterator pages active -> waiting -> stopped
+    assert methods == ["aria2.tellActive", "aria2.tellWaiting",
+                       "aria2.tellStopped", "aria2.tellStatus"]
     # tellStopped uses the same [offset, num] paging window as purge_others
-    assert calls[1][1][:2] == [0, 100]
+    assert calls[2][1][:2] == [0, 100]
     assert calls[-1][1][0] == "gidS"
 
 

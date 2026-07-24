@@ -176,6 +176,7 @@ rpc_secret = $RPC_SECRET
 catalog_ca = $CATALOG_CA
 telemetry = ${TELEMETRY:-on}
 token_expires_at = 0
+agent_version = $(cat "$HERE/../VERSION" 2>/dev/null || echo unknown)
 EOF
 }
 
@@ -234,10 +235,10 @@ ssh_host() {                       # run a command on STAGE_HOST
     -o LogLevel=ERROR "$HOST_USER@$STAGE_HOST" "$@"
 }
 
-echo "[1/6] flash pre-check on $DEVICE_IP"
+echo "[1/7] flash pre-check on $DEVICE_IP"
 printf 'dir flash: | include bytes free\n' | "$HERE/../lab/device-run.sh" "$DEVICE_IP" | grep -i 'bytes free' || true
 
-echo "[2/6] stage per-device agent config into artifacts/ (served on :8000 by the container)"
+echo "[2/7] stage per-device agent config into artifacts/ (served on :8000 by the container)"
 CONF="iris-agent-$DEVICE_ID.conf"
 ART="${IRIS_ARTIFACTS_DIR:-$(cd "$HERE/.." && pwd)/artifacts}"
 # the agent's pinned CA = the SAME bare crt.pem; served as the fifth artifact and
@@ -262,7 +263,7 @@ else
   ssh_host "cat > ~/iris/artifacts/iris-catalog.pem" < "$IRIS_CRT_FILE"
 fi
 
-echo "[3/6] apply IOS config ($NETWORK_ATTACHMENT app-hosting, file prompt, EEM timers)"
+echo "[3/7] apply IOS config ($NETWORK_ATTACHMENT app-hosting, file prompt, EEM timers)"
 { echo "configure terminal"; ios_config; } | "$HERE/../lab/device-run.sh" "$DEVICE_IP" >/dev/null
 
 # HARDWARE-LEARNED (C9300, 2026-07-04): <fs>guest-share must exist BEFORE
@@ -273,10 +274,10 @@ echo "[3/6] apply IOS config ($NETWORK_ATTACHMENT app-hosting, file prompt, EEM 
 # Root-owned is fine for the ROOT (IOS does the copies, the guest only reads
 # and creates its own subdir). Idempotent: "already exists" is swallowed. The
 # blank line answers the "Create directory" prompt on boxes that don't have
-# `file prompt quiet` applied yet ([3/6] has, but belt-and-braces).
+# `file prompt quiet` applied yet ([3/7] has, but belt-and-braces).
 printf 'mkdir %sguest-share\n\n' "$IOS_FS" | "$HERE/../lab/device-run.sh" "$DEVICE_IP" >/dev/null 2>&1 || true
 
-echo "[4/6] guestshell enable (IOx cold start can take several minutes on a fresh device)"
+echo "[4/7] guestshell enable (IOx cold start can take several minutes on a fresh device)"
 for i in $(seq 1 30); do
   state="$(printf 'show app-hosting list\n' | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>/dev/null | grep -i guestshell || true)"
   case "$state" in
@@ -293,7 +294,7 @@ for i in $(seq 1 30); do
   sleep 15
 done
 
-echo "[5/6] push PKI trustpoint over SSH (FIRST), then drop files over verified https"
+echo "[5/7] push PKI trustpoint over SSH (FIRST), then drop files over verified https"
 # Trust-anchor distribution: paste the bare server cert into trustpoint IRIS and
 # select it as the HTTP client's secure trustpoint, over the EXISTING SSH session,
 # BEFORE any `copy https:`. Idempotent (no-then-re-add). Non-circular by construction
