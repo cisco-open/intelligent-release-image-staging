@@ -44,6 +44,11 @@ additionally never creates, changes, or removes the operator's existing network.
   Validation pages.
 
 ### Changed
+- Documentation and Console wording says **network** rather than "fleet"
+  (the `fleet/` CSV directory, `fleet.json`, and code identifiers keep their
+  names). The README and docs index now map every documentation page, and a
+  new test gate fails whenever the site nav, the docs index, and the README
+  drift apart.
 - **C9300 IOx image transfer no longer uses scp**: onboarding bind-mounts the
   app-hosting SSD share (`usbflash1:iox_host_data_share`) into the container,
   the agent lands its verified scratch at the share root as

@@ -16,7 +16,7 @@ root for `linux/amd64`:
 docker build --platform linux/amd64 -f server/Dockerfile -t iris:docker-alpha .
 ```
 
-The root `.dockerignore` excludes credentials, firmware, fleet state, generated
+The root `.dockerignore` excludes credentials, firmware, network state, generated
 artifacts, and test output from the build context.
 
 ## Network surfaces

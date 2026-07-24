@@ -1,6 +1,6 @@
 # IRIS: Intelligent Release and Image Staging
 
-IRIS stages Cisco IOS-XE images across a fleet before an operator performs any install or reload activity. It uses a private BitTorrent swarm, a catalog of approved image metadata, and a small device agent to move large images efficiently while keeping verification on the device.
+IRIS stages Cisco IOS-XE images across a network before an operator performs any install or reload activity. It uses a private BitTorrent swarm, a catalog of approved image metadata, and a small device agent to move large images efficiently while keeping verification on the device.
 
 > IRIS distributes, verifies, and stages images. It never installs, activates, reloads, changes boot variables, or mutates the running software state of a device.
 
@@ -10,12 +10,23 @@ The detailed manual now lives in the Zensical documentation tree:
 
 - [Documentation overview](docs/zensical/index.md)
 - [Getting started](docs/zensical/getting-started.md)
+- [AI-guided PoC](docs/zensical/aiagent.md)
 - [Architecture](docs/zensical/architecture.md)
 - [Container deployments](docs/zensical/containers.md)
+- [Server](docs/zensical/server.md)
+- [Network ports and flows](docs/zensical/network-ports.md)
+- [Management type and VLAN ownership](docs/zensical/network-attachment.md)
 - [Kubernetes](docs/zensical/kubernetes.md)
+- [Device agents](docs/zensical/device-agents.md)
+- [Web console](docs/zensical/console.md)
+- [Network workflows](docs/zensical/fleet-workflows.md)
+- [IOx app](docs/zensical/iox.md)
 - [Security model](docs/zensical/security.md)
+- [Observability](docs/zensical/observability.md)
 - [Operations](docs/zensical/operations.md)
 - [Validation](docs/zensical/validation.md)
+- [Development](docs/zensical/development.md)
+- [Reference](docs/zensical/reference.md)
 
 The public website source is in [docs/](docs/index.html). The GitHub Pages workflow builds Zensical into `site/`, combines it with the website, and publishes the website root plus generated docs under `/docs/`.
 
@@ -82,7 +93,7 @@ tools/apply-assignments.sh fleet/assignments.csv
 
 Each generated installer contains a short-lived enrollment token. On first
 contact, the agent exchanges it for rotating catalog, announce, and local RPC
-credentials; no permanent fleet token is baked into the installer. Re-provision
+credentials; no permanent network token is baked into the installer. Re-provision
 a device when replacing its bootstrap configuration or enrollment material.
 That cutover still only changes the staging agent and never installs or reloads
 an IOS-XE image.
@@ -104,9 +115,11 @@ docker build --platform linux/amd64 -f server/Dockerfile -t iris:docker-alpha .
 ```
 
 The Cisco app-hosting agent supports ARM64 IE platforms and x86_64 Catalyst 9000
-platforms. It downloads into the CAF persistent directory, then uses SSH-to-self
-plus IOS `copy /verify` to place the image on the selected IOS filesystem. Build
-an image for inspection, or package it with `ioxclient`:
+platforms. It downloads into the CAF persistent directory and hands the image
+to IOS for a signature-enforcing `copy /verify`: on Catalyst 9000 through the
+bind-mounted SSD share at disk speed, on IE-3x00 by SCP over SSH-to-self (see
+[IOx app](docs/zensical/iox.md)). Build an image for inspection, or package it
+with `ioxclient`:
 
 ```bash
 # ARM64 package (default)
@@ -118,9 +131,12 @@ IOX_ARCH=amd64 PACKAGE_NAME=iris-amd64.tar \
   CATALOG_PEM=/path/to/iris-catalog.pem device/iox/build.sh device/iox/out
 ```
 
-Set `TARGET_FS=sdflash:` (the installer default), `usbflash1:`, or another
-writable IOS disk when running `device/iox/install.sh`. C9300 deployments also
-typically set `APP_INTF=AppGigabitEthernet1/0/1` and use the amd64 package. See
+`device/iox/install.sh` defaults to the IE-3x00 profile (`TARGET_FS=sdflash:`,
+`AppGigabitEthernet1/1`). Console-onboarded C9300 deployments use the amd64
+package with `APP_INTF=AppGigabitEthernet1/0/1`, `TARGET_FS=flash:`, and the
+SSD-share pair `SHARE_HOST_PATH=/vol/usb1/iox_host_data_share` /
+`SHARE_IOS_PATH=usbflash1:iox_host_data_share` carrying the transfer. See
+[IOx app](docs/zensical/iox.md) and
 [Container deployments](docs/zensical/containers.md) for the complete data path
 and [Kubernetes](docs/zensical/kubernetes.md) for the optional seed-server
 manifests.

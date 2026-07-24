@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Observability
 
-IRIS reports fleet progress from the point of view that matters most: whether each device has staged the approved image safely.
+IRIS reports network progress from the point of view that matters most: whether each device has staged the approved image safely.
 
 ## Always-on surfaces
 
@@ -15,7 +15,7 @@ IRIS reports fleet progress from the point of view that matters most: whether ea
 | `/healthz` on port 9101 | Basic service health. |
 | `/swarm` on port 9101 | Machine-readable swarm and peer state. |
 | `/swarmmap` on port 9101 | Pointer to the console swarm view. |
-| Console monitoring | Human-readable fleet, image, and audit state. |
+| Console monitoring | Human-readable network, image, and audit state. |
 
 ## Optional metrics
 

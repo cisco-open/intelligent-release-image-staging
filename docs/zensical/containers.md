@@ -54,7 +54,7 @@ docker build --platform linux/amd64 \
 ```
 
 The root `.dockerignore` prevents local credentials, firmware, generated
-artifacts, and fleet files from entering the build context. The image exposes
+artifacts, and network files from entering the build context. The image exposes
 all device-facing services, includes a `/healthz` Docker health check, and keeps
 aria2 RPC on loopback only.
 

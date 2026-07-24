@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Validation
 
-Validate documentation, server behavior, device packaging, and lab behavior separately. A passing unit test suite is necessary but not enough for a fleet rollout.
+Validate documentation, server behavior, device packaging, and lab behavior separately. A passing unit test suite is necessary but not enough for a network rollout.
 
 ## Automated tests
 

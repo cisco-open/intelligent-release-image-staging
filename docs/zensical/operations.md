@@ -36,7 +36,7 @@ outside that PVC. Both are required for recovery.
 
 ## Scaling notes
 
-Private BitTorrent reduces server load by letting devices exchange pieces after the seeder introduces the content. The server remains important for tracker announces, catalog policy, initial seeding, and telemetry. Watch the seeder data port, tracker health, and device storage pressure during large fleet waves.
+Private BitTorrent reduces server load by letting devices exchange pieces after the seeder introduces the content. The server remains important for tracker announces, catalog policy, initial seeding, and telemetry. Watch the seeder data port, tracker health, and device storage pressure during large network waves.
 
 On C9k IOx devices the final agent-to-IOS transfer uses the bind-mounted SSD share and runs at disk speed. On IE-3x00 (or a C9k that fell back to the scp push) that transfer is capped by the platform's default control-plane policing — roughly 1.4 MB/s on Catalyst 9300; see [Transfer throughput and CoPP](iox.md#transfer-throughput-and-copp) for measurements and the operator-side mitigation.
 

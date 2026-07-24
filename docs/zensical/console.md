@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Web Console
 
-The console is the preferred operator surface once the server is running. It does not replace the CLI; it wraps common workflows and makes fleet state visible.
+The console is the preferred operator surface once the server is running. It does not replace the CLI; it wraps common workflows and makes network state visible.
 
 ## First run
 
@@ -26,7 +26,7 @@ docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin
 
 | Area | What it does |
 | --- | --- |
-| Images | Shows published image metadata and staged fleet status. |
+| Images | Shows published image metadata and staged network status. |
 | Devices | Lists known devices, their network **attachment**, platform details, current assignment, and recent reports. |
 | Assignments | Maps each device to the image it should stage. |
 | Onboarding | Starts and tracks install or undeploy jobs when stage-host credentials are configured. |
