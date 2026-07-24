@@ -966,7 +966,14 @@ def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
     staged = os.path.join(sub, fname)
     part = os.path.join(sub, ".%s.part" % fname)
     try:
-        shutil.copyfile(local, part)
+        # Plain chunked read/write, NOT shutil.copyfile: copyfile uses
+        # os.sendfile on Linux, and the C9300 IOx runtime (17.18) denies
+        # sendfile between the CAF persistent disk and the -v share mount
+        # (LSM label mismatch) with EACCES — while ordinary write() to the
+        # same file succeeds (hardware-observed: the 4-byte probe wrote fine,
+        # the image copy died instantly).
+        with open(local, "rb") as src, open(part, "wb") as dst:
+            shutil.copyfileobj(src, dst, length=1 << 20)
         os.replace(part, staged)
     except OSError as e:
         emit_fn("SHARE-FALLBACK",
