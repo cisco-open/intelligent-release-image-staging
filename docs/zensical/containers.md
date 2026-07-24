@@ -26,16 +26,21 @@ flowchart LR
     Catalog --> Agent["IOx agent container"]
     Swarm --> Scratch["Persistent /data/iris scratch"]
     Agent --> Scratch
-    Scratch --> SCP["SCP push to IOS guest-share"]
-    SCP --> Verify["IOS copy /verify"]
+    Scratch --> Hand["Hand-off: SSD share write (C9k) or SCP push (IE-3x00)"]
+    Hand --> Verify["IOS copy /verify"]
     Verify --> Target["Selected IOS filesystem root"]
 ```
 
 The final copy deliberately crosses back into IOS. The CAF persistent disk is
 available to the application (for example, as `/iox_data` on C9300), but it is
 not an IOS filesystem root. The agent uses that disk for resumable swarm data,
-pushes the completed file through SSH-to-self, and asks IOS to perform the
-signature-enforcing `copy /verify` into the selected filesystem.
+then hands the completed file to IOS for the signature-enforcing
+`copy /verify`: on C9k the app-hosting SSD share
+(`usbflash1:iox_host_data_share`) is bind-mounted into the container, so the
+hand-off is a disk-speed write followed by an IOS-internal copy onto
+bootflash; on IE-3x00 (where IOx cannot bind-mount the SD card) the agent
+SCP-pushes the file to `guest-share` through SSH-to-self instead. See
+[IOx App](iox.md#runtime-behavior).
 
 ## Seed-server image
 
@@ -108,15 +113,18 @@ lab address is baked in:
 An explicit target is accepted only if `show file systems` reports it as a
 writable disk and it is not `crashinfo:`. If it is unavailable, the agent logs
 the fallback and uses platform-aware auto-detection. `device/iox/install.sh`
-defaults to `sdflash:`. C9300 deployments should select a writable local disk,
-such as `usbflash1:`, and typically use `AppGigabitEthernet1/0/1`.
+defaults to `sdflash:`. Console-onboarded C9300 deployments use the SSD-share
+transfer with `flash:` (bootflash) as the final target — the same placement as
+Guest Shell — and `AppGigabitEthernet1/0/1`.
 
 ## Alpha constraints
 
 - The seed-server image is amd64 so the static binary packed into Catalyst
   Guest Shell bundles remains x86_64.
-- IOx packages are architecture-specific and currently use SSH-to-self because
-  IOx does not expose IOS storage as a normal container bind mount.
+- IOx packages are architecture-specific. On IE-3x00 the image hand-off uses
+  SSH-to-self SCP because IOx there does not expose the SD card as a container
+  bind mount; on C9k the app-hosting SSD share is bind-mounted and carries the
+  hand-off at disk speed.
 - Server clustering is not implemented. Kubernetes uses one replica and one
   ReadWriteOnce PVC.
 - The server certificate is IP-pinned. Its public address must be stable, and a

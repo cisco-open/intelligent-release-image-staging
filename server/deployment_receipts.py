@@ -14,16 +14,18 @@ import secrets_store
 
 
 _STATES = frozenset(("planned", "applying", "active", "unknown", "drifted",
-                     "needs-reconcile", "removed"))
+                     "needs-reconcile", "removed", "superseded"))
 _NONTERMINAL = frozenset(("planned", "applying"))
 _TRANSITIONS = {
     "planned": frozenset(("applying", "unknown", "needs-reconcile")),
     "applying": frozenset(("active", "unknown", "needs-reconcile", "removed")),
-    "active": frozenset(("drifted", "needs-reconcile", "applying", "removed")),
+    "active": frozenset(("drifted", "needs-reconcile", "applying", "removed",
+                         "superseded")),
     "unknown": frozenset(("drifted", "needs-reconcile")),
     "drifted": frozenset(("needs-reconcile",)),
     "needs-reconcile": frozenset(),
     "removed": frozenset(),
+    "superseded": frozenset(),
 }
 _REQUIRED = ("controller_id", "device_id", "inventory_revision", "plan_hash",
              "resolved", "preflight", "resources")
@@ -96,6 +98,21 @@ class ReceiptStore:
         if _contains_secret(receipt):
             raise ValueError("receipts must not contain secrets")
 
+    def _supersede_other_actives(self, data, device_id, keep_receipt_id):
+        """Retire every OTHER active receipt of ``device_id`` (caller holds the
+        store lock). A device has ONE live deployment: when a new receipt goes
+        active — a re-onboard's idempotent teardown+redeploy, or an explicit
+        adopt — the previous active record no longer describes what is on the
+        box. Without this, actives accumulate and active_for_device() refuses
+        undeploy for the device."""
+        timestamp = int(self._now())
+        for receipt in data["receipts"].values():
+            if (receipt.get("device_id") == device_id
+                    and receipt.get("state") == "active"
+                    and receipt.get("receipt_id") != keep_receipt_id):
+                receipt["state"] = "superseded"
+                receipt.setdefault("timestamps", {})["finished_at"] = timestamp
+
     def create(self, receipt):
         """Persist a new planned receipt and return its immutable initial record."""
         self._validate(receipt)
@@ -131,6 +148,8 @@ class ReceiptStore:
             data = self._read()
             if record["receipt_id"] in data["receipts"]:
                 raise ValueError("receipt already exists: %s" % record["receipt_id"])
+            self._supersede_other_actives(data, record["device_id"],
+                                          record["receipt_id"])
             data["receipts"][record["receipt_id"]] = record
             _atomic_write_json(self.path, data)
         return copy.deepcopy(record)
@@ -165,17 +184,40 @@ class ReceiptStore:
                 receipt["evidence"] = copy.deepcopy(evidence)
             if state in ("active", "unknown", "drifted", "needs-reconcile", "removed"):
                 receipt.setdefault("timestamps", {})["finished_at"] = int(self._now())
+            if state == "active":
+                self._supersede_other_actives(data, receipt.get("device_id"),
+                                              receipt_id)
             _atomic_write_json(self.path, data)
             return copy.deepcopy(receipt)
 
     def recover_interrupted(self):
-        """Mark planned/applying work unknown after a controller restart."""
+        """Mark planned/applying work unknown after a controller restart, and
+        collapse legacy duplicate actives (written before activation superseded
+        siblings): keep each device's NEWEST active — by activation time, then
+        plan time, then receipt id, so the choice is deterministic — and retire
+        the rest, restoring the one-active-per-device invariant undeploy needs."""
         changed = []
         with secrets_store.store_lock(self.path):
             data = self._read()
             for receipt in data["receipts"].values():
                 if receipt.get("state") in _NONTERMINAL:
                     receipt["state"] = "unknown"
+                    receipt.setdefault("timestamps", {})["finished_at"] = int(self._now())
+                    changed.append(receipt["receipt_id"])
+            actives = {}
+            for receipt in data["receipts"].values():
+                if receipt.get("state") == "active":
+                    actives.setdefault(receipt.get("device_id"), []).append(receipt)
+            for duplicates in actives.values():
+                if len(duplicates) < 2:
+                    continue
+                def _age(receipt):
+                    timestamps = receipt.get("timestamps") or {}
+                    return (timestamps.get("finished_at") or 0,
+                            timestamps.get("planned_at") or 0,
+                            receipt.get("receipt_id") or "")
+                for receipt in sorted(duplicates, key=_age)[:-1]:
+                    receipt["state"] = "superseded"
                     receipt.setdefault("timestamps", {})["finished_at"] = int(self._now())
                     changed.append(receipt["receipt_id"])
             if changed:

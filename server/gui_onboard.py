@@ -63,13 +63,18 @@ _MODEL_PLATFORMS = (          # first match wins; case-insensitive prefix regexe
 # Model families that take the arm64 IOx package (installer defaults: iris-arm64.tar,
 # AppGigabitEthernet1/1, sdflash:). Used ONLY after platform has resolved to iox.
 _ARM_IOX_MODELS = (r"^IE-?3", r"^IR1[018]")
-# Catalyst 9000 -> amd64 IOx package on an SSD (usbflash1:), stacked-member-
-# overridable APP_INTF.
+# Catalyst 9000 -> amd64 IOx package; the app-hosting SSD share
+# (usbflash1:iox_host_data_share, host-side /vol/usb1) is bind-mounted into
+# the app so image transfer is a local disk write + an IOS-internal
+# `copy /verify` onto bootflash — same final placement as Guest Shell, and no
+# CoPP-policed punt traffic. Stacked-member-overridable APP_INTF.
 _C9K_MODEL = r"^C9[0-9]{3}"
 _C9K_IOX_ENV = {
     "PKG": "iris-amd64.tar",
     "APP_INTF": "AppGigabitEthernet1/0/1",
-    "TARGET_FS": "usbflash1:",
+    "TARGET_FS": "flash:",
+    "SHARE_HOST_PATH": "/vol/usb1/iox_host_data_share",
+    "SHARE_IOS_PATH": "usbflash1:iox_host_data_share",
 }
 
 
@@ -331,6 +336,24 @@ class OnboardService:
             env["DEVICE_SSH_USER"] = env["DEVICE_USER"]
         return platform, script
 
+    def _transition_or_note(self, job_id, receipt_id, state):
+        """Advance the job's receipt, downgrading lifecycle races to a job
+        line. A concurrent action can retire the bound receipt between this
+        worker's steps — e.g. a re-onboard's activation supersedes it, or an
+        operator adopt replaces it. The transition then raises, and an
+        uncaught raise here would kill the worker thread BEFORE _finish(),
+        wedging the job "running" and the device "busy" until a restart.
+        Returns True iff the transition applied."""
+        if self.receipts is None or not receipt_id:
+            return True
+        try:
+            self.receipts.transition(receipt_id, state)
+            return True
+        except Exception as exc:
+            self._append(job_id, "receipt %s -> %s not applied: %s"
+                         % (receipt_id, state, exc))
+            return False
+
     def start(self, device_id, action="onboard", resolved=None, prepare=None):
         """Create a job and run the action's script on a daemon thread.
         Returns the job id immediately. action is "onboard"
@@ -391,8 +414,8 @@ class OnboardService:
                 # A receipt has already resolved platform before token minting.
                 platform, script = self._resolve(device_id, dev, env, action)
             except Exception as exc:
-                if self.receipts is not None and j.get("receipt_id"):
-                    self.receipts.transition(j["receipt_id"], "needs-reconcile")
+                self._transition_or_note(job_id, j.get("receipt_id"),
+                                         "needs-reconcile")
                 self._append(job_id, "ERROR: " + str(exc))
                 self._finish(job_id, "error", None)
                 return
@@ -411,14 +434,22 @@ class OnboardService:
                     self._append(job_id, "ERROR: %s not found in artifacts dir "
                                  "-- build device/iox/build.sh%s and place it in "
                                  "artifacts/ (device untouched)" % (pkg, flag))
-                    if self.receipts is not None and j.get("receipt_id"):
-                        self.receipts.transition(j["receipt_id"], "needs-reconcile")
+                    self._transition_or_note(job_id, j.get("receipt_id"),
+                                             "needs-reconcile")
                     self._finish(job_id, "error", None)
                     return
             try:
                 receipt_id = j.get("receipt_id")
-                if self.receipts is not None and receipt_id:
-                    self.receipts.transition(receipt_id, "applying")
+                if not self._transition_or_note(job_id, receipt_id, "applying"):
+                    # The bound receipt is no longer usable (a newer action
+                    # superseded it). Running a script rendered from a STALE
+                    # receipt would act on a box someone else just changed —
+                    # abort before touching the device.
+                    self._append(job_id, "ERROR: the job's receipt is no "
+                                 "longer active; aborting without touching "
+                                 "the device")
+                    self._finish(job_id, "error", None)
+                    return
                 if self._run_supports_proc:
                     rc = self._run(script, env,
                                    lambda line: self._append(job_id, line),
@@ -426,8 +457,7 @@ class OnboardService:
                 else:
                     rc = self._run(script, env, lambda line: self._append(job_id, line))
             except Exception as exc:
-                if self.receipts is not None and receipt_id:
-                    self.receipts.transition(receipt_id, "needs-reconcile")
+                self._transition_or_note(job_id, receipt_id, "needs-reconcile")
                 self._append(job_id, "ERROR: " + str(exc))
                 self._finish(job_id, "error", None)
                 return
@@ -439,13 +469,12 @@ class OnboardService:
                     self._clear_state(device_id)
                 except Exception:
                     pass   # a bookkeeping failure must never fail the job
-            if self.receipts is not None and receipt_id:
-                if rc != 0:
-                    self.receipts.transition(receipt_id, "needs-reconcile")
-                elif action == "onboard":
-                    self.receipts.transition(receipt_id, "active")
-                else:
-                    self.receipts.transition(receipt_id, "removed")
+            if rc != 0:
+                self._transition_or_note(job_id, receipt_id, "needs-reconcile")
+            elif action == "onboard":
+                self._transition_or_note(job_id, receipt_id, "active")
+            else:
+                self._transition_or_note(job_id, receipt_id, "removed")
             self._finish(job_id, "done" if rc == 0 else "error", rc)
 
         def run_slotted():

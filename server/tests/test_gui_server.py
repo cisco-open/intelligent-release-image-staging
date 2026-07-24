@@ -1113,6 +1113,40 @@ def test_inband_iox_onboard_defaults_ssh_host_to_mgmt_ip(tmp_path):
         stop()
 
 
+def test_reonboard_then_undeploy_starts(tmp_path):
+    """Re-onboarding a device (idempotent redeploy) and then undeploying it
+    must work: the second onboard's receipt supersedes the first, so the
+    undeploy start finds exactly one active receipt. This is the lab-observed
+    failure: two active receipts made active_for_device() raise and the
+    Console reported 'failed to start' with no reason."""
+    host, port, stop = _serve_inband(tmp_path, lambda p, e, on: 0)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        import time as _t
+
+        def _wait_done(jid):
+            deadline = _t.time() + 3
+            while _t.time() < deadline:
+                _, _, jb = _req(host, port, "GET", "/api/onboard/jobs/" + jid,
+                                headers={"Cookie": ck})
+                if json.loads(jb)["state"] in ("done", "error"):
+                    return json.loads(jb)["state"]
+                _t.sleep(0.02)
+            return "timeout"
+
+        for _ in range(2):    # onboard TWICE — the re-onboard mints receipt #2
+            st, _, b = _req(host, port, "POST", "/api/devices/edge/onboard", {},
+                            headers=hh)
+            assert st == 200
+            assert _wait_done(json.loads(b)["job_id"]) == "done"
+        st, _, b = _req(host, port, "POST", "/api/devices/edge/undeploy", {},
+                        headers=hh)
+        assert st == 200, "undeploy refused after re-onboard: %s" % b
+    finally:
+        stop()
+
+
 def test_inband_onboard_is_one_click_and_drives_inband_renderer(tmp_path):
     """Inband onboards exactly like routed: a plain POST starts a job, records a
     receipt, and runs the installer with NETWORK_ATTACHMENT=inband."""

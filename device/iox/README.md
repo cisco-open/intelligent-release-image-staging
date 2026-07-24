@@ -121,13 +121,20 @@ and verification call during an agent tick.
      run-opts 6 "-e IRIS_DEVICE_SSH_USER=<user>"
      run-opts 7 "-e IRIS_TARGET_FS=<ios-filesystem>:"
      run-opts 8 "-e IRIS_TELEMETRY=on"
+    !                                  C9k share-mount transfer only (9-11):
+     run-opts 9 "-e IRIS_SHARE_DIR=/mnt/share"
+     run-opts 10 "-e IRIS_SHARE_IOS_PATH=usbflash1:iox_host_data_share"
+     run-opts 11 "-v /vol/usb1/iox_host_data_share:/mnt/share"
    ```
 
    `install.sh` emits separate numbered `run-opts` lines because Catalyst app
-   hosting limits each option line. For the validated C9300-24UX path, use the
-   amd64 package, `APP_INTF=AppGigabitEthernet1/0/1`, and
-   `TARGET_FS=usbflash1:`. IE-3x00 defaults remain ARM64,
-   `AppGigabitEthernet1/1`, and `sdflash:`.
+   hosting limits each option line. For the validated C9300 path, use the
+   amd64 package, `APP_INTF=AppGigabitEthernet1/0/1`, `TARGET_FS=flash:`, and
+   the share pair `SHARE_HOST_PATH=/vol/usb1/iox_host_data_share`
+   `SHARE_IOS_PATH=usbflash1:iox_host_data_share` (run-opts 9-11 above; also
+   `mkdir usbflash1:iox_host_data_share` before activation so the bind-mount
+   target exists). IE-3x00 defaults remain ARM64, `AppGigabitEthernet1/1`, and
+   `sdflash:` with no share mount.
 
 5. **Verify**: `show app-hosting list` (RUNNING), `show app-hosting detail appid
    iris` (Status 0). The device then refreshes its token, downloads the assigned
@@ -137,11 +144,19 @@ and verification call during an agent tick.
 
 ## On-box staging target
 
-The agent stages the downloaded image to the selected IOS filesystem (`sdflash:`
-by installer default; use a writable platform disk such as `usbflash1:` on the
-validated C9300). IOx can't bind-mount that filesystem into the container, so
-the agent **scp-pushes** the image to
-`<target>guest-share/iris/` through the device's SCP server (`ip scp server
-enable`, set by `install.sh`). It then runs `copy /verify
-<target>guest-share/iris/<img> <target><img>` directly over the SSH-to-self IOS
-session and confirms the destination appears before reporting `ready`.
+How the agent hands the downloaded image to IOS depends on the platform:
+
+- **C9k (share mount, the Console default)**: the app-hosting SSD share
+  (`usbflash1:iox_host_data_share`, host-side `/vol/usb1/…`) is bind-mounted
+  into the container, so the agent writes the image into the share's `iris/`
+  subdirectory at disk speed and runs an IOS-internal
+  `copy /verify usbflash1:iox_host_data_share/iris/<img> flash:<img>` over the
+  SSH-to-self session — bootflash-root placement like Guest Shell, no image
+  bytes on the CoPP-policed punt path. Before the multi-GB copy the agent
+  probes that IOS can actually read the share path and otherwise falls back to
+  the scp push below; the transient share copy is removed after placement.
+- **IE-3x00 (scp push)**: IOx can't bind-mount `sdflash:` there, so the agent
+  **scp-pushes** the image to `<target>guest-share/iris/` through the device's
+  SCP server (`ip scp server enable`, set by `install.sh`), then runs
+  `copy /verify <target>guest-share/iris/<img> <target><img>` and confirms the
+  destination appears before reporting `ready`.

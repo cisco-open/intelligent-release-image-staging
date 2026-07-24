@@ -936,8 +936,13 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     return
                 if body.get("acknowledge_adopt") is not True:
                     self._json(400, {"error": "adoption acknowledgement is required"}); return
-                if receipts.active_for_device(did) is not None:
-                    self._json(409, {"error": "device already has an active receipt"}); return
+                try:
+                    if receipts.active_for_device(did) is not None:
+                        self._json(409, {"error": "device already has an active receipt"}); return
+                except ValueError as exc:
+                    # duplicate actives (legacy store not yet healed) — surface
+                    # the reason like the undeploy branch, not a dropped request
+                    self._json(409, {"error": str(exc)}); return
                 try:
                     plan = self._plan(did, device)
                 except ValueError as exc:
@@ -994,7 +999,13 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     # post-deploy inventory edit cannot retarget cleanup. Without
                     # a receipt store, fall back to legacy fleet-driven teardown.
                     if receipts is not None:
-                        receipt = receipts.active_for_device(did)
+                        try:
+                            receipt = receipts.active_for_device(did)
+                        except ValueError as exc:
+                            # duplicate actives should be impossible (activation
+                            # supersedes siblings; startup collapses legacy dupes)
+                            # — but surface the reason instead of a 500 if not.
+                            self._json(409, {"error": str(exc)}); return
                         if receipt is None:
                             self._json(409, {"error": "no active receipt; adopt the device "
                                              "first, then undeploy"}); return

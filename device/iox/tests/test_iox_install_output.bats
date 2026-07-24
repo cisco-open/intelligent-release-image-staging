@@ -83,6 +83,48 @@ setup() {
   [[ "$output" == *"vlan 666"* ]] && [[ "$output" == *"interface Vlan666"* ]]
 }
 
+# --- C9k share-mount transfer (Route B): the app-hosting SSD share is bind-
+# mounted into the container so the agent lands its scratch at disk speed and
+# placement is an IOS-internal copy — no scp, no punt path, no CoPP cap. ---
+
+@test "share dry-run renders the bind-mount run-opts and the share env" {
+  VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
+    SHARE_HOST_PATH=/vol/usb1/iox_host_data_share \
+    SHARE_IOS_PATH=usbflash1:iox_host_data_share \
+    run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'-v /vol/usb1/iox_host_data_share:/mnt/share'* ]] && \
+  [[ "$output" == *'-e IRIS_SHARE_DIR=/mnt/share'* ]] && \
+  [[ "$output" == *'-e IRIS_SHARE_IOS_PATH=usbflash1:iox_host_data_share'* ]] && \
+  [[ "$output" == *"mkdir usbflash1:iox_host_data_share"* ]]
+}
+
+@test "share run-opts render INSIDE the app-hosting docker block (before end)" {
+  # app-hosting silently ignores run-opts rendered after the block's `end`,
+  # so the mount would vanish while every substring gate still passed —
+  # assert the line that immediately follows run-opts 11 is `end`.
+  VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
+    SHARE_HOST_PATH=/vol/usb1/iox_host_data_share \
+    SHARE_IOS_PATH=usbflash1:iox_host_data_share \
+    run bash "$INSTALL" --dry-run
+  after="$(printf '%s\n' "$output" | grep -A1 'run-opts 11' | tail -1)"
+  [ "$after" = "end" ]
+}
+
+@test "without SHARE env no bind-mount is rendered (IE-3x00 default unchanged)" {
+  VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
+    run bash "$INSTALL" --dry-run
+  [[ "$output" != *'-v /vol/'* ]] && \
+  [[ "$output" != *'IRIS_SHARE_DIR'* ]]
+}
+
+@test "SHARE env is all-or-nothing" {
+  VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
+    SHARE_HOST_PATH=/vol/usb1/iox_host_data_share \
+    run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ] && [[ "$output" == *"SHARE_IOS_PATH"* ]]
+}
+
 @test "IOx install retries app-hosting verification disable until it succeeds" {
   install="$BATS_TEST_DIRNAME/../install.sh"
   run grep -F 'app-hosting verification disable' "$install"

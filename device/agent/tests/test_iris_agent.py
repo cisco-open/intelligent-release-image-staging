@@ -899,6 +899,203 @@ def test_copy_to_root_direct_reverify_false_returns_false():
     assert all(m != "ROOTCOPY" for m, _ in emitted)
 
 
+def test_copy_to_root_direct_deletes_scp_scratch_after_success():
+    # container scp path: the guest-share scratch is a transfer intermediary
+    # (the swarm seeds from the CAF-persistent stage_dir, unlike Guest Shell,
+    # where guest-share IS the stage dir) — leaving it kept a permanent
+    # duplicate image on the target FS, doubling steady-state usage
+    cli_calls = []
+    ok = iris_agent._copy_to_root_direct_impl(
+        "img1.bin", "flash:", lambda c: cli_calls.append(c) or "",
+        lambda m, msg: None, reverify_fn=lambda *a: True,
+        delete_source_on_success=True)
+    assert ok is True
+    assert cli_calls[-1] == "delete /force flash:/guest-share/iris/img1.bin"
+
+
+def test_copy_to_root_direct_keeps_scratch_on_failure():
+    # a failed placement must keep the pushed scratch: the next tick's retry
+    # would otherwise re-push the whole image over the slow scp path
+    cli_calls = []
+    ok = iris_agent._copy_to_root_direct_impl(
+        "img1.bin", "flash:", lambda c: cli_calls.append(c) or "",
+        lambda m, msg: None, reverify_fn=lambda *a: False,
+        delete_source_on_success=True)
+    assert ok is False
+    assert all(not c.startswith("delete /force flash:/guest-share")
+               for c in cli_calls)
+
+
+# --- Share-mount staging (C9k IOx): the app-hosting SSD share
+# (usbflash1:iox_host_data_share) is bind-mounted into the container, so the
+# agent lands its scratch there at DISK speed and the final placement is an
+# IOS-internal `copy /verify` from the SSD to the target FS — no scp, no
+# control-plane punt path, no CoPP ceiling. Falls back to the scp push when
+# the share is not mounted (IE-3x00, or a failed -v mount). ---
+
+def _mk_scratch(tmp_path, fname="img1.bin", content=b"IMAGEBYTES"):
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    (stage / fname).write_bytes(content)
+    return str(stage)
+
+
+def _cli_probe_ok(cmd):
+    # a `dir <share>/iris/<probe>` transcript that lists the probe file
+    assert cmd.startswith("dir ")
+    return "  12 -rw-  4  " + cmd.split("/")[-1]
+
+
+def _share_files(share):
+    sub = share / "iris"
+    return sorted(p.name for p in sub.iterdir()) if sub.is_dir() else []
+
+
+def test_stage_via_share_lands_file_then_copy_verifies_from_share(tmp_path):
+    stage = _mk_scratch(tmp_path)
+    share = tmp_path / "share"
+    share.mkdir()
+    seen = {}
+
+    def copy_direct(copy_source):
+        # the share copy must be fully in place when copy /verify fires
+        seen["source"] = copy_source("img1.bin", "flash:")
+        seen["bytes"] = (share / "iris" / "img1.bin").read_bytes()
+        return True
+
+    ok = iris_agent._stage_via_share_impl(
+        "img1.bin", stage, str(share), "usbflash1:iox_host_data_share",
+        copy_direct, lambda m, msg: None, _cli_probe_ok)
+    assert ok is True
+    # IRIS stages under its OWN subdirectory of the shared CAF dir, so sweeps
+    # and undeploy cleanup can never touch an operator's files in the share
+    assert seen["source"] == "usbflash1:iox_host_data_share/iris/img1.bin"
+    assert seen["bytes"] == b"IMAGEBYTES"
+    # transient copy + probe removed after placement, no .part leftovers
+    assert _share_files(share) == []
+
+
+def test_stage_via_share_returns_none_when_share_dir_missing(tmp_path):
+    stage = _mk_scratch(tmp_path)
+    calls = []
+    result = iris_agent._stage_via_share_impl(
+        "img1.bin", stage, str(tmp_path / "nope"), "usbflash1:iox_host_data_share",
+        lambda copy_source: calls.append(1) or True, lambda m, msg: None,
+        _cli_probe_ok)
+    assert result is None          # None = share unavailable -> caller falls back
+    assert calls == []
+
+
+def test_stage_via_share_returns_none_when_share_unset(tmp_path):
+    stage = _mk_scratch(tmp_path)
+    result = iris_agent._stage_via_share_impl(
+        "img1.bin", stage, "", "usbflash1:iox_host_data_share",
+        lambda copy_source: True, lambda m, msg: None, _cli_probe_ok)
+    assert result is None
+
+
+def test_stage_via_share_probe_failure_falls_back_before_big_copy(tmp_path):
+    # The bind mount exists container-side but IOS cannot read the path (wrong
+    # SHARE_IOS_PATH for this box — e.g. a stacked C9300 enumerating the SSD
+    # differently, or an operator override typo). Without the probe this
+    # wedged the device: a multi-GB copy into the share, then a ~15-minute
+    # reverify timeout, with the working scp fallback permanently suppressed.
+    stage = _mk_scratch(tmp_path, content=b"X" * 4096)
+    share = tmp_path / "share"
+    share.mkdir()
+    emitted, calls = [], []
+    result = iris_agent._stage_via_share_impl(
+        "img1.bin", stage, str(share), "usbflash1:WRONG",
+        lambda copy_source: calls.append(1) or True,
+        lambda m, msg: emitted.append((m, msg)),
+        lambda cmd: "%Error opening usbflash1:WRONG/iris/ (No such device)")
+    assert result is None          # -> scp fallback
+    assert calls == []             # copy /verify never attempted
+    assert any(m == "SHARE-FALLBACK" for m, _ in emitted)
+    assert _share_files(share) == []   # probe cleaned up, image never copied
+
+
+def test_stage_via_share_probe_transport_error_falls_back(tmp_path):
+    stage = _mk_scratch(tmp_path)
+    share = tmp_path / "share"
+    share.mkdir()
+
+    def cli_raises(cmd):
+        raise RuntimeError("ssh transport failed")
+
+    result = iris_agent._stage_via_share_impl(
+        "img1.bin", stage, str(share), "usbflash1:iox_host_data_share",
+        lambda copy_source: True, lambda m, msg: None, cli_raises)
+    assert result is None
+    assert _share_files(share) == []
+
+
+def test_stage_via_share_sweeps_orphans_from_killed_ticks(tmp_path):
+    # a tick killed mid-transfer leaves a full-size image or .part in OUR
+    # subdir; the next attempt must sweep them so multi-GB junk never
+    # accumulates on the operator's SSD
+    stage = _mk_scratch(tmp_path)
+    share = tmp_path / "share"
+    (share / "iris").mkdir(parents=True)
+    (share / "iris" / "old-image.bin").write_bytes(b"ORPHAN")
+    (share / "iris" / ".old-image.bin.part").write_bytes(b"HALF")
+    (share / "operator-file.txt").write_bytes(b"NOT OURS")   # share root: untouched
+    ok = iris_agent._stage_via_share_impl(
+        "img1.bin", stage, str(share), "usbflash1:iox_host_data_share",
+        lambda copy_source: True, lambda m, msg: None, _cli_probe_ok)
+    assert ok is True
+    assert _share_files(share) == []
+    assert (share / "operator-file.txt").read_bytes() == b"NOT OURS"
+
+
+def test_stage_via_share_local_copy_failure_falls_back(tmp_path):
+    # scratch file missing entirely -> emit a breadcrumb and hand back to scp
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    share = tmp_path / "share"
+    share.mkdir()
+    emitted, calls = [], []
+    result = iris_agent._stage_via_share_impl(
+        "img1.bin", str(stage), str(share), "usbflash1:iox_host_data_share",
+        lambda copy_source: calls.append(1) or True,
+        lambda m, msg: emitted.append((m, msg)), _cli_probe_ok)
+    assert result is None
+    assert calls == []
+    assert any(m == "SHARE-FALLBACK" for m, _ in emitted)
+    assert _share_files(share) == []   # no partial left behind
+
+
+def test_stage_via_share_copy_verify_failure_is_final_and_cleans_up(tmp_path):
+    # IOS-side copy /verify genuinely failed AFTER a successful probe (e.g.
+    # signature rejection): scp would push the SAME bytes, so there is no
+    # fallback — the verdict is False and the share copy is still removed.
+    stage = _mk_scratch(tmp_path)
+    share = tmp_path / "share"
+    share.mkdir()
+    ok = iris_agent._stage_via_share_impl(
+        "img1.bin", stage, str(share), "usbflash1:iox_host_data_share",
+        lambda copy_source: False, lambda m, msg: None, _cli_probe_ok)
+    assert ok is False
+    assert _share_files(share) == []
+
+
+def test_share_settings_env_wins_over_conf(monkeypatch):
+    monkeypatch.setenv("IRIS_SHARE_DIR", "/mnt/share")
+    monkeypatch.setenv("IRIS_SHARE_IOS_PATH", "usbflash1:iox_host_data_share")
+    d, p = iris_agent._share_settings(
+        {"share_dir": "/conf/dir", "share_ios_path": "conf:path"})
+    assert (d, p) == ("/mnt/share", "usbflash1:iox_host_data_share")
+
+
+def test_share_settings_falls_back_to_conf_then_empty(monkeypatch):
+    monkeypatch.delenv("IRIS_SHARE_DIR", raising=False)
+    monkeypatch.delenv("IRIS_SHARE_IOS_PATH", raising=False)
+    assert iris_agent._share_settings(
+        {"share_dir": "/conf/dir", "share_ios_path": "conf:path"}) == \
+        ("/conf/dir", "conf:path")
+    assert iris_agent._share_settings({}) == ("", "")
+
+
 # --- Schema migration guard for Flaw 1 (upgrade-path bypass): a device
 # carrying pre-v2 state from the old buggy agent would otherwise enter
 # steady-state on first tick and never re-verify the existing flash-root

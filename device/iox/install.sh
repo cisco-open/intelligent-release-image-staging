@@ -60,6 +60,17 @@ esac
 
 CATALOG_URL="${CATALOG_URL:-https://$STAGE_HOST:8443}"
 APP_INTF="${APP_INTF:-AppGigabitEthernet1/1}"
+# C9k share-mount transfer (Route B): bind-mount the app-hosting SSD share into
+# the container so the agent lands its scratch at disk speed and IOS places it
+# with an internal disk-to-disk copy — no scp, no CoPP-policed punt traffic.
+# Both or neither: SHARE_HOST_PATH is the host-side dir (/vol/usb1/...),
+# SHARE_IOS_PATH the same dir as IOS sees it (usbflash1:iox_host_data_share).
+SHARE_HOST_PATH="${SHARE_HOST_PATH:-}"; SHARE_IOS_PATH="${SHARE_IOS_PATH:-}"
+if [ -n "$SHARE_HOST_PATH$SHARE_IOS_PATH" ] && \
+   { [ -z "$SHARE_HOST_PATH" ] || [ -z "$SHARE_IOS_PATH" ]; }; then
+  echo "ERROR: SHARE_HOST_PATH and SHARE_IOS_PATH must be set together" >&2
+  exit 2
+fi
 CPU="${CPU:-400}"; MEM="${MEM:-768}"; DISK="${DISK:-2048}"
 PKG="${PKG:-iris-arm64.tar}"; PKG_FS="${PKG_FS:-flash:}"
 DEVICE_SSH_USER="${DEVICE_SSH_USER:-dnac}"
@@ -158,8 +169,15 @@ app-hosting appid $APPID
   run-opts 6 "-e IRIS_DEVICE_SSH_USER=$DEVICE_SSH_USER"
   run-opts 7 "-e IRIS_TARGET_FS=$TARGET_FS"
   run-opts 8 "-e IRIS_TELEMETRY=$IRIS_TELEMETRY"
-end
 EOF
+if [ -n "$SHARE_HOST_PATH" ]; then
+cat <<EOF
+  run-opts 9 "-e IRIS_SHARE_DIR=/mnt/share"
+  run-opts 10 "-e IRIS_SHARE_IOS_PATH=$SHARE_IOS_PATH"
+  run-opts 11 "-v $SHARE_HOST_PATH:/mnt/share"
+EOF
+fi
+echo "end"
 }
 
 iox_ready() {
@@ -212,6 +230,10 @@ if [ "$DRY" -eq 1 ]; then
   trustpoint_block
   echo "===== APP-HOSTING appid $APPID (app SSHes to IOS at $IOS_SSH_HOST for copy /verify) ====="
   appid_block
+  if [ -n "$SHARE_IOS_PATH" ]; then
+    echo "===== SHARE (created on IOS before activation so the bind-mount target exists) ====="
+    echo "mkdir $SHARE_IOS_PATH"
+  fi
   echo "===== INSTALL COPY (over verified https) ====="
   printf 'copy https://%s:8000/%s %s%s\n' "$STAGE_HOST" "$PKG" "$PKG_FS" "$PKG"
   echo "===== app-hosting install -> activate -> start appid $APPID, then persist ====="
@@ -229,6 +251,20 @@ printf 'configure terminal\nno app-hosting appid %s\nend\n' "$APPID" | RUN >/dev
 
 echo "[2/8] apply IOx networking ($NETWORK_ATTACHMENT: IOx enable$([ "$NETWORK_ATTACHMENT" = inband ] && echo ", existing VLAN preserved" || echo ", VLAN $VLAN, $APP_INTF, Vlan$VLAN SVI"))"
 { echo "configure terminal"; ios_net; } | RUN >/dev/null
+
+# The share dir must exist BEFORE activation binds it into the container.
+# Idempotent ("already exists" is fine; the blank line answers the "Create
+# directory" prompt on boxes without `file prompt quiet` yet), but a real
+# failure (missing/unwritable SSD) is WARNED, not silent — the agent's share
+# probe will fall back to scp at runtime, and this line says why.
+if [ -n "$SHARE_IOS_PATH" ]; then
+  mk_out="$(printf 'mkdir %s\n\n' "$SHARE_IOS_PATH" | RUN 2>/dev/null || true)"
+  case "$mk_out" in
+    *%Error*|*Invalid*) echo "  WARN: mkdir $SHARE_IOS_PATH failed on the device:" \
+      "$(printf '%s' "$mk_out" | grep -Eo '%Error[^\r]*|Invalid[^\r]*' | head -1)" \
+      "— the agent will fall back to scp for image transfer" ;;
+  esac
+fi
 
 echo "    waiting for IOx app-hosting services after enable"
 wait_iox_ready 180 || {

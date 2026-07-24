@@ -14,6 +14,7 @@ import json
 import os
 import random
 import re
+import shutil
 import sys
 import time
 
@@ -793,7 +794,8 @@ def _copy_to_root_impl(fname, target_prefix, cli_configure_fn, cli_execute_fn,
 
 
 def _copy_to_root_direct_impl(fname, target_prefix, cli_execute_fn, emit_fn,
-                             reverify_fn=_agent_reverify_root, copy_source=None):
+                             reverify_fn=_agent_reverify_root, copy_source=None,
+                             delete_source_on_success=False):
     """Copy the staged image to the target-FS root by running `copy /verify`
     DIRECTLY in the agent's IOS vty — no EEM applet. This is the container /
     SSH-to-self (IE-3x00) path.
@@ -826,7 +828,111 @@ def _copy_to_root_direct_impl(fname, target_prefix, cli_execute_fn, emit_fn,
     except Exception as e:
         emit_fn("ROOTCOPY-FAIL", "%s direct copy /verify raised: %s" % (fname, e))
         return False
-    return reverify_fn(fname, target_prefix, cli_execute_fn, emit_fn)
+    ok = reverify_fn(fname, target_prefix, cli_execute_fn, emit_fn)
+    # In container mode the scp-pushed guest-share scratch is a transfer
+    # intermediary (the swarm seeds from the CAF-persistent stage_dir), so a
+    # verified placement deletes it — otherwise a duplicate image doubles
+    # steady-state target-FS usage. Kept on failure: the next tick re-runs
+    # copy /verify from it instead of re-pushing over the slow scp path.
+    if ok and delete_source_on_success:
+        try:
+            cli_execute_fn("delete /force %s" % src)
+        except Exception:
+            pass
+    return ok
+
+
+def _share_settings(cfg):
+    """(share_dir, share_ios_path) for the C9k SSD share mount. The app-hosting
+    run-opts set the environment (the normal path); conf keys are the fallback
+    so a hand-dropped config can steer it too. Empty strings = no share."""
+    return (os.environ.get("IRIS_SHARE_DIR") or cfg.get("share_dir") or "",
+            os.environ.get("IRIS_SHARE_IOS_PATH")
+            or cfg.get("share_ios_path") or "")
+
+
+_SHARE_SUBDIR = "iris"        # OUR subdir of the shared CAF dir: sweeps and
+_SHARE_PROBE = ".iris-probe"  # undeploy cleanup can never touch operator files
+
+
+def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
+                          copy_direct_fn, emit_fn, cli_execute_fn):
+    """Land the downloaded scratch in the bind-mounted app-hosting share
+    (C9k: usbflash1:iox_host_data_share, mounted into the container via
+    run-opts -v), then have IOS place it with an INTERNAL disk-to-disk
+    `copy /verify` — no scp, no control-plane punt path, no CoPP ceiling.
+
+    Everything IRIS writes lives under the share's iris/ subdirectory, so the
+    orphan sweep below and undeploy's share cleanup can never touch operator
+    files in the shared CAF directory. Each attempt starts by sweeping that
+    subdir — a tick killed mid-transfer (re-onboard's app teardown, CAF
+    restart, power loss) can strand a full-size image or .part there, and
+    nothing else would ever reclaim the space.
+
+    Before committing to the multi-GB copy, a tiny probe file is written and
+    `dir`-checked THROUGH IOS: the bind mount proves only the container side,
+    not that share_ios_path names this box's view of the same directory (a
+    stacked C9300 can enumerate the SSD differently; an operator override can
+    be wrong). An IOS-unreadable share must fall back to scp — without the
+    probe it burned a full SSD write plus a ~15-minute reverify timeout per
+    tick, wedging the device while the working fallback sat suppressed.
+
+    Returns None when the share cannot be used (unconfigured, not mounted,
+    probe failed, or the local copy failed) so the caller falls back to the
+    scp push. Otherwise returns copy_direct_fn's bool verdict: an IOS-side
+    `copy /verify` failure AFTER a good probe is FINAL — scp would push the
+    same bytes. The transient share copy is always removed (the swarm seeds
+    from the scratch under stage_dir, not from the share)."""
+    if not (share_dir and share_ios_path and os.path.isdir(share_dir)):
+        return None
+    sub = os.path.join(share_dir, _SHARE_SUBDIR)
+    ios_sub = "%s/%s" % (share_ios_path, _SHARE_SUBDIR)
+
+    def _sweep():
+        try:
+            for leftover in os.listdir(sub):
+                try:
+                    os.remove(os.path.join(sub, leftover))
+                except OSError:
+                    pass
+        except OSError:
+            pass
+
+    try:
+        os.makedirs(sub, exist_ok=True)
+    except OSError as e:
+        emit_fn("SHARE-FALLBACK",
+                "%s share subdir failed (%s); falling back to scp" % (fname, e))
+        return None
+    _sweep()
+    probe = os.path.join(sub, _SHARE_PROBE)
+    try:
+        with open(probe, "w") as stream:
+            stream.write("iris")
+        listing = cli_execute_fn("dir %s/%s" % (ios_sub, _SHARE_PROBE))
+        if _SHARE_PROBE not in (listing or ""):
+            raise OSError("IOS cannot read %s" % ios_sub)
+    except Exception as e:
+        emit_fn("SHARE-FALLBACK",
+                "%s share probe failed (%s); falling back to scp" % (fname, e))
+        _sweep()
+        return None
+    local = os.path.join(stage_dir, fname)
+    staged = os.path.join(sub, fname)
+    part = os.path.join(sub, ".%s.part" % fname)
+    try:
+        shutil.copyfile(local, part)
+        os.replace(part, staged)
+    except OSError as e:
+        emit_fn("SHARE-FALLBACK",
+                "%s share copy failed (%s); falling back to scp" % (fname, e))
+        _sweep()
+        return None
+    try:
+        return copy_direct_fn(
+            lambda f, target_prefix: "%s/%s" % (ios_sub, f))
+    finally:
+        _sweep()
 
 
 # ---- on-box wiring (not exercised by unit tests) ----
@@ -882,20 +988,39 @@ def build_deps(cfg, conf_path):  # pragma: no cover
         # behavioural tests can inject all callables and prove the success log
         # is gated by _agent_reverify_root's pass.
         if _mode == "container" and _transport is not None:
-            # IE-3x00 / container: push the scratch onto the IOS-visible SD,
-            # then `copy /verify` DIRECTLY over the SSH-to-self vty. The EEM
-            # applet offload is only needed for the C9300 Guest Shell cli module
-            # (can't drive interactive copy); a real vty runs copy fine, and the
-            # EEM `cli command "copy"` action is a no-op on this platform — so
-            # the direct path is both correct and necessary here.
+            # C9k container: the SSD share (usbflash1:iox_host_data_share) is
+            # bind-mounted at IRIS_SHARE_DIR, so the scratch lands there at
+            # disk speed and IOS places it with an internal disk-to-disk
+            # `copy /verify` — no scp, no CoPP-policed punt traffic. None =
+            # share unusable -> fall through to the scp push below.
+            share_dir, share_ios_path = _share_settings(cfg)
+            if share_dir:
+                shared = _stage_via_share_impl(
+                    fname, cfg["stage_dir"], share_dir, share_ios_path,
+                    lambda copy_source: _copy_to_root_direct_impl(
+                        fname, target_prefix, cli_execute, emit,
+                        copy_source=copy_source),
+                    emit, cli_execute)
+                if shared is not None:
+                    return shared
+            # IE-3x00 / container fallback: push the scratch onto the
+            # IOS-visible SD, then `copy /verify` DIRECTLY over the SSH-to-self
+            # vty. The EEM applet offload is only needed for the C9300 Guest
+            # Shell cli module (can't drive interactive copy); a real vty runs
+            # copy fine, and the EEM `cli command "copy"` action is a no-op on
+            # this platform — so the direct path is both correct and necessary.
             try:
                 _push_scratch(fname, target_prefix)
             except Exception as e:
                 emit("ROOTCOPY-FAIL",
                      "%s scp push to %s failed: %s" % (fname, target_prefix, e))
                 return False
+            # NOTE: like the Guest Shell path, placement transiently needs
+            # ~2x the image on the target FS (scratch + root copy); the
+            # verified-delete below reclaims the scratch afterwards.
             return _copy_to_root_direct_impl(fname, target_prefix,
-                                             cli_execute, emit)
+                                             cli_execute, emit,
+                                             delete_source_on_success=True)
         return _copy_to_root_impl(fname, target_prefix,
                                   cli_configure, cli_execute, emit)
 

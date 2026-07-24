@@ -96,3 +96,15 @@ setup() {
   [[ "$output" != *"no crypto pki trustpoint"* ]] && \
   [[ "$output" != *"no ip http client"* ]]
 }
+
+@test "dry-run with SHARE_IOS_PATH removes only the iris/ share subdir" {
+  SHARE_IOS_PATH=usbflash1:iox_host_data_share run bash "$UNINSTALL" --dry-run
+  [[ "$output" == *"delete /force /recursive usbflash1:iox_host_data_share/iris"* ]] && \
+  [[ "$output" != *"delete /force /recursive usbflash1:iox_host_data_share
+"* ]]
+}
+
+@test "dry-run without SHARE_IOS_PATH never touches the CAF share" {
+  run bash "$UNINSTALL" --dry-run
+  [[ "$output" != *"iox_host_data_share"* ]]
+}

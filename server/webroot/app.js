@@ -364,9 +364,9 @@
       function (cb) { return cb.getAttribute('data-id'); });
     if (!ids.length) { devStatus.textContent = 'No devices selected.'; return; }
     if (action === 'undeploy' &&
-        !confirm('Undeploy ' + ids.length + ' device(s)?\n\nThis removes the device agent, ' +
-                  'guestshell and only receipt-owned resources. Inband deployments preserve their existing network. Staged images at ' +
-                 'flash root are left in place). Running jobs are never interrupted.')) return;
+        !confirm('Undeploy ' + ids.length + ' device(s)?\n\nThis removes the device agent ' +
+                  '(Guest Shell or IOx app) and only receipt-owned resources. Inband deployments preserve their existing network. Staged images at ' +
+                 'flash root are left in place. Running jobs are never interrupted.')) return;
     onBtn.disabled = true; unBtn.disabled = true;   // no overlapping batches from double-clicks
     var gen = ++batchGen;
     stopBatchPoll();
@@ -379,7 +379,12 @@
       await Promise.all(ids.map(async function (id) {
         try {
           var r = await jpost('/api/devices/' + encodeURIComponent(id) + '/' + action, {});
-          if (r.ok) { batchJobs[(await r.json()).job_id] = id; } else { failed.push(id); }
+          if (r.ok) { batchJobs[(await r.json()).job_id] = id; } else {
+            // surface WHY it was refused — a bare id reads as a mystery
+            var reason = '';
+            try { reason = (await r.json()).error || ''; } catch (e2) { }
+            failed.push(reason ? id + ' (' + reason + ')' : id);
+          }
         } catch (e) { failed.push(id); }   // one blipped POST must not kill the batch
       }));
     } finally {

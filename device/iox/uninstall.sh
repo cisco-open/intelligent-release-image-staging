@@ -12,7 +12,9 @@
 #   - remove any IRIS-COPYROOT / IRIS-AGENT EEM applet the agent created at
 #     runtime for its copy /verify (no-op if absent — IOx has no 60s timer)
 #   - remove crypto pki trustpoint IRIS + ip http client secure-trustpoint IRIS
-#   - delete the staged app package (<pkg-fs>iris-arm64.tar)
+#   - delete the staged app package (<pkg-fs>iris-arm64.tar) and, on C9k share
+#     deployments, the IRIS iris/ subdir of the CAF share (transient transfer
+#     copies; the share root itself is operator space and never touched)
 # Deliberately LEFT IN PLACE (the installer re-applies the first three
 # idempotently; the last two are generic + a delivered artifact):
 #   iox, file prompt quiet, the AppGigabitEthernet trunk, ip scp server enable,
@@ -34,6 +36,10 @@ NETWORK_ATTACHMENT="${NETWORK_ATTACHMENT:-routed}"
 VLAN_IN="${VLAN:-${INBAND_VLAN:-}}"
 VLAN="${VLAN_IN:-666}"
 PKG="${PKG:-iris-arm64.tar}"; PKG_FS="${PKG_FS:-flash:}"
+# C9k share-mount transfer: when set, [3/4] also deletes OUR iris/ subdir of
+# the shared CAF dir (transient image copies orphaned by a mid-transfer kill).
+# Never the share root — operator files there are not IRIS's to remove.
+SHARE_IOS_PATH="${SHARE_IOS_PATH:-}"
 APPID=iris
 
 config_cleanup() {
@@ -77,6 +83,9 @@ if [ "$DRY" -eq 1 ]; then
   echo "===== [2/4] remove config footprint (appid, VLAN$VLAN, applets, trustpoint) ====="
   config_cleanup
   echo "===== [3/4] delete ${PKG_FS}${PKG} ====="
+  if [ -n "$SHARE_IOS_PATH" ]; then
+    echo "delete /force /recursive $SHARE_IOS_PATH/iris"
+  fi
   echo "===== [4/4] verify no '$APPID' app / config footprint remains ====="
    echo "===== PERSIST: copy running-config startup-config (after successful cleanup) ====="
    echo "===== LEFT IN PLACE: iox, file prompt quiet, AppGig trunk, ip scp server, sdflash image ====="
@@ -115,6 +124,10 @@ fi
 
 echo "[3/4] delete ${PKG_FS}${PKG} (the staged IOx app package)"
 printf 'delete /force %s%s\n' "$PKG_FS" "$PKG" | RUN >/dev/null 2>&1 || true
+if [ -n "$SHARE_IOS_PATH" ]; then
+  echo "  also removing the IRIS share subdir ($SHARE_IOS_PATH/iris)"
+  printf 'delete /force /recursive %s/iris\n\n' "$SHARE_IOS_PATH" | RUN >/dev/null 2>&1 || true
+fi
 
 echo "[4/4] verify no '$APPID' app and no config footprint remains"
 if [ "$NETWORK_ATTACHMENT" = "inband" ]; then

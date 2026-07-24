@@ -90,3 +90,82 @@ def test_create_rejects_secrets_and_invalid_shape(tmp_path, bad):
     store = deployment_receipts.ReceiptStore(str(tmp_path))
     with pytest.raises(ValueError):
         store.create(bad)
+
+
+# --- Re-onboard lifecycle: a device is re-onboarded (idempotent teardown +
+# redeploy), so the NEW receipt's activation must retire the old active one.
+# Without this, actives accumulate and active_for_device() refuses undeploy
+# ("multiple active receipts") — the lab-observed IOx undeploy failure. ---
+
+def test_activation_supersedes_prior_active_for_device(tmp_path):
+    store = deployment_receipts.ReceiptStore(str(tmp_path), now_fn=lambda: 100)
+    store.create(_receipt(receipt_id="old"))
+    store.transition("old", "applying")
+    store.transition("old", "active")
+    store.create(_receipt(receipt_id="new"))
+    store.transition("new", "applying")
+    store.transition("new", "active")
+    assert store.get("old")["state"] == "superseded"
+    assert store.get("new")["state"] == "active"
+    assert store.active_for_device("edge-01")["receipt_id"] == "new"
+
+
+def test_activation_leaves_other_devices_actives_alone(tmp_path):
+    store = deployment_receipts.ReceiptStore(str(tmp_path), now_fn=lambda: 100)
+    store.create(_receipt(receipt_id="other", device_id="edge-99"))
+    store.transition("other", "applying")
+    store.transition("other", "active")
+    store.create(_receipt(receipt_id="mine"))
+    store.transition("mine", "applying")
+    store.transition("mine", "active")
+    assert store.get("other")["state"] == "active"
+    assert store.active_for_device("edge-99")["receipt_id"] == "other"
+
+
+def test_superseded_is_terminal(tmp_path):
+    store = deployment_receipts.ReceiptStore(str(tmp_path), now_fn=lambda: 100)
+    store.create(_receipt(receipt_id="old"))
+    store.transition("old", "applying")
+    store.transition("old", "active")
+    store.create(_receipt(receipt_id="new"))
+    store.transition("new", "applying")
+    store.transition("new", "active")
+    for state in ("active", "applying", "removed", "needs-reconcile"):
+        with pytest.raises(ValueError, match="invalid receipt transition"):
+            store.transition("old", state)
+
+
+def test_adopt_supersedes_existing_active(tmp_path):
+    store = deployment_receipts.ReceiptStore(str(tmp_path), now_fn=lambda: 100)
+    store.create(_receipt(receipt_id="old"))
+    store.transition("old", "applying")
+    store.transition("old", "active")
+    adopted = store.adopt(_receipt(receipt_id="a1"))
+    assert adopted["state"] == "active"
+    assert store.get("old")["state"] == "superseded"
+    assert store.active_for_device("edge-01")["receipt_id"] == "a1"
+
+
+def test_recover_interrupted_collapses_legacy_duplicate_actives(tmp_path):
+    # Simulate the on-disk legacy state written by the pre-supersede code:
+    # two actives for one device (differing activation times) — undeploy was
+    # refused for exactly this shape on the lab server. Startup recovery must
+    # keep the NEWEST active and retire the rest, deterministically.
+    import json as _json
+    legacy = {"receipts": {
+        "r-old": dict(_receipt(receipt_id="r-old"), state="active",
+                      timestamps={"planned_at": 10, "finished_at": 100}),
+        "r-new": dict(_receipt(receipt_id="r-new"), state="active",
+                      timestamps={"planned_at": 20, "finished_at": 200}),
+        "r-other": dict(_receipt(receipt_id="r-other", device_id="edge-99"),
+                        state="active",
+                        timestamps={"planned_at": 10, "finished_at": 50}),
+    }}
+    path = tmp_path / "deployment_receipts.json"
+    path.write_text(_json.dumps(legacy))
+    store = deployment_receipts.ReceiptStore(str(tmp_path), now_fn=lambda: 300)
+    store.recover_interrupted()
+    assert store.get("r-old")["state"] == "superseded"
+    assert store.get("r-new")["state"] == "active"
+    assert store.get("r-other")["state"] == "active"   # single active untouched
+    assert store.active_for_device("edge-01")["receipt_id"] == "r-new"

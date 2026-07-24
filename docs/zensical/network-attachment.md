@@ -103,11 +103,15 @@ certificates, or raw device configuration. Their lifecycle is fail-closed:
 
 ```text
 planned → applying → active → (applying) → removed
-                 ↘ unknown / needs-reconcile / drifted
+                 ↘ unknown / needs-reconcile / drifted / superseded
 ```
 
 A controller restart converts any non-terminal (`planned`/`applying`) receipt to
-`unknown`; in-flight device work is never silently resumed.
+`unknown`; in-flight device work is never silently resumed. A device has exactly
+one live deployment, so when a new receipt becomes `active` — a re-onboard's
+idempotent redeploy, or an explicit adopt — any previous `active` receipt for
+that device is retired to the terminal `superseded` state. Undeploy therefore
+always finds at most one active receipt.
 
 Undeploy renders **exclusively from an active receipt**, never from the editable
 inventory — so changing a VLAN, model, or CSV import after onboarding cannot

@@ -44,6 +44,17 @@ additionally never creates, changes, or removes the operator's existing network.
   Validation pages.
 
 ### Changed
+- **C9300 IOx image transfer no longer uses scp**: onboarding bind-mounts the
+  app-hosting SSD share (`usbflash1:iox_host_data_share`) into the container,
+  the agent lands its verified scratch in the share's `iris/` subdirectory at
+  disk speed, and IOS places it with an internal `copy /verify` onto bootflash
+  — the same final placement as Guest Shell, with no image bytes on the
+  CoPP-policed control-plane punt path (which capped scp at ~1.4 MB/s by
+  default). IRIS stays inside its own `iris/` subdirectory of the shared CAF
+  dir: each attempt sweeps its own orphans, a probe verifies IOS can read the
+  share path before any multi-GB copy (falling back to the scp push
+  otherwise), and undeploy removes the subdirectory. IE-3x00 keeps the scp
+  push unchanged.
 - Onboarding resolves an immutable plan and records a receipt before any device
   contact; the platform is resolved before the plan hash so a receipt binds the
   exact rendered plan.
@@ -65,6 +76,18 @@ additionally never creates, changes, or removes the operator's existing network.
   bare VLAN/SVI value.
 
 ### Fixed
+- Re-onboarding a device no longer accumulates duplicate `active` deployment
+  receipts (which made a later undeploy fail to start with no visible reason):
+  a receipt reaching `active` — or an adopt — now retires any previous active
+  receipt for that device to the new terminal `superseded` state, and server
+  startup collapses legacy duplicates by keeping the newest. Receipt
+  transitions in the job worker are race-tolerant: a receipt retired by a
+  concurrent action mid-job is reported as a job line instead of killing the
+  worker thread (which left the job "running" and the device "busy" forever);
+  an undeploy whose receipt is no longer active aborts before touching the
+  device. The Console surfaces the server's refusal reason when a batch
+  action fails to start, and the undeploy confirmation covers both Guest
+  Shell and IOx (it previously described only Guest Shell).
 - `NOTICE` now lists Cisco `ioxclient` (the proprietary, operator-provided IOx
   package tool used to build `iris-arm64.tar` / `iris-amd64.tar`) among the
   invoked third-party tools.
