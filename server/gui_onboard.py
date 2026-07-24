@@ -16,6 +16,7 @@ stage-host HOST_USER/HOST_PASS) to the installer via the environment (consumed
 by lab/device-run.sh's SSHPASS and the installer's sshpass). The streamed job
 lines are the installer's stdout, which echoes neither password (sshpass reads
 them from the env)."""
+import inspect
 import os
 import re
 import secrets
@@ -139,12 +140,15 @@ def _default_mint(device_id, server_dir):
     return out.stdout.strip()
 
 
-def _default_runner(install_path, env, on_line):
+def _default_runner(install_path, env, on_line, on_proc=None):
     """Run device-install.sh, calling on_line(line) for each stdout/stderr line.
-    Returns the process exit code."""
+    Returns the process exit code. on_proc(proc), when given, receives the live
+    Popen so the caller can terminate it (abort)."""
     proc = subprocess.Popen(["bash", install_path], env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, bufsize=1)
+    if on_proc is not None:
+        on_proc(proc)
     try:
         for line in proc.stdout:
             on_line(line.rstrip("\n"))
@@ -214,6 +218,13 @@ class OnboardService:
         # "queued" (their threads parked here) until a slot frees.
         self._slots = threading.Semaphore(self.max_concurrent)
         self._jobs = {}
+        self._procs = {}   # job_id -> live installer Popen (for abort)
+        # Whether the injected runner can report its process for abort support.
+        try:
+            self._run_supports_proc = len(
+                inspect.signature(self._run).parameters) >= 4
+        except (TypeError, ValueError):
+            self._run_supports_proc = False
         self._lock = threading.Lock()
 
     def _build_env(self, device_id, mint=True, resolved=None):
@@ -230,7 +241,9 @@ class OnboardService:
         token = self._mint(device_id) if mint else ""
         env = dict(os.environ)
         target = resolved or dev
-        attachment = target.get("attachment", target.get("network_attachment", "routed"))
+        attachment = target.get("attachment",
+                                target.get("management_type",
+                                           target.get("network_attachment", "routed")))
         if attachment == "legacy_routed":
             attachment = "routed"
         env.update({
@@ -404,7 +417,12 @@ class OnboardService:
                 receipt_id = j.get("receipt_id")
                 if self.receipts is not None and receipt_id:
                     self.receipts.transition(receipt_id, "applying")
-                rc = self._run(script, env, lambda line: self._append(job_id, line))
+                if self._run_supports_proc:
+                    rc = self._run(script, env,
+                                   lambda line: self._append(job_id, line),
+                                   lambda proc: self._register_proc(job_id, proc))
+                else:
+                    rc = self._run(script, env, lambda line: self._append(job_id, line))
             except Exception as exc:
                 if self.receipts is not None and receipt_id:
                     self.receipts.transition(receipt_id, "needs-reconcile")
@@ -441,10 +459,31 @@ class OnboardService:
             if j is not None:
                 j["lines"].append(line)
 
+    def _register_proc(self, job_id, proc):
+        with self._lock:
+            self._procs[job_id] = proc
+
+    def abort(self, job_id):
+        """Terminate a running installer subprocess. Returns True if a running
+        job's process was signalled. The run loop then finishes with a non-zero
+        rc, so the job errors and its receipt moves to needs-reconcile."""
+        with self._lock:
+            j = self._jobs.get(job_id)
+            proc = self._procs.get(job_id)
+            if j is None or j["state"] != "running" or proc is None:
+                return False
+            j["lines"].append("[abort requested by operator]")
+        try:
+            proc.terminate()
+        except Exception:
+            return False
+        return True
+
     def _finish(self, job_id, state, rc):
         device_id = detail = None
         action = "onboard"
         with self._lock:
+            self._procs.pop(job_id, None)   # drop the (now-dead) installer handle
             j = self._jobs.get(job_id)
             if j is not None:
                 j["state"] = state

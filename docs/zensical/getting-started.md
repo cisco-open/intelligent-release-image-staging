@@ -81,22 +81,22 @@ cp fleet/devices.csv.example fleet/devices.csv
 ```
 
 The inventory contains network onboarding information only, as an
-attachment-aware CSV v2. Each device declares a `network_attachment` of `routed`
+attachment-aware CSV v2. Each device declares a `management_type` of `routed`
 (IRIS creates a dedicated VLAN/SVI) or `inband` (attach to an existing,
 operator-owned VLAN that IRIS never changes):
 
 ```text
-device_id,device_ip,network_attachment,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,platform
+device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,platform
 ```
 
 Fill the routed columns (`iris_vlan`, `svi_*`) for routed devices, or the inband
 columns (`inband_vlan`, `app_*`) for inband devices. `model`/`platform` are
 optional; blank `platform` auto-selects from the model. See
-[Network Attachment and VLAN Ownership](network-attachment.md).
+[Management Type and VLAN Ownership](network-attachment.md).
 
 Attachment-aware onboarding runs through the **Console** (or API), which records
 a durable receipt and drives teardown from it. The legacy CLI generator below is
-routed-only and refuses a v2 (`network_attachment`) header:
+routed-only and refuses a v2 (`management_type`) header:
 
 ```bash
 # legacy routed inventory only

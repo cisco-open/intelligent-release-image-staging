@@ -4,9 +4,9 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Network Attachment And VLAN Ownership
+# Management Type And VLAN Ownership
 
-IRIS supports two explicit network attachment models for the staging agent. The
+IRIS supports two explicit management type models for the staging agent. The
 choice is per device, recorded in inventory, and — critically — determines what
 IRIS is allowed to create and remove on the device.
 
@@ -65,7 +65,7 @@ Inventory is an attachment-aware, named-header CSV. The header is required and
 validated; extra, missing, or misplaced columns are rejected.
 
 ```text
-device_id,device_ip,network_attachment,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,platform
+device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,platform
 ```
 
 - **routed** rows fill `iris_vlan`, `svi_ip`, `svi_mask`, `app_ip`, `app_mask`,
@@ -116,14 +116,14 @@ Adoption records ownership; it makes no changes to the device.
 
 ## Console and CLI
 
-The Console Add Device flow has an explicit **Network attachment** choice —
+The Console Add Device flow has an explicit **Management type** choice —
 *Routed - IRIS-managed app network* or *Inband - existing management VLAN* — and
 the device table shows each device's **Attachment**, not a bare VLAN/SVI value.
 Routed and inband onboarding are both one-click and receipt-backed. See
 [Web Console](console.md).
 
 The legacy `tools/gen-device-installers.sh` generator is routed-only and refuses
-a v2 (`network_attachment`) header: a self-contained installer cannot record a
+a v2 (`management_type`) header: a self-contained installer cannot record a
 receipt or run preflight before minting an enrollment token.
 
 ## Deployment environments

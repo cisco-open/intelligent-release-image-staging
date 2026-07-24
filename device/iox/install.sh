@@ -230,8 +230,21 @@ wait_iox_ready 180 || {
   exit 1
 }
 
-echo "[3/8] disable app-hosting signature verification (EXEC)"
-printf 'app-hosting verification disable\n' | RUN 2>/dev/null | grep -i 'signature' || true
+echo "[3/8] disable app-hosting signature verification (EXEC; required for the unsigned agent app on SSD-backed IOx)"
+# Even after `show iox` reports CAF/Dockerd Running, the app-hosting EXEC layer
+# can still answer "The process for the command is not responding or is
+# otherwise unavailable" for a few more seconds. Retry until it reports success
+# so a not-yet-ready box doesn't leave verification enabled and fail the install.
+vok=0
+for _ in $(seq 1 24); do
+  vout="$(printf 'app-hosting verification disable\n' | RUN 2>/dev/null || true)"
+  case "$vout" in
+    *"disabled successfully"*|*"already disabled"*|*"verification is disabled"*)
+      vok=1; echo "  app signature verification disabled"; break ;;
+  esac
+  sleep 5
+done
+[ "$vok" -eq 1 ] || { echo "  ERROR: could not disable app-hosting signature verification (app-hosting not responding)" >&2; exit 1; }
 
 echo "[4/8] push PKI trustpoint over SSH (so 'copy https:' validates the server cert)"
 { echo "configure terminal"; trustpoint_block; echo "end"; } | RUN >/dev/null

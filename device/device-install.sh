@@ -84,6 +84,8 @@ IOS_STAGE="${IOS_FS}${STAGE#/flash}"
 ios_config() {
 if [ "$NETWORK_ATTACHMENT" = "inband" ]; then
 cat <<EOF
+iox
+!
 app-hosting appid guestshell
  app-vnic AppGigabitEthernet trunk
   vlan $VLAN guest-interface 0

@@ -12,7 +12,7 @@ A device attaches to the network in one of two ways — a dedicated IRIS-managed
 VLAN/SVI (**routed**) or an existing operator-owned management VLAN (**inband**,
 Guest Shell static IPv4). The attachment choice governs what the installer and
 uninstaller may configure and remove; see
-[Network Attachment and VLAN Ownership](network-attachment.md).
+[Management Type and VLAN Ownership](network-attachment.md).
 
 After a successful Guest Shell or IOx onboarding or cleanup lifecycle, IRIS runs
 `copy running-config startup-config`. This persists the IRIS app-hosting,

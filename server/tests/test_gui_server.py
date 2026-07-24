@@ -333,7 +333,7 @@ def test_static_index_served_and_traversal_blocked(tmp_path):
     host, port, _, stop = _serve(tmp_path)
     try:
         status, headers, body = _req(host, port, "GET", "/")
-        assert status == 200 and b"intelligent-release-image-staging" in body
+        assert status == 200 and b"Intelligent Release" in body
         assert "text/html" in headers.get("Content-Type", "")
         # SPA assets must revalidate so a redeploy is not masked by a stale
         # browser cache (else new UI like the Monitoring tab stays invisible).
@@ -661,7 +661,7 @@ def test_csv_import_export(tmp_path):
                          headers={"Cookie": ck})
         assert st == 200 and "text/csv" in hd.get("Content-Type", "")
         assert b.decode().splitlines()[0] == \
-            ("device_id,device_ip,network_attachment,iris_vlan,svi_ip,svi_mask,"
+            ("device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,"
              "app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,platform")
         assert "d9,10.9.9.1" in b.decode()
     finally:
@@ -1059,7 +1059,7 @@ def _serve_inband(tmp_path, run_fn, device=None):
     state = str(tmp_path / "state")
     fleet = gui_fleet.FleetStore(state)
     fleet.upsert(device or {"device_id": "edge", "device_ip": "192.0.2.10",
-                  "network_attachment": "inband", "inband_vlan": "120",
+                  "management_type": "inband", "inband_vlan": "120",
                   "app_ip": "192.0.2.11", "app_mask": "255.255.255.0",
                   "app_gateway": "192.0.2.1", "model": "C9300",
                   "platform": "guestshell", "credential_profile_id": "lab"})
@@ -1087,7 +1087,7 @@ def test_inband_iox_onboard_carries_ios_ssh_host(tmp_path):
     host, port, stop = _serve_inband(
         tmp_path, lambda p, e, on: (ran.append(dict(e)), 0)[1],
         device={"device_id": "ie", "device_ip": "192.0.2.30",
-                "network_attachment": "inband", "inband_vlan": "120",
+                "management_type": "inband", "inband_vlan": "120",
                 "app_ip": "192.0.2.31", "app_mask": "255.255.255.0",
                 "app_gateway": "192.0.2.1", "model": "IE-3400", "platform": "iox",
                 "ios_ssh_host": "192.0.2.1", "credential_profile_id": "lab"})
@@ -1400,6 +1400,19 @@ def test_settings_get(tmp_path):
         stop()
 
 
+def test_settings_console_port_is_dynamic(tmp_path, monkeypatch):
+    """The Settings page must show the actual published console port
+    (IRIS_GUI_PUBLISH), not a hardcoded 8080."""
+    monkeypatch.setenv("IRIS_GUI_PUBLISH", "8082")
+    host, port, _ctx, stop = _serve_full(tmp_path)
+    try:
+        ck, _csrf = _auth(host, port)
+        st, _, b = _req(host, port, "GET", "/api/settings", headers={"Cookie": ck})
+        assert st == 200 and json.loads(b)["ports"]["console"] == 8082
+    finally:
+        stop()
+
+
 def test_settings_password_change(tmp_path):
     host, port, _ctx, stop = _serve_full(tmp_path)
     try:
@@ -1475,7 +1488,7 @@ def test_devices_example_csv_download(tmp_path):
                          headers={"Cookie": ck})
         assert st == 200
         assert "filename=devices-example.csv" in hd.get("Content-Disposition", "")
-        assert "device_id,device_ip,network_attachment,iris_vlan" in b.decode()
+        assert "device_id,device_ip,management_type,iris_vlan" in b.decode()
     finally:
         stop()
 
@@ -1854,7 +1867,7 @@ def test_device_platform_iox_on_inband_rejected_400(tmp_path):
     _app, fleet, _creds, _cat = deps
     try:
         fleet.upsert({"device_id": "edge", "device_ip": "192.0.2.10",
-                      "network_attachment": "inband", "inband_vlan": "120",
+                      "management_type": "inband", "inband_vlan": "120",
                       "app_ip": "192.0.2.11", "app_mask": "255.255.255.0",
                       "app_gateway": "192.0.2.1", "platform": "guestshell"})
         ck, csrf = _auth(host, port)

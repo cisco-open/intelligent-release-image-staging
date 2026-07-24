@@ -11,16 +11,16 @@ top-level `VERSION` file.
 
 ## [2026.07.24]
 
-The inband-management release adds a second network attachment model and a
+The inband-management release adds a second management type and a
 durable deployment-receipt lifecycle. IRIS stays stage-only, and inband
 additionally never creates, changes, or removes the operator's existing network.
 
 ### Added
-- **Inband network attachment**: attach the staging agent to an existing,
+- **Inband management type**: attach the staging agent to an existing,
   operator-owned management VLAN (static IPv4) instead of a dedicated IRIS
   VLAN/SVI. IRIS never creates, configures, selects, claims, or deletes that
   VLAN, its SVI, gateway, routes, or VRF. The Console Add Device flow has an
-  explicit **Network attachment** choice and onboards inband one-click, exactly
+  explicit **Management type** choice and onboards inband one-click, exactly
   like routed. Inband works for both **Guest Shell and IOx** (IE-3x00, C9300);
   inband IOx additionally needs `ios_ssh_host` (the existing IOS management SVI
   the app SSHes to for `copy /verify`). DHCP is not supported.
@@ -37,7 +37,7 @@ additionally never creates, changes, or removes the operator's existing network.
   one shared server-side validator across the Console, API, and CSV import.
   Legacy positional CSVs still import but are classified `legacy_routed` and are
   never inferred as inband.
-- **Network Attachment and VLAN Ownership** documentation page plus a
+- **Management Type and VLAN Ownership** documentation page plus a
   public-site safety callout, and cross-links from the Console, Fleet, Security,
   Operations, Server, Kubernetes, Containers, Device Agents, Network Ports, and
   Validation pages.
@@ -56,7 +56,7 @@ additionally never creates, changes, or removes the operator's existing network.
 - The legacy `tools/gen-device-installers.sh` generator is routed-only and
   refuses a v2 (`network_attachment`) header, because a self-contained installer
   cannot record a receipt before minting an enrollment token.
-- The Console devices table shows each device's network attachment instead of a
+- The Console devices table shows each device's management type instead of a
   bare VLAN/SVI value.
 
 ### Fixed

@@ -59,7 +59,7 @@ Docker Compose mounts operator images read-only from `IRIS_IMAGE_ROOT` (default
 
 Deployment receipts persist under `IRIS_STATE` on the `iris-state` volume, so
 undeploy-from-receipt and restart recovery behave identically to the Kubernetes
-PVC layout. See [Network Attachment and VLAN Ownership](network-attachment.md).
+PVC layout. See [Management Type and VLAN Ownership](network-attachment.md).
 
 ## App-hosting image
 

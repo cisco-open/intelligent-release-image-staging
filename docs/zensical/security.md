@@ -23,7 +23,7 @@ Deployment lifecycle state is recorded in durable, non-secret **receipts** under
 `IRIS_STATE`, and teardown is driven from a device's active receipt rather than
 its editable inventory. Receipts contain no passwords, tokens, certificate keys,
 or raw device configuration. See
-[Network Attachment and VLAN Ownership](network-attachment.md).
+[Management Type and VLAN Ownership](network-attachment.md).
 
 ## Trust boundaries
 

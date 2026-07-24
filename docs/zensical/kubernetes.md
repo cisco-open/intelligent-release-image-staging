@@ -32,7 +32,7 @@ staging uses `/data/artifacts` on the same PVC. Because there is a single
 replica, a pod restart marks any in-flight (`planned`/`applying`) receipt
 `unknown` and requires reconciliation instead of blindly retrying a device
 operation. See
-[Network Attachment and VLAN Ownership](network-attachment.md).
+[Management Type and VLAN Ownership](network-attachment.md).
 
 ## External address
 

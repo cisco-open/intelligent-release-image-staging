@@ -1,9 +1,9 @@
-device_id,device_ip,network_attachment,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,platform
+device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,platform
 # One row per device — NETWORK INFO ONLY. Tokens and secrets are handled
-# automatically by the Console/API onboarding flow (see the Network Attachment
+# automatically by the Console/API onboarding flow (see the Management Type
 # and VLAN Ownership doc). Comment lines (#) and the header are ignored on import.
 #
-# network_attachment (required): 'routed' or 'inband'.
+# management_type (required): 'routed' or 'inband'.
 #   routed  = IRIS creates a dedicated VLAN + SVI. Fill iris_vlan, svi_ip,
 #             svi_mask, app_ip, app_mask, app_gateway. Leave inband_vlan blank.
 #   inband  = attach to an EXISTING operator-owned VLAN. IRIS never creates,

@@ -49,7 +49,7 @@ operator-owned VLAN/SVI/routes/VRF. A device deployed before receipts existed
 has no active receipt and must be **adopted** (an explicit, audited, no-change
 recording of ownership) before it can be undeployed; a missing, drifted, or
 uncertain receipt stops cleanup in `needs-reconcile` rather than guessing. See
-[Network Attachment and VLAN Ownership](network-attachment.md).
+[Management Type and VLAN Ownership](network-attachment.md).
 
 ## Recovery checklist
 

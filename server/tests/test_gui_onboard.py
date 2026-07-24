@@ -1071,3 +1071,33 @@ def test_c9k_iox_notfound_names_amd64_tar(tmp_path):
     assert job["state"] == "error"
     assert called == []
     assert any("iris-amd64.tar" in l for l in job["lines"])
+
+
+def test_abort_terminates_running_job():
+    """abort() signals the running installer's process; the job then errors."""
+    release = threading.Event()
+    aborted = {"v": False}
+
+    class FakeProc:
+        def terminate(self):
+            aborted["v"] = True
+            release.set()
+
+    def run_fn(p, e, on, on_proc):
+        on_proc(FakeProc())
+        on("running")
+        release.wait(5)          # blocks until aborted (or timeout)
+        return 137
+
+    svc = _multi_svc(1, run_fn, max_concurrent=1)
+    j = svc.start("d1")
+    assert _wait_for(lambda: svc.get_job(j)["state"] == "running")
+    assert svc.abort(j) is True
+    assert aborted["v"] is True
+    assert _wait(svc, j)["state"] == "error"
+    assert svc.abort(j) is False     # not running anymore -> nothing to abort
+
+
+def test_abort_unknown_job_is_false():
+    svc = _svc(lambda p, e, on: 0)
+    assert svc.abort("nope") is False

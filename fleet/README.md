@@ -6,8 +6,8 @@ automatically by the generator — it talks to the running server on this machin
 
 ## Files
 - `devices.csv` — attachment-aware inventory (CSV v2). Each row declares a
-  `network_attachment` (`routed` or `inband`) plus its addressing:
-  `device_id,device_ip,network_attachment,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,platform`.
+  `management_type` (`routed` or `inband`) plus its addressing:
+  `device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,platform`.
   **routed** uses `iris_vlan`/`svi_*` (IRIS creates the VLAN/SVI); **inband**
   uses `inband_vlan`/`app_*` and attaches to an existing operator-owned VLAN
   that IRIS never changes. Attachment-aware onboarding runs through the

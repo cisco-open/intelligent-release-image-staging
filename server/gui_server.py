@@ -122,7 +122,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
 
         def _plan(self, device_id, device):
             """Resolve immutable, non-secret installer input before token minting."""
-            attachment = device.get("network_attachment", "legacy_routed")
+            attachment = device.get("management_type",
+                                    device.get("network_attachment", "legacy_routed"))
             if attachment == "legacy_routed":
                 attachment = "routed"
             if attachment not in ("routed", "inband"):
@@ -552,12 +553,18 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
         def _settings_info(self, admin_username):
             host_ip = os.environ.get("IRIS_HOST_IP", "")
             obs = bool(os.environ.get("IRIS_OBSERVABILITY"))
+            # The console's published host port is overridable (IRIS_GUI_PUBLISH);
+            # the container always listens on 8080 internally. Show the real one.
+            try:
+                console_port = int(os.environ.get("IRIS_GUI_PUBLISH", "") or 8080)
+            except ValueError:
+                console_port = 8080
             return {
                 "admin_username": admin_username,
                 "version": _read_version(),
                 "host_ip": host_ip,
                 "ports": {"tracker": 6969, "catalog": 8443, "artifacts": 8000,
-                          "swarm": 9101, "console": 8080},
+                          "swarm": 9101, "console": console_port},
                 "observability": {
                     "enabled": obs,
                     "metrics_url": ("http://%s:9101/metrics" % host_ip
@@ -1007,6 +1014,18 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 self._audit("%s_start" % act, "onboard", action="start",
                            target=did, actor=actor, detail="job %s" % jid)
                 self._json(200, {"job_id": jid}); return
+            if path.startswith("/api/onboard/jobs/") and path.endswith("/abort"):
+                if onboard is None:
+                    self._json(404, {"error": "not found"}); return
+                jid = unquote(path[len("/api/onboard/jobs/"):-len("/abort")])
+                ok = onboard.abort(jid)
+                self._audit("onboard_abort", "onboard", action="abort", target=jid,
+                           actor=actor, result="ok" if ok else "fail",
+                           detail="operator aborted a running onboard job"
+                                  if ok else "no running job to abort")
+                if not ok:
+                    self._json(409, {"error": "job is not running / cannot be aborted"}); return
+                self._json(200, {"aborted": True}); return
             if path == "/api/onboard/cancel-queued":
                 if onboard is None:
                     self._json(404, {"error": "not found"}); return

@@ -41,9 +41,9 @@ container storage into IOS-visible storage. A final-placement failure is shown
 as `placement failed` with a bounded diagnostic; inspect the device's
 `IRIS ROOTCOPY-FAIL` syslog entry for the full device-side detail.
 
-## Network attachment
+## Management type
 
-The Add Device form has an explicit **Network attachment** choice, and the
+The Add Device form has an explicit **Management type** choice, and the
 device table shows each device's attachment rather than a bare VLAN/SVI value:
 
 - **Routed - IRIS-managed app network** — IRIS creates a dedicated VLAN and SVI.
@@ -56,7 +56,7 @@ runs only from that receipt, so editing inventory after onboarding cannot
 retarget cleanup. A device deployed before receipts existed shows no active
 receipt; use the row's **Adopt** action (an explicit, audited, no-change
 recording of current ownership) before undeploying it. See
-[Network Attachment and VLAN Ownership](network-attachment.md).
+[Management Type and VLAN Ownership](network-attachment.md).
 
 ## Onboarding from the console
 

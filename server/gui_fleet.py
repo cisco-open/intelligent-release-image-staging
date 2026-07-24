@@ -13,7 +13,7 @@ import tempfile
 import secrets_store
 
 
-CSV_V2_COLS = ["device_id", "device_ip", "network_attachment", "iris_vlan",
+CSV_V2_COLS = ["device_id", "device_ip", "management_type", "iris_vlan",
                "svi_ip", "svi_mask", "app_ip", "app_mask", "app_gateway",
                "inband_vlan", "ios_ssh_host", "model", "platform"]
 # Retained for callers that render/export the current schema.
@@ -88,15 +88,18 @@ def validate_record(record, allow_legacy=False):
     if not isinstance(record, dict):
         raise ValueError("device record must be an object")
     result = {key: _text(value) for key, value in record.items() if value is not None}
+    # Accept the pre-rename field name as an alias.
+    if "network_attachment" in result and "management_type" not in result:
+        result["management_type"] = result.pop("network_attachment")
     did = result.get("device_id", "")
     if not _ID_RE.fullmatch(did):
         raise ValueError("device_id must contain only letters, numbers, dot, underscore, or hyphen")
     result["device_ip"] = _ipv4(result.get("device_ip"), "device_ip")
-    attachment = result.get("network_attachment", "")
+    attachment = result.get("management_type", "")
     if attachment == "legacy_routed" and allow_legacy:
         return result
     if attachment not in ("routed", "inband"):
-        raise ValueError("network_attachment must be routed or inband")
+        raise ValueError("management_type must be routed or inband")
     platform = result.get("platform", "")
     if platform not in ("", "guestshell", "iox"):
         raise ValueError("platform must be guestshell or iox")
@@ -104,7 +107,7 @@ def validate_record(record, allow_legacy=False):
     if model and not _MODEL_RE.fullmatch(model):
         raise ValueError("model contains unsupported characters")
     result["schema_version"] = 2
-    result["network_attachment"] = attachment
+    result["management_type"] = attachment
     if attachment == "routed":
         result["iris_vlan"] = str(_vlan(result.get("iris_vlan"), "iris_vlan"))
         result["svi_ip"] = _ipv4(result.get("svi_ip"), "svi_ip")
@@ -137,7 +140,7 @@ def _legacy_record(row):
     if not _ID_RE.fullmatch(result.get("device_id", "")):
         raise ValueError("legacy row has invalid device_id")
     result["device_ip"] = _ipv4(result.get("device_ip"), "device_ip")
-    result["network_attachment"] = "legacy_routed"
+    result["management_type"] = "legacy_routed"
     return result
 
 
@@ -153,7 +156,7 @@ def _legacy_like(record):
         raise ValueError("device_id must contain only letters, numbers, dot, "
                          "underscore, or hyphen")
     result["device_ip"] = _ipv4(result.get("device_ip"), "device_ip")
-    result["network_attachment"] = "legacy_routed"
+    result["management_type"] = "legacy_routed"
     return result
 
 
@@ -169,9 +172,16 @@ class FleetStore:
             if not isinstance(data, dict):
                 return {"revision": 0, "devices": {}}
             if "devices" in data and isinstance(data["devices"], dict):
-                return {"revision": int(data.get("revision", 0)), "devices": data["devices"]}
-            # Upgrade the old bare mapping in memory on the next write.
-            return {"revision": 0, "devices": data}
+                result = {"revision": int(data.get("revision", 0)), "devices": data["devices"]}
+            else:
+                # Upgrade the old bare mapping in memory on the next write.
+                result = {"revision": 0, "devices": data}
+            # Migrate the pre-rename field name in memory (persists on next write).
+            for rec in result["devices"].values():
+                if isinstance(rec, dict) and "network_attachment" in rec \
+                        and "management_type" not in rec:
+                    rec["management_type"] = rec.pop("network_attachment")
+            return result
         except (OSError, ValueError):
             return {"revision": 0, "devices": {}}
 
@@ -191,17 +201,19 @@ class FleetStore:
             previous = data["devices"].get(did, {})
             merged = dict(previous)
             merged.update({key: value for key, value in record.items() if value is not None})
+            if "network_attachment" in merged and "management_type" not in merged:
+                merged["management_type"] = merged.pop("network_attachment")
             # Full v2 validation applies only when the record actually carries a
             # routed/inband attachment (Console form, CSV v2, adoption). Bare
             # creation and partial edits (model/platform/credential/legacy CSV)
             # are stored as legacy_routed and must pick an attachment before
             # deployment -- OnboardService/plan enforce that at onboard time.
-            if merged.get("network_attachment") in ("routed", "inband"):
+            if merged.get("management_type") in ("routed", "inband"):
                 normalized = validate_record(merged)
-            elif merged.get("network_attachment", "") in ("", "legacy_routed"):
+            elif merged.get("management_type", "") in ("", "legacy_routed"):
                 normalized = _legacy_like(merged)
             else:
-                raise ValueError("network_attachment must be routed, inband, "
+                raise ValueError("management_type must be routed, inband, "
                                  "or legacy_routed")
             data["devices"][did] = normalized
             data["revision"] += 1
@@ -237,9 +249,14 @@ class FleetStore:
             data_rows.append(row)
         if header is None:
             return {"imported": 0, "new": 0, "updated": 0, "skipped": skipped}
+        # Accept the pre-rename v2 header (network_attachment) as an alias so an
+        # older exported CSV still imports; validate_record maps the field.
+        v2_alias = [c if c != "management_type" else "network_attachment"
+                    for c in CSV_V2_COLS]
         legacy = header in (_LEGACY_COLS, _LEGACY_COLS[:-1], _LEGACY_COLS[:-2])
-        if header != CSV_V2_COLS and not legacy:
+        if header not in (CSV_V2_COLS, v2_alias) and not legacy:
             raise ValueError("CSV must use the v2 named header: %s" % ",".join(CSV_V2_COLS))
+        cols = header if header in (CSV_V2_COLS, v2_alias) else CSV_V2_COLS
         records = []
         for index, row in enumerate(data_rows, 1):
             if len(row) != len(header):
@@ -247,7 +264,7 @@ class FleetStore:
                                  % (index, len(row), len(header)))
             try:
                 records.append(_legacy_record(row) if legacy else
-                               validate_record(dict(zip(CSV_V2_COLS, row)),
+                               validate_record(dict(zip(cols, row)),
                                                allow_legacy=True))
             except ValueError as exc:
                 raise ValueError("data row %d: %s" % (index, exc))
@@ -271,7 +288,7 @@ class FleetStore:
         """Map any stored record onto the v2 columns. Legacy routed rows keep a
         ``legacy_routed`` marker and map vlan->iris_vlan, guest_ip->app_ip so an
         export never silently drops a device."""
-        if record.get("network_attachment") == "legacy_routed":
+        if record.get("management_type") == "legacy_routed":
             row = dict(record)
             row.setdefault("iris_vlan", record.get("vlan", ""))
             row.setdefault("app_ip", record.get("guest_ip", ""))

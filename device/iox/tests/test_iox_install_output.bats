@@ -73,3 +73,11 @@ setup() {
     run bash "$INSTALL" --dry-run
   [[ "$output" == *"vlan 666"* ]] && [[ "$output" == *"interface Vlan666"* ]]
 }
+
+@test "IOx install retries app-hosting verification disable until it succeeds" {
+  install="$BATS_TEST_DIRNAME/../install.sh"
+  run grep -F 'app-hosting verification disable' "$install"
+  [ "$status" -eq 0 ]
+  run grep -F 'disabled successfully' "$install"
+  [ "$status" -eq 0 ]
+}

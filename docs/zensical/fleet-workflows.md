@@ -17,12 +17,12 @@ cp fleet/devices.csv.example fleet/devices.csv
 ```
 
 The inventory is an attachment-aware, named-header **CSV v2**. Every device
-declares a `network_attachment` — either `routed` (IRIS creates a dedicated
+declares a `management_type` — either `routed` (IRIS creates a dedicated
 VLAN and SVI) or `inband` (the agent attaches to an existing, operator-owned
 management VLAN that IRIS never creates, changes, or removes):
 
 ```text
-device_id,device_ip,network_attachment,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,platform
+device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,platform
 ```
 
 - **routed** — fill `iris_vlan`, `svi_ip`, `svi_mask`, `app_ip`, `app_mask`,
@@ -33,7 +33,7 @@ device_id,device_ip,network_attachment,iris_vlan,svi_ip,svi_mask,app_ip,app_mask
   existing IOS management SVI the app SSHes to (Guest Shell leaves it blank).
 - `model`/`platform` are optional; blank `platform` auto-selects from the model.
 
-See [Network Attachment and VLAN Ownership](network-attachment.md) for the full
+See [Management Type and VLAN Ownership](network-attachment.md) for the full
 ownership rules. Older positional CSVs (e.g. `device_id,device_ip,vlan,...`)
 still import, but are classified `legacy_routed` and must be adopted before they
 can be undeployed — they are never inferred as inband.
@@ -46,7 +46,7 @@ teardown from that receipt (not from the editable inventory). Routed and inband
 onboarding are both one-click and receipt-backed. See [Web Console](console.md).
 
 The legacy CLI generator is **routed-only** and deliberately refuses a v2
-(`network_attachment`) header, because a self-contained installer cannot record
+(`management_type`) header, because a self-contained installer cannot record
 a receipt or run preflight before minting an enrollment token:
 
 ```bash
@@ -93,7 +93,7 @@ flowchart LR
 ## Review guidance
 
 Review `fleet/devices.csv` for network correctness — including the
-`network_attachment` of each device and, for inband rows, that the existing
+`management_type` of each device and, for inband rows, that the existing
 VLAN/SVI/gateway are operator-owned and correct — and `fleet/assignments.csv`
 for release correctness. Do not mix credentials, operator passwords, or image
 binaries into either file.

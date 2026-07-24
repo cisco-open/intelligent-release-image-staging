@@ -397,3 +397,32 @@ run_with_timeout() {
   [ -f "$ARTDIR/bootstrap.sh" ]
   [ -f "$ARTDIR/iris-catalog.pem" ]
 }
+
+# --- inband Guest Shell (network-preserving; must still enable iox) ---
+_inband() {
+  NETWORK_ATTACHMENT=inband INBAND_VLAN=120 APP_IP=198.51.100.20 \
+    APP_MASK=255.255.255.0 APP_GATEWAY=198.51.100.1 \
+    bash "$INSTALL" --dry-run
+}
+
+@test "inband dry-run enables iox (app-hosting subsystem needed for guestshell)" {
+  run _inband
+  [ "$status" -eq 0 ] && [[ "$output" == *$'\niox\n'* ]]
+}
+
+@test "inband dry-run emits app-hosting appid guestshell" {
+  run _inband
+  [[ "$output" == *"app-hosting appid guestshell"* ]]
+}
+
+@test "inband dry-run preserves the existing network (no vlan/SVI/trunk/isis)" {
+  run _inband
+  [[ "$output" != *$'\nvlan '* ]] && [[ "$output" != *"interface Vlan"* ]] && \
+  [[ "$output" != *"switchport trunk allowed vlan"* ]] && \
+  [[ "$output" != *"ip router isis"* ]]
+}
+
+@test "inband Guest Shell does NOT disable app signature verification (IOx/SSD only)" {
+  run _inband
+  [[ "$output" != *"verification disable"* ]]
+}

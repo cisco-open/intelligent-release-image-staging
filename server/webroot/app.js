@@ -144,7 +144,7 @@
         '<td><input type="checkbox" class="mark" data-id="' + esc(d.device_id) + '"></td>' +
         '<td>' + esc(d.device_id) + '</td><td>' + esc(d.device_ip || '') + '</td>' +
         '<td>' + esc(d.model || d.heartbeat_model || '') + '</td>' +
-        '<td>' + esc(d.network_attachment || 'legacy') + ' / ' + esc(d.inband_vlan || d.iris_vlan || '') + '</td>' +
+        '<td>' + esc(d.management_type || d.network_attachment || 'legacy') + ' / ' + esc(d.inband_vlan || d.iris_vlan || '') + '</td>' +
         '<td><select class="platform">' + platSel + '</select></td>' +
         '<td><select class="cred">' + credSel + '</select></td>' +
         '<td><select class="assign">' + opts + '</select></td>' +
@@ -189,9 +189,19 @@
     document.querySelectorAll('#dev-rows .adopt').forEach(function (btn) {
       btn.addEventListener('click', async function () {
         var id = btn.closest('tr').getAttribute('data-id');
-        if (!confirm('Adopt ' + id + '?\n\nRecord an applied receipt from this ' +
-            'device\u2019s current inventory so an existing deployment can later be ' +
-            'undeployed. IRIS makes no device changes now.')) return;
+        if (!confirm(
+            'Adopt ' + id + '?\n\n' +
+            'WHAT IT DOES: records an "applied receipt" for this device from its ' +
+            'CURRENT inventory. It makes NO changes to the device — it is a ' +
+            'bookkeeping/ownership action only, and it is audited.\n\n' +
+            'WHY: Undeploy runs only from a receipt. A device deployed by an older ' +
+            'IRIS (before receipts existed) has none, so undeploy is refused ' +
+            '("no active receipt"). Adopt creates that receipt so it can be ' +
+            'undeployed.\n\n' +
+            'WHEN NOT TO: you do NOT need this for a normal onboard — onboarding ' +
+            'writes the receipt automatically. Only adopt a device whose inventory ' +
+            'row actually matches what is deployed on the box; if unsure, re-onboard ' +
+            '(idempotent) instead.\n\nProceed with adopt?')) return;
         var r = await jpost('/api/devices/' + encodeURIComponent(id) + '/adopt',
                             { acknowledge_adopt: true });
         devStatus.textContent = r.ok ? ('Adopted ' + id)
@@ -201,18 +211,22 @@
     document.getElementById('mark-all').checked = false;
   }
   var onboardEs = null;
+  var onboardJobId = null;
   function openOnboardPanel(label) {
     var panel = document.getElementById('onboard-panel');
     var log = document.getElementById('onboard-log');
     document.getElementById('onboard-dev').textContent = label;
     log.textContent = ''; panel.hidden = false;
+    onboardJobId = null;
+    document.getElementById('onboard-abort').hidden = false;
     if (onboardEs) { onboardEs.close(); onboardEs = null; }
     return log;
   }
   function streamOnboardJob(jobId, log) {
+    onboardJobId = jobId;
     onboardEs = new EventSource('/api/onboard/jobs/' + encodeURIComponent(jobId) + '/stream');
     onboardEs.onmessage = function (e) { log.textContent += e.data + '\n'; log.scrollTop = log.scrollHeight; };
-    onboardEs.addEventListener('end', function (e) { log.textContent += '\n— ' + e.data + ' —\n'; onboardEs.close(); onboardEs = null; refreshDevices(); });
+    onboardEs.addEventListener('end', function (e) { log.textContent += '\n— ' + e.data + ' —\n'; onboardEs.close(); onboardEs = null; onboardJobId = null; document.getElementById('onboard-abort').hidden = true; refreshDevices(); });
     onboardEs.onerror = function () { log.textContent += '\n[stream closed]\n'; if (onboardEs) { onboardEs.close(); onboardEs = null; } };
   }
   function startOnboard(id) {
@@ -225,6 +239,15 @@
   document.getElementById('onboard-close').addEventListener('click', function () {
     if (onboardEs) { onboardEs.close(); onboardEs = null; }
     document.getElementById('onboard-panel').hidden = true;
+  });
+  document.getElementById('onboard-abort').addEventListener('click', async function () {
+    if (!onboardJobId) return;
+    if (!confirm('Abort this onboard?\n\nThis stops the running installer. The ' +
+        'device may be left partially configured; re-onboard (idempotent) or ' +
+        'undeploy to clean up.')) return;
+    var r = await jpost('/api/onboard/jobs/' + encodeURIComponent(onboardJobId) + '/abort', {});
+    var log = document.getElementById('onboard-log');
+    log.textContent += r.ok ? '\n[abort requested]\n' : '\n[abort failed (' + r.status + ')]\n';
   });
   document.getElementById('mark-all').addEventListener('change', function (e) {
     document.querySelectorAll('#dev-rows .mark').forEach(function (cb) { cb.checked = e.target.checked; });
@@ -393,21 +416,27 @@
     var did = document.getElementById('df-id').value.trim();
     var derr = document.getElementById('df-err'); derr.textContent = '';
     if (!did) { derr.textContent = 'Device ID is required.'; return; }
+    var attach = document.getElementById('df-attachment').value;
+    var vlan = document.getElementById('df-vlan').value.trim();
+    var mask = document.getElementById('df-mask').value.trim();
     var body = {
       device_id: did,
       device_ip: document.getElementById('df-ip').value.trim() || did,
-      network_attachment: document.getElementById('df-attachment').value,
-      iris_vlan: document.getElementById('df-vlan').value.trim(),
-      svi_ip: document.getElementById('df-svi').value.trim(),
-      svi_mask: document.getElementById('df-mask').value.trim(),
+      management_type: attach,
       app_ip: document.getElementById('df-guest').value.trim(),
-      app_mask: document.getElementById('df-mask').value.trim(),
+      app_mask: mask,
       app_gateway: document.getElementById('df-gateway').value.trim(),
       model: document.getElementById('df-model').value.trim(),
       credential_profile_id: document.getElementById('df-cred').value
     };
-    if (body.network_attachment === 'inband') {
-      body.inband_vlan = body.iris_vlan; body.iris_vlan = ''; body.svi_ip = ''; body.svi_mask = '';
+    if (attach === 'inband') {
+      body.inband_vlan = vlan;
+      var ssh = document.getElementById('df-ssh').value.trim();
+      if (ssh) body.ios_ssh_host = ssh;
+    } else {
+      body.iris_vlan = vlan;
+      body.svi_ip = document.getElementById('df-svi').value.trim();
+      body.svi_mask = mask;
     }
     var r = await jpost('/api/devices', body);
     if (!r.ok) { derr.textContent = 'Add failed: ' + ((await r.json()).error || r.status); return; }
@@ -440,15 +469,24 @@
   document.getElementById('export-csv').addEventListener('click', function () { downloadCsv('/api/devices/export-csv', 'devices.csv'); });
   document.getElementById('example-csv').addEventListener('click', function () { downloadCsv('/api/devices/example-csv', 'devices-example.csv'); });
   var credPanel = document.getElementById('cred-panel');
+  var _credProfs = [];
   async function renderCreds() {
     var cr = await fetch('/api/credentials'); var profs = cr.ok ? (await cr.json()).profiles : [];
-    credOpts = profs;
+    credOpts = profs; _credProfs = profs;
     document.getElementById('cred-rows').innerHTML = profs.length
       ? profs.map(function (p) {
           return '<tr data-id="' + esc(p.id) + '"><td><b>' + esc(p.id) + '</b></td><td>' +
             esc(p.name || '') + '</td><td>' + esc(p.device_user || '') +
-            '</td><td><button class="linkish cred-del">delete</button></td></tr>'; }).join('')
-      : '<tr><td class="muted">No credential profiles yet.</td></tr>';
+            '</td><td><button class="linkish cred-edit">edit</button> · ' +
+            '<button class="linkish cred-del">delete</button></td></tr>'; }).join('')
+      : '<tr><td colspan="4" class="muted">No credential profiles yet.</td></tr>';
+    document.querySelectorAll('#cred-rows .cred-edit').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var id = btn.closest('tr').getAttribute('data-id');
+        var p = _credProfs.filter(function (x) { return x.id === id; })[0];
+        if (p) editCred(p);
+      });
+    });
     document.querySelectorAll('#cred-rows .cred-del').forEach(function (btn) {
       btn.addEventListener('click', async function () {
         var id = btn.closest('tr').getAttribute('data-id');
@@ -458,6 +496,21 @@
       });
     });
   }
+  function editCred(p) {
+    document.getElementById('cf-id').value = p.id;
+    document.getElementById('cf-name').value = p.name || '';
+    document.getElementById('cf-user').value = p.device_user || '';
+    document.getElementById('cf-pass').value = '';
+    document.getElementById('cf-pass2').value = '';
+    document.getElementById('cf-en').value = '';
+    document.getElementById('cf-err').textContent =
+      'Editing "' + p.id + '" — re-enter the device password to save changes.';
+    document.getElementById('cf-pass').focus();
+  }
+  document.getElementById('cf-reset').addEventListener('click', function () {
+    document.getElementById('cred-form').reset();
+    document.getElementById('cf-err').textContent = '';
+  });
   document.getElementById('manage-creds').addEventListener('click', function () {
     credPanel.hidden = !credPanel.hidden;
     if (!credPanel.hidden) renderCreds();
@@ -540,8 +593,10 @@
       s.sessions.active + ' active session(s); idle timeout ' +
       s.sessions.idle_ttl_minutes + ' min.';
     var sh = s.stage_host || {};
+    document.getElementById('sh-user').value = sh.username || '';
     document.getElementById('sh-status').textContent = sh.configured
-      ? ('Configured — onboarding will ssh to the stage host as "' + sh.username + '".')
+      ? ('Configured — onboarding will ssh to the stage host as "' + sh.username +
+         '". To change it, edit the username and/or re-enter the password below and Save.')
       : 'Not configured — needed when the Console runs in Docker, so the onboard ' +
         'installer can ssh to the stage host to stage per-device artifacts. ' +
         'Stored age-encrypted; the password is never shown again.';

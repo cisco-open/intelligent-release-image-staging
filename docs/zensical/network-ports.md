@@ -73,4 +73,4 @@ endpoint is external to IRIS and is not published by the Compose stack.
 - For **inband** devices, these flows traverse the existing operator-owned
   management VLAN and its SVI; IRIS adds no VLAN, SVI, gateway, route, or VRF.
   Preflight only confirms that path can reach the catalog, artifact, tracker,
-  and seeder ports. See [Network Attachment and VLAN Ownership](network-attachment.md).
+  and seeder ports. See [Management Type and VLAN Ownership](network-attachment.md).

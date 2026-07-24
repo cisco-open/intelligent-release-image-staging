@@ -9,7 +9,7 @@ def _fs(tmp_path):
     return gui_fleet.FleetStore(str(tmp_path))
 
 
-_ROUTED = {"device_id": "d1", "device_ip": "10.0.0.1", "network_attachment": "routed",
+_ROUTED = {"device_id": "d1", "device_ip": "10.0.0.1", "management_type": "routed",
            "iris_vlan": "666", "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
            "app_ip": "10.0.0.1", "app_mask": "255.255.255.252", "app_gateway": "10.0.0.2",
            "model": "C9300", "platform": "guestshell"}
@@ -25,7 +25,7 @@ def test_upsert_get_list_delete(tmp_path):
     fs.upsert({"device_id": "d1", "model": "C9300-48UXM"})
     d = fs.get_device("d1")
     assert d["model"] == "C9300-48UXM" and d["device_ip"] == "10.0.0.1"
-    assert d["network_attachment"] == "routed"     # preserved
+    assert d["management_type"] == "routed"     # preserved
     assert fs.delete("d1") is True
     assert fs.get_device("d1") is None
     assert fs.delete("d1") is False
@@ -34,11 +34,11 @@ def test_upsert_get_list_delete(tmp_path):
 def test_upsert_rejects_invalid_records(tmp_path):
     fs = _fs(tmp_path)
     bad = [
-        {"device_id": "d1", "device_ip": "nope", "network_attachment": "routed"},
-        {"device_id": "bad id", "device_ip": "10.0.0.1", "network_attachment": "routed"},
-        {"device_id": "d1", "device_ip": "10.0.0.1", "network_attachment": "sideways"},
+        {"device_id": "d1", "device_ip": "nope", "management_type": "routed"},
+        {"device_id": "bad id", "device_ip": "10.0.0.1", "management_type": "routed"},
+        {"device_id": "d1", "device_ip": "10.0.0.1", "management_type": "sideways"},
         # inband IOx is rejected
-        dict(_ROUTED, device_id="d2", network_attachment="inband", inband_vlan="120",
+        dict(_ROUTED, device_id="d2", management_type="inband", inband_vlan="120",
              iris_vlan="", svi_ip="", svi_mask="", platform="iox"),
     ]
     for rec in bad:
@@ -52,14 +52,14 @@ def test_upsert_rejects_invalid_records(tmp_path):
 def test_inband_upsert_and_field_isolation(tmp_path):
     fs = _fs(tmp_path)
     saved = fs.upsert({"device_id": "edge-1", "device_ip": "192.0.2.10",
-                       "network_attachment": "inband", "inband_vlan": "120",
+                       "management_type": "inband", "inband_vlan": "120",
                        "app_ip": "192.0.2.11", "app_mask": "255.255.255.0",
                        "app_gateway": "192.0.2.1", "platform": "guestshell"})
-    assert saved["network_attachment"] == "inband" and saved["inband_vlan"] == "120"
+    assert saved["management_type"] == "inband" and saved["inband_vlan"] == "120"
     # inband records must not carry routed SVI/VLAN fields
     try:
         fs.upsert({"device_id": "edge-2", "device_ip": "192.0.2.20",
-                   "network_attachment": "inband", "inband_vlan": "120",
+                   "management_type": "inband", "inband_vlan": "120",
                    "app_ip": "192.0.2.21", "app_mask": "255.255.255.0",
                    "app_gateway": "192.0.2.1", "iris_vlan": "999"})
         assert False, "expected ValueError"
@@ -72,7 +72,7 @@ def test_inband_iox_requires_ios_ssh_host(tmp_path):
     # inband IOx without ios_ssh_host is rejected
     try:
         fs.upsert({"device_id": "ie1", "device_ip": "192.0.2.30",
-                   "network_attachment": "inband", "inband_vlan": "120",
+                   "management_type": "inband", "inband_vlan": "120",
                    "app_ip": "192.0.2.31", "app_mask": "255.255.255.0",
                    "app_gateway": "192.0.2.1", "platform": "iox"})
         assert False, "expected ValueError"
@@ -80,7 +80,7 @@ def test_inband_iox_requires_ios_ssh_host(tmp_path):
         assert "ios_ssh_host" in str(exc)
     # with ios_ssh_host it is accepted and the field is preserved
     saved = fs.upsert({"device_id": "ie1", "device_ip": "192.0.2.30",
-                       "network_attachment": "inband", "inband_vlan": "120",
+                       "management_type": "inband", "inband_vlan": "120",
                        "app_ip": "192.0.2.31", "app_mask": "255.255.255.0",
                        "app_gateway": "192.0.2.1", "platform": "iox",
                        "ios_ssh_host": "192.0.2.1"})
@@ -88,7 +88,7 @@ def test_inband_iox_requires_ios_ssh_host(tmp_path):
     # a bad ios_ssh_host is rejected
     try:
         fs.upsert({"device_id": "ie2", "device_ip": "192.0.2.40",
-                   "network_attachment": "inband", "inband_vlan": "120",
+                   "management_type": "inband", "inband_vlan": "120",
                    "app_ip": "192.0.2.41", "app_mask": "255.255.255.0",
                    "app_gateway": "192.0.2.1", "platform": "iox",
                    "ios_ssh_host": "not-an-ip"})
@@ -115,7 +115,7 @@ def test_import_export_csv_roundtrip(tmp_path):
     # re-importing the export reproduces the same fleet
     fs2 = gui_fleet.FleetStore(str(tmp_path / "b"))
     assert fs2.import_csv(out)["imported"] == 2
-    assert fs2.get_device("edge")["network_attachment"] == "inband"
+    assert fs2.get_device("edge")["management_type"] == "inband"
 
 
 def test_import_csv_stats_new_updated_skipped(tmp_path):
@@ -162,14 +162,14 @@ def test_legacy_csv_imports_as_legacy_routed_and_exports_without_loss(tmp_path):
               "old,192.0.2.20,666,192.0.2.21,255.255.255.252,192.0.2.22,C9300-48UXM\n")
     assert fs.import_csv(legacy)["imported"] == 1
     dev = fs.get_device("old")
-    assert dev["network_attachment"] == "legacy_routed"
+    assert dev["management_type"] == "legacy_routed"
     assert dev["model"] == "C9300-48UXM"
     # export maps it onto v2 columns without dropping the device
     out = fs.export_csv()
     assert "old,192.0.2.20,legacy_routed" in out
     fs2 = gui_fleet.FleetStore(str(tmp_path / "b"))
     assert fs2.import_csv(out)["imported"] == 1
-    assert fs2.get_device("old")["network_attachment"] == "legacy_routed"
+    assert fs2.get_device("old")["management_type"] == "legacy_routed"
 
 
 def test_example_csv_is_a_safe_importable_template(tmp_path):
@@ -194,4 +194,4 @@ def test_revision_increments_on_write(tmp_path):
 def test_platform_is_last_csv_column():
     assert gui_fleet.CSV_COLS[-1] == "platform"
     assert gui_fleet.CSV_COLS[0] == "device_id"
-    assert "network_attachment" in gui_fleet.CSV_COLS
+    assert "management_type" in gui_fleet.CSV_COLS
