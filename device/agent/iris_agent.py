@@ -898,6 +898,14 @@ def _share_settings(cfg):
 
 _SHARE_SUBDIR = "iris"        # OUR subdir of the shared CAF dir: sweeps and
 _SHARE_PROBE = ".iris-probe"  # undeploy cleanup can never touch operator files
+# The image is staged under a SIMPLE fixed name, NOT the real (long, multi-dot)
+# IOS image filename: the C9300 SSD share filesystem rejects the real name with
+# EACCES at open (hardware-observed: a 4-byte probe writes fine in the same dir,
+# but `<img>.part` fails). copy /verify reads this simple source and writes the
+# REAL name to the target FS, verifying the Cisco signature from the bytes — so
+# the staged name is irrelevant to correctness. The swarm seeds from the
+# CAF-persistent stage_dir copy (the correctly-named file), never from here.
+_SHARE_STAGE = "iris-staged.bin"
 
 
 def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
@@ -963,15 +971,13 @@ def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
         _sweep()
         return None
     local = os.path.join(stage_dir, fname)
-    staged = os.path.join(sub, fname)
-    part = os.path.join(sub, ".%s.part" % fname)
+    staged = os.path.join(sub, _SHARE_STAGE)
+    part = os.path.join(sub, _SHARE_STAGE + ".part")
     try:
-        # Plain chunked read/write, NOT shutil.copyfile: copyfile uses
-        # os.sendfile on Linux, and the C9300 IOx runtime (17.18) denies
-        # sendfile between the CAF persistent disk and the -v share mount
-        # (LSM label mismatch) with EACCES — while ordinary write() to the
-        # same file succeeds (hardware-observed: the 4-byte probe wrote fine,
-        # the image copy died instantly).
+        # Chunked read/write (not shutil.copyfile, whose os.sendfile fast path
+        # is unreliable across this bind mount). The staged/part names are the
+        # SIMPLE _SHARE_STAGE, never the real image name — the SSD filesystem
+        # EACCES-rejects the long multi-dot name at open.
         with open(local, "rb") as src, open(part, "wb") as dst:
             shutil.copyfileobj(src, dst, length=1 << 20)
         os.replace(part, staged)
@@ -981,8 +987,11 @@ def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
         _sweep()
         return None
     try:
+        # copy /verify reads the simple staged name and writes the REAL image
+        # name to the target FS (the caller's dst), so the source name here is
+        # cosmetic; the Cisco signature is verified from the bytes.
         return copy_direct_fn(
-            lambda f, target_prefix: "%s/%s" % (ios_sub, f))
+            lambda f, target_prefix: "%s/%s" % (ios_sub, _SHARE_STAGE))
     finally:
         _sweep()
 

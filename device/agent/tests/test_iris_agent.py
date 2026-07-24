@@ -999,18 +999,25 @@ def test_stage_via_share_lands_file_then_copy_verifies_from_share(tmp_path):
     def copy_direct(copy_source):
         # the share copy must be fully in place when copy /verify fires
         seen["source"] = copy_source("img1.bin", "flash:")
-        seen["bytes"] = (share / "iris" / "img1.bin").read_bytes()
+        seen["bytes"] = (share / "iris" / iris_agent._SHARE_STAGE).read_bytes()
         return True
 
     ok = iris_agent._stage_via_share_impl(
         "img1.bin", stage, str(share), "usbflash1:iox_host_data_share",
         copy_direct, lambda m, msg: None, _cli_probe_ok)
     assert ok is True
-    # IRIS stages under its OWN subdirectory of the shared CAF dir, so sweeps
-    # and undeploy cleanup can never touch an operator's files in the share
-    assert seen["source"] == "usbflash1:iox_host_data_share/iris/img1.bin"
+    # IRIS stages under its OWN subdirectory of the shared CAF dir (sweeps and
+    # undeploy cleanup can never touch operator files), and writes the image
+    # under a SIMPLE fixed name — the SSD filesystem rejects the long
+    # multi-dot image name (hardware: EACCES on <img>.part). copy /verify
+    # reads that simple source and writes the REAL name to flash:, and
+    # verifies the signature from the bytes, so the name never matters.
+    assert seen["source"] == \
+        "usbflash1:iox_host_data_share/iris/" + iris_agent._SHARE_STAGE
+    assert "." not in iris_agent._SHARE_STAGE.rstrip(".bin") or \
+        iris_agent._SHARE_STAGE.count(".") <= 1     # at most one dot
     assert seen["bytes"] == b"IMAGEBYTES"
-    # transient copy + probe removed after placement, no .part leftovers
+    # transient copy + probe removed after placement, no leftovers
     assert _share_files(share) == []
 
 
@@ -1076,8 +1083,8 @@ def test_stage_via_share_sweeps_orphans_from_killed_ticks(tmp_path):
     stage = _mk_scratch(tmp_path)
     share = tmp_path / "share"
     (share / "iris").mkdir(parents=True)
-    (share / "iris" / "old-image.bin").write_bytes(b"ORPHAN")
-    (share / "iris" / ".old-image.bin.part").write_bytes(b"HALF")
+    (share / "iris" / iris_agent._SHARE_STAGE).write_bytes(b"ORPHAN")
+    (share / "iris" / (iris_agent._SHARE_STAGE + ".part")).write_bytes(b"HALF")
     (share / "operator-file.txt").write_bytes(b"NOT OURS")   # share root: untouched
     ok = iris_agent._stage_via_share_impl(
         "img1.bin", stage, str(share), "usbflash1:iox_host_data_share",
