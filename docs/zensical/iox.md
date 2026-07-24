@@ -80,9 +80,12 @@ end
 ```
 
 This yields roughly 5x faster staging (a 1.2 GB image drops from ~15 to ~3
-minutes); `police rate 1000 pps` restores the default. The raised rate applies
-to **all** traffic addressed to the switch, on every interface, so it
-increases the CPU's exposure accordingly.
+minutes); `police rate 1000 pps` restores the default. The change does not
+affect the actual network: transit traffic is forwarded in hardware and never
+crosses this policer, so no data-plane, VLAN, or routing behavior changes. Its
+only effect is on the switch's own control plane — the CPU will accept more
+traffic addressed to the switch itself, which is the resource CoPP exists to
+protect.
 
 Guest Shell staging is unaffected: the C9300 Guest Shell writes through the
 bind-mounted guest-share at disk speed and never crosses the punt path.
