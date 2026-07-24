@@ -10,11 +10,15 @@ device_id,device_ip,network_attachment,iris_vlan,svi_ip,svi_mask,app_ip,app_mask
 #             changes, or removes that VLAN/SVI/gateway/routes/VRF. Fill
 #             inband_vlan, app_ip, app_mask, app_gateway. Leave iris_vlan/svi_* blank.
 # 'model' is OPTIONAL (e.g. C9300-48UXM, IE-3400); blank lets onboarding detect it.
-# 'platform' is OPTIONAL and LAST: blank = auto (by model), or force 'guestshell'.
-#   Inband IOx and DHCP are NOT supported and are rejected on import.
-# ios_ssh_host is reserved for a future IOx capability gate; leave it blank.
+# 'platform' is OPTIONAL and LAST: blank = auto (by model), or force 'guestshell'
+#   or 'iox'. Inband supports Guest Shell and IOx (IE-3x00, C9300); DHCP is NOT
+#   supported and is rejected on import.
+# ios_ssh_host: required for inband IOx (the existing IOS management SVI the app
+#   SSHes to for copy /verify); leave blank for Guest Shell.
 #
 # Routed example (dedicated IRIS VLAN/SVI):
 100.92.9.3,100.92.9.3,routed,666,100.92.9.125,255.255.255.252,100.92.9.126,255.255.255.252,100.92.9.125,,,C9300-48UXM,guestshell
-# Inband example (existing management VLAN 120, static Guest Shell address):
+# Inband Guest Shell example (existing management VLAN 120, static address):
 100.92.9.1,100.92.9.1,inband,,,,100.92.9.121,255.255.255.0,100.92.9.1,120,,C9300-48UXM,guestshell
+# Inband IOx example (IE-3400, app SSHes to the existing management SVI 100.90.168.98):
+100.90.168.99,100.90.168.99,inband,,,,100.90.168.97,255.255.255.0,100.90.168.98,120,100.90.168.98,IE-3400,iox

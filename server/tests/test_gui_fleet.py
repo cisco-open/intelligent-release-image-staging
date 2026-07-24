@@ -67,6 +67,36 @@ def test_inband_upsert_and_field_isolation(tmp_path):
         pass
 
 
+def test_inband_iox_requires_ios_ssh_host(tmp_path):
+    fs = _fs(tmp_path)
+    # inband IOx without ios_ssh_host is rejected
+    try:
+        fs.upsert({"device_id": "ie1", "device_ip": "192.0.2.30",
+                   "network_attachment": "inband", "inband_vlan": "120",
+                   "app_ip": "192.0.2.31", "app_mask": "255.255.255.0",
+                   "app_gateway": "192.0.2.1", "platform": "iox"})
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "ios_ssh_host" in str(exc)
+    # with ios_ssh_host it is accepted and the field is preserved
+    saved = fs.upsert({"device_id": "ie1", "device_ip": "192.0.2.30",
+                       "network_attachment": "inband", "inband_vlan": "120",
+                       "app_ip": "192.0.2.31", "app_mask": "255.255.255.0",
+                       "app_gateway": "192.0.2.1", "platform": "iox",
+                       "ios_ssh_host": "192.0.2.1"})
+    assert saved["platform"] == "iox" and saved["ios_ssh_host"] == "192.0.2.1"
+    # a bad ios_ssh_host is rejected
+    try:
+        fs.upsert({"device_id": "ie2", "device_ip": "192.0.2.40",
+                   "network_attachment": "inband", "inband_vlan": "120",
+                   "app_ip": "192.0.2.41", "app_mask": "255.255.255.0",
+                   "app_gateway": "192.0.2.1", "platform": "iox",
+                   "ios_ssh_host": "not-an-ip"})
+        assert False, "expected ValueError"
+    except ValueError:
+        pass
+
+
 def test_import_export_csv_roundtrip(tmp_path):
     fs = _fs(tmp_path)
     header = ",".join(gui_fleet.CSV_COLS)

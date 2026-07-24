@@ -9,6 +9,64 @@ This project uses **Calendar Versioning (CalVer)**: `YYYY.0M.0D` with an optiona
 `2026.06.11.1`). Releases are tagged `vYYYY.0M.0D`. The current version is in the
 top-level `VERSION` file.
 
+## [2026.07.24]
+
+The inband-management release adds a second network attachment model and a
+durable deployment-receipt lifecycle. IRIS stays stage-only, and inband
+additionally never creates, changes, or removes the operator's existing network.
+
+### Added
+- **Inband network attachment**: attach the staging agent to an existing,
+  operator-owned management VLAN (static IPv4) instead of a dedicated IRIS
+  VLAN/SVI. IRIS never creates, configures, selects, claims, or deletes that
+  VLAN, its SVI, gateway, routes, or VRF. The Console Add Device flow has an
+  explicit **Network attachment** choice and onboards inband one-click, exactly
+  like routed. Inband works for both **Guest Shell and IOx** (IE-3x00, C9300);
+  inband IOx additionally needs `ios_ssh_host` (the existing IOS management SVI
+  the app SSHes to for `copy /verify`). DHCP is not supported.
+- **Durable deployment receipts**: a lock-protected, atomic, non-secret store
+  under `IRIS_STATE` records the applied lifecycle of each deployment. Undeploy
+  renders exclusively from a device's active receipt, so editing inventory after
+  onboarding can no longer retarget cleanup. A controller restart marks
+  in-flight receipts `unknown`; missing, drifted, or uncertain receipts stop in
+  `needs-reconcile` rather than guessing.
+- **Device adoption**: an explicit, audited **Adopt** action records an active
+  receipt from a pre-existing deployment's current inventory so it can be
+  undeployed, without making any device change.
+- **Attachment-aware inventory (CSV v2)**: a named-header interchange format and
+  one shared server-side validator across the Console, API, and CSV import.
+  Legacy positional CSVs still import but are classified `legacy_routed` and are
+  never inferred as inband.
+- **Network Attachment and VLAN Ownership** documentation page plus a
+  public-site safety callout, and cross-links from the Console, Fleet, Security,
+  Operations, Server, Kubernetes, Containers, Device Agents, Network Ports, and
+  Validation pages.
+
+### Changed
+- Onboarding resolves an immutable plan and records a receipt before any device
+  contact; the platform is resolved before the plan hash so a receipt binds the
+  exact rendered plan.
+- Both the Guest Shell and IOx installers/uninstallers render an inband path that
+  structurally preserves the existing network — the inband command stream never
+  contains `vlan`, `interface Vlan`, VRF, `ip route`, IS-IS, DHCP, or
+  AppGigabitEthernet trunk configuration. Inband teardown removes only the app
+  footprint and leaves shared globals (logging discriminator, PKI trustpoint,
+  HTTP-client settings) in place. Routed teardown is unchanged. The IOx installer
+  also gains a `--dry-run` mode to preview its rendered configuration.
+- The legacy `tools/gen-device-installers.sh` generator is routed-only and
+  refuses a v2 (`network_attachment`) header, because a self-contained installer
+  cannot record a receipt before minting an enrollment token.
+- The Console devices table shows each device's network attachment instead of a
+  bare VLAN/SVI value.
+
+### Fixed
+- `NOTICE` now lists Cisco `ioxclient` (the proprietary, operator-provided IOx
+  package tool used to build `iris-arm64.tar` / `iris-amd64.tar`) among the
+  invoked third-party tools.
+- `MAINTAINERS.md` uses the public github.com handles instead of the retired
+  internal Cisco GitHub Enterprise usernames.
+- `server/swarmmap.html` carries the required Apache-2.0 SPDX header.
+
 ## [2026.07.23]
 
 ### Added

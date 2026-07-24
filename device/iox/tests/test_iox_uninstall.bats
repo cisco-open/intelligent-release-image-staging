@@ -82,3 +82,17 @@ setup() {
   VLAN='' run bash "$UNINSTALL"
   [ "$status" -ne 0 ] && [[ "$output" == *"VLAN not set"* ]]
 }
+
+@test "inband dry-run removes only the app footprint" {
+  NETWORK_ATTACHMENT=inband INBAND_VLAN=120 run bash "$UNINSTALL" --dry-run
+  [[ "$output" == *"no app-hosting appid iris"* ]] && \
+  [[ "$output" == *"no event manager applet IRIS-COPYROOT"* ]]
+}
+
+@test "inband dry-run never removes the existing VLAN/SVI/trustpoint" {
+  NETWORK_ATTACHMENT=inband INBAND_VLAN=120 run bash "$UNINSTALL" --dry-run
+  [[ "$output" != *"no vlan "* ]] && \
+  [[ "$output" != *"no interface Vlan"* ]] && \
+  [[ "$output" != *"no crypto pki trustpoint"* ]] && \
+  [[ "$output" != *"no ip http client"* ]]
+}

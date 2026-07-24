@@ -1052,13 +1052,13 @@ def test_sse_stream_survives_queue_wait(tmp_path, monkeypatch):
         stop()
 
 
-def _serve_inband(tmp_path, run_fn):
+def _serve_inband(tmp_path, run_fn, device=None):
     import deployment_receipts
     secrets_path = str(tmp_path / "secrets.json")
     app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
     state = str(tmp_path / "state")
     fleet = gui_fleet.FleetStore(state)
-    fleet.upsert({"device_id": "edge", "device_ip": "192.0.2.10",
+    fleet.upsert(device or {"device_id": "edge", "device_ip": "192.0.2.10",
                   "network_attachment": "inband", "inband_vlan": "120",
                   "app_ip": "192.0.2.11", "app_mask": "255.255.255.0",
                   "app_gateway": "192.0.2.1", "model": "C9300",
@@ -1066,14 +1066,52 @@ def _serve_inband(tmp_path, run_fn):
     creds = gui_creds.CredentialStore(secrets_path)
     creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
     receipts = deployment_receipts.ReceiptStore(state)
+    art = str(tmp_path / "artifacts"); os.makedirs(art, exist_ok=True)
+    for pkg in ("iris-arm64.tar", "iris-amd64.tar"):
+        open(os.path.join(art, pkg), "w").close()   # IOx package-presence gate
     onboard = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
                                          mint_fn=lambda d: "TOK", run_fn=run_fn,
-                                         receipts=receipts)
+                                         receipts=receipts, artifacts_dir=art)
     srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, creds, None,
                                  onboard, certfile=None, receipts=receipts)
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return "127.0.0.1", port, srv.shutdown
+
+
+def test_inband_iox_onboard_carries_ios_ssh_host(tmp_path):
+    """Inband IOx resolves the iox platform, requires ios_ssh_host, and runs the
+    installer with NETWORK_ATTACHMENT=inband and IOS_SSH_HOST set to the existing
+    management SVI."""
+    ran = []
+    host, port, stop = _serve_inband(
+        tmp_path, lambda p, e, on: (ran.append(dict(e)), 0)[1],
+        device={"device_id": "ie", "device_ip": "192.0.2.30",
+                "network_attachment": "inband", "inband_vlan": "120",
+                "app_ip": "192.0.2.31", "app_mask": "255.255.255.0",
+                "app_gateway": "192.0.2.1", "model": "IE-3400", "platform": "iox",
+                "ios_ssh_host": "192.0.2.1", "credential_profile_id": "lab"})
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, b = _req(host, port, "GET", "/api/devices/ie/plan",
+                        headers={"Cookie": ck})
+        assert st == 200
+        resolved = json.loads(b)["plan"]["resolved"]
+        assert resolved["attachment"] == "inband" and resolved["platform"] == "iox"
+        assert resolved["ios_ssh_host"] == "192.0.2.1"
+        st, _, b = _req(host, port, "POST", "/api/devices/ie/onboard", {}, headers=hh)
+        assert st == 200
+        import time as _t
+        deadline = _t.time() + 3
+        while _t.time() < deadline:
+            if ran:
+                break
+            _t.sleep(0.02)
+        assert ran and ran[-1]["NETWORK_ATTACHMENT"] == "inband"
+        assert ran[-1]["IOS_SSH_HOST"] == "192.0.2.1"
+    finally:
+        stop()
 
 
 def test_inband_onboard_is_one_click_and_drives_inband_renderer(tmp_path):

@@ -35,8 +35,9 @@ setup() {
 _appid_block_output() {
   local svi="${1:-$SVI_IP}" user="${2:-$DEVICE_SSH_USER}" target="${3:-$TARGET_FS}"
   # Re-export with overrides so the heredoc substitutions inside appid_block pick
-  # them up correctly.
-  SVI_IP="$svi" DEVICE_SSH_USER="$user" TARGET_FS="$target" \
+  # them up correctly. For routed the app SSH host is the IRIS SVI, so
+  # IOS_SSH_HOST mirrors SVI_IP (the routed default set in install.sh's case block).
+  SVI_IP="$svi" IOS_SSH_HOST="$svi" DEVICE_SSH_USER="$user" TARGET_FS="$target" \
   bash -c '
     # Source only the variable defaults (lines that assign defaults not the
     # mandatory parameter checks) and the appid_block() function body.

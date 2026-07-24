@@ -24,26 +24,40 @@ IRIS never silently adopts a pre-existing VLAN or SVI.
 
 ## Inband — existing management VLAN
 
-Inband attachment connects Guest Shell to an **existing management VLAN**. IRIS
+Inband attachment connects the staging agent — Guest Shell or an IOx app — to an
+**existing management VLAN**. IRIS
 does not create, configure, select, claim ownership of, or delete that VLAN, its
 SVI, gateway, routes, or VRF. The operator-owned SVI (and any VRF it belongs to)
 supplies routing; preflight only proves the existing topology can reach IRIS.
 
-The supported inband cell is intentionally narrow:
+The supported inband cells:
 
 | Attachment | Addressing | Platform | Status |
 | --- | --- | --- | --- |
 | Routed | static | Guest Shell / IOx | supported (receipt/preflight hardened) |
 | Inband | static | Guest Shell | supported |
-| Inband | static | IOx | rejected — separate capability gate |
+| Inband | static | IOx (IE-3x00, C9300) | supported — requires `ios_ssh_host` |
 | Inband | DHCP | any | rejected — separate capability gate |
 
 Inband install and teardown command streams never contain `vlan`,
 `interface Vlan`, `no vlan`, `no interface Vlan`, VRF, `ip route`, IS-IS, DHCP,
 or AppGigabitEthernet trunk configuration. Teardown removes only the app
-footprint (Guest Shell, IRIS EEM applets, agent files); it deliberately leaves
-shared globals (logging discriminator, PKI trustpoint, HTTP-client settings) in
-place because a receipt cannot prove those remain uniquely IRIS-owned.
+footprint (Guest Shell or the IOx app, IRIS EEM applets, agent files); it
+deliberately leaves shared globals (logging discriminator, PKI trustpoint,
+HTTP-client settings) in place because a receipt cannot prove those remain
+uniquely IRIS-owned.
+
+### Inband IOx and the IOS SSH endpoint
+
+Guest Shell runs inside IOS, so it configures the device locally. An **IOx** app
+runs in a container and reaches IOS by SSH-ing to an IOS IP to run `copy /verify`.
+For a routed IOx device that is the IRIS-managed SVI; for an **inband** IOx
+device there is no IRIS SVI, so the operator supplies `ios_ssh_host` — the
+existing management SVI address the app connects to. The AppGigabitEthernet
+trunk must already allow the inband VLAN, because IRIS never modifies it inband.
+The IOx app carries a device SSH credential in its run options exactly as the
+routed IOx path already does; hardening that credential path is a separate
+improvement that applies equally to both.
 
 ## Inventory (CSV v2)
 
@@ -58,7 +72,9 @@ device_id,device_ip,network_attachment,iris_vlan,svi_ip,svi_mask,app_ip,app_mask
   `app_gateway`.
 - **inband** rows fill `inband_vlan`, `app_ip`, `app_mask`, `app_gateway`, and
   must not carry routed VLAN/SVI fields. There is no IRIS VRF field.
-- `ios_ssh_host` is reserved for a future IOx capability gate.
+- `ios_ssh_host` is the existing IOS management SVI address; it is required for
+  inband IOx (the app SSHes there for `copy /verify`) and left blank for Guest
+  Shell.
 
 The same server-side validator is applied to the Console, the API, and CSV
 import: strict IDs, IPv4 addresses and contiguous masks, VLAN range 1–4094, and

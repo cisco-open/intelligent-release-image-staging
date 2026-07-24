@@ -29,16 +29,36 @@
 #   DEVICE_SSH_USER=dnac  TARGET_FS=sdflash:  IRIS_TELEMETRY=on
 set -euo pipefail
 
-: "${DEVICE_IP:?set DEVICE_IP}"; : "${VLAN:?set VLAN}"
-: "${SVI_IP:?set SVI_IP}"; : "${SVI_MASK:?set SVI_MASK}"; : "${GUEST_IP:?set GUEST_IP}"
+DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
+
+: "${DEVICE_IP:?set DEVICE_IP}"
 : "${CATALOG_TOKEN:?set CATALOG_TOKEN}"; : "${DEVICE_ID:?set DEVICE_ID}"
 : "${STAGE_HOST:?set STAGE_HOST}"; : "${DEVICE_SSH_PASS:?set DEVICE_SSH_PASS}"
-: "${IRIS_CRT_FILE:?set IRIS_CRT_FILE — local path to the bare server cert crt.pem}"
-[ -r "$IRIS_CRT_FILE" ] || { echo "ERROR: IRIS_CRT_FILE=$IRIS_CRT_FILE not readable" >&2; exit 1; }
+IRIS_CRT_FILE="${IRIS_CRT_FILE:-}"
+if [ "$DRY" -eq 0 ]; then
+  : "${IRIS_CRT_FILE:?set IRIS_CRT_FILE — local path to the bare server cert crt.pem}"
+  [ -r "$IRIS_CRT_FILE" ] || { echo "ERROR: IRIS_CRT_FILE=$IRIS_CRT_FILE not readable" >&2; exit 1; }
+fi
+
+# Attachment model. routed: IRIS creates a dedicated VLAN/SVI and the app SSHes
+# to that SVI. inband: the app attaches to an EXISTING operator-owned VLAN that
+# IRIS never creates/changes/removes, and SSHes to the existing IOS management
+# SVI (IOS_SSH_HOST) for its copy /verify. The AppGig trunk must already allow
+# the inband VLAN (IRIS does not modify it inband).
+NETWORK_ATTACHMENT="${NETWORK_ATTACHMENT:-routed}"
+case "$NETWORK_ATTACHMENT" in
+  routed)
+    : "${VLAN:?set VLAN}"; : "${SVI_IP:?set SVI_IP}"; : "${SVI_MASK:?set SVI_MASK}"; : "${GUEST_IP:?set GUEST_IP}"
+    GW_IP="${GW_IP:-$SVI_IP}"; IOS_SSH_HOST="${IOS_SSH_HOST:-$SVI_IP}" ;;
+  inband)
+    : "${INBAND_VLAN:?set INBAND_VLAN}"; : "${APP_IP:?set APP_IP}"; : "${APP_MASK:?set APP_MASK}"; : "${APP_GATEWAY:?set APP_GATEWAY}"
+    : "${IOS_SSH_HOST:?set IOS_SSH_HOST — the existing IOS management SVI the app SSHes to}"
+    VLAN="$INBAND_VLAN"; GUEST_IP="$APP_IP"; SVI_MASK="$APP_MASK"; GW_IP="$APP_GATEWAY" ;;
+  *) echo "ERROR: NETWORK_ATTACHMENT must be routed or inband" >&2; exit 1 ;;
+esac
 
 CATALOG_URL="${CATALOG_URL:-https://$STAGE_HOST:8443}"
 APP_INTF="${APP_INTF:-AppGigabitEthernet1/1}"
-GW_IP="${GW_IP:-$SVI_IP}"
 CPU="${CPU:-400}"; MEM="${MEM:-768}"; DISK="${DISK:-2048}"
 PKG="${PKG:-iris-arm64.tar}"; PKG_FS="${PKG_FS:-flash:}"
 DEVICE_SSH_USER="${DEVICE_SSH_USER:-dnac}"
@@ -59,12 +79,33 @@ trustpoint_block() {
   echo "crypto pki trustpoint IRIS"
   echo " enrollment terminal"; echo " revocation-check none"; echo "exit"
   echo "crypto pki authenticate IRIS"
-  cat "$IRIS_CRT_FILE"
+  if [ -n "$IRIS_CRT_FILE" ] && [ -r "$IRIS_CRT_FILE" ]; then
+    cat "$IRIS_CRT_FILE"
+  else
+    echo "! <contents of \$IRIS_CRT_FILE (the bare crt.pem) inserted here at apply time>"
+  fi
   echo "quit"; echo "yes"
   echo "ip http client secure-trustpoint IRIS"
 }
 
 ios_net() {           # networking + IOx enable (idempotent)
+if [ "$NETWORK_ATTACHMENT" = "inband" ]; then
+# Inband: attach to the EXISTING operator-owned VLAN. IRIS creates NO vlan, SVI,
+# or AppGig trunk config — the operator's network already carries the app, and
+# the AppGig must already allow the inband VLAN.
+cat <<EOF
+iox
+!
+file prompt quiet
+!
+! SCP server: the IOx-app agent scp-pushes its downloaded scratch to the target
+! disk (it can't bind-mount it nor receive inbound), then copy /verify places it.
+ip scp server enable
+!
+end
+EOF
+return
+fi
 cat <<EOF
 iox
 !
@@ -106,7 +147,7 @@ app-hosting appid $APPID
   run-opts 2 "-e IRIS_DEVICE_SSH_PASS=$DEVICE_SSH_PASS"
   run-opts 3 "-e IRIS_CATALOG_TOKEN=$CATALOG_TOKEN"
   run-opts 4 "-e IRIS_CATALOG_URL=$CATALOG_URL"
-  run-opts 5 "-e IRIS_DEVICE_SSH_HOST=$SVI_IP"
+  run-opts 5 "-e IRIS_DEVICE_SSH_HOST=$IOS_SSH_HOST"
   run-opts 6 "-e IRIS_DEVICE_SSH_USER=$DEVICE_SSH_USER"
   run-opts 7 "-e IRIS_TARGET_FS=$TARGET_FS"
   run-opts 8 "-e IRIS_TELEMETRY=$IRIS_TELEMETRY"
@@ -157,13 +198,29 @@ clear_partial_app_config() {
     | RUN >/dev/null 2>&1 || true
 }
 
+if [ "$DRY" -eq 1 ]; then
+  echo "===== IOS NETWORKING ($NETWORK_ATTACHMENT; apply via lab/device-run.sh $DEVICE_IP) ====="
+  ios_net
+  echo "===== PKI TRUSTPOINT (pasted over SSH FIRST, before any copy) ====="
+  trustpoint_block
+  echo "===== APP-HOSTING appid $APPID (app SSHes to IOS at $IOS_SSH_HOST for copy /verify) ====="
+  appid_block
+  echo "===== INSTALL COPY (over verified https) ====="
+  printf 'copy https://%s:8000/%s %s%s\n' "$STAGE_HOST" "$PKG" "$PKG_FS" "$PKG"
+  echo "===== app-hosting install -> activate -> start appid $APPID, then persist ====="
+  if [ "$NETWORK_ATTACHMENT" = "inband" ]; then
+    echo "===== LEFT UNTOUCHED (inband): existing VLAN/SVI, AppGig trunk, routes, VRF ====="
+  fi
+  exit 0
+fi
+
 echo "[1/8] teardown any existing '$APPID' app (idempotent re-install)"
 printf 'app-hosting stop appid %s\napp-hosting deactivate appid %s\napp-hosting uninstall appid %s\n' \
   "$APPID" "$APPID" "$APPID" | RUN >/dev/null 2>&1 || true
 sleep 6
 printf 'configure terminal\nno app-hosting appid %s\nend\n' "$APPID" | RUN >/dev/null 2>&1 || true
 
-echo "[2/8] apply IOx networking (IOx enable, VLAN $VLAN, $APP_INTF, Vlan$VLAN SVI)"
+echo "[2/8] apply IOx networking ($NETWORK_ATTACHMENT: IOx enable$([ "$NETWORK_ATTACHMENT" = inband ] && echo ", existing VLAN preserved" || echo ", VLAN $VLAN, $APP_INTF, Vlan$VLAN SVI"))"
 { echo "configure terminal"; ios_net; } | RUN >/dev/null
 
 echo "    waiting for IOx app-hosting services after enable"

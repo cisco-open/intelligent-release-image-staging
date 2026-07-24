@@ -30,8 +30,9 @@ DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
 # VLAN_IN preserves whether a VLAN was actually supplied; the 666 default is
 # ONLY for --dry-run text. A real run re-requires a non-empty VLAN below, so we
 # never tear down the wrong SVI/VLAN and then falsely verify clean.
-VLAN_IN="${VLAN:-}"
-VLAN="${VLAN:-666}"
+NETWORK_ATTACHMENT="${NETWORK_ATTACHMENT:-routed}"
+VLAN_IN="${VLAN:-${INBAND_VLAN:-}}"
+VLAN="${VLAN_IN:-666}"
 PKG="${PKG:-iris-arm64.tar}"; PKG_FS="${PKG_FS:-flash:}"
 APPID=iris
 
@@ -41,6 +42,20 @@ config_cleanup() {
 # copy-to-root applet and the on-demand low-space reclaim applets, which the
 # agent never self-removes. IRIS-AGENT won't exist on IOx (no 60s timer) but
 # the no-op is harmless. All no-ops if absent.
+#
+# Inband removes ONLY the app footprint: it preserves the operator-owned VLAN/
+# SVI and the shared PKI trustpoint / HTTP-client settings (a receipt cannot
+# prove those globals remain uniquely IRIS-owned).
+if [ "$NETWORK_ATTACHMENT" = "inband" ]; then
+cat <<EOF
+no app-hosting appid $APPID
+no event manager applet IRIS-AGENT
+no event manager applet IRIS-COPYROOT
+no event manager applet IRIS-RECLAIM
+no event manager applet IRIS-RECLAIM-BUNDLE
+EOF
+return
+fi
 cat <<EOF
 no app-hosting appid $APPID
 no event manager applet IRIS-AGENT
@@ -91,17 +106,27 @@ done
 st="$(app_state)"
 [ -z "$st" ] || echo "  WARN: '$APPID' still shows state '$st' after uninstall"
 
-echo "[2/4] remove config footprint (appid, Vlan$VLAN, EEM applets, PKI trustpoint)"
+if [ "$NETWORK_ATTACHMENT" = "inband" ]; then
+  echo "[2/4] remove inband app footprint (appid, EEM applets; existing network preserved)"
+else
+  echo "[2/4] remove config footprint (appid, Vlan$VLAN, EEM applets, PKI trustpoint)"
+fi
 { echo "configure terminal"; config_cleanup; echo "end"; } | RUN >/dev/null
 
 echo "[3/4] delete ${PKG_FS}${PKG} (the staged IOx app package)"
 printf 'delete /force %s%s\n' "$PKG_FS" "$PKG" | RUN >/dev/null 2>&1 || true
 
 echo "[4/4] verify no '$APPID' app and no config footprint remains"
-out="$(printf 'terminal width 512\nshow app-hosting list\nshow running-config | include app-hosting appid %s|applet IRIS-|interface Vlan%s|crypto pki trustpoint IRIS\n' \
-        "$APPID" "$VLAN" | RUN | grep -v "#" || true)"
-left="$(printf '%s\n' "$out" | grep -E \
-  "^$APPID |^app-hosting appid $APPID|^event manager applet IRIS-|^interface Vlan$VLAN|^crypto pki trustpoint IRIS *$" || true)"
+if [ "$NETWORK_ATTACHMENT" = "inband" ]; then
+  inc="app-hosting appid $APPID|applet IRIS-"
+  artifact_re="^$APPID |^app-hosting appid $APPID|^event manager applet IRIS-"
+else
+  inc="app-hosting appid $APPID|applet IRIS-|interface Vlan$VLAN|crypto pki trustpoint IRIS"
+  artifact_re="^$APPID |^app-hosting appid $APPID|^event manager applet IRIS-|^interface Vlan$VLAN|^crypto pki trustpoint IRIS *\$"
+fi
+out="$(printf 'terminal width 512\nshow app-hosting list\nshow running-config | include %s\n' \
+        "$inc" | RUN | grep -v "#" || true)"
+left="$(printf '%s\n' "$out" | grep -E "$artifact_re" || true)"
 if [ -n "$left" ]; then
   echo "ERROR: artifacts still present after undeploy:" >&2
   printf '%s\n' "$left" >&2

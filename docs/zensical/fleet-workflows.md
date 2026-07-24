@@ -28,8 +28,9 @@ device_id,device_ip,network_attachment,iris_vlan,svi_ip,svi_mask,app_ip,app_mask
 - **routed** — fill `iris_vlan`, `svi_ip`, `svi_mask`, `app_ip`, `app_mask`,
   `app_gateway`; leave `inband_vlan` blank.
 - **inband** — fill `inband_vlan`, `app_ip`, `app_mask`, `app_gateway`; leave
-  `iris_vlan`/`svi_*` blank. Guest Shell + static IPv4 only; IOx and DHCP are
-  rejected. `ios_ssh_host` is reserved for a future capability gate.
+  `iris_vlan`/`svi_*` blank. Static IPv4 on Guest Shell or IOx (IE-3x00, C9300);
+  DHCP is not supported. For inband **IOx**, also set `ios_ssh_host` to the
+  existing IOS management SVI the app SSHes to (Guest Shell leaves it blank).
 - `model`/`platform` are optional; blank `platform` auto-selects from the model.
 
 See [Network Attachment and VLAN Ownership](network-attachment.md) for the full

@@ -115,14 +115,19 @@ def validate_record(record, allow_legacy=False):
         if any(result.get(key) for key in ("inband_vlan", "ios_ssh_host")):
             raise ValueError("routed inventory cannot contain inband fields")
     else:
-        if platform == "iox":
-            raise ValueError("inband IOx is not supported")
         result["inband_vlan"] = str(_vlan(result.get("inband_vlan"), "inband_vlan"))
         app_ip, app_mask, app_gateway = _static_network(
             result.get("app_ip"), result.get("app_mask"), result.get("app_gateway"), "app")
         result.update(app_ip=app_ip, app_mask=app_mask, app_gateway=app_gateway)
-        if any(result.get(key) for key in ("iris_vlan", "svi_ip", "svi_mask", "ios_ssh_host")):
-            raise ValueError("inband inventory cannot contain routed or IOx fields")
+        if any(result.get(key) for key in ("iris_vlan", "svi_ip", "svi_mask")):
+            raise ValueError("inband inventory cannot contain routed fields")
+        # ios_ssh_host is the EXISTING IOS management SVI the IOx app SSHes to for
+        # copy /verify. Guest Shell runs inside IOS and never needs it; IOx does.
+        if result.get("ios_ssh_host"):
+            result["ios_ssh_host"] = _ipv4(result.get("ios_ssh_host"), "ios_ssh_host")
+        if platform == "iox" and not result.get("ios_ssh_host"):
+            raise ValueError("inband IOx requires ios_ssh_host "
+                             "(the existing IOS management SVI address)")
     return result
 
 
@@ -289,9 +294,11 @@ class FleetStore:
         return "\n".join([
             "# IRIS inventory CSV v2. Legacy routed CSV files require explicit migration.",
             "# Inband preserves an existing operator-owned VLAN, SVI, gateway, routes, and VRF.",
-            "# Supported inband cell: static IPv4 Guest Shell only. IOx and DHCP are rejected.",
+            "# Inband supports static IPv4 Guest Shell and IOx (IE-3x00, C9300); DHCP is not",
+            "# supported. Inband IOx also needs ios_ssh_host (the existing IOS management SVI).",
             "# Uncomment and edit the example rows below to import your devices.",
             ",".join(CSV_V2_COLS),
             "# edge-routed,192.0.2.10,routed,666,192.0.2.9,255.255.255.252,192.0.2.10,255.255.255.252,192.0.2.9,,,C9300-48UXM,guestshell",
             "# edge-inband,192.0.2.20,inband,,,,192.0.2.21,255.255.255.0,192.0.2.1,120,,C9300-48UXM,guestshell",
+            "# ie-inband-iox,192.0.2.30,inband,,,,192.0.2.31,255.255.255.0,192.0.2.1,120,192.0.2.1,IE-3400,iox",
         ]) + "\n"
