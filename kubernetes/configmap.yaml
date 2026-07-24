@@ -28,5 +28,9 @@ data:
 
   IRIS_OBSERVABILITY: ""
   IRIS_OTLP_ENDPOINT: ""
+  # Optional. Overrides the console link on the :9101 pointer page AND the
+  # console port shown on the Settings page. Set it (e.g.
+  # "https://<external-ip>:8080/") if you front the console on a non-8080
+  # external port; otherwise the Settings page shows the Service port 8080.
   IRIS_CONSOLE_URL: ""
   PYTHONDONTWRITEBYTECODE: "1"
