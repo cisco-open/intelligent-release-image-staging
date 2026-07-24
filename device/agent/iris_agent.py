@@ -896,15 +896,19 @@ def _share_settings(cfg):
             or cfg.get("share_ios_path") or "")
 
 
-_SHARE_SUBDIR = "iris"        # OUR subdir of the shared CAF dir: sweeps and
-_SHARE_PROBE = ".iris-probe"  # undeploy cleanup can never touch operator files
-# The image is staged under a SIMPLE fixed name, NOT the real (long, multi-dot)
-# IOS image filename: the C9300 SSD share filesystem rejects the real name with
-# EACCES at open (hardware-observed: a 4-byte probe writes fine in the same dir,
-# but `<img>.part` fails). copy /verify reads this simple source and writes the
-# REAL name to the target FS, verifying the Cisco signature from the bytes — so
-# the staged name is irrelevant to correctness. The swarm seeds from the
-# CAF-persistent stage_dir copy (the correctly-named file), never from here.
+# IRIS stages at the share ROOT, never in a subdirectory: on the C9300 SSD
+# share (ext4 + seclabel), a directory the container creates becomes
+# inaccessible to the container itself once IOS-side file ops touch it
+# (hardware-observed: even `ls` of the agent-created subdir returned EACCES
+# for a uid-0 container shell, while 100 MB writes to the CAF-created share
+# root ran at 1.5 GB/s). Isolation therefore comes from a NAME PREFIX: every
+# file IRIS writes or sweeps here starts with "iris-", and operator/CAF files
+# at the root are never touched. copy /verify reads the fixed staged name and
+# writes the REAL image name to the target FS, verifying the Cisco signature
+# from the bytes — the staged name is cosmetic. The swarm seeds from the
+# CAF-persistent stage_dir copy, never from the share.
+_SHARE_PREFIX = "iris-"
+_SHARE_PROBE = "iris-probe.txt"
 _SHARE_STAGE = "iris-staged.bin"
 
 
@@ -938,46 +942,39 @@ def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
     from the scratch under stage_dir, not from the share)."""
     if not (share_dir and share_ios_path and os.path.isdir(share_dir)):
         return None
-    sub = os.path.join(share_dir, _SHARE_SUBDIR)
-    ios_sub = "%s/%s" % (share_ios_path, _SHARE_SUBDIR)
 
     def _sweep():
+        # ONLY files carrying OUR prefix, at the share root — operator and
+        # CAF files live at the same level and must never be touched
         try:
-            for leftover in os.listdir(sub):
-                try:
-                    os.remove(os.path.join(sub, leftover))
-                except OSError:
-                    pass
+            for leftover in os.listdir(share_dir):
+                if leftover.startswith(_SHARE_PREFIX):
+                    try:
+                        os.remove(os.path.join(share_dir, leftover))
+                    except OSError:
+                        pass
         except OSError:
             pass
 
-    try:
-        os.makedirs(sub, exist_ok=True)
-    except OSError as e:
-        emit_fn("SHARE-FALLBACK",
-                "%s share subdir failed (%s); falling back to scp" % (fname, e))
-        return None
     _sweep()
-    probe = os.path.join(sub, _SHARE_PROBE)
+    probe = os.path.join(share_dir, _SHARE_PROBE)
     try:
         with open(probe, "w") as stream:
             stream.write("iris")
-        listing = cli_execute_fn("dir %s/%s" % (ios_sub, _SHARE_PROBE))
+        listing = cli_execute_fn("dir %s/%s" % (share_ios_path, _SHARE_PROBE))
         if _SHARE_PROBE not in (listing or ""):
-            raise OSError("IOS cannot read %s" % ios_sub)
+            raise OSError("IOS cannot read %s" % share_ios_path)
     except Exception as e:
         emit_fn("SHARE-FALLBACK",
                 "%s share probe failed (%s); falling back to scp" % (fname, e))
         _sweep()
         return None
     local = os.path.join(stage_dir, fname)
-    staged = os.path.join(sub, _SHARE_STAGE)
-    part = os.path.join(sub, _SHARE_STAGE + ".part")
+    staged = os.path.join(share_dir, _SHARE_STAGE)
+    part = os.path.join(share_dir, _SHARE_STAGE + ".part")
     try:
-        # Chunked read/write (not shutil.copyfile, whose os.sendfile fast path
-        # is unreliable across this bind mount). The staged/part names are the
-        # SIMPLE _SHARE_STAGE, never the real image name — the SSD filesystem
-        # EACCES-rejects the long multi-dot name at open.
+        # Chunked read/write (shutil.copyfile's sendfile fast path is
+        # unreliable across this bind mount).
         with open(local, "rb") as src, open(part, "wb") as dst:
             shutil.copyfileobj(src, dst, length=1 << 20)
         os.replace(part, staged)
@@ -987,11 +984,11 @@ def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
         _sweep()
         return None
     try:
-        # copy /verify reads the simple staged name and writes the REAL image
-        # name to the target FS (the caller's dst), so the source name here is
-        # cosmetic; the Cisco signature is verified from the bytes.
+        # copy /verify reads the fixed staged name and writes the REAL image
+        # name to the target FS (the caller's dst); the Cisco signature is
+        # verified from the bytes, so the source name is cosmetic.
         return copy_direct_fn(
-            lambda f, target_prefix: "%s/%s" % (ios_sub, _SHARE_STAGE))
+            lambda f, target_prefix: "%s/%s" % (share_ios_path, _SHARE_STAGE))
     finally:
         _sweep()
 

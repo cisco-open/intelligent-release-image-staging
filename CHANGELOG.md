@@ -46,15 +46,17 @@ additionally never creates, changes, or removes the operator's existing network.
 ### Changed
 - **C9300 IOx image transfer no longer uses scp**: onboarding bind-mounts the
   app-hosting SSD share (`usbflash1:iox_host_data_share`) into the container,
-  the agent lands its verified scratch in the share's `iris/` subdirectory at
-  disk speed, and IOS places it with an internal `copy /verify` onto bootflash
-  — the same final placement as Guest Shell, with no image bytes on the
-  CoPP-policed control-plane punt path (which capped scp at ~1.4 MB/s by
-  default). IRIS stays inside its own `iris/` subdirectory of the shared CAF
-  dir: each attempt sweeps its own orphans, a probe verifies IOS can read the
-  share path before any multi-GB copy (falling back to the scp push
-  otherwise), and undeploy removes the subdirectory. IE-3x00 keeps the scp
-  push unchanged.
+  the agent lands its verified scratch at the share root as
+  `iris-staged.bin` at disk speed, and IOS places it with an internal
+  `copy /verify` onto bootflash under the real image name — the same final
+  placement as Guest Shell, with no image bytes on the CoPP-policed
+  control-plane punt path (which capped scp at ~1.4 MB/s by default). IRIS
+  touches only `iris-` prefixed filenames at the share root (a
+  container-created subdirectory becomes inaccessible to the container itself
+  on this platform): each attempt sweeps its own orphans, a probe verifies
+  IOS can read the share before any multi-GB copy (falling back to the scp
+  push otherwise), and undeploy removes the prefixed files. IE-3x00 keeps the
+  scp push unchanged.
 - Onboarding resolves an immutable plan and records a receipt before any device
   contact; the platform is resolved before the plan hash so a receipt binds the
   exact rendered plan.

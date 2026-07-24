@@ -84,6 +84,9 @@ if [ "$DRY" -eq 1 ]; then
   config_cleanup
   echo "===== [3/4] delete ${PKG_FS}${PKG} ====="
   if [ -n "$SHARE_IOS_PATH" ]; then
+    echo "delete /force $SHARE_IOS_PATH/iris-staged.bin"
+    echo "delete /force $SHARE_IOS_PATH/iris-staged.bin.part"
+    echo "delete /force $SHARE_IOS_PATH/iris-probe.txt"
     echo "delete /force /recursive $SHARE_IOS_PATH/iris"
   fi
   echo "===== [4/4] verify no '$APPID' app / config footprint remains ====="
@@ -125,8 +128,11 @@ fi
 echo "[3/4] delete ${PKG_FS}${PKG} (the staged IOx app package)"
 printf 'delete /force %s%s\n' "$PKG_FS" "$PKG" | RUN >/dev/null 2>&1 || true
 if [ -n "$SHARE_IOS_PATH" ]; then
-  echo "  also removing the IRIS share subdir ($SHARE_IOS_PATH/iris)"
-  printf 'delete /force /recursive %s/iris\n\n' "$SHARE_IOS_PATH" | RUN >/dev/null 2>&1 || true
+  echo "  also removing the IRIS-prefixed transfer files from the share"
+  # our transient staging files at the share ROOT (name-prefix isolation),
+  # plus the legacy iris/ subdir from earlier builds. Never the share itself.
+  printf 'delete /force %s/iris-staged.bin\ndelete /force %s/iris-staged.bin.part\ndelete /force %s/iris-probe.txt\ndelete /force /recursive %s/iris\n\n' \
+    "$SHARE_IOS_PATH" "$SHARE_IOS_PATH" "$SHARE_IOS_PATH" "$SHARE_IOS_PATH" | RUN >/dev/null 2>&1 || true
 fi
 
 echo "[4/4] verify no '$APPID' app and no config footprint remains"

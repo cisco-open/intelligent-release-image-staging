@@ -40,15 +40,18 @@ scratch file to IOS depends on the platform:
 - **C9k (share mount)**: onboarding bind-mounts the app-hosting SSD share —
   `usbflash1:iox_host_data_share`, host-side `/vol/usb1/iox_host_data_share` —
   into the container (`run-opts "-v …:/mnt/share"`). The agent copies the
-  scratch into the share's `iris/` subdirectory at disk speed, then drives an
-  IOS-internal `copy /verify usbflash1:iox_host_data_share/iris/<img>
-  flash:<img>` over its SSH-to-self CLI — the same bootflash-root placement as
-  Guest Shell, with no bulk data on the control-plane punt path. IRIS confines
-  itself to that `iris/` subdirectory (the share is a shared CAF directory):
-  each attempt sweeps its own leftovers, a tiny probe proves IOS can actually
-  read the share path before any multi-GB copy is committed (falling back to
-  scp otherwise), the transient copy is removed after placement, and undeploy
-  deletes the subdirectory.
+  scratch to the share ROOT under its fixed `iris-staged.bin` name at disk
+  speed, then drives an IOS-internal
+  `copy /verify usbflash1:iox_host_data_share/iris-staged.bin flash:<img>`
+  over its SSH-to-self CLI — the same bootflash-root placement as Guest
+  Shell, with no bulk data on the control-plane punt path, and `copy /verify`
+  restores the real image name and checks the Cisco signature from the bytes.
+  IRIS never creates a subdirectory in the share (a container-created subdir
+  becomes inaccessible to the container itself on this platform) and confines
+  itself to `iris-` prefixed filenames: each attempt sweeps only its own
+  leftovers, a tiny probe proves IOS can actually read the share before any
+  multi-GB copy is committed (falling back to scp otherwise), the transient
+  copy is removed after placement, and undeploy deletes the prefixed files.
 - **IE-3x00 (scp push)**: IOx cannot bind-mount the SD card there, so the
   container SCP-pushes the scratch to `guest-share/iris` through the device's
   SCP server and then runs `copy /verify` for the final placement. The agent

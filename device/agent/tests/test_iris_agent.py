@@ -980,14 +980,15 @@ def _mk_scratch(tmp_path, fname="img1.bin", content=b"IMAGEBYTES"):
 
 
 def _cli_probe_ok(cmd):
-    # a `dir <share>/iris/<probe>` transcript that lists the probe file
+    # a `dir <share>/<probe>` transcript that lists the probe file
     assert cmd.startswith("dir ")
     return "  12 -rw-  4  " + cmd.split("/")[-1]
 
 
-def _share_files(share):
-    sub = share / "iris"
-    return sorted(p.name for p in sub.iterdir()) if sub.is_dir() else []
+def _iris_share_files(share):
+    # only the files IRIS is allowed to own (its name prefix), share ROOT
+    return sorted(p.name for p in share.iterdir()
+                  if p.name.startswith("iris-"))
 
 
 def test_stage_via_share_lands_file_then_copy_verifies_from_share(tmp_path):
@@ -999,26 +1000,25 @@ def test_stage_via_share_lands_file_then_copy_verifies_from_share(tmp_path):
     def copy_direct(copy_source):
         # the share copy must be fully in place when copy /verify fires
         seen["source"] = copy_source("img1.bin", "flash:")
-        seen["bytes"] = (share / "iris" / iris_agent._SHARE_STAGE).read_bytes()
+        seen["bytes"] = (share / iris_agent._SHARE_STAGE).read_bytes()
         return True
 
     ok = iris_agent._stage_via_share_impl(
         "img1.bin", stage, str(share), "usbflash1:iox_host_data_share",
         copy_direct, lambda m, msg: None, _cli_probe_ok)
     assert ok is True
-    # IRIS stages under its OWN subdirectory of the shared CAF dir (sweeps and
-    # undeploy cleanup can never touch operator files), and writes the image
-    # under a SIMPLE fixed name — the SSD filesystem rejects the long
-    # multi-dot image name (hardware: EACCES on <img>.part). copy /verify
-    # reads that simple source and writes the REAL name to flash:, and
-    # verifies the signature from the bytes, so the name never matters.
+    # IRIS stages at the share ROOT (container-created SUBDIRS become
+    # inaccessible to the container itself on the C9300 SSD share —
+    # hardware-observed; the CAF-created root stays writable at disk speed)
+    # under its own iris- prefixed fixed name. copy /verify reads that source
+    # and writes the REAL image name to flash:, verifying the signature from
+    # the bytes, so the staged name is cosmetic.
     assert seen["source"] == \
-        "usbflash1:iox_host_data_share/iris/" + iris_agent._SHARE_STAGE
-    assert "." not in iris_agent._SHARE_STAGE.rstrip(".bin") or \
-        iris_agent._SHARE_STAGE.count(".") <= 1     # at most one dot
+        "usbflash1:iox_host_data_share/" + iris_agent._SHARE_STAGE
+    assert iris_agent._SHARE_STAGE.startswith("iris-")
     assert seen["bytes"] == b"IMAGEBYTES"
     # transient copy + probe removed after placement, no leftovers
-    assert _share_files(share) == []
+    assert _iris_share_files(share) == []
 
 
 def test_stage_via_share_returns_none_when_share_dir_missing(tmp_path):
@@ -1054,11 +1054,11 @@ def test_stage_via_share_probe_failure_falls_back_before_big_copy(tmp_path):
         "img1.bin", stage, str(share), "usbflash1:WRONG",
         lambda copy_source: calls.append(1) or True,
         lambda m, msg: emitted.append((m, msg)),
-        lambda cmd: "%Error opening usbflash1:WRONG/iris/ (No such device)")
+        lambda cmd: "%Error opening usbflash1:WRONG/ (No such device)")
     assert result is None          # -> scp fallback
     assert calls == []             # copy /verify never attempted
     assert any(m == "SHARE-FALLBACK" for m, _ in emitted)
-    assert _share_files(share) == []   # probe cleaned up, image never copied
+    assert _iris_share_files(share) == []  # probe cleaned, image never copied
 
 
 def test_stage_via_share_probe_transport_error_falls_back(tmp_path):
@@ -1073,7 +1073,7 @@ def test_stage_via_share_probe_transport_error_falls_back(tmp_path):
         "img1.bin", stage, str(share), "usbflash1:iox_host_data_share",
         lambda copy_source: True, lambda m, msg: None, cli_raises)
     assert result is None
-    assert _share_files(share) == []
+    assert _iris_share_files(share) == []
 
 
 def test_stage_via_share_sweeps_orphans_from_killed_ticks(tmp_path):
@@ -1082,16 +1082,20 @@ def test_stage_via_share_sweeps_orphans_from_killed_ticks(tmp_path):
     # accumulates on the operator's SSD
     stage = _mk_scratch(tmp_path)
     share = tmp_path / "share"
-    (share / "iris").mkdir(parents=True)
-    (share / "iris" / iris_agent._SHARE_STAGE).write_bytes(b"ORPHAN")
-    (share / "iris" / (iris_agent._SHARE_STAGE + ".part")).write_bytes(b"HALF")
-    (share / "operator-file.txt").write_bytes(b"NOT OURS")   # share root: untouched
+    share.mkdir()
+    (share / iris_agent._SHARE_STAGE).write_bytes(b"ORPHAN")
+    (share / (iris_agent._SHARE_STAGE + ".part")).write_bytes(b"HALF")
+    # operator/CAF files at the SAME level must NEVER be touched — the sweep
+    # is scoped to the iris- prefix, that is the whole isolation contract now
+    (share / "operator-file.txt").write_bytes(b"NOT OURS")
+    (share / "bigtest.1.2.3.bin").write_bytes(b"ALSO NOT OURS")
     ok = iris_agent._stage_via_share_impl(
         "img1.bin", stage, str(share), "usbflash1:iox_host_data_share",
         lambda copy_source: True, lambda m, msg: None, _cli_probe_ok)
     assert ok is True
-    assert _share_files(share) == []
+    assert _iris_share_files(share) == []
     assert (share / "operator-file.txt").read_bytes() == b"NOT OURS"
+    assert (share / "bigtest.1.2.3.bin").read_bytes() == b"ALSO NOT OURS"
 
 
 def test_stage_via_share_local_copy_failure_falls_back(tmp_path):
@@ -1108,7 +1112,7 @@ def test_stage_via_share_local_copy_failure_falls_back(tmp_path):
     assert result is None
     assert calls == []
     assert any(m == "SHARE-FALLBACK" for m, _ in emitted)
-    assert _share_files(share) == []   # no partial left behind
+    assert _iris_share_files(share) == []   # no partial left behind
 
 
 def test_stage_via_share_copy_verify_failure_is_final_and_cleans_up(tmp_path):
@@ -1122,7 +1126,7 @@ def test_stage_via_share_copy_verify_failure_is_final_and_cleans_up(tmp_path):
         "img1.bin", stage, str(share), "usbflash1:iox_host_data_share",
         lambda copy_source: False, lambda m, msg: None, _cli_probe_ok)
     assert ok is False
-    assert _share_files(share) == []
+    assert _iris_share_files(share) == []
 
 
 def test_share_settings_env_wins_over_conf(monkeypatch):

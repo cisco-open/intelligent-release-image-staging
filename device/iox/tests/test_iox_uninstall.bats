@@ -97,8 +97,10 @@ setup() {
   [[ "$output" != *"no ip http client"* ]]
 }
 
-@test "dry-run with SHARE_IOS_PATH removes only the iris/ share subdir" {
+@test "dry-run with SHARE_IOS_PATH removes only iris-prefixed share files" {
   SHARE_IOS_PATH=usbflash1:iox_host_data_share run bash "$UNINSTALL" --dry-run
+  [[ "$output" == *"delete /force usbflash1:iox_host_data_share/iris-staged.bin"* ]] && \
+  [[ "$output" == *"delete /force usbflash1:iox_host_data_share/iris-probe.txt"* ]] && \
   [[ "$output" == *"delete /force /recursive usbflash1:iox_host_data_share/iris"* ]] && \
   [[ "$output" != *"delete /force /recursive usbflash1:iox_host_data_share
 "* ]]
