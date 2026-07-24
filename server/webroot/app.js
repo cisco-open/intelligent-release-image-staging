@@ -144,12 +144,12 @@
         '<td><input type="checkbox" class="mark" data-id="' + esc(d.device_id) + '"></td>' +
         '<td>' + esc(d.device_id) + '</td><td>' + esc(d.device_ip || '') + '</td>' +
         '<td>' + esc(d.model || d.heartbeat_model || '') + '</td>' +
-        '<td>' + esc(d.vlan || '') + ' / ' + esc(d.svi_ip || '') + '</td>' +
+        '<td>' + esc(d.network_attachment || 'legacy') + ' / ' + esc(d.inband_vlan || d.iris_vlan || '') + '</td>' +
         '<td><select class="platform">' + platSel + '</select></td>' +
         '<td><select class="cred">' + credSel + '</select></td>' +
         '<td><select class="assign">' + opts + '</select></td>' +
         '<td>' + status + '</td>' +
-        '<td><button class="linkish onboard">onboard</button> · <button class="linkish del">delete</button></td></tr>';
+        '<td><button class="linkish onboard">onboard</button> · <button class="linkish adopt">adopt</button> · <button class="linkish del">delete</button></td></tr>';
     }).join('');
     document.querySelectorAll('#dev-rows .assign').forEach(function (sel) {
       sel.addEventListener('change', async function () {
@@ -186,6 +186,18 @@
         startOnboard(id);
       });
     });
+    document.querySelectorAll('#dev-rows .adopt').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        var id = btn.closest('tr').getAttribute('data-id');
+        if (!confirm('Adopt ' + id + '?\n\nRecord an applied receipt from this ' +
+            'device\u2019s current inventory so an existing deployment can later be ' +
+            'undeployed. IRIS makes no device changes now.')) return;
+        var r = await jpost('/api/devices/' + encodeURIComponent(id) + '/adopt',
+                            { acknowledge_adopt: true });
+        devStatus.textContent = r.ok ? ('Adopted ' + id)
+          : ('Adopt failed: ' + ((await r.json()).error || r.status));
+      });
+    });
     document.getElementById('mark-all').checked = false;
   }
   var onboardEs = null;
@@ -205,10 +217,21 @@
   }
   function startOnboard(id) {
     var log = openOnboardPanel(id);
-    jpost('/api/devices/' + encodeURIComponent(id) + '/onboard', {}).then(function (r) {
+    fetch('/api/devices/' + encodeURIComponent(id) + '/plan').then(function (r) {
+      if (!r.ok) throw new Error('plan unavailable'); return r.json();
+    }).then(function (body) {
+      var plan = body.plan;
+      var acknowledgement = plan.resolved.attachment !== 'inband' || confirm(
+        'Inband preserves the existing VLAN, SVI, gateway, routes, and VRF.\n\n' +
+        'IRIS will configure only Guest Shell resources. Review and acknowledge this exact plan:\n' + plan.plan_hash);
+      if (!acknowledgement) throw new Error('acknowledgement required');
+      return jpost('/api/devices/' + encodeURIComponent(id) + '/onboard', {
+        plan_hash: plan.plan_hash, acknowledge_plan: acknowledgement
+      });
+    }).then(function (r) {
       if (!r.ok) { log.textContent = 'Failed to start onboarding (' + r.status + ')'; return; }
       return r.json();
-    }).then(function (j) { if (j) streamOnboardJob(j.job_id, log); });
+    }).then(function (j) { if (j) streamOnboardJob(j.job_id, log); }).catch(function (err) { log.textContent = err.message; });
   }
   document.getElementById('onboard-close').addEventListener('click', function () {
     if (onboardEs) { onboardEs.close(); onboardEs = null; }
@@ -324,7 +347,7 @@
     if (!ids.length) { devStatus.textContent = 'No devices selected.'; return; }
     if (action === 'undeploy' &&
         !confirm('Undeploy ' + ids.length + ' device(s)?\n\nThis removes the device agent, ' +
-                 'guestshell, VLAN/SVI and trustpoint from each device (staged images at ' +
+                  'guestshell and only receipt-owned resources. Inband deployments preserve their existing network. Staged images at ' +
                  'flash root are left in place). Running jobs are never interrupted.')) return;
     onBtn.disabled = true; unBtn.disabled = true;   // no overlapping batches from double-clicks
     var gen = ++batchGen;
@@ -337,7 +360,21 @@
     try {
       await Promise.all(ids.map(async function (id) {
         try {
-          var r = await jpost('/api/devices/' + encodeURIComponent(id) + '/' + action, {});
+          var r;
+          if (action === 'onboard') {
+            var planResponse = await fetch('/api/devices/' + encodeURIComponent(id) + '/plan');
+            if (!planResponse.ok) { failed.push(id); return; }
+            var plan = (await planResponse.json()).plan;
+            if (plan.resolved.attachment === 'inband' && !confirm(
+              id + ': acknowledge preservation of the existing management VLAN, SVI, gateway, routes, and VRF?')) {
+              failed.push(id); return;
+            }
+            r = await jpost('/api/devices/' + encodeURIComponent(id) + '/onboard', {
+              plan_hash: plan.plan_hash, acknowledge_plan: true
+            });
+          } else {
+            r = await jpost('/api/devices/' + encodeURIComponent(id) + '/' + action, {});
+          }
           if (r.ok) { batchJobs[(await r.json()).job_id] = id; } else { failed.push(id); }
         } catch (e) { failed.push(id); }   // one blipped POST must not kill the batch
       }));
@@ -384,13 +421,19 @@
     var body = {
       device_id: did,
       device_ip: document.getElementById('df-ip').value.trim() || did,
-      vlan: document.getElementById('df-vlan').value.trim(),
+      network_attachment: document.getElementById('df-attachment').value,
+      iris_vlan: document.getElementById('df-vlan').value.trim(),
       svi_ip: document.getElementById('df-svi').value.trim(),
       svi_mask: document.getElementById('df-mask').value.trim(),
-      guest_ip: document.getElementById('df-guest').value.trim(),
+      app_ip: document.getElementById('df-guest').value.trim(),
+      app_mask: document.getElementById('df-mask').value.trim(),
+      app_gateway: document.getElementById('df-gateway').value.trim(),
       model: document.getElementById('df-model').value.trim(),
       credential_profile_id: document.getElementById('df-cred').value
     };
+    if (body.network_attachment === 'inband') {
+      body.inband_vlan = body.iris_vlan; body.iris_vlan = ''; body.svi_ip = ''; body.svi_mask = '';
+    }
     var r = await jpost('/api/devices', body);
     if (!r.ok) { derr.textContent = 'Add failed: ' + ((await r.json()).error || r.status); return; }
     devForm.hidden = true; devForm.reset(); refreshDevices();

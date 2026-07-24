@@ -20,6 +20,7 @@ nav = [
   { "Container Deployments" = "containers.md" },
   { "Server" = "server.md" },
   { "Network Ports and Flows" = "network-ports.md" },
+  { "Network Attachment and VLAN Ownership" = "network-attachment.md" },
   { "Kubernetes" = "kubernetes.md" },
   { "Device Agents" = "device-agents.md" },
   { "Web Console" = "console.md" },

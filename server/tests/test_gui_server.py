@@ -661,7 +661,8 @@ def test_csv_import_export(tmp_path):
                          headers={"Cookie": ck})
         assert st == 200 and "text/csv" in hd.get("Content-Type", "")
         assert b.decode().splitlines()[0] == \
-            "device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip,model,platform"
+            ("device_id,device_ip,network_attachment,iris_vlan,svi_ip,svi_mask,"
+             "app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,platform")
         assert "d9,10.9.9.1" in b.decode()
     finally:
         stop()
@@ -1381,7 +1382,7 @@ def test_devices_example_csv_download(tmp_path):
                          headers={"Cookie": ck})
         assert st == 200
         assert "filename=devices-example.csv" in hd.get("Content-Disposition", "")
-        assert "device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip" in b.decode()
+        assert "device_id,device_ip,network_attachment,iris_vlan" in b.decode()
     finally:
         stop()
 
@@ -1749,6 +1750,25 @@ def test_device_platform_happy_path_and_clear(tmp_path):
         st, _, b = _req(host, port, "GET", "/api/devices", headers={"Cookie": ck})
         dev = json.loads(b)["devices"][0]
         assert dev.get("platform") == ""
+    finally:
+        stop()
+
+
+def test_device_platform_iox_on_inband_rejected_400(tmp_path):
+    """Setting an unsupported platform for the attachment (inband IOx) surfaces
+    the validation error as a clean 400, never an uncaught 500."""
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, _cat = deps
+    try:
+        fleet.upsert({"device_id": "edge", "device_ip": "192.0.2.10",
+                      "network_attachment": "inband", "inband_vlan": "120",
+                      "app_ip": "192.0.2.11", "app_mask": "255.255.255.0",
+                      "app_gateway": "192.0.2.1", "platform": "guestshell"})
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, b = _req(host, port, "POST", "/api/devices/edge/platform",
+                        {"platform": "iox"}, headers=hh)
+        assert st == 400 and "inband" in json.loads(b)["error"].lower()
     finally:
         stop()
 

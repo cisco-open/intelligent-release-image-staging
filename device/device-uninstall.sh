@@ -6,18 +6,22 @@
 
 # Undeploy IRIS from a Guest Shell device (Catalyst 9300 / ISR / ASR / CSR /
 # C8000v): the exact inverse of device/device-install.sh, lab-validated on
-# C9300 (2026-07-04). Removes ONLY the IRIS footprint:
-#   - EEM applets IRIS-AGENT + IRIS-COPYROOT (FIRST, so the 60s timer can't
-#     relaunch bootstrap mid-teardown)
-#   - the guestshell instance (disable -> destroy) + its app-hosting config
-#   - interface Vlan$VLAN + vlan $VLAN
-#   - the IRISQ logging discriminator + its buffered/console/monitor
-#     attachments (EXPLICIT-name no-forms — the bare forms are rejected with
-#     "% Incomplete command")
-#   - crypto pki trustpoint IRIS + ip http client secure-trustpoint IRIS
-#   - <fs>guest-share (agent, conf, bundle, staged seeding copy)
-# Deliberately LEFT IN PLACE: `iox`, `file prompt quiet`, the AppGig trunk
-# (the installer re-applies all three idempotently on the next onboard), any
+# C9300 (2026-07-04). NETWORK_ATTACHMENT selects the teardown scope:
+#   routed (default) removes the full IRIS footprint:
+#     - EEM applets IRIS-AGENT + IRIS-COPYROOT (FIRST, so the 60s timer can't
+#       relaunch bootstrap mid-teardown)
+#     - the guestshell instance (disable -> destroy) + its app-hosting config
+#     - interface Vlan$VLAN + vlan $VLAN
+#     - the IRISQ logging discriminator + its buffered/console/monitor
+#       attachments (EXPLICIT-name no-forms)
+#     - crypto pki trustpoint IRIS + ip http client secure-trustpoint IRIS
+#     - <fs>guest-share (agent, conf, bundle, staged seeding copy)
+#   inband removes ONLY the app footprint (EEM applets, guestshell/app-hosting,
+#     guest-share). It preserves the operator-owned VLAN/SVI/routes/VRF AND the
+#     shared logging discriminator and PKI trustpoint/HTTP-client settings,
+#     because a receipt cannot prove those globals remain uniquely IRIS-owned.
+# Deliberately LEFT IN PLACE (both modes): `iox`, `file prompt quiet`, the
+# AppGig trunk (the installer re-applies idempotently on the next onboard), any
 # staged image at flash root (a delivered artifact, never IRIS machinery),
 # and staged images at the filesystem root. Successful cleanup is persisted to
 # startup-config so a reload cannot restore IRIS configuration.
@@ -35,8 +39,9 @@ DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
 # verify clean (the verify greps for this exact VLAN). Platform selection is
 # the CALLER's job now (OnboardService routes IOx to device/iox/uninstall.sh),
 # so this script no longer refuses by model.
-VLAN_IN="${VLAN:-}"
-VLAN="${VLAN:-666}"
+NETWORK_ATTACHMENT="${NETWORK_ATTACHMENT:-routed}"
+VLAN_IN="${VLAN:-${INBAND_VLAN:-}}"
+VLAN="${VLAN_IN:-666}"
 IOS_FS="${IOS_FS:-flash:}"
 IOS_ROOT="${IOS_FS}guest-share"
 
@@ -54,6 +59,12 @@ EOF
 }
 
 config_cleanup() {
+if [ "$NETWORK_ATTACHMENT" = "inband" ]; then
+cat <<EOF
+no app-hosting appid guestshell
+EOF
+return
+fi
 cat <<EOF
 no app-hosting appid guestshell
 no interface Vlan$VLAN
@@ -82,7 +93,7 @@ fi
 
 : "${DEVICE_IP:?set DEVICE_IP}"; : "${DEVICE_USER:?set DEVICE_USER}"
 : "${DEVICE_PASS:?set DEVICE_PASS}"
-[ -n "$VLAN_IN" ] || { echo "ERROR: VLAN not set (the device's fleet row is" \
+[ -n "$VLAN_IN" ] || { echo "ERROR: VLAN not set (the deployment receipt is" \
   "missing its vlan); refusing to guess — set the vlan on the device and retry" >&2; exit 1; }
 RUN="$HERE/../lab/device-run.sh"
 
@@ -112,7 +123,11 @@ if [ -n "$st" ]; then
 fi
 echo "  guestshell destroyed"
 
-echo "[4/5] remove config footprint (app-hosting block, Vlan$VLAN, IRISQ, PKI trustpoint)"
+if [ "$NETWORK_ATTACHMENT" = "inband" ]; then
+  echo "[4/5] remove inband app footprint (app-hosting only; existing network preserved)"
+else
+  echo "[4/5] remove config footprint (app-hosting block, Vlan$VLAN, IRISQ, PKI trustpoint)"
+fi
 { echo "configure terminal"; config_cleanup; echo "end"; } | "$RUN" "$DEVICE_IP" >/dev/null
 
 echo "[5/5] delete $IOS_ROOT (agent, conf, bundle, staged seeding copy)"
@@ -122,10 +137,18 @@ echo "verify: no app-hosting entry, no leftover config lines, no guest-share"
 # terminal width 512 stops IOS wrapping the echoed command lines (wrap
 # fragments would false-match the artifact greps below); lines carrying the
 # prompt '#' are the command echoes themselves — excluded.
-out="$(printf 'terminal width 512\nshow app-hosting list\nshow running-config | include applet IRIS-|interface Vlan%s|crypto pki trustpoint IRIS|discriminator IRISQ\ndir %s | include guest-share\n' \
-        "$VLAN" "$IOS_FS" | "$RUN" "$DEVICE_IP" | grep -v "#" || true)"
-left="$(printf '%s\n' "$out" | grep -E \
-  "^guestshell|^event manager applet IRIS-|^interface Vlan$VLAN|^crypto pki trustpoint IRIS *$|IRISQ|guest-share" || true)"
+# Inband intentionally preserves the operator-owned network, discriminator, and
+# trustpoint, so its verify only asserts the app footprint is gone.
+if [ "$NETWORK_ATTACHMENT" = "inband" ]; then
+  verify_filter="applet IRIS-"
+  artifact_re="^guestshell|^event manager applet IRIS-|guest-share"
+else
+  verify_filter="applet IRIS-|interface Vlan$VLAN|crypto pki trustpoint IRIS|discriminator IRISQ"
+  artifact_re="^guestshell|^event manager applet IRIS-|^interface Vlan$VLAN|^crypto pki trustpoint IRIS *\$|IRISQ|guest-share"
+fi
+out="$(printf 'terminal width 512\nshow app-hosting list\nshow running-config | include %s\ndir %s | include guest-share\n' \
+         "$verify_filter" "$IOS_FS" | "$RUN" "$DEVICE_IP" | grep -v "#" || true)"
+left="$(printf '%s\n' "$out" | grep -E "$artifact_re" || true)"
 if [ -n "$left" ]; then
   echo "ERROR: artifacts still present after undeploy:" >&2
   printf '%s\n' "$left" >&2

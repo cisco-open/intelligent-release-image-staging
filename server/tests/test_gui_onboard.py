@@ -811,6 +811,28 @@ def test_conflicting_action_on_active_job_raises():
     assert _wait(svc, j1)["state"] == "done"
 
 
+def test_prepare_runs_once_and_not_on_dedup():
+    """start()'s prepare() (used to mint the receipt) must fire exactly once for
+    a genuinely new job and NEVER when a second same-action start dedups onto the
+    running job -- otherwise a double-onboard would strand an orphan receipt."""
+    release = threading.Event()
+
+    def run_fn(p, e, on):
+        release.wait(5)
+        return 0
+
+    svc = _multi_svc(1, run_fn, max_concurrent=1)
+    calls = []
+    j1 = svc.start("d1", prepare=lambda: calls.append(1) or "rcpt-1")
+    assert _wait_for(lambda: svc.get_job(j1)["state"] == "running")
+    j2 = svc.start("d1", prepare=lambda: calls.append(1) or "rcpt-2")
+    assert j1 == j2                                # deduped onto the running job
+    assert calls == [1]                            # prepare fired only once
+    assert svc.get_job(j1)["receipt_id"] == "rcpt-1"
+    release.set()
+    assert _wait(svc, j1)["state"] == "done"
+
+
 def test_undeploy_clears_device_state_on_success():
     """A successful undeploy must forget the device's stored heartbeat so the
     console stops showing the wiped box as 'deployed' from its last live

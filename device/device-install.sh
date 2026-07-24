@@ -28,12 +28,21 @@
 #     Required for a real run; optional for --dry-run (the block is rendered either way).
 set -euo pipefail
 
-: "${DEVICE_IP:?set DEVICE_IP}"; : "${VLAN:?set VLAN}"
-: "${SVI_IP:?set SVI_IP}"; : "${SVI_MASK:?set SVI_MASK}"; : "${GUEST_IP:?set GUEST_IP}"
+: "${DEVICE_IP:?set DEVICE_IP}"
 : "${CATALOG_URL:?set CATALOG_URL}"; : "${CATALOG_TOKEN:?set CATALOG_TOKEN}"
 : "${DEVICE_ID:?set DEVICE_ID}"; : "${STAGE_HOST:?set STAGE_HOST}"
+NETWORK_ATTACHMENT="${NETWORK_ATTACHMENT:-routed}"
+case "$NETWORK_ATTACHMENT" in
+  routed)
+    : "${VLAN:?set VLAN}"; : "${SVI_IP:?set SVI_IP}"; : "${SVI_MASK:?set SVI_MASK}"; : "${GUEST_IP:?set GUEST_IP}"
+    GW_IP="${GW_IP:-$SVI_IP}" ;;
+  inband)
+    : "${INBAND_VLAN:?set INBAND_VLAN}"; : "${APP_IP:?set APP_IP}"; : "${APP_MASK:?set APP_MASK}"; : "${APP_GATEWAY:?set APP_GATEWAY}"
+    VLAN="$INBAND_VLAN"; GUEST_IP="$APP_IP"; SVI_MASK="$APP_MASK"; GW_IP="$APP_GATEWAY" ;;
+  *) echo "ERROR: NETWORK_ATTACHMENT must be routed or inband" >&2; exit 1 ;;
+esac
 RPC_SECRET=""   # NOT baked: the agent fetches it on its first token-refresh
-GW_IP="${GW_IP:-$SVI_IP}"; CPU="${CPU:-1110}"; MEM="${MEM:-512}"; PERSIST="${PERSIST:-256}"
+CPU="${CPU:-1110}"; MEM="${MEM:-512}"; PERSIST="${PERSIST:-256}"
 HOST_USER="${HOST_USER:-}"; HOST_PASS="${HOST_PASS:-}"   # required only when STAGE_HOST is REMOTE (enforced at the ssh path below)
 STAGE="${STAGE:-/flash/guest-share/iris}"
 IRIS_CRT_FILE="${IRIS_CRT_FILE:-}"   # local path to the bare crt.pem (trustpoint + curl --cacert)
@@ -73,6 +82,34 @@ IOS_STAGE="${IOS_FS}${STAGE#/flash}"
 # NOTE: IRIS-COPYROOT is NOT installed here — the agent templates+fires it at runtime
 # (event syslog/$_arg1 proved unreliable on 17.18; the agent's cli.configure does it).
 ios_config() {
+if [ "$NETWORK_ATTACHMENT" = "inband" ]; then
+cat <<EOF
+app-hosting appid guestshell
+ app-vnic AppGigabitEthernet trunk
+  vlan $VLAN guest-interface 0
+   guest-ipaddress $GUEST_IP netmask $SVI_MASK
+ app-default-gateway $GW_IP guest-interface 0
+ app-resource profile custom
+  cpu $CPU
+  memory $MEM
+  persist-disk $PERSIST
+!
+file prompt quiet
+!
+logging discriminator IRISQ mnemonics drops IOX_INST_WARN
+logging buffered discriminator IRISQ
+logging console discriminator IRISQ
+logging monitor discriminator IRISQ
+!
+event manager applet IRIS-AGENT authorization bypass
+ event timer watchdog time 60 maxrun 900
+ action 100 cli command "enable"
+ action 200 cli command "guestshell run bash /flash/guest-share/bootstrap.sh"
+!
+end
+EOF
+return
+fi
 cat <<EOF
 iox
 !
@@ -214,7 +251,7 @@ else
   ssh_host "cat > ~/iris/artifacts/iris-catalog.pem" < "$IRIS_CRT_FILE"
 fi
 
-echo "[3/6] apply IOS config (IOx, VLAN $VLAN, Vlan$VLAN SVI, app-hosting, file prompt, EEM timers)"
+echo "[3/6] apply IOS config ($NETWORK_ATTACHMENT app-hosting, file prompt, EEM timers)"
 { echo "configure terminal"; ios_config; } | "$HERE/../lab/device-run.sh" "$DEVICE_IP" >/dev/null
 
 # HARDWARE-LEARNED (C9300, 2026-07-04): <fs>guest-share must exist BEFORE

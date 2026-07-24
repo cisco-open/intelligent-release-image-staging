@@ -178,7 +178,7 @@ class OnboardService:
                  crt_public=None, host_ip=None, catalog_url=None,
                  mint_fn=None, run_fn=_default_runner, now_fn=time.time,
                  probe_fn=None, artifacts_dir=None, audit_fn=None,
-                 max_concurrent=None, clear_state_fn=None):
+                  max_concurrent=None, clear_state_fn=None, receipts=None):
         self.fleet = fleet
         self.creds = creds
         self.server_dir = server_dir or os.path.dirname(os.path.abspath(__file__))
@@ -205,6 +205,7 @@ class OnboardService:
         # CatalogStore.forget_device in main()). Injected, like mint/run/audit,
         # so orchestration stays unit-testable without a catalog.
         self._clear_state = clear_state_fn
+        self.receipts = receipts
         if max_concurrent is None:
             max_concurrent = int(os.environ.get(
                 "IRIS_ONBOARD_CONCURRENCY", str(_DEFAULT_CONCURRENCY)))
@@ -215,7 +216,7 @@ class OnboardService:
         self._jobs = {}
         self._lock = threading.Lock()
 
-    def _build_env(self, device_id, mint=True):
+    def _build_env(self, device_id, mint=True, resolved=None):
         dev = self.fleet.get_device(device_id)
         if not dev:
             raise ValueError("unknown device: %s" % device_id)
@@ -228,13 +229,22 @@ class OnboardService:
         # the secrets store — pure teardown must not touch it.
         token = self._mint(device_id) if mint else ""
         env = dict(os.environ)
+        target = resolved or dev
+        attachment = target.get("attachment", target.get("network_attachment", "routed"))
+        if attachment == "legacy_routed":
+            attachment = "routed"
         env.update({
             "DEVICE_IP": dev["device_ip"],
             "DEVICE_ID": device_id,
-            "VLAN": str(dev.get("vlan", "")),
-            "SVI_IP": dev.get("svi_ip", ""),
-            "SVI_MASK": dev.get("svi_mask", ""),
-            "GUEST_IP": dev.get("guest_ip", ""),
+            "NETWORK_ATTACHMENT": attachment,
+            "VLAN": str(target.get("iris_vlan", target.get("vlan", ""))),
+            "SVI_IP": target.get("svi_ip", ""),
+            "SVI_MASK": target.get("svi_mask", target.get("app_mask", "")),
+            "GUEST_IP": target.get("app_ip", target.get("guest_ip", "")),
+            "INBAND_VLAN": str(target.get("inband_vlan", "")),
+            "APP_IP": target.get("app_ip", target.get("guest_ip", "")),
+            "APP_MASK": target.get("app_mask", target.get("svi_mask", "")),
+            "APP_GATEWAY": target.get("app_gateway", target.get("svi_ip", "")),
             "CATALOG_URL": self.catalog_url,
             "STAGE_HOST": self.host_ip,
             "CATALOG_TOKEN": token,
@@ -251,8 +261,8 @@ class OnboardService:
             "IRIS_STAGE_LOCAL": "1",
             "IRIS_ARTIFACTS_DIR": os.environ.get("IRIS_ARTIFACTS_DIR", "/srv/artifacts"),
         })
-        if dev.get("model"):
-            env["MODEL"] = dev["model"]
+        if target.get("model"):
+            env["MODEL"] = target["model"]
         # Stage-host SSH login for the installer's remote-STAGE_HOST branch (in
         # Docker the container's netns never owns STAGE_HOST, so artifact staging
         # goes over ssh). The age-encrypted store beats any inherited process env;
@@ -263,7 +273,10 @@ class OnboardService:
         if sh:
             env["HOST_USER"] = sh["username"]
             env["HOST_PASS"] = sh["password"]
-        return dev, env
+        resolved_dev = dict(dev)
+        resolved_dev.update(target)
+        resolved_dev["platform"] = target.get("platform", resolved_dev.get("platform"))
+        return resolved_dev, env
 
     def _resolve(self, device_id, dev, env, action="onboard"):
         """Resolve (platform, script) for a device, using the live probe (if
@@ -302,7 +315,7 @@ class OnboardService:
             env["DEVICE_SSH_USER"] = env["DEVICE_USER"]
         return platform, script
 
-    def start(self, device_id, action="onboard"):
+    def start(self, device_id, action="onboard", resolved=None, prepare=None):
         """Create a job and run the action's script on a daemon thread.
         Returns the job id immediately. action is "onboard"
         (device-install.sh / the iox recipe) or "undeploy"
@@ -310,6 +323,12 @@ class OnboardService:
         installers run at once; beyond that a job stays "queued" (its thread
         parked on the slot semaphore — threads are cheap, hundreds queue
         fine) until a slot frees or cancel_queued() flips it to "cancelled".
+
+        prepare() (optional) is called EXACTLY ONCE, under the job lock, only
+        when a genuinely new job is registered — never when this start joins an
+        already-active same-action job. It returns the receipt id to bind to the
+        job. Creating the receipt there (instead of before start) means a
+        concurrent double-onboard cannot leave an orphan planned receipt behind.
 
         Jobs are in-memory and per-process: a server restart loses all job state
         and abandons any in-flight job (re-running either script is
@@ -319,9 +338,10 @@ class OnboardService:
             raise ValueError("unknown action: %s" % action)
         job_id = secrets.token_hex(8)
         job = {"id": job_id, "device_id": device_id, "action": action,
-               "state": "queued", "lines": [], "returncode": None,
-               "queued_at": int(self._now()),
-               "started_at": None, "finished_at": None}
+                "state": "queued", "lines": [], "returncode": None,
+                "queued_at": int(self._now()),
+                "started_at": None, "finished_at": None, "receipt_id": None,
+                "resolved": resolved}
         with self._lock:
             # Never run two scripts against the same device at once: the same
             # action again (double-click, overlapping batches) joins the
@@ -335,6 +355,9 @@ class OnboardService:
                     raise ValueError(
                         "device %s is busy with an active %s job (%s)"
                         % (device_id, j.get("action", "onboard"), j["id"]))
+            # Only now, holding the lock and past the dedup guard, do we mint the
+            # receipt — so exactly one receipt exists per genuinely started job.
+            job["receipt_id"] = prepare() if prepare else None
             self._evict_old(self._now())
             self._jobs[job_id] = job
 
@@ -347,10 +370,13 @@ class OnboardService:
                 j["state"] = "running"
                 j["started_at"] = int(self._now())
             try:
-                dev, env = self._build_env(device_id,
-                                           mint=(action == "onboard"))
+                dev, env = self._build_env(device_id, mint=(action == "onboard"),
+                                           resolved=j.get("resolved"))
+                # A receipt has already resolved platform before token minting.
                 platform, script = self._resolve(device_id, dev, env, action)
             except Exception as exc:
+                if self.receipts is not None and j.get("receipt_id"):
+                    self.receipts.transition(j["receipt_id"], "needs-reconcile")
                 self._append(job_id, "ERROR: " + str(exc))
                 self._finish(job_id, "error", None)
                 return
@@ -369,11 +395,18 @@ class OnboardService:
                     self._append(job_id, "ERROR: %s not found in artifacts dir "
                                  "-- build device/iox/build.sh%s and place it in "
                                  "artifacts/ (device untouched)" % (pkg, flag))
+                    if self.receipts is not None and j.get("receipt_id"):
+                        self.receipts.transition(j["receipt_id"], "needs-reconcile")
                     self._finish(job_id, "error", None)
                     return
             try:
+                receipt_id = j.get("receipt_id")
+                if self.receipts is not None and receipt_id:
+                    self.receipts.transition(receipt_id, "applying")
                 rc = self._run(script, env, lambda line: self._append(job_id, line))
             except Exception as exc:
+                if self.receipts is not None and receipt_id:
+                    self.receipts.transition(receipt_id, "needs-reconcile")
                 self._append(job_id, "ERROR: " + str(exc))
                 self._finish(job_id, "error", None)
                 return
@@ -385,6 +418,13 @@ class OnboardService:
                     self._clear_state(device_id)
                 except Exception:
                     pass   # a bookkeeping failure must never fail the job
+            if self.receipts is not None and receipt_id:
+                if rc != 0:
+                    self.receipts.transition(receipt_id, "needs-reconcile")
+                elif action == "onboard":
+                    self.receipts.transition(receipt_id, "active")
+                else:
+                    self.receipts.transition(receipt_id, "removed")
             self._finish(job_id, "done" if rc == 0 else "error", rc)
 
         def run_slotted():
