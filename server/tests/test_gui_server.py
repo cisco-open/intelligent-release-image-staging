@@ -1052,6 +1052,61 @@ def test_sse_stream_survives_queue_wait(tmp_path, monkeypatch):
         stop()
 
 
+def _serve_inband(tmp_path, run_fn):
+    import deployment_receipts
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
+    state = str(tmp_path / "state")
+    fleet = gui_fleet.FleetStore(state)
+    fleet.upsert({"device_id": "edge", "device_ip": "192.0.2.10",
+                  "network_attachment": "inband", "inband_vlan": "120",
+                  "app_ip": "192.0.2.11", "app_mask": "255.255.255.0",
+                  "app_gateway": "192.0.2.1", "model": "C9300",
+                  "platform": "guestshell", "credential_profile_id": "lab"})
+    creds = gui_creds.CredentialStore(secrets_path)
+    creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
+    receipts = deployment_receipts.ReceiptStore(state)
+    onboard = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
+                                         mint_fn=lambda d: "TOK", run_fn=run_fn,
+                                         receipts=receipts)
+    srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, creds, None,
+                                 onboard, certfile=None, receipts=receipts)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return "127.0.0.1", port, srv.shutdown
+
+
+def test_inband_onboard_is_one_click_and_drives_inband_renderer(tmp_path):
+    """Inband onboards exactly like routed: a plain POST starts a job, records a
+    receipt, and runs the installer with NETWORK_ATTACHMENT=inband."""
+    ran = []
+    host, port, stop = _serve_inband(
+        tmp_path, lambda p, e, on: (ran.append(dict(e)), 0)[1])
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        # plan preview reports the inband attachment
+        st, _, b = _req(host, port, "GET", "/api/devices/edge/plan",
+                        headers={"Cookie": ck})
+        assert st == 200 and json.loads(b)["plan"]["resolved"]["attachment"] == "inband"
+        # a plain onboard POST starts the job (no gate, no acknowledgement dance)
+        st, _, b = _req(host, port, "POST", "/api/devices/edge/onboard", {},
+                        headers=hh)
+        assert st == 200
+        jid = json.loads(b)["job_id"]
+        import time as _t
+        deadline = _t.time() + 3
+        while _t.time() < deadline:
+            _, _, jb = _req(host, port, "GET", "/api/onboard/jobs/" + jid,
+                            headers={"Cookie": ck})
+            if json.loads(jb)["state"] in ("done", "error"):
+                break
+            _t.sleep(0.02)
+        assert ran and ran[-1]["NETWORK_ATTACHMENT"] == "inband"
+    finally:
+        stop()
+
+
 def _serve_onboard_audit(tmp_path, run_fn, **svc_kw):
     """_serve_onboard, but the OnboardService is built with an audit_fn wired
     to a real audit.jsonl under tmp_path (via gui_server's audit_path kwarg,

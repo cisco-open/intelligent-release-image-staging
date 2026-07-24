@@ -217,21 +217,10 @@
   }
   function startOnboard(id) {
     var log = openOnboardPanel(id);
-    fetch('/api/devices/' + encodeURIComponent(id) + '/plan').then(function (r) {
-      if (!r.ok) throw new Error('plan unavailable'); return r.json();
-    }).then(function (body) {
-      var plan = body.plan;
-      var acknowledgement = plan.resolved.attachment !== 'inband' || confirm(
-        'Inband preserves the existing VLAN, SVI, gateway, routes, and VRF.\n\n' +
-        'IRIS will configure only Guest Shell resources. Review and acknowledge this exact plan:\n' + plan.plan_hash);
-      if (!acknowledgement) throw new Error('acknowledgement required');
-      return jpost('/api/devices/' + encodeURIComponent(id) + '/onboard', {
-        plan_hash: plan.plan_hash, acknowledge_plan: acknowledgement
-      });
-    }).then(function (r) {
+    jpost('/api/devices/' + encodeURIComponent(id) + '/onboard', {}).then(function (r) {
       if (!r.ok) { log.textContent = 'Failed to start onboarding (' + r.status + ')'; return; }
       return r.json();
-    }).then(function (j) { if (j) streamOnboardJob(j.job_id, log); }).catch(function (err) { log.textContent = err.message; });
+    }).then(function (j) { if (j) streamOnboardJob(j.job_id, log); });
   }
   document.getElementById('onboard-close').addEventListener('click', function () {
     if (onboardEs) { onboardEs.close(); onboardEs = null; }
@@ -360,21 +349,7 @@
     try {
       await Promise.all(ids.map(async function (id) {
         try {
-          var r;
-          if (action === 'onboard') {
-            var planResponse = await fetch('/api/devices/' + encodeURIComponent(id) + '/plan');
-            if (!planResponse.ok) { failed.push(id); return; }
-            var plan = (await planResponse.json()).plan;
-            if (plan.resolved.attachment === 'inband' && !confirm(
-              id + ': acknowledge preservation of the existing management VLAN, SVI, gateway, routes, and VRF?')) {
-              failed.push(id); return;
-            }
-            r = await jpost('/api/devices/' + encodeURIComponent(id) + '/onboard', {
-              plan_hash: plan.plan_hash, acknowledge_plan: true
-            });
-          } else {
-            r = await jpost('/api/devices/' + encodeURIComponent(id) + '/' + action, {});
-          }
+          var r = await jpost('/api/devices/' + encodeURIComponent(id) + '/' + action, {});
           if (r.ok) { batchJobs[(await r.json()).job_id] = id; } else { failed.push(id); }
         } catch (e) { failed.push(id); }   // one blipped POST must not kill the batch
       }));

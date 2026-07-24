@@ -34,7 +34,7 @@ The supported inband cell is intentionally narrow:
 | Attachment | Addressing | Platform | Status |
 | --- | --- | --- | --- |
 | Routed | static | Guest Shell / IOx | supported (receipt/preflight hardened) |
-| Inband | static | Guest Shell | implemented, **fail-closed pending physical preflight evidence** |
+| Inband | static | Guest Shell | supported |
 | Inband | static | IOx | rejected — separate capability gate |
 | Inband | DHCP | any | rejected — separate capability gate |
 
@@ -103,8 +103,8 @@ Adoption records ownership; it makes no changes to the device.
 The Console Add Device flow has an explicit **Network attachment** choice —
 *Routed - IRIS-managed app network* or *Inband - existing management VLAN* — and
 the device table shows each device's **Attachment**, not a bare VLAN/SVI value.
-Routed onboarding is one-click; inband requires an ownership acknowledgement and
-is currently held closed pending lab preflight. See [Web Console](console.md).
+Routed and inband onboarding are both one-click and receipt-backed. See
+[Web Console](console.md).
 
 The legacy `tools/gen-device-installers.sh` generator is routed-only and refuses
 a v2 (`network_attachment`) header: a self-contained installer cannot record a

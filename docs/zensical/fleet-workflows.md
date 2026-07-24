@@ -41,9 +41,8 @@ can be undeployed — they are never inferred as inband.
 
 Attachment-aware onboarding runs through the **Console / API**, which resolves
 an immutable plan, records a durable *receipt* of what was applied, and drives
-teardown from that receipt (not from the editable inventory). Routed onboarding
-is one-click; inband onboarding is held closed until physical preflight evidence
-is captured. See [Web Console](console.md).
+teardown from that receipt (not from the editable inventory). Routed and inband
+onboarding are both one-click and receipt-backed. See [Web Console](console.md).
 
 The legacy CLI generator is **routed-only** and deliberately refuses a v2
 (`network_attachment`) header, because a self-contained installer cannot record

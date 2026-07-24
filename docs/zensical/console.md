@@ -49,9 +49,7 @@ device table shows each device's attachment rather than a bare VLAN/SVI value:
 - **Routed - IRIS-managed app network** — IRIS creates a dedicated VLAN and SVI.
   Onboarding is one-click and create-only.
 - **Inband - existing management VLAN** — the agent attaches to an existing,
-  operator-owned VLAN that IRIS never creates, changes, or removes. Onboarding
-  requires an ownership acknowledgement and is currently held closed pending
-  physical preflight evidence.
+  operator-owned VLAN that IRIS never creates, changes, or removes.
 
 Each onboard records a durable **receipt** of what was applied. **Undeploy**
 runs only from that receipt, so editing inventory after onboarding cannot

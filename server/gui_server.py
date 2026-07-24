@@ -951,9 +951,6 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 # parked worker thread — junk ids must not accumulate either.
                 if fleet is not None and fleet.get_device(did) is None:
                     self._json(404, {"error": "no such device"}); return
-                body = self._json_body(raw)
-                if body is None:
-                    return
                 resolved = None
                 receipt_ref = {}
                 prepare = None
@@ -967,12 +964,6 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             plan = self._plan(did, device)
                         except ValueError as exc:
                             self._json(409, {"error": str(exc)}); return
-                        attachment = plan["resolved"]["attachment"]
-                        if attachment == "inband":
-                            # Inband requires the exact-plan acknowledgement gate
-                            # and is held closed until physical preflight evidence.
-                            self._json(409, {"error": "inband onboarding is awaiting "
-                                             "physical preflight evidence"}); return
                         resolved = plan["resolved"]
 
                         def prepare():
