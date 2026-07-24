@@ -86,6 +86,18 @@
   var devStatus = document.getElementById('dev-status');
   var imageIds = [];
   var credOpts = [];
+  // Live status: the devices table previously refreshed only on tab switches
+  // and after actions, so stage_state changes (staging -> transferring ->
+  // ready) sat stale until the operator clicked something. Poll every 10s —
+  // but never while the operator is interacting with a row control (redrawing
+  // innerHTML would yank an open dropdown out from under them) and never in a
+  // hidden browser tab.
+  setInterval(function () {
+    if (document.hidden) return;
+    var a = document.activeElement;
+    if (a && a.closest && a.closest('#dev-rows')) return;
+    refreshDevices();
+  }, 10000);
   async function refreshDevices() {
     var [dr, ir, cr] = await Promise.all([fetch('/api/devices'), fetch('/api/images'), fetch('/api/credentials')]);
     if (!dr.ok) return;
@@ -94,6 +106,11 @@
     var devNow = dbody.now || Date.now() / 1000;   // server clock for last_seen freshness
     imageIds = ir.ok ? ((await ir.json()).images || []).map(function (i) { return i.id; }) : [];
     credOpts = cr.ok ? ((await cr.json()).profiles || []) : [];
+    // keep batch checkbox selections across the periodic re-render
+    var marked = {};
+    document.querySelectorAll('#dev-rows .mark:checked').forEach(function (cb) {
+      marked[cb.getAttribute('data-id')] = true;
+    });
     document.getElementById('dev-rows').innerHTML = devs.map(function (d) {
       var opts = ['<option value="">— assign —</option>'].concat(imageIds.map(function (id) {
         return '<option value="' + esc(id) + '"' + (id === d.assigned_image_id ? ' selected' : '') + '>' + esc(id) + '</option>';
@@ -141,7 +158,8 @@
       }
       if (d.last_seen && !fresh) status += ' <span class="muted" style="font-size:10px">offline</span>';
       return '<tr data-id="' + esc(d.device_id) + '">' +
-        '<td><input type="checkbox" class="mark" data-id="' + esc(d.device_id) + '"></td>' +
+        '<td><input type="checkbox" class="mark" data-id="' + esc(d.device_id) + '"' +
+        (marked[d.device_id] ? ' checked' : '') + '></td>' +
         '<td>' + esc(d.device_id) + '</td><td>' + esc(d.device_ip || '') + '</td>' +
         '<td>' + esc(d.model || d.heartbeat_model || '') + '</td>' +
         '<td>' + esc(d.management_type || d.network_attachment || 'legacy') + ' / ' + esc(d.inband_vlan || d.iris_vlan || '') + '</td>' +
