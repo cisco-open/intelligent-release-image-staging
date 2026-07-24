@@ -554,11 +554,13 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             host_ip = os.environ.get("IRIS_HOST_IP", "")
             obs = bool(os.environ.get("IRIS_OBSERVABILITY"))
             # The console's published host port is overridable (IRIS_GUI_PUBLISH);
-            # the container always listens on 8080 internally. Show the real one.
-            try:
-                console_port = int(os.environ.get("IRIS_GUI_PUBLISH", "") or 8080)
-            except ValueError:
-                console_port = 8080
+            # the container always listens on 8080 internally. Prefer that env,
+            # else derive it from the operator-set IRIS_CONSOLE_URL, else 8080.
+            raw = os.environ.get("IRIS_GUI_PUBLISH", "").strip()
+            if not raw:
+                tail = os.environ.get("IRIS_CONSOLE_URL", "").rstrip("/").rsplit(":", 1)[-1]
+                raw = tail if tail.isdigit() else ""
+            console_port = int(raw) if raw.isdigit() else 8080
             return {
                 "admin_username": admin_username,
                 "version": _read_version(),

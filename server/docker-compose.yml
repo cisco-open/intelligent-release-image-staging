@@ -50,6 +50,9 @@ services:
       # shared host publishing the console on a non-default port). Unset ->
       # the moved_page() default of https://<IRIS_HOST_IP>:8080/.
       IRIS_CONSOLE_URL: "${IRIS_CONSOLE_URL:-}"
+      # The published console host port, so the Settings page can show the real
+      # one (the container always listens on 8080 internally).
+      IRIS_GUI_PUBLISH: "${IRIS_GUI_PUBLISH:-}"
       # At-rest encryption (age). The master identity is mounted as a Docker
       # secret (read-only, RAM-backed); plaintext is decrypted to a tmpfs at
       # /run/iris and never touches the persistent iris-config volume.
