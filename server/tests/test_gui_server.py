@@ -1079,10 +1079,9 @@ def _serve_inband(tmp_path, run_fn, device=None):
     return "127.0.0.1", port, srv.shutdown
 
 
-def test_inband_iox_onboard_carries_ios_ssh_host(tmp_path):
-    """Inband IOx resolves the iox platform, requires ios_ssh_host, and runs the
-    installer with NETWORK_ATTACHMENT=inband and IOS_SSH_HOST set to the existing
-    management SVI."""
+def test_inband_iox_onboard_defaults_ssh_host_to_mgmt_ip(tmp_path):
+    """Inband IOx resolves the iox platform and, with no explicit ios_ssh_host,
+    the app SSHes to the switch's management IP (device_ip)."""
     ran = []
     host, port, stop = _serve_inband(
         tmp_path, lambda p, e, on: (ran.append(dict(e)), 0)[1],
@@ -1090,7 +1089,7 @@ def test_inband_iox_onboard_carries_ios_ssh_host(tmp_path):
                 "management_type": "inband", "inband_vlan": "120",
                 "app_ip": "192.0.2.31", "app_mask": "255.255.255.0",
                 "app_gateway": "192.0.2.1", "model": "IE-3400", "platform": "iox",
-                "ios_ssh_host": "192.0.2.1", "credential_profile_id": "lab"})
+                "credential_profile_id": "lab"})
     try:
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
@@ -1099,7 +1098,7 @@ def test_inband_iox_onboard_carries_ios_ssh_host(tmp_path):
         assert st == 200
         resolved = json.loads(b)["plan"]["resolved"]
         assert resolved["attachment"] == "inband" and resolved["platform"] == "iox"
-        assert resolved["ios_ssh_host"] == "192.0.2.1"
+        assert resolved["ios_ssh_host"] == "192.0.2.30"    # defaults to device_ip
         st, _, b = _req(host, port, "POST", "/api/devices/ie/onboard", {}, headers=hh)
         assert st == 200
         import time as _t
@@ -1109,7 +1108,7 @@ def test_inband_iox_onboard_carries_ios_ssh_host(tmp_path):
                 break
             _t.sleep(0.02)
         assert ran and ran[-1]["NETWORK_ATTACHMENT"] == "inband"
-        assert ran[-1]["IOS_SSH_HOST"] == "192.0.2.1"
+        assert ran[-1]["IOS_SSH_HOST"] == "192.0.2.30"
     finally:
         stop()
 
@@ -1860,9 +1859,9 @@ def test_device_platform_happy_path_and_clear(tmp_path):
         stop()
 
 
-def test_device_platform_iox_on_inband_rejected_400(tmp_path):
-    """Setting an unsupported platform for the attachment (inband IOx) surfaces
-    the validation error as a clean 400, never an uncaught 500."""
+def test_device_platform_iox_on_inband_is_allowed(tmp_path):
+    """Setting platform=iox on an inband device now succeeds and persists (the
+    app SSHes to the switch's management IP by default)."""
     host, port, deps, stop = _serve_full(tmp_path)
     _app, fleet, _creds, _cat = deps
     try:
@@ -1872,9 +1871,10 @@ def test_device_platform_iox_on_inband_rejected_400(tmp_path):
                       "app_gateway": "192.0.2.1", "platform": "guestshell"})
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
-        st, _, b = _req(host, port, "POST", "/api/devices/edge/platform",
+        st, _, _ = _req(host, port, "POST", "/api/devices/edge/platform",
                         {"platform": "iox"}, headers=hh)
-        assert st == 400 and "inband" in json.loads(b)["error"].lower()
+        assert st == 200
+        assert fleet.get_device("edge")["platform"] == "iox"
     finally:
         stop()
 

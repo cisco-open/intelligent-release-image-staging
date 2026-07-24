@@ -124,13 +124,12 @@ def validate_record(record, allow_legacy=False):
         result.update(app_ip=app_ip, app_mask=app_mask, app_gateway=app_gateway)
         if any(result.get(key) for key in ("iris_vlan", "svi_ip", "svi_mask")):
             raise ValueError("inband inventory cannot contain routed fields")
-        # ios_ssh_host is the EXISTING IOS management SVI the IOx app SSHes to for
-        # copy /verify. Guest Shell runs inside IOS and never needs it; IOx does.
+        # ios_ssh_host is the IOS endpoint the inband IOx app SSHes to for
+        # copy /verify. It defaults to the device's management IP (device_ip),
+        # which is on the same existing management VLAN; it is only set here as
+        # an advanced override for asymmetric topologies. Guest Shell never uses it.
         if result.get("ios_ssh_host"):
             result["ios_ssh_host"] = _ipv4(result.get("ios_ssh_host"), "ios_ssh_host")
-        if platform == "iox" and not result.get("ios_ssh_host"):
-            raise ValueError("inband IOx requires ios_ssh_host "
-                             "(the existing IOS management SVI address)")
     return result
 
 
@@ -312,7 +311,7 @@ class FleetStore:
             "# IRIS inventory CSV v2. Legacy routed CSV files require explicit migration.",
             "# Inband preserves an existing operator-owned VLAN, SVI, gateway, routes, and VRF.",
             "# Inband supports static IPv4 Guest Shell and IOx (IE-3x00, C9300); DHCP is not",
-            "# supported. Inband IOx also needs ios_ssh_host (the existing IOS management SVI).",
+            "# supported. Inband IOx SSHes to the switch mgmt IP by default (ios_ssh_host overrides).",
             "# Uncomment and edit the example rows below to import your devices.",
             ",".join(CSV_V2_COLS),
             "# edge-routed,192.0.2.10,routed,666,192.0.2.9,255.255.255.252,192.0.2.10,255.255.255.252,192.0.2.9,,,C9300-48UXM,guestshell",

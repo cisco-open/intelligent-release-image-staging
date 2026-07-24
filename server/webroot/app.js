@@ -170,7 +170,13 @@
       sel.addEventListener('change', async function () {
         var id = sel.closest('tr').getAttribute('data-id');
         var r = await jpost('/api/devices/' + encodeURIComponent(id) + '/platform', { platform: sel.value });
-        devStatus.textContent = r.ok ? ('Platform updated for ' + id) : 'Platform update failed';
+        if (r.ok) {
+          devStatus.textContent = 'Platform updated for ' + id;
+        } else {
+          // surface the real reason and revert the dropdown to the saved value
+          devStatus.textContent = 'Platform update failed: ' + ((await r.json()).error || r.status);
+          refreshDevices();
+        }
       });
     });
     document.querySelectorAll('#dev-rows .del').forEach(function (btn) {
@@ -431,8 +437,6 @@
     };
     if (attach === 'inband') {
       body.inband_vlan = vlan;
-      var ssh = document.getElementById('df-ssh').value.trim();
-      if (ssh) body.ios_ssh_host = ssh;
     } else {
       body.iris_vlan = vlan;
       body.svi_ip = document.getElementById('df-svi').value.trim();

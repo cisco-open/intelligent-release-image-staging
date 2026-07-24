@@ -37,9 +37,9 @@ def test_upsert_rejects_invalid_records(tmp_path):
         {"device_id": "d1", "device_ip": "nope", "management_type": "routed"},
         {"device_id": "bad id", "device_ip": "10.0.0.1", "management_type": "routed"},
         {"device_id": "d1", "device_ip": "10.0.0.1", "management_type": "sideways"},
-        # inband IOx is rejected
+        # inband with a routed VLAN field is rejected
         dict(_ROUTED, device_id="d2", management_type="inband", inband_vlan="120",
-             iris_vlan="", svi_ip="", svi_mask="", platform="iox"),
+             svi_ip="", svi_mask="", platform="guestshell"),
     ]
     for rec in bad:
         try:
@@ -67,29 +67,26 @@ def test_inband_upsert_and_field_isolation(tmp_path):
         pass
 
 
-def test_inband_iox_requires_ios_ssh_host(tmp_path):
+def test_inband_iox_ssh_host_optional_and_validated(tmp_path):
     fs = _fs(tmp_path)
-    # inband IOx without ios_ssh_host is rejected
-    try:
-        fs.upsert({"device_id": "ie1", "device_ip": "192.0.2.30",
-                   "management_type": "inband", "inband_vlan": "120",
-                   "app_ip": "192.0.2.31", "app_mask": "255.255.255.0",
-                   "app_gateway": "192.0.2.1", "platform": "iox"})
-        assert False, "expected ValueError"
-    except ValueError as exc:
-        assert "ios_ssh_host" in str(exc)
-    # with ios_ssh_host it is accepted and the field is preserved
+    # inband IOx is accepted WITHOUT ios_ssh_host (it defaults to the device's
+    # management IP at plan time), and platform=iox persists.
     saved = fs.upsert({"device_id": "ie1", "device_ip": "192.0.2.30",
                        "management_type": "inband", "inband_vlan": "120",
                        "app_ip": "192.0.2.31", "app_mask": "255.255.255.0",
-                       "app_gateway": "192.0.2.1", "platform": "iox",
-                       "ios_ssh_host": "192.0.2.1"})
-    assert saved["platform"] == "iox" and saved["ios_ssh_host"] == "192.0.2.1"
-    # a bad ios_ssh_host is rejected
+                       "app_gateway": "192.0.2.1", "platform": "iox"})
+    assert saved["platform"] == "iox" and not saved.get("ios_ssh_host")
+    # an explicit override is kept and IPv4-validated
+    saved2 = fs.upsert({"device_id": "ie2", "device_ip": "192.0.2.40",
+                        "management_type": "inband", "inband_vlan": "120",
+                        "app_ip": "192.0.2.41", "app_mask": "255.255.255.0",
+                        "app_gateway": "192.0.2.1", "platform": "iox",
+                        "ios_ssh_host": "192.0.2.1"})
+    assert saved2["ios_ssh_host"] == "192.0.2.1"
     try:
-        fs.upsert({"device_id": "ie2", "device_ip": "192.0.2.40",
+        fs.upsert({"device_id": "ie3", "device_ip": "192.0.2.50",
                    "management_type": "inband", "inband_vlan": "120",
-                   "app_ip": "192.0.2.41", "app_mask": "255.255.255.0",
+                   "app_ip": "192.0.2.51", "app_mask": "255.255.255.0",
                    "app_gateway": "192.0.2.1", "platform": "iox",
                    "ios_ssh_host": "not-an-ip"})
         assert False, "expected ValueError"

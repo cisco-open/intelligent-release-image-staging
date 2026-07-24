@@ -138,16 +138,15 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 "app_mask": device.get("app_mask", device.get("svi_mask", "")),
                 "app_gateway": device.get("app_gateway", device.get("svi_ip", "")),
                 "inband_vlan": device.get("inband_vlan", ""),
-                "ios_ssh_host": device.get("ios_ssh_host", ""),
+                # The inband IOx app reaches IOS at the switch's management IP
+                # (which is on the same existing management VLAN); ios_ssh_host is
+                # an optional advanced override for asymmetric topologies.
+                "ios_ssh_host": (device.get("ios_ssh_host")
+                                 or (device.get("device_ip", "") if attachment == "inband" else "")),
                 "model": device.get("model", ""),
                 "platform": platform,
                 "renderer": "v1",
             }
-            # Inband IOx reaches IOS over the existing management SVI (the app
-            # SSHes there for copy /verify); Guest Shell runs inside IOS.
-            if attachment == "inband" and platform == "iox" and not network["ios_ssh_host"]:
-                raise ValueError("inband IOx requires ios_ssh_host "
-                                 "(the existing IOS management SVI address)")
             plan = {"device_id": device_id, "inventory_revision": fleet.revision(),
                     "resolved": network,
                     "ownership": ("preserves existing VLAN, SVI, gateway, routes, and VRF"

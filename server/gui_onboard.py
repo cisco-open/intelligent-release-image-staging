@@ -258,7 +258,9 @@ class OnboardService:
             "APP_IP": target.get("app_ip", target.get("guest_ip", "")),
             "APP_MASK": target.get("app_mask", target.get("svi_mask", "")),
             "APP_GATEWAY": target.get("app_gateway", target.get("svi_ip", "")),
-            "IOS_SSH_HOST": target.get("ios_ssh_host", ""),
+            # inband IOx reaches IOS at the switch's management IP by default
+            "IOS_SSH_HOST": (target.get("ios_ssh_host", "")
+                             or (dev["device_ip"] if attachment == "inband" else "")),
             "CATALOG_URL": self.catalog_url,
             "STAGE_HOST": self.host_ip,
             "CATALOG_TOKEN": token,

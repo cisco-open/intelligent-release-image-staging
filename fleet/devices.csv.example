@@ -13,8 +13,8 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
 # 'platform' is OPTIONAL and LAST: blank = auto (by model), or force 'guestshell'
 #   or 'iox'. Inband supports Guest Shell and IOx (IE-3x00, C9300); DHCP is NOT
 #   supported and is rejected on import.
-# ios_ssh_host: required for inband IOx (the existing IOS management SVI the app
-#   SSHes to for copy /verify); leave blank for Guest Shell.
+# ios_ssh_host: OPTIONAL for inband IOx. The app SSHes to the switch's mgmt IP
+#   (device_ip) by default; set this only to override it. Blank for Guest Shell.
 #
 # Routed example (dedicated IRIS VLAN/SVI):
 100.92.9.3,100.92.9.3,routed,666,100.92.9.125,255.255.255.252,100.92.9.126,255.255.255.252,100.92.9.125,,,C9300-48UXM,guestshell
