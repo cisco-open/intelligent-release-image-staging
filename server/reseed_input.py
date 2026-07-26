@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Build the aria2 --input-file for the seeder's startup re-seed: pair each
 published torrent in the state dir with the directory that actually holds its
-image, by walking the image roots (colon-separated, earlier roots win a basename
+image. A catalog entry's recorded source_dir is authoritative; otherwise fall
+back to walking the image roots (colon-separated, earlier roots win a basename
 collision — callers pass the writable upload dir first). Split out of
 seed-launch.sh so this mapping is unit-testable. Stdlib only."""
 import glob
@@ -32,8 +33,18 @@ def build(state, images_roots, default_dir):
     lines = []
     for t in sorted(glob.glob(os.path.join(state, "torrents", "*.torrent"))):
         iid = os.path.basename(t)[:-len(".torrent")]
-        fn = (imgs.get(iid) or {}).get("filename")
-        d = loc.get(fn) if fn else None
+        entry = imgs.get(iid) or {}
+        fn = entry.get("filename")
+        # Prefer the directory the image was actually published from. The
+        # basename walk cannot tell two same-named files in different roots
+        # apart, and the seeder runs with bt-seed-unverified — so guessing wrong
+        # serves the wrong bytes under the right piece hashes. Entries predating
+        # source_dir, or whose recorded directory has since gone away, still fall
+        # back to the walk.
+        src = entry.get("source_dir")
+        d = src if src and os.path.isdir(src) else None
+        if d is None:
+            d = loc.get(fn) if fn else None
         if d is None:
             d = default_dir
         lines.append(t)
