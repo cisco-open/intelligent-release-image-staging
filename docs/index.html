@@ -175,7 +175,7 @@ SPDX-License-Identifier: Apache-2.0
           <p class="eyebrow">Platforms</p>
           <h2>Same delivery model, platform-specific staging.</h2>
           <p>
-            Catalyst 9300 devices use Guest Shell and stage to `flash:`. IE platforms use an IOx app and stage to `sdflash:`. Both paths download by swarm, verify on the device, and stop before activation.
+            Catalyst 9300 devices use Guest Shell and stage to `flash:`. IE platforms use an IOx app and stage to `sdflash:`. Catalyst 8000 routers use Guest Shell through a VirtualPortGroup and stage to `bootflash:`. Router support is designed for the Catalyst 8000 family and lab-tested on C8000v: routed and NAT modes completed onboarding, verified staging, and receipt-backed undeploy, with Swarm Map and Grafana telemetry confirmed. Router preflight repeats before token mint, receipts bind management IP and processor-board identity, and router adoption requires re-onboarding. Every path downloads by swarm, verifies on the device, and stops before activation.
           </p>
         </div>
       </section>

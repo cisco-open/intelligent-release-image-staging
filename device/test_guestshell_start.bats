@@ -22,4 +22,18 @@
   [[ "$out" == *"--bt-seed-unverified=true"* ]]
   [[ "$out" == *"--bt-max-peers=10"* ]]
   [[ "$out" == *"--dir=$tmp/stage"* ]]
+  [[ "$out" != *"--listen-port="* ]]
+}
+
+@test "guestshell-start pins the BitTorrent port only when requested" {
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/stage" "$tmp/home"
+  echo "rpcsecret" > "$tmp/stage/rpc-secret"
+  printf '#!/usr/bin/env bash\necho "$@" > "%s/launched.txt"\n' "$tmp" > "$tmp/aria2c-stub"
+  chmod +x "$tmp/aria2c-stub"
+  run env STAGE_DIR="$tmp/stage" EXEC_DIR="$tmp/home" ARIA2_SRC="$tmp/aria2c-stub" \
+      RPC_SECRET_FILE="$tmp/stage/rpc-secret" SKIP_RPC_PROBE=1 BT_LISTEN_PORT=6881 \
+      bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
+  [ "$status" -eq 0 ]
+  [[ "$(cat "$tmp/launched.txt")" == *"--listen-port=6881"* ]]
 }

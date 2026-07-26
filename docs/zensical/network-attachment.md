@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Management Type And VLAN Ownership
 
-IRIS supports two explicit management type models for the staging agent. The
+IRIS supports four explicit management type models for the staging agent. The
 choice is per device, recorded in inventory, and — critically — determines what
 IRIS is allowed to create and remove on the device.
 
@@ -65,19 +65,56 @@ The IOx app carries a device SSH credential in its run options exactly as the
 routed IOx path already does; hardening that credential path is a separate
 improvement that applies equally to both.
 
+## Router routed and router NAT — IRIS-managed VirtualPortGroup
+
+Catalyst 8000 routers use Guest Shell through `VirtualPortGroup<N>` (VPG), not
+a VLAN/SVI or AppGigabitEthernet interface. Support is **designed for the
+Catalyst 8000 family, lab-tested on C8000v**. Both router modes onboard, stage a
+verified image, and undeploy from their receipt, and both appear on the Swarm Map
+with telemetry when observability is enabled.
+
+- **router-routed** creates an IRIS-owned VPG gateway and static app subnet.
+  It performs no NAT. The operator must provide routes (static routes or IGP
+  redistribution) between that app subnet and the IRIS server, tracker, and
+  peers.
+- **router-nat** adds overload NAT behind the operator-selected outside
+  interface and static TCP PAT for swarm port **6881**, so peers can reach the
+  agent through the router outside address. IRIS owns the VPG, NAT ACL, and NAT
+  rules. The outside interface is canonicalized before rendering. Its receipt
+  records whether `ip nat outside` already existed; a pre-existing marking is
+  preserved and undeploy removes that marking only when IRIS created it.
+
+Undeploy of a **router-nat** device flushes NAT translations
+(`clear ip nat translation *`) before it removes the NAT configuration. IOS
+refuses `no ip nat inside source list ... overload` while translations still
+reference that mapping, while the removal of `IRIS-NAT-<vpg>` on the following
+line succeeds regardless — so without the flush the overload rule survives
+against a deleted ACL and the teardown verify rejects the dangling reference.
+The flush is safe because the app is already destroyed by that point, so every
+remaining translation is stale. Routed teardown never flushes: it configures no
+NAT.
+
+Both modes stage only to `bootflash:`. Allow roughly **2× the image size + 200
+MB** of free bootflash (about 4.2 GB for a 2 GB image); the agent refuses a
+stage safely when space is insufficient.
+
 ## Inventory (CSV v2)
 
 Inventory is an attachment-aware, named-header CSV. The header is required and
 validated; extra, missing, or misplaced columns are rejected.
 
 ```text
-device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,platform
+device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,vpg_number,nat_interface,platform
 ```
 
 - **routed** rows fill `iris_vlan`, `svi_ip`, `svi_mask`, `app_ip`, `app_mask`,
   `app_gateway`.
 - **inband** rows fill `inband_vlan`, `app_ip`, `app_mask`, `app_gateway`, and
   must not carry routed VLAN/SVI fields. There is no IRIS VRF field.
+- **router-routed** rows fill `app_ip`, `app_mask`, `app_gateway`, and
+  `vpg_number`; router fields cannot be combined with switch VLAN/SVI fields.
+- **router-nat** rows additionally fill `nat_interface`. `platform=router` is
+  required (and selected automatically for a known C8xxx model).
 - `ios_ssh_host` is an OPTIONAL advanced override: the IOS endpoint the inband
   IOx app SSHes to for `copy /verify`. It defaults to the device's management IP
   (`device_ip`), which is on the same existing management VLAN. Only set it for an
@@ -96,7 +133,8 @@ IRIS separates three concepts that were previously conflated:
 2. **Deployment plan** — an immutable, resolved plan for one action, including
    the resolved platform and a `plan_hash`. Computed before any device contact.
 3. **Applied receipt** — a durable, non-secret record of what IRIS actually
-   applied, its resource ownership, and lifecycle state.
+   applied, its resource ownership, lifecycle state, management IP, and
+   processor-board identity.
 
 Receipts live under `IRIS_STATE` (see below) and contain no passwords, tokens,
 certificates, or raw device configuration. Their lifecycle is fail-closed:
@@ -121,16 +159,26 @@ legacy, cleanup stops in `needs-reconcile` instead of guessing.
 ### Adopting a pre-existing deployment
 
 Devices deployed before receipts existed have no active receipt, so undeploy is
-refused. An explicit, audited **Adopt** action records an `active` receipt from
-the device's current validated inventory, after which undeploy can proceed.
-Adoption records ownership; it makes no changes to the device.
+refused. Router deployments cannot be adopted because their live identity and
+ownership evidence must be collected during onboarding; **re-onboard** the
+router instead. Non-router deployments may use the explicit, audited **Adopt**
+action, which records current ownership without changing the device.
+
+### Router preflight and ownership
+
+Router preflight is read-only and runs once before planning and again at job
+execution, immediately before the enrollment token is minted. It rejects
+collisions for the VPG, NAT entries, named IRIS globals, and
+`bootflash:guest-share`. These names and the guest share are receipt-owned;
+teardown removes only resources proven by that receipt.
 
 ## Console and CLI
 
-The Console Add Device flow has an explicit **Management type** choice —
-*Routed - IRIS-managed app network* or *Inband - existing management VLAN* — and
-the device table shows each device's **Attachment**, not a bare VLAN/SVI value.
-Routed and inband onboarding are both one-click and receipt-backed. See
+The Console Add Device flow offers **Routed**, **Inband**, **Router routed**, and
+**Router NAT** management types. Router choices show VPG number and app
+addressing; Router NAT also shows the outside interface. The device table shows
+each device's **Attachment**, not a bare VLAN/SVI value. Onboarding is
+receipt-backed. See
 [Web Console](console.md).
 
 The legacy `tools/gen-device-installers.sh` generator is routed-only and refuses

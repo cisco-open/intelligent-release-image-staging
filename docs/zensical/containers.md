@@ -50,7 +50,7 @@ installers and SSH helper used by console onboarding:
 ```bash
 docker build --platform linux/amd64 \
   -f server/Dockerfile \
-  -t iris:docker-alpha .
+  -t iris:latest .
 ```
 
 The root `.dockerignore` prevents local credentials, firmware, generated
@@ -59,8 +59,27 @@ all device-facing services, includes a `/healthz` Docker health check, and keeps
 aria2 RPC on loopback only.
 
 Docker Compose mounts operator images read-only from `IRIS_IMAGE_ROOT` (default
-`/opt/images`) and served artifacts from `IRIS_ARTIFACTS_HOST_DIR` (default
-`artifacts/`). Run `iris-bootstrap` once before the normal service startup.
+`/opt/images`) and served artifacts from `IRIS_ARTIFACTS_HOST_DIR`, which
+defaults to the repository's `artifacts/` directory (`../artifacts`, relative to
+`server/docker-compose.yml`). Run `iris-bootstrap` once before the normal service
+startup.
+
+The read-only mount is one of the seed server's two image roots. The other is
+the `iris-images` uploads volume (`IRIS_IMAGES_DIR`, default
+`/var/lib/iris-images`), which holds images the console received over HTTP.
+Publishing seeds an image from its own directory rather than copying it, so an
+image staged on the host is published in place and the read-only root stays
+read-only. See [Server](server.md#publishing-images).
+
+### Non-root runtime
+
+Every seed-server service runs as the fixed uid and gid `10001`, and Compose
+drops all capabilities. Two host paths — the age identity file and the served
+artifacts directory — plus the host tree behind `IRIS_IMAGE_ROOT` must be
+accessible to that uid, and a deployment upgraded from a root-runtime release
+needs a one-time migration of its named volumes. Both procedures live in
+[Runtime identity](server.md#runtime-identity), with the migration command in
+[Upgrading from a root-runtime deployment](server.md#upgrading-from-a-root-runtime-deployment).
 
 Deployment receipts persist under `IRIS_STATE` on the `iris-state` volume, so
 undeploy-from-receipt and restart recovery behave identically to the Kubernetes
@@ -125,6 +144,9 @@ Guest Shell — and `AppGigabitEthernet1/0/1`.
   SSH-to-self SCP because IOx there does not expose the SD card as a container
   bind mount; on C9k the app-hosting SSD share is bind-mounted and carries the
   hand-off at disk speed.
+- Compose requires Docker Engine 23.0 or later, because the `/run/iris` tmpfs is
+  mounted with `uid=`, `gid=`, and `mode=` mount options that older engines
+  reject.
 - Server clustering is not implemented. Kubernetes uses one replica and one
   ReadWriteOnce PVC.
 - The server certificate is IP-pinned. Its public address must be stable, and a

@@ -71,21 +71,26 @@ At the end of every step, state the next action required from me.
 1. **Choose the runtime.** Use [Getting Started](getting-started.md) for Docker
    Compose on one server. Use [Kubernetes](kubernetes.md) only when a
    single-replica Kubernetes deployment and its persistent volume are intended.
-2. **Bring up the server.** Create the age identity outside the repository,
-   then run `tools/start-compose-server.sh` on the Linux Compose host. It
+2. **Bring up the server.** Create the age identity outside the repository, give
+   uid `10001` the age key file and the host `artifacts/` directory (the
+   container runs non-root and cannot chown host paths — see
+   [Host paths to chown on every deploy](server.md#host-paths-to-chown-on-every-deploy)),
+   then run
+   `tools/start-compose-server.sh` on the Linux Compose host. It
    bootstraps encrypted state idempotently, starts Compose, waits for health,
    and builds/stages both supported IOx packages before any Console onboarding.
    Do not proceed until `https://<server-ip>:8080/` is reachable.
 3. **Create the Console admin.** Accept the self-signed certificate warning only
    for the expected server, create the initial admin, and sign in.
-4. **Publish an image.** Upload through the Console or use `iris-publish` from
-   inside the server container. Publishing creates catalog and torrent metadata;
-   it does not change any device.
+4. **Publish an image.** Upload through the Console, import a file that is
+   already on the server from the Console **Import from disk** panel, or use
+   `iris-publish` from inside the server container. Publishing creates catalog
+   and torrent metadata; it does not change any device.
 5. **Add devices.** Use the Console Devices page or its example CSV. Set each
    model when known. Leave `platform` blank for automatic selection, force
-   `guestshell` for the standard C9300 path, or force `iox` only for a supported
-   IOx device.
-6. **Confirm IOx packages are ready.** The server bring-up step staged arm64
+   `guestshell` for the standard C9300 path, `iox` only for a supported IOx
+   device, or `router` for a Catalyst 8000 router VPG attachment.
+6. **Confirm IOx packages are ready.** The server bring-up step stages arm64
    `iris-arm64.tar` for IE-3x00/IR and amd64 `iris-amd64.tar` for C9300 IOx. A C9300
    IOx deployment also requires a USB SSD and the C9300 app-hosting interface.
    See [IOx App](iox.md). Re-run `tools/provision-iox-packages.sh` after a
