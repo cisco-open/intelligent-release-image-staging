@@ -253,3 +253,68 @@ def test_sshcli_uses_shared_control_connection_for_cli_and_scp():
     assert "ControlMaster=auto" in opts
     assert "ControlPersist=120" in opts
     assert "ControlPath=/data/iris/ios-%r@%h:%p" in opts
+
+
+# ---- host-key pinning (verify-if-present, mirroring the catalog TLS pin):
+# with no known_hosts configured the ssh/scp argv must stay byte-identical to
+# the legacy no-verify pair (LOCKED back-compat — a deployed fleet must not
+# change behavior on an agent-only upgrade); with a configured+existing file
+# the session pins the device host key against it. ----
+
+def test_hostkey_options_default_is_legacy_no_verify():
+    cli = cli_ssh.SSHCli(host="h", user="u", password="p")
+    assert cli._hostkey_options() == [
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null"]
+
+
+def test_hostkey_options_pins_when_known_hosts_exists(tmp_path):
+    kh = tmp_path / "known_hosts"
+    kh.write_text("[100.92.100.253]:22 ssh-rsa AAAAB3NzaC1yc2E fake\n")
+    cli = cli_ssh.SSHCli(host="h", user="u", password="p",
+                         known_hosts=str(kh))
+    assert cli._hostkey_options() == [
+        "-o", "StrictHostKeyChecking=yes",
+        "-o", "UserKnownHostsFile=" + str(kh)]
+
+
+def test_hostkey_options_missing_file_falls_back_to_legacy(tmp_path):
+    # configured but absent on disk (e.g. conf shipped before the pin file was
+    # placed) -> keep the legacy no-verify behavior rather than locking the
+    # agent out of its own device.
+    cli = cli_ssh.SSHCli(host="h", user="u", password="p",
+                         known_hosts=str(tmp_path / "nope"))
+    assert cli._hostkey_options() == [
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null"]
+
+
+def test_select_cli_container_mode_passes_known_hosts_through(tmp_path):
+    kh = tmp_path / "known_hosts"
+    kh.write_text("h ssh-rsa AAAA fake\n")
+    cfg = {
+        "runtime_mode": "container",
+        "device_ssh_host": "h",
+        "device_ssh_user": "u",
+        "device_ssh_pass": "p",
+        "device_ssh_known_hosts": str(kh),
+    }
+    execute, _ = cli_ssh.select_cli(cfg, env={})
+    assert execute.__self__.known_hosts == str(kh)
+    assert "StrictHostKeyChecking=yes" in execute.__self__._hostkey_options()
+
+
+def test_select_cli_container_mode_no_known_hosts_key_stays_legacy():
+    # a fleet conf that predates the pin key: SSHCli must come up with the
+    # exact legacy no-verify options.
+    cfg = {
+        "runtime_mode": "container",
+        "device_ssh_host": "h",
+        "device_ssh_user": "u",
+        "device_ssh_pass": "p",
+    }
+    execute, _ = cli_ssh.select_cli(cfg, env={})
+    assert execute.__self__.known_hosts is None
+    assert execute.__self__._hostkey_options() == [
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null"]

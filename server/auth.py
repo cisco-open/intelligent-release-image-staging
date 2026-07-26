@@ -3,8 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Token auth shared by the tracker (announce ?key=) and catalog (Bearer header).
-Tokens are looked up in the secrets store and validated for scope and
-expiry/revoke state. Matching is constant-time inside secrets_store."""
+Tokens are resolved via the secrets store's reverse index — a dict keyed by the
+random token value (secrets_store.record_for) — then validated for scope and
+expiry/revoke state."""
 from urllib.parse import parse_qs
 
 import secrets_store as _ss

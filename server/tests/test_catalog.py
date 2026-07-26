@@ -1229,6 +1229,29 @@ def test_sanitize_report_accepts_and_coerces_avg_bps():
         {"ip": "10.0.0.9", "rx_bytes": 300, "tx_bytes": 0, "avg_bps": 0}]
 
 
+def test_sanitize_report_coerces_link_numeric_fields():
+    """The numeric link fields are stored as ints — the swarm-map drawer
+    interpolates rtt_ms_median into its HTML unescaped (it reads as a number),
+    so a device-supplied string surviving to storage would be stored XSS."""
+    data = _report()
+    data["link"]["rtt_ms_median"] = "<img src=x onerror=alert(1)>"
+    data["link"]["rtt_samples"] = "8"            # numeric string round-trips
+    data["link"]["hb_failures"] = None
+    out = catalog._sanitize_report(data)
+    assert out["link"]["rtt_ms_median"] == 0
+    assert out["link"]["rtt_samples"] == 8
+    assert out["link"]["hb_failures"] == 0
+    # an agent-shaped link section passes through unchanged (tier/trimmed
+    # untouched, legit ints intact); an absent field stays absent, it does
+    # not materialize as 0
+    assert catalog._sanitize_report(_report())["link"] == {
+        "tier": "good", "rtt_ms_median": 12, "rtt_samples": 8,
+        "hb_failures": 0, "trimmed": False}
+    trimmed = _report()
+    del trimmed["link"]["rtt_ms_median"]
+    assert "rtt_ms_median" not in catalog._sanitize_report(trimmed)["link"]
+
+
 def test_sanitize_report_rejects_garbage():
     """Non-dict bodies and events outside the allowed set raise ValueError
     (the route maps that to a 400)."""

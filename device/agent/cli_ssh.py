@@ -79,7 +79,7 @@ class SSHCli(object):
 
     def __init__(self, host, user, password=None, enable=None, port=22,
                  runner=None, scp_runner=None, connect_timeout=15,
-                 exec_timeout=900, control_path=None):
+                 exec_timeout=900, control_path=None, known_hosts=None):
         self.host = host
         self.user = user
         self.password = password
@@ -88,11 +88,26 @@ class SSHCli(object):
         self.port = int(port)
         self.connect_timeout = int(connect_timeout)
         self.exec_timeout = int(exec_timeout)
+        self.known_hosts = known_hosts
         stage_dir = os.environ.get("IRIS_STAGE_DIR", "/tmp")
         self.control_path = control_path or os.path.join(
             stage_dir, "ios-ssh-%r@%h:%p")
         self._runner = runner or self._default_runner
         self._scp = scp_runner or self._default_scp
+
+    def _hostkey_options(self):
+        # verify-if-present, same shape as make_catalog_context's TLS pinning
+        # (spec §4.6): when a known_hosts file is configured AND exists, pin the
+        # device host key against it; otherwise keep the legacy no-verify pair
+        # unchanged, so a fleet whose conf has no pin behaves identically after
+        # an agent-only upgrade. The no-verify default is tolerable only because
+        # this is SSH-to-self over the app's point-to-point /30 to the switch's
+        # own SVI — same posture as lab/device-run.sh.
+        if self.known_hosts and os.path.exists(self.known_hosts):
+            return ["-o", "StrictHostKeyChecking=yes",
+                    "-o", "UserKnownHostsFile=" + self.known_hosts]
+        return ["-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null"]
 
     def _control_options(self):
         # ControlPath substitutions (%r/%h/%p) keep each IOS target separate.
@@ -147,8 +162,7 @@ class SSHCli(object):
         cmd = [
             "sshpass", "-e", "scp",
             "-O",                       # legacy scp protocol — IOS scp server needs it
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
+        ] + self._hostkey_options() + [
             "-o", "ConnectTimeout=%d" % self.connect_timeout,
             "-o", "KexAlgorithms=+diffie-hellman-group14-sha1,"
                   "diffie-hellman-group-exchange-sha1",
@@ -164,8 +178,7 @@ class SSHCli(object):
     def _default_runner(self, script):  # pragma: no cover (shells out to ssh)
         cmd = [
             "sshpass", "-e", "ssh", "-tt",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
+        ] + self._hostkey_options() + [
             "-o", "ConnectTimeout=%d" % self.connect_timeout,
             "-o", "KexAlgorithms=+diffie-hellman-group14-sha1,"
                   "diffie-hellman-group-exchange-sha1",
@@ -203,6 +216,10 @@ def select_cli(cfg, env=None, guestshell_factory=None):
             password=cfg.get("device_ssh_pass"),
             enable=cfg.get("device_ssh_enable"),
             port=cfg.get("device_ssh_port", 22),
+            # optional pinned known_hosts (verify-if-present; see
+            # _hostkey_options) — absent on existing fleet confs, so the
+            # default stays the legacy no-verify behavior.
+            known_hosts=cfg.get("device_ssh_known_hosts"),
         )
         return cli.execute, cli.configure
     if guestshell_factory is None:

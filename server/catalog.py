@@ -82,9 +82,10 @@ def _cap_strings(value):
 
 
 def _peer_int(value):
+    # OverflowError: json.loads accepts Infinity, and int(float('inf')) raises.
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
@@ -93,10 +94,11 @@ def _sanitize_report(data):
 
     Whitelists top-level keys, requires a known event, re-trims peers to
     _REPORT_PEER_ROWS rows of exactly
-    {ip[:64], rx_bytes:int, tx_bytes:int, avg_bps:int}, and caps every other
-    string at _REPORT_STR_MAX chars.  The device already trims client-side, but
-    ingest never trusts that.  Raises ValueError on a non-dict body or an
-    unknown event (routes map that to a 400)."""
+    {ip[:64], rx_bytes:int, tx_bytes:int, avg_bps:int}, coerces the numeric
+    link fields to int, and caps every other string at _REPORT_STR_MAX chars.
+    The device already trims client-side, but ingest never trusts that.
+    Raises ValueError on a non-dict body or an unknown event (routes map that
+    to a 400)."""
     if not isinstance(data, dict):
         raise ValueError("report must be a JSON object")
     if data.get("event") not in _REPORT_EVENTS:
@@ -105,6 +107,16 @@ def _sanitize_report(data):
     for key in _REPORT_KEYS:
         if key in data:
             report[key] = _cap_strings(data[key])
+    # The numeric link fields must be STORED as numbers: the swarm-map drawer
+    # interpolates rtt_ms_median into its HTML unescaped (it reads as a
+    # number), so a device-supplied string here would be stored XSS in the
+    # console session.  Same int-coercion discipline as the peer rows below;
+    # absent keys stay absent (the map shows a placeholder for those).
+    link = report.get("link")
+    if isinstance(link, dict):
+        for key in ("rtt_ms_median", "rtt_samples", "hb_failures"):
+            if key in link:
+                link[key] = _peer_int(link[key])
     rows = []
     peers = data.get("peers")
     if isinstance(peers, list):

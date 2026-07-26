@@ -149,7 +149,7 @@ const svg=document.getElementById("svg"), tip=document.getElementById("tip"),
 let DATA=null, curHash="all", paused=false, selPeer=null, peerFilter="";
 let selDev=null, pullReq=null;   // open drawer's device_id + pull-request state
 let selTeleOff=false;   // open drawer's peer has telemetry_enabled===false (#13)
-let zoom=1, panX=0, panY=0, panning=null;
+let zoom=1, panX=0, panY=0, panning=null, sceneEl=null;
 
 function el(tag,attrs={},parent){const e=document.createElementNS(SVGNS,tag);
   for(const k in attrs)e.setAttribute(k,attrs[k]);if(parent)parent.appendChild(e);return e;}
@@ -297,6 +297,7 @@ function render(){
   const view=currentView();
   renderStats(view); renderLegend(view, imageColorMap());
   while(svg.firstChild)svg.removeChild(svg.firstChild);
+  sceneEl=null;
   const peers=view.peers.slice();
   document.getElementById("empty").style.display=peers.length?"none":"flex";
   if(!peers.length)return;
@@ -320,7 +321,7 @@ function render(){
     markerWidth:7,markerHeight:7,orient:"auto"},defs);
   el("path",{d:"M0,0 L10,5 L0,10 z",fill:"var(--leech)"},mk);
 
-  const scene=el("g",{transform:`translate(${panX} ${panY}) scale(${zoom})`},svg);
+  const scene=sceneEl=el("g",{transform:viewTransform()},svg);
   // edges: server hub -> each device (animated + rate-labelled when serving)
   let serverServing=false;
   peers.forEach((p,i)=>{
@@ -546,10 +547,13 @@ function reportHtml(reports){
       `</td><td>~${fmtBytes(row.rx_bytes||0)}</td><td>${row.avg_bps?fmtBps(row.avg_bps):"—"}</td>`+
       `<td>${tx>0?"~"+fmtBytes(tx):"—"}</td></tr>`;
   }).join("");
+  // rtt_ms_median is interpolated WITHOUT escapeHtml (it reads as a number),
+  // so gate it on actually being a finite number — anything else, including a
+  // string in a stored report, renders as the placeholder instead of markup.
   return `<dl>
       <dt>event</dt><dd>${escapeHtml(rep.event)||"—"}</dd>
       <dt>link tier</dt><dd>${escapeHtml((l.tier||"—"))}${l.trimmed?" (trimmed)":""}</dd>
-      <dt>rtt median</dt><dd>${l.rtt_ms_median!=null?l.rtt_ms_median+" ms":"—"}</dd>
+      <dt>rtt median</dt><dd>${Number.isFinite(l.rtt_ms_median)?l.rtt_ms_median+" ms":"—"}</dd>
       <dt>avg download</dt><dd>${t.avg_bps?fmtBps(t.avg_bps):"—"}</dd>
       <dt>transferred</dt><dd>${fmtBytes(t.total_bytes||0)} in ${fmtDur(t.elapsed_s)}</dd>
       <dt>reported</dt><dd>${age}</dd>
@@ -657,12 +661,18 @@ document.getElementById("pause").addEventListener("click",e=>{paused=!paused;
    e.target.textContent=paused?"▶ resume":"⏸ pause";});
 document.getElementById("peerfind").addEventListener("input",e=>{peerFilter=e.target.value;render();});
 document.getElementById("legend-toggle").addEventListener("click",()=>{legendEl.hidden=!legendEl.hidden;});
-document.getElementById("fit").addEventListener("click",()=>{zoom=1;panX=0;panY=0;render();});
-function changeZoom(factor){zoom=Math.max(.5,Math.min(3,zoom*factor));render();}
+// Pan/zoom are camera moves only: retarget the scene group's transform in
+// place. Calling render() here would rebuild the whole SVG per pointer event
+// and restart every node's staggered fade-in (fill-mode "both" keeps a node
+// invisible until its delay elapses), strobing the graph during a drag.
+function viewTransform(){return `translate(${panX} ${panY}) scale(${zoom})`;}
+function applyView(){if(sceneEl)sceneEl.setAttribute("transform",viewTransform());}
+document.getElementById("fit").addEventListener("click",()=>{zoom=1;panX=0;panY=0;applyView();});
+function changeZoom(factor){zoom=Math.max(.5,Math.min(3,zoom*factor));applyView();}
 document.getElementById("zoom-out").addEventListener("click",()=>changeZoom(.8));
 document.getElementById("zoom-in").addEventListener("click",()=>changeZoom(1.25));
 svg.addEventListener("pointerdown",e=>{if(e.target===svg){panning={x:e.clientX,y:e.clientY};svg.setPointerCapture(e.pointerId);}});
-svg.addEventListener("pointermove",e=>{if(!panning)return;panX+=e.clientX-panning.x;panY+=e.clientY-panning.y;panning={x:e.clientX,y:e.clientY};render();});
+svg.addEventListener("pointermove",e=>{if(!panning)return;panX+=e.clientX-panning.x;panY+=e.clientY-panning.y;panning={x:e.clientX,y:e.clientY};applyView();});
 svg.addEventListener("pointerup",()=>{panning=null;});
 window.addEventListener("keydown",e=>{if(e.key==="Escape")closeDrawer();});
 
