@@ -31,6 +31,14 @@ spec:
       securityContext:
         seccompProfile:
           type: RuntimeDefault
+        # Match the unprivileged uid/gid baked into the server image. fsGroup
+        # makes the kubelet group-own the mounted volumes: without it the
+        # PVC-backed /data arrives root-owned and the 0400 age-key secret is
+        # unreadable at uid 10001 (fsGroup adds group read to secret files).
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
       initContainers:
         - name: bootstrap
           image: iris:docker-alpha

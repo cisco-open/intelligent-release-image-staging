@@ -30,7 +30,12 @@ IRIS_RUN="${IRIS_RUN:-/run/iris}"
 IRIS_AGE_BIN="${IRIS_AGE_BIN:-age}"
 IRIS_AGE_KEY_FILE="${IRIS_AGE_KEY_FILE:-/run/secrets/iris_age_key}"
 mkdir -p "$IRIS_STATE/torrents" "$IRIS_CONFIG/tls" "$IRIS_LOG" "$IRIS_RUN/tls"
-chmod 700 "$IRIS_RUN"
+# Keep the plaintext dir private. Running non-root (uid 10001), we may not OWN
+# the mountpoint — compose mounts the tmpfs with uid=10001,mode=0700 (chmod
+# succeeds and is a no-op), but Kubernetes' Memory emptyDir stays root-owned
+# (fsGroup grants group access only) and chmod by a non-owner fails. The mount
+# options / fsGroup are the enforcement there, so don't abort on it.
+chmod 700 "$IRIS_RUN" 2>/dev/null || true
 
 # At-rest: the persistent volume holds ONLY ciphertext (*.age). The master
 # age identity is supplied out-of-band (a Docker secret), never on the volume.

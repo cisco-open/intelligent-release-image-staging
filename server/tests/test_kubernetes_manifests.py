@@ -62,6 +62,27 @@ def test_config_keeps_persistent_and_plaintext_paths_separate():
     assert data["IRIS_RPC_SECRET_FILE"] == "/run/iris/rpc-secret"
 
 
+def test_pod_satisfies_restricted_pod_security_profile():
+    ns = _load("namespace.yaml")
+    assert ns["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] == "restricted"
+    pod = _load("deployment.yaml")["spec"]["template"]["spec"]
+    sc = pod["securityContext"]
+    assert sc["runAsNonRoot"] is True
+    # Must match the uid/gid the server image runs as; fsGroup lets that uid
+    # read the 0400 age-key secret and write the PVC-backed /data volume.
+    assert sc["runAsUser"] == sc["runAsGroup"] == sc["fsGroup"] == 10001
+    assert sc["seccompProfile"]["type"] == "RuntimeDefault"
+    for container in pod["initContainers"] + pod["containers"]:
+        csc = container["securityContext"]
+        assert csc["allowPrivilegeEscalation"] is False
+        assert csc["capabilities"]["drop"] == ["ALL"]
+    # restricted forbids host namespaces, hostPath volumes, and hostPorts.
+    assert not any(pod.get(k) for k in ("hostNetwork", "hostPID", "hostIPC"))
+    assert not any("hostPath" in v for v in pod["volumes"])
+    for container in pod["initContainers"] + pod["containers"]:
+        assert not any("hostPort" in p for p in container.get("ports", []))
+
+
 def test_operator_copy_works_with_dropped_chown_capability():
     with open(os.path.join(K8S, "README.md"), encoding="utf-8") as f:
         assert "kubectl -n iris cp --no-preserve" in f.read()

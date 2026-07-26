@@ -56,6 +56,15 @@ teardown() { rm -rf "$TMP"; }
       "$BATS_TEST_DIRNAME/../docker-entrypoint.sh"
 }
 
+@test "entrypoint tolerates a tmpfs mountpoint it cannot chmod (non-root runtime)" {
+  # running as uid 10001 the entrypoint may not OWN /run/iris (k8s Memory
+  # emptyDir stays root-owned; fsGroup only grants group access) — the chmod
+  # must not abort startup there. Compose enforces 0700 via tmpfs uid=/mode=
+  # mount options instead.
+  grep -Eq 'chmod 700 "\$IRIS_RUN" 2>/dev/null \|\| true' \
+      "$BATS_TEST_DIRNAME/../docker-entrypoint.sh"
+}
+
 @test "entrypoint self-provisions the served artifacts before launching services" {
   # the fresh-deploy fix: docker-entrypoint.sh calls provision-served.sh so the
   # Guest Shell bundle / bootstrap.sh / iris-catalog.pem exist before onboarding

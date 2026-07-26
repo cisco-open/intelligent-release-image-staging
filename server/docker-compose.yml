@@ -14,6 +14,33 @@
 # Publish an image (run inside the container; IRIS_IMAGE_ROOT is mounted at
 # /opt/images). Runtime secret paths are declared in the container environment,
 # so docker compose exec can use iris-publish without repeating them.
+#
+# NON-ROOT: the container runs as the fixed uid/gid 10001 (image user `iris`).
+# Two host-side paths cross the container boundary and must be made accessible
+# to that uid ON EVERY DEPLOY (fresh or upgraded) — the Dockerfile cannot chown
+# the host:
+#   sudo chown 10001 "$IRIS_AGE_KEY_FILE_HOST"            # keep it mode 600
+#   sudo chown -R 10001:10001 artifacts                   # from the REPO ROOT
+# (the IRIS_ARTIFACTS_HOST_DIR default below is ../artifacts because Compose
+# resolves it relative to THIS file's directory, server/ — pasting that literal
+# into a repo-root shell would target a directory above the repository.)
+# A deployment UPGRADED from a root-runtime release additionally needs a
+# one-time migration of the named volumes (a fresh volume inherits the image's
+# 10001 ownership automatically; existing ones stay root-owned). Run it as a
+# THROWAWAY container, not through this service: `compose run` inherits the
+# cap_drop below, so the chown is denied even as --user 0 — and `chown -R` still
+# exits 0, so the failure looks like success. Volume names carry the compose
+# project prefix (`server_` for the default project name here):
+#   docker run --rm -u 0 \
+#     -v server_iris-state:/var/lib/iris \
+#     -v server_iris-config:/etc/iris \
+#     -v server_iris-images:/var/lib/iris-images \
+#     iris:latest chown -R 10001:10001 /var/lib/iris /etc/iris /var/lib/iris-images
+# This applies per volume, so a RESET that removes some volumes but KEEPS others
+# still needs it for the ones kept — e.g. wiping iris-config/iris-state to redo
+# admin setup while preserving iris-images leaves the published .bin files
+# root-owned mode 0600, and the non-root server cannot read them (the Images
+# screen then lists them as "not readable by the server").
 services:
   iris:
     platform: linux/amd64
@@ -33,6 +60,16 @@ services:
     image: iris:latest
     container_name: iris
     init: true
+    # The image already declares USER iris (uid 10001); restated here so
+    # `docker compose run`/`exec` and any future image override can't silently
+    # regress to root.
+    user: "10001:10001"
+    # No service needs Linux capabilities (every listener binds >1024, no raw
+    # sockets, no chown at runtime) and nothing may re-gain privilege via
+    # setuid/file caps.
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     environment:
       # the docker host's IP, used in the TLS cert SAN — REQUIRED, no default
       IRIS_HOST_IP: "${IRIS_HOST_IP:?Set IRIS_HOST_IP to this server's IP, e.g. IRIS_HOST_IP=10.0.0.5 docker compose up}"
@@ -106,9 +143,13 @@ services:
       # source — so self-provisioning it is expected.
       - "${IRIS_ARTIFACTS_HOST_DIR:-../artifacts}:/srv/artifacts"
       - iris-images:/var/lib/iris-images
-    # plaintext secrets live ONLY here, in RAM — never on the iris-config volume
+    # plaintext secrets live ONLY here, in RAM — never on the iris-config
+    # volume. The mount options make the tmpfs owned by the non-root runtime
+    # uid and private to it — without them docker mounts it root:root and the
+    # entrypoint (uid 10001) could not restrict it. uid=/gid= tmpfs options
+    # need Docker Engine 23.0+.
     tmpfs:
-      - /run/iris
+      - /run/iris:uid=10001,gid=10001,mode=0700
     secrets:
       - iris_age_key
     # survives crashes AND host/docker restarts (only a manual `docker stop` sticks)
