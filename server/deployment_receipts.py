@@ -16,14 +16,23 @@ import secrets_store
 _STATES = frozenset(("planned", "applying", "active", "unknown", "drifted",
                      "needs-reconcile", "removed", "superseded"))
 _NONTERMINAL = frozenset(("planned", "applying"))
+# States that are not active but still describe a deployment IRIS applied, so a
+# teardown may be authorized from them (see recoverable_for_device).
+_RECOVERABLE = frozenset(("unknown", "drifted", "needs-reconcile"))
 _TRANSITIONS = {
-    "planned": frozenset(("applying", "unknown", "needs-reconcile")),
+    "planned": frozenset(("applying", "unknown", "needs-reconcile", "removed")),
     "applying": frozenset(("active", "unknown", "needs-reconcile", "removed")),
     "active": frozenset(("drifted", "needs-reconcile", "applying", "removed",
                          "superseded")),
-    "unknown": frozenset(("drifted", "needs-reconcile")),
-    "drifted": frozenset(("needs-reconcile",)),
-    "needs-reconcile": frozenset(),
+    # unknown/drifted/needs-reconcile must all still reach "applying", because
+    # reconciling a deployment IS tearing it down. Without that edge a receipt
+    # interrupted by a controller restart became a permanent dead end: the
+    # device is already configured, so a re-onboard fails preflight, a router
+    # cannot be adopted, and undeploy had no receipt to authorize it — leaving
+    # no Console path to the device at all.
+    "unknown": frozenset(("applying", "drifted", "needs-reconcile")),
+    "drifted": frozenset(("applying", "needs-reconcile")),
+    "needs-reconcile": frozenset(("applying",)),
     "removed": frozenset(),
     "superseded": frozenset(),
 }
@@ -158,6 +167,32 @@ class ReceiptStore:
         receipt = self._read()["receipts"].get(receipt_id)
         return copy.deepcopy(receipt) if receipt else None
 
+    def update_planned(self, receipt_id, *, plan_hash, resolved, preflight,
+                       resources):
+        """Atomically refresh execution-time evidence on a planned receipt.
+
+        Router jobs can wait in the onboarding queue, so ownership-sensitive
+        preflight is repeated immediately before apply. Only a still-planned
+        receipt may be refreshed; once applying starts its renderer inputs are
+        immutable.
+        """
+        with secrets_store.store_lock(self.path):
+            data = self._read()
+            receipt = data["receipts"].get(receipt_id)
+            if receipt is None:
+                raise ValueError("unknown receipt: %s" % receipt_id)
+            if receipt.get("state") != "planned":
+                raise ValueError("only planned receipts may refresh preflight")
+            candidate = copy.deepcopy(receipt)
+            candidate.update({"plan_hash": plan_hash,
+                              "resolved": copy.deepcopy(resolved),
+                              "preflight": copy.deepcopy(preflight),
+                              "resources": copy.deepcopy(resources)})
+            self._validate(candidate)
+            data["receipts"][receipt_id] = candidate
+            _atomic_write_json(self.path, data)
+            return copy.deepcopy(candidate)
+
     def list(self, device_id=None):
         receipts = self._read()["receipts"].values()
         if device_id is not None:
@@ -230,3 +265,26 @@ class ReceiptStore:
         if len(active) > 1:
             raise ValueError("multiple active receipts for device: %s" % device_id)
         return active[0] if active else None
+
+    def recoverable_for_device(self, device_id):
+        """The receipt that may authorize a TEARDOWN of *device_id*: the active
+        one, or — when there is none — a single receipt left in a recoverable
+        state (unknown after a controller restart, or drifted/needs-reconcile).
+        Those states still record the resolved plan and the owned resources,
+        which is exactly the ownership proof teardown validates, and without
+        this the device would be unmanageable.
+
+        Returns None when nothing is left to reconcile. Raises when more than
+        one candidate exists: two receipts mean we cannot prove which one
+        describes the box, and tearing down the wrong one could remove
+        resources the other still owns."""
+        active = self.active_for_device(device_id)
+        if active is not None:
+            return active
+        candidates = [receipt for receipt in self.list(device_id)
+                      if receipt.get("state") in _RECOVERABLE]
+        if len(candidates) > 1:
+            raise ValueError(
+                "multiple recoverable receipts for device: %s — resolve them "
+                "before undeploying" % device_id)
+        return candidates[0] if candidates else None

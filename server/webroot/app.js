@@ -48,7 +48,7 @@
         if (!confirm('Delete image ' + id + '? This removes it from the catalog and stops seeding.')) return;
         var r = await fetch('/api/images/' + encodeURIComponent(id), { method: 'DELETE', headers: csrfHdr() });
         if (r.status === 409) { var j = await r.json(); alert('Cannot delete: assigned to ' + (j.assigned || []).join(', ') + '. Reassign those devices first.'); return; }
-        refreshImages();
+        refreshImages(); refreshImportable();
       });
     });
   }
@@ -57,10 +57,51 @@
       var r = await fetch('/api/images/jobs/' + jobId);
       if (!r.ok) { clearInterval(iv); return; }
       var j = await r.json();
-      if (j.state === 'done') { clearInterval(iv); statusEl.textContent = 'Published ' + (j.image_id || '') + ' ✓'; prog.hidden = true; refreshImages(); }
-      else if (j.state === 'error') { clearInterval(iv); statusEl.textContent = 'Publish failed: ' + j.message; prog.hidden = true; }
+      if (j.state === 'done') { clearInterval(iv); statusEl.textContent = 'Published ' + (j.image_id || '') + ' ✓'; prog.hidden = true; refreshImages(); refreshImportable(); }
+      else if (j.state === 'error') { clearInterval(iv); statusEl.textContent = 'Publish failed: ' + j.message; prog.hidden = true; refreshImportable(); }
       else { statusEl.textContent = 'Publishing ' + j.filename + '…'; }
     }, 1000);
+  }
+  // Images already on disk but not in the catalog: orphaned uploads after a
+  // catalog reset, and operator-staged files under the read-only image root.
+  async function refreshImportable() {
+    var panel = document.getElementById('import-panel');
+    var r = await fetch('/api/images/importable');
+    if (!r.ok) { panel.hidden = true; return; }
+    var out = await r.json();
+    var cands = out.importable || [];
+    var skipped = out.skipped || [];
+    panel.hidden = cands.length === 0 && skipped.length === 0;
+    // The full path is shown, not just the basename: two files can share a
+    // basename across the roots, and the path is what distinguishes them.
+    document.getElementById('import-rows').innerHTML = cands.map(function (c) {
+      return '<tr><td>' + esc(c.filename) + '</td><td>' + esc(fmtSize(c.size)) +
+        '</td><td class="muted">' + esc(c.path) +
+        '</td><td><button class="linkish do-import" data-path="' + esc(c.path) +
+        '">import</button></td></tr>';
+    }).concat(skipped.map(function (c) {
+      return '<tr class="muted"><td>' + esc(c.filename) + '</td><td>' +
+        esc(fmtSize(c.size)) + '</td><td class="muted">' + esc(c.path) +
+        '</td><td>' + esc(c.reason) + '</td></tr>';
+    })).join('');
+    document.querySelectorAll('#import-rows .do-import').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        btn.disabled = true;
+        statusEl.textContent = 'Importing…';
+        var res = await fetch('/api/images/import', {
+          method: 'POST', headers: csrfHdr({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify({ path: btn.getAttribute('data-path') })
+        });
+        if (!res.ok) {
+          btn.disabled = false;
+          var j = await res.json().catch(function () { return {}; });
+          statusEl.textContent = 'Import failed: ' + (j.error || res.status);
+          refreshImportable();
+          return;
+        }
+        pollJob((await res.json()).job_id);
+      });
+    });
   }
   function upload(file) {
     if (!file) return;
@@ -106,6 +147,7 @@
     var devNow = dbody.now || Date.now() / 1000;   // server clock for last_seen freshness
     imageIds = ir.ok ? ((await ir.json()).images || []).map(function (i) { return i.id; }) : [];
     credOpts = cr.ok ? ((await cr.json()).profiles || []) : [];
+    syncCredSelected();
     // keep batch checkbox selections across the periodic re-render
     var marked = {};
     document.querySelectorAll('#dev-rows .mark:checked').forEach(function (cb) {
@@ -120,7 +162,8 @@
       })).join('');
       var platVal = d.platform || '';
       var platSel = [
-        ['', '— auto —'], ['guestshell', 'Guest Shell'], ['iox', 'IOx']
+        ['', '— auto —'], ['guestshell', 'Guest Shell'], ['iox', 'IOx'],
+        ['router', 'Router (VPG)']
       ].map(function (o) {
         return '<option value="' + esc(o[0]) + '"' + (o[0] === platVal ? ' selected' : '') + '>' + esc(o[1]) + '</option>';
       }).join('');
@@ -157,12 +200,16 @@
         status = '<span class="muted">not enrolled</span>';
       }
       if (d.last_seen && !fresh) status += ' <span class="muted" style="font-size:10px">offline</span>';
+      var attachment = d.management_type || d.network_attachment || 'legacy';
+      var attachmentDetail = attachment.indexOf('router-') === 0
+        ? (' / VPG' + (d.vpg_number == null ? '' : d.vpg_number))
+        : (' / ' + (d.inband_vlan || d.iris_vlan || ''));
       return '<tr data-id="' + esc(d.device_id) + '">' +
         '<td><input type="checkbox" class="mark" data-id="' + esc(d.device_id) + '"' +
         (marked[d.device_id] ? ' checked' : '') + '></td>' +
         '<td>' + esc(d.device_id) + '</td><td>' + esc(d.device_ip || '') + '</td>' +
         '<td>' + esc(d.model || d.heartbeat_model || '') + '</td>' +
-        '<td>' + esc(d.management_type || d.network_attachment || 'legacy') + ' / ' + esc(d.inband_vlan || d.iris_vlan || '') + '</td>' +
+        '<td>' + esc(attachment + attachmentDetail) + '</td>' +
         '<td><select class="platform">' + platSel + '</select></td>' +
         '<td><select class="cred">' + credSel + '</select></td>' +
         '<td><select class="assign">' + opts + '</select></td>' +
@@ -200,6 +247,7 @@
     document.querySelectorAll('#dev-rows .del').forEach(function (btn) {
       btn.addEventListener('click', async function () {
         var id = btn.closest('tr').getAttribute('data-id');
+        if (!confirm(delWarning([id]))) return;
         await fetch('/api/devices/' + encodeURIComponent(id), { method: 'DELETE', headers: csrfHdr() });
         refreshDevices();
       });
@@ -255,8 +303,14 @@
   }
   function startOnboard(id) {
     var log = openOnboardPanel(id);
-    jpost('/api/devices/' + encodeURIComponent(id) + '/onboard', {}).then(function (r) {
-      if (!r.ok) { log.textContent = 'Failed to start onboarding (' + r.status + ')'; return; }
+    jpost('/api/devices/' + encodeURIComponent(id) + '/onboard', {}).then(async function (r) {
+      if (!r.ok) {
+        var reason = '';
+        try { reason = (await r.json()).error || ''; } catch (e) { }
+        log.textContent = 'Failed to start onboarding (' + r.status + ')' +
+          (reason ? ': ' + reason : '');
+        return;
+      }
       return r.json();
     }).then(function (j) { if (j) streamOnboardJob(j.job_id, log); });
   }
@@ -375,17 +429,14 @@
     startBatchPoll(gen);
   }
   async function startBatch(action) {
-    var onBtn = document.getElementById('onboard-selected');
-    var unBtn = document.getElementById('undeploy-selected');
-    if (onBtn.disabled) return;
-    var ids = Array.prototype.map.call(document.querySelectorAll('#dev-rows .mark:checked'),
-      function (cb) { return cb.getAttribute('data-id'); });
-    if (!ids.length) { devStatus.textContent = 'No devices selected.'; return; }
+    var ids = claimSelection();
+    if (!ids) return;
     if (action === 'undeploy' &&
         !confirm('Undeploy ' + ids.length + ' device(s)?\n\nThis removes the device agent ' +
-                  '(Guest Shell or IOx app) and only receipt-owned resources. Inband deployments preserve their existing network. Staged images at ' +
-                 'flash root are left in place. Running jobs are never interrupted.')) return;
-    onBtn.disabled = true; unBtn.disabled = true;   // no overlapping batches from double-clicks
+                  '(Guest Shell or IOx app) and only receipt-owned resources. Inband deployments preserve their existing network; router NAT preserves a pre-existing outside marking. Staged images at ' +
+                 'the filesystem root are left in place. Running jobs are never interrupted.')) {
+      setBulkBusy(false); return;
+    }
     var gen = ++batchGen;
     stopBatchPoll();
     batchJobs = {};
@@ -406,7 +457,7 @@
         } catch (e) { failed.push(id); }   // one blipped POST must not kill the batch
       }));
     } finally {
-      onBtn.disabled = false; unBtn.disabled = false;
+      setBulkBusy(false);
     }
     if (gen !== batchGen) return;    // panel was closed mid-start
     devStatus.textContent = 'Started ' + action + ' for ' + Object.keys(batchJobs).length + ' device(s)' +
@@ -415,6 +466,112 @@
   }
   document.getElementById('onboard-selected').addEventListener('click', function () { startBatch('onboard'); });
   document.getElementById('undeploy-selected').addEventListener('click', function () { startBatch('undeploy'); });
+
+  // ---- bulk row actions (adopt / delete / assign credential) ----
+  function selectedIds() {
+    return Array.prototype.map.call(document.querySelectorAll('#dev-rows .mark:checked'),
+      function (cb) { return cb.getAttribute('data-id'); });
+  }
+  // Every selected-action shares one lock. Without it a delete could fire while
+  // an onboard batch is still starting, removing inventory out from under a
+  // running job — onboard/undeploy previously guarded only each other.
+  var BULK_BTNS = ['onboard-selected', 'undeploy-selected', 'adopt-selected',
+                   'delete-selected', 'apply-cred-selected'];
+  var bulkBusy = false;
+  function setBulkBusy(busy) {
+    bulkBusy = busy;
+    BULK_BTNS.forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) el.disabled = busy;
+    });
+  }
+  // Claim the lock for a selected-action, returning the checked ids (or null if
+  // another action holds it or nothing is selected).
+  function claimSelection() {
+    if (bulkBusy) return null;
+    var ids = selectedIds();
+    if (!ids.length) { devStatus.textContent = 'No devices selected.'; return null; }
+    setBulkBusy(true);
+    return ids;
+  }
+  // The bulk credential picker is populated from the same credOpts the per-row
+  // dropdowns use, and is re-synced whenever profiles change — creating a
+  // profile must make it immediately assignable, not on the next 10s poll.
+  function syncCredSelected() {
+    var sel = document.getElementById('cred-selected');
+    if (!sel) return;
+    var keep = sel.value;
+    sel.innerHTML = '<option value="">— credential for selected —</option>' +
+      '<option value="">— no credential —</option>' +
+      credOpts.map(function (c) {
+        return '<option value="' + esc(c.id) + '">' + esc(c.id) + '</option>';
+      }).join('');
+    if (keep) sel.value = keep;
+  }
+  function delWarning(ids) {
+    // Removing inventory does NOT undeploy: an onboarded device keeps running
+    // its agent with no Console record of it, so say so before it happens.
+    return 'Delete ' + ids.length + ' device(s) from the inventory?\n\n' +
+      ids.join(', ') + '\n\nThis removes the Console record only — it does NOT ' +
+      'undeploy. An onboarded device keeps its agent and staged image with no ' +
+      'inventory entry left to manage it. Undeploy first if that is what you want.' +
+      '\n\nThis cannot be undone.';
+  }
+  // Run *fn* for each selected id, reporting per-device refusals rather than
+  // failing the whole batch — same shape as startBatch's error handling.
+  async function forSelected(label, ids, fn) {
+    var failed = [];
+    try {
+      await Promise.all(ids.map(async function (id) {
+        try {
+          var r = await fn(id);
+          if (!r.ok) {
+            var reason = '';
+            try { reason = (await r.json()).error || ''; } catch (e2) { }
+            failed.push(reason ? id + ' (' + reason + ')' : id);
+          }
+        } catch (e) { failed.push(id); }
+      }));
+    } finally {
+      setBulkBusy(false);
+    }
+    devStatus.textContent = label + ' ' + (ids.length - failed.length) + '/' +
+      ids.length + ' device(s)' + (failed.length ? '; failed: ' + failed.join(', ') : '');
+    refreshDevices();
+  }
+  document.getElementById('delete-selected').addEventListener('click', async function () {
+    var ids = claimSelection();
+    if (!ids) return;
+    if (!confirm(delWarning(ids))) { setBulkBusy(false); return; }
+    await forSelected('Deleted', ids, function (id) {
+      return fetch('/api/devices/' + encodeURIComponent(id),
+                   { method: 'DELETE', headers: csrfHdr() });
+    });
+  });
+  document.getElementById('adopt-selected').addEventListener('click', async function () {
+    var ids = claimSelection();
+    if (!ids) return;
+    if (!confirm('Adopt ' + ids.length + ' device(s)?\n\n' + ids.join(', ') +
+      '\n\nAdoption records an ownership receipt for a device IRIS did not onboard, ' +
+      'so undeploy may later remove resources IRIS did not create. Only adopt ' +
+      'devices whose inventory matches what is really on the box; re-onboarding ' +
+      '(idempotent) is the safer option. Router deployments cannot be adopted.' +
+      '\n\nProceed with adopt?')) { setBulkBusy(false); return; }
+    await forSelected('Adopted', ids, function (id) {
+      return jpost('/api/devices/' + encodeURIComponent(id) + '/adopt',
+                   { acknowledge_adopt: true });
+    });
+  });
+  document.getElementById('apply-cred-selected').addEventListener('click', async function () {
+    var ids = claimSelection();
+    if (!ids) return;
+    var pid = document.getElementById('cred-selected').value;
+    await forSelected(pid ? 'Assigned ' + pid + ' to' : 'Cleared credential on', ids,
+      function (id) {
+        return jpost('/api/devices/' + encodeURIComponent(id) + '/credential',
+                     { credential_profile_id: pid });
+      });
+  });
   document.getElementById('batch-cancel').addEventListener('click', async function () {
     // scoped to THIS panel's jobs — other sessions' queued batches and parked
     // single-device onboards must survive our cancel
@@ -432,12 +589,25 @@
   });
   restoreBatch();
   var devForm = document.getElementById('dev-form');
+  function updateDeviceFields() {
+    var attach = document.getElementById('df-attachment').value;
+    var router = attach === 'router-routed' || attach === 'router-nat';
+    document.getElementById('df-vlan').hidden = router;
+    document.getElementById('df-svi').hidden = attach !== 'routed';
+    document.getElementById('df-vpg').hidden = !router;
+    document.getElementById('df-nat-interface').hidden = attach !== 'router-nat';
+    var platform = document.getElementById('df-platform');
+    if (router && !platform.value) platform.value = 'router';
+    if (!router && platform.value === 'router') platform.value = '';
+  }
+  document.getElementById('df-attachment').addEventListener('change', updateDeviceFields);
   document.getElementById('add-dev').addEventListener('click', function () {
     // populate the credential dropdown from the latest profiles
     var sel = document.getElementById('df-cred');
     sel.innerHTML = '<option value="">— no credential —</option>' +
       credOpts.map(function (c) { return '<option value="' + esc(c.id) + '">' + esc(c.id) + '</option>'; }).join('');
     devForm.hidden = !devForm.hidden;
+    if (!devForm.hidden) updateDeviceFields();
   });
   document.getElementById('df-cancel').addEventListener('click', function () { devForm.hidden = true; });
   devForm.addEventListener('submit', async function (e) {
@@ -456,10 +626,16 @@
       app_mask: mask,
       app_gateway: document.getElementById('df-gateway').value.trim(),
       model: document.getElementById('df-model').value.trim(),
+      platform: document.getElementById('df-platform').value,
       credential_profile_id: document.getElementById('df-cred').value
     };
     if (attach === 'inband') {
       body.inband_vlan = vlan;
+    } else if (attach === 'router-routed' || attach === 'router-nat') {
+      body.vpg_number = document.getElementById('df-vpg').value.trim();
+      if (attach === 'router-nat') {
+        body.nat_interface = document.getElementById('df-nat-interface').value.trim();
+      }
     } else {
       body.iris_vlan = vlan;
       body.svi_ip = document.getElementById('df-svi').value.trim();
@@ -500,6 +676,7 @@
   async function renderCreds() {
     var cr = await fetch('/api/credentials'); var profs = cr.ok ? (await cr.json()).profiles : [];
     credOpts = profs; _credProfs = profs;
+    syncCredSelected();
     document.getElementById('cred-rows').innerHTML = profs.length
       ? profs.map(function (p) {
           return '<tr data-id="' + esc(p.id) + '"><td><b>' + esc(p.id) + '</b></td><td>' +
@@ -519,7 +696,7 @@
         var id = btn.closest('tr').getAttribute('data-id');
         if (!confirm('Delete credential profile ' + id + '?')) return;
         await fetch('/api/credentials/' + encodeURIComponent(id), { method: 'DELETE', headers: csrfHdr() });
-        renderCreds();
+        await renderCreds(); refreshDevices();
       });
     });
   }
@@ -557,7 +734,11 @@
                  device_pass: pass, enable_secret: document.getElementById('cf-en').value };
     var r = await jpost('/api/credentials', body);
     if (!r.ok) { err.textContent = 'Save failed: ' + ((await r.json()).error || r.status); return; }
-    document.getElementById('cred-form').reset(); renderCreds();
+    document.getElementById('cred-form').reset();
+    // Re-render the device rows too: their credential dropdowns are built from
+    // credOpts, so a device imported before any profile existed stays
+    // unassignable until the table is redrawn.
+    await renderCreds(); refreshDevices();
   });
 
   // ---- Overview ----
@@ -1078,7 +1259,7 @@
       if (nav) nav.classList.toggle('active', v === view);
     });
     if (view === 'overview') refreshOverview();
-    else if (view === 'images') refreshImages();
+    else if (view === 'images') { refreshImages(); refreshImportable(); }
     else if (view === 'devices') refreshDevices();
     else if (view === 'swarm') refreshSwarm();
     else if (view === 'settings') refreshSettings();

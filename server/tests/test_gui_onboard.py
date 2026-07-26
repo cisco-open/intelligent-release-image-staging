@@ -4,9 +4,11 @@
 # SPDX-License-Identifier: Apache-2.0
 import threading
 import time
+from types import SimpleNamespace
 
 import catalog as catalog_mod
 import gui_onboard
+import pytest
 
 
 class _Fleet:
@@ -267,8 +269,19 @@ def test_resolve_platform_model_map_iox():
 
 
 def test_resolve_platform_model_map_guestshell():
-    for model in ("C9300-48UXM", "c9300-48uxm", "ISR4451", "ASR1001", "CSR1000v", "C8000v"):
+    for model in ("C9300-48UXM", "c9300-48uxm", "ISR4451", "ASR1001", "CSR1000v"):
         assert gui_onboard.resolve_platform({"device_id": "d", "model": model}) == "guestshell", model
+
+
+def test_resolve_platform_model_map_catalyst_8000_router():
+    for model in ("C8000V", "c8000v", "C8200-1N-4T", "C8300-2N2S-6T", "C8500-12X"):
+        assert gui_onboard.resolve_platform({"device_id": "d", "model": model}) == "router", model
+
+
+def test_c8000_explicit_guestshell_is_rejected():
+    with pytest.raises(ValueError, match="platform router"):
+        gui_onboard.resolve_platform({"device_id": "d", "model": "C8000V",
+                                      "platform": "guestshell"})
 
 
 def test_resolve_platform_unknown_model_raises_with_guidance():
@@ -402,6 +415,196 @@ def test_guestshell_env_unchanged_no_ssh_keys(tmp_path):
     assert job["state"] == "done"
     assert "DEVICE_SSH_PASS" not in seen["env"]
     assert "DEVICE_SSH_USER" not in seen["env"]
+
+
+def test_router_recipe_and_env_plumbing(tmp_path):
+    fleet = _Fleet({"r1": {
+        "device_id": "r1", "device_ip": "192.0.2.10", "model": "C8000V",
+        "platform": "router", "management_type": "router-nat",
+        "vpg_number": "10", "nat_interface": "GigabitEthernet1",
+        "app_ip": "10.8.0.2", "app_mask": "255.255.255.252",
+        "app_gateway": "10.8.0.1", "credential_profile_id": "lab"}})
+    seen = {}
+    svc = gui_onboard.OnboardService(
+        fleet, _iox_creds(), host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
+        run_fn=_run_capture(seen), artifacts_dir=str(tmp_path),
+        preflight_fn=lambda dev, env, resolved: {
+            "status": "passed", "device_identity": "9ABC123",
+            "detected_model": "C8000V",
+            "nat_interface": "GigabitEthernet1",
+            "nat_outside_preexisting": False})
+    job = _wait(svc, svc.start("r1"))
+    assert job["state"] == "done"
+    assert seen["install_path"].endswith("device/router-install.sh")
+    assert seen["env"]["NETWORK_ATTACHMENT"] == "router-nat"
+    assert seen["env"]["VPG_NUMBER"] == "10"
+    assert seen["env"]["NAT_INTERFACE"] == "GigabitEthernet1"
+    assert seen["env"]["BT_LISTEN_PORT"] == "6881"
+    assert seen["env"]["EXPECTED_DEVICE_IDENTITY"] == "9ABC123"
+    assert "DEVICE_SSH_PASS" not in seen["env"]
+
+
+def test_router_undeploy_uses_router_recipe_and_receipt_ownership(tmp_path):
+    fleet = _Fleet({"r1": {
+        "device_id": "r1", "device_ip": "192.0.2.10", "model": "C8000V",
+        "platform": "router", "credential_profile_id": "lab"}})
+    seen = {}
+    svc = gui_onboard.OnboardService(
+        fleet, _iox_creds(), host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
+        run_fn=_run_capture(seen), artifacts_dir=str(tmp_path))
+    resolved = {"platform": "router", "attachment": "router-nat",
+                "device_ip": "192.0.2.10", "device_identity": "9ABC123",
+                "vpg_number": "10", "nat_interface": "GigabitEthernet1",
+                "app_ip": "10.8.0.2", "app_mask": "255.255.255.252",
+                "app_gateway": "10.8.0.1", "swarm_port": "6881",
+                "nat_outside_owned": "1", "model": "C8000V"}
+    job = _wait(svc, svc.start("r1", action="undeploy", resolved=resolved))
+    assert job["state"] == "done"
+    assert seen["install_path"].endswith("device/router-uninstall.sh")
+    assert seen["env"]["NAT_OUTSIDE_OWNED"] == "1"
+
+
+def test_router_execution_preflight_runs_before_mint_and_refreshes_env(tmp_path):
+    fleet = _Fleet({"r1": {
+        "device_id": "r1", "device_ip": "192.0.2.10", "model": "C8000V",
+        "platform": "router", "management_type": "router-nat",
+        "vpg_number": "10", "nat_interface": "Gi1",
+        "app_ip": "10.8.0.2", "app_mask": "255.255.255.252",
+        "app_gateway": "10.8.0.1", "credential_profile_id": "lab"}})
+    events = []
+    seen = {}
+
+    def preflight(dev, env, resolved):
+        events.append("preflight")
+        return {"status": "passed", "device_identity": "9ABC123",
+                "detected_model": "C8000V",
+                "nat_interface": "GigabitEthernet1",
+                "nat_outside_preexisting": True}
+
+    svc = gui_onboard.OnboardService(
+        fleet, _iox_creds(), host_ip="10.9.9.9",
+        mint_fn=lambda d: events.append("mint") or "TOK",
+        run_fn=lambda p, e, on: (events.append("run"), seen.update(e), 0)[2],
+        preflight_fn=preflight)
+    job = _wait(svc, svc.start("r1"))
+    assert job["state"] == "done"
+    assert events == ["preflight", "mint", "run"]
+    assert seen["NAT_INTERFACE"] == "GigabitEthernet1"
+    assert seen["NAT_OUTSIDE_OWNED"] == "0"
+    assert seen["EXPECTED_DEVICE_IDENTITY"] == "9ABC123"
+
+
+def test_router_execution_preflight_failure_never_mints_or_runs(tmp_path):
+    fleet = _Fleet({"r1": {
+        "device_id": "r1", "device_ip": "192.0.2.10", "model": "C8000V",
+        "platform": "router", "management_type": "router-routed",
+        "vpg_number": "10", "app_ip": "10.8.0.2",
+        "app_mask": "255.255.255.252", "app_gateway": "10.8.0.1",
+        "credential_profile_id": "lab"}})
+    minted, ran = [], []
+    svc = gui_onboard.OnboardService(
+        fleet, _iox_creds(), host_ip="10.9.9.9",
+        mint_fn=lambda d: minted.append(d) or "TOK",
+        run_fn=lambda p, e, on: ran.append(1) or 0,
+        preflight_fn=lambda *args: (_ for _ in ()).throw(
+            ValueError("VirtualPortGroup10 appeared while queued")))
+    job = _wait(svc, svc.start("r1"))
+    assert job["state"] == "error"
+    assert minted == [] and ran == []
+    assert any("preflight failed" in line for line in job["lines"])
+
+
+def _router_preflight_stub(monkeypatch, running="", apps="", guest_share="%Error opening",
+                           interface="GigabitEthernet1 is up, line protocol is up"):
+    outputs = {
+        "show version": ("Cisco IOS XE Software\n"
+                         "cisco C8000V (VXE) processor\n"
+                         "Processor board ID 9ABC123\n"),
+        "show running-config": running,
+        "show app-hosting list": apps,
+        "dir bootflash:guest-share": guest_share,
+        "show interfaces Gi1": interface,
+    }
+
+    def run(_argv, input=None, **_kwargs):
+        return SimpleNamespace(returncode=0, stdout=outputs.get(input.strip(), ""))
+
+    monkeypatch.setattr(gui_onboard.subprocess, "run", run)
+
+
+def _router_resolved(attachment="router-nat"):
+    return {"attachment": attachment, "vpg_number": "10",
+            "app_ip": "10.8.0.2", "app_mask": "255.255.255.252",
+            "app_gateway": "10.8.0.1", "nat_interface": "Gi1",
+            "swarm_port": "6881"}
+
+
+def test_default_router_preflight_canonicalizes_interface_and_records_globals(monkeypatch):
+    _router_preflight_stub(
+        monkeypatch,
+        running=("iox\nfile prompt quiet\ninterface GigabitEthernet1\n"
+                 " ip nat outside\n!\n"))
+    evidence = gui_onboard._default_router_preflight(
+        {}, {"DEVICE_IP": "192.0.2.10"}, _router_resolved(), "/repo")
+    assert evidence == {
+        "status": "passed", "detected_model": "C8000V",
+        "device_identity": "9ABC123", "iox_preexisting": True,
+        "file_prompt_quiet_preexisting": True,
+        "nat_outside_preexisting": True,
+        "nat_interface": "GigabitEthernet1"}
+
+
+def test_default_router_preflight_rejects_secondary_subnet_overlap(monkeypatch):
+    _router_preflight_stub(
+        monkeypatch,
+        running="interface Loopback0\n ip address 10.8.0.1 255.255.255.252 secondary\n!")
+    with pytest.raises(ValueError, match="already configured"):
+        gui_onboard._default_router_preflight(
+            {}, {"DEVICE_IP": "192.0.2.10"}, _router_resolved(), "/repo")
+
+
+def test_default_router_preflight_rejects_global_address_pat_collision(monkeypatch):
+    _router_preflight_stub(
+        monkeypatch,
+        running=("interface GigabitEthernet1\n!\n"
+                 "ip nat inside source static tcp 10.1.1.10 22 198.51.100.10 6881\n"))
+    with pytest.raises(ValueError, match="collides with swarm port"):
+        gui_onboard._default_router_preflight(
+            {}, {"DEVICE_IP": "192.0.2.10"}, _router_resolved(), "/repo")
+
+
+@pytest.mark.parametrize("collision", [
+    "event manager applet IRIS-AGENT authorization bypass\n",
+    "logging discriminator IRISQ mnemonics drops IOX_INST_WARN\n",
+    "crypto pki trustpoint IRIS\n",
+    "ip http client secure-trustpoint IRIS\n",
+])
+def test_default_router_preflight_rejects_named_global_collisions(monkeypatch, collision):
+    _router_preflight_stub(monkeypatch, running=collision)
+    with pytest.raises(ValueError, match="already exists"):
+        gui_onboard._default_router_preflight(
+            {}, {"DEVICE_IP": "192.0.2.10"},
+            _router_resolved("router-routed"), "/repo")
+
+
+def test_default_router_preflight_allows_empty_guest_share(monkeypatch):
+    _router_preflight_stub(
+        monkeypatch, guest_share=("Directory of bootflash:/guest-share/\n\n"
+                                  "No files in directory\n"))
+    evidence = gui_onboard._default_router_preflight(
+        {}, {"DEVICE_IP": "192.0.2.10"},
+        _router_resolved("router-routed"), "/repo")
+    assert evidence["status"] == "passed"
+
+
+def test_default_router_preflight_rejects_populated_guest_share(monkeypatch):
+    _router_preflight_stub(
+        monkeypatch, guest_share=("Directory of bootflash:/guest-share/\n"
+                                  "  12  -rw-  10  Jul 25 2026  operator.txt\n"))
+    with pytest.raises(ValueError, match="guest-share is not empty"):
+        gui_onboard._default_router_preflight(
+            {}, {"DEVICE_IP": "192.0.2.10"},
+            _router_resolved("router-routed"), "/repo")
 
 
 def test_iox_missing_iris_tar_errors_before_run(tmp_path):

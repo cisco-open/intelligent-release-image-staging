@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import ssl
 import time
@@ -126,11 +127,25 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                     device.get("network_attachment", "legacy_routed"))
             if attachment == "legacy_routed":
                 attachment = "routed"
-            if attachment not in ("routed", "inband"):
+            if attachment not in ("routed", "inband", "router-routed", "router-nat"):
                 raise ValueError("unknown network attachment")
             platform = gui_onboard.resolve_platform(device)
+            router_attachment = attachment in ("router-routed", "router-nat")
+            if device.get("model") and re.match(
+                    r"^C8[0-9]{3}", device["model"], re.IGNORECASE) \
+                    and not router_attachment:
+                raise ValueError("Catalyst 8000 models require management_type "
+                                 "router-routed or router-nat")
+            if (platform == "router") != router_attachment:
+                raise ValueError("platform router requires management_type "
+                                 "router-routed or router-nat")
+            if platform == "router" and device.get("model") and not re.match(
+                    r"^C8[0-9]{3}", device["model"], re.IGNORECASE):
+                raise ValueError("router modes support the Catalyst 8000 family only; "
+                                 "%s is not yet supported" % device["model"])
             network = {
                 "attachment": attachment,
+                "device_ip": device.get("device_ip", ""),
                 "iris_vlan": device.get("iris_vlan", device.get("vlan", "")),
                 "svi_ip": device.get("svi_ip", ""),
                 "svi_mask": device.get("svi_mask", ""),
@@ -138,6 +153,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 "app_mask": device.get("app_mask", device.get("svi_mask", "")),
                 "app_gateway": device.get("app_gateway", device.get("svi_ip", "")),
                 "inband_vlan": device.get("inband_vlan", ""),
+                "vpg_number": device.get("vpg_number", ""),
+                "nat_interface": device.get("nat_interface", ""),
+                "swarm_port": "6881",
                 # The inband IOx app reaches IOS at the switch's management IP
                 # (which is on the same existing management VLAN); ios_ssh_host is
                 # an optional advanced override for asymmetric topologies.
@@ -147,27 +165,140 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 "platform": platform,
                 "renderer": "v1",
             }
+            if attachment == "inband":
+                ownership = "preserves existing VLAN, SVI, gateway, routes, and VRF"
+            elif attachment == "routed":
+                ownership = "creates only a clean IRIS-owned VLAN and SVI"
+            elif attachment == "router-nat":
+                ownership = ("creates an IRIS-owned VPG and NAT rules; preserves the "
+                             "outside interface except for a receipt-owned NAT marking")
+            else:
+                ownership = "creates only a clean IRIS-owned VirtualPortGroup"
             plan = {"device_id": device_id, "inventory_revision": fleet.revision(),
-                    "resolved": network,
-                    "ownership": ("preserves existing VLAN, SVI, gateway, routes, and VRF"
-                                  if attachment == "inband" else
-                                  "creates only a clean IRIS-owned VLAN and SVI")}
+                    "resolved": network, "ownership": ownership}
             plan["plan_hash"] = hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()
             return plan
+
+        @staticmethod
+        def _apply_router_preflight(plan, evidence):
+            """Bind live, ownership-sensitive router evidence into a plan."""
+            resolved = gui_onboard.apply_router_preflight(
+                plan["resolved"], evidence)
+            updated = dict(plan)
+            updated["resolved"] = resolved
+            payload = {key: value for key, value in updated.items()
+                       if key != "plan_hash"}
+            updated["plan_hash"] = hashlib.sha256(
+                json.dumps(payload, sort_keys=True).encode()).hexdigest()
+            return updated
 
         @staticmethod
         def _owned_resources(resolved):
             """Resources IRIS may later remove, per attachment. Inband owns only
             the app; it never claims the operator's VLAN/SVI."""
+            attachment = resolved.get("attachment")
             resources = [{"kind": "guestshell", "ownership": "iris-created"}]
-            if resolved.get("attachment") == "routed":
+            if attachment == "routed":
                 resources = [
                     {"kind": "vlan", "ownership": "iris-created",
                      "id": resolved.get("iris_vlan", "")},
                     {"kind": "svi", "ownership": "iris-created",
                      "ip": resolved.get("svi_ip", "")},
                 ] + resources
+            elif attachment in ("router-routed", "router-nat"):
+                vpg = resolved.get("vpg_number", "")
+                resources = [
+                    {"kind": "virtualportgroup", "ownership": "iris-created",
+                     "id": vpg},
+                    {"kind": "eem-applets", "ownership": "iris-created"},
+                    {"kind": "agent-files", "ownership": "iris-created",
+                     "path": "bootflash:guest-share"},
+                    {"kind": "logging-discriminator", "ownership": "iris-created",
+                     "name": "IRISQ"},
+                    {"kind": "pki-trustpoint", "ownership": "iris-created",
+                     "name": "IRIS"},
+                    {"kind": "http-client-trustpoint", "ownership": "iris-created",
+                     "name": "IRIS"},
+                    {"kind": "iox-global",
+                     "ownership": ("pre-existing" if resolved.get("iox_preexisting") == "1"
+                                   else "iris-added-preserved")},
+                    {"kind": "file-prompt-quiet",
+                     "ownership": ("pre-existing"
+                                   if resolved.get("file_prompt_quiet_preexisting") == "1"
+                                   else "iris-added-preserved")},
+                ] + resources
+                if attachment == "router-nat":
+                    outside_ownership = ("iris-created"
+                                         if resolved.get("nat_outside_owned") in (True, 1, "1")
+                                         else "pre-existing")
+                    resources.extend([
+                        {"kind": "nat-acl", "ownership": "iris-created",
+                         "name": "IRIS-NAT-%s" % vpg},
+                        {"kind": "nat-overload", "ownership": "iris-created"},
+                        {"kind": "nat-static", "ownership": "iris-created",
+                         "port": resolved.get("swarm_port", "6881")},
+                        {"kind": "nat-outside-marking", "ownership": outside_ownership,
+                         "interface": resolved.get("nat_interface", "")},
+                    ])
             return resources
+
+        @staticmethod
+        def _router_teardown_resolved(receipt):
+            """Authorize router teardown strictly from receipt-owned resources."""
+            resolved = dict(receipt.get("resolved") or {})
+            if resolved.get("platform") != "router":
+                return resolved
+            required = {"virtualportgroup", "eem-applets", "agent-files",
+                        "logging-discriminator", "pki-trustpoint",
+                        "http-client-trustpoint", "iox-global",
+                        "file-prompt-quiet", "guestshell"}
+            if resolved.get("attachment") == "router-nat":
+                required.update(("nat-acl", "nat-overload", "nat-static",
+                                 "nat-outside-marking"))
+            resources = receipt.get("resources") or []
+            by_kind = {resource.get("kind"): resource for resource in resources}
+            missing = sorted(required - set(by_kind))
+            if missing:
+                raise ValueError("router receipt does not prove ownership of: %s"
+                                 % ", ".join(missing))
+            preserved = {"nat-outside-marking", "iox-global", "file-prompt-quiet"}
+            for kind in required - preserved:
+                if by_kind[kind].get("ownership") != "iris-created":
+                    raise ValueError("router receipt does not prove IRIS ownership of %s"
+                                     % kind)
+            for kind in ("iox-global", "file-prompt-quiet"):
+                if by_kind[kind].get("ownership") not in (
+                        "pre-existing", "iris-added-preserved"):
+                    raise ValueError("router receipt has ambiguous ownership of %s"
+                                     % kind)
+            expected = {
+                "virtualportgroup": ("id", str(resolved.get("vpg_number", ""))),
+                "agent-files": ("path", "bootflash:guest-share"),
+                "logging-discriminator": ("name", "IRISQ"),
+                "pki-trustpoint": ("name", "IRIS"),
+                "http-client-trustpoint": ("name", "IRIS"),
+            }
+            if resolved.get("attachment") == "router-nat":
+                expected.update({
+                    "nat-acl": ("name", "IRIS-NAT-%s" % resolved.get("vpg_number", "")),
+                    "nat-static": ("port", str(resolved.get("swarm_port", "6881"))),
+                    "nat-outside-marking": ("interface", resolved.get("nat_interface", "")),
+                })
+            for kind, (field, value) in expected.items():
+                if str(by_kind[kind].get(field, "")) != str(value):
+                    raise ValueError("router receipt %s does not match resolved plan"
+                                     % kind)
+            if not resolved.get("device_ip") or not resolved.get("device_identity"):
+                raise ValueError("router receipt is missing deployed device identity")
+            resolved["router_resources_owned"] = "1"
+            if resolved.get("attachment") == "router-nat":
+                marking = by_kind["nat-outside-marking"]
+                if marking.get("ownership") not in ("iris-created", "pre-existing"):
+                    raise ValueError("router receipt has ambiguous NAT outside ownership")
+                resolved["nat_outside_owned"] = (
+                    "1" if marking.get("ownership") == "iris-created" else "0")
+                resolved["nat_interface"] = marking.get("interface") or ""
+            return resolved
 
         def _send(self, status, ctype, body, extra_headers=None):
             if isinstance(body, str):
@@ -374,6 +505,15 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 else:
                     self._json(200, {"images": images.list_images()})
                 return
+            if path == "/api/images/importable":
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"})
+                elif images is None:
+                    self._json(200, {"importable": [], "skipped": []})
+                else:
+                    self._json(200, {"importable": images.list_importable(),
+                                     "skipped": images.list_skipped()})
+                return
             if path.startswith("/api/images/jobs/"):
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"})
@@ -484,10 +624,13 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             # "onboarding…" / "waiting for heartbeat" instead of a misleading
             # "not enrolled" before the fresh agent's first heartbeat lands
             jobs = onboard.latest_jobs_by_device() if onboard else {}
+            # one policy.json read for the whole table — get_policy() re-parses
+            # the file per call, which multiplies badly on the polled endpoints
+            policies = catalog.list_policies() if catalog else {}
             out = []
             for d in devs:
                 did = d.get("device_id")
-                pol = catalog.get_policy(did) if catalog else {}
+                pol = policies.get(did, {})
                 h = hb.get(did, {})
                 row = dict(d)
                 row["assigned_image_id"] = pol.get("approved_image_id")
@@ -517,31 +660,28 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
 
         def _overview(self):
             imgs = catalog.list_images() if catalog else []
-            devs = fleet.list_devices() if fleet else []
-            hb = {d.get("device_id"): d for d in (catalog.list_devices()
-                                                  if catalog else [])}
-            pol = catalog.list_policies() if catalog else {}
+            # the merged device rows already carry policy + heartbeat, so one
+            # _device_view() pass feeds rollout, totals, and the awaiting count
+            # without re-reading the fleet/policy/heartbeat stores here
+            rows = self._device_view()
             rollout = []
             for img in imgs:
                 iid = img.get("id")
-                assigned = [d for d in devs
-                            if pol.get(d.get("device_id"), {}).get(
-                                "approved_image_id") == iid]
-                staged = [d for d in assigned
-                          if hb.get(d.get("device_id"), {}).get(
-                              "stage_state") == "ready"
-                          and hb.get(d.get("device_id"), {}).get(
-                              "current_image_id") == iid]
+                assigned = [r for r in rows
+                            if r.get("assigned_image_id") == iid]
+                staged = [r for r in assigned
+                          if r.get("stage_state") == "ready"
+                          and r.get("current_image_id") == iid]
                 rollout.append({"image_id": iid, "filename": img.get("filename"),
                                 "assigned": len(assigned), "staged": len(staged)})
             assigned_total = sum(r["assigned"] for r in rollout)
             staged_total = sum(r["staged"] for r in rollout)
             # devices freshly onboarded whose agent hasn't heartbeated yet —
             # surfaced so an operator doesn't read the gap as "undeployed"
-            awaiting = sum(1 for row in self._device_view()
+            awaiting = sum(1 for row in rows
                            if self._awaiting_heartbeat(row))
             return {
-                "images": len(imgs), "devices": len(devs),
+                "images": len(imgs), "devices": len(rows),
                 "assigned": assigned_total, "staged": staged_total,
                 "staging_now": assigned_total - staged_total,
                 "awaiting_heartbeat": awaiting,
@@ -735,6 +875,41 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                            % COOKIE)
                 self._json(200, {"ok": True}, extra_headers=[("Set-Cookie", expired)])
                 return
+            if path == "/api/images/import":
+                if images is None:
+                    self._json(404, {"error": "not found"}); return
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                src = str(data.get("path", ""))
+
+                def _reject(status, error, detail):
+                    self._audit("image_import", "image", action="import",
+                               actor=actor, result="fail",
+                               target=os.path.basename(src) if src else "",
+                               detail=detail, src_ip=self.client_address[0])
+                    self._json(status, {"error": error})
+
+                # Authorize by candidate IDENTITY, not by prefix: a path that
+                # merely starts inside a root ("<root>/../outside/secret.bin")
+                # is not importable.
+                if not src or not images.is_importable_path(src):
+                    _reject(400, "not an importable image",
+                            "rejected non-candidate path %s" % (src or "(empty)"))
+                    return
+                if not os.path.isfile(src):
+                    _reject(404, "image no longer on disk",
+                            "candidate vanished before import: %s" % src)
+                    return
+                if images.publish_in_flight(images.derived_id(src)):
+                    _reject(409, "already being published",
+                            "concurrent import of %s" % src)
+                    return
+                self._audit("image_import", "image", action="import",
+                           actor=actor, target=os.path.basename(src),
+                           detail="publishing in place from %s" % src,
+                           src_ip=self.client_address[0])
+                self._json(200, {"job_id": images.start_publish(src)}); return
             if path == "/api/settings/password":
                 data = self._json_body(raw)
                 if data is None:
@@ -890,9 +1065,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if body is None:
                     return
                 plat = str(body.get("platform", "")).strip()
-                if plat and plat not in ("guestshell", "iox"):
+                if plat and plat not in ("guestshell", "iox", "router"):
                     self._json(400, {"error": "platform must be empty, "
-                                     "guestshell, or iox"}); return
+                                     "guestshell, iox, or router"}); return
                 old = dev.get("platform") or ""
                 # Empty value CLEARS the override (falls back to Auto/model).
                 try:
@@ -951,6 +1126,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     plan = self._plan(did, device)
                 except ValueError as exc:
                     self._json(409, {"error": str(exc)}); return
+                if plan["resolved"].get("platform") == "router":
+                    self._json(409, {"error": "router deployments cannot be adopted; "
+                                     "re-onboard to record live ownership evidence"}); return
                 receipt = receipts.adopt({"controller_id": "iris", "device_id": did,
                     "inventory_revision": fleet.revision(), "plan_hash": plan["plan_hash"],
                     "resolved": plan["resolved"],
@@ -975,6 +1153,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 resolved = None
                 receipt_ref = {}
                 prepare = None
+                pre_apply = None
                 if act == "onboard":
                     # With a receipt store (always in production via main()), an
                     # onboard resolves an immutable plan and records a receipt.
@@ -985,6 +1164,29 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             plan = self._plan(did, device)
                         except ValueError as exc:
                             self._json(409, {"error": str(exc)}); return
+                        try:
+                            preflight = onboard.preflight(did, plan["resolved"])
+                        except (ValueError, OSError) as exc:
+                            self._json(409, {"error": "preflight failed: %s" % exc}); return
+                        if plan["resolved"].get("platform") == "router":
+                            try:
+                                # Any receipt IRIS already applied blocks a
+                                # re-onboard, not just an active one: the box is
+                                # configured either way, so preflight would fail
+                                # with a confusing "guestshell is already
+                                # enabled" instead of naming the real fix.
+                                existing = receipts.recoverable_for_device(did)
+                            except ValueError as exc:
+                                self._json(409, {"error": str(exc)}); return
+                            if existing is not None:
+                                self._json(409, {"error": "router already has a %s "
+                                                 "deployment receipt; undeploy it before "
+                                                 "onboarding again"
+                                                 % existing.get("state", "recorded")}); return
+                            try:
+                                plan = self._apply_router_preflight(plan, preflight)
+                            except ValueError as exc:
+                                self._json(409, {"error": "preflight failed: %s" % exc}); return
                         resolved = plan["resolved"]
 
                         def prepare():
@@ -994,32 +1196,78 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             rid = receipts.create({"controller_id": "iris",
                                 "device_id": did, "inventory_revision": fleet.revision(),
                                 "plan_hash": plan["plan_hash"], "resolved": plan["resolved"],
-                                "preflight": {"status": "pending"},
+                                "preflight": preflight,
                                 "resources": self._owned_resources(plan["resolved"])})["receipt_id"]
                             receipt_ref["id"] = rid
                             return rid
+
+                        if resolved.get("platform") == "router":
+                            def pre_apply(evidence):
+                                # The job may have waited in the queue. Refresh
+                                # live ownership immediately before apply, then
+                                # atomically replace the planned receipt inputs.
+                                final_plan = self._apply_router_preflight(plan, evidence)
+                                rid = receipt_ref.get("id")
+                                if not rid:
+                                    raise ValueError("planned receipt is unavailable")
+                                receipts.update_planned(
+                                    rid, plan_hash=final_plan["plan_hash"],
+                                    resolved=final_plan["resolved"],
+                                    preflight=evidence,
+                                    resources=self._owned_resources(
+                                        final_plan["resolved"]))
+                                return final_plan["resolved"]
+                    else:
+                        try:
+                            degraded_plan = self._plan(did, fleet.get_device(did))
+                        except ValueError as exc:
+                            self._json(409, {"error": str(exc)}); return
+                        if degraded_plan["resolved"].get("platform") == "router":
+                            self._json(503, {"error": "router onboarding requires the "
+                                             "deployment receipt store"}); return
                 else:
                     # Undeploy renders exclusively from an active receipt so a
                     # post-deploy inventory edit cannot retarget cleanup. Without
                     # a receipt store, fall back to legacy fleet-driven teardown.
                     if receipts is not None:
                         try:
-                            receipt = receipts.active_for_device(did)
+                            # Not just the ACTIVE receipt: a controller restart
+                            # during an onboard leaves the receipt "unknown"
+                            # while the device is already configured, and that
+                            # receipt still records what IRIS created. Teardown
+                            # must accept it, or the device is stranded — a
+                            # router cannot be adopted and its preflight refuses
+                            # a re-onboard.
+                            receipt = receipts.recoverable_for_device(did)
                         except ValueError as exc:
                             # duplicate actives should be impossible (activation
                             # supersedes siblings; startup collapses legacy dupes)
                             # — but surface the reason instead of a 500 if not.
                             self._json(409, {"error": str(exc)}); return
                         if receipt is None:
-                            self._json(409, {"error": "no active receipt; adopt the device "
-                                             "first, then undeploy"}); return
-                        resolved = receipt["resolved"]
+                            self._json(409, {"error": "no deployment receipt for this "
+                                             "device; adopt it first, then undeploy"}); return
+                        try:
+                            resolved = self._router_teardown_resolved(receipt)
+                        except ValueError as exc:
+                            receipts.transition(receipt["receipt_id"], "needs-reconcile")
+                            self._json(409, {"error": str(exc)}); return
 
                         def prepare():
                             receipt_ref["id"] = receipt["receipt_id"]
                             return receipt["receipt_id"]
+                    else:
+                        try:
+                            degraded_plan = self._plan(did, fleet.get_device(did))
+                        except ValueError as exc:
+                            self._json(409, {"error": str(exc)}); return
+                        if degraded_plan["resolved"].get("platform") == "router":
+                            self._json(503, {"error": "router undeploy requires an "
+                                             "active deployment receipt"}); return
                 try:
-                    jid = onboard.start(did, action=act, resolved=resolved, prepare=prepare)
+                    jid = onboard.start(
+                        did, action=act, resolved=resolved, prepare=prepare,
+                        pre_apply=pre_apply)
                 except ValueError as exc:
                     if receipt_ref.get("id") and act == "onboard":
                         receipts.transition(receipt_ref["id"], "needs-reconcile")
