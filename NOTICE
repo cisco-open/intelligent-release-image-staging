@@ -7,10 +7,11 @@ This product includes software developed at Cisco Systems, Inc.
 Licensed under the Apache License, Version 2.0.
 
 ------------------------------------------------------------------------------
-Third-party tools invoked at runtime (NOT part of this source distribution)
+Third-party tools invoked as separate programs (NOT part of this source distribution)
 ------------------------------------------------------------------------------
 
-intelligent-release-image-staging distributes and stages software images by INVOKING the following tools as
+intelligent-release-image-staging distributes and stages software images — and
+builds its optional IOx application packages — by INVOKING the following tools as
 separate, independent programs (subprocesses). It does not link against, embed,
 include, or derive from their source code. Each tool is executed via its own
 command-line / RPC interface and remains under its own license:
@@ -30,6 +31,15 @@ command-line / RPC interface and remains under its own license:
                Installed as a system package and invoked as a subprocess
                (e.g. to generate secrets and TLS material).
 
+  * ioxclient — Cisco IOx Client — proprietary Cisco software distributed by
+               Cisco Systems, Inc. under its own license terms. It is
+               operator-provided (staged at tools/bin/ioxclient or pointed to by
+               the IOXCLIENT variable), which keeps IOx package builds working in
+               air-gapped environments, and is invoked only as a separate
+               command-line program to build the optional IRIS IOx application
+               packages (iris-arm64.tar / iris-amd64.tar). It is NOT part of this
+               source repository and is NOT redistributed here.
+
 ------------------------------------------------------------------------------
 Documentation tooling and runtime assets
 ------------------------------------------------------------------------------
@@ -47,7 +57,7 @@ third-party tools or runtime assets. They are not linked into the IRIS runtime:
                Loaded by the generated documentation site to render diagrams
                from Mermaid code blocks.
 
-The runtime tools listed above are invoked as separate programs and are not
+The tools listed above are invoked as separate programs and are not
 linked into or derived from this project's source code. The documentation tools
 and assets listed above are used only for documentation build or rendering. The
 project's own code is licensed under the Apache License, Version 2.0, while each

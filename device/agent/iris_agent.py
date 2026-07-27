@@ -14,6 +14,7 @@ import json
 import os
 import random
 import re
+import shutil
 import sys
 import time
 
@@ -367,18 +368,41 @@ def run_once(cfg, deps, state):
     prev = state.get("image_id")
     if prev and prev != img_id:
         deps.purge_others(image["filename"], img_id)
-        old_root = state.get("root_file")
-        # Re-check the whitelist before interpolating into a destructive delete,
-        # in case the state file was hand-edited.
-        if old_root and old_root != image["filename"] \
-                and _FILENAME_RE.match(old_root):
-            deps.ios("delete /force %s%s"
-                     % (state.get("stage_fs", "flash:"), old_root))
-            deps.emit("CLEANUP", "removed replaced image %s (now %s)"
-                      % (old_root, img_id))
-            state.pop("root_file", None)
+        old_root = state.pop("root_file", None)
+        if old_root and old_root != image["filename"]:
+            pending = state.setdefault("pending_root_deletes", [])
+            if old_root not in pending:
+                pending.append(old_root)
         state.pop(prev, None)             # old image's done/copied flags
     state["image_id"] = img_id
+
+    # Delete replaced flash-root images, VERIFYING each is actually gone
+    # before claiming CLEANUP: AAA nodes silently no-op a raw exec `delete`
+    # (the reclaim/copyroot EEM applets exist for exactly that), and an
+    # unverified claim strands the old image on flash forever. Unverified
+    # entries stay on the list and are retried every tick. The whitelist
+    # re-check guards the destructive interpolation against a hand-edited
+    # state file.
+    pending = state.get("pending_root_deletes") or []
+    if pending:
+        fs = state.get("stage_fs", "flash:")
+        still = []
+        for old_root in pending:
+            if old_root == image["filename"] or not _FILENAME_RE.match(old_root):
+                continue
+            deps.ios("delete /force %s%s" % (fs, old_root))
+            if deps.root_present(old_root, fs):
+                still.append(old_root)
+                deps.emit("CLEANUP-PENDING",
+                          "replaced image %s still present after delete; "
+                          "will retry" % old_root)
+            else:
+                deps.emit("CLEANUP", "removed replaced image %s (now %s)"
+                          % (old_root, img_id))
+        if still:
+            state["pending_root_deletes"] = still
+        else:
+            state.pop("pending_root_deletes", None)
 
     # already downloaded AND aria2 finished? aria2 keeps a "<file>.aria2" control
     # file until the download is fully done; checking it avoids hashing a file that
@@ -645,21 +669,43 @@ def _emit_impl(cli_execute_fn, mnemonic, msg):
 # discard persisted state and force a ~1.2 GB re-copy. ----
 
 
+def _aria_downloads(rpc):
+    """Yield (gid, file-basenames) for every download aria2 knows about —
+    active first (live download / seed), then queued, then finished. The ONE
+    iteration idiom shared by gid lookup, purge_others, and aria_remove (they
+    had drifted into three near-identical copies, one of which skipped the
+    queued view its own docstring claimed to check). Per-call failures are
+    swallowed so one unavailable view doesn't hide the others."""
+    for call, extra in (("aria2.tellActive", []),
+                        ("aria2.tellWaiting", [0, 100]),
+                        ("aria2.tellStopped", [0, 100])):
+        try:
+            downloads = rpc(call, extra + [["gid", "files"]])
+        except Exception:
+            continue
+        for d in downloads:
+            yield d.get("gid"), [os.path.basename(f.get("path", ""))
+                                 for f in d.get("files", [])]
+
+
+def _aria_drop(rpc, gid):
+    """Remove a download AND its stopped-result entry, both best-effort —
+    aria2 refuses a duplicate info_hash while either survives."""
+    for method in ("aria2.forceRemove", "aria2.removeDownloadResult"):
+        try:
+            rpc(method, [gid])
+        except Exception:
+            pass
+
+
 def _find_aria_gid(rpc, stage_path):
     """Locate the aria2 gid whose download owns the staged file at stage_path.
-
-    Basename match against each download's files paths — the same idiom
-    purge_others uses — checking tellActive first (live download / seed), then
-    tellStopped (finished). Returns the gid string or None when no download
-    matches. May raise on rpc failure (callers wrap)."""
+    Basename match against each download's files paths. Returns the gid
+    string or None when no download matches (including on rpc failure)."""
     fname = os.path.basename(stage_path)
-    for call, extra in (("aria2.tellActive", []),
-                        ("aria2.tellStopped", [0, 100])):
-        for d in rpc(call, extra + [["gid", "files"]]):
-            names = [os.path.basename(f.get("path", ""))
-                     for f in d.get("files", [])]
-            if fname in names:
-                return d["gid"]
+    for gid, names in _aria_downloads(rpc):
+        if fname in names:
+            return gid
     return None
 
 
@@ -793,7 +839,8 @@ def _copy_to_root_impl(fname, target_prefix, cli_configure_fn, cli_execute_fn,
 
 
 def _copy_to_root_direct_impl(fname, target_prefix, cli_execute_fn, emit_fn,
-                             reverify_fn=_agent_reverify_root, copy_source=None):
+                             reverify_fn=_agent_reverify_root, copy_source=None,
+                             delete_source_on_success=False):
     """Copy the staged image to the target-FS root by running `copy /verify`
     DIRECTLY in the agent's IOS vty — no EEM applet. This is the container /
     SSH-to-self (IE-3x00) path.
@@ -826,7 +873,124 @@ def _copy_to_root_direct_impl(fname, target_prefix, cli_execute_fn, emit_fn,
     except Exception as e:
         emit_fn("ROOTCOPY-FAIL", "%s direct copy /verify raised: %s" % (fname, e))
         return False
-    return reverify_fn(fname, target_prefix, cli_execute_fn, emit_fn)
+    ok = reverify_fn(fname, target_prefix, cli_execute_fn, emit_fn)
+    # In container mode the scp-pushed guest-share scratch is a transfer
+    # intermediary (the swarm seeds from the CAF-persistent stage_dir), so a
+    # verified placement deletes it — otherwise a duplicate image doubles
+    # steady-state target-FS usage. Kept on failure: the next tick re-runs
+    # copy /verify from it instead of re-pushing over the slow scp path.
+    if ok and delete_source_on_success:
+        try:
+            cli_execute_fn("delete /force %s" % src)
+        except Exception:
+            pass
+    return ok
+
+
+def _share_settings(cfg):
+    """(share_dir, share_ios_path) for the C9k SSD share mount. The app-hosting
+    run-opts set the environment (the normal path); conf keys are the fallback
+    so a hand-dropped config can steer it too. Empty strings = no share."""
+    return (os.environ.get("IRIS_SHARE_DIR") or cfg.get("share_dir") or "",
+            os.environ.get("IRIS_SHARE_IOS_PATH")
+            or cfg.get("share_ios_path") or "")
+
+
+# IRIS stages at the share ROOT, never in a subdirectory: on the C9300 SSD
+# share (ext4 + seclabel), a directory the container creates becomes
+# inaccessible to the container itself once IOS-side file ops touch it
+# (hardware-observed: even `ls` of the agent-created subdir returned EACCES
+# for a uid-0 container shell, while 100 MB writes to the CAF-created share
+# root ran at 1.5 GB/s). Isolation therefore comes from a NAME PREFIX: every
+# file IRIS writes or sweeps here starts with "iris-", and operator/CAF files
+# at the root are never touched. copy /verify reads the fixed staged name and
+# writes the REAL image name to the target FS, verifying the Cisco signature
+# from the bytes — the staged name is cosmetic. The swarm seeds from the
+# CAF-persistent stage_dir copy, never from the share.
+_SHARE_PREFIX = "iris-"
+_SHARE_PROBE = "iris-probe.txt"
+_SHARE_STAGE = "iris-staged.bin"
+
+
+def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
+                          copy_direct_fn, emit_fn, cli_execute_fn):
+    """Land the downloaded scratch in the bind-mounted app-hosting share
+    (C9k: usbflash1:iox_host_data_share, mounted into the container via
+    run-opts -v), then have IOS place it with an INTERNAL disk-to-disk
+    `copy /verify` — no scp, no control-plane punt path, no CoPP ceiling.
+
+    Everything IRIS writes lives under the share's iris/ subdirectory, so the
+    orphan sweep below and undeploy's share cleanup can never touch operator
+    files in the shared CAF directory. Each attempt starts by sweeping that
+    subdir — a tick killed mid-transfer (re-onboard's app teardown, CAF
+    restart, power loss) can strand a full-size image or .part there, and
+    nothing else would ever reclaim the space.
+
+    Before committing to the multi-GB copy, a tiny probe file is written and
+    `dir`-checked THROUGH IOS: the bind mount proves only the container side,
+    not that share_ios_path names this box's view of the same directory (a
+    stacked C9300 can enumerate the SSD differently; an operator override can
+    be wrong). An IOS-unreadable share must fall back to scp — without the
+    probe it burned a full SSD write plus a ~15-minute reverify timeout per
+    tick, wedging the device while the working fallback sat suppressed.
+
+    Returns None when the share cannot be used (unconfigured, not mounted,
+    probe failed, or the local copy failed) so the caller falls back to the
+    scp push. Otherwise returns copy_direct_fn's bool verdict: an IOS-side
+    `copy /verify` failure AFTER a good probe is FINAL — scp would push the
+    same bytes. The transient share copy is always removed (the swarm seeds
+    from the scratch under stage_dir, not from the share)."""
+    if not (share_dir and share_ios_path and os.path.isdir(share_dir)):
+        return None
+
+    def _sweep():
+        # ONLY files carrying OUR prefix, at the share root — operator and
+        # CAF files live at the same level and must never be touched
+        try:
+            for leftover in os.listdir(share_dir):
+                if leftover.startswith(_SHARE_PREFIX):
+                    try:
+                        os.remove(os.path.join(share_dir, leftover))
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+
+    _sweep()
+    probe = os.path.join(share_dir, _SHARE_PROBE)
+    try:
+        with open(probe, "w") as stream:
+            stream.write("iris")
+        listing = cli_execute_fn("dir %s/%s" % (share_ios_path, _SHARE_PROBE))
+        if _SHARE_PROBE not in (listing or ""):
+            raise OSError("IOS cannot read %s" % share_ios_path)
+    except Exception as e:
+        emit_fn("SHARE-FALLBACK",
+                "%s share probe failed (%s); falling back to scp" % (fname, e))
+        _sweep()
+        return None
+    local = os.path.join(stage_dir, fname)
+    staged = os.path.join(share_dir, _SHARE_STAGE)
+    part = os.path.join(share_dir, _SHARE_STAGE + ".part")
+    try:
+        # Chunked read/write (shutil.copyfile's sendfile fast path is
+        # unreliable across this bind mount).
+        with open(local, "rb") as src, open(part, "wb") as dst:
+            shutil.copyfileobj(src, dst, length=1 << 20)
+        os.replace(part, staged)
+    except OSError as e:
+        emit_fn("SHARE-FALLBACK",
+                "%s share copy failed (%s); falling back to scp" % (fname, e))
+        _sweep()
+        return None
+    try:
+        # copy /verify reads the fixed staged name and writes the REAL image
+        # name to the target FS (the caller's dst); the Cisco signature is
+        # verified from the bytes, so the source name is cosmetic.
+        return copy_direct_fn(
+            lambda f, target_prefix: "%s/%s" % (share_ios_path, _SHARE_STAGE))
+    finally:
+        _sweep()
 
 
 # ---- on-box wiring (not exercised by unit tests) ----
@@ -882,20 +1046,39 @@ def build_deps(cfg, conf_path):  # pragma: no cover
         # behavioural tests can inject all callables and prove the success log
         # is gated by _agent_reverify_root's pass.
         if _mode == "container" and _transport is not None:
-            # IE-3x00 / container: push the scratch onto the IOS-visible SD,
-            # then `copy /verify` DIRECTLY over the SSH-to-self vty. The EEM
-            # applet offload is only needed for the C9300 Guest Shell cli module
-            # (can't drive interactive copy); a real vty runs copy fine, and the
-            # EEM `cli command "copy"` action is a no-op on this platform — so
-            # the direct path is both correct and necessary here.
+            # C9k container: the SSD share (usbflash1:iox_host_data_share) is
+            # bind-mounted at IRIS_SHARE_DIR, so the scratch lands there at
+            # disk speed and IOS places it with an internal disk-to-disk
+            # `copy /verify` — no scp, no CoPP-policed punt traffic. None =
+            # share unusable -> fall through to the scp push below.
+            share_dir, share_ios_path = _share_settings(cfg)
+            if share_dir:
+                shared = _stage_via_share_impl(
+                    fname, cfg["stage_dir"], share_dir, share_ios_path,
+                    lambda copy_source: _copy_to_root_direct_impl(
+                        fname, target_prefix, cli_execute, emit,
+                        copy_source=copy_source),
+                    emit, cli_execute)
+                if shared is not None:
+                    return shared
+            # IE-3x00 / container fallback: push the scratch onto the
+            # IOS-visible SD, then `copy /verify` DIRECTLY over the SSH-to-self
+            # vty. The EEM applet offload is only needed for the C9300 Guest
+            # Shell cli module (can't drive interactive copy); a real vty runs
+            # copy fine, and the EEM `cli command "copy"` action is a no-op on
+            # this platform — so the direct path is both correct and necessary.
             try:
                 _push_scratch(fname, target_prefix)
             except Exception as e:
                 emit("ROOTCOPY-FAIL",
                      "%s scp push to %s failed: %s" % (fname, target_prefix, e))
                 return False
+            # NOTE: like the Guest Shell path, placement transiently needs
+            # ~2x the image on the target FS (scratch + root copy); the
+            # verified-delete below reclaims the scratch afterwards.
             return _copy_to_root_direct_impl(fname, target_prefix,
-                                             cli_execute, emit)
+                                             cli_execute, emit,
+                                             delete_source_on_success=True)
         return _copy_to_root_impl(fname, target_prefix,
                                   cli_configure, cli_execute, emit)
 
@@ -968,22 +1151,9 @@ def build_deps(cfg, conf_path):  # pragma: no cover
 
     def purge_others(keep_filename, keep_id):
         # 1. drop every download except the current image from aria2c
-        downloads = []
-        for call, extra in (("aria2.tellActive", []),
-                            ("aria2.tellWaiting", [0, 100]),
-                            ("aria2.tellStopped", [0, 100])):
-            try:
-                downloads += _rpc(call, extra + [["gid", "files"]])
-            except Exception:
-                pass
-        for d in downloads:
-            names = [os.path.basename(f.get("path", "")) for f in d.get("files", [])]
+        for gid, names in _aria_downloads(_rpc):
             if keep_filename not in names:
-                for m in ("aria2.forceRemove", "aria2.removeDownloadResult"):
-                    try:
-                        _rpc(m, [d["gid"]])
-                    except Exception:
-                        pass
+                _aria_drop(_rpc, gid)
         # 2. delete stale staged image artifacts (never the agent's own files)
         import glob
         keep = {keep_filename, keep_filename + ".aria2", keep_id + ".torrent"}
@@ -1022,22 +1192,9 @@ def build_deps(cfg, conf_path):  # pragma: no cover
         # completed/seeding entry (e.g. after the staged file was deleted)
         # silently swallows the re-add. Mirrors purge_others' removal, but
         # targets the kept image instead of the others.
-        for call, extra in (("aria2.tellActive", []),
-                            ("aria2.tellWaiting", [0, 100]),
-                            ("aria2.tellStopped", [0, 100])):
-            try:
-                for d in _rpc(call, extra + [["gid", "files"]]):
-                    names = [os.path.basename(f.get("path", ""))
-                             for f in d.get("files", [])]
-                    if filename in names:
-                        for m in ("aria2.forceRemove",
-                                  "aria2.removeDownloadResult"):
-                            try:
-                                _rpc(m, [d["gid"]])
-                            except Exception:
-                                pass
-            except Exception:
-                pass
+        for gid, names in _aria_downloads(_rpc):
+            if filename in names:
+                _aria_drop(_rpc, gid)
 
     def _show(cmd):
         try:

@@ -36,7 +36,7 @@ priv() { if [ "$SKIP_PRIVILEGED" -eq 1 ]; then echo "  skip-priv: $*"; else run 
 
 uninstall() {
   log "uninstalling (state dir $IRIS_STATE preserved)"
-  priv "systemctl disable --now iris-tracker iris-catalog iris-seeder 2>/dev/null || true"
+  priv "systemctl disable --now iris-tracker iris-catalog iris-seeder iris-artifacts iris-gui 2>/dev/null || true"
   run "rm -f '$SYSTEMD_DIR'/iris-*.service"
   run "rm -f '$LOGROTATE_DIR/iris'"
   run "rm -rf '$IRIS_ROOT' '$IRIS_CONFIG' '$IRIS_LOG'"
@@ -94,7 +94,7 @@ install() {
 
   # 9. enable + (re)start services (privileged)
   priv "systemctl daemon-reload"
-  priv "systemctl enable --now iris-tracker iris-catalog iris-seeder"
+  priv "systemctl enable --now iris-tracker iris-catalog iris-seeder iris-artifacts iris-gui"
 
   log "done. tracker :6969  catalog :8443 (https)  seeder rpc :6800"
   log "age key: $IRIS_AGE_KEY_FILE   (operator-held, OFF the config volume — back up + protect separately)"

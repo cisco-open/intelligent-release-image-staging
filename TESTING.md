@@ -10,7 +10,7 @@ both before submitting a change:
 
 ```
 python3 -m pytest server/tests/ device/agent/tests/ device/iox/tests/ device/test_verify_image.py -q
-bats device/test_guestshell_start.bats device/tests/ device/iox/tests/ server/tests/*.bats
+bats device/test_guestshell_start.bats device/test_bootstrap.bats device/tests/ device/iox/tests/ server/tests/*.bats
 ```
 
 Add tests for any new functionality or bug fix, and ensure all tests pass before

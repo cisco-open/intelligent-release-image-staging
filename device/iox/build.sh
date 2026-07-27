@@ -102,6 +102,7 @@ mkdir -p "$CTX/agent" "$CTX/agent_bin" "$OUT"
 echo ">> staging agent python (incl. cli_ssh.py, verify_image.py)"
 cp "$REPO"/device/agent/*.py "$CTX/agent/"
 cp "$REPO"/device/verify_image.py "$CTX/agent/verify_image.py"   # lives in device/, agent imports it
+cp "$REPO/VERSION" "$CTX/agent/VERSION"   # telemetry reports the packaged release
 
 echo ">> staging $IOX_CPUARCH aria2c"
 if [ -n "${ARIA2C_BIN:-}" ]; then

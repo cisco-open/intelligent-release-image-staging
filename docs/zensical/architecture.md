@@ -10,7 +10,7 @@ IRIS uses a private BitTorrent swarm to distribute large Cisco IOS-XE images to 
 
 ## The Simple Model
 
-With a traditional file-server rollout, every device downloads the entire image from one server. That works for a few devices, but large images and large fleets can overload the server or its uplink.
+With a traditional file-server rollout, every device downloads the entire image from one server. That works for a few devices, but large images and large networks can overload the server or its uplink.
 
 With IRIS, the server seeds the image and devices exchange image pieces with each other. As more devices receive pieces, they can help other devices complete the same image.
 
@@ -44,7 +44,7 @@ flowchart TB
 
 | Merit | What it means |
 | --- | --- |
-| Faster fleet distribution | The server does not need to send every byte of a multi-gigabyte image to every device. Devices that already have pieces can help the rest of the fleet. |
+| Faster network distribution | The server does not need to send every byte of a multi-gigabyte image to every device. Devices that already have pieces can help the rest of the network. |
 | Higher transfer tolerance | Downloads are piece-based and resumable. If a transfer is interrupted or one path is slow, a device can continue by fetching missing pieces from available peers and the seeder. |
 | Controlled rollout intent | The catalog tells each device which image is approved for staging. Devices that are not assigned do not stage that image. |
 | Device-side safety | Each device verifies the downloaded file and the final staged copy. IRIS stops after staging; install, activation, boot changes, and reloads remain outside IRIS. |

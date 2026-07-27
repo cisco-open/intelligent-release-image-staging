@@ -26,6 +26,24 @@ registry is in memory, catalog state is file-backed, and the seeder RPC is local
 to the container. More replicas would split coordination state rather than add
 capacity.
 
+Deployment receipts (the applied-lifecycle state that drives undeploy) are
+file-backed under `IRIS_STATE` (`/data/state`) on the PVC, and Console artifact
+staging uses `/data/artifacts` on the same PVC. Because there is a single
+replica, a pod restart marks any in-flight (`planned`/`applying`) receipt
+`unknown` and requires reconciliation instead of blindly retrying a device
+operation. See
+[Management Type and VLAN Ownership](network-attachment.md).
+
+IOx onboarding (routed or inband, on IE-3x00 or C9300) needs the IOx app
+packages staged on the PVC: copy `iris-arm64.tar` and/or `iris-amd64.tar` into
+`/data/artifacts`. Kubernetes does not run the Compose host-side package
+builder, so build them elsewhere (`tools/provision-iox-packages.sh`) and copy
+them in with `kubectl cp`. Guest Shell onboarding needs no staged package.
+
+The published console port shown on the Settings page follows `IRIS_CONSOLE_URL`
+when set (otherwise it defaults to the Service's `8080`); set it if you front
+the console on a different external port.
+
 ## External address
 
 Reserve a stable, device-reachable IPv4 address before bootstrapping. Put that

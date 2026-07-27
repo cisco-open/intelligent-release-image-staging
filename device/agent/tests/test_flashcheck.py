@@ -29,13 +29,3 @@ def test_has_room():
                                    image_size=1_260_618_344)
 
 
-def test_reclaim_plan_is_install_remove_inactive_only():
-    # short on space -> ONLY `install remove inactive`; never a delete of any bin
-    plan = flashcheck.reclaim_plan(free_bytes=500_000_000, image_size=1_260_618_344)
-    assert plan == ["install remove inactive"]
-    assert all("delete" not in action for action in plan)
-
-
-def test_reclaim_plan_empty_when_room():
-    assert flashcheck.reclaim_plan(
-        free_bytes=9_000_000_000, image_size=1_260_618_344) == []

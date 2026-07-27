@@ -29,16 +29,48 @@
 #   DEVICE_SSH_USER=dnac  TARGET_FS=sdflash:  IRIS_TELEMETRY=on
 set -euo pipefail
 
-: "${DEVICE_IP:?set DEVICE_IP}"; : "${VLAN:?set VLAN}"
-: "${SVI_IP:?set SVI_IP}"; : "${SVI_MASK:?set SVI_MASK}"; : "${GUEST_IP:?set GUEST_IP}"
+DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
+
+: "${DEVICE_IP:?set DEVICE_IP}"
 : "${CATALOG_TOKEN:?set CATALOG_TOKEN}"; : "${DEVICE_ID:?set DEVICE_ID}"
 : "${STAGE_HOST:?set STAGE_HOST}"; : "${DEVICE_SSH_PASS:?set DEVICE_SSH_PASS}"
-: "${IRIS_CRT_FILE:?set IRIS_CRT_FILE — local path to the bare server cert crt.pem}"
-[ -r "$IRIS_CRT_FILE" ] || { echo "ERROR: IRIS_CRT_FILE=$IRIS_CRT_FILE not readable" >&2; exit 1; }
+IRIS_CRT_FILE="${IRIS_CRT_FILE:-}"
+if [ "$DRY" -eq 0 ]; then
+  : "${IRIS_CRT_FILE:?set IRIS_CRT_FILE — local path to the bare server cert crt.pem}"
+  [ -r "$IRIS_CRT_FILE" ] || { echo "ERROR: IRIS_CRT_FILE=$IRIS_CRT_FILE not readable" >&2; exit 1; }
+fi
+
+# Attachment model. routed: IRIS creates a dedicated VLAN/SVI and the app SSHes
+# to that SVI. inband: the app attaches to an EXISTING operator-owned VLAN that
+# IRIS never creates/changes/removes, and SSHes to the existing IOS management
+# SVI (IOS_SSH_HOST) for its copy /verify. The AppGig trunk is the one inband
+# touch: IRIS ADDs the inband VLAN to its allowed list (additive only, never
+# replaced, never removed on uninstall).
+NETWORK_ATTACHMENT="${NETWORK_ATTACHMENT:-routed}"
+case "$NETWORK_ATTACHMENT" in
+  routed)
+    : "${VLAN:?set VLAN}"; : "${SVI_IP:?set SVI_IP}"; : "${SVI_MASK:?set SVI_MASK}"; : "${GUEST_IP:?set GUEST_IP}"
+    GW_IP="${GW_IP:-$SVI_IP}"; IOS_SSH_HOST="${IOS_SSH_HOST:-$SVI_IP}" ;;
+  inband)
+    : "${INBAND_VLAN:?set INBAND_VLAN}"; : "${APP_IP:?set APP_IP}"; : "${APP_MASK:?set APP_MASK}"; : "${APP_GATEWAY:?set APP_GATEWAY}"
+    : "${IOS_SSH_HOST:?set IOS_SSH_HOST — the existing IOS management SVI the app SSHes to}"
+    VLAN="$INBAND_VLAN"; GUEST_IP="$APP_IP"; SVI_MASK="$APP_MASK"; GW_IP="$APP_GATEWAY" ;;
+  *) echo "ERROR: NETWORK_ATTACHMENT must be routed or inband" >&2; exit 1 ;;
+esac
 
 CATALOG_URL="${CATALOG_URL:-https://$STAGE_HOST:8443}"
 APP_INTF="${APP_INTF:-AppGigabitEthernet1/1}"
-GW_IP="${GW_IP:-$SVI_IP}"
+# C9k share-mount transfer (Route B): bind-mount the app-hosting SSD share into
+# the container so the agent lands its scratch at disk speed and IOS places it
+# with an internal disk-to-disk copy — no scp, no CoPP-policed punt traffic.
+# Both or neither: SHARE_HOST_PATH is the host-side dir (/vol/usb1/...),
+# SHARE_IOS_PATH the same dir as IOS sees it (usbflash1:iox_host_data_share).
+SHARE_HOST_PATH="${SHARE_HOST_PATH:-}"; SHARE_IOS_PATH="${SHARE_IOS_PATH:-}"
+if [ -n "$SHARE_HOST_PATH$SHARE_IOS_PATH" ] && \
+   { [ -z "$SHARE_HOST_PATH" ] || [ -z "$SHARE_IOS_PATH" ]; }; then
+  echo "ERROR: SHARE_HOST_PATH and SHARE_IOS_PATH must be set together" >&2
+  exit 2
+fi
 CPU="${CPU:-400}"; MEM="${MEM:-768}"; DISK="${DISK:-2048}"
 PKG="${PKG:-iris-arm64.tar}"; PKG_FS="${PKG_FS:-flash:}"
 DEVICE_SSH_USER="${DEVICE_SSH_USER:-dnac}"
@@ -59,12 +91,39 @@ trustpoint_block() {
   echo "crypto pki trustpoint IRIS"
   echo " enrollment terminal"; echo " revocation-check none"; echo "exit"
   echo "crypto pki authenticate IRIS"
-  cat "$IRIS_CRT_FILE"
+  if [ -n "$IRIS_CRT_FILE" ] && [ -r "$IRIS_CRT_FILE" ]; then
+    cat "$IRIS_CRT_FILE"
+  else
+    echo "! <contents of \$IRIS_CRT_FILE (the bare crt.pem) inserted here at apply time>"
+  fi
   echo "quit"; echo "yes"
   echo "ip http client secure-trustpoint IRIS"
 }
 
 ios_net() {           # networking + IOx enable (idempotent)
+if [ "$NETWORK_ATTACHMENT" = "inband" ]; then
+# Inband: attach to the EXISTING operator-owned VLAN. IRIS creates NO vlan, SVI,
+# route, or VRF. The ONE allowed touch is the AppGig trunk, and only ADDITIVELY —
+# `allowed vlan add` never replaces the allowed list (the bare form would), and
+# uninstall never removes it (operator-owned VLAN; the trunk may be shared).
+# Without it the app's traffic has no L2 path off the box.
+cat <<EOF
+iox
+!
+interface $APP_INTF
+ switchport mode trunk
+ switchport trunk allowed vlan add $VLAN
+!
+file prompt quiet
+!
+! SCP server: the scp fallback hand-off (primary on IE-3x00; C9k uses the
+! bind-mounted SSD share) pushes the scratch here, then copy /verify places it.
+ip scp server enable
+!
+end
+EOF
+return
+fi
 cat <<EOF
 iox
 !
@@ -81,8 +140,9 @@ interface Vlan$VLAN
 !
 file prompt quiet
 !
-! SCP server: the IOx-app agent scp-pushes its downloaded scratch to sdflash:
-! (it can't bind-mount sdflash: nor receive inbound), then copy /verify places it.
+! SCP server: the scp hand-off (primary on IE-3x00, where IOx cannot
+! bind-mount sdflash:; the C9k default is the SSD share) pushes the scratch to
+! guest-share, then copy /verify places it.
 ip scp server enable
 !
 end
@@ -106,12 +166,19 @@ app-hosting appid $APPID
   run-opts 2 "-e IRIS_DEVICE_SSH_PASS=$DEVICE_SSH_PASS"
   run-opts 3 "-e IRIS_CATALOG_TOKEN=$CATALOG_TOKEN"
   run-opts 4 "-e IRIS_CATALOG_URL=$CATALOG_URL"
-  run-opts 5 "-e IRIS_DEVICE_SSH_HOST=$SVI_IP"
+  run-opts 5 "-e IRIS_DEVICE_SSH_HOST=$IOS_SSH_HOST"
   run-opts 6 "-e IRIS_DEVICE_SSH_USER=$DEVICE_SSH_USER"
   run-opts 7 "-e IRIS_TARGET_FS=$TARGET_FS"
   run-opts 8 "-e IRIS_TELEMETRY=$IRIS_TELEMETRY"
-end
 EOF
+if [ -n "$SHARE_HOST_PATH" ]; then
+cat <<EOF
+  run-opts 9 "-e IRIS_SHARE_DIR=/mnt/share"
+  run-opts 10 "-e IRIS_SHARE_IOS_PATH=$SHARE_IOS_PATH"
+  run-opts 11 "-v $SHARE_HOST_PATH:/mnt/share"
+EOF
+fi
+echo "end"
 }
 
 iox_ready() {
@@ -157,14 +224,48 @@ clear_partial_app_config() {
     | RUN >/dev/null 2>&1 || true
 }
 
-echo "[1/8] teardown any existing '$APPID' app (idempotent re-install)"
+if [ "$DRY" -eq 1 ]; then
+  echo "===== IOS NETWORKING ($NETWORK_ATTACHMENT; apply via lab/device-run.sh $DEVICE_IP) ====="
+  ios_net
+  echo "===== PKI TRUSTPOINT (pasted over SSH FIRST, before any copy) ====="
+  trustpoint_block
+  echo "===== APP-HOSTING appid $APPID (app SSHes to IOS at $IOS_SSH_HOST for copy /verify) ====="
+  appid_block
+  if [ -n "$SHARE_IOS_PATH" ]; then
+    echo "===== SHARE (created on IOS before activation so the bind-mount target exists) ====="
+    echo "mkdir $SHARE_IOS_PATH"
+  fi
+  echo "===== INSTALL COPY (over verified https) ====="
+  printf 'copy https://%s:8000/%s %s%s\n' "$STAGE_HOST" "$PKG" "$PKG_FS" "$PKG"
+  echo "===== app-hosting install -> activate -> start appid $APPID, then persist ====="
+  if [ "$NETWORK_ATTACHMENT" = "inband" ]; then
+    echo "===== LEFT UNTOUCHED (inband): existing VLAN/SVI, routes, VRF (AppGig allowed list only ever ADDs) ====="
+  fi
+  exit 0
+fi
+
+echo "[1/9] teardown any existing '$APPID' app (idempotent re-install)"
 printf 'app-hosting stop appid %s\napp-hosting deactivate appid %s\napp-hosting uninstall appid %s\n' \
   "$APPID" "$APPID" "$APPID" | RUN >/dev/null 2>&1 || true
 sleep 6
 printf 'configure terminal\nno app-hosting appid %s\nend\n' "$APPID" | RUN >/dev/null 2>&1 || true
 
-echo "[2/8] apply IOx networking (IOx enable, VLAN $VLAN, $APP_INTF, Vlan$VLAN SVI)"
+echo "[2/9] apply IOx networking ($NETWORK_ATTACHMENT: IOx enable$([ "$NETWORK_ATTACHMENT" = inband ] && echo ", existing VLAN preserved" || echo ", VLAN $VLAN, $APP_INTF, Vlan$VLAN SVI"))"
 { echo "configure terminal"; ios_net; } | RUN >/dev/null
+
+# The share dir must exist BEFORE activation binds it into the container.
+# Idempotent ("already exists" is fine; the blank line answers the "Create
+# directory" prompt on boxes without `file prompt quiet` yet), but a real
+# failure (missing/unwritable SSD) is WARNED, not silent — the agent's share
+# probe will fall back to scp at runtime, and this line says why.
+if [ -n "$SHARE_IOS_PATH" ]; then
+  mk_out="$(printf 'mkdir %s\n\n' "$SHARE_IOS_PATH" | RUN 2>/dev/null || true)"
+  case "$mk_out" in
+    *%Error*|*Invalid*) echo "  WARN: mkdir $SHARE_IOS_PATH failed on the device:" \
+      "$(printf '%s' "$mk_out" | grep -Eo '%Error[^\r]*|Invalid[^\r]*' | head -1)" \
+      "— the agent will fall back to scp for image transfer" ;;
+  esac
+fi
 
 echo "    waiting for IOx app-hosting services after enable"
 wait_iox_ready 180 || {
@@ -173,13 +274,26 @@ wait_iox_ready 180 || {
   exit 1
 }
 
-echo "[3/8] disable app-hosting signature verification (EXEC)"
-printf 'app-hosting verification disable\n' | RUN 2>/dev/null | grep -i 'signature' || true
+echo "[3/9] disable app-hosting signature verification (EXEC; required for the unsigned agent app on SSD-backed IOx)"
+# Even after `show iox` reports CAF/Dockerd Running, the app-hosting EXEC layer
+# can still answer "The process for the command is not responding or is
+# otherwise unavailable" for a few more seconds. Retry until it reports success
+# so a not-yet-ready box doesn't leave verification enabled and fail the install.
+vok=0
+for _ in $(seq 1 24); do
+  vout="$(printf 'app-hosting verification disable\n' | RUN 2>/dev/null || true)"
+  case "$vout" in
+    *"disabled successfully"*|*"already disabled"*|*"verification is disabled"*)
+      vok=1; echo "  app signature verification disabled"; break ;;
+  esac
+  sleep 5
+done
+[ "$vok" -eq 1 ] || { echo "  ERROR: could not disable app-hosting signature verification (app-hosting not responding)" >&2; exit 1; }
 
-echo "[4/8] push PKI trustpoint over SSH (so 'copy https:' validates the server cert)"
+echo "[4/9] push PKI trustpoint over SSH (so 'copy https:' validates the server cert)"
 { echo "configure terminal"; trustpoint_block; echo "end"; } | RUN >/dev/null
 
-echo "[5/8] preflight: is https://$STAGE_HOST:8000/$PKG reachable? (HEAD, advisory)"
+echo "[5/9] preflight: is https://$STAGE_HOST:8000/$PKG reachable? (HEAD, advisory)"
 # HEAD only (-I) so we don't pull the whole package; -k because the DEVICE (not us)
 # validates the cert against the trustpoint we just pasted. Advisory: a flaky
 # operator->server link must not block a deploy the DEVICE can complete — the
@@ -190,7 +304,7 @@ else
   echo "    WARN: preflight inconclusive from here; relying on the device copy"
 fi
 
-echo "[6/8] copy $PKG -> ${PKG_FS} over verified https (retry x3)"
+echo "[6/9] copy $PKG -> ${PKG_FS} over verified https (retry x3)"
 printf 'delete /force %s%s\n' "$PKG_FS" "$PKG" | RUN >/dev/null 2>&1 || true
 ok=0
 for a in 1 2 3; do
@@ -200,7 +314,7 @@ for a in 1 2 3; do
 done
 [ "$ok" -eq 1 ] || { echo "  ERROR: copy of $PKG failed after 3 attempts" >&2; exit 1; }
 
-echo "[7/8] configure app-hosting appid $APPID + install/activate/start"
+echo "[7/9] configure app-hosting appid $APPID + install/activate/start"
 { echo "configure terminal"; appid_block; } | RUN >/dev/null
 install_out="$(printf 'app-hosting install appid %s package %s%s\n' "$APPID" "$PKG_FS" "$PKG" | RUN 2>&1 || true)"
 # RUN redacts device secrets. Print only the IOS lifecycle response, not the

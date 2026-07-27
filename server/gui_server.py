@@ -9,6 +9,7 @@ and double-submit CSRF on state-changing requests.
 Mirrors catalog.py's ThreadingHTTPServer + BaseHTTPRequestHandler + TLS pattern.
 Stdlib only."""
 import http.cookies
+import hashlib
 import hmac
 import json
 import os
@@ -21,6 +22,7 @@ from urllib.parse import unquote, parse_qs
 
 import audit
 import gui_app
+import gui_onboard
 
 WEBROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webroot")
 COOKIE = "iris_sid"
@@ -99,7 +101,8 @@ def _read_version():
 
 
 def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=None,
-                onboard=None, swarm_fetch=None, certfile=None, audit_path=None):
+                 onboard=None, swarm_fetch=None, certfile=None, audit_path=None,
+                 receipts=None):
     class Handler(BaseHTTPRequestHandler):
         timeout = 60  # socket inactivity timeout (s): a stalled upload frees its thread
 
@@ -116,6 +119,55 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                    src_ip=src_ip, result=result)
             except Exception:
                 pass
+
+        def _plan(self, device_id, device):
+            """Resolve immutable, non-secret installer input before token minting."""
+            attachment = device.get("management_type",
+                                    device.get("network_attachment", "legacy_routed"))
+            if attachment == "legacy_routed":
+                attachment = "routed"
+            if attachment not in ("routed", "inband"):
+                raise ValueError("unknown network attachment")
+            platform = gui_onboard.resolve_platform(device)
+            network = {
+                "attachment": attachment,
+                "iris_vlan": device.get("iris_vlan", device.get("vlan", "")),
+                "svi_ip": device.get("svi_ip", ""),
+                "svi_mask": device.get("svi_mask", ""),
+                "app_ip": device.get("app_ip", device.get("guest_ip", "")),
+                "app_mask": device.get("app_mask", device.get("svi_mask", "")),
+                "app_gateway": device.get("app_gateway", device.get("svi_ip", "")),
+                "inband_vlan": device.get("inband_vlan", ""),
+                # The inband IOx app reaches IOS at the switch's management IP
+                # (which is on the same existing management VLAN); ios_ssh_host is
+                # an optional advanced override for asymmetric topologies.
+                "ios_ssh_host": (device.get("ios_ssh_host")
+                                 or (device.get("device_ip", "") if attachment == "inband" else "")),
+                "model": device.get("model", ""),
+                "platform": platform,
+                "renderer": "v1",
+            }
+            plan = {"device_id": device_id, "inventory_revision": fleet.revision(),
+                    "resolved": network,
+                    "ownership": ("preserves existing VLAN, SVI, gateway, routes, and VRF"
+                                  if attachment == "inband" else
+                                  "creates only a clean IRIS-owned VLAN and SVI")}
+            plan["plan_hash"] = hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()
+            return plan
+
+        @staticmethod
+        def _owned_resources(resolved):
+            """Resources IRIS may later remove, per attachment. Inband owns only
+            the app; it never claims the operator's VLAN/SVI."""
+            resources = [{"kind": "guestshell", "ownership": "iris-created"}]
+            if resolved.get("attachment") == "routed":
+                resources = [
+                    {"kind": "vlan", "ownership": "iris-created",
+                     "id": resolved.get("iris_vlan", "")},
+                    {"kind": "svi", "ownership": "iris-created",
+                     "ip": resolved.get("svi_ip", "")},
+                ] + resources
+            return resources
 
         def _send(self, status, ctype, body, extra_headers=None):
             if isinstance(body, str):
@@ -335,7 +387,19 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 # "now" rides along so last_seen freshness is computed
                 # server-clock-to-server-clock in the UI (skewed lab VMs)
                 self._json(200, {"devices": self._device_view(),
-                                 "now": int(time.time())}); return
+                                  "now": int(time.time())}); return
+            if path.startswith("/api/devices/") and path.endswith("/plan"):
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                did = unquote(path[len("/api/devices/"):-len("/plan")])
+                device = fleet.get_device(did) if fleet else None
+                if device is None:
+                    self._json(404, {"error": "no such device"}); return
+                try:
+                    plan = self._plan(did, device)
+                except ValueError as exc:
+                    self._json(409, {"error": str(exc)}); return
+                self._json(200, {"plan": plan}); return
             if path == "/api/devices/export-csv":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
@@ -432,6 +496,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 row["stage_error"] = h.get("stage_error")
                 row["current_image_id"] = h.get("current_image_id")
                 row["heartbeat_model"] = h.get("model")
+                # the "copying to <fs>" badge needs the heartbeat's target FS
+                row["target_fs"] = h.get("target_fs")
                 j = jobs.get(did)
                 if j:
                     row["onboard_action"] = j["action"]
@@ -488,12 +554,20 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
         def _settings_info(self, admin_username):
             host_ip = os.environ.get("IRIS_HOST_IP", "")
             obs = bool(os.environ.get("IRIS_OBSERVABILITY"))
+            # The console's published host port is overridable (IRIS_GUI_PUBLISH);
+            # the container always listens on 8080 internally. Prefer that env,
+            # else derive it from the operator-set IRIS_CONSOLE_URL, else 8080.
+            raw = os.environ.get("IRIS_GUI_PUBLISH", "").strip()
+            if not raw:
+                tail = os.environ.get("IRIS_CONSOLE_URL", "").rstrip("/").rsplit(":", 1)[-1]
+                raw = tail if tail.isdigit() else ""
+            console_port = int(raw) if raw.isdigit() else 8080
             return {
                 "admin_username": admin_username,
                 "version": _read_version(),
                 "host_ip": host_ip,
                 "ports": {"tracker": 6969, "catalog": 8443, "artifacts": 8000,
-                          "swarm": 9101, "console": 8080},
+                          "swarm": 9101, "console": console_port},
                 "observability": {
                     "enabled": obs,
                     "metrics_url": ("http://%s:9101/metrics" % host_ip
@@ -724,7 +798,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if prev is None:
                     action = "create"
                     detail = "ip %s, vlan %s, model %s" % (
-                        saved.get("device_ip"), saved.get("vlan") or "-",
+                        saved.get("device_ip"),
+                        saved.get("iris_vlan") or saved.get("inband_vlan")
+                        or saved.get("vlan") or "-",
                         saved.get("model") or "-")
                 else:
                     action = "update"
@@ -793,7 +869,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if pid and (creds is None or creds.get_secrets(pid) is None):
                     self._json(400, {"error": "no such credential profile"}); return
                 old = dev.get("credential_profile_id") or ""
-                fleet.upsert({"device_id": did, "credential_profile_id": pid})
+                try:
+                    fleet.upsert({"device_id": did, "credential_profile_id": pid})
+                except (ValueError, KeyError) as exc:
+                    self._json(400, {"error": str(exc)}); return
                 self._audit("device_credential_change", "device", action="credential",
                            target=did,
                            detail="profile %s -> %s" % (old or "(none)",
@@ -816,7 +895,11 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                      "guestshell, or iox"}); return
                 old = dev.get("platform") or ""
                 # Empty value CLEARS the override (falls back to Auto/model).
-                fleet.upsert({"device_id": did, "platform": plat})
+                try:
+                    fleet.upsert({"device_id": did, "platform": plat})
+                except (ValueError, KeyError) as exc:
+                    # e.g. platform=iox on an inband device (unsupported)
+                    self._json(400, {"error": str(exc)}); return
                 self._audit("device_platform_change", "device", action="platform",
                            target=did,
                            detail="platform %s -> %s" % (old or "(auto)",
@@ -839,6 +922,44 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 self._json(200, {"ok": True,
                                  "expires_at": int(now) + catalog.PULL_TTL})
                 return
+            if path.startswith("/api/devices/") and path.endswith("/adopt"):
+                # Adopt an already-deployed device that predates receipts, so it
+                # can be undeployed. Creates an ACTIVE receipt from the current
+                # validated inventory; it is an explicit, acknowledged operator
+                # action (audited), never an implicit fallback.
+                did = unquote(path[len("/api/devices/"):-len("/adopt")])
+                if not did.strip():
+                    self._json(400, {"error": "bad device id"}); return
+                if receipts is None:
+                    self._json(503, {"error": "receipt store unavailable"}); return
+                device = fleet.get_device(did) if fleet else None
+                if device is None:
+                    self._json(404, {"error": "no such device"}); return
+                body = self._json_body(raw)
+                if body is None:
+                    return
+                if body.get("acknowledge_adopt") is not True:
+                    self._json(400, {"error": "adoption acknowledgement is required"}); return
+                try:
+                    if receipts.active_for_device(did) is not None:
+                        self._json(409, {"error": "device already has an active receipt"}); return
+                except ValueError as exc:
+                    # duplicate actives (legacy store not yet healed) — surface
+                    # the reason like the undeploy branch, not a dropped request
+                    self._json(409, {"error": str(exc)}); return
+                try:
+                    plan = self._plan(did, device)
+                except ValueError as exc:
+                    self._json(409, {"error": str(exc)}); return
+                receipt = receipts.adopt({"controller_id": "iris", "device_id": did,
+                    "inventory_revision": fleet.revision(), "plan_hash": plan["plan_hash"],
+                    "resolved": plan["resolved"],
+                    "preflight": {"status": "adopted"},
+                    "resources": self._owned_resources(plan["resolved"])})
+                self._audit("device_adopt", "onboard", action="adopt", target=did,
+                           actor=actor, detail="receipt %s (%s)"
+                           % (receipt["receipt_id"], plan["resolved"]["attachment"]))
+                self._json(200, {"receipt_id": receipt["receipt_id"]}); return
             if path.startswith("/api/devices/") and (
                     path.endswith("/onboard") or path.endswith("/undeploy")):
                 if onboard is None:
@@ -851,9 +972,57 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 # parked worker thread — junk ids must not accumulate either.
                 if fleet is not None and fleet.get_device(did) is None:
                     self._json(404, {"error": "no such device"}); return
+                resolved = None
+                receipt_ref = {}
+                prepare = None
+                if act == "onboard":
+                    # With a receipt store (always in production via main()), an
+                    # onboard resolves an immutable plan and records a receipt.
+                    # Without one (embedded/degraded), it stays one-click legacy.
+                    if receipts is not None:
+                        device = fleet.get_device(did)
+                        try:
+                            plan = self._plan(did, device)
+                        except ValueError as exc:
+                            self._json(409, {"error": str(exc)}); return
+                        resolved = plan["resolved"]
+
+                        def prepare():
+                            # Runs under the onboard job lock only when a genuinely
+                            # new job is registered, so a concurrent double-onboard
+                            # cannot leave an orphan planned receipt.
+                            rid = receipts.create({"controller_id": "iris",
+                                "device_id": did, "inventory_revision": fleet.revision(),
+                                "plan_hash": plan["plan_hash"], "resolved": plan["resolved"],
+                                "preflight": {"status": "pending"},
+                                "resources": self._owned_resources(plan["resolved"])})["receipt_id"]
+                            receipt_ref["id"] = rid
+                            return rid
+                else:
+                    # Undeploy renders exclusively from an active receipt so a
+                    # post-deploy inventory edit cannot retarget cleanup. Without
+                    # a receipt store, fall back to legacy fleet-driven teardown.
+                    if receipts is not None:
+                        try:
+                            receipt = receipts.active_for_device(did)
+                        except ValueError as exc:
+                            # duplicate actives should be impossible (activation
+                            # supersedes siblings; startup collapses legacy dupes)
+                            # — but surface the reason instead of a 500 if not.
+                            self._json(409, {"error": str(exc)}); return
+                        if receipt is None:
+                            self._json(409, {"error": "no active receipt; adopt the device "
+                                             "first, then undeploy"}); return
+                        resolved = receipt["resolved"]
+
+                        def prepare():
+                            receipt_ref["id"] = receipt["receipt_id"]
+                            return receipt["receipt_id"]
                 try:
-                    jid = onboard.start(did, action=act)
+                    jid = onboard.start(did, action=act, resolved=resolved, prepare=prepare)
                 except ValueError as exc:
+                    if receipt_ref.get("id") and act == "onboard":
+                        receipts.transition(receipt_ref["id"], "needs-reconcile")
                     # the device is busy with the OPPOSITE action
                     self._json(409, {"error": str(exc)}); return
                 # Emitted AFTER start() so the job id correlates this start with
@@ -861,6 +1030,18 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 self._audit("%s_start" % act, "onboard", action="start",
                            target=did, actor=actor, detail="job %s" % jid)
                 self._json(200, {"job_id": jid}); return
+            if path.startswith("/api/onboard/jobs/") and path.endswith("/abort"):
+                if onboard is None:
+                    self._json(404, {"error": "not found"}); return
+                jid = unquote(path[len("/api/onboard/jobs/"):-len("/abort")])
+                ok = onboard.abort(jid)
+                self._audit("onboard_abort", "onboard", action="abort", target=jid,
+                           actor=actor, result="ok" if ok else "fail",
+                           detail="operator aborted a running onboard job"
+                                  if ok else "no running job to abort")
+                if not ok:
+                    self._json(409, {"error": "job is not running / cannot be aborted"}); return
+                self._json(200, {"aborted": True}); return
             if path == "/api/onboard/cancel-queued":
                 if onboard is None:
                     self._json(404, {"error": "not found"}); return
@@ -983,7 +1164,7 @@ def main():
     import gui_images
     import gui_fleet
     import gui_creds
-    import gui_onboard
+    import deployment_receipts
     import catalog as catalog_mod
     host = os.environ.get("IRIS_GUI_HOST", "0.0.0.0")
     port = int(os.environ.get("IRIS_GUI_PORT", "8080"))
@@ -1007,11 +1188,13 @@ def main():
     creds = gui_creds.CredentialStore(secrets_path, recipients_csv=recipients,
                                       secrets_enc=secrets_enc)
     catalog = catalog_mod.CatalogStore(state_dir)
+    receipts = deployment_receipts.ReceiptStore(state_dir)
+    receipts.recover_interrupted()
     onboard = gui_onboard.OnboardService(
         fleet, creds, audit_fn=_bg_audit,
-        clear_state_fn=catalog.forget_device)   # undeploy forgets the wiped device's heartbeat
+        clear_state_fn=catalog.forget_device, receipts=receipts)
     srv = make_server(host, port, app, images, fleet, creds, catalog, onboard,
-                      None, certfile=certfile, audit_path=audit_path)
+                       None, certfile=certfile, audit_path=audit_path, receipts=receipts)
     scheme = "https" if certfile else "http"
     print("iris-gui on %s://%s:%d/" % (scheme, host, port), flush=True)
     srv.serve_forever()

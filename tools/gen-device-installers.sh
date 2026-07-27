@@ -12,15 +12,22 @@
 #     baked — the agent fetches it on that same first token-refresh.
 #   * derives the catalog URL / stage host from IRIS_HOST_IP or this machine's IP
 #
-# Usage:  tools/gen-device-installers.sh [csv]      (default fleet/devices.csv)
-# CSV:    device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip[,catalog_token]
-#         (the token column is optional — normally leave it out)
+# Usage:  tools/gen-device-installers.sh [csv]      (legacy routed inventory only)
+# CSV v2 deployment is intentionally Console/API-only: it requires a persisted
+# receipt, plan confirmation, and preflight before an enrollment token is minted.
 # Output: fleet/dist/install-<device_id>.sh  (+ install-all.sh)
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 CSV="${1:-$REPO/fleet/devices.csv}"
 OUT="${OUT:-$REPO/fleet/dist}"
 [ -f "$CSV" ] || { echo "no CSV inventory: $CSV (copy fleet/devices.csv.example)" >&2; exit 1; }
+if IFS= read -r first_line < "$CSV" && \
+   { [[ "$first_line" == *"management_type"* ]] || \
+     [[ "$first_line" == *"network_attachment"* ]]; }; then
+  echo "ERROR: CSV v2 requires Console/API onboarding so IRIS can persist a receipt,"
+  echo "plan, and preflight before minting an enrollment token." >&2
+  exit 1
+fi
 
 # ---------- where do the server's secrets live? ----------
 in_docker() { docker ps --format '{{.Names}}' 2>/dev/null | grep -qx iris; }

@@ -6,12 +6,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>intelligent-release-image-staging — Console</title>
+  <title>Intelligent Release &amp; Image Staging - IRIS — Console</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
   <div class="top">
-    <span>◈ intelligent-release-image-staging <span class="tag">IRIS</span></span>
+    <span>◈ Intelligent Release &amp; Image Staging <span class="tag">IRIS</span></span>
     <span class="spacer"></span>
     <span class="who" id="who"></span>
     <button class="btn ghost" id="logout">Sign out</button>
@@ -29,7 +29,7 @@
     </nav>
     <main class="main">
       <section id="view-overview" hidden>
-        <h2>Fleet Overview</h2>
+        <h2>Network Overview</h2>
         <div class="cards" id="ov-cards"></div>
         <h3>Rollout</h3>
         <table class="tbl" id="ov-rollout">
@@ -66,10 +66,12 @@
         <form class="inline-form" id="dev-form" hidden>
           <input id="df-id" placeholder="Device ID / IP">
           <input id="df-ip" placeholder="Management IP">
-          <input id="df-vlan" placeholder="VLAN" value="666">
-          <input id="df-svi" placeholder="SVI IP">
-          <input id="df-mask" placeholder="SVI mask" value="255.255.255.252">
-          <input id="df-guest" placeholder="Guest IP">
+          <select id="df-attachment"><option value="">Management type…</option><option value="routed">Routed - IRIS-managed app network</option><option value="inband">Inband - existing management VLAN</option></select>
+          <input id="df-vlan" placeholder="VLAN">
+          <input id="df-svi" placeholder="SVI IP (routed only)">
+          <input id="df-guest" placeholder="App IP">
+          <input id="df-mask" placeholder="App mask">
+          <input id="df-gateway" placeholder="App gateway">
           <input id="df-model" placeholder="model (e.g. C9300-48UXM / IE-3400) — optional, auto-detected on onboard">
           <select id="df-cred"><option value="">— no credential —</option></select>
           <button class="btn" type="submit">Save device</button>
@@ -77,7 +79,10 @@
           <span class="err" id="df-err"></span>
         </form>
         <div class="inline-form" id="cred-panel" hidden>
-          <table class="tbl"><tbody id="cred-rows"></tbody></table>
+          <table class="tbl">
+            <thead><tr><th>Profile id</th><th>Name</th><th>Device username</th><th></th></tr></thead>
+            <tbody id="cred-rows"></tbody>
+          </table>
           <form id="cred-form">
             <input id="cf-id" placeholder="Profile id (e.g. lab-switches)">
             <input id="cf-name" placeholder="Display name">
@@ -86,12 +91,13 @@
             <input id="cf-pass2" type="password" placeholder="Confirm password" autocomplete="new-password">
             <input id="cf-en" type="password" placeholder="Enable secret (blank = same)" autocomplete="new-password">
             <button class="btn" type="submit">Save profile</button>
+            <button class="btn ghost" type="button" id="cf-reset">New</button>
             <button class="btn ghost" type="button" id="cf-close">Close</button>
             <span class="err" id="cf-err"></span>
           </form>
         </div>
         <table class="tbl" id="devices">
-          <thead><tr><th><input type="checkbox" id="mark-all"></th><th>Device</th><th>IP</th><th>Model</th><th>VLAN/SVI</th><th>Platform</th><th>Credential</th><th>Assigned image</th><th>Status</th><th></th></tr></thead>
+          <thead><tr><th><input type="checkbox" id="mark-all"></th><th>Device</th><th>IP</th><th>Model</th><th>Management type</th><th>Platform</th><th>Credential</th><th>Assigned image</th><th>Status</th><th></th></tr></thead>
           <tbody id="dev-rows"></tbody>
         </table>
         <div id="batch-panel" hidden>
@@ -106,6 +112,7 @@
         <div id="onboard-panel" hidden>
           <h3>Onboarding <span id="onboard-dev" class="muted"></span></h3>
           <pre class="log" id="onboard-log"></pre>
+          <button class="btn ghost" id="onboard-abort">Abort onboard</button>
           <button class="btn ghost" id="onboard-close">Close</button>
         </div>
       </section>

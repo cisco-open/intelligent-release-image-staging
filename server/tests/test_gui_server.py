@@ -333,7 +333,7 @@ def test_static_index_served_and_traversal_blocked(tmp_path):
     host, port, _, stop = _serve(tmp_path)
     try:
         status, headers, body = _req(host, port, "GET", "/")
-        assert status == 200 and b"intelligent-release-image-staging" in body
+        assert status == 200 and b"Intelligent Release" in body
         assert "text/html" in headers.get("Content-Type", "")
         # SPA assets must revalidate so a redeploy is not masked by a stale
         # browser cache (else new UI like the Monitoring tab stays invisible).
@@ -661,7 +661,8 @@ def test_csv_import_export(tmp_path):
                          headers={"Cookie": ck})
         assert st == 200 and "text/csv" in hd.get("Content-Type", "")
         assert b.decode().splitlines()[0] == \
-            "device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip,model,platform"
+            ("device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,"
+             "app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,platform")
         assert "d9,10.9.9.1" in b.decode()
     finally:
         stop()
@@ -1051,6 +1052,132 @@ def test_sse_stream_survives_queue_wait(tmp_path, monkeypatch):
         stop()
 
 
+def _serve_inband(tmp_path, run_fn, device=None):
+    import deployment_receipts
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
+    state = str(tmp_path / "state")
+    fleet = gui_fleet.FleetStore(state)
+    fleet.upsert(device or {"device_id": "edge", "device_ip": "192.0.2.10",
+                  "management_type": "inband", "inband_vlan": "120",
+                  "app_ip": "192.0.2.11", "app_mask": "255.255.255.0",
+                  "app_gateway": "192.0.2.1", "model": "C9300",
+                  "platform": "guestshell", "credential_profile_id": "lab"})
+    creds = gui_creds.CredentialStore(secrets_path)
+    creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
+    receipts = deployment_receipts.ReceiptStore(state)
+    art = str(tmp_path / "artifacts"); os.makedirs(art, exist_ok=True)
+    for pkg in ("iris-arm64.tar", "iris-amd64.tar"):
+        open(os.path.join(art, pkg), "w").close()   # IOx package-presence gate
+    onboard = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
+                                         mint_fn=lambda d: "TOK", run_fn=run_fn,
+                                         receipts=receipts, artifacts_dir=art)
+    srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, creds, None,
+                                 onboard, certfile=None, receipts=receipts)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return "127.0.0.1", port, srv.shutdown
+
+
+def test_inband_iox_onboard_defaults_ssh_host_to_mgmt_ip(tmp_path):
+    """Inband IOx resolves the iox platform and, with no explicit ios_ssh_host,
+    the app SSHes to the switch's management IP (device_ip)."""
+    ran = []
+    host, port, stop = _serve_inband(
+        tmp_path, lambda p, e, on: (ran.append(dict(e)), 0)[1],
+        device={"device_id": "ie", "device_ip": "192.0.2.30",
+                "management_type": "inband", "inband_vlan": "120",
+                "app_ip": "192.0.2.31", "app_mask": "255.255.255.0",
+                "app_gateway": "192.0.2.1", "model": "IE-3400", "platform": "iox",
+                "credential_profile_id": "lab"})
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, b = _req(host, port, "GET", "/api/devices/ie/plan",
+                        headers={"Cookie": ck})
+        assert st == 200
+        resolved = json.loads(b)["plan"]["resolved"]
+        assert resolved["attachment"] == "inband" and resolved["platform"] == "iox"
+        assert resolved["ios_ssh_host"] == "192.0.2.30"    # defaults to device_ip
+        st, _, b = _req(host, port, "POST", "/api/devices/ie/onboard", {}, headers=hh)
+        assert st == 200
+        import time as _t
+        deadline = _t.time() + 3
+        while _t.time() < deadline:
+            if ran:
+                break
+            _t.sleep(0.02)
+        assert ran and ran[-1]["NETWORK_ATTACHMENT"] == "inband"
+        assert ran[-1]["IOS_SSH_HOST"] == "192.0.2.30"
+    finally:
+        stop()
+
+
+def test_reonboard_then_undeploy_starts(tmp_path):
+    """Re-onboarding a device (idempotent redeploy) and then undeploying it
+    must work: the second onboard's receipt supersedes the first, so the
+    undeploy start finds exactly one active receipt. This is the lab-observed
+    failure: two active receipts made active_for_device() raise and the
+    Console reported 'failed to start' with no reason."""
+    host, port, stop = _serve_inband(tmp_path, lambda p, e, on: 0)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        import time as _t
+
+        def _wait_done(jid):
+            deadline = _t.time() + 3
+            while _t.time() < deadline:
+                _, _, jb = _req(host, port, "GET", "/api/onboard/jobs/" + jid,
+                                headers={"Cookie": ck})
+                if json.loads(jb)["state"] in ("done", "error"):
+                    return json.loads(jb)["state"]
+                _t.sleep(0.02)
+            return "timeout"
+
+        for _ in range(2):    # onboard TWICE — the re-onboard mints receipt #2
+            st, _, b = _req(host, port, "POST", "/api/devices/edge/onboard", {},
+                            headers=hh)
+            assert st == 200
+            assert _wait_done(json.loads(b)["job_id"]) == "done"
+        st, _, b = _req(host, port, "POST", "/api/devices/edge/undeploy", {},
+                        headers=hh)
+        assert st == 200, "undeploy refused after re-onboard: %s" % b
+    finally:
+        stop()
+
+
+def test_inband_onboard_is_one_click_and_drives_inband_renderer(tmp_path):
+    """Inband onboards exactly like routed: a plain POST starts a job, records a
+    receipt, and runs the installer with NETWORK_ATTACHMENT=inband."""
+    ran = []
+    host, port, stop = _serve_inband(
+        tmp_path, lambda p, e, on: (ran.append(dict(e)), 0)[1])
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        # plan preview reports the inband attachment
+        st, _, b = _req(host, port, "GET", "/api/devices/edge/plan",
+                        headers={"Cookie": ck})
+        assert st == 200 and json.loads(b)["plan"]["resolved"]["attachment"] == "inband"
+        # a plain onboard POST starts the job (no gate, no acknowledgement dance)
+        st, _, b = _req(host, port, "POST", "/api/devices/edge/onboard", {},
+                        headers=hh)
+        assert st == 200
+        jid = json.loads(b)["job_id"]
+        import time as _t
+        deadline = _t.time() + 3
+        while _t.time() < deadline:
+            _, _, jb = _req(host, port, "GET", "/api/onboard/jobs/" + jid,
+                            headers={"Cookie": ck})
+            if json.loads(jb)["state"] in ("done", "error"):
+                break
+            _t.sleep(0.02)
+        assert ran and ran[-1]["NETWORK_ATTACHMENT"] == "inband"
+    finally:
+        stop()
+
+
 def _serve_onboard_audit(tmp_path, run_fn, **svc_kw):
     """_serve_onboard, but the OnboardService is built with an audit_fn wired
     to a real audit.jsonl under tmp_path (via gui_server's audit_path kwarg,
@@ -1306,6 +1433,19 @@ def test_settings_get(tmp_path):
         stop()
 
 
+def test_settings_console_port_is_dynamic(tmp_path, monkeypatch):
+    """The Settings page must show the actual published console port
+    (IRIS_GUI_PUBLISH), not a hardcoded 8080."""
+    monkeypatch.setenv("IRIS_GUI_PUBLISH", "8082")
+    host, port, _ctx, stop = _serve_full(tmp_path)
+    try:
+        ck, _csrf = _auth(host, port)
+        st, _, b = _req(host, port, "GET", "/api/settings", headers={"Cookie": ck})
+        assert st == 200 and json.loads(b)["ports"]["console"] == 8082
+    finally:
+        stop()
+
+
 def test_settings_password_change(tmp_path):
     host, port, _ctx, stop = _serve_full(tmp_path)
     try:
@@ -1381,7 +1521,7 @@ def test_devices_example_csv_download(tmp_path):
                          headers={"Cookie": ck})
         assert st == 200
         assert "filename=devices-example.csv" in hd.get("Content-Disposition", "")
-        assert "device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip" in b.decode()
+        assert "device_id,device_ip,management_type,iris_vlan" in b.decode()
     finally:
         stop()
 
@@ -1749,6 +1889,26 @@ def test_device_platform_happy_path_and_clear(tmp_path):
         st, _, b = _req(host, port, "GET", "/api/devices", headers={"Cookie": ck})
         dev = json.loads(b)["devices"][0]
         assert dev.get("platform") == ""
+    finally:
+        stop()
+
+
+def test_device_platform_iox_on_inband_is_allowed(tmp_path):
+    """Setting platform=iox on an inband device now succeeds and persists (the
+    app SSHes to the switch's management IP by default)."""
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, _cat = deps
+    try:
+        fleet.upsert({"device_id": "edge", "device_ip": "192.0.2.10",
+                      "management_type": "inband", "inband_vlan": "120",
+                      "app_ip": "192.0.2.11", "app_mask": "255.255.255.0",
+                      "app_gateway": "192.0.2.1", "platform": "guestshell"})
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, _ = _req(host, port, "POST", "/api/devices/edge/platform",
+                        {"platform": "iox"}, headers=hh)
+        assert st == 200
+        assert fleet.get_device("edge")["platform"] == "iox"
     finally:
         stop()
 

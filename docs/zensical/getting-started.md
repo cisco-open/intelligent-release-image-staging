@@ -80,23 +80,29 @@ Create an inventory from the template:
 cp fleet/devices.csv.example fleet/devices.csv
 ```
 
-The inventory contains network onboarding information only:
+The inventory contains network onboarding information only, as an
+attachment-aware CSV v2. Each device declares a `management_type` of `routed`
+(IRIS creates a dedicated VLAN/SVI) or `inband` (attach to an existing,
+operator-owned VLAN that IRIS never changes):
 
 ```text
-device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip,model,platform
+device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,platform
 ```
 
-`model` and `platform` are optional trailing fields. Set a model for deterministic
-Console platform selection; leave `platform` blank for automatic selection, use
-`guestshell` for the standard C9300 path, or use `iox` for supported IOx devices.
+Fill the routed columns (`iris_vlan`, `svi_*`) for routed devices, or the inband
+columns (`inband_vlan`, `app_*`) for inband devices. `model`/`platform` are
+optional; blank `platform` auto-selects from the model. See
+[Management Type and VLAN Ownership](network-attachment.md).
 
-Generate one self-contained installer per device:
+Attachment-aware onboarding runs through the **Console** (or API), which records
+a durable receipt and drives teardown from it. The legacy CLI generator below is
+routed-only and refuses a v2 (`management_type`) header:
 
 ```bash
+# legacy routed inventory only
 tools/gen-device-installers.sh fleet/devices.csv
 ```
 
-Run the generated installer for each device, or use the generated `fleet/dist/install-all.sh` wrapper after reviewing the inventory.
 
 ## Assign images
 

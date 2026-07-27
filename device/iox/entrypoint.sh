@@ -29,9 +29,11 @@ export IRIS_STAGE_DIR="$STAGE_DIR"
 export IRIS_AGENT_CONF="$CONF"
 export IRIS_AGENT_STATE="$STATE"
 
-# IOx cannot bind-mount an IOS filesystem into the app. The agent therefore
-# scp-pushes the staged image to <target>guest-share/iris through the device's
-# SCP server, then IOS `copy /verify`s it onto the selected filesystem root.
+# Image hand-off to IOS: on C9k the app-hosting SSD share is bind-mounted in
+# (IRIS_SHARE_DIR, run-opts -v) and the agent lands its scratch there at disk
+# speed for an IOS-internal `copy /verify`; without a share (IE-3x00) it
+# scp-pushes the image to <target>guest-share/iris through the device's SCP
+# server instead.
 mkdir -p "$STAGE_DIR" "$(dirname "$CONF")" "$(dirname "$STATE")"
 
 # --- 1. config: use a dropped conf if present, else synthesize from env ---------
@@ -65,6 +67,9 @@ if [ ! -f "$CONF" ]; then
     echo "max_peers = ${MAX_PEERS}"
     echo "telemetry = ${IRIS_TELEMETRY:-on}"
     echo "rpc_port = ${RPC_PORT}"
+    echo "share_dir = ${IRIS_SHARE_DIR:-}"
+    echo "share_ios_path = ${IRIS_SHARE_IOS_PATH:-}"
+    echo "agent_version = $(cat /opt/iris/agent/VERSION 2>/dev/null || echo unknown)"
   } > "$tmp"
   chmod 600 "$tmp"
   mv -f "$tmp" "$CONF"

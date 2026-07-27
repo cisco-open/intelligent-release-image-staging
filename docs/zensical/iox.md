@@ -13,8 +13,9 @@ ARM64 IE-3x00/IE-3400 style platforms and x86_64 Catalyst 9000 app hosting.
 
 Use the IOx app when the platform expects an IOx application lifecycle. The
 Guest Shell path remains available for Catalyst devices that support that agent
-model. Select a writable IOS filesystem appropriate to the platform, such as
-`sdflash:` on IE-3x00 or `usbflash1:` on C9300.
+model. The staging target is platform-appropriate: `sdflash:` on IE-3x00;
+Console-onboarded C9300 IOx targets `flash:` (bootflash, like Guest Shell)
+with the SSD share carrying the transfer.
 
 ## Files
 
@@ -33,16 +34,84 @@ model. Select a writable IOS filesystem appropriate to the platform, such as
 
 The IOx agent follows the same catalog and staging model as the Guest Shell
 agent. It downloads resumable swarm data under the CAF persistent directory
-(`/iox_data/iris` on the validated C9300 runtime). Because that disk is not an
-IOS filesystem root, the
-container reaches IOS through SSH-to-self, SCP-pushes the verified scratch file
-to `guest-share/iris`, and runs IOS `copy /verify` for the final placement.
+(`/iox_data/iris` on the validated C9300 runtime). The hand-off of the verified
+scratch file to IOS depends on the platform:
+
+- **C9k (share mount)**: onboarding bind-mounts the app-hosting SSD share —
+  `usbflash1:iox_host_data_share`, host-side `/vol/usb1/iox_host_data_share` —
+  into the container (`run-opts "-v …:/mnt/share"`). The agent copies the
+  scratch to the share ROOT under its fixed `iris-staged.bin` name at disk
+  speed, then drives an IOS-internal
+  `copy /verify usbflash1:iox_host_data_share/iris-staged.bin flash:<img>`
+  over its SSH-to-self CLI — the same bootflash-root placement as Guest
+  Shell, with no bulk data on the control-plane punt path, and `copy /verify`
+  restores the real image name and checks the Cisco signature from the bytes.
+  IRIS never creates a subdirectory in the share (a container-created subdir
+  becomes inaccessible to the container itself on this platform) and confines
+  itself to `iris-` prefixed filenames: each attempt sweeps only its own
+  leftovers, a tiny probe proves IOS can actually read the share before any
+  multi-GB copy is committed (falling back to scp otherwise), the transient
+  copy is removed after placement, and undeploy deletes the prefixed files.
+- **IE-3x00 (scp push)**: IOx cannot bind-mount the SD card there, so the
+  container SCP-pushes the scratch to `guest-share/iris` through the device's
+  SCP server and then runs `copy /verify` for the final placement. The agent
+  also falls back to this path automatically if the share mount is absent or
+  unreadable from IOS.
 
 `IRIS_TARGET_FS` optionally selects a filesystem prefix such as `sdflash:` or
 `bootflash:`. The agent accepts it only when `show file systems` reports a
 writable non-crash disk; otherwise it logs the fallback and retains automatic
 platform selection. `device/iox/install.sh` exposes this as `TARGET_FS` and
 defaults it to `sdflash:`.
+
+## Transfer throughput and CoPP
+
+The C9k share-mount hand-off above never carries image bytes over the network,
+so it is not subject to any of this section — it runs at disk speed. This
+section applies to the **scp push path** (IE-3x00, or a C9k where the share
+mount is unavailable and the agent fell back): that traffic is addressed to
+the switch itself, so it crosses the control-plane punt path and is subject to
+Control Plane Policing (CoPP). On Catalyst 9300 the default CoPP policy caps
+that path long before any transport setting does. Measured on C9300
+(IOS-XE 17.18.3):
+
+| Transfer path | Throughput | Notes |
+| --- | --- | --- |
+| Agent SCP push (default CoPP) | ~1.4 MB/s | identical for chacha20, aes128-gcm, aes128-ctr |
+| IOS `copy https:` pull (default CoPP) | ~1.4 MB/s | same ceiling — not a protocol property |
+| Agent SCP push, forus policer at 10000 pps | ~7.3 MB/s | next limit is the IOSd file-write path |
+
+The ceiling is the `system-cpp-police-forus` CoPP class: its default
+1000 packets/sec ≈ 1.4 MB/s of full-size frames, and the policer visibly drops
+the transfer's frames (`show platform hardware fed switch active qos queue
+stats internal cpu policer`). Raising `ip ssh window-size`,
+`ip tcp window-size`, or `ip ssh bulk-mode` does not help on 17.18 — bulk-mode
+and the 128 KB TCP window are already platform defaults there, and the policer
+sits below all of them.
+
+**IRIS never modifies CoPP.** The policer protects the switch CPU from
+traffic floods; weakening it is a security decision only the operator can
+make. Until a faster transfer path exists in IRIS, an operator who accepts the
+tradeoff can raise the class on devices that stage over IOx:
+
+```text
+configure terminal
+policy-map system-cpp-policy
+ class system-cpp-police-forus
+  police rate 10000 pps
+end
+```
+
+This yields roughly 5x faster staging (a 1.2 GB image drops from ~15 to ~3
+minutes); `police rate 1000 pps` restores the default. The change does not
+affect the actual network: transit traffic is forwarded in hardware and never
+crosses this policer, so no data-plane, VLAN, or routing behavior changes. Its
+only effect is on the switch's own control plane — the CPU will accept more
+traffic addressed to the switch itself, which is the resource CoPP exists to
+protect.
+
+Guest Shell staging is unaffected: the C9300 Guest Shell writes through the
+bind-mounted guest-share at disk speed and never crosses the punt path.
 
 ## Build modes
 

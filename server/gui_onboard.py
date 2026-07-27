@@ -16,6 +16,7 @@ stage-host HOST_USER/HOST_PASS) to the installer via the environment (consumed
 by lab/device-run.sh's SSHPASS and the installer's sshpass). The streamed job
 lines are the installer's stdout, which echoes neither password (sshpass reads
 them from the env)."""
+import inspect
 import os
 import re
 import secrets
@@ -62,13 +63,18 @@ _MODEL_PLATFORMS = (          # first match wins; case-insensitive prefix regexe
 # Model families that take the arm64 IOx package (installer defaults: iris-arm64.tar,
 # AppGigabitEthernet1/1, sdflash:). Used ONLY after platform has resolved to iox.
 _ARM_IOX_MODELS = (r"^IE-?3", r"^IR1[018]")
-# Catalyst 9000 -> amd64 IOx package on an SSD (usbflash1:), stacked-member-
-# overridable APP_INTF.
+# Catalyst 9000 -> amd64 IOx package; the app-hosting SSD share
+# (usbflash1:iox_host_data_share, host-side /vol/usb1) is bind-mounted into
+# the app so image transfer is a local disk write + an IOS-internal
+# `copy /verify` onto bootflash — same final placement as Guest Shell, and no
+# CoPP-policed punt traffic. Stacked-member-overridable APP_INTF.
 _C9K_MODEL = r"^C9[0-9]{3}"
 _C9K_IOX_ENV = {
     "PKG": "iris-amd64.tar",
     "APP_INTF": "AppGigabitEthernet1/0/1",
-    "TARGET_FS": "usbflash1:",
+    "TARGET_FS": "flash:",
+    "SHARE_HOST_PATH": "/vol/usb1/iox_host_data_share",
+    "SHARE_IOS_PATH": "usbflash1:iox_host_data_share",
 }
 
 
@@ -139,12 +145,15 @@ def _default_mint(device_id, server_dir):
     return out.stdout.strip()
 
 
-def _default_runner(install_path, env, on_line):
+def _default_runner(install_path, env, on_line, on_proc=None):
     """Run device-install.sh, calling on_line(line) for each stdout/stderr line.
-    Returns the process exit code."""
+    Returns the process exit code. on_proc(proc), when given, receives the live
+    Popen so the caller can terminate it (abort)."""
     proc = subprocess.Popen(["bash", install_path], env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, bufsize=1)
+    if on_proc is not None:
+        on_proc(proc)
     try:
         for line in proc.stdout:
             on_line(line.rstrip("\n"))
@@ -178,7 +187,7 @@ class OnboardService:
                  crt_public=None, host_ip=None, catalog_url=None,
                  mint_fn=None, run_fn=_default_runner, now_fn=time.time,
                  probe_fn=None, artifacts_dir=None, audit_fn=None,
-                 max_concurrent=None, clear_state_fn=None):
+                  max_concurrent=None, clear_state_fn=None, receipts=None):
         self.fleet = fleet
         self.creds = creds
         self.server_dir = server_dir or os.path.dirname(os.path.abspath(__file__))
@@ -205,6 +214,7 @@ class OnboardService:
         # CatalogStore.forget_device in main()). Injected, like mint/run/audit,
         # so orchestration stays unit-testable without a catalog.
         self._clear_state = clear_state_fn
+        self.receipts = receipts
         if max_concurrent is None:
             max_concurrent = int(os.environ.get(
                 "IRIS_ONBOARD_CONCURRENCY", str(_DEFAULT_CONCURRENCY)))
@@ -213,9 +223,16 @@ class OnboardService:
         # "queued" (their threads parked here) until a slot frees.
         self._slots = threading.Semaphore(self.max_concurrent)
         self._jobs = {}
+        self._procs = {}   # job_id -> live installer Popen (for abort)
+        # Whether the injected runner can report its process for abort support.
+        try:
+            self._run_supports_proc = len(
+                inspect.signature(self._run).parameters) >= 4
+        except (TypeError, ValueError):
+            self._run_supports_proc = False
         self._lock = threading.Lock()
 
-    def _build_env(self, device_id, mint=True):
+    def _build_env(self, device_id, mint=True, resolved=None):
         dev = self.fleet.get_device(device_id)
         if not dev:
             raise ValueError("unknown device: %s" % device_id)
@@ -228,13 +245,27 @@ class OnboardService:
         # the secrets store — pure teardown must not touch it.
         token = self._mint(device_id) if mint else ""
         env = dict(os.environ)
+        target = resolved or dev
+        attachment = target.get("attachment",
+                                target.get("management_type",
+                                           target.get("network_attachment", "routed")))
+        if attachment == "legacy_routed":
+            attachment = "routed"
         env.update({
             "DEVICE_IP": dev["device_ip"],
             "DEVICE_ID": device_id,
-            "VLAN": str(dev.get("vlan", "")),
-            "SVI_IP": dev.get("svi_ip", ""),
-            "SVI_MASK": dev.get("svi_mask", ""),
-            "GUEST_IP": dev.get("guest_ip", ""),
+            "NETWORK_ATTACHMENT": attachment,
+            "VLAN": str(target.get("iris_vlan", target.get("vlan", ""))),
+            "SVI_IP": target.get("svi_ip", ""),
+            "SVI_MASK": target.get("svi_mask", target.get("app_mask", "")),
+            "GUEST_IP": target.get("app_ip", target.get("guest_ip", "")),
+            "INBAND_VLAN": str(target.get("inband_vlan", "")),
+            "APP_IP": target.get("app_ip", target.get("guest_ip", "")),
+            "APP_MASK": target.get("app_mask", target.get("svi_mask", "")),
+            "APP_GATEWAY": target.get("app_gateway", target.get("svi_ip", "")),
+            # inband IOx reaches IOS at the switch's management IP by default
+            "IOS_SSH_HOST": (target.get("ios_ssh_host", "")
+                             or (dev["device_ip"] if attachment == "inband" else "")),
             "CATALOG_URL": self.catalog_url,
             "STAGE_HOST": self.host_ip,
             "CATALOG_TOKEN": token,
@@ -251,8 +282,8 @@ class OnboardService:
             "IRIS_STAGE_LOCAL": "1",
             "IRIS_ARTIFACTS_DIR": os.environ.get("IRIS_ARTIFACTS_DIR", "/srv/artifacts"),
         })
-        if dev.get("model"):
-            env["MODEL"] = dev["model"]
+        if target.get("model"):
+            env["MODEL"] = target["model"]
         # Stage-host SSH login for the installer's remote-STAGE_HOST branch (in
         # Docker the container's netns never owns STAGE_HOST, so artifact staging
         # goes over ssh). The age-encrypted store beats any inherited process env;
@@ -263,7 +294,10 @@ class OnboardService:
         if sh:
             env["HOST_USER"] = sh["username"]
             env["HOST_PASS"] = sh["password"]
-        return dev, env
+        resolved_dev = dict(dev)
+        resolved_dev.update(target)
+        resolved_dev["platform"] = target.get("platform", resolved_dev.get("platform"))
+        return resolved_dev, env
 
     def _resolve(self, device_id, dev, env, action="onboard"):
         """Resolve (platform, script) for a device, using the live probe (if
@@ -302,7 +336,25 @@ class OnboardService:
             env["DEVICE_SSH_USER"] = env["DEVICE_USER"]
         return platform, script
 
-    def start(self, device_id, action="onboard"):
+    def _transition_or_note(self, job_id, receipt_id, state):
+        """Advance the job's receipt, downgrading lifecycle races to a job
+        line. A concurrent action can retire the bound receipt between this
+        worker's steps — e.g. a re-onboard's activation supersedes it, or an
+        operator adopt replaces it. The transition then raises, and an
+        uncaught raise here would kill the worker thread BEFORE _finish(),
+        wedging the job "running" and the device "busy" until a restart.
+        Returns True iff the transition applied."""
+        if self.receipts is None or not receipt_id:
+            return True
+        try:
+            self.receipts.transition(receipt_id, state)
+            return True
+        except Exception as exc:
+            self._append(job_id, "receipt %s -> %s not applied: %s"
+                         % (receipt_id, state, exc))
+            return False
+
+    def start(self, device_id, action="onboard", resolved=None, prepare=None):
         """Create a job and run the action's script on a daemon thread.
         Returns the job id immediately. action is "onboard"
         (device-install.sh / the iox recipe) or "undeploy"
@@ -310,6 +362,12 @@ class OnboardService:
         installers run at once; beyond that a job stays "queued" (its thread
         parked on the slot semaphore — threads are cheap, hundreds queue
         fine) until a slot frees or cancel_queued() flips it to "cancelled".
+
+        prepare() (optional) is called EXACTLY ONCE, under the job lock, only
+        when a genuinely new job is registered — never when this start joins an
+        already-active same-action job. It returns the receipt id to bind to the
+        job. Creating the receipt there (instead of before start) means a
+        concurrent double-onboard cannot leave an orphan planned receipt behind.
 
         Jobs are in-memory and per-process: a server restart loses all job state
         and abandons any in-flight job (re-running either script is
@@ -319,9 +377,10 @@ class OnboardService:
             raise ValueError("unknown action: %s" % action)
         job_id = secrets.token_hex(8)
         job = {"id": job_id, "device_id": device_id, "action": action,
-               "state": "queued", "lines": [], "returncode": None,
-               "queued_at": int(self._now()),
-               "started_at": None, "finished_at": None}
+                "state": "queued", "lines": [], "returncode": None,
+                "queued_at": int(self._now()),
+                "started_at": None, "finished_at": None, "receipt_id": None,
+                "resolved": resolved}
         with self._lock:
             # Never run two scripts against the same device at once: the same
             # action again (double-click, overlapping batches) joins the
@@ -335,6 +394,9 @@ class OnboardService:
                     raise ValueError(
                         "device %s is busy with an active %s job (%s)"
                         % (device_id, j.get("action", "onboard"), j["id"]))
+            # Only now, holding the lock and past the dedup guard, do we mint the
+            # receipt — so exactly one receipt exists per genuinely started job.
+            job["receipt_id"] = prepare() if prepare else None
             self._evict_old(self._now())
             self._jobs[job_id] = job
 
@@ -347,10 +409,13 @@ class OnboardService:
                 j["state"] = "running"
                 j["started_at"] = int(self._now())
             try:
-                dev, env = self._build_env(device_id,
-                                           mint=(action == "onboard"))
+                dev, env = self._build_env(device_id, mint=(action == "onboard"),
+                                           resolved=j.get("resolved"))
+                # A receipt has already resolved platform before token minting.
                 platform, script = self._resolve(device_id, dev, env, action)
             except Exception as exc:
+                self._transition_or_note(job_id, j.get("receipt_id"),
+                                         "needs-reconcile")
                 self._append(job_id, "ERROR: " + str(exc))
                 self._finish(job_id, "error", None)
                 return
@@ -369,11 +434,30 @@ class OnboardService:
                     self._append(job_id, "ERROR: %s not found in artifacts dir "
                                  "-- build device/iox/build.sh%s and place it in "
                                  "artifacts/ (device untouched)" % (pkg, flag))
+                    self._transition_or_note(job_id, j.get("receipt_id"),
+                                             "needs-reconcile")
                     self._finish(job_id, "error", None)
                     return
             try:
-                rc = self._run(script, env, lambda line: self._append(job_id, line))
+                receipt_id = j.get("receipt_id")
+                if not self._transition_or_note(job_id, receipt_id, "applying"):
+                    # The bound receipt is no longer usable (a newer action
+                    # superseded it). Running a script rendered from a STALE
+                    # receipt would act on a box someone else just changed —
+                    # abort before touching the device.
+                    self._append(job_id, "ERROR: the job's receipt is no "
+                                 "longer active; aborting without touching "
+                                 "the device")
+                    self._finish(job_id, "error", None)
+                    return
+                if self._run_supports_proc:
+                    rc = self._run(script, env,
+                                   lambda line: self._append(job_id, line),
+                                   lambda proc: self._register_proc(job_id, proc))
+                else:
+                    rc = self._run(script, env, lambda line: self._append(job_id, line))
             except Exception as exc:
+                self._transition_or_note(job_id, receipt_id, "needs-reconcile")
                 self._append(job_id, "ERROR: " + str(exc))
                 self._finish(job_id, "error", None)
                 return
@@ -385,6 +469,12 @@ class OnboardService:
                     self._clear_state(device_id)
                 except Exception:
                     pass   # a bookkeeping failure must never fail the job
+            if rc != 0:
+                self._transition_or_note(job_id, receipt_id, "needs-reconcile")
+            elif action == "onboard":
+                self._transition_or_note(job_id, receipt_id, "active")
+            else:
+                self._transition_or_note(job_id, receipt_id, "removed")
             self._finish(job_id, "done" if rc == 0 else "error", rc)
 
         def run_slotted():
@@ -400,10 +490,31 @@ class OnboardService:
             if j is not None:
                 j["lines"].append(line)
 
+    def _register_proc(self, job_id, proc):
+        with self._lock:
+            self._procs[job_id] = proc
+
+    def abort(self, job_id):
+        """Terminate a running installer subprocess. Returns True if a running
+        job's process was signalled. The run loop then finishes with a non-zero
+        rc, so the job errors and its receipt moves to needs-reconcile."""
+        with self._lock:
+            j = self._jobs.get(job_id)
+            proc = self._procs.get(job_id)
+            if j is None or j["state"] != "running" or proc is None:
+                return False
+            j["lines"].append("[abort requested by operator]")
+        try:
+            proc.terminate()
+        except Exception:
+            return False
+        return True
+
     def _finish(self, job_id, state, rc):
         device_id = detail = None
         action = "onboard"
         with self._lock:
+            self._procs.pop(job_id, None)   # drop the (now-dead) installer handle
             j = self._jobs.get(job_id)
             if j is not None:
                 j["state"] = state

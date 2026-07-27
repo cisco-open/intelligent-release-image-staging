@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Web Console
 
-The console is the preferred operator surface once the server is running. It does not replace the CLI; it wraps common workflows and makes fleet state visible.
+The console is the preferred operator surface once the server is running. It does not replace the CLI; it wraps common workflows and makes network state visible.
 
 ## First run
 
@@ -26,8 +26,8 @@ docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin
 
 | Area | What it does |
 | --- | --- |
-| Images | Shows published image metadata and staged fleet status. |
-| Devices | Lists known devices, platform details, current assignment, and recent reports. |
+| Images | Shows published image metadata and staged network status. |
+| Devices | Lists known devices, their network **attachment**, platform details, current assignment, and recent reports. |
 | Assignments | Maps each device to the image it should stage. |
 | Onboarding | Starts and tracks install or undeploy jobs when stage-host credentials are configured. |
 | Swarm | Shows peer progress and seeder/device participation. |
@@ -40,6 +40,23 @@ the torrent download phase while the app transfers a completed image from its
 container storage into IOS-visible storage. A final-placement failure is shown
 as `placement failed` with a bounded diagnostic; inspect the device's
 `IRIS ROOTCOPY-FAIL` syslog entry for the full device-side detail.
+
+## Management type
+
+The Add Device form has an explicit **Management type** choice, and the
+device table shows each device's attachment rather than a bare VLAN/SVI value:
+
+- **Routed - IRIS-managed app network** — IRIS creates a dedicated VLAN and SVI.
+  Onboarding is one-click and create-only.
+- **Inband - existing management VLAN** — the agent attaches to an existing,
+  operator-owned VLAN that IRIS never creates, changes, or removes.
+
+Each onboard records a durable **receipt** of what was applied. **Undeploy**
+runs only from that receipt, so editing inventory after onboarding cannot
+retarget cleanup. A device deployed before receipts existed shows no active
+receipt; use the row's **Adopt** action (an explicit, audited, no-change
+recording of current ownership) before undeploying it. See
+[Management Type and VLAN Ownership](network-attachment.md).
 
 ## Onboarding from the console
 

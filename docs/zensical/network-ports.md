@@ -70,3 +70,7 @@ endpoint is external to IRIS and is not published by the Compose stack.
   (6969) and telemetry (9101) use HTTP by design.
 - Kubernetes publishes 6969, 8443, 8000, 6881, 8080, and 9101 through its
   LoadBalancer. Preserve source IP as described in [Kubernetes](kubernetes.md).
+- For **inband** devices, these flows traverse the existing operator-owned
+  management VLAN and its SVI; IRIS adds no VLAN, SVI, gateway, route, or VRF.
+  Preflight only confirms that path can reach the catalog, artifact, tracker,
+  and seeder ports. See [Management Type and VLAN Ownership](network-attachment.md).

@@ -44,7 +44,7 @@ SPDX-License-Identifier: Apache-2.0
 | Start | [Overview](index.md), [Getting Started](getting-started.md), [AI-Guided PoC](aiagent.md) |
 | Design | [Architecture](architecture.md), [Container Deployments](containers.md), [Security Model](security.md), [Observability](observability.md) |
 | Components | [Server](server.md), [Network Ports and Flows](network-ports.md), [Kubernetes](kubernetes.md), [Device Agents](device-agents.md), [IOx App](iox.md), [Web Console](console.md) |
-| Workflows | [Fleet Workflows](fleet-workflows.md), [Operations](operations.md), [Validation](validation.md), [Development](development.md) |
+| Workflows | [Network Workflows](fleet-workflows.md), [Operations](operations.md), [Validation](validation.md), [Development](development.md) |
 | Reference | [Reference](reference.md) |
 
 ## Generated outputs

@@ -811,6 +811,28 @@ def test_conflicting_action_on_active_job_raises():
     assert _wait(svc, j1)["state"] == "done"
 
 
+def test_prepare_runs_once_and_not_on_dedup():
+    """start()'s prepare() (used to mint the receipt) must fire exactly once for
+    a genuinely new job and NEVER when a second same-action start dedups onto the
+    running job -- otherwise a double-onboard would strand an orphan receipt."""
+    release = threading.Event()
+
+    def run_fn(p, e, on):
+        release.wait(5)
+        return 0
+
+    svc = _multi_svc(1, run_fn, max_concurrent=1)
+    calls = []
+    j1 = svc.start("d1", prepare=lambda: calls.append(1) or "rcpt-1")
+    assert _wait_for(lambda: svc.get_job(j1)["state"] == "running")
+    j2 = svc.start("d1", prepare=lambda: calls.append(1) or "rcpt-2")
+    assert j1 == j2                                # deduped onto the running job
+    assert calls == [1]                            # prepare fired only once
+    assert svc.get_job(j1)["receipt_id"] == "rcpt-1"
+    release.set()
+    assert _wait(svc, j1)["state"] == "done"
+
+
 def test_undeploy_clears_device_state_on_success():
     """A successful undeploy must forget the device's stored heartbeat so the
     console stops showing the wiped box as 'deployed' from its last live
@@ -951,7 +973,12 @@ def test_c9k_iox_gets_amd64_env(tmp_path):
     env = seen["env"]
     assert env["PKG"] == "iris-amd64.tar"
     assert env["APP_INTF"] == "AppGigabitEthernet1/0/1"
-    assert env["TARGET_FS"] == "usbflash1:"
+    # Route B: the C9k SSD share is bind-mounted into the app, the scratch
+    # lands there at disk speed, and placement targets bootflash like the
+    # Guest Shell path — no scp, no CoPP-limited punt traffic.
+    assert env["TARGET_FS"] == "flash:"
+    assert env["SHARE_HOST_PATH"] == "/vol/usb1/iox_host_data_share"
+    assert env["SHARE_IOS_PATH"] == "usbflash1:iox_host_data_share"
 
 
 def test_ie3k_iox_keeps_arm_defaults(tmp_path):
@@ -968,6 +995,9 @@ def test_ie3k_iox_keeps_arm_defaults(tmp_path):
     assert "PKG" not in env
     assert "APP_INTF" not in env
     assert "TARGET_FS" not in env
+    # the SSD share mount is a C9k mechanism; IE-3x00 keeps the scp path
+    assert "SHARE_HOST_PATH" not in env
+    assert "SHARE_IOS_PATH" not in env
 
 
 def test_c9k_guestshell_override_runs_guestshell(tmp_path):
@@ -1049,3 +1079,91 @@ def test_c9k_iox_notfound_names_amd64_tar(tmp_path):
     assert job["state"] == "error"
     assert called == []
     assert any("iris-amd64.tar" in l for l in job["lines"])
+
+
+def test_abort_terminates_running_job():
+    """abort() signals the running installer's process; the job then errors."""
+    release = threading.Event()
+    aborted = {"v": False}
+
+    class FakeProc:
+        def terminate(self):
+            aborted["v"] = True
+            release.set()
+
+    def run_fn(p, e, on, on_proc):
+        on_proc(FakeProc())
+        on("running")
+        release.wait(5)          # blocks until aborted (or timeout)
+        return 137
+
+    svc = _multi_svc(1, run_fn, max_concurrent=1)
+    j = svc.start("d1")
+    assert _wait_for(lambda: svc.get_job(j)["state"] == "running")
+    assert svc.abort(j) is True
+    assert aborted["v"] is True
+    assert _wait(svc, j)["state"] == "error"
+    assert svc.abort(j) is False     # not running anymore -> nothing to abort
+
+
+def test_abort_unknown_job_is_false():
+    svc = _svc(lambda p, e, on: 0)
+    assert svc.abort("nope") is False
+
+
+# --- Receipt lifecycle races in the worker thread: a concurrent action can
+# retire (supersede) the receipt a job bound between the job's start and its
+# worker's receipt transitions. Those transitions then raise — and must not
+# kill the worker before _finish(), which would wedge the job "running" and
+# the device "busy" until a server restart. ---
+
+def _receipted_svc(tmp_path, run_fn):
+    import deployment_receipts
+    receipts = deployment_receipts.ReceiptStore(str(tmp_path))
+    svc = _svc(run_fn, receipts=receipts)
+    return svc, receipts
+
+
+def _active_receipt(receipts, rid, device_id="d1"):
+    receipts.create({"receipt_id": rid, "controller_id": "c", "device_id": device_id,
+                     "inventory_revision": 1, "plan_hash": "h" * 64,
+                     "resolved": {"platform": "guestshell"},
+                     "preflight": {}, "resources": []})
+    receipts.transition(rid, "applying")
+    receipts.transition(rid, "active")
+
+
+def test_undeploy_with_superseded_receipt_aborts_cleanly(tmp_path):
+    ran = []
+    svc, receipts = _receipted_svc(tmp_path, lambda p, e, on: ran.append(1) or 0)
+    _active_receipt(receipts, "r1")
+    _active_receipt(receipts, "r2")   # supersedes r1 (the race winner)
+    job = _wait(svc, svc.start("d1", action="undeploy",
+                               resolved={"platform": "guestshell"},
+                               prepare=lambda: "r1"))
+    # the worker must FINISH (error), not die mid-thread leaving "running"
+    assert job["state"] == "error"
+    assert ran == []                  # stale-receipt teardown never ran
+    assert any("receipt" in line for line in job["lines"])
+
+
+def test_receipt_retired_during_run_does_not_wedge_the_job(tmp_path):
+    holder = {}
+
+    def run_fn(p, e, on):
+        # simulate a concurrent reconciliation retiring the in-flight receipt
+        # mid-script (applying -> unknown), so the worker's terminal
+        # transition (removed) becomes invalid
+        holder["receipts"].transition("r1", "unknown")
+        return 0
+
+    svc, receipts = _receipted_svc(tmp_path, run_fn)
+    holder["receipts"] = receipts
+    _active_receipt(receipts, "r1")
+    job = _wait(svc, svc.start("d1", action="undeploy",
+                               resolved={"platform": "guestshell"},
+                               prepare=lambda: "r1"))
+    # script succeeded -> job reports the script's truth; the receipt
+    # discrepancy is surfaced as a job line instead of killing the worker
+    assert job["state"] == "done"
+    assert any("receipt" in line for line in job["lines"])

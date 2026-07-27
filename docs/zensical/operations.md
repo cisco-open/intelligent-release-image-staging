@@ -36,11 +36,22 @@ outside that PVC. Both are required for recovery.
 
 ## Scaling notes
 
-Private BitTorrent reduces server load by letting devices exchange pieces after the seeder introduces the content. The server remains important for tracker announces, catalog policy, initial seeding, and telemetry. Watch the seeder data port, tracker health, and device storage pressure during large fleet waves.
+Private BitTorrent reduces server load by letting devices exchange pieces after the seeder introduces the content. The server remains important for tracker announces, catalog policy, initial seeding, and telemetry. Watch the seeder data port, tracker health, and device storage pressure during large network waves.
+
+On C9k IOx devices the final agent-to-IOS transfer uses the bind-mounted SSD share and runs at disk speed. On IE-3x00 (or a C9k that fell back to the scp push) that transfer is capped by the platform's default control-plane policing — roughly 1.4 MB/s on Catalyst 9300; see [Transfer throughput and CoPP](iox.md#transfer-throughput-and-copp) for measurements and the operator-side mitigation.
 
 ## Cleanup
 
 Use `device/device-uninstall.sh` or the IOx uninstall path for device cleanup. Cleanup removes IRIS-owned EEM applets, Guest Shell or IOx agent wiring, trustpoint binding, and staged agent artifacts. It still does not reload the device.
+
+Undeploy is driven by the device's applied **receipt**, not its editable
+inventory row, so a later inventory edit cannot retarget cleanup. An
+**inband** device's teardown removes only the app footprint and preserves the
+operator-owned VLAN/SVI/routes/VRF. A device deployed before receipts existed
+has no active receipt and must be **adopted** (an explicit, audited, no-change
+recording of ownership) before it can be undeployed; a missing, drifted, or
+uncertain receipt stops cleanup in `needs-reconcile` rather than guessing. See
+[Management Type and VLAN Ownership](network-attachment.md).
 
 ## Recovery checklist
 

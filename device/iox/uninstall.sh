@@ -12,7 +12,9 @@
 #   - remove any IRIS-COPYROOT / IRIS-AGENT EEM applet the agent created at
 #     runtime for its copy /verify (no-op if absent — IOx has no 60s timer)
 #   - remove crypto pki trustpoint IRIS + ip http client secure-trustpoint IRIS
-#   - delete the staged app package (<pkg-fs>iris-arm64.tar)
+#   - delete the staged app package (<pkg-fs>iris-arm64.tar) and, on C9k share
+#     deployments, the IRIS iris/ subdir of the CAF share (transient transfer
+#     copies; the share root itself is operator space and never touched)
 # Deliberately LEFT IN PLACE (the installer re-applies the first three
 # idempotently; the last two are generic + a delivered artifact):
 #   iox, file prompt quiet, the AppGigabitEthernet trunk, ip scp server enable,
@@ -30,9 +32,14 @@ DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
 # VLAN_IN preserves whether a VLAN was actually supplied; the 666 default is
 # ONLY for --dry-run text. A real run re-requires a non-empty VLAN below, so we
 # never tear down the wrong SVI/VLAN and then falsely verify clean.
-VLAN_IN="${VLAN:-}"
-VLAN="${VLAN:-666}"
+NETWORK_ATTACHMENT="${NETWORK_ATTACHMENT:-routed}"
+VLAN_IN="${VLAN:-${INBAND_VLAN:-}}"
+VLAN="${VLAN_IN:-666}"
 PKG="${PKG:-iris-arm64.tar}"; PKG_FS="${PKG_FS:-flash:}"
+# C9k share-mount transfer: when set, [3/4] also deletes OUR iris/ subdir of
+# the shared CAF dir (transient image copies orphaned by a mid-transfer kill).
+# Never the share root — operator files there are not IRIS's to remove.
+SHARE_IOS_PATH="${SHARE_IOS_PATH:-}"
 APPID=iris
 
 config_cleanup() {
@@ -41,6 +48,20 @@ config_cleanup() {
 # copy-to-root applet and the on-demand low-space reclaim applets, which the
 # agent never self-removes. IRIS-AGENT won't exist on IOx (no 60s timer) but
 # the no-op is harmless. All no-ops if absent.
+#
+# Inband removes ONLY the app footprint: it preserves the operator-owned VLAN/
+# SVI and the shared PKI trustpoint / HTTP-client settings (a receipt cannot
+# prove those globals remain uniquely IRIS-owned).
+if [ "$NETWORK_ATTACHMENT" = "inband" ]; then
+cat <<EOF
+no app-hosting appid $APPID
+no event manager applet IRIS-AGENT
+no event manager applet IRIS-COPYROOT
+no event manager applet IRIS-RECLAIM
+no event manager applet IRIS-RECLAIM-BUNDLE
+EOF
+return
+fi
 cat <<EOF
 no app-hosting appid $APPID
 no event manager applet IRIS-AGENT
@@ -62,6 +83,12 @@ if [ "$DRY" -eq 1 ]; then
   echo "===== [2/4] remove config footprint (appid, VLAN$VLAN, applets, trustpoint) ====="
   config_cleanup
   echo "===== [3/4] delete ${PKG_FS}${PKG} ====="
+  if [ -n "$SHARE_IOS_PATH" ]; then
+    echo "delete /force $SHARE_IOS_PATH/iris-staged.bin"
+    echo "delete /force $SHARE_IOS_PATH/iris-staged.bin.part"
+    echo "delete /force $SHARE_IOS_PATH/iris-probe.txt"
+    echo "delete /force /recursive $SHARE_IOS_PATH/iris"
+  fi
   echo "===== [4/4] verify no '$APPID' app / config footprint remains ====="
    echo "===== PERSIST: copy running-config startup-config (after successful cleanup) ====="
    echo "===== LEFT IN PLACE: iox, file prompt quiet, AppGig trunk, ip scp server, sdflash image ====="
@@ -91,17 +118,34 @@ done
 st="$(app_state)"
 [ -z "$st" ] || echo "  WARN: '$APPID' still shows state '$st' after uninstall"
 
-echo "[2/4] remove config footprint (appid, Vlan$VLAN, EEM applets, PKI trustpoint)"
+if [ "$NETWORK_ATTACHMENT" = "inband" ]; then
+  echo "[2/4] remove inband app footprint (appid, EEM applets; existing network preserved)"
+else
+  echo "[2/4] remove config footprint (appid, Vlan$VLAN, EEM applets, PKI trustpoint)"
+fi
 { echo "configure terminal"; config_cleanup; echo "end"; } | RUN >/dev/null
 
 echo "[3/4] delete ${PKG_FS}${PKG} (the staged IOx app package)"
 printf 'delete /force %s%s\n' "$PKG_FS" "$PKG" | RUN >/dev/null 2>&1 || true
+if [ -n "$SHARE_IOS_PATH" ]; then
+  echo "  also removing the IRIS-prefixed transfer files from the share"
+  # our transient staging files at the share ROOT (name-prefix isolation),
+  # plus the legacy iris/ subdir from earlier builds. Never the share itself.
+  printf 'delete /force %s/iris-staged.bin\ndelete /force %s/iris-staged.bin.part\ndelete /force %s/iris-probe.txt\ndelete /force /recursive %s/iris\n\n' \
+    "$SHARE_IOS_PATH" "$SHARE_IOS_PATH" "$SHARE_IOS_PATH" "$SHARE_IOS_PATH" | RUN >/dev/null 2>&1 || true
+fi
 
 echo "[4/4] verify no '$APPID' app and no config footprint remains"
-out="$(printf 'terminal width 512\nshow app-hosting list\nshow running-config | include app-hosting appid %s|applet IRIS-|interface Vlan%s|crypto pki trustpoint IRIS\n' \
-        "$APPID" "$VLAN" | RUN | grep -v "#" || true)"
-left="$(printf '%s\n' "$out" | grep -E \
-  "^$APPID |^app-hosting appid $APPID|^event manager applet IRIS-|^interface Vlan$VLAN|^crypto pki trustpoint IRIS *$" || true)"
+if [ "$NETWORK_ATTACHMENT" = "inband" ]; then
+  inc="app-hosting appid $APPID|applet IRIS-"
+  artifact_re="^$APPID |^app-hosting appid $APPID|^event manager applet IRIS-"
+else
+  inc="app-hosting appid $APPID|applet IRIS-|interface Vlan$VLAN|crypto pki trustpoint IRIS"
+  artifact_re="^$APPID |^app-hosting appid $APPID|^event manager applet IRIS-|^interface Vlan$VLAN|^crypto pki trustpoint IRIS *\$"
+fi
+out="$(printf 'terminal width 512\nshow app-hosting list\nshow running-config | include %s\n' \
+        "$inc" | RUN | grep -v "#" || true)"
+left="$(printf '%s\n' "$out" | grep -E "$artifact_re" || true)"
 if [ -n "$left" ]; then
   echo "ERROR: artifacts still present after undeploy:" >&2
   printf '%s\n' "$left" >&2

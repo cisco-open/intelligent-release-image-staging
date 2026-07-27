@@ -28,12 +28,21 @@
 #     Required for a real run; optional for --dry-run (the block is rendered either way).
 set -euo pipefail
 
-: "${DEVICE_IP:?set DEVICE_IP}"; : "${VLAN:?set VLAN}"
-: "${SVI_IP:?set SVI_IP}"; : "${SVI_MASK:?set SVI_MASK}"; : "${GUEST_IP:?set GUEST_IP}"
+: "${DEVICE_IP:?set DEVICE_IP}"
 : "${CATALOG_URL:?set CATALOG_URL}"; : "${CATALOG_TOKEN:?set CATALOG_TOKEN}"
 : "${DEVICE_ID:?set DEVICE_ID}"; : "${STAGE_HOST:?set STAGE_HOST}"
+NETWORK_ATTACHMENT="${NETWORK_ATTACHMENT:-routed}"
+case "$NETWORK_ATTACHMENT" in
+  routed)
+    : "${VLAN:?set VLAN}"; : "${SVI_IP:?set SVI_IP}"; : "${SVI_MASK:?set SVI_MASK}"; : "${GUEST_IP:?set GUEST_IP}"
+    GW_IP="${GW_IP:-$SVI_IP}" ;;
+  inband)
+    : "${INBAND_VLAN:?set INBAND_VLAN}"; : "${APP_IP:?set APP_IP}"; : "${APP_MASK:?set APP_MASK}"; : "${APP_GATEWAY:?set APP_GATEWAY}"
+    VLAN="$INBAND_VLAN"; GUEST_IP="$APP_IP"; SVI_MASK="$APP_MASK"; GW_IP="$APP_GATEWAY" ;;
+  *) echo "ERROR: NETWORK_ATTACHMENT must be routed or inband" >&2; exit 1 ;;
+esac
 RPC_SECRET=""   # NOT baked: the agent fetches it on its first token-refresh
-GW_IP="${GW_IP:-$SVI_IP}"; CPU="${CPU:-1110}"; MEM="${MEM:-512}"; PERSIST="${PERSIST:-256}"
+CPU="${CPU:-1110}"; MEM="${MEM:-512}"; PERSIST="${PERSIST:-256}"
 HOST_USER="${HOST_USER:-}"; HOST_PASS="${HOST_PASS:-}"   # required only when STAGE_HOST is REMOTE (enforced at the ssh path below)
 STAGE="${STAGE:-/flash/guest-share/iris}"
 IRIS_CRT_FILE="${IRIS_CRT_FILE:-}"   # local path to the bare crt.pem (trustpoint + curl --cacert)
@@ -73,6 +82,45 @@ IOS_STAGE="${IOS_FS}${STAGE#/flash}"
 # NOTE: IRIS-COPYROOT is NOT installed here — the agent templates+fires it at runtime
 # (event syslog/$_arg1 proved unreliable on 17.18; the agent's cli.configure does it).
 ios_config() {
+if [ "$NETWORK_ATTACHMENT" = "inband" ]; then
+# Inband keeps the operator's network intact: no vlan/SVI/route/VRF/IS-IS. The
+# ONE allowed touch is the AppGig trunk, and only ADDITIVELY — `allowed vlan add`
+# never replaces the allowed list (the bare form would), and uninstall never
+# removes it (the VLAN is operator-owned; other apps may ride the same trunk).
+# Without it the app's traffic has no L2 path to the catalog.
+cat <<EOF
+iox
+!
+interface $APP_INTF
+ switchport mode trunk
+ switchport trunk allowed vlan add $VLAN
+!
+app-hosting appid guestshell
+ app-vnic AppGigabitEthernet trunk
+  vlan $VLAN guest-interface 0
+   guest-ipaddress $GUEST_IP netmask $SVI_MASK
+ app-default-gateway $GW_IP guest-interface 0
+ app-resource profile custom
+  cpu $CPU
+  memory $MEM
+  persist-disk $PERSIST
+!
+file prompt quiet
+!
+logging discriminator IRISQ mnemonics drops IOX_INST_WARN
+logging buffered discriminator IRISQ
+logging console discriminator IRISQ
+logging monitor discriminator IRISQ
+!
+event manager applet IRIS-AGENT authorization bypass
+ event timer watchdog time 60 maxrun 900
+ action 100 cli command "enable"
+ action 200 cli command "guestshell run bash /flash/guest-share/bootstrap.sh"
+!
+end
+EOF
+return
+fi
 cat <<EOF
 iox
 !
@@ -128,6 +176,7 @@ rpc_secret = $RPC_SECRET
 catalog_ca = $CATALOG_CA
 telemetry = ${TELEMETRY:-on}
 token_expires_at = 0
+agent_version = $(cat "$HERE/../VERSION" 2>/dev/null || echo unknown)
 EOF
 }
 
@@ -186,10 +235,10 @@ ssh_host() {                       # run a command on STAGE_HOST
     -o LogLevel=ERROR "$HOST_USER@$STAGE_HOST" "$@"
 }
 
-echo "[1/6] flash pre-check on $DEVICE_IP"
+echo "[1/7] flash pre-check on $DEVICE_IP"
 printf 'dir flash: | include bytes free\n' | "$HERE/../lab/device-run.sh" "$DEVICE_IP" | grep -i 'bytes free' || true
 
-echo "[2/6] stage per-device agent config into artifacts/ (served on :8000 by the container)"
+echo "[2/7] stage per-device agent config into artifacts/ (served on :8000 by the container)"
 CONF="iris-agent-$DEVICE_ID.conf"
 ART="${IRIS_ARTIFACTS_DIR:-$(cd "$HERE/.." && pwd)/artifacts}"
 # the agent's pinned CA = the SAME bare crt.pem; served as the fifth artifact and
@@ -214,7 +263,7 @@ else
   ssh_host "cat > ~/iris/artifacts/iris-catalog.pem" < "$IRIS_CRT_FILE"
 fi
 
-echo "[3/6] apply IOS config (IOx, VLAN $VLAN, Vlan$VLAN SVI, app-hosting, file prompt, EEM timers)"
+echo "[3/7] apply IOS config ($NETWORK_ATTACHMENT app-hosting, file prompt, EEM timers)"
 { echo "configure terminal"; ios_config; } | "$HERE/../lab/device-run.sh" "$DEVICE_IP" >/dev/null
 
 # HARDWARE-LEARNED (C9300, 2026-07-04): <fs>guest-share must exist BEFORE
@@ -225,10 +274,10 @@ echo "[3/6] apply IOS config (IOx, VLAN $VLAN, Vlan$VLAN SVI, app-hosting, file 
 # Root-owned is fine for the ROOT (IOS does the copies, the guest only reads
 # and creates its own subdir). Idempotent: "already exists" is swallowed. The
 # blank line answers the "Create directory" prompt on boxes that don't have
-# `file prompt quiet` applied yet ([3/6] has, but belt-and-braces).
+# `file prompt quiet` applied yet ([3/7] has, but belt-and-braces).
 printf 'mkdir %sguest-share\n\n' "$IOS_FS" | "$HERE/../lab/device-run.sh" "$DEVICE_IP" >/dev/null 2>&1 || true
 
-echo "[4/6] guestshell enable (IOx cold start can take several minutes on a fresh device)"
+echo "[4/7] guestshell enable (IOx cold start can take several minutes on a fresh device)"
 for i in $(seq 1 30); do
   state="$(printf 'show app-hosting list\n' | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>/dev/null | grep -i guestshell || true)"
   case "$state" in
@@ -245,7 +294,7 @@ for i in $(seq 1 30); do
   sleep 15
 done
 
-echo "[5/6] push PKI trustpoint over SSH (FIRST), then drop files over verified https"
+echo "[5/7] push PKI trustpoint over SSH (FIRST), then drop files over verified https"
 # Trust-anchor distribution: paste the bare server cert into trustpoint IRIS and
 # select it as the HTTP client's secure trustpoint, over the EXISTING SSH session,
 # BEFORE any `copy https:`. Idempotent (no-then-re-add). Non-circular by construction

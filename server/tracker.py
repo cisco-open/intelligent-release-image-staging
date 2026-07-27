@@ -13,7 +13,7 @@ import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, unquote_to_bytes, urlparse
+from urllib.parse import unquote_to_bytes, urlparse
 
 import auth
 import bencode
@@ -176,13 +176,19 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None):
             self._send(200, build_announce_response(peers, compact=a["compact"]))
 
         def _handle_scrape(self, query):
-            hashes = parse_qs(query).get("info_hash", [])
-            if not hashes:
+            # Parse the RAW query like parse_announce: a real info_hash is 20
+            # raw SHA-1 bytes and not valid UTF-8, so parse_qs (which decodes
+            # escapes as UTF-8) mangled it — crash on high bytes, silent
+            # corruption on accidentally-valid multibyte sequences.
+            quoted = None
+            for kv in query.split("&"):
+                if kv.startswith("info_hash="):
+                    quoted = kv.split("=", 1)[1]
+                    break
+            if not quoted:
                 self._send(400, build_failure("scrape requires info_hash"))
                 return
-            info_hex = binascii.hexlify(
-                unquote_to_bytes(hashes[0].encode("latin1") if isinstance(
-                    hashes[0], str) else hashes[0])).decode()
+            info_hex = binascii.hexlify(unquote_to_bytes(quoted)).decode()
             stats = registry.scrape(info_hex)
             self._send(200, build_scrape_response(info_hex, stats))
 

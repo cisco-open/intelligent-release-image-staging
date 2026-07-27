@@ -8,6 +8,12 @@ SPDX-License-Identifier: Apache-2.0
 
 Device agents are the only part of IRIS that runs on IOS-XE devices. Their job is intentionally narrow: discover the approved image, download it, verify it, copy it to the platform storage root, and report status.
 
+A device attaches to the network in one of two ways — a dedicated IRIS-managed
+VLAN/SVI (**routed**) or an existing operator-owned management VLAN (**inband**,
+Guest Shell static IPv4). The attachment choice governs what the installer and
+uninstaller may configure and remove; see
+[Management Type and VLAN Ownership](network-attachment.md).
+
 After a successful Guest Shell or IOx onboarding or cleanup lifecycle, IRIS runs
 `copy running-config startup-config`. This persists the IRIS app-hosting,
 networking, trustpoint, and cleanup state across a reload. Failed or partial
@@ -61,4 +67,5 @@ If verification fails, the agent reports the failure and leaves installation dec
 | Platform path | Storage target | Control path |
 | --- | --- | --- |
 | Catalyst 9300 Guest Shell | `flash:` | EEM timer and Guest Shell process. |
+| Catalyst 9300 IOx | `flash:` (via the SSD share) | IOx Docker app and SSH-to-self IOS commands. |
 | IE-3x00/IE-3400 IOx | `sdflash:` | IOx Docker app and SSH-to-self IOS commands. |

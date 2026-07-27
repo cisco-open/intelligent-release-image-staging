@@ -1,0 +1,34 @@
+[Unit]
+Description=intelligent-release-image-staging (IRIS) — HTTPS web console
+After=network-online.target iris-catalog.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=iris
+Group=iris
+Environment=IRIS_CONFIG=/etc/iris
+Environment=IRIS_RUN=/run/iris
+Environment=IRIS_STATE=/var/lib/iris
+Environment=IRIS_SECRETS=/run/iris/secrets.json
+Environment=IRIS_CERT=/run/iris/tls/cert.pem
+Environment=IRIS_ARTIFACTS_DIR=/srv/artifacts
+Environment=IRIS_ROOT=/opt/iris
+# The console re-encrypts the secrets store on write (IRIS_AGE_RECIPIENTS) and
+# takes operator overrides (console port/URL) — mirrors compose env.
+EnvironmentFile=-/etc/iris/iris.env
+RuntimeDirectory=iris
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+ExecStartPre=/opt/iris/server/iris-secretfs
+ExecStart=/usr/bin/python3 /opt/iris/server/gui_server.py
+Restart=on-failure
+RestartSec=5
+ProtectSystem=strict
+# /etc/iris: the console re-encrypts the rotated secrets store (*.age) here.
+ReadWritePaths=/var/lib/iris /etc/iris /srv/artifacts /run/iris
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

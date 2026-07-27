@@ -34,11 +34,9 @@ for f in get-aria2c.sh make-torrent.sh make-agent-bundle.sh \
   cp "$REPO/tools/$f" "$OUT/tools/"
 done
 
-# lab helpers (the installer drives devices through these)
+# the one lab helper the installers drive devices through
 mkdir -p "$OUT/lab"
-for f in device-run.sh gsrun.sh device-copy.sh; do
-  cp "$REPO/lab/$f" "$OUT/lab/"
-done
+cp "$REPO/lab/device-run.sh" "$OUT/lab/"
 
 # optional Kubernetes seed-server deployment
 mkdir -p "$OUT/kubernetes"

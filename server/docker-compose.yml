@@ -36,9 +36,10 @@ services:
     environment:
       # the docker host's IP, used in the TLS cert SAN — REQUIRED, no default
       IRIS_HOST_IP: "${IRIS_HOST_IP:?Set IRIS_HOST_IP to this server's IP, e.g. IRIS_HOST_IP=10.0.0.5 docker compose up}"
-      # External observability is OPT-IN. The swarm map on :9101/swarmmap is
-      # always served from inside the container; the Prometheus /metrics
-      # endpoint + OTLP/Loki push only turn on when IRIS_OBSERVABILITY=1.
+      # External observability is OPT-IN. The swarm map lives in the Console
+      # (:8080 -> Swarm tab; the old :9101/swarmmap now serves a pointer page);
+      # the Prometheus /metrics endpoint + OTLP/Loki push only turn on when
+      # IRIS_OBSERVABILITY=1.
       # Use this if you already run a Grafana/Prometheus/Loki/OTel stack;
       # leave unset otherwise.
       IRIS_OBSERVABILITY: "${IRIS_OBSERVABILITY:-}"
@@ -50,6 +51,9 @@ services:
       # shared host publishing the console on a non-default port). Unset ->
       # the moved_page() default of https://<IRIS_HOST_IP>:8080/.
       IRIS_CONSOLE_URL: "${IRIS_CONSOLE_URL:-}"
+      # The published console host port, so the Settings page can show the real
+      # one (the container always listens on 8080 internally).
+      IRIS_GUI_PUBLISH: "${IRIS_GUI_PUBLISH:-}"
       # At-rest encryption (age). The master identity is mounted as a Docker
       # secret (read-only, RAM-backed); plaintext is decrypted to a tmpfs at
       # /run/iris and never touches the persistent iris-config volume.

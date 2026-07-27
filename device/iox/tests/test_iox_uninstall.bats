@@ -82,3 +82,31 @@ setup() {
   VLAN='' run bash "$UNINSTALL"
   [ "$status" -ne 0 ] && [[ "$output" == *"VLAN not set"* ]]
 }
+
+@test "inband dry-run removes only the app footprint" {
+  NETWORK_ATTACHMENT=inband INBAND_VLAN=120 run bash "$UNINSTALL" --dry-run
+  [[ "$output" == *"no app-hosting appid iris"* ]] && \
+  [[ "$output" == *"no event manager applet IRIS-COPYROOT"* ]]
+}
+
+@test "inband dry-run never removes the existing VLAN/SVI/trustpoint" {
+  NETWORK_ATTACHMENT=inband INBAND_VLAN=120 run bash "$UNINSTALL" --dry-run
+  [[ "$output" != *"no vlan "* ]] && \
+  [[ "$output" != *"no interface Vlan"* ]] && \
+  [[ "$output" != *"no crypto pki trustpoint"* ]] && \
+  [[ "$output" != *"no ip http client"* ]]
+}
+
+@test "dry-run with SHARE_IOS_PATH removes only iris-prefixed share files" {
+  SHARE_IOS_PATH=usbflash1:iox_host_data_share run bash "$UNINSTALL" --dry-run
+  [[ "$output" == *"delete /force usbflash1:iox_host_data_share/iris-staged.bin"* ]] && \
+  [[ "$output" == *"delete /force usbflash1:iox_host_data_share/iris-probe.txt"* ]] && \
+  [[ "$output" == *"delete /force /recursive usbflash1:iox_host_data_share/iris"* ]] && \
+  [[ "$output" != *"delete /force /recursive usbflash1:iox_host_data_share
+"* ]]
+}
+
+@test "dry-run without SHARE_IOS_PATH never touches the CAF share" {
+  run bash "$UNINSTALL" --dry-run
+  [[ "$output" != *"iox_host_data_share"* ]]
+}
