@@ -84,15 +84,15 @@ with telemetry when observability is enabled.
   records whether `ip nat outside` already existed; a pre-existing marking is
   preserved and undeploy removes that marking only when IRIS created it.
 
-Undeploy of a **router-nat** device flushes NAT translations
-(`clear ip nat translation *`) before it removes the NAT configuration. IOS
-refuses `no ip nat inside source list ... overload` while translations still
-reference that mapping, while the removal of `IRIS-NAT-<vpg>` on the following
-line succeeds regardless — so without the flush the overload rule survives
-against a deleted ACL and the teardown verify rejects the dangling reference.
-The flush is safe because the app is already destroyed by that point, so every
-remaining translation is stale. Routed teardown never flushes: it configures no
-NAT.
+Undeploy of a **router-nat** device clears only translations whose inside-local
+address matches the app IP recorded in the receipt, using targeted
+`clear ip nat translation inside <global> <local> forced` commands before it
+removes the NAT configuration. IOS refuses
+`no ip nat inside source list ... overload` while translations still reference
+that mapping. Teardown therefore verifies that the overload rule is gone before
+removing `IRIS-NAT-<vpg>`; on failure it preserves the ACL for safe
+reconciliation. It never flushes device-wide NAT state. Routed teardown does
+not clear translations because it configures no NAT.
 
 Both modes stage only to `bootflash:`. Allow roughly **2× the image size + 200
 MB** of free bootflash (about 4.2 GB for a 2 GB image); the agent refuses a

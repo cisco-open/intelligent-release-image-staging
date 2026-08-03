@@ -7,6 +7,7 @@ import time
 from types import SimpleNamespace
 
 import catalog as catalog_mod
+import deployment_receipts
 import gui_onboard
 import pytest
 
@@ -502,16 +503,28 @@ def test_router_execution_preflight_failure_never_mints_or_runs(tmp_path):
         "app_mask": "255.255.255.252", "app_gateway": "10.8.0.1",
         "credential_profile_id": "lab"}})
     minted, ran = [], []
+    receipts = deployment_receipts.ReceiptStore(str(tmp_path / "state"))
+    receipt = receipts.create({
+        "controller_id": "controller-1", "device_id": "r1",
+        "inventory_revision": 1, "plan_hash": "queued-plan",
+        "resolved": {"platform": "router", "attachment": "router-routed"},
+        "preflight": {"status": "passed"},
+        "resources": [{"kind": "virtualportgroup", "name": "10",
+                       "ownership": "iris-created"}],
+    })
     svc = gui_onboard.OnboardService(
         fleet, _iox_creds(), host_ip="10.9.9.9",
         mint_fn=lambda d: minted.append(d) or "TOK",
         run_fn=lambda p, e, on: ran.append(1) or 0,
+        receipts=receipts,
         preflight_fn=lambda *args: (_ for _ in ()).throw(
             ValueError("VirtualPortGroup10 appeared while queued")))
-    job = _wait(svc, svc.start("r1"))
+    job = _wait(svc, svc.start("r1", prepare=lambda: receipt["receipt_id"]))
     assert job["state"] == "error"
     assert minted == [] and ran == []
     assert any("preflight failed" in line for line in job["lines"])
+    assert receipts.get(receipt["receipt_id"])["state"] == "removed"
+    assert receipts.recoverable_for_device("r1") is None
 
 
 def _router_preflight_stub(monkeypatch, running="", apps="", guest_share="%Error opening",

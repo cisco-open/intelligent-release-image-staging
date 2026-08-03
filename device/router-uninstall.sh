@@ -83,8 +83,6 @@ no app-hosting appid guestshell
 EOF
 if [ "$NETWORK_ATTACHMENT" = "router-nat" ]; then
 cat <<EOF
-no ip nat inside source static tcp $APP_IP $BT_LISTEN_PORT interface $NAT_INTERFACE $BT_LISTEN_PORT
-no ip nat inside source list IRIS-NAT-$VPG_NUMBER interface $NAT_INTERFACE overload
 no ip access-list standard IRIS-NAT-$VPG_NUMBER
 EOF
   if [ "$NAT_OUTSIDE_OWNED" = "1" ]; then
@@ -111,7 +109,13 @@ if [ "$DRY" -eq 1 ]; then
   echo "===== [1/5] EEM applets removed FIRST ====="; config_teardown
   echo "===== [2/5] guestshell disable  [3/5] guestshell destroy ====="
   echo "===== [4/5] receipt-owned config removal ====="
-  [ "$NETWORK_ATTACHMENT" = "router-nat" ] && echo "clear ip nat translation *"
+  if [ "$NETWORK_ATTACHMENT" = "router-nat" ]; then
+    echo "no ip nat inside source static tcp $APP_IP $BT_LISTEN_PORT interface $NAT_INTERFACE $BT_LISTEN_PORT"
+    echo "show ip nat translations | include $APP_IP"
+    echo "clear ip nat translation inside <IRIS-inside-global> $APP_IP forced"
+    echo "no ip nat inside source list IRIS-NAT-$VPG_NUMBER interface $NAT_INTERFACE overload"
+    echo "verify overload mapping is absent before removing IRIS-NAT-$VPG_NUMBER"
+  fi
   config_cleanup
   echo "===== [5/5] remove only IRIS files under $IOS_ROOT (preserve directory) ====="
   echo "delete /force /recursive $IRIS_DIR"
@@ -147,13 +151,52 @@ done
 
 echo "[4/5] remove receipt-owned VPG and NAT footprint"
 # IOS refuses to unconfigure a dynamic NAT mapping while translations still
-# reference it. config_cleanup drops IRIS-NAT-$VPG_NUMBER on the line after the
-# overload no-form, so a refusal there would strip the ACL out from under a
-# surviving rule and leave a dangling reference that the [5/5] verify then
-# rejects. The app is destroyed by [3/5], so any remaining translations are
-# stale and safe to flush.
+# reference it. Remove the static rule, clear only translations whose inside
+# local address belongs to this receipt, then remove and verify the overload
+# rule before deleting its ACL. A failure leaves the ACL and unrelated device
+# translations intact for safe operator reconciliation.
 if [ "$NETWORK_ATTACHMENT" = "router-nat" ]; then
-  printf 'clear ip nat translation *\n' | "$RUN" "$DEVICE_IP" >/dev/null 2>&1 || true
+  {
+    echo "configure terminal"
+    echo "no ip nat inside source static tcp $APP_IP $BT_LISTEN_PORT interface $NAT_INTERFACE $BT_LISTEN_PORT"
+    echo "end"
+  } | "$RUN" "$DEVICE_IP" >/dev/null 2>&1 || true
+
+  TRANSLATIONS="$(printf 'show ip nat translations | include %s\n' "$APP_IP" \
+    | "$RUN" "$DEVICE_IP" 2>/dev/null || true)"
+  GLOBALS="$(python3 -c 'import re, sys
+local = sys.argv[1]
+seen = set()
+for line in sys.stdin:
+    fields = line.split()
+    if len(fields) < 3:
+        continue
+    match_global = re.match(r"^(\d+(?:\.\d+){3})(?::\d+)?$", fields[1])
+    match_local = re.match(r"^(\d+(?:\.\d+){3})(?::\d+)?$", fields[2])
+    if match_global and match_local and match_local.group(1) == local:
+        address = match_global.group(1)
+        if address not in seen:
+            print(address)
+            seen.add(address)' "$APP_IP" <<< "$TRANSLATIONS")"
+  while IFS= read -r global; do
+    [ -z "$global" ] && continue
+    printf 'clear ip nat translation inside %s %s forced\n' "$global" "$APP_IP" \
+      | "$RUN" "$DEVICE_IP" >/dev/null 2>&1 || true
+  done <<< "$GLOBALS"
+
+  {
+    echo "configure terminal"
+    echo "no ip nat inside source list IRIS-NAT-$VPG_NUMBER interface $NAT_INTERFACE overload"
+    echo "end"
+  } | "$RUN" "$DEVICE_IP" >/dev/null 2>&1 || true
+  NAT_RUNNING="$(printf 'terminal width 512\nshow running-config\n' \
+    | "$RUN" "$DEVICE_IP" | grep -v '#' || true)"
+  NAT_RULE="ip nat inside source list IRIS-NAT-$VPG_NUMBER interface $NAT_INTERFACE overload"
+  case "$NAT_RUNNING" in
+    *"$NAT_RULE"*)
+      echo "ERROR: IRIS NAT overload mapping is still active; preserving its ACL" >&2
+      exit 1 ;;
+  esac
 fi
 { echo "configure terminal"; config_cleanup; echo "end"; } | "$RUN" "$DEVICE_IP" >/dev/null
 

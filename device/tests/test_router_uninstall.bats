@@ -30,16 +30,21 @@ setup() {
   [[ "$output" == *"no ip access-list standard IRIS-NAT-10"* ]]
 }
 
-@test "NAT teardown flushes translations before unconfiguring the mapping" {
+@test "NAT teardown clears only receipt-owned translations before the mapping" {
   NETWORK_ATTACHMENT=router-nat NAT_INTERFACE=GigabitEthernet1 \
     run bash "$UNINSTALL" --dry-run
   [ "$status" -eq 0 ]
-  [[ "$output" == *"clear ip nat translation *"* ]]
-  # IOS refuses the overload no-form while translations reference the mapping,
-  # and the ACL no-form on the next line would then orphan the surviving rule.
-  clear_at="${output%%clear ip nat translation \**}"
+  [[ "$output" == *"clear ip nat translation inside <IRIS-inside-global> 10.8.0.2 forced"* ]]
+  [[ "$output" != *"clear ip nat translation *"* ]]
+  # IOS refuses the overload no-form while translations reference the mapping;
+  # targeted clearing must happen before the rule and its ACL are removed.
+  clear_at="${output%%clear ip nat translation inside*}"
   rule_at="${output%%no ip nat inside source list*}"
   [ "${#clear_at}" -lt "${#rule_at}" ]
+}
+
+@test "router teardown never contains a device-wide NAT clear" {
+  ! grep -qF 'clear ip nat translation *' "$UNINSTALL"
 }
 
 @test "routed teardown does not flush NAT translations" {

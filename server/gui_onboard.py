@@ -610,8 +610,14 @@ class OnboardService:
                         platform, script = self._resolve(
                             device_id, dev, env, action)
             except Exception as exc:
-                self._transition_or_note(job_id, j.get("receipt_id"),
-                                         "needs-reconcile")
+                # Nothing has reached the device yet. A planned onboarding
+                # receipt must not become teardown authority: another actor
+                # may own the resources that caused this pre-apply failure.
+                # An undeploy receipt already describes the live deployment,
+                # so leave it unchanged when teardown never started.
+                if action == "onboard":
+                    self._transition_or_note(job_id, j.get("receipt_id"),
+                                             "removed")
                 self._append(job_id, "ERROR: " + str(exc))
                 self._finish(job_id, "error", None)
                 return
@@ -631,7 +637,7 @@ class OnboardService:
                                  "-- build device/iox/build.sh%s and place it in "
                                  "artifacts/ (device untouched)" % (pkg, flag))
                     self._transition_or_note(job_id, j.get("receipt_id"),
-                                             "needs-reconcile")
+                                             "removed")
                     self._finish(job_id, "error", None)
                     return
             try:

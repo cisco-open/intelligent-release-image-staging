@@ -52,10 +52,13 @@ top-level `VERSION` file.
   down. Previously such a receipt was a dead end — the device was already
   configured so a re-onboard failed preflight, a router could not be adopted,
   and undeploy had no receipt to authorize it.
-- **Router NAT teardown** flushes NAT translations before removing the dynamic
-  mapping. IOS refuses the mapping's no-form while translations reference it,
-  while the ACL removal on the following line succeeds, leaving a dangling
-  reference that failed the teardown verify.
+- **Router NAT teardown** clears only translations owned by the receipt before
+  removing the dynamic mapping. IOS refuses the mapping's no-form while
+  translations reference it; teardown now verifies that removal before
+  deleting the ACL and never flushes unrelated device-wide NAT state.
+- **Pre-apply onboarding failures** retire their planned deployment receipt
+  instead of marking it recoverable, so a collision or missing artifact cannot
+  authorize teardown of resources that IRIS never created.
 - **Identical image roots are scanned once**, so a deployment that points the
   uploads volume and the import root at one directory (as the Kubernetes
   ConfigMap does) can still import.
