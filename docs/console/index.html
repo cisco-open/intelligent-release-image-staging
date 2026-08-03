@@ -1,0 +1,1508 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Intelligent Release and Image Staging documentation">
+      
+      
+        <meta name="author" content="Cisco Systems, Inc.">
+      
+      
+      
+        <link rel="prev" href="../iox/">
+      
+      
+        <link rel="next" href="../fleet-workflows/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.51">
+    
+    
+      
+        <title>Web Console - IRIS Documentation</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../assets/stylesheets/modern/main.62c9b9cc.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,500,500i,700,700i%7CJetBrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-label="Navigation"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#web-console" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="./.." title="IRIS Documentation" class="md-header__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            IRIS Documentation
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Web Console
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+    </div>
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="./.." title="IRIS Documentation" class="md-nav__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    IRIS Documentation
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="./.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Overview
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Get started
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Get started
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Getting Started
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../aiagent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  AI-Guided PoC
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  How it works
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  How it works
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Architecture
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Security Model
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../network-ports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Ports and Flows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Deploy the server
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Deploy the server
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../server/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Server
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../containers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Container Deployments
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kubernetes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Kubernetes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Onboard devices
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Onboard devices
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../device-agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Device Agents
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../network-attachment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Management Type and VLAN Ownership
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../iox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  IOx App
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operate
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Operate
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Web Console
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Web Console
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#first-run" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        First run
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#console-areas" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Console areas
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#importing-images-already-on-disk" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Importing images already on disk
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#management-type" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Management type
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#bulk-device-actions" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Bulk device actions
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#onboarding-from-the-console" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Onboarding from the console
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#when-to-use-the-cli" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        When to use the CLI
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fleet-workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Workflows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operations
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Observability
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference and development
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Reference and development
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Validation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../development/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Development
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#first-run" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        First run
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#console-areas" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Console areas
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#importing-images-already-on-disk" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Importing images already on disk
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#management-type" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Management type
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#bulk-device-actions" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Bulk device actions
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#onboarding-from-the-console" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Onboarding from the console
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#when-to-use-the-cli" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        When to use the CLI
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
+<h1 id="web-console">Web Console</h1>
+<p>The console is the preferred operator surface once the server is running. It does not replace the CLI; it wraps common workflows and makes network state visible.</p>
+<h2 id="first-run">First run</h2>
+<p>Open:</p>
+<div class="highlight"><pre><span></span><code>https://&lt;server-ip&gt;:8080/
+</code></pre></div>
+<p>The server uses a self-signed certificate by default. Create the initial admin in the browser or with:</p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>compose<span class="w"> </span>-f<span class="w"> </span>server/docker-compose.yml<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>iris<span class="w"> </span>iris-gui-admin<span class="w"> </span>admin
+</code></pre></div>
+<h2 id="console-areas">Console areas</h2>
+<table>
+<thead>
+<tr>
+<th>Area</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Images</td>
+<td>Shows published image metadata and staged network status, uploads new images, and imports images already on disk.</td>
+</tr>
+<tr>
+<td>Devices</td>
+<td>Lists known devices, their network <strong>attachment</strong>, platform details, current assignment, and recent reports.</td>
+</tr>
+<tr>
+<td>Assignments</td>
+<td>Maps each device to the image it should stage.</td>
+</tr>
+<tr>
+<td>Onboarding</td>
+<td>Starts and tracks install or undeploy jobs when stage-host credentials are configured.</td>
+</tr>
+<tr>
+<td>Swarm</td>
+<td>Shows peer progress and seeder/device participation.</td>
+</tr>
+<tr>
+<td>Monitoring</td>
+<td>Links to health, swarm, metrics, and recent telemetry.</td>
+</tr>
+<tr>
+<td>Settings</td>
+<td>Shows server configuration, version, and operational settings.</td>
+</tr>
+<tr>
+<td>Audit</td>
+<td>Records administrative and workflow actions.</td>
+</tr>
+</tbody>
+</table>
+<p>For IOx devices, the Devices status distinguishes <code>copying to &lt;filesystem&gt;</code> from
+the torrent download phase while the app transfers a completed image from its
+container storage into IOS-visible storage. A final-placement failure is shown
+as <code>placement failed</code> with a bounded diagnostic; inspect the device's
+<code>IRIS ROOTCOPY-FAIL</code> syslog entry for the full device-side detail.</p>
+<h2 id="importing-images-already-on-disk">Importing images already on disk</h2>
+<p>Besides the upload box, the Images screen has an <strong>Import from disk</strong> panel that
+lists image files present on the server but missing from the catalog — orphaned
+uploads left behind by a catalog reset, and files an operator placed under the
+read-only image root. Both image roots are scanned recursively: the read-write
+uploads volume (<code>IRIS_IMAGES_DIR</code>) and the read-only import root (<code>IMAGES_ROOT</code>,
+the <code>IRIS_IMAGE_ROOT</code> host tree bind mounted <code>:ro</code>). See
+<a href="../reference/#image-path-variables">Image path variables</a>.</p>
+<p>Importing publishes <strong>in place</strong>: the publish seeds from the file's own
+directory, so nothing is copied and the read-only root stays read-only, and the
+<code>.torrent</code> is written to the server's state directory rather than next to the
+image. The import runs as an ordinary publish job with the same progress
+reporting as an upload, and is recorded in Audit as <code>image_import</code> (also with
+<code>result=fail</code> when a request is rejected).</p>
+<p>A file is offered only when it is a <code>.bin</code>, passes the filename charset gate, is
+not a dotfile or a <code>.torrent</code>/<code>.upload</code> temporary, resolves inside its own root
+(so a symlink cannot reach outside it), is readable by the server, is not
+already published, and is not ambiguous. Everything else is listed greyed out
+with its reason. Two of the three reasons are actionable from this screen:</p>
+<ul>
+<li><code>ambiguous name in more than one location</code> — remove or rename the duplicate so
+  exactly one file claims the ID, then re-check the panel.</li>
+<li><code>not readable by the server</code> — fix ownership so uid 10001 can read the file and
+  traverse its directory, then re-check the panel. See
+  <a href="../server/#upgrading-from-a-root-runtime-deployment">Upgrading from a root-runtime deployment</a>.</li>
+</ul>
+<p><code>already published</code> needs nothing; the image is already in the catalog under its
+derived ID. For the exact definitions see
+<a href="../reference/#import-skip-reasons">Import skip reasons</a>.</p>
+<p>Ambiguity is refused rather than guessed. Reseeding prefers the catalog entry's
+recorded <code>source_dir</code> and falls back to a basename walk only for entries
+published before that field existed or whose directory has since gone away; the
+seeder runs with <code>bt-seed-unverified</code>, so a wrong directory would serve the
+wrong bytes under correct piece hashes.</p>
+<p>Because publishing records <code>source_dir</code>, <strong>Delete</strong> unlinks the file only when
+that directory resolves to the uploads volume: an image published in place from
+the read-only import root is removed from the catalog and left on disk. See
+<a href="../reference/#catalog-entry-fields">Catalog entry fields</a>.</p>
+<h2 id="management-type">Management type</h2>
+<p>The Add Device form has an explicit <strong>Management type</strong> choice, and the
+device table shows each device's attachment rather than a bare VLAN/SVI value:</p>
+<ul>
+<li><strong>Routed - IRIS-managed app network</strong> — IRIS creates a dedicated VLAN and SVI.
+  Onboarding is one-click and create-only.</li>
+<li><strong>Inband - existing management VLAN</strong> — the agent attaches to an existing,
+  operator-owned VLAN that IRIS never creates, changes, or removes.</li>
+<li><strong>Router routed - IRIS-managed VPG subnet</strong> — creates a VirtualPortGroup and
+  routed app subnet; the operator provides routes to IRIS and peers.</li>
+<li><strong>Router NAT - VPG behind NAT</strong> — adds overload NAT and static TCP PAT for
+  port 6881. The receipt preserves a pre-existing <code>ip nat outside</code> marking.</li>
+</ul>
+<p>Router choices show the VPG number and app addressing; Router NAT also requires
+the outside interface. Both target the Catalyst 8000 family and are validated on
+C8000v across onboarding, image staging, receipt-backed undeploy, Swarm Map, and
+Grafana telemetry.</p>
+<p>Each onboard records a durable <strong>receipt</strong> of what it applied, and <strong>Undeploy</strong>
+runs only from that receipt, so editing inventory after onboarding cannot
+retarget cleanup. A device deployed before receipts existed shows no active
+receipt; use the row's <strong>Adopt</strong> action (an explicit, audited, no-change
+recording of current ownership) before undeploying it. Router deployments cannot
+be adopted — re-onboard instead. For preflight and receipt ownership see
+<a href="../network-attachment/#deployment-plans-and-applied-receipts">Deployment plans and applied receipts</a>.</p>
+<h2 id="bulk-device-actions">Bulk device actions</h2>
+<p>The Devices toolbar acts on every checked row, so a CSV import can be finished
+without touching each device:</p>
+<table>
+<thead>
+<tr>
+<th>Control</th>
+<th>What it does</th>
+<th>Confirms first</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Onboard selected</td>
+<td>Queues an onboard job per device and tracks them in the batch panel; the server runs a bounded number at a time and queues the rest.</td>
+<td>No</td>
+</tr>
+<tr>
+<td>Undeploy selected</td>
+<td>Runs receipt-driven cleanup on each device.</td>
+<td>Yes — one dialog for the whole selection, naming what teardown removes and preserves</td>
+</tr>
+<tr>
+<td>Adopt selected</td>
+<td>Records the ownership receipt for each device.</td>
+<td>Yes — a dialog listing the selected devices</td>
+</tr>
+<tr>
+<td>Delete selected</td>
+<td>Removes the inventory rows only.</td>
+<td>Yes — the same confirmation text the per-row delete uses, listing the devices</td>
+</tr>
+<tr>
+<td><em>credential for selected</em> + <strong>Apply</strong></td>
+<td>Assigns one credential profile to every checked device. Leaving the picker on either blank entry clears the credential instead.</td>
+<td>No</td>
+</tr>
+</tbody>
+</table>
+<p>The bulk <strong>Adopt</strong> dialog is not the per-row one: it is shorter and names the
+whole selection. Both warn that you should only adopt a device whose inventory
+row matches what is really on the box, both point at re-onboarding as the safer
+and idempotent alternative, and both send the acknowledgement the server requires
+— an adopt that omits it is refused. Only the per-row dialog explains that adopt
+makes no change to the device, and only the bulk dialog states up front that
+routers cannot be adopted.</p>
+<p>Bulk operations report per-device refusals rather than failing the whole batch:
+the status line shows how many devices succeeded and names the ones that did
+not, with the server's reason. Adopting a router, for example, comes back as a
+<code>409</code> for that device while the rest of the batch proceeds.</p>
+<p>Creating or deleting a credential profile re-renders the device rows
+immediately, so a device imported before any profile existed becomes assignable
+at once instead of after the next ten-second poll.</p>
+<div class="admonition warning">
+<p class="admonition-title">Deleting inventory is not an undeploy</p>
+<p>Delete removes the Console record and nothing else. An onboarded device
+keeps its agent and its staged image, with no inventory entry left to manage
+it. Undeploy first if that is what you meant. The deletion cannot be undone.</p>
+</div>
+<h2 id="onboarding-from-the-console">Onboarding from the console</h2>
+<p>GUI-driven onboarding uses stage-host credentials to run the same install logic that the CLI generates. The sensitive values belong in the console or the server secret store, not in Git. Generated per-device staging files are temporary and swept after their configured age.</p>
+<h2 id="when-to-use-the-cli">When to use the CLI</h2>
+<p>Use the CLI when you want a reproducible batch operation from reviewed CSV files. Use the console when you need visibility, one-off onboarding, or fast assignment changes during a lab.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 Cisco Systems, Inc.
+    </div>
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate":null,"base":"..","features":[],"search":"../assets/javascripts/workers/search.b6b7e04f.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7f30b55.min.js"></script>
+      
+        <script src="../javascripts/mermaid.mjs" type="module"></script>
+      
+    
+  </body>
+</html>

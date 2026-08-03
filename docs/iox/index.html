@@ -1,0 +1,1524 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Intelligent Release and Image Staging documentation">
+      
+      
+        <meta name="author" content="Cisco Systems, Inc.">
+      
+      
+      
+        <link rel="prev" href="../network-attachment/">
+      
+      
+        <link rel="next" href="../console/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.51">
+    
+    
+      
+        <title>IOx App - IRIS Documentation</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../assets/stylesheets/modern/main.62c9b9cc.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,500,500i,700,700i%7CJetBrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-label="Navigation"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#iox-app" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="./.." title="IRIS Documentation" class="md-header__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            IRIS Documentation
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              IOx App
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+    </div>
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="./.." title="IRIS Documentation" class="md-nav__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    IRIS Documentation
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="./.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Overview
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Get started
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Get started
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Getting Started
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../aiagent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  AI-Guided PoC
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  How it works
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  How it works
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Architecture
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Security Model
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../network-ports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Ports and Flows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Deploy the server
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Deploy the server
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../server/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Server
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../containers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Container Deployments
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kubernetes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Kubernetes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Onboard devices
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Onboard devices
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../device-agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Device Agents
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../network-attachment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Management Type and VLAN Ownership
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  IOx App
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  IOx App
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#when-to-use-it" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        When to use it
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#files" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Files
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#runtime-behavior" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Runtime behavior
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#transfer-throughput-and-copp" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Transfer throughput and CoPP
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#build-modes" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Build modes
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#build-and-stage-for-console-onboarding" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Build and stage for Console onboarding
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#artifact-handling" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Artifact handling
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operate
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Operate
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../console/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Web Console
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fleet-workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Workflows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operations
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Observability
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference and development
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Reference and development
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Validation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../development/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Development
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#when-to-use-it" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        When to use it
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#files" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Files
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#runtime-behavior" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Runtime behavior
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#transfer-throughput-and-copp" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Transfer throughput and CoPP
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#build-modes" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Build modes
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#build-and-stage-for-console-onboarding" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Build and stage for Console onboarding
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#artifact-handling" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Artifact handling
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
+<h1 id="iox-app">IOx App</h1>
+<p>The IOx path runs the agent as a Docker-based IOx application. It supports
+ARM64 IE-3x00/IE-3400 style platforms and x86_64 Catalyst 9000 app hosting.</p>
+<h2 id="when-to-use-it">When to use it</h2>
+<p>Use the IOx app when the platform expects an IOx application lifecycle. The
+Guest Shell path remains available for Catalyst devices that support that agent
+model. The staging target is platform-appropriate: <code>sdflash:</code> on IE-3x00;
+Console-onboarded C9300 IOx targets <code>flash:</code> (bootflash, like Guest Shell)
+with the SSD share carrying the transfer.</p>
+<h2 id="files">Files</h2>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>device/iox/Dockerfile</code></td>
+<td>Builds the multi-architecture IOx agent container.</td>
+</tr>
+<tr>
+<td><code>device/iox/package.yaml</code></td>
+<td>ARM64 IOx package metadata.</td>
+</tr>
+<tr>
+<td><code>device/iox/package-amd64.yaml</code></td>
+<td>x86_64 IOx package metadata.</td>
+</tr>
+<tr>
+<td><code>device/iox/entrypoint.sh</code></td>
+<td>Starts the agent inside the application container.</td>
+</tr>
+<tr>
+<td><code>device/iox/build.sh</code></td>
+<td>Builds the IOx package.</td>
+</tr>
+<tr>
+<td><code>device/iox/install.sh</code></td>
+<td>Installs the IOx app on a target device.</td>
+</tr>
+<tr>
+<td><code>device/iox/uninstall.sh</code></td>
+<td>Removes the IOx app.</td>
+</tr>
+<tr>
+<td><code>device/iox/rebake_iris_tar.py</code></td>
+<td>Updates an existing IOx package's content.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="runtime-behavior">Runtime behavior</h2>
+<p>The IOx agent follows the same catalog and staging model as the Guest Shell
+agent. It downloads resumable swarm data under the CAF persistent directory
+(<code>/iox_data/iris</code> on the validated C9300 runtime). The hand-off of the verified
+scratch file to IOS depends on the platform:</p>
+<ul>
+<li><strong>C9k (share mount)</strong>: onboarding bind-mounts the app-hosting SSD share —
+  <code>usbflash1:iox_host_data_share</code>, host-side <code>/vol/usb1/iox_host_data_share</code> —
+  into the container (<code>run-opts "-v …:/mnt/share"</code>). The agent copies the
+  scratch to the share ROOT under its fixed <code>iris-staged.bin</code> name at disk
+  speed, then drives an IOS-internal
+  <code>copy /verify usbflash1:iox_host_data_share/iris-staged.bin flash:&lt;img&gt;</code>
+  over its SSH-to-self CLI — the same bootflash-root placement as Guest
+  Shell, with no bulk data on the control-plane punt path, and <code>copy /verify</code>
+  restores the real image name and checks the Cisco signature from the bytes.
+  IRIS never creates a subdirectory in the share (a container-created subdir
+  becomes inaccessible to the container itself on this platform) and confines
+  itself to <code>iris-</code> prefixed filenames: each attempt sweeps only its own
+  leftovers, a tiny probe proves IOS can actually read the share before any
+  multi-GB copy is committed (falling back to scp otherwise), the transient
+  copy is removed after placement, and undeploy deletes the prefixed files.</li>
+<li><strong>IE-3x00 (scp push)</strong>: IOx cannot bind-mount the SD card there, so the
+  container SCP-pushes the scratch to <code>guest-share/iris</code> through the device's
+  SCP server and then runs <code>copy /verify</code> for the final placement. The agent
+  also falls back to this path automatically if the share mount is absent or
+  unreadable from IOS.</li>
+</ul>
+<p>Both platforms drive IOS over the app's SSH-to-self CLI, for <code>copy /verify</code> and for
+the one-shot EEM applets that place and reclaim files at the target-FS root. That
+connection can optionally be pinned: set <code>device_ssh_known_hosts</code> in the agent config
+and, when that file exists, the app's <code>ssh</code> and <code>scp</code> calls verify the IOS host key
+against it instead of running unverified. See
+<a href="../device-agents/">Device Agents</a>.</p>
+<p><code>IRIS_TARGET_FS</code> optionally selects a filesystem prefix such as <code>sdflash:</code> or
+<code>bootflash:</code>. The agent accepts it only when <code>show file systems</code> reports a
+writable non-crash disk; otherwise it logs the fallback and retains automatic
+platform selection. <code>device/iox/install.sh</code> exposes this as <code>TARGET_FS</code> and
+defaults it to <code>sdflash:</code>.</p>
+<h2 id="transfer-throughput-and-copp">Transfer throughput and CoPP</h2>
+<p>The C9k share-mount hand-off above never carries image bytes over the network,
+so it is not subject to any of this section — it runs at disk speed. This
+section applies to the <strong>scp push path</strong> (IE-3x00, or a C9k where the share
+mount is unavailable and the agent falls back): that traffic is addressed to
+the switch itself, so it crosses the control-plane punt path and is subject to
+Control Plane Policing (CoPP). On Catalyst 9300 the default CoPP policy caps
+that path long before any transport setting does. Measured on C9300
+(IOS-XE 17.18.3):</p>
+<table>
+<thead>
+<tr>
+<th>Transfer path</th>
+<th>Throughput</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Agent SCP push (default CoPP)</td>
+<td>~1.4 MB/s</td>
+<td>identical for chacha20, aes128-gcm, aes128-ctr</td>
+</tr>
+<tr>
+<td>IOS <code>copy https:</code> pull (default CoPP)</td>
+<td>~1.4 MB/s</td>
+<td>same ceiling — not a protocol property</td>
+</tr>
+<tr>
+<td>Agent SCP push, forus policer at 10000 pps</td>
+<td>~7.3 MB/s</td>
+<td>next limit is the IOSd file-write path</td>
+</tr>
+</tbody>
+</table>
+<p>The ceiling is the <code>system-cpp-police-forus</code> CoPP class: its default
+1000 packets/sec ≈ 1.4 MB/s of full-size frames, and the policer visibly drops
+the transfer's frames (<code>show platform hardware fed switch active qos queue
+stats internal cpu policer</code>). Raising <code>ip ssh window-size</code>,
+<code>ip tcp window-size</code>, or <code>ip ssh bulk-mode</code> does not help on 17.18 — bulk-mode
+and the 128 KB TCP window are already platform defaults there, and the policer
+sits below all of them.</p>
+<p><strong>IRIS never modifies CoPP.</strong> The policer protects the switch CPU from
+traffic floods; weakening it is a security decision only the operator can
+make. Until a faster transfer path exists in IRIS, an operator who accepts the
+tradeoff can raise the class on devices that stage over IOx:</p>
+<div class="highlight"><pre><span></span><code>configure terminal
+policy-map system-cpp-policy
+ class system-cpp-police-forus
+  police rate 10000 pps
+end
+</code></pre></div>
+<p>This yields roughly 5x faster staging (a 1.2 GB image drops from ~15 to ~3
+minutes); <code>police rate 1000 pps</code> restores the default. The change does not
+affect the actual network: transit traffic is forwarded in hardware and never
+crosses this policer, so no data-plane, VLAN, or routing behavior changes. Its
+only effect is on the switch's own control plane — the CPU will accept more
+traffic addressed to the switch itself, which is the resource CoPP exists to
+protect.</p>
+<p>Guest Shell staging is unaffected: the C9300 Guest Shell writes through the
+bind-mounted guest-share at disk speed and never crosses the punt path.</p>
+<h2 id="build-modes">Build modes</h2>
+<div class="highlight"><pre><span></span><code><span class="c1"># Docker image only</span>
+<span class="nv">CATALOG_PEM</span><span class="o">=</span>/path/to/iris-catalog.pem<span class="w"> </span>device/iox/build.sh<span class="w"> </span>--image-only
+
+<span class="c1"># Docker image plus Cisco iris-arm64.tar package (requires ioxclient)</span>
+<span class="nv">CATALOG_PEM</span><span class="o">=</span>/path/to/iris-catalog.pem<span class="w"> </span>device/iox/build.sh<span class="w"> </span>device/iox/out
+
+<span class="c1"># x86_64 Catalyst package</span>
+<span class="nv">IOX_ARCH</span><span class="o">=</span>amd64<span class="w"> </span><span class="nv">PACKAGE_NAME</span><span class="o">=</span>iris-amd64.tar<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="nv">CATALOG_PEM</span><span class="o">=</span>/path/to/iris-catalog.pem<span class="w"> </span>device/iox/build.sh<span class="w"> </span>device/iox/out
+</code></pre></div>
+<p>The clean-clone build path downloads a pinned architecture-matched static
+<code>aria2c</code> when no local bundle is available and fails if its SHA-256 digest
+differs. For package builds, <code>tools/stage-iox-package.sh</code> downloads Cisco's
+pinned Linux amd64 <code>ioxclient</code> release to git-ignored <code>tools/bin/</code> on first use;
+set <code>IOXCLIENT</code> to use an existing installation instead.</p>
+<h2 id="build-and-stage-for-console-onboarding">Build and stage for Console onboarding</h2>
+<p>Run this on the Linux Compose host after the IRIS container is healthy. The same
+Linux amd64 <code>ioxclient</code> package tool builds both architecture-specific packages;
+the <code>--arch</code> choice selects the Docker image, package descriptor, and output
+name.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Build and stage both packages during server bring-up (recommended).</span>
+tools/provision-iox-packages.sh
+
+<span class="c1"># IE-3x00 / IE-3400 / IR: arm64 package served as iris-arm64.tar</span>
+tools/stage-iox-package.sh<span class="w"> </span>--arch<span class="w"> </span>arm64
+
+<span class="c1"># SSD-equipped C9300 IOx: amd64 package served as iris-amd64.tar</span>
+tools/stage-iox-package.sh<span class="w"> </span>--arch<span class="w"> </span>amd64
+</code></pre></div>
+<p>On first use the helper downloads Cisco's pinned <code>ioxclient</code> 1.18.0.0 to
+<code>tools/bin/ioxclient</code>; that binary is git-ignored and not embedded in the
+repository or seed-server image. The helper retrieves the live catalog
+certificate from the running <code>iris</code> container, builds a package that pins it,
+and places the result in <code>/srv/artifacts</code>. When the served host directory is not
+writable by the invoking user — the normal case, since the server runs as uid
+10001 and its artifacts directory is owned by that uid — the helper places the
+package with <code>docker cp</code> rather than requiring a host ownership change. On an
+amd64 server, the arm64 build automatically registers Docker's ARM64 emulation
+handler when it is missing.</p>
+<p>Rebuild both packages after rotating the server certificate, because each
+package contains the pinned catalog certificate. The helper only builds and
+places artifacts; it never contacts or changes a device.</p>
+<h2 id="artifact-handling">Artifact handling</h2>
+<p><code>iris-arm64.tar</code> and <code>iris-amd64.tar</code> are operator-built artifacts and belong under
+<code>artifacts/</code> for serving. The server container serves them but does not rebuild
+or mutate them automatically.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 Cisco Systems, Inc.
+    </div>
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate":null,"base":"..","features":[],"search":"../assets/javascripts/workers/search.b6b7e04f.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7f30b55.min.js"></script>
+      
+        <script src="../javascripts/mermaid.mjs" type="module"></script>
+      
+    
+  </body>
+</html>

@@ -1,0 +1,2346 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Intelligent Release and Image Staging documentation">
+      
+      
+        <meta name="author" content="Cisco Systems, Inc.">
+      
+      
+      
+        <link rel="prev" href="../observability/">
+      
+      
+        <link rel="next" href="../validation/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.51">
+    
+    
+      
+        <title>Reference - IRIS Documentation</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../assets/stylesheets/modern/main.62c9b9cc.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,500,500i,700,700i%7CJetBrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-label="Navigation"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#reference" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="./.." title="IRIS Documentation" class="md-header__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            IRIS Documentation
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Reference
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+    </div>
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="./.." title="IRIS Documentation" class="md-nav__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    IRIS Documentation
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="./.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Overview
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Get started
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Get started
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Getting Started
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../aiagent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  AI-Guided PoC
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  How it works
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  How it works
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Architecture
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Security Model
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../network-ports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Ports and Flows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Deploy the server
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Deploy the server
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../server/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Server
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../containers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Container Deployments
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kubernetes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Kubernetes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Onboard devices
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Onboard devices
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../device-agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Device Agents
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../network-attachment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Management Type and VLAN Ownership
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../iox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  IOx App
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operate
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Operate
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../console/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Web Console
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fleet-workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Workflows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operations
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Observability
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference and development
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Reference and development
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#command-quick-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Command quick reference
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#port-quick-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Port quick reference
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#environment-variables" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Environment variables
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Environment variables">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#required-at-deploy-time" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Required at deploy time
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#optional-at-deploy-time" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Optional at deploy time
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#container-paths" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Container paths
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#image-path-variables" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Image path variables
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#telemetry-variables" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Telemetry variables
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Telemetry variables">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#telemetry-gating-rule" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Telemetry gating rule
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#console-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Console API
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Console API">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#session-and-settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Session and settings
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#images" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Images
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#devices" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Devices
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#onboarding-jobs" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Onboarding jobs
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#credentials" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Credentials
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#monitoring" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Monitoring
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#import-skip-reasons" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Import skip reasons
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#catalog-entry-fields" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Catalog entry fields
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#device-agent-config-keys" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Device agent config keys
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#generated-outputs" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Generated outputs
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Validation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../development/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Development
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#command-quick-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Command quick reference
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#port-quick-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Port quick reference
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#environment-variables" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Environment variables
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Environment variables">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#required-at-deploy-time" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Required at deploy time
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#optional-at-deploy-time" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Optional at deploy time
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#container-paths" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Container paths
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#image-path-variables" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Image path variables
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#telemetry-variables" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Telemetry variables
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Telemetry variables">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#telemetry-gating-rule" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Telemetry gating rule
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#console-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Console API
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Console API">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#session-and-settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Session and settings
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#images" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Images
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#devices" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Devices
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#onboarding-jobs" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Onboarding jobs
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#credentials" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Credentials
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#monitoring" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Monitoring
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#import-skip-reasons" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Import skip reasons
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#catalog-entry-fields" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Catalog entry fields
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#device-agent-config-keys" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Device agent config keys
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#generated-outputs" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Generated outputs
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
+<h1 id="reference">Reference</h1>
+<p>Lookup tables for commands, ports, environment variables, the console API, and
+the catalog schema. Every page is listed in the <a href="../">Overview</a>.</p>
+<h2 id="command-quick-reference">Command quick reference</h2>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>docker compose -f server/docker-compose.yml run --rm iris iris-bootstrap</code></td>
+<td>Initialize a fresh encrypted server config volume.</td>
+</tr>
+<tr>
+<td><code>docker compose -f server/docker-compose.yml up -d --build</code></td>
+<td>Build and start the IRIS server.</td>
+</tr>
+<tr>
+<td><code>tools/start-compose-server.sh</code></td>
+<td>Bootstrap/start Compose and automatically stage both IOx packages.</td>
+</tr>
+<tr>
+<td><code>docker compose -f server/docker-compose.yml exec iris iris-publish /opt/images/&lt;image&gt;.bin</code></td>
+<td>Publish an image into the catalog and seeder. In place: the image is seeded from its own directory and nothing is copied.</td>
+</tr>
+<tr>
+<td><code>docker compose -f server/docker-compose.yml exec iris iris-assign</code></td>
+<td>Show images and assignments.</td>
+</tr>
+<tr>
+<td><code>docker compose -f server/docker-compose.yml exec iris iris-assign &lt;device&gt; &lt;image&gt;</code></td>
+<td>Assign one image to one device.</td>
+</tr>
+<tr>
+<td><code>tools/gen-device-installers.sh fleet/devices.csv</code></td>
+<td>Generate per-device installers.</td>
+</tr>
+<tr>
+<td><code>tools/apply-assignments.sh fleet/assignments.csv</code></td>
+<td>Validate and apply assignment CSV.</td>
+</tr>
+<tr>
+<td><code>tools/make-agent-bundle.sh</code></td>
+<td>Build the Guest Shell agent bundle manually.</td>
+</tr>
+<tr>
+<td><code>device/device-uninstall.sh</code></td>
+<td>Remove Guest Shell IRIS wiring from a device.</td>
+</tr>
+<tr>
+<td><code>device/iox/install.sh</code></td>
+<td>Install the IOx app path.</td>
+</tr>
+<tr>
+<td><code>device/iox/uninstall.sh</code></td>
+<td>Remove the IOx app path.</td>
+</tr>
+<tr>
+<td><code>device/iox/build.sh --image-only</code></td>
+<td>Build the ARM64 app-hosting image; set <code>IOX_ARCH=amd64</code> for x86_64.</td>
+</tr>
+<tr>
+<td><code>kubectl apply -k kubernetes</code></td>
+<td>Deploy the optional single-replica Kubernetes seed server.</td>
+</tr>
+</tbody>
+</table>
+<p>Docs build commands and their tool pins live in <a href="../development/#documentation-loop">Development</a>.</p>
+<h2 id="port-quick-reference">Port quick reference</h2>
+<table>
+<thead>
+<tr>
+<th>Port</th>
+<th>Service</th>
+<th>Device-facing</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>6969</td>
+<td>Tracker</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>8443</td>
+<td>Catalog</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>8000</td>
+<td>Artifact server</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>6881</td>
+<td>Seeder data</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>8080</td>
+<td>Web console</td>
+<td>Operator-facing</td>
+</tr>
+<tr>
+<td>9101</td>
+<td>Telemetry</td>
+<td>Operator-facing</td>
+</tr>
+<tr>
+<td>6800</td>
+<td>aria2 RPC</td>
+<td>No, local-only</td>
+</tr>
+</tbody>
+</table>
+<h2 id="environment-variables">Environment variables</h2>
+<h3 id="required-at-deploy-time">Required at deploy time</h3>
+<p>Compose refuses to start without these; none has a default.</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>IRIS_HOST_IP</code></td>
+<td>The docker host's IP — the address devices reach. Baked into the catalog's self-signed TLS certificate on first start, so changing it later means recreating the config volume.</td>
+</tr>
+<tr>
+<td><code>IRIS_AGE_RECIPIENTS</code></td>
+<td>Comma-separated age public keys the at-rest secret store is encrypted to: the primary key plus an offline break-glass recipient.</td>
+</tr>
+<tr>
+<td><code>IRIS_AGE_KEY_FILE_HOST</code></td>
+<td>Host path of the age identity (private key), mounted as the Docker secret <code>iris_age_key</code> at <code>/run/secrets/iris_age_key</code>.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="optional-at-deploy-time">Optional at deploy time</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>IRIS_ARTIFACTS_HOST_DIR</code></td>
+<td><code>../artifacts</code></td>
+<td>Host directory bind-mounted read-write at <code>/srv/artifacts</code>.</td>
+</tr>
+<tr>
+<td><code>IRIS_GUI_PUBLISH</code></td>
+<td><code>8080</code></td>
+<td>Published host port for the console. The container always listens on 8080 internally.</td>
+</tr>
+<tr>
+<td><code>IRIS_CONSOLE_URL</code></td>
+<td>unset</td>
+<td>Overrides the console link on the port 9101 pointer page verbatim, for hosts publishing the console somewhere other than <code>https://&lt;IRIS_HOST_IP&gt;:8080/</code>. Read per request.</td>
+</tr>
+<tr>
+<td><code>IRIS_VERSION</code></td>
+<td>unset</td>
+<td>Build argument that bakes the release string the console's Settings page shows. Unset means the <code>VERSION</code> file in the image.</td>
+</tr>
+</tbody>
+</table>
+<p>The host-side ownership these paths need is in
+<a href="../server/#host-paths-to-chown-on-every-deploy">Server</a>.</p>
+<h3 id="container-paths">Container paths</h3>
+<p><code>server/docker-compose.yml</code> sets each container-side path explicitly, so one-shot
+commands launched with <code>docker compose exec</code> see the same layout as the supervised
+services. What each directory holds is in
+<a href="../server/#important-paths">Server</a>.</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Compose value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>IRIS_STATE</code></td>
+<td><code>/var/lib/iris</code></td>
+</tr>
+<tr>
+<td><code>IRIS_CONFIG</code></td>
+<td><code>/etc/iris</code></td>
+</tr>
+<tr>
+<td><code>IRIS_RUN</code></td>
+<td><code>/run/iris</code> (tmpfs)</td>
+</tr>
+<tr>
+<td><code>IRIS_SECRETS</code></td>
+<td><code>/run/iris/secrets.json</code></td>
+</tr>
+<tr>
+<td><code>IRIS_SECRETS_ENC</code></td>
+<td><code>/etc/iris/secrets.json.age</code></td>
+</tr>
+<tr>
+<td><code>IRIS_RPC_SECRET_FILE</code></td>
+<td><code>/run/iris/rpc-secret</code></td>
+</tr>
+<tr>
+<td><code>IRIS_CERT</code></td>
+<td><code>/run/iris/tls/cert.pem</code></td>
+</tr>
+<tr>
+<td><code>IRIS_AUDIT</code></td>
+<td><code>/etc/iris/audit.jsonl</code></td>
+</tr>
+<tr>
+<td><code>IRIS_ARTIFACTS_DIR</code></td>
+<td><code>/srv/artifacts</code></td>
+</tr>
+</tbody>
+</table>
+<p>The Kubernetes alpha maps the durable paths into one PVC under <code>/data</code> instead —
+see <a href="../kubernetes/">Kubernetes</a>.</p>
+<h3 id="image-path-variables">Image path variables</h3>
+<p>The server reads images from two places, and the distinction decides what a
+delete removes and what an import offers.</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>IRIS_IMAGE_ROOT</code></td>
+<td><code>/opt/images</code></td>
+<td>Host directory holding images you staged yourself. Bind-mounted into the container at <code>/opt/images</code> read-only.</td>
+</tr>
+<tr>
+<td><code>IMAGES_ROOT</code></td>
+<td><code>/opt/images</code></td>
+<td>Container-side path of that read-only bind. Scanned recursively for importable images, and walked by the seeder's startup re-seed when it has to locate a torrent's image.</td>
+</tr>
+<tr>
+<td><code>IRIS_IMAGES_DIR</code></td>
+<td><code>/var/lib/iris-images</code></td>
+<td>The uploads volume: where a console upload lands. Also scanned recursively for importable images, and walked first by the startup re-seed. This is the only directory whose files a catalog delete unlinks.</td>
+</tr>
+<tr>
+<td><code>IMAGES_DIR</code></td>
+<td><code>/opt/images/iosxe/c9300</code></td>
+<td>Fallback seed directory, used for a torrent whose image the startup re-seed cannot locate under either root.</td>
+</tr>
+</tbody>
+</table>
+<p>The host tree behind <code>IRIS_IMAGE_ROOT</code> must be readable and traversable by uid
+10001 — see <a href="../server/#host-image-tree-permissions">Server</a>.</p>
+<h3 id="telemetry-variables">Telemetry variables</h3>
+<p>External telemetry is off by default: IRIS does not assume a Prometheus, Loki, or
+Grafana stack exists.</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>IRIS_OBSERVABILITY</code></td>
+<td>unset (off)</td>
+<td>Enables the external observability surface when set to <code>1</code>, <code>true</code>, <code>yes</code>, or <code>on</code>. Any other value, empty, or unset leaves it off.</td>
+</tr>
+<tr>
+<td><code>IRIS_OTLP_ENDPOINT</code></td>
+<td>unset</td>
+<td>OTLP/HTTP endpoint of your collector, e.g. <code>http://&lt;collector-ip&gt;:4318</code>.</td>
+</tr>
+<tr>
+<td><code>IRIS_METRICS_PORT</code></td>
+<td><code>9101</code></td>
+<td>Port for the telemetry listener. Empty or <code>0</code> disables the listener entirely.</td>
+</tr>
+<tr>
+<td><code>IRIS_SWARM_URL</code></td>
+<td><code>http://127.0.0.1:9101/swarm</code></td>
+<td>Where the console fetches swarm state from.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="telemetry-gating-rule">Telemetry gating rule</h4>
+<ul>
+<li>Prometheus <code>/metrics</code> is served only while <code>IRIS_OBSERVABILITY</code> is enabled; otherwise the path answers 404.</li>
+<li>OTLP export requires <strong>both</strong> <code>IRIS_OBSERVABILITY</code> enabled <strong>and</strong> <code>IRIS_OTLP_ENDPOINT</code> set. <code>IRIS_OTLP_ENDPOINT</code> on its own is inert — nothing is exported.</li>
+<li><code>/healthz</code>, <code>/swarm</code>, and the <code>/swarmmap</code> pointer page are served whenever the listener runs, regardless of either variable.</li>
+<li>The console reads <code>/swarm</code> over container loopback (<code>127.0.0.1:9101</code>), so port 9101 needs external reachability only for Prometheus scraping or operator tools — never for the console.</li>
+</ul>
+<p><code>IRIS_OBSERVABILITY</code> and <code>IRIS_OTLP_ENDPOINT</code> are read at startup, so a change
+takes effect on the next container restart. The startup log states which posture
+is in effect.</p>
+<div class="admonition note">
+<p class="admonition-title">A down Prometheus target is not a fault</p>
+<p>With observability off, a Prometheus job scraping IRIS reads down and a
+Grafana IRIS dashboard is blank. That is telemetry being off, not a broken
+server. Set <code>IRIS_OBSERVABILITY</code> to get the scrape surface, and
+<code>IRIS_OTLP_ENDPOINT</code> as well to get event export.</p>
+</div>
+<h2 id="console-api">Console API</h2>
+<p>Every <code>/api</code> route requires an authenticated console session cookie except two
+pre-auth routes: <code>POST /api/login</code> and <code>POST /api/setup</code>. State-changing methods
+on the authenticated routes additionally require the session's CSRF token in an
+<code>X-CSRF-Token</code> header (double submit); without it the request is rejected with
+403. The two pre-auth routes carry no CSRF token, because there is no session
+yet. JSON request bodies are capped at 64 KiB — the exceptions are the CSV import
+at 8 MiB and the streamed image upload at 4 GiB.</p>
+<h3 id="session-and-settings">Session and settings</h3>
+<table>
+<thead>
+<tr>
+<th>Route</th>
+<th>Body / result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>POST /api/login</code></td>
+<td>Pre-auth. <code>{username, password}</code> → <code>{username, csrf}</code> plus the session cookie; 401 on bad credentials.</td>
+</tr>
+<tr>
+<td><code>POST /api/setup</code></td>
+<td>Pre-auth, first run only. <code>{username, password}</code> creates the admin account; 409 once one exists.</td>
+</tr>
+<tr>
+<td><code>POST /api/logout</code></td>
+<td>Revokes the current session and expires the cookie.</td>
+</tr>
+<tr>
+<td><code>GET /api/session</code></td>
+<td>The current session's info, or 401.</td>
+</tr>
+<tr>
+<td><code>GET /api/settings</code></td>
+<td>Console settings, published port, and the running version.</td>
+</tr>
+<tr>
+<td><code>POST /api/settings/password</code></td>
+<td><code>{current, new, confirm}</code>; changes the admin password and revokes every other session.</td>
+</tr>
+<tr>
+<td><code>POST /api/settings/sessions/revoke-others</code></td>
+<td>Revokes every session except the caller's.</td>
+</tr>
+<tr>
+<td><code>POST /api/settings/stage-host</code></td>
+<td>Stores the stage-host SSH credential; returns the redacted record.</td>
+</tr>
+<tr>
+<td><code>DELETE /api/settings/stage-host</code></td>
+<td><code>{deleted: &lt;bool&gt;}</code> — clears that credential.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="images">Images</h3>
+<table>
+<thead>
+<tr>
+<th>Route</th>
+<th>Body / result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /api/images</code></td>
+<td><code>{images: [...]}</code> — the catalog entries.</td>
+</tr>
+<tr>
+<td><code>GET /api/images/importable</code></td>
+<td><code>{importable: [...], skipped: [...]}</code> — image files on disk under either root that are not in the catalog. A pure read; nothing is published or moved.</td>
+</tr>
+<tr>
+<td><code>PUT /api/images/upload/&lt;filename&gt;</code></td>
+<td>Streams the body into the uploads volume and starts a publish job; returns <code>{job_id}</code>. 413 for a missing body or one over 4 GiB.</td>
+</tr>
+<tr>
+<td><code>POST /api/images/import</code></td>
+<td>Body <code>{"path": "&lt;candidate path&gt;"}</code>; returns <code>{job_id}</code>. Publishes the file in place.</td>
+</tr>
+<tr>
+<td><code>GET /api/images/jobs/&lt;job_id&gt;</code></td>
+<td>Publish job state (<code>publishing</code>, <code>done</code>, <code>error</code>). Shared by upload and import.</td>
+</tr>
+<tr>
+<td><code>DELETE /api/images/&lt;image_id&gt;</code></td>
+<td><code>{deleted: true}</code>, or 409 with <code>{assigned: [...]}</code> when a live device still has the image approved.</td>
+</tr>
+</tbody>
+</table>
+<p><code>POST /api/images/import</code> authorizes on candidate identity, not on a path prefix,
+so a path that merely starts inside a root is refused with 400. It answers 404 if
+the file vanished between listing and import, and 409 if a publish of the same
+catalog id is already in flight. Every outcome writes an <code>image_import</code> audit
+event, with <code>result=fail</code> and the reason on a rejection.</p>
+<h3 id="devices">Devices</h3>
+<table>
+<thead>
+<tr>
+<th>Route</th>
+<th>Body / result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /api/devices</code></td>
+<td><code>{devices: [...], now}</code> — the inventory view plus the server clock, so the UI computes freshness server-clock-to-server-clock.</td>
+</tr>
+<tr>
+<td><code>POST /api/devices</code></td>
+<td>Creates or updates one inventory row; returns <code>{device: ...}</code>.</td>
+</tr>
+<tr>
+<td><code>DELETE /api/devices/&lt;id&gt;</code></td>
+<td><code>{deleted: &lt;bool&gt;}</code>.</td>
+</tr>
+<tr>
+<td><code>GET /api/devices/export-csv</code>, <code>GET /api/devices/example-csv</code></td>
+<td>The inventory as <code>devices.csv</code>, and a blank example.</td>
+</tr>
+<tr>
+<td><code>POST /api/devices/import-csv</code></td>
+<td>Bulk inventory import (8 MiB cap, all-or-nothing); returns per-row stats.</td>
+</tr>
+<tr>
+<td><code>GET /api/devices/&lt;id&gt;/plan</code></td>
+<td><code>{plan}</code> — the resolved deployment plan; 409 when it cannot resolve.</td>
+</tr>
+<tr>
+<td><code>GET /api/devices/&lt;id&gt;/reports</code></td>
+<td><code>{reports: [...]}</code> — the device's stored telemetry ring.</td>
+</tr>
+<tr>
+<td><code>POST /api/devices/&lt;id&gt;/assign</code>, <code>.../credential</code>, <code>.../platform</code></td>
+<td>Sets the approved image, the credential profile, or the platform and storage target; each returns <code>{ok: true}</code>.</td>
+</tr>
+<tr>
+<td><code>POST /api/devices/&lt;id&gt;/request-report</code></td>
+<td>Requests a fresh telemetry report; <code>{ok: true, expires_at}</code>, or 429 while one is already pending.</td>
+</tr>
+<tr>
+<td><code>POST /api/devices/&lt;id&gt;/adopt</code></td>
+<td>Requires <code>{"acknowledge_adopt": true}</code>; returns <code>{receipt_id}</code>. 409 when the device already has an active receipt; routers cannot be adopted.</td>
+</tr>
+<tr>
+<td><code>POST /api/devices/&lt;id&gt;/onboard</code>, <code>POST /api/devices/&lt;id&gt;/undeploy</code></td>
+<td>Starts the job; <code>{job_id}</code>. 409 when the device is busy with the opposite action.</td>
+</tr>
+</tbody>
+</table>
+<p>Router deployments carry extra preflight and ownership rules — see
+<a href="../network-attachment/#router-preflight-and-ownership">Management Type and VLAN Ownership</a>.</p>
+<h3 id="onboarding-jobs">Onboarding jobs</h3>
+<table>
+<thead>
+<tr>
+<th>Route</th>
+<th>Body / result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /api/onboard/jobs</code></td>
+<td><code>{jobs: [...], max_concurrent, now}</code>.</td>
+</tr>
+<tr>
+<td><code>GET /api/onboard/jobs/&lt;id&gt;</code></td>
+<td>One job, or 404.</td>
+</tr>
+<tr>
+<td><code>GET /api/onboard/jobs/&lt;id&gt;/stream</code></td>
+<td>Server-sent events for that job until it reaches a terminal state.</td>
+</tr>
+<tr>
+<td><code>POST /api/onboard/jobs/&lt;id&gt;/abort</code></td>
+<td><code>{aborted: true}</code>.</td>
+</tr>
+<tr>
+<td><code>POST /api/onboard/cancel-queued</code></td>
+<td><code>{cancelled: &lt;count&gt;}</code> — drops jobs still queued.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="credentials">Credentials</h3>
+<table>
+<thead>
+<tr>
+<th>Route</th>
+<th>Body / result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /api/credentials</code></td>
+<td><code>{profiles: [...]}</code> — id, name, and device user only, never passwords.</td>
+</tr>
+<tr>
+<td><code>POST /api/credentials</code></td>
+<td>Creates or updates a profile; returns <code>{profile}</code> redacted the same way.</td>
+</tr>
+<tr>
+<td><code>DELETE /api/credentials/&lt;id&gt;</code></td>
+<td><code>{deleted: &lt;bool&gt;}</code>.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="monitoring">Monitoring</h3>
+<table>
+<thead>
+<tr>
+<th>Route</th>
+<th>Body / result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /api/overview</code></td>
+<td>The dashboard rollup: image, device, and rollout state.</td>
+</tr>
+<tr>
+<td><code>GET /api/swarm</code></td>
+<td>The telemetry <code>/swarm</code> JSON, fetched over loopback. Answers 200 with <code>{"peers": [], "error": ...}</code> when the telemetry listener is unreachable.</td>
+</tr>
+<tr>
+<td><code>GET /api/audit</code></td>
+<td><code>{events: [...]}</code>; <code>category</code>, <code>limit</code> (max 500), <code>before_ts</code>, and <code>after_ts</code> query parameters.</td>
+</tr>
+<tr>
+<td><code>GET /api/audit/histogram</code></td>
+<td>Per-bucket audit event counts for the activity strip.</td>
+</tr>
+<tr>
+<td><code>GET /swarmmap</code></td>
+<td>The swarm map page itself. Session-gated like the <code>/api</code> routes, but not under <code>/api</code>.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="import-skip-reasons">Import skip reasons</h3>
+<p><code>skipped</code> entries carry the same fields as importable ones plus a <code>reason</code>, and
+the console greys them out so a file you expected to see does not just silently
+fail to appear. There are exactly three reasons.</p>
+<table>
+<thead>
+<tr>
+<th>Reason</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>already published</code></td>
+<td>The derived catalog id is already in the catalog, or a publish for that id is in flight — an in-flight publish counts, because the entry appears only when the async job finishes. A catalog <code>filename</code> match counts too. <code>publish.derive_id()</code> strips <code>.SPA.bin</code> or <code>.bin</code>, so <code>foo.bin</code> and <code>foo.SPA.bin</code> are one catalog id.</td>
+</tr>
+<tr>
+<td><code>ambiguous name in more than one location</code></td>
+<td>The same basename, or the same derived id, exists under more than one root. The startup re-seed can resolve a torrent to a directory by basename and the seeder runs with <code>bt-seed-unverified</code>, so a wrong guess would serve the wrong bytes under correct piece hashes. IRIS refuses rather than guess: keep one copy.</td>
+</tr>
+<tr>
+<td><code>not readable by the server</code></td>
+<td>The file exists but uid 10001 cannot open it. Listing a file needs only its directory, so without this check an unreadable image would pass discovery and fail deep inside publish. Root-owned mode <code>0600</code> images left in a volume by an older root-runtime container land here; the fix is the volume-ownership migration in <a href="../server/#upgrading-from-a-root-runtime-deployment">Server</a>.</td>
+</tr>
+</tbody>
+</table>
+<p>A file is only listed at all if it is a <code>.bin</code>, its basename passes the catalog
+filename charset (<code>A-Za-z0-9._-</code>), it is not a dotfile, sidecar <code>.torrent</code>, or
+<code>.upload-*</code> temp file, and its resolved path is still inside the root it was
+found under — a symlink cannot pull a file from outside the mount into the set.
+Each distinct tree is walked once, so pointing both roots at the same directory,
+or nesting one inside the other, yields each file exactly once.</p>
+<h2 id="catalog-entry-fields">Catalog entry fields</h2>
+<p>Catalog entries live in <code>&lt;state&gt;/catalog.json</code>; each image's metainfo file is
+written to <code>&lt;state&gt;/torrents/&lt;image_id&gt;.torrent</code>, never next to the image itself.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>Catalog id, derived from the filename by stripping <code>.SPA.bin</code> or <code>.bin</code>. What a device policy names.</td>
+</tr>
+<tr>
+<td><code>filename</code></td>
+<td>Basename of the image file, as it reaches the device.</td>
+</tr>
+<tr>
+<td><code>source_dir</code></td>
+<td>Absolute directory the image is seeded from. Set by <code>publish()</code>.</td>
+</tr>
+<tr>
+<td><code>size</code></td>
+<td>Image size in bytes.</td>
+</tr>
+<tr>
+<td><code>sha256</code></td>
+<td>Checked by the agent against the staged file.</td>
+</tr>
+<tr>
+<td><code>sha512</code></td>
+<td>Checked by the agent against the flash-root copy via <code>verify /sha512</code> (IOS has <code>/sha512</code> but not <code>/sha256</code>).</td>
+</tr>
+<tr>
+<td><code>cisco_signature_verified</code></td>
+<td>Whether the Cisco signature was verified elsewhere. The server never checks it; the device is the on-box trust gate.</td>
+</tr>
+<tr>
+<td><code>info_hash_hex</code></td>
+<td>Torrent info hash, used to stop seeding on delete.</td>
+</tr>
+<tr>
+<td><code>published_at</code></td>
+<td>Unix timestamp of the publish.</td>
+</tr>
+</tbody>
+</table>
+<p><code>source_dir</code> is what makes in-place publishing safe. A delete unlinks the image
+file only when <code>source_dir</code> resolves to <code>IRIS_IMAGES_DIR</code>, so an image published
+from the read-only root stays on disk and a same-named file in the uploads volume
+is never destroyed. Entries published before <code>source_dir</code> was recorded keep the
+older behaviour: their delete unlinks <code>IRIS_IMAGES_DIR/&lt;filename&gt;</code>. The startup
+re-seed likewise prefers <code>source_dir</code>, falling back to its basename walk for
+entries with no <code>source_dir</code> or whose recorded directory has gone away.</p>
+<h2 id="device-agent-config-keys">Device agent config keys</h2>
+<p>The agent reads <code>key = value</code> lines from
+<code>/flash/guest-share/iris/iris-agent.conf</code> (override with <code>IRIS_AGENT_CONF</code>).</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>device_ssh_known_hosts</code></td>
+<td>unset</td>
+<td>Path to a <code>known_hosts</code> file pinning the device's SSH host key. When the key is set and the file exists, the agent's SSH and SCP calls use <code>StrictHostKeyChecking=yes</code> against it. Otherwise they keep the default <code>StrictHostKeyChecking=no</code> with <code>UserKnownHostsFile=/dev/null</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>The pin is opt-in and verify-if-present, the same shape as the catalog client's
+TLS pinning: setting it on one device changes nothing elsewhere, and an agent
+upgrade on a fleet whose config omits it behaves identically. It applies to the
+container runtime mode (the IOx SSH-to-self path) only — the Guest Shell agent
+uses the on-box <code>cli</code> module and never opens an SSH session. Nothing in IRIS
+writes this key for you.</p>
+<h2 id="generated-outputs">Generated outputs</h2>
+<table>
+<thead>
+<tr>
+<th>Output</th>
+<th>Source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>site/</code></td>
+<td>Zensical build output. Not committed.</td>
+</tr>
+<tr>
+<td><code>deploy/</code></td>
+<td>GitHub Pages assembly directory. Not committed.</td>
+</tr>
+<tr>
+<td><code>fleet/dist/</code></td>
+<td>Generated device installers. Not committed.</td>
+</tr>
+<tr>
+<td><code>artifacts/</code></td>
+<td>Served runtime artifacts. Not committed except <code>.gitkeep</code>.</td>
+</tr>
+<tr>
+<td><code>release/</code></td>
+<td>Release packaging output. Not committed.</td>
+</tr>
+</tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 Cisco Systems, Inc.
+    </div>
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate":null,"base":"..","features":[],"search":"../assets/javascripts/workers/search.b6b7e04f.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7f30b55.min.js"></script>
+      
+        <script src="../javascripts/mermaid.mjs" type="module"></script>
+      
+    
+  </body>
+</html>

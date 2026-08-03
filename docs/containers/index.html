@@ -1,0 +1,1462 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Intelligent Release and Image Staging documentation">
+      
+      
+        <meta name="author" content="Cisco Systems, Inc.">
+      
+      
+      
+        <link rel="prev" href="../server/">
+      
+      
+        <link rel="next" href="../kubernetes/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.51">
+    
+    
+      
+        <title>Container Deployments - IRIS Documentation</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../assets/stylesheets/modern/main.62c9b9cc.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,500,500i,700,700i%7CJetBrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-label="Navigation"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#container-deployments" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="./.." title="IRIS Documentation" class="md-header__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            IRIS Documentation
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Container Deployments
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+    </div>
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="./.." title="IRIS Documentation" class="md-nav__button md-logo" aria-label="IRIS Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+
+    </a>
+    IRIS Documentation
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="./.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Overview
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Get started
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Get started
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Getting Started
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../aiagent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  AI-Guided PoC
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  How it works
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  How it works
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Architecture
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Security Model
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../network-ports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Ports and Flows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Deploy the server
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Deploy the server
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../server/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Server
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Container Deployments
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Container Deployments
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#end-to-end-data-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        End-to-end data path
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#seed-server-image" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Seed-server image
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Seed-server image">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#non-root-runtime" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Non-root runtime
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#app-hosting-image" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        App-hosting image
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#alpha-constraints" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Alpha constraints
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kubernetes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Kubernetes
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Onboard devices
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Onboard devices
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../device-agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Device Agents
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../network-attachment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Management Type and VLAN Ownership
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../iox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  IOx App
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operate
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Operate
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../console/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Web Console
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fleet-workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Network Workflows
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operations
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Observability
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference and development
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Reference and development
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Validation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../development/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Development
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#end-to-end-data-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        End-to-end data path
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#seed-server-image" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Seed-server image
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Seed-server image">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#non-root-runtime" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Non-root runtime
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#app-hosting-image" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        App-hosting image
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#alpha-constraints" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Alpha constraints
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
+<h1 id="container-deployments">Container Deployments</h1>
+<p>IRIS ships two container roles built around the same catalog and private-swarm
+protocol. The seed server coordinates and originates content; the app-hosting
+agent consumes an assignment, verifies the synchronized image, and writes it to
+IOS-managed storage without installing or activating it.</p>
+<table>
+<thead>
+<tr>
+<th>Role</th>
+<th>Image architecture</th>
+<th>Durable storage</th>
+<th>Deployment target</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Seed server</td>
+<td><code>linux/amd64</code></td>
+<td>State, encrypted config, images, served artifacts</td>
+<td>Docker Compose or one Kubernetes pod</td>
+</tr>
+<tr>
+<td>App-hosting agent</td>
+<td><code>linux/arm64</code> or <code>linux/amd64</code></td>
+<td>CAF persistent disk</td>
+<td>Cisco IE or Catalyst 9000 IOx app hosting</td>
+</tr>
+</tbody>
+</table>
+<h2 id="end-to-end-data-path">End-to-end data path</h2>
+<pre class="mermaid"><code>flowchart LR
+    Operator["Operator image source"] --&gt; Seed["Seed server container"]
+    Seed --&gt; Catalog["Catalog + private tracker"]
+    Seed --&gt; Swarm["BitTorrent pieces"]
+    Catalog --&gt; Agent["IOx agent container"]
+    Swarm --&gt; Scratch["Persistent /data/iris scratch"]
+    Agent --&gt; Scratch
+    Scratch --&gt; Hand["Hand-off: SSD share write (C9k) or SCP push (IE-3x00)"]
+    Hand --&gt; Verify["IOS copy /verify"]
+    Verify --&gt; Target["Selected IOS filesystem root"]</code></pre>
+<p>The final copy deliberately crosses back into IOS. The CAF persistent disk is
+available to the application (for example, as <code>/iox_data</code> on C9300), but it is
+not an IOS filesystem root. The agent uses that disk for resumable swarm data,
+then hands the completed file to IOS for the signature-enforcing
+<code>copy /verify</code>: on C9k the app-hosting SSD share
+(<code>usbflash1:iox_host_data_share</code>) is bind-mounted into the container, so the
+hand-off is a disk-speed write followed by an IOS-internal copy onto
+bootflash; on IE-3x00 (where IOx cannot bind-mount the SD card) the agent
+SCP-pushes the file to <code>guest-share</code> through SSH-to-self instead. See
+<a href="../iox/#runtime-behavior">IOx App</a>.</p>
+<h2 id="seed-server-image">Seed-server image</h2>
+<p>Build from the repository root because the runtime image includes the device
+installers and SSH helper used by console onboarding:</p>
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>build<span class="w"> </span>--platform<span class="w"> </span>linux/amd64<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-f<span class="w"> </span>server/Dockerfile<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-t<span class="w"> </span>iris:latest<span class="w"> </span>.
+</code></pre></div>
+<p>The root <code>.dockerignore</code> prevents local credentials, firmware, generated
+artifacts, and network files from entering the build context. The image exposes
+all device-facing services, includes a <code>/healthz</code> Docker health check, and keeps
+aria2 RPC on loopback only.</p>
+<p>Docker Compose mounts operator images read-only from <code>IRIS_IMAGE_ROOT</code> (default
+<code>/opt/images</code>) and served artifacts from <code>IRIS_ARTIFACTS_HOST_DIR</code>, which
+defaults to the repository's <code>artifacts/</code> directory (<code>../artifacts</code>, relative to
+<code>server/docker-compose.yml</code>). Run <code>iris-bootstrap</code> once before the normal service
+startup.</p>
+<p>The read-only mount is one of the seed server's two image roots. The other is
+the <code>iris-images</code> uploads volume (<code>IRIS_IMAGES_DIR</code>, default
+<code>/var/lib/iris-images</code>), which holds images the console received over HTTP.
+Publishing seeds an image from its own directory rather than copying it, so an
+image staged on the host is published in place and the read-only root stays
+read-only. See <a href="../server/#publishing-images">Server</a>.</p>
+<h3 id="non-root-runtime">Non-root runtime</h3>
+<p>Every seed-server service runs as the fixed uid and gid <code>10001</code>, and Compose
+drops all capabilities. Two host paths — the age identity file and the served
+artifacts directory — plus the host tree behind <code>IRIS_IMAGE_ROOT</code> must be
+accessible to that uid, and a deployment upgraded from a root-runtime release
+needs a one-time migration of its named volumes. Both procedures live in
+<a href="../server/#runtime-identity">Runtime identity</a>, with the migration command in
+<a href="../server/#upgrading-from-a-root-runtime-deployment">Upgrading from a root-runtime deployment</a>.</p>
+<p>Deployment receipts persist under <code>IRIS_STATE</code> on the <code>iris-state</code> volume, so
+undeploy-from-receipt and restart recovery behave identically to the Kubernetes
+PVC layout. See <a href="../network-attachment/">Management Type and VLAN Ownership</a>.</p>
+<h2 id="app-hosting-image">App-hosting image</h2>
+<p>Build only the Docker image when iterating locally:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">CATALOG_PEM</span><span class="o">=</span>/path/to/iris-catalog.pem<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>device/iox/build.sh<span class="w"> </span>--image-only
+</code></pre></div>
+<p>Build the Cisco IOx package directly when <code>ioxclient</code> is available:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">CATALOG_PEM</span><span class="o">=</span>/path/to/iris-catalog.pem<span class="w"> </span><span class="se">\</span>
+device/iox/build.sh<span class="w"> </span>device/iox/out
+
+<span class="nv">IOX_ARCH</span><span class="o">=</span>amd64<span class="w"> </span><span class="nv">PACKAGE_NAME</span><span class="o">=</span>iris-amd64.tar<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="nv">CATALOG_PEM</span><span class="o">=</span>/path/to/iris-catalog.pem<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>device/iox/build.sh<span class="w"> </span>device/iox/out
+</code></pre></div>
+<p>For the normal Compose workflow, run <code>tools/provision-iox-packages.sh</code> after
+the server becomes healthy. It obtains the pinned Cisco <code>ioxclient</code> tool on the
+Linux server when needed, uses the running server certificate, and places both
+architecture-specific packages in served artifacts. Use
+<code>tools/stage-iox-package.sh --arch arm64</code> or <code>--arch amd64</code> only when rebuilding
+one package.</p>
+<p>If no matching local agent bundle is present, the build downloads a pinned
+architecture-matched static <code>aria2c</code> and verifies its SHA-256 digest. The catalog certificate
+must either be supplied locally or fetched with an explicitly supplied SHA-256
+certificate fingerprint.</p>
+<p>The installer passes all environment-specific values at deployment time. No
+lab address is baked in:</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>IRIS_CATALOG_URL</code></td>
+<td>Reachable HTTPS catalog URL covered by the pinned certificate.</td>
+</tr>
+<tr>
+<td><code>IRIS_CATALOG_TOKEN</code></td>
+<td>Per-device enrollment token.</td>
+</tr>
+<tr>
+<td><code>IRIS_DEVICE_ID</code></td>
+<td>Catalog identity for the device.</td>
+</tr>
+<tr>
+<td><code>IRIS_DEVICE_SSH_HOST</code></td>
+<td>IOS SVI used for SSH-to-self and SCP.</td>
+</tr>
+<tr>
+<td><code>IRIS_DEVICE_SSH_USER</code> / <code>IRIS_DEVICE_SSH_PASS</code></td>
+<td>Scoped IOS transport credential.</td>
+</tr>
+<tr>
+<td><code>IRIS_TARGET_FS</code></td>
+<td>Optional IOS filesystem prefix such as <code>sdflash:</code>, <code>usbflash1:</code>, or <code>bootflash:</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>An explicit target is accepted only if <code>show file systems</code> reports it as a
+writable disk and it is not <code>crashinfo:</code>. If it is unavailable, the agent logs
+the fallback and uses platform-aware auto-detection. <code>device/iox/install.sh</code>
+defaults to <code>sdflash:</code>. Console-onboarded C9300 deployments use the SSD-share
+transfer with <code>flash:</code> (bootflash) as the final target — the same placement as
+Guest Shell — and <code>AppGigabitEthernet1/0/1</code>.</p>
+<h2 id="alpha-constraints">Alpha constraints</h2>
+<ul>
+<li>The seed-server image is amd64 so the static binary packed into Catalyst
+  Guest Shell bundles remains x86_64.</li>
+<li>IOx packages are architecture-specific. On IE-3x00 the image hand-off uses
+  SSH-to-self SCP because IOx there does not expose the SD card as a container
+  bind mount; on C9k the app-hosting SSD share is bind-mounted and carries the
+  hand-off at disk speed.</li>
+<li>Compose requires Docker Engine 23.0 or later, because the <code>/run/iris</code> tmpfs is
+  mounted with <code>uid=</code>, <code>gid=</code>, and <code>mode=</code> mount options that older engines
+  reject.</li>
+<li>Server clustering is not implemented. Kubernetes uses one replica and one
+  ReadWriteOnce PVC.</li>
+<li>The server certificate is IP-pinned. Its public address must be stable, and a
+  change requires certificate rotation plus a device trust update.</li>
+</ul>
+<p>The container packaging follows Cisco's
+<a href="https://developer.cisco.com/docs/iox/package-descriptor/">IOx package descriptor</a>
+and <a href="https://www.cisco.com/c/en/us/td/docs/ios-xml/ios/prog/configuration/1718/b-1718-programmability-cg/m_1717_prog_application_hosting.html">IOS XE app-hosting</a>
+contracts.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 Cisco Systems, Inc.
+    </div>
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate":null,"base":"..","features":[],"search":"../assets/javascripts/workers/search.b6b7e04f.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7f30b55.min.js"></script>
+      
+        <script src="../javascripts/mermaid.mjs" type="module"></script>
+      
+    
+  </body>
+</html>
