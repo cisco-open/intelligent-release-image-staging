@@ -58,6 +58,13 @@ scratch file to IOS depends on the platform:
   also falls back to this path automatically if the share mount is absent or
   unreadable from IOS.
 
+Both platforms drive IOS over the app's SSH-to-self CLI, for `copy /verify` and for
+the one-shot EEM applets that place and reclaim files at the target-FS root. That
+connection can optionally be pinned: set `device_ssh_known_hosts` in the agent config
+and, when that file exists, the app's `ssh` and `scp` calls verify the IOS host key
+against it instead of running unverified. See
+[Device Agents](device-agents.md).
+
 `IRIS_TARGET_FS` optionally selects a filesystem prefix such as `sdflash:` or
 `bootflash:`. The agent accepts it only when `show file systems` reports a
 writable non-crash disk; otherwise it logs the fallback and retains automatic
@@ -69,7 +76,7 @@ defaults it to `sdflash:`.
 The C9k share-mount hand-off above never carries image bytes over the network,
 so it is not subject to any of this section — it runs at disk speed. This
 section applies to the **scp push path** (IE-3x00, or a C9k where the share
-mount is unavailable and the agent fell back): that traffic is addressed to
+mount is unavailable and the agent falls back): that traffic is addressed to
 the switch itself, so it crosses the control-plane punt path and is subject to
 Control Plane Policing (CoPP). On Catalyst 9300 the default CoPP policy caps
 that path long before any transport setting does. Measured on C9300
@@ -155,10 +162,12 @@ On first use the helper downloads Cisco's pinned `ioxclient` 1.18.0.0 to
 `tools/bin/ioxclient`; that binary is git-ignored and not embedded in the
 repository or seed-server image. The helper retrieves the live catalog
 certificate from the running `iris` container, builds a package that pins it,
-and places the result in `/srv/artifacts`. If Docker created the default bind
-mount as root, the helper uses `docker cp` rather than requiring a host ownership
-change. On an amd64 server, the arm64 build automatically registers Docker's
-ARM64 emulation handler when it is missing.
+and places the result in `/srv/artifacts`. When the served host directory is not
+writable by the invoking user — the normal case, since the server runs as uid
+10001 and its artifacts directory is owned by that uid — the helper places the
+package with `docker cp` rather than requiring a host ownership change. On an
+amd64 server, the arm64 build automatically registers Docker's ARM64 emulation
+handler when it is missing.
 
 Rebuild both packages after rotating the server certificate, because each
 package contains the pinned catalog certificate. The helper only builds and

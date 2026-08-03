@@ -177,39 +177,81 @@ def test_state_is_per_image_so_reassignment_recopies():
 
 def test_replaced_image_cleanup_claim_gated_on_actual_absence():
     # AAA nodes silently no-op a raw exec `delete` (the reclaim/copyroot EEM
-    # applets exist for exactly that reason) — so the CLEANUP log and the
-    # root_file bookkeeping must be gated on the file actually being gone,
-    # else the replaced image is stranded on flash while IRIS claims otherwise
+    # applets exist for exactly that reason) — so the delete must run through
+    # the authorization-bypass applet, and the CLEANUP log and root_file
+    # bookkeeping must be gated on the file actually being gone, else the
+    # replaced image is stranded on flash while IRIS claims otherwise
     cat = FakeCatalog({"approved_image_id": "img2"},
                       {"id": "img2", "filename": "img2.bin", "size": 7,
                        "sha256": "def"})
-    deps, emitted, ios_cmds, _, _, _, _, _ = make_deps(
+    deps, emitted, ios_cmds, _, _, _, _, bundle_reclaimed = make_deps(
         cat, {"/stage/img2.bin": 7}, verify_ok=True)
     deps = deps._replace(                       # the old root REFUSES to die
         root_present=lambda fname, prefix="flash:": fname == "old.bin")
     state = {"schema_version": iris_agent._STATE_SCHEMA,
              "image_id": "img1", "root_file": "old.bin"}
     iris_agent.run_once(CFG, deps, state)
-    assert any("delete /force flash:old.bin" in c for c in ios_cmds)
+    assert bundle_reclaimed == [("flash:", ["old.bin"])]   # via the bypass applet
+    assert all("delete" not in c for c in ios_cmds)        # never a raw exec delete
     # queued for retry every tick — NOT silently forgotten
     assert state.get("pending_root_deletes") == ["old.bin"]
     assert any(m == "CLEANUP-PENDING" for m, _ in emitted)
     assert all(not (m == "CLEANUP" and "old.bin" in msg) for m, msg in emitted)
 
 
+def test_replaced_image_cleanup_retry_refires_bypass_applet():
+    # a still-present entry must be retried with the SAME mechanism that can
+    # actually land on an AAA node — the bypass applet — every tick, not just
+    # re-verified after the first (possibly no-op'd) attempt
+    cat = FakeCatalog({"approved_image_id": "img2"},
+                      {"id": "img2", "filename": "img2.bin", "size": 7,
+                       "sha256": "def"})
+    deps, _, ios_cmds, _, _, _, _, bundle_reclaimed = make_deps(
+        cat, {"/stage/img2.bin": 7}, verify_ok=True)
+    deps = deps._replace(                       # the old root REFUSES to die
+        root_present=lambda fname, prefix="flash:": fname == "old.bin")
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "image_id": "img1", "root_file": "old.bin"}
+    iris_agent.run_once(CFG, deps, state)
+    iris_agent.run_once(CFG, deps, state)
+    assert bundle_reclaimed == [("flash:", ["old.bin"]),
+                                ("flash:", ["old.bin"])]
+    assert all("delete" not in c for c in ios_cmds)
+    assert state.get("pending_root_deletes") == ["old.bin"]
+
+
 def test_replaced_image_cleanup_confirmed_when_gone():
     cat = FakeCatalog({"approved_image_id": "img2"},
                       {"id": "img2", "filename": "img2.bin", "size": 7,
                        "sha256": "def"})
-    deps, emitted, ios_cmds, _, _, _, _, _ = make_deps(
+    deps, emitted, ios_cmds, _, _, _, _, bundle_reclaimed = make_deps(
         cat, {"/stage/img2.bin": 7}, verify_ok=True)
     deps = deps._replace(                        # old root really deleted
         root_present=lambda fname, prefix="flash:": fname != "old.bin")
     state = {"schema_version": iris_agent._STATE_SCHEMA,
              "image_id": "img1", "root_file": "old.bin"}
     iris_agent.run_once(CFG, deps, state)
+    assert bundle_reclaimed == [("flash:", ["old.bin"])]
     assert "pending_root_deletes" not in state
     assert any(m == "CLEANUP" and "old.bin" in msg for m, msg in emitted)
+
+
+def test_replaced_image_cleanup_whitelists_names_before_applet():
+    # pending_root_deletes comes from the state FILE (hand-editable) and is
+    # interpolated into applet config lines — anything outside the filename
+    # whitelist, or the current image itself, must be dropped before templating
+    cat = FakeCatalog({"approved_image_id": "img2"},
+                      {"id": "img2", "filename": "img2.bin", "size": 7,
+                       "sha256": "def"})
+    deps, _, ios_cmds, _, _, _, _, bundle_reclaimed = make_deps(
+        cat, {"/stage/img2.bin": 7}, verify_ok=True)
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "image_id": "img2",
+             "pending_root_deletes": ['bad"name', "img2.bin"]}
+    iris_agent.run_once(CFG, deps, state)
+    assert bundle_reclaimed == []               # applet never templated
+    assert all("delete" not in c for c in ios_cmds)
+    assert "pending_root_deletes" not in state  # dropped, not retried
 
 
 def test_complete_but_sha_mismatch_errors_no_done():
@@ -375,7 +417,8 @@ def test_reassignment_purges_old_image_everywhere():
     cat = FakeCatalog({"approved_image_id": "img2"},
                       {"id": "img2", "filename": "img2.bin",
                        "size": 1000, "sha256": "def"})
-    deps, emitted, ios_cmds, _, _, purged, _, _ = make_deps(cat, {}, free=9_000_000_000)
+    deps, emitted, ios_cmds, _, _, purged, _, bundle_reclaimed = make_deps(
+        cat, {}, free=9_000_000_000)
     deps = deps._replace(   # the delete genuinely lands: old root reads absent
         root_present=lambda fname, prefix="flash:": fname != "img1.bin")
     state = {"schema_version": iris_agent._STATE_SCHEMA,
@@ -383,7 +426,9 @@ def test_reassignment_purges_old_image_everywhere():
              "img1": {"done": True, "copied": True}}
     assert iris_agent.run_once(CFG, deps, state) == "downloading"
     assert purged == [("img2.bin", "img2")]            # old torrent/files purged
-    assert "delete /force flash:img1.bin" in ios_cmds  # old ROOT copy removed (ours)
+    # old ROOT copy removed (ours) — via the bypass applet, never a raw delete
+    assert bundle_reclaimed == [("flash:", ["img1.bin"])]
+    assert all("delete" not in c for c in ios_cmds)
     assert any(m == "CLEANUP" for m, _ in emitted)
     assert "img1" not in state and state["image_id"] == "img2"
 
@@ -394,14 +439,13 @@ def test_reassignment_purges_old_root_on_cached_stage_fs():
     cat = FakeCatalog({"approved_image_id": "img2"},
                       {"id": "img2", "filename": "img2.bin", "size": 5,
                        "sha256": "abc"})
-    deps, _, ios_cmds, _, _, _, _, _ = make_deps(
+    deps, _, _, _, _, _, _, bundle_reclaimed = make_deps(
         cat, {"/stage/img2.bin": 5}, mode="bundle")
     deps = deps._replace(target_fs=lambda: ("sdflash:", 9_000_000_000))
     state = {"image_id": "img1", "root_file": "img1.bin", "stage_fs": "sdflash:",
              "img1": {"done": True, "copied": True}}
     iris_agent.run_once(CFG, deps, state)
-    assert "delete /force sdflash:img1.bin" in ios_cmds
-    assert "delete /force flash:img1.bin" not in ios_cmds
+    assert bundle_reclaimed == [("sdflash:", ["img1.bin"])]
 
 
 def test_reassignment_purge_defaults_to_flash_for_legacy_state():
@@ -409,12 +453,12 @@ def test_reassignment_purge_defaults_to_flash_for_legacy_state():
     cat = FakeCatalog({"approved_image_id": "img2"},
                       {"id": "img2", "filename": "img2.bin", "size": 5,
                        "sha256": "abc"})
-    deps, _, ios_cmds, _, _, _, _, _ = make_deps(
+    deps, _, _, _, _, _, _, bundle_reclaimed = make_deps(
         cat, {"/stage/img2.bin": 5}, mode="bundle")
     state = {"image_id": "img1", "root_file": "img1.bin",
              "img1": {"done": True, "copied": True}}
     iris_agent.run_once(CFG, deps, state)
-    assert "delete /force flash:img1.bin" in ios_cmds
+    assert bundle_reclaimed == [("flash:", ["img1.bin"])]
 
 
 def test_gate_caches_stage_fs_in_state():
@@ -432,12 +476,13 @@ def test_same_assignment_never_purges():
     cat = FakeCatalog({"approved_image_id": "img1"},
                       {"id": "img1", "filename": "img1.bin", "size": 5,
                        "sha256": "abc"})
-    deps, _, ios_cmds, _, _, purged, _, _ = make_deps(cat, {"/stage/img1.bin": 5})
+    deps, _, ios_cmds, _, _, purged, _, bundle_reclaimed = make_deps(
+        cat, {"/stage/img1.bin": 5})
     state = {"schema_version": iris_agent._STATE_SCHEMA,
              "image_id": "img1", "root_file": "img1.bin",
              "img1": {"done": True, "copied": True, "sha": "abc"}}
     iris_agent.run_once(CFG, deps, state)
-    assert purged == []
+    assert purged == [] and bundle_reclaimed == []
     assert all("delete" not in c for c in ios_cmds)
 
 
@@ -963,6 +1008,33 @@ def test_copy_to_root_direct_keeps_scratch_on_failure():
     assert ok is False
     assert all(not c.startswith("delete /force flash:/guest-share")
                for c in cli_calls)
+
+
+# --- _reclaim_bundle_impl: every automated image delete (the bundle-mode
+# download gate AND the replaced-root cleanup) runs through the one-shot
+# IRIS-RECLAIM-BUNDLE authorization-bypass applet — a raw exec `delete` is
+# silently no-op'd on AAA nodes, which stranded replaced images on flash. ---
+
+def test_reclaim_bundle_impl_templates_authorization_bypass_applet():
+    cli_cfg, cli_exec, _, configured, cli_calls, _ = _capture_calls()
+    iris_agent._reclaim_bundle_impl(
+        "flash:", ["old.bin", "older.bin"], cli_cfg, cli_exec)
+    assert len(configured) == 1
+    body = configured[0]
+    # one-shot re-registration under the KNOWN applet name (the uninstall
+    # scripts and the onboarding collision check both enumerate it)
+    assert body[0] == "no event manager applet IRIS-RECLAIM-BUNDLE"
+    assert body[1] == \
+        "event manager applet IRIS-RECLAIM-BUNDLE authorization bypass"
+    assert 'action 020 cli command "delete /force flash:old.bin"' in body
+    assert 'action 030 cli command "delete /force flash:older.bin"' in body
+    assert cli_calls == ["event manager run IRIS-RECLAIM-BUNDLE"]
+
+
+def test_reclaim_bundle_impl_empty_names_is_a_no_op():
+    cli_cfg, cli_exec, _, configured, cli_calls, _ = _capture_calls()
+    iris_agent._reclaim_bundle_impl("flash:", [], cli_cfg, cli_exec)
+    assert configured == [] and cli_calls == []
 
 
 # --- Share-mount staging (C9k IOx): the app-hosting SSD share

@@ -180,6 +180,11 @@ def publish(image_path, store, tracker_url, image_id=None,
     entry = {
         "id": image_id,
         "filename": os.path.basename(image_path),
+        # Where the image is seeded FROM. An image published in place (from the
+        # read-only IRIS_IMAGE_ROOT, or by iris-publish) is not in the uploads
+        # volume, and the two directories can hold the same basename -- so a
+        # delete must not infer the file's location from its name alone.
+        "source_dir": os.path.dirname(os.path.abspath(image_path)),
         "size": size,
         "sha256": sha,
         "sha512": sha512,

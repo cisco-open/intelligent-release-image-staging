@@ -30,17 +30,32 @@ Console-to-stage-host SSH hop.
 | 8443 | Device agent -> catalog | HTTPS | Image policy, assignment, enrollment-token refresh, heartbeats, and reports. |
 | 6969 | Device or server seeder -> tracker | HTTP | Private BitTorrent announces. |
 | 6881 | Device -> server seeder | BitTorrent | Initial image pieces from the origin seeder. |
-| 6881-6999 | Device <-> device | BitTorrent | Peer-to-peer fetch and reseed traffic. |
+| 6881-6999 | Device <-> device | BitTorrent | Peer-to-peer fetch and reseed traffic. Router NAT uses static TCP PAT for 6881. |
 | 8080 | Operator browser -> Console | HTTPS | Console UI and API. The host port can be changed with `IRIS_GUI_PUBLISH`. |
 | 9101 | Prometheus or operator tooling -> server telemetry | HTTP | `/healthz`, `/swarm`, and optional `/metrics`. |
 | 22 | IOx agent -> its own IOS SVI | SSH/SCP | IOx SSH-to-self control and SCP image transfer before IOS `copy /verify`. |
+
+External telemetry is opt-in, and the 9101 listener runs either way: `/healthz`,
+the `/swarm` JSON, and the `/swarmmap` pointer are served regardless, while the
+Prometheus `/metrics` endpoint and OTLP export are gated. See
+[Telemetry variables](reference.md#telemetry-variables) for which variable does
+what.
+
+The Console reads `/swarm` over container loopback (`127.0.0.1:9101`), so 9101
+needs **external** reachability only for Prometheus scraping or operator tools.
+A deployment with no monitoring stack can leave it closed at the firewall
+without affecting the Console.
+
+Every service listens on an unprivileged port, which is what lets the whole
+server run as the non-root uid 10001 with all capabilities dropped. See
+[Container runtime privileges](security.md#container-runtime-privileges).
 
 ## Local-Only Services
 
 | Port | Service | Constraint |
 | --- | --- | --- |
 | 6800 | aria2 JSON-RPC | Bound to loopback in the device runtime and seed-server container. It is intentionally not published by Docker Compose and must not be opened in a firewall. |
-| 9101 | Console swarm access | The Console reads swarm data locally; devices report through authenticated catalog traffic on 8443, not to telemetry directly. |
+| 9101 | Console swarm access | The Console's swarm view uses container loopback, not the published port. Devices report through authenticated catalog traffic on 8443 and never talk to telemetry directly. |
 
 ## Firewall Rules
 
@@ -50,13 +65,13 @@ Minimum rules for a Compose server:
 | --- | --- |
 | Devices -> server | 6969, 8443, 8000, 6881 |
 | Operators -> server | 8080 |
-| Monitoring host -> server, when used | 9101 |
+| Prometheus or operator tooling -> server, when used | 9101 |
 | Server/Console -> devices during onboarding | 22 |
 | Devices <-> devices | 6881-6999 in both directions |
 
-If telemetry export is enabled, the server also needs outbound TCP reachability
-to the configured `IRIS_OTLP_ENDPOINT` (commonly OTLP/HTTP port 4318). That
-endpoint is external to IRIS and is not published by the Compose stack.
+When both `IRIS_OBSERVABILITY` and `IRIS_OTLP_ENDPOINT` are set, the server also
+needs outbound TCP reachability to that endpoint (commonly OTLP/HTTP port 4318).
+The collector is external to IRIS and is not published by the Compose stack.
 
 ## Important Constraints
 
@@ -74,3 +89,6 @@ endpoint is external to IRIS and is not published by the Compose stack.
   management VLAN and its SVI; IRIS adds no VLAN, SVI, gateway, route, or VRF.
   Preflight only confirms that path can reach the catalog, artifact, tracker,
   and seeder ports. See [Management Type and VLAN Ownership](network-attachment.md).
+- For **router-routed** devices, the operator must route the VPG app subnet to
+  the IRIS server and peers. **router-nat** uses the configured outside
+  interface; permit inbound TCP 6881 to its outside address for peer reachability.

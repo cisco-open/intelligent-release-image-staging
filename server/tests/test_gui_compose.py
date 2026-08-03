@@ -128,6 +128,28 @@ def test_version_baked_as_optional_build_arg():
     assert "ENV IRIS_VERSION=${IRIS_VERSION}" in df
 
 
+def test_dockerfile_runs_as_nonroot_fixed_uid():
+    # every listener binds >1024 and nothing needs root, so the image drops to
+    # an unprivileged user. The uid is FIXED (10001) so host-side chowns of
+    # bind mounts / the age key are deterministic across hosts, and fresh
+    # named volumes inherit a known owner.
+    df = _read("Dockerfile")
+    assert "--uid 10001" in df and "--gid 10001" in df
+    assert "\nUSER iris\n" in df
+    # USER must take effect before the ENTRYPOINT so the entrypoint and every
+    # service it supervises run unprivileged
+    assert df.index("\nUSER iris\n") < df.index("ENTRYPOINT")
+
+
+def test_compose_hardens_iris_service():
+    import yaml
+    svc = yaml.safe_load(_read("docker-compose.yml"))["services"]["iris"]
+    # restated uid so `docker compose run`/`exec` can't regress to root
+    assert svc["user"] == "10001:10001"
+    assert svc["cap_drop"] == ["ALL"]
+    assert "no-new-privileges:true" in svc["security_opt"]
+
+
 def test_compose_forwards_version_build_arg():
     import yaml
     svc = yaml.safe_load(_read("docker-compose.yml"))["services"]["iris"]

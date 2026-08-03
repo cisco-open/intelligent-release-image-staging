@@ -58,6 +58,40 @@ def test_receipt_keeps_immutable_resolved_network(tmp_path):
     assert created["resolved"]["iris_vlan"] == "666"
 
 
+def test_update_planned_atomically_refreshes_execution_evidence(tmp_path):
+    store = deployment_receipts.ReceiptStore(str(tmp_path), now_fn=lambda: 100)
+    store.create(_receipt(receipt_id="r1"))
+    updated = store.update_planned(
+        "r1", plan_hash="b" * 64,
+        resolved={"platform": "router", "device_identity": "9ABC123"},
+        preflight={"status": "passed", "device_identity": "9ABC123"},
+        resources=[{"kind": "virtualportgroup", "ownership": "iris-created"}])
+    assert updated["state"] == "planned"
+    assert updated["plan_hash"] == "b" * 64
+    assert updated["resolved"]["device_identity"] == "9ABC123"
+    assert store.get("r1") == updated
+
+
+def test_update_planned_refuses_after_apply_started_or_with_secrets(tmp_path):
+    store = deployment_receipts.ReceiptStore(str(tmp_path))
+    store.create(_receipt(receipt_id="r1"))
+    with pytest.raises(ValueError, match="secrets"):
+        store.update_planned(
+            "r1", plan_hash="b" * 64, resolved={},
+            preflight={"token": "nope"}, resources=[])
+    store.transition("r1", "applying")
+    with pytest.raises(ValueError, match="only planned"):
+        store.update_planned(
+            "r1", plan_hash="b" * 64, resolved={},
+            preflight={}, resources=[])
+
+
+def test_cancelled_planned_receipt_can_be_retired(tmp_path):
+    store = deployment_receipts.ReceiptStore(str(tmp_path))
+    store.create(_receipt(receipt_id="r1"))
+    assert store.transition("r1", "removed")["state"] == "removed"
+
+
 def test_adopt_creates_active_receipt_for_existing_deployment(tmp_path):
     store = deployment_receipts.ReceiptStore(str(tmp_path))
     adopted = store.adopt(_receipt(receipt_id="a1"))
@@ -169,3 +203,74 @@ def test_recover_interrupted_collapses_legacy_duplicate_actives(tmp_path):
     assert store.get("r-new")["state"] == "active"
     assert store.get("r-other")["state"] == "active"   # single active untouched
     assert store.active_for_device("edge-01")["receipt_id"] == "r-new"
+
+
+def test_interrupted_work_can_still_be_torn_down(tmp_path):
+    """A controller restart during an onboard leaves the receipt 'unknown' while
+    the device is already configured. That receipt records what IRIS created, so
+    it MUST still authorize a teardown — otherwise the device is stranded: a
+    router cannot be adopted and its preflight refuses a re-onboard, leaving no
+    Console path at all."""
+    store = deployment_receipts.ReceiptStore(str(tmp_path))
+    created = store.create(_receipt())
+    store.transition(created["receipt_id"], "applying")
+    store.recover_interrupted()
+    assert store.get(created["receipt_id"])["state"] == "unknown"
+    # not active, so it must not masquerade as one
+    assert store.active_for_device("edge-01") is None
+    # but it IS recoverable, and a teardown can run to completion
+    rec = store.recoverable_for_device("edge-01")
+    assert rec["receipt_id"] == created["receipt_id"]
+    store.transition(created["receipt_id"], "applying")
+    store.transition(created["receipt_id"], "removed")
+    assert store.get(created["receipt_id"])["state"] == "removed"
+
+
+def test_needs_reconcile_and_drifted_can_be_torn_down(tmp_path):
+    """needs-reconcile was terminal, which made a drift-detected deployment
+    permanently unmanageable. Reconciling IS undeploying, so it must lead
+    somewhere."""
+    store = deployment_receipts.ReceiptStore(str(tmp_path))
+    for state in ("needs-reconcile", "drifted"):
+        rid = store.create(_receipt(device_id="edge-%s" % state))["receipt_id"]
+        store.transition(rid, "applying")
+        store.transition(rid, "active")
+        store.transition(rid, state)
+        assert store.recoverable_for_device("edge-%s" % state)["receipt_id"] == rid
+        store.transition(rid, "applying")
+        store.transition(rid, "removed")
+        assert store.get(rid)["state"] == "removed"
+
+
+def test_recoverable_prefers_the_active_receipt(tmp_path):
+    store = deployment_receipts.ReceiptStore(str(tmp_path))
+    stale = store.create(_receipt(receipt_id="r-stale"))["receipt_id"]
+    store.transition(stale, "applying")
+    store.recover_interrupted()          # -> unknown
+    live = store.create(_receipt(receipt_id="r-live"))["receipt_id"]
+    store.transition(live, "applying")
+    store.transition(live, "active")
+    assert store.recoverable_for_device("edge-01")["receipt_id"] == live
+
+
+def test_recoverable_is_none_when_nothing_is_left(tmp_path):
+    store = deployment_receipts.ReceiptStore(str(tmp_path))
+    rid = store.create(_receipt())["receipt_id"]
+    store.transition(rid, "applying")
+    store.transition(rid, "removed")
+    assert store.recoverable_for_device("edge-01") is None
+
+
+def test_recoverable_refuses_to_guess_between_two_candidates(tmp_path):
+    """Two recoverable receipts means we cannot prove which one describes the
+    box; guessing could tear down resources the other receipt owns."""
+    store = deployment_receipts.ReceiptStore(str(tmp_path))
+    for rid in ("r-a", "r-b"):
+        made = store.create(_receipt(receipt_id=rid))["receipt_id"]
+        store.transition(made, "applying")
+    store.recover_interrupted()
+    try:
+        store.recoverable_for_device("edge-01")
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "edge-01" in str(exc)

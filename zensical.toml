@@ -14,24 +14,36 @@ extra_javascript = ["javascripts/mermaid.mjs"]
 copyright = "Copyright &copy; 2026 Cisco Systems, Inc."
 nav = [
   { "Overview" = "index.md" },
-  { "Getting Started" = "getting-started.md" },
-  { "AI-Guided PoC" = "aiagent.md" },
-  { "Architecture" = "architecture.md" },
-  { "Container Deployments" = "containers.md" },
-  { "Server" = "server.md" },
-  { "Network Ports and Flows" = "network-ports.md" },
-  { "Management Type and VLAN Ownership" = "network-attachment.md" },
-  { "Kubernetes" = "kubernetes.md" },
-  { "Device Agents" = "device-agents.md" },
-  { "Web Console" = "console.md" },
-  { "Network Workflows" = "fleet-workflows.md" },
-  { "IOx App" = "iox.md" },
-  { "Security Model" = "security.md" },
-  { "Observability" = "observability.md" },
-  { "Operations" = "operations.md" },
-  { "Validation" = "validation.md" },
-  { "Development" = "development.md" },
-  { "Reference" = "reference.md" },
+  { "Get started" = [
+    { "Getting Started" = "getting-started.md" },
+    { "AI-Guided PoC" = "aiagent.md" },
+  ] },
+  { "How it works" = [
+    { "Architecture" = "architecture.md" },
+    { "Security Model" = "security.md" },
+    { "Network Ports and Flows" = "network-ports.md" },
+  ] },
+  { "Deploy the server" = [
+    { "Server" = "server.md" },
+    { "Container Deployments" = "containers.md" },
+    { "Kubernetes" = "kubernetes.md" },
+  ] },
+  { "Onboard devices" = [
+    { "Device Agents" = "device-agents.md" },
+    { "Management Type and VLAN Ownership" = "network-attachment.md" },
+    { "IOx App" = "iox.md" },
+  ] },
+  { "Operate" = [
+    { "Web Console" = "console.md" },
+    { "Network Workflows" = "fleet-workflows.md" },
+    { "Operations" = "operations.md" },
+    { "Observability" = "observability.md" },
+  ] },
+  { "Reference and development" = [
+    { "Reference" = "reference.md" },
+    { "Validation" = "validation.md" },
+    { "Development" = "development.md" },
+  ] },
 ]
 
 [project.theme]

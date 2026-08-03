@@ -65,11 +65,28 @@ RUN chmod +x /opt/iris/server/seed-launch.sh \
     /opt/iris/device/iox/*.sh \
     /opt/iris/lab/*.sh
 
+# Run unprivileged: every listener binds >1024 and nothing in the entrypoint
+# needs root (secretfs shells out to age; no mounts, no chown at runtime). The
+# uid/gid are FIXED at 10001 so host-side ownership is deterministic: a fresh
+# named volume copies these dirs' image ownership, and the operator chowns of
+# bind mounts / the age key target the same uid on every host (see the
+# migration note in docker-compose.yml). /var/log/iris lives on the container
+# layer (not a volume) and /run/iris backs bare `docker run` without a tmpfs —
+# both must pre-exist writable or the entrypoint's mkdir fails.
+RUN groupadd --system --gid 10001 iris \
+    && useradd --system --uid 10001 --gid iris --home-dir /var/lib/iris \
+         --shell /usr/sbin/nologin iris \
+    && install -d -o iris -g iris \
+         /var/lib/iris /etc/iris /etc/iris/tls /var/lib/iris-images \
+         /srv/artifacts /opt/images /var/log/iris /run/iris
+
 # Device/operator-facing ports. aria2 RPC (:6800) is loopback-only and omitted.
 EXPOSE 6969 8443 8000 6881 8080 9101
 VOLUME ["/var/lib/iris", "/etc/iris", "/opt/images", "/srv/artifacts", "/var/lib/iris-images"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD curl -fsS http://127.0.0.1:9101/healthz || exit 1
+
+USER iris
 
 ENTRYPOINT ["/opt/iris/server/docker-entrypoint.sh"]

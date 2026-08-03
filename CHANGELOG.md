@@ -9,6 +9,92 @@ This project uses **Calendar Versioning (CalVer)**: `YYYY.0M.0D` with an optiona
 `2026.06.11.1`). Releases are tagged `vYYYY.0M.0D`. The current version is in the
 top-level `VERSION` file.
 
+## [2026.07.26]
+
+### Added
+- **Import images already on disk**: the Console's Images screen lists image
+  files present on the server but not in the catalog and publishes them **in
+  place** — nothing is copied, and a read-only image root stays read-only. Two
+  roots are scanned recursively: the uploads volume (`IRIS_IMAGES_DIR`) and the
+  read-only import root (`IMAGES_ROOT`, default `/opt/images`). Recovers
+  orphaned uploads after a catalog reset and gives the documented
+  operator-drops-a-file workflow a UI. New `GET /api/images/importable` and
+  `POST /api/images/import`, plus an `image_import` audit event. Files that are
+  not offered are reported with a reason rather than silently omitted.
+- **Bulk device actions**: **Adopt selected** and **Delete selected** join
+  Onboard/Undeploy, alongside a picker that assigns one credential profile to
+  every checked device — the CSV inventory carries no credentials, so this is
+  the batch path after an import. Every selected-action shares one lock, so a
+  delete can no longer fire while an onboard batch is starting.
+- **Catalog entries record `source_dir`**, the directory an image is seeded
+  from. Deletes only unlink inside the uploads volume, and the startup re-seed
+  resolves a torrent by recorded directory instead of guessing from a basename.
+- **Non-root server runtime**: the image runs as `iris` (uid/gid 10001) with
+  `cap_drop: ALL` and `no-new-privileges`; the Kubernetes pod sets
+  `runAsNonRoot` with matching uid/gid/fsGroup and the namespace enforces the
+  `restricted` Pod Security profile. Existing deployments need a one-time
+  volume-ownership migration — see the Server documentation.
+- **Optional device SSH host-key pinning** through a `device_ssh_known_hosts`
+  agent config key, following the same verify-if-present pattern as the catalog
+  CA. The default path is unchanged.
+
+### Fixed
+- **Stored cross-site scripting in the Swarm Map**: a device-supplied
+  `link.rtt_ms_median` reached the report drawer unescaped. The field is now
+  numerically gated in the browser and coerced server-side when a report is
+  sanitized.
+- **Replaced-image cleanup on AAA devices**: cleanup now deletes through an
+  authorization-bypass EEM applet. A raw exec `delete` is silently discarded on
+  a device running AAA command authorization, so the replaced image was never
+  freed and the delete was re-queued on every tick.
+- **Interrupted deployments are recoverable**: a receipt left `unknown` by a
+  controller restart, or marked `drifted`/`needs-reconcile`, can now be torn
+  down. Previously such a receipt was a dead end — the device was already
+  configured so a re-onboard failed preflight, a router could not be adopted,
+  and undeploy had no receipt to authorize it.
+- **Router NAT teardown** flushes NAT translations before removing the dynamic
+  mapping. IOS refuses the mapping's no-form while translations reference it,
+  while the ACL removal on the following line succeeds, leaving a dangling
+  reference that failed the teardown verify.
+- **Identical image roots are scanned once**, so a deployment that points the
+  uploads volume and the import root at one directory (as the Kubernetes
+  ConfigMap does) can still import.
+- Publish no longer overwrites a catalogued image when a filename differs only
+  by the `.SPA.bin`/`.bin` suffix, which resolves to the same catalog id.
+- `/api/devices` reads device policies once per request instead of once per
+  device.
+- Panning the Swarm Map updates the scene transform instead of rebuilding the
+  graph on every pointer event.
+- The device inventory's required-variable guard in `router-uninstall.sh` now
+  runs before the value is first used, and `get-aria2c.sh` cleans up its
+  temporary directory on every exit path.
+
+### Changed
+- The documentation navigation is grouped into **Get started**, **How it
+  works**, **Deploy the server**, **Onboard devices**, **Operate**, and
+  **Reference and development** instead of one flat page list. Page URLs are
+  unchanged.
+- `zensical` and the documentation workflow's Python version are pinned.
+
+## [2026.07.25]
+
+### Added
+- **Catalyst 8000 router attachment modes**: `router-routed` creates an
+  IRIS-owned VirtualPortGroup (VPG) subnet, while `router-nat` additionally
+  configures overload NAT and static TCP PAT for swarm port 6881. NAT teardown
+  removes `ip nat outside` only when the deployment receipt proves IRIS added
+   that marking. Support is designed for the Catalyst 8000 family, lab-tested
+  on C8000v. Both modes completed onboarding, verified image staging, and
+  receipt-backed undeploy in the lab; Swarm Map and Grafana telemetry were
+  also verified.
+- **Router inventory fields**: CSV v2 and the Console now support
+  `vpg_number` and `nat_interface` for router attachments.
+- **Router safety invariants**: preflight repeats at execution time before
+  enrollment-token minting; receipts bind management IP and processor-board
+  identity. Router adoption is refused (re-onboard instead). Named globals and
+  `guest-share` are collision-free and receipt-owned, NAT interfaces are
+  canonicalized, and pre-existing `ip nat outside` is preserved.
+
 ## [2026.07.24]
 
 The inband-management release adds a second management type and a

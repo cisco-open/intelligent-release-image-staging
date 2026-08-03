@@ -378,19 +378,22 @@ def run_once(cfg, deps, state):
 
     # Delete replaced flash-root images, VERIFYING each is actually gone
     # before claiming CLEANUP: AAA nodes silently no-op a raw exec `delete`
-    # (the reclaim/copyroot EEM applets exist for exactly that), and an
-    # unverified claim strands the old image on flash forever. Unverified
-    # entries stay on the list and are retried every tick. The whitelist
-    # re-check guards the destructive interpolation against a hand-edited
-    # state file.
+    # (the reclaim/copyroot EEM applets exist for exactly that), so the
+    # delete runs through the same authorization-bypass applet as bundle
+    # reclaim — a raw delete would no-op on every retry and strand the old
+    # image on flash forever. Unverified entries stay on the list and are
+    # retried every tick (the applet may still be running when we look; the
+    # next tick's re-check settles it). The whitelist re-check guards the
+    # destructive interpolation against a hand-edited state file.
     pending = state.get("pending_root_deletes") or []
     if pending:
         fs = state.get("stage_fs", "flash:")
+        doomed = [n for n in pending
+                  if n != image["filename"] and _FILENAME_RE.match(n)]
+        if doomed:
+            deps.reclaim_bundle(fs, doomed)
         still = []
-        for old_root in pending:
-            if old_root == image["filename"] or not _FILENAME_RE.match(old_root):
-                continue
-            deps.ios("delete /force %s%s" % (fs, old_root))
+        for old_root in doomed:
             if deps.root_present(old_root, fs):
                 still.append(old_root)
                 deps.emit("CLEANUP-PENDING",
@@ -887,6 +890,32 @@ def _copy_to_root_direct_impl(fname, target_prefix, cli_execute_fn, emit_fn,
     return ok
 
 
+def _reclaim_bundle_impl(target_prefix, names, cli_configure_fn, cli_execute_fn):
+    """Delete image artifacts at the target-FS root via the one-shot
+    IRIS-RECLAIM-BUNDLE authorization-bypass applet (AAA nodes silently no-op
+    a raw exec `delete`). Callers own the never-delete-that guarantee: the
+    bundle-mode download gate passes only names outside its protect set
+    (running/staging/seeding image + IRIS's own root copy), and the
+    replaced-root cleanup passes only re-whitelisted IRIS-placed root copies.
+    Fire-and-forget — callers that need proof re-check afterwards (the
+    replaced-root cleanup verifies file presence; the download gate re-reads
+    free space).
+
+    Module-level + injected callables so it's unit-testable."""
+    if not names:
+        return
+    actions = ['action 010 cli command "enable"']
+    for i, n in enumerate(names, start=2):
+        actions.append('action %03d cli command "delete /force %s%s"'
+                       % (i * 10, target_prefix, n))
+    cli_configure_fn([
+        "no event manager applet IRIS-RECLAIM-BUNDLE",
+        "event manager applet IRIS-RECLAIM-BUNDLE authorization bypass",
+        "event none maxrun 120",
+    ] + actions)
+    cli_execute_fn("event manager run IRIS-RECLAIM-BUNDLE")
+
+
 def _share_settings(cfg):
     """(share_dir, share_ios_path) for the C9k SSD share mount. The app-hosting
     run-opts set the environment (the normal path); conf keys are the fallback
@@ -1267,22 +1296,11 @@ def build_deps(cfg, conf_path):  # pragma: no cover
             _show("dir %s" % target_prefix), protect)
 
     def reclaim_bundle(target_prefix, names):
-        # Delete UNUSED image artifacts via a one-shot authorization-bypass
-        # applet (AAA nodes silently no-op a raw delete). Stage-only: never the
-        # running/staging/seeding image (the caller's `protect` set guarantees
-        # `names` excludes them).
-        if not names:
-            return
-        actions = ['action 010 cli command "enable"']
-        for i, n in enumerate(names, start=2):
-            actions.append('action %03d cli command "delete /force %s%s"'
-                            % (i * 10, target_prefix, n))
-        cli_configure([
-            "no event manager applet IRIS-RECLAIM-BUNDLE",
-            "event manager applet IRIS-RECLAIM-BUNDLE authorization bypass",
-            "event none maxrun 120",
-        ] + actions)
-        cli_execute("event manager run IRIS-RECLAIM-BUNDLE")
+        # Thin wrapper — the applet templating lives in the module-level impl
+        # so it's unit-tested off-box. Serves both the bundle-mode download
+        # gate and the replaced-root cleanup in run_once (see the impl's
+        # docstring for each caller's safety guarantee).
+        _reclaim_bundle_impl(target_prefix, names, cli_configure, cli_execute)
 
     def version():
         try:

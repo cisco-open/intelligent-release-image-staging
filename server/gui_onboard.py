@@ -17,6 +17,7 @@ by lab/device-run.sh's SSHPASS and the installer's sshpass). The streamed job
 lines are the installer's stdout, which echoes neither password (sshpass reads
 them from the env)."""
 import inspect
+import ipaddress
 import os
 import re
 import secrets
@@ -46,18 +47,21 @@ def _fmt_dur(secs):
 _PLATFORM_RECIPES = {
     "guestshell": "device/device-install.sh",
     "iox": "device/iox/install.sh",
+    "router": "device/router-install.sh",
 }
 # Teardown recipe per platform — the inverse of _PLATFORM_RECIPES, so undeploy
 # is fleet-wide (Guest Shell C9300/ISR/ASR AND IOx IE-3x00/IR1101/IR18xx).
 _UNINSTALL_RECIPES = {
     "guestshell": "device/device-uninstall.sh",
     "iox": "device/iox/uninstall.sh",
+    "router": "device/router-uninstall.sh",
 }
 _MODEL_PLATFORMS = (          # first match wins; case-insensitive prefix regexes
     (r"^IE-?3", "iox"),       # IE-3x00: no Guest Shell on IOS-XE >=17.9
     (r"^IR1[018]", "iox"),    # IR1101/IR18xx are IOx-hosted the same way
     (r"^C9[0-9]{3}", "guestshell"),
-    (r"^(ISR|ASR|CSR|C8[0-9]{3})", "guestshell"),  # router families run Guest Shell
+    (r"^C8[0-9]{3}", "router"),
+    (r"^(ISR|ASR|CSR)", "guestshell"),  # legacy router mapping; not yet supported
 )
 
 # Model families that take the arm64 IOx package (installer defaults: iris-arm64.tar,
@@ -109,6 +113,9 @@ def resolve_platform(dev, probe=None):
             raise ValueError(
                 "unknown platform %r for %s: valid platforms are %s"
                 % (explicit, device_id, ", ".join(sorted(_PLATFORM_RECIPES))))
+        if re.match(r"^C8[0-9]{3}", dev.get("model") or "", re.IGNORECASE) \
+                and explicit != "router":
+            raise ValueError("Catalyst 8000 models require platform router")
         return explicit
 
     def _match(model):
@@ -124,7 +131,7 @@ def resolve_platform(dev, probe=None):
             return platform
         raise ValueError(
             "cannot determine platform for %s: unrecognized model %r -- set "
-            "'platform' (guestshell|iox) or a recognized 'model' on the device"
+            "'platform' (guestshell|iox|router) or a recognized 'model' on the device"
             % (device_id, model))
 
     if probe is not None:
@@ -135,7 +142,7 @@ def resolve_platform(dev, probe=None):
                 return platform
 
     raise ValueError(
-        "cannot determine platform for %s: set 'platform' (guestshell|iox) "
+        "cannot determine platform for %s: set 'platform' (guestshell|iox|router) "
         "or 'model' on the device" % device_id)
 
 
@@ -182,12 +189,158 @@ def _default_probe(dev, env, repo_root):
     return m.group(1) if m else None
 
 
+def _default_router_preflight(dev, env, resolved, repo_root):
+    """Read-only collision check for a Catalyst 8000 VPG deployment."""
+    runner = os.path.join(repo_root, "lab", "device-run.sh")
+
+    def show(command):
+        out = subprocess.run(["bash", runner, env["DEVICE_IP"]],
+                             input=command + "\n", capture_output=True,
+                             text=True, env=env, timeout=60)
+        if out.returncode != 0:
+            raise ValueError("router preflight could not run %r" % command)
+        return out.stdout or ""
+
+    version = show("show version")
+    match = _MODEL_RE.search(version)
+    model = match.group(1) if match else ""
+    if not re.match(r"^C8[0-9]{3}", model, re.IGNORECASE):
+        raise ValueError("router modes support the Catalyst 8000 family only; %s is not yet supported"
+                         % (model or "detected model"))
+    identity_match = re.search(r"(?im)^Processor board ID\s+(\S+)\s*$", version)
+    if not identity_match:
+        raise ValueError("could not determine the router's processor board ID")
+    device_identity = identity_match.group(1)
+
+    running = show("show running-config")
+    vpg = str(resolved.get("vpg_number", ""))
+    if re.search(r"(?m)^interface VirtualPortGroup%s\s*$" % re.escape(vpg), running):
+        raise ValueError("VirtualPortGroup%s already exists" % vpg)
+
+    candidate = ipaddress.IPv4Network(
+        "%s/%s" % (resolved["app_ip"], resolved["app_mask"]), strict=False)
+    for address, mask in re.findall(
+            r"(?m)^\s*ip address\s+(\d+(?:\.\d+){3})\s+"
+            r"(\d+(?:\.\d+){3})(?:\s+secondary)?\s*$",
+            running):
+        try:
+            configured = ipaddress.IPv4Network("%s/%s" % (address, mask), strict=False)
+        except (ipaddress.AddressValueError, ipaddress.NetmaskValueError):
+            continue
+        if candidate.overlaps(configured):
+            raise ValueError("router app subnet %s is already configured" % candidate)
+
+    apps = show("show app-hosting list")
+    if re.search(r"(?im)^\s*(?:app id\s*:\s*)?guestshell(?:\s|$)", apps):
+        raise ValueError("guestshell is already enabled")
+    collisions = (
+        (r"(?m)^app-hosting appid guestshell\s*$", "guestshell app-hosting config"),
+        (r"(?m)^event manager applet IRIS-(?:AGENT|COPYROOT|RECLAIM|RECLAIM-BUNDLE)(?:\s|$)",
+         "an IRIS EEM applet"),
+        (r"(?m)^logging discriminator IRISQ(?:\s|$)", "logging discriminator IRISQ"),
+        (r"(?m)^logging (?:buffered|console|monitor) discriminator IRISQ\s*$",
+         "an IRISQ logging binding"),
+        (r"(?m)^crypto pki trustpoint IRIS\s*$", "crypto pki trustpoint IRIS"),
+        (r"(?m)^ip http client secure-trustpoint IRIS\s*$",
+         "the IRIS HTTP client trustpoint binding"),
+    )
+    for pattern, description in collisions:
+        if re.search(pattern, running):
+            raise ValueError("%s already exists" % description)
+    guest_share = show("dir bootflash:guest-share")
+    if re.search(r"(?im)Directory of\s+bootflash:/?guest-share/?", guest_share) \
+            and not re.search(r"(?im)^No files in directory\s*$", guest_share):
+        raise ValueError("bootflash:guest-share is not empty")
+
+    evidence = {"status": "passed", "detected_model": model,
+                "device_identity": device_identity,
+                "iox_preexisting": bool(re.search(r"(?m)^iox\s*$", running)),
+                "file_prompt_quiet_preexisting": bool(
+                    re.search(r"(?m)^file prompt quiet\s*$", running)),
+                "nat_outside_preexisting": False}
+    if resolved.get("attachment") != "router-nat":
+        return evidence
+
+    requested_outside = resolved["nat_interface"]
+    interfaces = show("show interfaces %s" % requested_outside)
+    interface_match = re.search(
+        r"(?m)^([A-Za-z][A-Za-z0-9./_-]{0,63}) is ", interfaces)
+    if not interface_match:
+        raise ValueError("nat_interface %s does not exist" % requested_outside)
+    outside = interface_match.group(1)
+    evidence["nat_interface"] = outside
+
+    block = re.search(
+        r"(?ms)^interface %s\s*$\n(.*?)(?=^!\s*$|^interface |^end\s*$|\Z)"
+        % re.escape(outside), running)
+    evidence["nat_outside_preexisting"] = bool(
+        block and re.search(r"(?m)^\s*ip nat outside\s*$", block.group(1)))
+    acl = "IRIS-NAT-%s" % vpg
+    if re.search(r"(?m)^ip access-list standard %s\s*$" % re.escape(acl), running):
+        raise ValueError("NAT ACL %s already exists" % acl)
+    if re.search(r"(?m)^ip nat inside source list %s\s" % re.escape(acl), running):
+        raise ValueError("NAT overload rule for %s already exists" % acl)
+    port = str(resolved.get("swarm_port", "6881"))
+    for line in re.findall(r"(?m)^ip nat inside source static tcp\s+.*$", running):
+        fields = line.split()
+        # ip nat inside source static tcp <inside-ip> <inside-port>
+        #   interface <outside-interface> <outside-port>
+        if len(fields) < 10:
+            continue
+        inside_ip, inside_port = fields[6], fields[7]
+        if fields[8] == "interface":
+            outside_port = fields[10] if len(fields) > 10 else ""
+        else:
+            outside_port = fields[9]
+        if ((inside_ip == resolved["app_ip"] and inside_port == port)
+                or outside_port == port):
+            raise ValueError("NAT static mapping collides with swarm port %s" % port)
+    return evidence
+
+
+def apply_router_preflight(resolved, evidence):
+    """Return renderer input bound to validated live router evidence."""
+    if evidence.get("status") != "passed":
+        raise ValueError("router preflight did not pass")
+    identity = str(evidence.get("device_identity") or "").strip()
+    if not identity or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", identity):
+        raise ValueError("router preflight did not return a safe device identity")
+    result = dict(resolved)
+    attachment = result.get(
+        "attachment", result.get("management_type",
+                                 result.get("network_attachment", "")))
+    bound_identity = str(result.get("device_identity") or "").strip()
+    if bound_identity and bound_identity != identity:
+        raise ValueError("router device identity changed while the job was queued")
+    result["device_identity"] = identity
+    result["iox_preexisting"] = (
+        "1" if evidence.get("iox_preexisting") else "0")
+    result["file_prompt_quiet_preexisting"] = (
+        "1" if evidence.get("file_prompt_quiet_preexisting") else "0")
+    detected_model = str(evidence.get("detected_model") or "").strip()
+    if detected_model:
+        if not re.match(r"^C8[0-9]{3}", detected_model, re.IGNORECASE):
+            raise ValueError("router preflight returned a non-Catalyst-8000 model")
+        result["model"] = detected_model
+    if attachment == "router-nat":
+        outside = str(evidence.get("nat_interface") or "").strip()
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9./_-]{0,63}", outside):
+            raise ValueError("router preflight did not resolve nat_interface")
+        if bound_identity and result.get("nat_interface") != outside:
+            raise ValueError("router NAT interface changed while the job was queued")
+        result["nat_interface"] = outside
+        result["nat_outside_owned"] = (
+            "0" if evidence.get("nat_outside_preexisting") else "1")
+    return result
+
+
 class OnboardService:
     def __init__(self, fleet, creds, server_dir=None, device_install=None,
                  crt_public=None, host_ip=None, catalog_url=None,
                  mint_fn=None, run_fn=_default_runner, now_fn=time.time,
                  probe_fn=None, artifacts_dir=None, audit_fn=None,
-                  max_concurrent=None, clear_state_fn=None, receipts=None):
+                 max_concurrent=None, clear_state_fn=None, receipts=None,
+                 preflight_fn=None):
         self.fleet = fleet
         self.creds = creds
         self.server_dir = server_dir or os.path.dirname(os.path.abspath(__file__))
@@ -207,6 +360,9 @@ class OnboardService:
         self._run = run_fn
         self._now = now_fn
         self._probe = probe_fn or (lambda dev, env: _default_probe(dev, env, self.repo_root))
+        self._router_preflight = preflight_fn or (
+            lambda dev, env, resolved: _default_router_preflight(
+                dev, env, resolved, self.repo_root))
         self.artifacts_dir = artifacts_dir or os.environ.get("IRIS_ARTIFACTS_DIR", "/srv/artifacts")
         self._audit = audit_fn
         # Injected callback(device_id) run after a successful undeploy to drop
@@ -251,8 +407,10 @@ class OnboardService:
                                            target.get("network_attachment", "routed")))
         if attachment == "legacy_routed":
             attachment = "routed"
+        target_ip = (target.get("device_ip")
+                     if attachment in ("router-routed", "router-nat") else None)
         env.update({
-            "DEVICE_IP": dev["device_ip"],
+            "DEVICE_IP": target_ip or dev["device_ip"],
             "DEVICE_ID": device_id,
             "NETWORK_ATTACHMENT": attachment,
             "VLAN": str(target.get("iris_vlan", target.get("vlan", ""))),
@@ -263,6 +421,13 @@ class OnboardService:
             "APP_IP": target.get("app_ip", target.get("guest_ip", "")),
             "APP_MASK": target.get("app_mask", target.get("svi_mask", "")),
             "APP_GATEWAY": target.get("app_gateway", target.get("svi_ip", "")),
+            "VPG_NUMBER": str(target.get("vpg_number", "")),
+            "NAT_INTERFACE": target.get("nat_interface", ""),
+            "BT_LISTEN_PORT": str(target.get("swarm_port", "6881"))
+                              if attachment == "router-nat" else "",
+            "NAT_OUTSIDE_OWNED": str(target.get("nat_outside_owned", "0")),
+            "EXPECTED_DEVICE_IDENTITY": target.get("device_identity", ""),
+            "ROUTER_RESOURCES_OWNED": str(target.get("router_resources_owned", "0")),
             # inband IOx reaches IOS at the switch's management IP by default
             "IOS_SSH_HOST": (target.get("ios_ssh_host", "")
                              or (dev["device_ip"] if attachment == "inband" else "")),
@@ -275,7 +440,7 @@ class OnboardService:
             "IRIS_CRT_FILE": self.crt_public,
             # The console always runs in the SAME container as the artifact
             # server (docker-entrypoint launches both), so device-install.sh's
-            # step [2/6] can always stage the per-device config directly --
+            # step [2/7] can always stage the per-device config directly --
             # ssh-to-self / HOST_USER is never needed for console onboarding.
             # IRIS_ARTIFACTS_DIR tells the installer where that server actually
             # serves from (default /srv/artifacts, bind-mounted from the host).
@@ -298,6 +463,13 @@ class OnboardService:
         resolved_dev.update(target)
         resolved_dev["platform"] = target.get("platform", resolved_dev.get("platform"))
         return resolved_dev, env
+
+    def preflight(self, device_id, resolved):
+        """Run a router deployment's read-only checks before token minting."""
+        dev, env = self._build_env(device_id, mint=False, resolved=resolved)
+        if resolved.get("platform") != "router":
+            return {"status": "not-required"}
+        return self._router_preflight(dev, env, resolved)
 
     def _resolve(self, device_id, dev, env, action="onboard"):
         """Resolve (platform, script) for a device, using the live probe (if
@@ -331,7 +503,7 @@ class OnboardService:
         script = os.path.join(self.repo_root, _PLATFORM_RECIPES[platform])
         if platform == "guestshell":
             script = self.device_install
-        else:
+        elif platform == "iox":
             env["DEVICE_SSH_PASS"] = env["DEVICE_PASS"]
             env["DEVICE_SSH_USER"] = env["DEVICE_USER"]
         return platform, script
@@ -354,11 +526,14 @@ class OnboardService:
                          % (receipt_id, state, exc))
             return False
 
-    def start(self, device_id, action="onboard", resolved=None, prepare=None):
+    def start(self, device_id, action="onboard", resolved=None, prepare=None,
+              pre_apply=None):
         """Create a job and run the action's script on a daemon thread.
         Returns the job id immediately. action is "onboard"
-        (device-install.sh / the iox recipe) or "undeploy"
-        (device-uninstall.sh, Guest Shell only). At most max_concurrent
+        (the platform's install recipe: device-install.sh, device/iox/install.sh
+        or device/router-install.sh) or "undeploy" (the platform's teardown
+        recipe: device-uninstall.sh, device/iox/uninstall.sh or
+        device/router-uninstall.sh). At most max_concurrent
         installers run at once; beyond that a job stays "queued" (its thread
         parked on the slot semaphore — threads are cheap, hundreds queue
         fine) until a slot frees or cancel_queued() flips it to "cancelled".
@@ -409,10 +584,31 @@ class OnboardService:
                 j["state"] = "running"
                 j["started_at"] = int(self._now())
             try:
-                dev, env = self._build_env(device_id, mint=(action == "onboard"),
+                # Build credentials and resolve the recipe without minting. A
+                # queued router job must repeat ownership-sensitive preflight at
+                # execution time, immediately before its receipt becomes
+                # applying and before an enrollment token is created.
+                dev, env = self._build_env(device_id, mint=False,
                                            resolved=j.get("resolved"))
-                # A receipt has already resolved platform before token minting.
                 platform, script = self._resolve(device_id, dev, env, action)
+                if action == "onboard" and platform == "router":
+                    try:
+                        evidence = self._router_preflight(
+                            dev, env, j.get("resolved") or dev)
+                    except Exception as exc:
+                        raise ValueError("preflight failed: %s" % exc)
+                    final_resolved = (pre_apply(evidence) if pre_apply else
+                                      apply_router_preflight(
+                                          j.get("resolved") or dev, evidence))
+                    if final_resolved is not None:
+                        with self._lock:
+                            current = self._jobs.get(job_id)
+                            if current is not None:
+                                current["resolved"] = final_resolved
+                        dev, env = self._build_env(
+                            device_id, mint=False, resolved=final_resolved)
+                        platform, script = self._resolve(
+                            device_id, dev, env, action)
             except Exception as exc:
                 self._transition_or_note(job_id, j.get("receipt_id"),
                                          "needs-reconcile")
@@ -450,6 +646,8 @@ class OnboardService:
                                  "the device")
                     self._finish(job_id, "error", None)
                     return
+                if action == "onboard":
+                    env["CATALOG_TOKEN"] = self._mint(device_id)
                 if self._run_supports_proc:
                     rc = self._run(script, env,
                                    lambda line: self._append(job_id, line),
@@ -599,6 +797,7 @@ class OnboardService:
         parked thread exits without running when it eventually wins a slot.
         Returns the count cancelled."""
         n = 0
+        receipt_ids = []
         with self._lock:
             now = int(self._now())
             for jid, j in self._jobs.items():
@@ -608,7 +807,12 @@ class OnboardService:
                     j["state"] = "cancelled"
                     j["finished_at"] = now
                     j["lines"].append("cancelled before start")
+                    if j.get("receipt_id"):
+                        receipt_ids.append((jid, j["receipt_id"]))
                     n += 1
+        for jid, receipt_id in receipt_ids:
+            if not self._transition_or_note(jid, receipt_id, "removed"):
+                self._append(jid, "cancelled job receipt could not be retired")
         return n
 
     def _evict_old(self, now):

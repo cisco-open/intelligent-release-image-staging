@@ -39,6 +39,81 @@ def test_csv_download_buttons_and_multiselect_onboard_wired():
     assert "#dev-rows .mark" in js
 
 
+def test_import_from_disk_panel_wired():
+    """Source guards for importing images already on disk: an Images-view panel
+    fed by GET /api/images/importable, a per-row import posting the candidate's
+    exact path with the CSRF header, and reuse of the existing publish poll."""
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    assert 'id="import-panel"' in html
+    assert 'id="import-rows"' in html
+
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    assert "'/api/images/importable'" in js or '"/api/images/importable"' in js
+    assert "/api/images/import'" in js or '/api/images/import"' in js
+    assert "#import-rows .do-import" in js
+    # the exact discovered path is echoed back — the server authorizes on
+    # candidate identity, so the client must not reconstruct or edit it
+    assert "data-path" in js
+    # the import POST carries the CSRF header, like every other mutating call
+    post_call = js.split("/api/images/import'")[1][:400]
+    assert "csrfHdr(" in post_call
+    # publish progress reuses the upload path's poller rather than a second one
+    assert "pollJob((await res.json()).job_id)" in js
+    # the panel stays hidden only when there is nothing to show at all
+    assert "cands.length === 0 && skipped.length === 0" in js
+    # the distinguishing path is rendered — two roots can hold one basename
+    assert "esc(c.path)" in js
+    # deleting a catalogued image makes its name importable again
+    assert "refreshImages(); refreshImportable();" in js
+
+
+def test_bulk_row_actions_wired():
+    """Adopt/delete selected, a bulk credential assign, and a confirmation on
+    every destructive delete (per-row included — it previously had none)."""
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    for el in ('id="adopt-selected"', 'id="delete-selected"',
+               'id="cred-selected"', 'id="apply-cred-selected"'):
+        assert el in html, el
+
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    assert "'adopt-selected'" in js and "'delete-selected'" in js
+    assert "'apply-cred-selected'" in js
+    assert "/adopt'" in js and "acknowledge_adopt: true" in js
+    # bulk assign reuses the per-device credential route
+    assert "'/credential'" in js or "+ '/credential'" in js
+    # BOTH delete paths confirm first, via one shared warning
+    assert "function delWarning(" in js
+    assert js.count("confirm(delWarning(") == 2
+    # the warning must say deletion is not an undeploy — the dangerous part
+    assert "does NOT " in js and "undeploy" in js
+    # creating or deleting a profile re-renders the device rows, so a device
+    # imported before any profile existed becomes assignable immediately
+    assert js.count("renderCreds(); refreshDevices();") == 2
+    assert "function syncCredSelected(" in js
+
+
+def test_all_selected_actions_share_one_busy_lock():
+    """Every selected-action must hold the same lock. Onboard/undeploy used to
+    guard only each other, so a delete could remove inventory out from under a
+    starting onboard batch."""
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    assert "var BULK_BTNS = [" in js
+    for el in ("onboard-selected", "undeploy-selected", "adopt-selected",
+               "delete-selected", "apply-cred-selected"):
+        block = js.split("var BULK_BTNS = [")[1].split("]")[0]
+        assert el in block, "%s is not covered by the bulk busy lock" % el
+    # every action claims the lock rather than reading another button's state
+    assert js.count("claimSelection()") == 5
+    assert "onBtn.disabled" not in js and "unBtn.disabled" not in js
+    # a declined confirmation must release the lock, not wedge the toolbar
+    assert js.count("setBulkBusy(false); return;") >= 2
+
+
 def test_batch_onboard_panel_wired():
     """Source guards for parallel onboarding: bulk-onboard opens a batch panel
     with per-device live status (polled from GET /api/onboard/jobs), a per-row
@@ -455,7 +530,8 @@ def test_module_run_as_script_actually_starts_the_server(tmp_path):
 import gui_images
 
 
-def _serve_with_images(tmp_path, publish_fn=None, tracker_url="http://t/announce?key=k"):
+def _serve_with_images(tmp_path, publish_fn=None, tracker_url="http://t/announce?key=k",
+                       import_root=None):
     """Start gui_server with a preset admin AND an ImageService (fake publish)."""
     secrets_path = str(tmp_path / "secrets.json")
     app = gui_app.GuiApp(secrets_path)
@@ -472,7 +548,8 @@ def _serve_with_images(tmp_path, publish_fn=None, tracker_url="http://t/announce
     images = gui_images.ImageService(
         str(tmp_path / "state"), str(tmp_path / "imgs"),
         tracker_url_fn=lambda: tracker_url,
-        publish_fn=publish_fn or default_publish)
+        publish_fn=publish_fn or default_publish,
+        import_root=import_root or str(tmp_path / "opt-images"))
     srv = gui_server.make_server("127.0.0.1", 0, app, images, certfile=None)
     port = srv.server_address[1]
     t = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -523,6 +600,193 @@ def test_upload_streams_publishes_and_lists(tmp_path):
         assert s == 200
         ids = [i["id"] for i in json.loads(lb)["images"]]
         assert "img1" in ids
+    finally:
+        stop()
+
+
+def _seed_importable(tmp_path, name="staged.26.01.01.SPA.bin"):
+    """Drop an unpublished image into the read-only-style import root."""
+    d = tmp_path / "opt-images" / "iosxe" / "c9300"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / name).write_bytes(b"STAGED-ON-DISK")
+    return str(d / name)
+
+
+def test_importable_list_requires_auth(tmp_path):
+    host, port, _, _, stop = _serve_with_images(tmp_path)
+    try:
+        assert _req(host, port, "GET", "/api/images/importable")[0] == 401
+    finally:
+        stop()
+
+
+def test_importable_lists_unpublished_disk_images(tmp_path):
+    _seed_importable(tmp_path)
+    host, port, _, _, stop = _serve_with_images(tmp_path)
+    try:
+        cookie, _csrf = _login(host, port)
+        status, _, body = _req(host, port, "GET", "/api/images/importable",
+                               headers={"Cookie": cookie})
+        assert status == 200
+        found = json.loads(body)["importable"]
+        assert [c["filename"] for c in found] == ["staged.26.01.01.SPA.bin"]
+        assert found[0]["root"] == "import"
+    finally:
+        stop()
+
+
+def test_import_requires_csrf(tmp_path):
+    path = _seed_importable(tmp_path)
+    host, port, _, _, stop = _serve_with_images(tmp_path)
+    try:
+        cookie, _csrf = _login(host, port)
+        status, _, _ = _req(host, port, "POST", "/api/images/import",
+                            {"path": path}, headers={"Cookie": cookie})
+        assert status == 403
+    finally:
+        stop()
+
+
+def test_import_requires_a_session(tmp_path):
+    path = _seed_importable(tmp_path)
+    host, port, _, _, stop = _serve_with_images(tmp_path)
+    try:
+        assert _req(host, port, "POST", "/api/images/import",
+                    {"path": path})[0] in (401, 403)
+    finally:
+        stop()
+
+
+def test_importable_reports_skipped_with_reason(tmp_path):
+    """A file the operator expects must not silently fail to appear: an
+    ambiguous same-named pair is reported as skipped, with the reason."""
+    _seed_importable(tmp_path)
+    (tmp_path / "imgs").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "imgs" / "staged.26.01.01.SPA.bin").write_bytes(b"twin")
+    host, port, _, _, stop = _serve_with_images(tmp_path)
+    try:
+        cookie, _csrf = _login(host, port)
+        s, _, body = _req(host, port, "GET", "/api/images/importable",
+                          headers={"Cookie": cookie})
+        assert s == 200
+        out = json.loads(body)
+        assert out["importable"] == []
+        assert {c["reason"] for c in out["skipped"]} == {
+            "ambiguous name in more than one location"}
+    finally:
+        stop()
+
+
+def test_import_rejection_is_audited(tmp_path):
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        cookie, csrf = _login(host, port)
+        st, _, _ = _req(host, port, "POST", "/api/images/import",
+                        {"path": "/etc/shadow"},
+                        headers={"Cookie": cookie, "X-CSRF-Token": csrf})
+        assert st == 400
+        ev = [e for e in _read_audit_lines(audit_path)
+              if e.get("event") == "image_import" and e.get("result") == "fail"]
+        assert ev and "/etc/shadow" in ev[0]["detail"]
+    finally:
+        stop()
+
+
+def test_import_publishes_in_place_without_copying(tmp_path):
+    path = _seed_importable(tmp_path)
+    seen = {}
+
+    def publish_fn(image_path, store, url, **kw):
+        seen["path"] = image_path
+        entry = {"id": "staged.26.01.01", "filename": os.path.basename(image_path),
+                 "size": 14, "published_at": 1}
+        store.save_image(entry)
+        return entry
+
+    host, port, _, _, stop = _serve_with_images(tmp_path, publish_fn=publish_fn)
+    try:
+        cookie, csrf = _login(host, port)
+        status, _, body = _req(host, port, "POST", "/api/images/import",
+                               {"path": path},
+                               headers={"Cookie": cookie, "X-CSRF-Token": csrf})
+        assert status == 200
+        job_id = json.loads(body)["job_id"]
+        import time as _t
+        deadline = _t.time() + 3
+        while _t.time() < deadline:
+            s, _, jb = _req(host, port, "GET", "/api/images/jobs/" + job_id,
+                            headers={"Cookie": cookie})
+            if json.loads(jb)["state"] in ("done", "error"):
+                break
+            _t.sleep(0.02)
+        assert json.loads(jb)["state"] == "done"
+        # published from where it already lived — never copied into the volume
+        assert seen["path"] == path
+        assert not os.path.exists(str(tmp_path / "imgs" / "staged.26.01.01.SPA.bin"))
+        # and it drops out of the importable set once catalogued
+        _s, _h, lb = _req(host, port, "GET", "/api/images/importable",
+                          headers={"Cookie": cookie})
+        assert json.loads(lb)["importable"] == []
+    finally:
+        stop()
+
+
+def test_import_rejects_path_outside_the_candidate_set(tmp_path):
+    _seed_importable(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.bin").write_bytes(b"not-ours")
+    host, port, _, _, stop = _serve_with_images(tmp_path)
+    try:
+        cookie, csrf = _login(host, port)
+        hdrs = {"Cookie": cookie, "X-CSRF-Token": csrf}
+        for bad in (str(outside / "secret.bin"),
+                    # starts inside a real root but escapes via traversal, so a
+                    # prefix check would wrongly accept it
+                    str(tmp_path / "opt-images" / ".." / "outside" / "secret.bin"),
+                    "/etc/shadow", ""):
+            status, _, _ = _req(host, port, "POST", "/api/images/import",
+                                {"path": bad}, headers=hdrs)
+            assert status == 400, "expected 400 for %r" % bad
+    finally:
+        stop()
+
+
+def test_import_of_vanished_file_is_404(tmp_path):
+    path = _seed_importable(tmp_path)
+    host, port, _, images, stop = _serve_with_images(tmp_path)
+    try:
+        cookie, csrf = _login(host, port)
+        real_check = images.is_importable_path
+        # authorize the path, then delete it before start_publish runs
+        def racy(p):
+            ok = real_check(p)
+            os.remove(path)
+            return ok
+        images.is_importable_path = racy
+        status, _, body = _req(host, port, "POST", "/api/images/import",
+                               {"path": path},
+                               headers={"Cookie": cookie, "X-CSRF-Token": csrf})
+        assert status == 404
+        # specifically the vanished-file branch, not a generic route miss
+        assert json.loads(body)["error"] == "image no longer on disk"
+    finally:
+        stop()
+
+
+def test_import_emits_audit_event(tmp_path):
+    path = _seed_importable(tmp_path)
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        cookie, csrf = _login(host, port)
+        st, _, _ = _req(host, port, "POST", "/api/images/import", {"path": path},
+                        headers={"Cookie": cookie, "X-CSRF-Token": csrf})
+        assert st == 200
+        ev = [e for e in _read_audit_lines(audit_path)
+              if e.get("event") == "image_import"]
+        assert ev and ev[0]["actor"] == "console:admin"
+        assert ev[0]["target"] == "staged.26.01.01.SPA.bin"
+        assert path in ev[0]["detail"]
     finally:
         stop()
 
@@ -593,7 +857,8 @@ def _serve_full(tmp_path):
                                      publish_fn=lambda p, s, u, **k: s.save_image(
                                          {"id": "img1", "filename": "img1.bin",
                                           "sha256": "ab", "published_at": 1}) or
-                                     {"id": "img1"})
+                                     {"id": "img1"},
+                                     import_root=str(tmp_path / "opt-images"))
     fleet = gui_fleet.FleetStore(state)
     creds = gui_creds.CredentialStore(secrets_path)
     cat = catalog_mod.CatalogStore(state)
@@ -662,7 +927,8 @@ def test_csv_import_export(tmp_path):
         assert st == 200 and "text/csv" in hd.get("Content-Type", "")
         assert b.decode().splitlines()[0] == \
             ("device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,"
-             "app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,platform")
+             "app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,"
+             "vpg_number,nat_interface,platform")
         assert "d9,10.9.9.1" in b.decode()
     finally:
         stop()
@@ -743,6 +1009,67 @@ def test_device_view_merges_policy_and_heartbeat(tmp_path):
         assert row["stage_error"] == "copy denied"
         assert row["last_seen"] == 123
         assert row["heartbeat_model"] == "C9300"
+    finally:
+        stop()
+
+
+def test_device_view_mixed_policy_defaults(tmp_path):
+    """Devices WITHOUT a policy entry still get assigned_image_id: null in the
+    /api/devices rows — the single list_policies() read must yield the same
+    output as the old per-device get_policy() (which defaulted the field)."""
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, cat = deps
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        _req(host, port, "POST", "/api/devices",
+             {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
+        _req(host, port, "POST", "/api/devices",
+             {"device_id": "d2", "device_ip": "10.0.0.2"}, headers=hh)
+        cat.set_policy("d1", approved_image_id="img1")   # d2 has NO policy
+        st, _, b = _req(host, port, "GET", "/api/devices", headers={"Cookie": ck})
+        assert st == 200
+        rows = {d["device_id"]: d for d in json.loads(b)["devices"]}
+        assert rows["d1"]["assigned_image_id"] == "img1"
+        assert "assigned_image_id" in rows["d2"]
+        assert rows["d2"]["assigned_image_id"] is None
+    finally:
+        stop()
+
+
+def test_policy_read_once_per_request(tmp_path):
+    """policy.json is parsed exactly once per /api/devices or /api/overview
+    request, regardless of fleet size — the console polls both endpoints, so
+    a per-device get_policy() re-read would grow linearly with the fleet."""
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, cat = deps
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        for i in range(3):
+            _req(host, port, "POST", "/api/devices",
+                 {"device_id": "d%d" % i, "device_ip": "10.0.0.%d" % (i + 1)},
+                 headers=hh)
+        cat.set_policy("d0", approved_image_id="img1")
+
+        reads = {"policy": 0}
+        orig_read = cat._read
+
+        def counting_read(path):
+            if path == cat.policy_path:
+                reads["policy"] += 1
+            return orig_read(path)
+
+        cat._read = counting_read
+        st, _, _ = _req(host, port, "GET", "/api/devices",
+                        headers={"Cookie": ck})
+        assert st == 200
+        assert reads["policy"] == 1
+        reads["policy"] = 0
+        st, _, _ = _req(host, port, "GET", "/api/overview",
+                        headers={"Cookie": ck})
+        assert st == 200
+        assert reads["policy"] == 1
     finally:
         stop()
 
@@ -1176,6 +1503,282 @@ def test_inband_onboard_is_one_click_and_drives_inband_renderer(tmp_path):
         assert ran and ran[-1]["NETWORK_ATTACHMENT"] == "inband"
     finally:
         stop()
+
+
+def _serve_router(tmp_path, run_fn, preflight_fn=None, mint_fn=None, device=None):
+    """Receipt-backed server with one C8000V router inventory row."""
+    import deployment_receipts
+    os.makedirs(tmp_path, exist_ok=True)
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
+    state = str(tmp_path / "state")
+    fleet = gui_fleet.FleetStore(state)
+    fleet.upsert(device or {
+        "device_id": "r1", "device_ip": "192.0.2.10", "model": "C8000V",
+        "management_type": "router-nat", "vpg_number": "10",
+        "nat_interface": "GigabitEthernet1", "app_ip": "10.8.0.2",
+        "app_mask": "255.255.255.252", "app_gateway": "10.8.0.1",
+        "credential_profile_id": "lab"})
+    creds = gui_creds.CredentialStore(secrets_path)
+    creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
+    receipts = deployment_receipts.ReceiptStore(state)
+    onboard = gui_onboard.OnboardService(
+        fleet, creds, host_ip="10.9.9.9", mint_fn=mint_fn or (lambda d: "TOK"),
+        run_fn=run_fn, receipts=receipts, preflight_fn=preflight_fn)
+    srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, creds, None,
+                                 onboard, certfile=None, receipts=receipts)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return "127.0.0.1", port, fleet, receipts, srv.shutdown
+
+
+def _wait_onboard_job(host, port, cookie, job_id):
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        _, _, body = _req(host, port, "GET", "/api/onboard/jobs/" + job_id,
+                          headers={"Cookie": cookie})
+        job = json.loads(body)
+        if job["state"] in ("done", "error", "cancelled"):
+            return job
+        time.sleep(0.02)
+    raise AssertionError("onboard job did not finish: %s" % job_id)
+
+
+def test_c8000v_router_plan_auto_resolves_blank_platform_and_fields(tmp_path):
+    host, port, _fleet, receipts, stop = _serve_router(
+        tmp_path, lambda p, e, on: 0,
+        preflight_fn=lambda dev, env, resolved: {
+            "status": "passed", "device_identity": "9ABC123",
+            "detected_model": "C8000V"},
+        device={"device_id": "r1", "device_ip": "192.0.2.10", "model": "C8000V",
+                "management_type": "router-routed", "vpg_number": "7",
+                "app_ip": "10.7.0.2", "app_mask": "255.255.255.252",
+                "app_gateway": "10.7.0.1", "credential_profile_id": "lab"})
+    try:
+        cookie, csrf = _auth(host, port)
+        status, _, body = _req(host, port, "GET", "/api/devices/r1/plan",
+                               headers={"Cookie": cookie})
+        assert status == 200
+        plan = json.loads(body)["plan"]
+        assert plan["ownership"] == "creates only a clean IRIS-owned VirtualPortGroup"
+        assert plan["resolved"] == {
+            "attachment": "router-routed", "device_ip": "192.0.2.10",
+            "iris_vlan": "", "svi_ip": "",
+            "svi_mask": "", "app_ip": "10.7.0.2", "app_mask": "255.255.255.252",
+            "app_gateway": "10.7.0.1", "inband_vlan": "", "vpg_number": "7",
+            "nat_interface": "", "swarm_port": "6881", "ios_ssh_host": "",
+            "model": "C8000V", "platform": "router", "renderer": "v1"}
+        status, _, body = _req(host, port, "POST", "/api/devices/r1/onboard", {},
+                               headers={"Cookie": cookie, "X-CSRF-Token": csrf})
+        assert status == 200
+        assert _wait_onboard_job(host, port, cookie, json.loads(body)["job_id"])["state"] == "done"
+        assert [resource["kind"] for resource in receipts.active_for_device("r1")["resources"]] == [
+            "virtualportgroup", "eem-applets", "agent-files",
+            "logging-discriminator", "pki-trustpoint", "http-client-trustpoint",
+            "iox-global", "file-prompt-quiet",
+            "guestshell"]
+    finally:
+        stop()
+
+
+def test_router_onboard_uses_router_recipe_env_and_router_resource_kinds(tmp_path):
+    events, ran = [], []
+    host, port, _fleet, receipts, stop = _serve_router(
+        tmp_path, lambda path, env, on: (ran.append((path, dict(env))), 0)[1],
+        preflight_fn=lambda dev, env, resolved: (events.append("preflight") or {
+            "status": "passed", "device_identity": "9ABC123",
+            "detected_model": "C8000V", "nat_interface": "GigabitEthernet1",
+            "nat_outside_preexisting": False}),
+        mint_fn=lambda did: events.append("mint") or "TOK")
+    try:
+        cookie, csrf = _auth(host, port)
+        status, _, body = _req(host, port, "POST", "/api/devices/r1/onboard", {},
+                               headers={"Cookie": cookie, "X-CSRF-Token": csrf})
+        assert status == 200
+        job = _wait_onboard_job(host, port, cookie, json.loads(body)["job_id"])
+        assert job["state"] == "done"
+        assert events == ["preflight", "preflight", "mint"]
+        path, env = ran[-1]
+        assert path.endswith("device/router-install.sh")
+        assert {key: env[key] for key in ("NETWORK_ATTACHMENT", "VPG_NUMBER",
+                                           "NAT_INTERFACE", "BT_LISTEN_PORT")} == {
+            "NETWORK_ATTACHMENT": "router-nat", "VPG_NUMBER": "10",
+            "NAT_INTERFACE": "GigabitEthernet1", "BT_LISTEN_PORT": "6881"}
+        receipt = receipts.active_for_device("r1")
+        assert [resource["kind"] for resource in receipt["resources"]] == [
+            "virtualportgroup", "eem-applets", "agent-files",
+            "logging-discriminator", "pki-trustpoint", "http-client-trustpoint",
+            "iox-global", "file-prompt-quiet",
+            "guestshell",
+            "nat-acl", "nat-overload", "nat-static", "nat-outside-marking"]
+        assert receipt["resources"][-1]["ownership"] == "iris-created"
+    finally:
+        stop()
+
+
+def test_router_preflight_failure_mints_nothing_and_creates_no_receipt(tmp_path):
+    minted, ran = [], []
+
+    def reject(*_args):
+        raise ValueError("VirtualPortGroup10 already exists")
+
+    host, port, _fleet, receipts, stop = _serve_router(
+        tmp_path, lambda p, e, on: ran.append(1) or 0, preflight_fn=reject,
+        mint_fn=lambda did: minted.append(did) or "TOK")
+    try:
+        cookie, csrf = _auth(host, port)
+        status, _, body = _req(host, port, "POST", "/api/devices/r1/onboard", {},
+                               headers={"Cookie": cookie, "X-CSRF-Token": csrf})
+        assert status == 409 and "preflight failed" in json.loads(body)["error"]
+        assert minted == [] and ran == [] and receipts.list("r1") == []
+    finally:
+        stop()
+
+
+def test_router_nat_preflight_ownership_persists_and_undeploy_uses_receipt(tmp_path):
+    for preexisting, expected in ((True, "0"), (False, "1")):
+        ran = []
+        host, port, _fleet, receipts, stop = _serve_router(
+            tmp_path / ("existing" if preexisting else "created"),
+            lambda path, env, on: (ran.append((path, dict(env))), 0)[1],
+            preflight_fn=lambda dev, env, resolved, preexisting=preexisting: {
+                "status": "passed", "device_identity": "9ABC123",
+                "detected_model": "C8000V", "nat_interface": "GigabitEthernet1",
+                "nat_outside_preexisting": preexisting})
+        try:
+            cookie, csrf = _auth(host, port)
+            headers = {"Cookie": cookie, "X-CSRF-Token": csrf}
+            _, _, body = _req(host, port, "POST", "/api/devices/r1/onboard", {},
+                              headers=headers)
+            onboard_job = _wait_onboard_job(host, port, cookie, json.loads(body)["job_id"])
+            assert onboard_job["state"] == "done"
+            receipt = receipts.active_for_device("r1")
+            assert receipt["resolved"]["nat_outside_owned"] == expected
+            marking = [r for r in receipt["resources"] if r["kind"] == "nat-outside-marking"]
+            assert marking == [{"kind": "nat-outside-marking", "interface": "GigabitEthernet1",
+                                "ownership": "pre-existing" if preexisting else "iris-created"}]
+            _, _, body = _req(host, port, "POST", "/api/devices/r1/undeploy", {},
+                              headers=headers)
+            job = _wait_onboard_job(host, port, cookie, json.loads(body)["job_id"])
+            assert job["state"] == "done"
+            assert ran[-1][0].endswith("device/router-uninstall.sh")
+            assert ran[-1][1]["NAT_OUTSIDE_OWNED"] == expected
+        finally:
+            stop()
+
+
+def test_platform_endpoint_allows_router_only_for_router_management_types(tmp_path):
+    host, port, fleet, _receipts, stop = _serve_router(tmp_path, lambda p, e, on: 0)
+    try:
+        fleet.upsert({"device_id": "switch", "device_ip": "192.0.2.20",
+                      "management_type": "routed", "iris_vlan": "120",
+                      "svi_ip": "10.20.0.1", "svi_mask": "255.255.255.252",
+                      "app_ip": "10.20.0.2", "app_mask": "255.255.255.252",
+                      "app_gateway": "10.20.0.1", "model": "C9300"})
+        cookie, csrf = _auth(host, port)
+        headers = {"Cookie": cookie, "X-CSRF-Token": csrf}
+        assert _req(host, port, "POST", "/api/devices/r1/platform", {"platform": "router"},
+                    headers=headers)[0] == 200
+        assert _req(host, port, "POST", "/api/devices/r1/platform", {"platform": "guestshell"},
+                    headers=headers)[0] == 400
+        assert _req(host, port, "POST", "/api/devices/switch/platform", {"platform": "router"},
+                    headers=headers)[0] == 400
+    finally:
+        stop()
+
+
+def test_router_adopt_is_refused_without_live_ownership_evidence(tmp_path):
+    host, port, _fleet, receipts, stop = _serve_router(tmp_path, lambda p, e, on: 0)
+    try:
+        cookie, csrf = _auth(host, port)
+        status, _, body = _req(
+            host, port, "POST", "/api/devices/r1/adopt",
+            {"acknowledge_adopt": True},
+            headers={"Cookie": cookie, "X-CSRF-Token": csrf})
+        assert status == 409 and "cannot be adopted" in json.loads(body)["error"]
+        assert receipts.list("r1") == []
+    finally:
+        stop()
+
+
+def test_router_undeploy_uses_receipt_ip_after_inventory_edit(tmp_path):
+    ran = []
+    evidence = {"status": "passed", "device_identity": "9ABC123",
+                "detected_model": "C8000V", "nat_interface": "GigabitEthernet1",
+                "nat_outside_preexisting": False}
+    host, port, fleet, _receipts, stop = _serve_router(
+        tmp_path, lambda path, env, on: (ran.append(dict(env)), 0)[1],
+        preflight_fn=lambda *args: dict(evidence))
+    try:
+        cookie, csrf = _auth(host, port)
+        headers = {"Cookie": cookie, "X-CSRF-Token": csrf}
+        _, _, body = _req(host, port, "POST", "/api/devices/r1/onboard", {},
+                          headers=headers)
+        assert _wait_onboard_job(host, port, cookie,
+                                 json.loads(body)["job_id"])["state"] == "done"
+        fleet.upsert({"device_id": "r1", "device_ip": "192.0.2.99"})
+        _, _, body = _req(host, port, "POST", "/api/devices/r1/undeploy", {},
+                          headers=headers)
+        assert _wait_onboard_job(host, port, cookie,
+                                 json.loads(body)["job_id"])["state"] == "done"
+        assert ran[-1]["DEVICE_IP"] == "192.0.2.10"
+        assert ran[-1]["EXPECTED_DEVICE_IDENTITY"] == "9ABC123"
+        assert ran[-1]["ROUTER_RESOURCES_OWNED"] == "1"
+    finally:
+        stop()
+
+
+def test_router_undeploy_refuses_incomplete_or_mismatched_receipt(tmp_path):
+    host, port, _fleet, receipts, stop = _serve_router(tmp_path, lambda p, e, on: 0)
+    try:
+        cookie, csrf = _auth(host, port)
+        headers = {"Cookie": cookie, "X-CSRF-Token": csrf}
+        plan = {"platform": "router", "attachment": "router-routed",
+                "device_ip": "192.0.2.10", "device_identity": "9ABC123",
+                "vpg_number": "10", "model": "C8000V"}
+        receipt = receipts.create({"controller_id": "iris", "device_id": "r1",
+            "inventory_revision": 1, "plan_hash": "a" * 64,
+            "resolved": plan, "preflight": {"status": "passed"},
+            "resources": [{"kind": "virtualportgroup", "ownership": "iris-created",
+                           "id": "99"}]})
+        receipts.transition(receipt["receipt_id"], "applying")
+        receipts.transition(receipt["receipt_id"], "active")
+        status, _, body = _req(host, port, "POST", "/api/devices/r1/undeploy", {},
+                               headers=headers)
+        assert status == 409 and "does not prove ownership" in json.loads(body)["error"]
+        assert receipts.get(receipt["receipt_id"])["state"] == "needs-reconcile"
+    finally:
+        stop()
+
+
+def test_router_routes_fail_closed_without_receipt_store(tmp_path):
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
+    fleet = gui_fleet.FleetStore(str(tmp_path / "state"))
+    fleet.upsert({"device_id": "r1", "device_ip": "192.0.2.10",
+                  "model": "C8000V", "management_type": "router-routed",
+                  "vpg_number": "10", "app_ip": "10.8.0.2",
+                  "app_mask": "255.255.255.252", "app_gateway": "10.8.0.1",
+                  "credential_profile_id": "lab"})
+    creds = gui_creds.CredentialStore(secrets_path)
+    creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
+    onboard = gui_onboard.OnboardService(
+        fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
+        run_fn=lambda p, e, on: 0)
+    srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, creds, None,
+                                 onboard, certfile=None, receipts=None)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        cookie, csrf = _auth("127.0.0.1", port)
+        headers = {"Cookie": cookie, "X-CSRF-Token": csrf}
+        for action in ("onboard", "undeploy"):
+            status, _, body = _req(
+                "127.0.0.1", port, "POST", "/api/devices/r1/" + action, {},
+                headers=headers)
+            assert status == 503 and "receipt" in json.loads(body)["error"]
+    finally:
+        srv.shutdown()
 
 
 def _serve_onboard_audit(tmp_path, run_fn, **svc_kw):
@@ -1936,7 +2539,8 @@ def _serve_full_audit(tmp_path):
                                      publish_fn=lambda p, s, u, **k: s.save_image(
                                          {"id": "img1", "filename": "img1.bin",
                                           "sha256": "ab", "published_at": 1}) or
-                                     {"id": "img1"})
+                                     {"id": "img1"},
+                                     import_root=str(tmp_path / "opt-images"))
     fleet = gui_fleet.FleetStore(state)
     creds = gui_creds.CredentialStore(secrets_path)
     cat = catalog_mod.CatalogStore(state)

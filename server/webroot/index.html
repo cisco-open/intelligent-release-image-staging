@@ -45,6 +45,15 @@
           <div class="progress" id="prog" hidden><div class="bar" id="bar"></div></div>
           <p class="muted" id="status"></p>
         </div>
+        <div id="import-panel" hidden>
+          <h3>Import from disk</h3>
+          <p class="muted">Images already present on this server that are not in the
+            catalog. They are published where they are — nothing is copied.</p>
+          <table class="tbl" id="importable">
+            <thead><tr><th>File</th><th>Size</th><th>Path</th><th></th></tr></thead>
+            <tbody id="import-rows"></tbody>
+          </table>
+        </div>
         <table class="tbl" id="images">
           <thead><tr><th>Image ID</th><th>File</th><th>Size</th><th>SHA-256</th><th>Published</th><th></th></tr></thead>
           <tbody id="rows"></tbody>
@@ -61,18 +70,25 @@
           <button class="btn ghost" id="manage-creds">Credentials</button>
           <button class="btn" id="onboard-selected">Onboard selected</button>
           <button class="btn ghost" id="undeploy-selected">Undeploy selected</button>
+          <button class="btn ghost" id="adopt-selected">Adopt selected</button>
+          <button class="btn ghost" id="delete-selected">Delete selected</button>
+          <select id="cred-selected"><option value="">— credential for selected —</option></select>
+          <button class="btn ghost" id="apply-cred-selected">Apply</button>
           <span class="muted" id="dev-status"></span>
         </div>
         <form class="inline-form" id="dev-form" hidden>
           <input id="df-id" placeholder="Device ID / IP">
           <input id="df-ip" placeholder="Management IP">
-          <select id="df-attachment"><option value="">Management type…</option><option value="routed">Routed - IRIS-managed app network</option><option value="inband">Inband - existing management VLAN</option></select>
+          <select id="df-attachment"><option value="">Management type…</option><option value="routed">Routed - IRIS-managed app network</option><option value="inband">Inband - existing management VLAN</option><option value="router-routed">Router routed - IRIS-managed VPG subnet</option><option value="router-nat">Router NAT - VPG behind NAT</option></select>
           <input id="df-vlan" placeholder="VLAN">
           <input id="df-svi" placeholder="SVI IP (routed only)">
-          <input id="df-guest" placeholder="App IP">
+          <input id="df-vpg" placeholder="VirtualPortGroup number (0-31)" title="IOS interface VirtualPortGroup<N>" hidden>
+          <input id="df-nat-interface" placeholder="NAT outside interface" hidden>
+          <input id="df-guest" placeholder="App IP (Guest Shell)">
           <input id="df-mask" placeholder="App mask">
-          <input id="df-gateway" placeholder="App gateway">
-          <input id="df-model" placeholder="model (e.g. C9300-48UXM / IE-3400) — optional, auto-detected on onboard">
+          <input id="df-gateway" placeholder="App gateway (VPG IP for routers)" title="For router modes, this is the IP configured on VirtualPortGroup<N>">
+          <input id="df-model" placeholder="model (e.g. C9300-48UXM / IE-3400 / C8000V) — optional">
+          <select id="df-platform"><option value="">Platform - auto by model</option><option value="guestshell">Guest Shell</option><option value="iox">IOx</option><option value="router">Router (Guest Shell via VirtualPortGroup)</option></select>
           <select id="df-cred"><option value="">— no credential —</option></select>
           <button class="btn" type="submit">Save device</button>
           <button class="btn ghost" type="button" id="df-cancel">Cancel</button>

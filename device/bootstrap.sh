@@ -17,8 +17,16 @@
 #   2. the aria2c RPC daemon is (re)launched if it isn't running.
 #   3. the agent runs once (poll catalog -> download -> verify -> EEM copy-to-root).
 set -u
-SRC="${SRC:-/flash/guest-share}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+case "$SCRIPT_DIR" in
+  */guest-share) DEFAULT_SRC="$SCRIPT_DIR" ;;
+  *) DEFAULT_SRC="/flash/guest-share" ;;
+esac
+SRC="${SRC:-$DEFAULT_SRC}"
 STAGE="${STAGE:-$SRC/iris}"
+export STAGE_DIR="${STAGE_DIR:-$STAGE}"
+export IRIS_AGENT_CONF="${IRIS_AGENT_CONF:-$STAGE/iris-agent.conf}"
+export IRIS_AGENT_STATE="${IRIS_AGENT_STATE:-$STAGE/iris-agent.state}"
 
 # 0. collect freshly dropped files into OUR (guest-owned) working dir
 mkdir -p "$STAGE" 2>/dev/null || true

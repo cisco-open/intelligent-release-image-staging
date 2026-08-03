@@ -19,6 +19,16 @@ RPC_PORT="${RPC_PORT:-6800}"
 RPC_SECRET_FILE="${RPC_SECRET_FILE:-$STAGE_DIR/rpc-secret}"
 LOG="${LOG:-$STAGE_DIR/aria2c.log}"
 MAX_PEERS="${MAX_PEERS:-10}"     # cap BT peer connections per torrent on a device
+BT_LISTEN_PORT="${BT_LISTEN_PORT:-}"
+
+if [ -n "$BT_LISTEN_PORT" ]; then
+  [[ "$BT_LISTEN_PORT" =~ ^[0-9]+$ ]] && [ "$BT_LISTEN_PORT" -ge 1 ] \
+    && [ "$BT_LISTEN_PORT" -le 65535 ] \
+    || { echo "invalid BT_LISTEN_PORT: $BT_LISTEN_PORT" >&2; exit 1; }
+  set -- "--listen-port=$BT_LISTEN_PORT"
+else
+  set --
+fi
 
 RPC_SECRET="$(cat "$RPC_SECRET_FILE" 2>/dev/null || echo iris)"
 
@@ -46,6 +56,7 @@ exec "$ARIA2" \
   --enable-peer-exchange=false \
   --bt-enable-lpd=false \
   --bt-max-peers="$MAX_PEERS" \
+  "$@" \
   --bt-seed-unverified=true \
   --seed-ratio=0.0 \
   --file-allocation=none \

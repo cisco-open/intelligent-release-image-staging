@@ -7,9 +7,10 @@
 """IRIS artifact server: serve the agent bundle + per-device install files over
 HTTPS. Mirrors catalog.py's exact stdlib TLS pattern (ThreadingHTTPServer +
 SSLContext(PROTOCOL_TLS_SERVER) + load_cert_chain(IRIS_CERT) + wrap_socket),
-reusing the SAME combined cert (IRIS_CERT) the catalog already serves with, on the
-SAME port (8000). The only differences from the catalog are the request handler
-(static files from the artifacts dir) and the port. NO auth is added: the device's
+reusing the SAME combined cert (IRIS_CERT) the catalog already serves with, but on
+its own port (IRIS_ARTIFACTS_PORT, default 8000; the catalog defaults to 8443). The
+only differences from the catalog are the request handler (static files from the
+artifacts dir) and the port. NO auth is added: the device's
 PKI trustpoint gives confidentiality + server authentication, and the payload IS the
 credential bundle, fetched by a device the operator is actively installing over an
 SSH session they already hold (spec §4.1). Stdlib only."""

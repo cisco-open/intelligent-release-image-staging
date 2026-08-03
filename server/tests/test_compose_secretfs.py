@@ -22,8 +22,15 @@ def _load():
 
 def test_iris_service_mounts_tmpfs_for_run_iris():
     svc = _load()["services"]["iris"]
-    assert "/run/iris" in svc.get("tmpfs", []), \
+    mounts = [t for t in svc.get("tmpfs", [])
+              if t == "/run/iris" or t.startswith("/run/iris:")]
+    assert mounts, \
         "iris service must mount tmpfs at /run/iris for plaintext secrets"
+    # non-root runtime: the tmpfs must be owned by uid 10001 and private —
+    # a default root:root mount would leave the entrypoint unable to restrict
+    # the plaintext dir (it cannot chmod a mountpoint it does not own)
+    opts = mounts[0].partition(":")[2].split(",")
+    assert "uid=10001" in opts and "gid=10001" in opts and "mode=0700" in opts
 
 
 def test_age_key_is_a_readonly_docker_secret():

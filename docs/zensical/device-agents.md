@@ -8,10 +8,11 @@ SPDX-License-Identifier: Apache-2.0
 
 Device agents are the only part of IRIS that runs on IOS-XE devices. Their job is intentionally narrow: discover the approved image, download it, verify it, copy it to the platform storage root, and report status.
 
-A device attaches to the network in one of two ways — a dedicated IRIS-managed
-VLAN/SVI (**routed**) or an existing operator-owned management VLAN (**inband**,
-Guest Shell static IPv4). The attachment choice governs what the installer and
-uninstaller may configure and remove; see
+A device attaches through one of four management types: a dedicated IRIS-managed
+VLAN/SVI (**routed**), an existing operator-owned management VLAN (**inband**),
+or an IRIS-managed VirtualPortGroup (**router-routed** or **router-nat**).
+The attachment choice governs what the installer and uninstaller may configure
+and remove; see
 [Management Type and VLAN Ownership](network-attachment.md).
 
 After a successful Guest Shell or IOx onboarding or cleanup lifecycle, IRIS runs
@@ -62,6 +63,36 @@ IRIS uses two checks because the server and device have different capabilities:
 
 If verification fails, the agent reports the failure and leaves installation decisions untouched. It does not change boot variables and does not reload the device.
 
+## Replaced image cleanup
+
+When a device is reassigned to a different image, the agent removes the storage-root
+copy it placed for the previous image — never an image IRIS did not place. The
+delete is queued in agent state and executed through a one-shot
+`event manager applet ... authorization bypass` EEM applet, the same mechanism the
+copy-to-root and bundle-mode reclaim paths use. A raw exec `delete` is not used: on a
+device running AAA command authorization IOS discards it silently, which leaves the
+replaced image on flash and the delete queued on every 60-second tick.
+
+After firing the applet the agent re-checks whether the file is gone. Cleanup is
+reported only on proven absence; a name still present stays queued and is retried on
+the next tick, which also covers the case where the applet is still running when the
+agent looks. Queued names are re-validated against the agent's filename whitelist
+before they reach the applet, so a hand-edited state file cannot inject a command.
+
+## Device SSH host-key pinning
+
+Guest Shell runs inside IOS and configures the device locally. The IOx app instead
+reaches IOS over SSH to run `copy /verify` and the cleanup applets, so it has a host
+key to consider.
+
+Host-key pinning is optional and off by default. Set `device_ssh_known_hosts` in the
+agent config to a `known_hosts` path and, when that file exists, SSH and SCP run with
+`StrictHostKeyChecking=yes` against it. With the key unset — or set to a path that
+does not exist — the agent runs `StrictHostKeyChecking=no` with
+`UserKnownHostsFile=/dev/null`. This is the same verify-if-present shape the agent
+uses for the catalog TLS trust anchor. Nothing in IRIS writes the `known_hosts` file;
+it exists for operators who want the connection pinned.
+
 ## Platform targets
 
 | Platform path | Storage target | Control path |
@@ -69,3 +100,7 @@ If verification fails, the agent reports the failure and leaves installation dec
 | Catalyst 9300 Guest Shell | `flash:` | EEM timer and Guest Shell process. |
 | Catalyst 9300 IOx | `flash:` (via the SSD share) | IOx Docker app and SSH-to-self IOS commands. |
 | IE-3x00/IE-3400 IOx | `sdflash:` | IOx Docker app and SSH-to-self IOS commands. |
+| Catalyst 8000 Guest Shell | `bootflash:` | Guest Shell through a VirtualPortGroup. |
+
+The router path targets the Catalyst 8000 family and is lab-tested on C8000v; see
+[Router routed and router NAT](network-attachment.md#router-routed-and-router-nat-iris-managed-virtualportgroup).

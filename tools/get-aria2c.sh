@@ -13,6 +13,7 @@ ASSET="aria2-x86_64-linux-musl_static.zip"
 URL="https://github.com/abcfy2/aria2-static-build/releases/download/${VERSION}/${ASSET}"
 OUT_DIR="$(cd "$(dirname "$0")/.." && pwd)/bin"
 TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
 
 echo "Downloading aria2 ${VERSION} static (musl) ..."
 curl -fsSL "$URL" -o "$TMP/${ASSET}"
@@ -29,5 +30,4 @@ fi
 unzip -o "$TMP/${ASSET}" -d "$TMP" >/dev/null
 BIN_PATH="$(find "$TMP" -name aria2c -type f | head -n1)"
 install -m 0755 "$BIN_PATH" "$OUT_DIR/aria2c"
-rm -rf "$TMP"
 echo "Installed: $OUT_DIR/aria2c"

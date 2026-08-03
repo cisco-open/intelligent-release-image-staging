@@ -711,6 +711,39 @@ def test_swarmmap_device_fields_not_raw_in_innerhtml():
     )
 
 
+def test_swarmmap_rtt_median_rendered_only_when_numeric():
+    # link.rtt_ms_median is device-supplied. It is semantically a number, so
+    # instead of escapeHtml() the report drawer gates on Number.isFinite()
+    # and shows the placeholder otherwise — the pre-fix form interpolated the
+    # raw stored value into innerHTML (stored XSS via a device report).
+    html = _swarmmap_html()
+    assert "l.rtt_ms_median!=null?l.rtt_ms_median" not in html, (
+        "raw rtt_ms_median still interpolated into innerHTML in swarmmap.html"
+    )
+    assert "Number.isFinite(l.rtt_ms_median)" in html, (
+        "rtt_ms_median must be gated on Number.isFinite() before insertion"
+    )
+
+
+def test_swarmmap_pan_zoom_update_transform_not_rebuild():
+    # Pan/zoom are camera moves: they must retarget the scene <g> transform in
+    # place (applyView), never call render() — a full rebuild per pointermove
+    # restarts every node's staggered fade-in (fill-mode "both" keeps a node
+    # invisible until its delay elapses), strobing the graph during a drag.
+    html = _swarmmap_html()
+    assert "function applyView" in html
+    move = [ln for ln in html.splitlines()
+            if 'addEventListener("pointermove"' in ln]
+    assert move, "svg pointermove pan handler missing from swarmmap.html"
+    assert all("applyView()" in ln and "render()" not in ln for ln in move), (
+        "pan must update the scene transform via applyView(), not re-render"
+    )
+    zoomfn = [ln for ln in html.splitlines() if "function changeZoom" in ln]
+    assert zoomfn and all("render()" not in ln for ln in zoomfn), (
+        "zoom must update the scene transform via applyView(), not re-render"
+    )
+
+
 def test_swarmmap_no_dead_stale_branch():
     # swarm_snapshot never emits a 'stale' field, so the p.stale colour branch
     # and its legend entry are dead. They must be removed.

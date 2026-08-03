@@ -90,11 +90,28 @@ The public story is peer-assisted staging. The server implements that with a few
 | Telemetry service | Receives device reports and exposes health, swarm, and metrics surfaces. |
 | Device agent | Downloads pieces, verifies the image, stages it to platform storage, and reports status. |
 
+All of these services run inside one container as the unprivileged user `iris`,
+a fixed uid/gid `10001` baked into the image. Every listener binds an
+unprivileged port, so the runtime drops all Linux capabilities and forbids
+privilege escalation. Nothing chowns anything at runtime, so the host paths that
+cross the container boundary — the age identity file, the artifacts directory,
+and the persistent volumes — have to be owned by that uid before the stack
+starts. See [Runtime identity](server.md#runtime-identity).
+
 ## Storage and State
 
 The server keeps durable state under `/var/lib/iris`. Catalog records are small JSON documents written atomically with advisory locks so concurrent GUI and CLI operations do not corrupt state. Secret material is encrypted at rest under `/etc/iris` with age recipients and decrypted to `/run/iris` tmpfs only while the container is running.
 
 Generated artifacts live under `artifacts/` on the host and are served by the artifact server. IOS-XE image files stay outside the repository, commonly under `/opt/images`, and are mounted read-only into the container.
+
+Publishing does not move the image. The seeder seeds it from the directory it
+already occupies, the generated `.torrent` goes to the state directory, and the
+catalog entry records the source directory. That record is what the seeder
+resolves each torrent back to when it re-seeds at startup, and it is what decides
+whether deleting a catalog entry may unlink the file: only images sitting on the
+writable uploads volume are removed from disk, so an image published in place
+from the read-only image root survives. See
+[Catalog entry fields](reference.md#catalog-entry-fields).
 
 On an IOx device, `/data/iris` is persistent application scratch rather than an
 IOS-visible image destination. After swarm verification, the app pushes the file

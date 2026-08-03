@@ -8,25 +8,43 @@ IRIS stages Cisco IOS-XE images across a network before an operator performs any
 
 The detailed manual now lives in the Zensical documentation tree:
 
-- [Documentation overview](docs/zensical/index.md)
-- [Getting started](docs/zensical/getting-started.md)
-- [AI-guided PoC](docs/zensical/aiagent.md)
-- [Architecture](docs/zensical/architecture.md)
-- [Container deployments](docs/zensical/containers.md)
-- [Server](docs/zensical/server.md)
-- [Network ports and flows](docs/zensical/network-ports.md)
-- [Management type and VLAN ownership](docs/zensical/network-attachment.md)
-- [Kubernetes](docs/zensical/kubernetes.md)
-- [Device agents](docs/zensical/device-agents.md)
-- [Web console](docs/zensical/console.md)
-- [Network workflows](docs/zensical/fleet-workflows.md)
-- [IOx app](docs/zensical/iox.md)
-- [Security model](docs/zensical/security.md)
-- [Observability](docs/zensical/observability.md)
-- [Operations](docs/zensical/operations.md)
-- [Validation](docs/zensical/validation.md)
-- [Development](docs/zensical/development.md)
-- [Reference](docs/zensical/reference.md)
+Start at the [documentation overview](docs/zensical/index.md), or jump to a section:
+
+**Get started**
+
+- [Getting started](docs/zensical/getting-started.md) — lab bring-up from zero to a staged image
+- [AI-guided PoC](docs/zensical/aiagent.md) — proof of value with an AI assistant driving the steps
+
+**How it works**
+
+- [Architecture](docs/zensical/architecture.md) — components, data flow, trust boundaries
+- [Security model](docs/zensical/security.md) — tokens, encryption at rest, TLS, non-root runtime
+- [Network ports and flows](docs/zensical/network-ports.md) — every port and what rides it
+
+**Deploy the server**
+
+- [Server](docs/zensical/server.md) — services, state, bootstrap, certificates
+- [Container deployments](docs/zensical/containers.md) — the Compose seed server and agent containers
+- [Kubernetes](docs/zensical/kubernetes.md) — optional single-replica manifests
+
+**Onboard devices**
+
+- [Device agents](docs/zensical/device-agents.md) — Guest Shell and IOx behavior on the device
+- [Management type and VLAN ownership](docs/zensical/network-attachment.md) — attachments, VPG/NAT ownership, receipts
+- [IOx app](docs/zensical/iox.md) — building, staging, and transfer paths
+
+**Operate**
+
+- [Web console](docs/zensical/console.md) — the admin browser workflow end to end
+- [Network workflows](docs/zensical/fleet-workflows.md) — CSV inventory, assignments, batch operations
+- [Operations](docs/zensical/operations.md) — day-two commands, backups, cleanup
+- [Observability](docs/zensical/observability.md) — metrics, swarm map, OTLP export
+
+**Reference and development**
+
+- [Reference](docs/zensical/reference.md) — environment variables, file layouts, APIs
+- [Validation](docs/zensical/validation.md) — test suites and the lab checklist
+- [Development](docs/zensical/development.md) — working on IRIS itself
 
 The public website source is in [docs/](docs/index.html). The GitHub Pages workflow builds Zensical into `site/`, combines it with the website, and publishes the website root plus generated docs under `/docs/`.
 
@@ -41,6 +59,21 @@ The public website source is in [docs/](docs/index.html). The GitHub Pages workf
 | `fleet/` | CSV templates for device inventory and image assignments. |
 | `tools/` | Operator helpers for agent bundles, per-device installers, assignments, torrents, and releases. |
 | `docs/` | Dynamic public website and Zensical documentation source. |
+
+## Platform support
+
+IRIS supports Catalyst 9300 Guest Shell, supported IE/Catalyst IOx paths, and
+router attachments designed for the Catalyst 8000 family, lab-tested on
+C8000v. Catalyst 8000 routers use Guest Shell through an IRIS-managed
+VirtualPortGroup and stage to `bootflash:`. Both `router-routed` and
+`router-nat` have been lab-validated on C8000v through onboarding, verified
+image staging, and receipt-backed undeploy; Swarm Map and Grafana telemetry
+were also verified.
+Router onboarding repeats read-only preflight immediately before execution and
+before minting the enrollment token. Receipts bind management IP and
+processor-board identity; router adoption is refused, so re-onboard instead.
+Named globals and `guest-share` must be collision-free and are receipt-owned.
+NAT interfaces are canonicalized, and pre-existing `ip nat outside` is preserved.
 
 ## Quick Start
 
