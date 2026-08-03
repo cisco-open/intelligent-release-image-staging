@@ -44,7 +44,7 @@ For the commands and the pinned Zensical and Python versions, see
 | Assignment applies | Device reports the approved image id. |
 | Download completes | Swarm state shows completed pieces. |
 | Verification passes | Agent reports the staged file and IOS verify success. |
-| Undeploy from receipt | Teardown targets only receipt-owned resources; router adoption is refused and requires re-onboarding. For `router-nat`, teardown flushes NAT translations before removing the NAT configuration, and the final verify reports no leftover IRIS NAT rule. |
+| Undeploy from receipt | Teardown targets only receipt-owned resources; router adoption is refused and requires re-onboarding. For `router-nat`, teardown clears only translations for the receipt's app IP, verifies the overload rule is gone before deleting its ACL, and reports no leftover IRIS NAT rule. |
 | No activation occurs | Boot variables, install state, and reload state remain operator-controlled. |
 
 Automated coverage for the attachment/receipt behavior lives in
