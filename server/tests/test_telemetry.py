@@ -534,12 +534,29 @@ def test_metrics_server_serves_provider_text():
 
 
 def test_metrics_server_healthz_ok():
+    # JSON body (spec 7.7); status stays 200 — container HEALTHCHECK and
+    # orchestrator probes are status-code based and unaffected.
+    srv = telemetry.make_metrics_server(
+        "127.0.0.1", 0, lambda: "",
+        health=lambda: {"state": "ok", "last_success_ts": 0, "fail_streak": 0})
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        status, body = _get(srv.server_address[1], "/healthz")
+        assert status == 200
+        data = json.loads(body)
+        assert data["ok"] is True
+        assert data["otlp_export"]["state"] in ("ok", "degraded", "off")
+    finally:
+        srv.shutdown()
+
+
+def test_metrics_server_healthz_without_health_provider():
     srv = telemetry.make_metrics_server("127.0.0.1", 0, lambda: "")
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
         status, body = _get(srv.server_address[1], "/healthz")
         assert status == 200
-        assert body.strip() == b"ok"
+        assert json.loads(body)["ok"] is True
     finally:
         srv.shutdown()
 
@@ -1309,3 +1326,93 @@ class TestSwarmSampleEnrichment:
         row = snap["images"][0]["peers"][0]
         assert row["down_bps"] == 123 and row["done_bytes"] == 500
         assert row["sample_age_s"] == 10
+
+
+# ---- OTLP export health + metrics push (spec 7.5/7.7) ----
+
+class TestExportHealth:
+    def test_transitions_fire_once_per_edge(self):
+        events = []
+        h = telemetry.ExportHealth(
+            on_transition=lambda name: events.append(name))
+        h.record(True, "logs", 100.0)
+        h.record(False, "metrics", 110.0)
+        h.record(False, "logs", 120.0)          # still degraded: no new event
+        h.record(True, "metrics", 130.0)
+        d = h.as_dict()
+        assert d["state"] == "ok" and d["last_success_ts"] == 130.0
+        assert d["failures_total"] == 2 and d["fail_streak"] == 0
+        assert d["failures_by_signal"] == {"logs": 1, "metrics": 1}
+        assert events == ["otlp-export-degraded", "otlp-export-recovered"]
+
+
+class TestSampleExportsMetrics:
+    def test_conflated_snapshot_exported(self):
+        exported = []
+        class _M:
+            def export(self, points):
+                exported.append(list(points))
+                return True
+        hub = telemetry.Telemetry(
+            live_info=lambda: {
+                "written_at": 100.0,        # fresh: aggregation runs for real
+                "counters": {"samples_rejected_total": 0},
+                "samples": {"d1": {"v": 1, "image_id": "img-1",
+                                   "phase": "downloading", "done_bytes": 500,
+                                   "down_bps": 5, "up_bps": 2, "peers": 1,
+                                   "tier": "good", "received_at": 100.0,
+                                   "effective_interval": 60}}},
+            images_info=lambda: {"img-1": {"id": "img-1",
+                                           "filename": "cat9k.bin",
+                                           "size": 1000,
+                                           "info_hash_hex": "aa11"}})
+        hub.metrics_exporter = _M()
+        hub.export_health = telemetry.ExportHealth()
+        hub.sample(now=100.0)
+        names = {p["name"] for p in exported[-1]}
+        assert "iris.transfer.throughput" in names
+        assert "iris.transfer.progress" in names
+        assert "iris.telemetry.export.failures" in names
+        assert not any(n.endswith("_total") for n in names)
+
+    def test_quiet_fleet_still_exports_counters(self):
+        exported = []
+        class _M:
+            def export(self, points):
+                exported.append(list(points))
+                return True
+        hub = telemetry.Telemetry(
+            live_info=lambda: {"written_at": 0, "counters":
+                               {"samples_rejected_total": 9}, "samples": {}},
+            images_info=lambda: {})
+        hub.metrics_exporter = _M()
+        hub.export_health = telemetry.ExportHealth()
+        hub.sample(now=100.0)
+        names = {p["name"] for p in exported[-1]}
+        assert "iris.telemetry.samples.rejected" in names
+
+
+class TestReportExportEnrichment:
+    def test_enrich_reaches_the_record(self):
+        emitted = []
+        class _E:
+            def emit(self, rec): emitted.append(rec)
+            def flush(self): return None
+        hub = telemetry.Telemetry(
+            exporter=_E(),
+            device_info=lambda: {"d1": {"swarm_ip": "10.0.0.2",
+                                        "model": "C9300",
+                                        "free_flash_bytes": 5,
+                                        "stage_state": "ready"}},
+            reports_info=lambda: {"d1": [{"ts": 1, "image_id": "img-1",
+                                          "received_at": 50.0,
+                                          "peers": [{"ip": "10.0.0.2",
+                                                     "rx_bytes": 1,
+                                                     "tx_bytes": 0,
+                                                     "avg_bps": 1}]}]})
+        hub._export_new_reports()
+        attrs = {a["key"]: a["value"] for a in emitted[0]["attributes"]}
+        assert attrs["device.model.identifier"] == {"stringValue": "C9300"}
+        row = attrs["iris.transfer.peers"]["arrayValue"]["values"][0]
+        kv = {p["key"]: p["value"] for p in row["kvlistValue"]["values"]}
+        assert kv["device.id"] == {"stringValue": "d1"}

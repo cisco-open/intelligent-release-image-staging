@@ -220,17 +220,22 @@ def main():
     hub.start()
     mport = telemetry.metrics_port()
     if mport is not None:
-        # External Prometheus /metrics is gated on IRIS_OBSERVABILITY (default
-        # off) — IRIS doesn't assume a Grafana/Prometheus stack is around. The
-        # self-contained swarm JSON (/swarm) is ALWAYS on; the map PAGE moved
-        # into the console (:8080), so /swarmmap and / point there instead.
+        # External Prometheus-format /metrics is gated on IRIS_OBSERVABILITY
+        # (default off) — IRIS doesn't assume any observability stack is
+        # around. The self-contained swarm JSON (/swarm) is ALWAYS on; the map
+        # PAGE moved into the console (:8080), so /swarmmap and / point there
+        # instead. IRIS_METRICS_HOST (default unchanged 0.0.0.0) lets an
+        # operator bind this unauthenticated surface to localhost when only
+        # the console's session-gated proxy consumes it (spec section 10).
         obs = telemetry.observability_enabled()
+        mhost = os.environ.get("IRIS_METRICS_HOST", "0.0.0.0")
         try:
             msrv = telemetry.make_metrics_server(
-                "0.0.0.0", mport,
+                mhost, mport,
                 hub.metrics_text if obs else None,
                 swarm_provider=hub.swarm_snapshot,
-                html=telemetry.moved_page)   # map page retired -> console pointer
+                html=telemetry.moved_page,   # map page retired -> console pointer
+                health=hub.export_health.as_dict)
             threading.Thread(target=msrv.serve_forever, daemon=True).start()
             print("swarm JSON on http://0.0.0.0:%d/swarm "
                   "(map page moved to the console :8080)%s"

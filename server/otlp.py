@@ -4,7 +4,8 @@
 
 """Minimal OTLP/HTTP-JSON log exporter for IRIS swarm lifecycle events
 (stdlib only). Events are queued and flushed in batches to the collector's
-`/v1/logs` endpoint; per-device (high-cardinality) audit lands in Loki.
+`/v1/logs` endpoint; per-device (high-cardinality) detail flows through the
+OTLP logs pipeline.
 
 Best-effort by design: a bounded queue drops the oldest events when the
 collector is unreachable, and send failures are swallowed — telemetry must
@@ -259,13 +260,16 @@ class OTLPLogExporter:
             self._queue.append(event)   # deque(maxlen) drops oldest when full
 
     def flush(self):
-        """Send all queued events in one request. Returns count delivered
-        (0 if nothing queued or the send failed — best-effort)."""
+        """Send all queued events in one request. Returns None when the queue
+        was empty (no attempt — nothing to report), 0 when a send was tried
+        and failed (best-effort, swallowed), else the count delivered. The
+        None/0 split lets export-health track real outcomes without counting
+        quiet passes as successes or failures."""
         with self._lock:
             batch = list(self._queue)
             self._queue.clear()
         if not batch:
-            return 0
+            return None
         body = json.dumps(build_logs_payload(batch, self._resource)).encode()
         try:
             _send(self._sender, self.url, body, self._headers)

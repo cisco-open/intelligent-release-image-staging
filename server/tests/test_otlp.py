@@ -61,7 +61,7 @@ def test_flush_clears_queue():
                                sender=lambda u, b: sent.append(b))
     exp.emit({"event": "join", "ts": 0})
     exp.flush()
-    assert exp.flush() == 0      # nothing left to send
+    assert exp.flush() is None   # nothing left to send (None = no attempt)
     assert len(sent) == 1
 
 
@@ -80,7 +80,7 @@ def test_flush_empty_does_not_call_sender():
     sent = []
     exp = otlp.OTLPLogExporter("http://c:4318",
                                sender=lambda u, b: sent.append(b))
-    assert exp.flush() == 0
+    assert exp.flush() is None   # empty queue: no attempt, nothing to report
     assert sent == []
 
 

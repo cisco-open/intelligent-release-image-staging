@@ -19,6 +19,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
+import audit
 import live_samples
 import metrics
 import otlp
@@ -167,15 +168,119 @@ def make_jsonrpc_caller(rpc_url, secret):
     return rpc
 
 
+class ExportHealth:
+    """Export health per R7: degrade silently in operation, loudly in
+    visibility. State transitions (ok<->degraded) fire on_transition exactly
+    once per edge — a dead collector cannot spam the audit log. 'off' until
+    the first attempt."""
+
+    def __init__(self, on_transition=None):
+        self._on = on_transition
+        self._state = "off"
+        self._last_success = 0.0
+        self._streak = 0
+        self._failures = {"logs": 0, "metrics": 0}   # per-signal (spec 7.5)
+
+    def record(self, ok, signal, now):
+        if ok:
+            self._last_success = now
+            self._streak = 0
+            if self._state == "degraded" and self._on:
+                self._on("otlp-export-recovered")
+            self._state = "ok"
+        else:
+            self._failures[signal] = self._failures.get(signal, 0) + 1
+            self._streak += 1
+            if self._state != "degraded" and self._on:
+                self._on("otlp-export-degraded")
+            self._state = "degraded"
+
+    def as_dict(self):
+        return {"state": self._state, "last_success_ts": self._last_success,
+                "fail_streak": self._streak,
+                "failures_total": sum(self._failures.values()),
+                "failures_by_signal": dict(self._failures)}
+
+
+def _metric_points(rows, extras, now, per_device=None, images=None,
+                   device_models=None, export_failures=None):
+    """Spec 7.5 table, encoded literally. Names/units are contract."""
+    pts = []
+    for r in rows:
+        base = {"iris.image.id": r["image"],
+                "iris.torrent.info_hash": r["info_hash"]}
+        pts.append({"name": "iris.transfer.active", "unit": "{transfer}",
+                    "kind": "gauge", "value": r["active"], "attrs": base,
+                    "ts": now})
+        for direction, key in (("receive", "down_bps"),
+                               ("transmit", "up_bps")):
+            pts.append({"name": "iris.transfer.throughput", "unit": "By/s",
+                        "kind": "gauge", "value": r[key],
+                        "attrs": dict(base, **{"network.io.direction":
+                                               direction}), "ts": now})
+        pts.append({"name": "iris.transfer.progress", "unit": "1",
+                    "kind": "gauge", "value": r["progress_ratio"],
+                    "float": True, "attrs": base, "ts": now})
+        pts.append({"name": "iris.transfer.stalled", "unit": "{transfer}",
+                    "kind": "gauge", "value": r["stalled"], "attrs": base,
+                    "ts": now})
+        for tier in ("good", "constrained"):
+            pts.append({"name": "iris.stream.devices", "unit": "{device}",
+                        "kind": "gauge", "value": r["tier_%s" % tier],
+                        "attrs": dict(base, **{"iris.link.tier": tier}),
+                        "ts": now})
+    pts.append({"name": "iris.telemetry.samples.rejected",
+                "unit": "{sample}", "kind": "sum",
+                "value": extras.get("samples_rejected_total", 0),
+                "attrs": {}, "ts": now})
+    for signal, n in (export_failures or {}).items():
+        pts.append({"name": "iris.telemetry.export.failures",
+                    "unit": "{error}", "kind": "sum", "value": n,
+                    "attrs": {"iris.telemetry.signal": signal}, "ts": now})
+    for device_id, s in (per_device or {}).items():
+        if not isinstance(s, dict):
+            continue
+        dattrs = {"device.id": device_id,
+                  "iris.image.id": s.get("image_id", "")}
+        model = (device_models or {}).get(device_id)
+        if model:
+            dattrs["device.model.identifier"] = str(model)[:128]
+        for direction, key in (("receive", "down_bps"),
+                               ("transmit", "up_bps")):
+            pts.append({"name": "iris.device.transfer.throughput",
+                        "unit": "By/s", "kind": "gauge",
+                        "value": s.get(key, 0),
+                        "attrs": dict(dattrs, **{"network.io.direction":
+                                                 direction}), "ts": now})
+        pts.append({"name": "iris.device.transfer.received", "unit": "By",
+                    "kind": "gauge", "value": s.get("done_bytes", 0),
+                    "attrs": dattrs, "ts": now})
+        entry = (images or {}).get(s.get("image_id") or "")
+        size = entry.get("size") if isinstance(entry, dict) else 0
+        pts.append({"name": "iris.device.transfer.progress", "unit": "1",
+                    "kind": "gauge", "float": True,
+                    "value": (s.get("done_bytes", 0) / size) if size else 0.0,
+                    "attrs": dattrs, "ts": now})
+    return pts
+
+
 class Telemetry:
     """Owns the live state behind /metrics and drives event export."""
 
     def __init__(self, registry=None, exporter=None, rpc=None,
                  interval=DEFAULT_INTERVAL, device_info=None,
-                 reports_info=None, live_info=None, images_info=None):
+                 reports_info=None, live_info=None, images_info=None,
+                 metrics_exporter=None, export_health=None,
+                 device_metrics=False):
         self.exporter = exporter
         self.rpc = rpc
         self.interval = interval
+        # OTLP metrics push (spec 7.5) + shared export-health tracker (7.7).
+        # device_metrics gates the per-device gauges (IRIS_OTLP_DEVICE_METRICS,
+        # default off — cardinality warning documented).
+        self.metrics_exporter = metrics_exporter
+        self.export_health = export_health or ExportHealth()
+        self.device_metrics = bool(device_metrics)
         # Optional callable -> the catalog's live-samples.json doc (spec 6.3);
         # aggregated per image each sample() pass. None -> no live streaming
         # surface (tests/standalone keep working unchanged).
@@ -243,7 +348,8 @@ class Telemetry:
         return metrics.render(swarm, self._seeder, counters,
                               reports_stored=self._reports_stored(),
                               transfers=self._transfers,
-                              extras=self._extras)
+                              extras=self._extras,
+                              otlp_health=self.export_health.as_dict())
 
     def _reports_stored(self):
         """Total stored device reports (all devices), derived fresh at render
@@ -329,27 +435,69 @@ class Telemetry:
             except Exception:
                 pass                        # telemetry never breaks on bad input
         if self.exporter is not None:
-            self.exporter.flush()
+            delivered = self.exporter.flush()
+            if delivered is not None:       # None = empty queue, no attempt
+                self.export_health.record(delivered > 0, "logs", now)
+        if self.metrics_exporter is not None:
+            # Every pass exports the latest snapshot (conflation, spec 7.5) —
+            # NOT gated on transfers existing: the rejected-samples counter
+            # and export.failures sums must flow even on a quiet fleet.
+            per_device = None
+            models = {}
+            if self.device_metrics:
+                per_device = (self._live_info() or {}).get("samples") \
+                    if self._live_info else None
+                if self._device_info is not None:
+                    try:
+                        models = {d: (rec or {}).get("model")
+                                  for d, rec in
+                                  (self._device_info() or {}).items()}
+                    except Exception:
+                        models = {}
+            ok = self.metrics_exporter.export(_metric_points(
+                self._transfers, self._extras, now, per_device=per_device,
+                images=self._images_info() if self._images_info else {},
+                device_models=models,
+                export_failures=self.export_health.as_dict()
+                    .get("failures_by_signal")))
+            self.export_health.record(ok, "metrics", now)
 
     def _export_new_reports(self):
-        """Emit one OTLP log record per stored device report not yet exported,
-        tracked by a received_at watermark so each report goes out exactly
-        once. The watermark is compared against its value at pass entry and
-        advanced only at the end, so rings scanned later in the same pass
-        cannot shadow earlier ones."""
+        """Emit one OTLP log record per stored device report not yet
+        exported (received_at watermark, exactly-once per process; compared
+        against its value at pass entry and advanced only at the end, so
+        rings scanned later in the same pass cannot shadow earlier ones).
+        Each record is enriched from the device's last heartbeat (model,
+        flash, stage state — capped/coerced inside build_report_record) plus
+        the swarm IP->device_id join for peer-row resolution (spec 7.6)."""
         seen = self._report_seen
         high = seen
+        devices = {}
+        if self._device_info is not None:
+            try:
+                devices = self._device_info() or {}
+            except Exception:
+                devices = {}
+        device_by_ip = {rec.get("swarm_ip"): str(did)
+                        for did, rec in devices.items()
+                        if isinstance(rec, dict) and rec.get("swarm_ip")}
         for device_id, ring in (self._reports_info() or {}).items():
             if not isinstance(ring, list):
                 continue
+            rec = devices.get(device_id)
+            rec = rec if isinstance(rec, dict) else {}
+            enrich = {"model": rec.get("model"),
+                      "free_flash_bytes": rec.get("free_flash_bytes"),
+                      "stage_state": rec.get("stage_state"),
+                      "peer_devices": device_by_ip}
             for rep in ring:
                 try:
                     rcv = float(rep.get("received_at", 0) or 0)
                 except (TypeError, ValueError, AttributeError):
                     continue
                 if rcv > seen:
-                    self.exporter.emit(
-                        otlp.build_report_record(rep, str(device_id)))
+                    self.exporter.emit(otlp.build_report_record(
+                        rep, str(device_id), enrich=enrich))
                     if rcv > high:
                         high = rcv
         self._report_seen = high
@@ -479,13 +627,28 @@ def _read_rpc_secret(env):
 def from_env(env=None):
     """Build a Telemetry hub from IRIS_* env vars. The seeder RPC is always
     wired (it is local; failures just surface as iris_seeder_rpc_up 0) so the
-    swarm map keeps working. External event export to OTLP/Loki is enabled
+    swarm map keeps working. External event export over OTLP is enabled
     ONLY when IRIS_OBSERVABILITY=1 AND IRIS_OTLP_ENDPOINT is set — IRIS makes
-    no assumptions about a Grafana/Prometheus stack being around."""
+    no assumptions about any observability stack being around."""
     env = os.environ if env is None else env
     endpoint = env.get("IRIS_OTLP_ENDPOINT", "").strip()
-    exporter = (otlp.OTLPLogExporter(endpoint)
-                if endpoint and observability_enabled(env) else None)
+    gate = bool(endpoint) and observability_enabled(env)
+    headers = otlp.read_headers_env(env) if gate else {}
+    exporter = (otlp.OTLPLogExporter(endpoint, headers=headers)
+                if gate else None)
+    metrics_exporter = (otlp.OTLPMetricsExporter(endpoint, headers=headers)
+                        if gate else None)
+    device_metrics = env.get("IRIS_OTLP_DEVICE_METRICS",
+                             "").strip().lower() in ("1", "true", "yes", "on")
+    audit_path = env.get("IRIS_AUDIT", "/etc/iris/audit.jsonl")
+
+    def _on_transition(name):
+        try:
+            audit.append_event(audit_path, name, "tracker",
+                               detail="otlp export state change")
+        except Exception:
+            pass                            # audit must never break telemetry
+    export_health = ExportHealth(on_transition=_on_transition)
     rpc = make_jsonrpc_caller(env.get("IRIS_RPC", DEFAULT_RPC_URL),
                               _read_rpc_secret(env))
     interval = _int(env.get("IRIS_SAMPLE_INTERVAL")) or DEFAULT_INTERVAL
@@ -498,7 +661,10 @@ def from_env(env=None):
     images_info = lambda: _read_images(state_dir)
     return Telemetry(exporter=exporter, rpc=rpc, interval=interval,
                      device_info=device_info, reports_info=reports_info,
-                     live_info=live_info, images_info=images_info)
+                     live_info=live_info, images_info=images_info,
+                     metrics_exporter=metrics_exporter,
+                     export_health=export_health,
+                     device_metrics=device_metrics)
 
 
 def _read_devices(state_dir):
@@ -637,9 +803,9 @@ def _report_summary(ring):
 
 
 def observability_enabled(env=None):
-    """Is the EXTERNAL observability surface (Prometheus /metrics + OTLP push)
-    turned on? Default OFF: IRIS doesn't assume a Grafana/Prometheus stack
-    exists. The self-contained swarm JSON (/swarm) stays on regardless — the
+    """Is the EXTERNAL observability surface (Prometheus-format /metrics +
+    OTLP push) turned on? Default OFF: IRIS doesn't assume any observability
+    stack exists. The self-contained swarm JSON (/swarm) stays on regardless — the
     map PAGE lives in the authenticated console (:8080); :9101 serves a
     static pointer there (moved_page)."""
     env = os.environ if env is None else env
@@ -680,11 +846,15 @@ def moved_page():
             % (console, console)).encode("ascii")
 
 
-def make_metrics_server(host, port, provider, swarm_provider=None, html=None):
-    """HTTP server. `/healthz` is always served; `/metrics` is served only when
-    `provider` is given (None -> 404, the observability-off posture); /swarm
-    and /swarmmap are served when their handlers are given. This is how the
-    swarm map stays always-on while the Prometheus surface is opt-in.
+def make_metrics_server(host, port, provider, swarm_provider=None, html=None,
+                        health=None):
+    """HTTP server. `/healthz` is always served (JSON; `health` is an optional
+    zero-arg callable adding the otlp_export block — spec 7.7. Status stays
+    200: container HEALTHCHECK and orchestrator probes are status-code based);
+    `/metrics` is served only when `provider` is given (None -> 404, the
+    observability-off posture); /swarm and /swarmmap are served when their
+    handlers are given. This is how the swarm map stays always-on while the
+    Prometheus surface is opt-in.
 
     `html` may be a string, bytes, or a zero-arg callable returning either; a
     callable is read per request, so the page can be hot-updated without a
@@ -703,7 +873,14 @@ def make_metrics_server(host, port, provider, swarm_provider=None, html=None):
                 self._send(200, provider().encode(),
                            "text/plain; version=0.0.4; charset=utf-8")
             elif path == "/healthz":
-                self._send(200, b"ok\n", "text/plain")
+                doc = {"ok": True}
+                if health is not None:
+                    try:
+                        doc["otlp_export"] = health()
+                    except Exception:
+                        pass
+                self._send(200, json.dumps(doc).encode(),
+                           "application/json; charset=utf-8")
             elif path == "/swarm" and swarm_provider is not None:
                 try:
                     body = json.dumps(swarm_provider()).encode()
