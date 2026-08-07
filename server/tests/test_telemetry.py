@@ -1166,7 +1166,7 @@ def test_sample_exports_each_stored_report_exactly_once():
                               reports_info=lambda: reports)
     hub.sample()                    # first pass: both reports exported
     assert len(sent) == 1
-    assert sent[0].decode().count('"device_id"') == 2   # one attr per record
+    assert sent[0].decode().count('"device.id"') == 2   # one attr per record
     hub.sample()                    # same stored data -> nothing new to send
     assert len(sent) == 1
     # a NEW report lands (newer received_at) -> exported exactly once more
@@ -1174,7 +1174,7 @@ def test_sample_exports_each_stored_report_exactly_once():
     hub.sample()
     assert len(sent) == 2
     body = sent[1].decode()
-    assert body.count('"device_id"') == 1
+    assert body.count('"device.id"') == 1
     assert "999000000000" in body   # ts=999 -> timeUnixNano
 
 
