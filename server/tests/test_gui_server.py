@@ -2233,7 +2233,8 @@ def test_swarmmap_injects_cfg_nonce_and_csp(tmp_path, monkeypatch):
         st, hd, b = _req(host, port, "GET", "/swarmmap", headers={"Cookie": ck})
         assert st == 200 and "text/html" in hd.get("Content-Type", "")
         body = b.decode()
-        cfg = 'window.IRIS_MAP_CFG = {"swarmUrl":"/api/swarm","pull":true};'
+        cfg = ('window.IRIS_MAP_CFG = {"swarmUrl":"/api/swarm","pull":true,'
+               '"eventsUrlTemplate":""};')
         assert body.count(cfg) == 1                       # substituted exactly once
         assert "window.IRIS_MAP_CFG = null;" not in body  # placeholder consumed
         m = re.search(r'<script nonce="([^"]+)">', body)

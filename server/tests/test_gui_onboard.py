@@ -1383,3 +1383,37 @@ def test_receipt_retired_during_run_does_not_wedge_the_job(tmp_path):
     # discrepancy is surfaced as a job line instead of killing the worker
     assert job["state"] == "done"
     assert any("receipt" in line for line in job["lines"])
+
+
+# ---- telemetry onboarding flags (device transfer telemetry spec 8.1) ----
+
+def test_build_env_applies_telemetry_flags():
+    svc = _svc(lambda p, e, on: 0)
+    _dev, env = svc._build_env("d1", mint=False,
+                               env_extra={"TELEMETRY": "on",
+                                          "TELEMETRY_STREAM": "on",
+                                          "IRIS_TELEMETRY": "on",
+                                          "IRIS_TELEMETRY_STREAM": "on"})
+    assert env["TELEMETRY_STREAM"] == "on"
+    assert env["IRIS_TELEMETRY_STREAM"] == "on"
+
+
+def test_build_env_default_is_dark(monkeypatch):
+    monkeypatch.delenv("TELEMETRY_STREAM", raising=False)
+    svc = _svc(lambda p, e, on: 0)
+    _dev, env = svc._build_env("d1", mint=False)
+    assert "TELEMETRY_STREAM" not in env           # installer default off
+
+
+def test_start_threads_env_extra_to_the_runner():
+    seen = {}
+
+    def fake_run(p, e, on):
+        seen["env"] = e
+        return 0
+
+    svc = _svc(fake_run)
+    _wait(svc, svc.start("d1", env_extra={"TELEMETRY_STREAM": "on",
+                                          "IRIS_TELEMETRY_STREAM": "on"}))
+    assert seen["env"]["TELEMETRY_STREAM"] == "on"
+    assert seen["env"]["IRIS_TELEMETRY_STREAM"] == "on"

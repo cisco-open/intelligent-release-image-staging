@@ -69,6 +69,8 @@
           <button class="btn ghost" id="example-csv">Example CSV</button>
           <button class="btn ghost" id="manage-creds">Credentials</button>
           <button class="btn" id="onboard-selected">Onboard selected</button>
+          <label class="muted"><input type="checkbox" id="onboard-telemetry" checked> Telemetry reports</label>
+          <label class="muted"><input type="checkbox" id="onboard-telemetry-stream"> Telemetry streaming (live samples)</label>
           <button class="btn ghost" id="undeploy-selected">Undeploy selected</button>
           <button class="btn ghost" id="adopt-selected">Adopt selected</button>
           <button class="btn ghost" id="delete-selected">Delete selected</button>
@@ -168,7 +170,7 @@
         </p>
       </section>
       <section id="view-monitoring" hidden>
-        <h2>Monitoring</h2>
+        <h2>Monitoring <span id="telemetry-health" class="badge badge-queued" hidden></span></h2>
         <h3>Audit trail (90-day circular)</h3>
         <div class="toolbar">
           <select id="audit-category">

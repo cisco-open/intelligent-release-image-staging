@@ -34,7 +34,17 @@ SWARMMAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # server/swarmmap.html for the console config line (the file on disk keeps
 # working standalone; only the served copy is rewritten):
 _MAP_PLACEHOLDER = "window.IRIS_MAP_CFG = null;"
-_MAP_CFG_LINE = 'window.IRIS_MAP_CFG = {"swarmUrl":"/api/swarm","pull":true};'
+# eventsUrlTemplate: operator-configured deep link ({ip}/{device_id}
+# placeholders) rendered by the swarm-map drawer; unset -> no button (the map
+# assumes no particular events backend). Read at request time via a callable
+# so tests can monkeypatch the env.
+def _map_cfg_line():
+    return ('window.IRIS_MAP_CFG = {"swarmUrl":"/api/swarm","pull":true,'
+            '"eventsUrlTemplate":%s};'
+            % json.dumps(os.environ.get("IRIS_EVENTS_URL_TEMPLATE", "")))
+
+
+_MAP_CFG_LINE = _map_cfg_line()
 _CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".js": "application/javascript",
@@ -397,7 +407,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 self._send(404, "text/plain", b"not found")
                 return
             nonce = secrets.token_urlsafe(16)
-            html = html.replace(_MAP_PLACEHOLDER, _MAP_CFG_LINE)
+            html = html.replace(_MAP_PLACEHOLDER, _map_cfg_line())
             html = html.replace("<script>", '<script nonce="%s">' % nonce)
             html = html.replace("<style>", '<style nonce="%s">' % nonce)
             body = html.encode("utf-8")
@@ -1193,6 +1203,18 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 receipt_ref = {}
                 prepare = None
                 pre_apply = None
+                # Telemetry flags from the onboard form (spec 8.1): reports
+                # default on, streaming default off — both installer-style and
+                # IOx-style env names so every platform recipe picks them up.
+                body_flags = self._json_body(raw)
+                if body_flags is None:
+                    return
+                t_on = body_flags.get("telemetry", True) is not False
+                s_on = body_flags.get("telemetry_stream", False) is True
+                env_extra = {"TELEMETRY": "on" if t_on else "off",
+                             "TELEMETRY_STREAM": "on" if s_on else "off"}
+                env_extra["IRIS_TELEMETRY"] = env_extra["TELEMETRY"]
+                env_extra["IRIS_TELEMETRY_STREAM"] = env_extra["TELEMETRY_STREAM"]
                 if act == "onboard":
                     # With a receipt store (always in production via main()), an
                     # onboard resolves an immutable plan and records a receipt.
@@ -1306,7 +1328,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 try:
                     jid = onboard.start(
                         did, action=act, resolved=resolved, prepare=prepare,
-                        pre_apply=pre_apply)
+                        pre_apply=pre_apply,
+                        env_extra=env_extra if act == "onboard" else None)
                 except ValueError as exc:
                     if receipt_ref.get("id") and act == "onboard":
                         receipts.transition(receipt_ref["id"], "needs-reconcile")

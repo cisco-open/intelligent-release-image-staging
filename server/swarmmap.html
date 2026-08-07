@@ -133,7 +133,6 @@ const SVGNS="http://www.w3.org/2000/svg";
 // The bare file keeps read-only defaults and never calls /api/*.
 window.IRIS_MAP_CFG = null;
 const MAP = window.IRIS_MAP_CFG || {swarmUrl: "/swarm", pull: false};
-const CFG={lokiUID:"P8E80F9AEF21F6940",grafanaPort:3000};
 // Console mode only: CSRF for the pull POST comes from the same session-info
 // bootstrap the console shell (app.js) uses — never from the injected CFG.
 let CSRF=null;
@@ -426,15 +425,15 @@ function openDrawer(p){
   const total=p._total, pct=p.is_seeder?100:(p.progress!=null?Math.round(p.progress*100):0);
   const done=total!=null?(p.is_seeder?total:total-(p.left||0)):null;
   const roleColor=p.is_seeder?"var(--seed)":(pct>=100?"var(--leech)":"var(--accent)");
-  const ghost=`http://${location.hostname}:${CFG.grafanaPort}`;
-  // p.ip goes into a Loki LogQL string — encode it so a crafted IP cannot
-  // escape the quoted filter value or inject extra LogQL.
-  const safeIp=encodeURIComponent(p.ip||"");
-  const expr=`{service_name="iris-tracker"} | ip="${safeIp}"`;
-  const panes=encodeURIComponent(JSON.stringify({iris:{datasource:CFG.lokiUID,
-    queries:[{refId:"A",expr,datasource:{type:"loki",uid:CFG.lokiUID}}],
-    range:{from:"now-6h",to:"now"}}}));
-  const explore=`${ghost}/explore?schemaVersion=1&orgId=1&panes=${panes}`;
+  // Operator-configured events deep link (IRIS_EVENTS_URL_TEMPLATE, injected
+  // via IRIS_MAP_CFG): {ip}/{device_id} placeholders, values URL-encoded so a
+  // crafted IP or id cannot escape the query URL. No template -> no button —
+  // IRIS assumes no particular events backend.
+  const eventsTpl=(window.IRIS_MAP_CFG||{}).eventsUrlTemplate||"";
+  const eventsUrl=eventsTpl
+    ? eventsTpl.replace("{ip}",encodeURIComponent(p.ip||""))
+               .replace("{device_id}",encodeURIComponent(p.device_id||""))
+    : "";
   // title leads with the CONSOLE device IP (peerLabel); the announce/guest IP
   // rides in the sub-line only when it differs.
   const asub=peerAnnounceSub(p);
@@ -463,7 +462,7 @@ function openDrawer(p){
       :selTeleOff?`<div style="color:var(--muted);font-size:12px">telemetry is disabled on this device (telemetry = off in iris-agent.conf) — pull unavailable</div>`
       :`<button id="pullbtn" style="width:100%">⇣ Pull fresh data from device</button>`}
     <div id="repbox"><p style="color:var(--muted);font-size:12px">loading report…</p></div>`:""}
-    <a class="btn" href="${explore}" target="_blank">↗ View this device's events in Grafana / Loki</a>`;
+    ${eventsUrl?`<a class="btn" href="${eventsUrl}" target="_blank" rel="noopener">&#8599; View this device's events</a>`:""}`;
   drawer.querySelector(".close").addEventListener("click", closeDrawer);
   const pb=document.getElementById("pullbtn");
   if(pb)pb.addEventListener("click",requestPull);

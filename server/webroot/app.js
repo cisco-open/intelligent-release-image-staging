@@ -301,9 +301,17 @@
     onboardEs.addEventListener('end', function (e) { log.textContent += '\n— ' + e.data + ' —\n'; onboardEs.close(); onboardEs = null; onboardJobId = null; document.getElementById('onboard-abort').hidden = true; refreshDevices(); });
     onboardEs.onerror = function () { log.textContent += '\n[stream closed]\n'; if (onboardEs) { onboardEs.close(); onboardEs = null; } };
   }
+  // Telemetry flags for onboard job bodies (reports default on, streaming
+  // default off — the server treats an absent key the same way).
+  function telemetryFlags() {
+    var t = document.getElementById('onboard-telemetry');
+    var s = document.getElementById('onboard-telemetry-stream');
+    return { telemetry: !t || t.checked,
+             telemetry_stream: !!(s && s.checked) };
+  }
   function startOnboard(id) {
     var log = openOnboardPanel(id);
-    jpost('/api/devices/' + encodeURIComponent(id) + '/onboard', {}).then(async function (r) {
+    jpost('/api/devices/' + encodeURIComponent(id) + '/onboard', telemetryFlags()).then(async function (r) {
       if (!r.ok) {
         var reason = '';
         try { reason = (await r.json()).error || ''; } catch (e) { }
@@ -447,7 +455,8 @@
     try {
       await Promise.all(ids.map(async function (id) {
         try {
-          var r = await jpost('/api/devices/' + encodeURIComponent(id) + '/' + action, {});
+          var r = await jpost('/api/devices/' + encodeURIComponent(id) + '/' + action,
+                              action === 'onboard' ? telemetryFlags() : {});
           if (r.ok) { batchJobs[(await r.json()).job_id] = id; } else {
             // surface WHY it was refused — a bare id reads as a mystery
             var reason = '';
@@ -1125,7 +1134,28 @@
   }
 
   async function refreshMonitoring() {
-    await Promise.all([refreshHistogram(), refreshAuditTable()]);
+    await Promise.all([refreshHistogram(), refreshAuditTable(),
+                       refreshTelemetryHealth()]);
+  }
+
+  // OTLP export health badge (spec 8.3), via the console's session-gated
+  // proxy — never the unauthenticated :9101 directly.
+  async function refreshTelemetryHealth() {
+    var el = document.getElementById('telemetry-health');
+    if (!el) return;
+    var state = 'unknown';
+    try {
+      var r = await fetch('/api/telemetry/health');
+      var d = await r.json();
+      if (d && d.otlp_export && d.otlp_export.state) state = d.otlp_export.state;
+      else if (d && d.ok === false) state = 'unknown';
+      else state = 'off';
+    } catch (e) { state = 'unknown'; }
+    el.hidden = false;
+    el.textContent = 'Telemetry export: ' + state;
+    el.className = 'badge ' + (state === 'ok' ? 'badge-ok'
+                               : state === 'degraded' ? 'badge-cancelled'
+                               : 'badge-queued');
   }
 
   async function loadOlderAudit() {
