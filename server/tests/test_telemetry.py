@@ -1416,3 +1416,77 @@ class TestReportExportEnrichment:
         row = attrs["iris.transfer.peers"]["arrayValue"]["values"][0]
         kv = {p["key"]: p["value"] for p in row["kvlistValue"]["values"]}
         assert kv["device.id"] == {"stringValue": "d1"}
+
+
+# ---- :9101 /swarm loopback gate (console-only swarm data by default) ----
+
+class TestSwarmPeerGate:
+    def test_predicate_loopback_allowed(self):
+        for p in ("127.0.0.1", "127.0.0.53", "::1", "::ffff:127.0.0.1",
+                  "::ffff:127.0.0.1%lo0"):
+            assert telemetry.swarm_peer_allowed(p, False), p
+
+    def test_predicate_non_loopback_denied(self):
+        for p in ("10.0.0.9", "192.168.1.5", "::ffff:10.0.0.9",
+                  "2001:db8::1", "not-an-ip", ""):
+            assert not telemetry.swarm_peer_allowed(p, False), p
+
+    def test_predicate_public_flag_allows_anything(self):
+        assert telemetry.swarm_peer_allowed("10.0.0.9", True)
+        assert telemetry.swarm_peer_allowed("garbage", True)
+
+
+class TestSwarmRouteGate:
+    """The deny path is unreachable by a real client (any connection to a
+    127.0.0.1-bound test server IS loopback), so these patch the predicate
+    the route consults at request time (module-global resolution)."""
+
+    def _server(self, swarm_public=False):
+        return telemetry.make_metrics_server(
+            "127.0.0.1", 0, lambda: "", swarm_provider=lambda: {"ok": 1},
+            health=lambda: {"state": "off"}, swarm_public=swarm_public)
+
+    def test_loopback_client_gets_swarm(self):
+        srv = self._server()
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1],
+                                           timeout=5)
+            c.request("GET", "/swarm")
+            r = c.getresponse()
+            assert r.status == 200 and b"ok" in r.read()
+        finally:
+            srv.shutdown()
+
+    def test_non_loopback_client_gets_403_but_healthz_ok(self, monkeypatch):
+        srv = self._server()
+        monkeypatch.setattr(telemetry, "swarm_peer_allowed",
+                            lambda peer, public: False)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1],
+                                           timeout=5)
+            c.request("GET", "/swarm")
+            r = c.getresponse()
+            body = r.read()
+            assert r.status == 403
+            assert b"console" in body               # self-describing
+            c2 = http.client.HTTPConnection("127.0.0.1",
+                                            srv.server_address[1], timeout=5)
+            c2.request("GET", "/healthz")            # probes unaffected
+            assert c2.getresponse().status == 200
+        finally:
+            srv.shutdown()
+
+    def test_swarm_public_true_serves_any_peer(self, monkeypatch):
+        srv = self._server(swarm_public=True)
+        monkeypatch.setattr(telemetry, "swarm_peer_allowed",
+                            lambda peer, public: public)  # only the flag saves it
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1],
+                                           timeout=5)
+            c.request("GET", "/swarm")
+            assert c.getresponse().status == 200
+        finally:
+            srv.shutdown()

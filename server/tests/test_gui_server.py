@@ -3245,3 +3245,13 @@ def test_telemetry_health_proxy_fallback(tmp_path, monkeypatch):
         assert json.loads(b)["ok"] is False
     finally:
         stop()
+
+
+def test_map_cfg_line_escapes_script_terminator(monkeypatch):
+    # An inline <script> block must never see a literal '</script>' from the
+    # injected template value (operator-trusted env, sealed anyway).
+    monkeypatch.setenv("IRIS_EVENTS_URL_TEMPLATE",
+                       "https://x/e?ip={ip}</script><script>alert(1)</script>")
+    line = gui_server._map_cfg_line()
+    assert "</script>" not in line          # cannot break out of the block
+    assert "\\u003c" in line                # '<' escaped

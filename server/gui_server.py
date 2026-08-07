@@ -39,12 +39,14 @@ _MAP_PLACEHOLDER = "window.IRIS_MAP_CFG = null;"
 # assumes no particular events backend). Read at request time via a callable
 # so tests can monkeypatch the env.
 def _map_cfg_line():
+    payload = json.dumps(os.environ.get("IRIS_EVENTS_URL_TEMPLATE", ""))
+    # Belt-and-suspenders: this line lands inside an inline <script> block, so
+    # the value must never contain a literal '</script>'. \uXXXX-escaping
+    # < > & keeps the JSON valid and the parsed value byte-identical.
+    payload = (payload.replace("<", "\\u003c").replace(">", "\\u003e")
+                      .replace("&", "\\u0026"))
     return ('window.IRIS_MAP_CFG = {"swarmUrl":"/api/swarm","pull":true,'
-            '"eventsUrlTemplate":%s};'
-            % json.dumps(os.environ.get("IRIS_EVENTS_URL_TEMPLATE", "")))
-
-
-_MAP_CFG_LINE = _map_cfg_line()
+            '"eventsUrlTemplate":%s};' % payload)
 _CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".js": "application/javascript",

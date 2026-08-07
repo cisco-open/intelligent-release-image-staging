@@ -20,6 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 import audit
+import ipaddress
 import live_samples
 import metrics
 import otlp
@@ -805,9 +806,10 @@ def _report_summary(ring):
 def observability_enabled(env=None):
     """Is the EXTERNAL observability surface (Prometheus-format /metrics +
     OTLP push) turned on? Default OFF: IRIS doesn't assume any observability
-    stack exists. The self-contained swarm JSON (/swarm) stays on regardless — the
-    map PAGE lives in the authenticated console (:8080); :9101 serves a
-    static pointer there (moved_page)."""
+    stack exists. The swarm JSON (/swarm) is served to loopback peers only by
+    default (IRIS_SWARM_PUBLIC opens it) — the map PAGE lives in the
+    authenticated console (:8080); :9101 serves a static pointer there
+    (moved_page)."""
     env = os.environ if env is None else env
     return env.get("IRIS_OBSERVABILITY", "").strip().lower() in (
         "1", "true", "yes", "on")
@@ -820,22 +822,45 @@ def metrics_port(env=None):
     return int(raw) if raw and raw != "0" else None
 
 
+def _console_url():
+    """Resolve the operator console URL: IRIS_CONSOLE_URL override verbatim
+    when non-empty (e.g. shared hosts publishing the console on a non-default
+    port; garbage tolerant, used as-is), else the IRIS_HOST_IP-derived
+    https://<host>:8080/ default. Read per call so it works without a restart.
+    Shared by the retired-map pointer page and the /swarm 403 body — both
+    surfaces already publish this URL, so echoing it leaks nothing new."""
+    override = os.environ.get("IRIS_CONSOLE_URL", "").strip()
+    if override:
+        return override
+    host = os.environ.get("IRIS_HOST_IP", "").strip() or "localhost"
+    return "https://%s:8080/" % host
+
+
+def swarm_peer_allowed(peer_host, swarm_public):
+    """Is this TCP peer allowed to read /swarm? True when swarm_public is on,
+    else only for a loopback source (all of 127.0.0.0/8, ::1, and IPv4-mapped
+    forms). Defense-in-depth scoped to the container network namespace: under
+    a rootless engine or host networking a source-address check is meaningless
+    — the hard control is IRIS_METRICS_HOST / not publishing 9101 (documented
+    in security.md). Fails CLOSED on any unparseable address."""
+    if swarm_public:
+        return True
+    try:
+        addr = ipaddress.ip_address((peer_host or "").partition("%")[0])
+    except ValueError:
+        return False
+    mapped = getattr(addr, "ipv4_mapped", None)
+    if mapped is not None:
+        addr = mapped
+    return addr.is_loopback
+
+
 def moved_page():
     """Static pointer page for the retired :9101 map URLs (/swarmmap and /).
     The live swarm map is inside the authenticated console — this keeps old
     bookmarks failing helpfully instead of 404ing. Reads env vars per request
-    so it works without a restart once they're set.
-
-    IRIS_CONSOLE_URL, when non-empty, overrides the console URL verbatim —
-    e.g. shared hosts publishing the console on a non-default port. Garbage
-    tolerant: any non-empty string is used as-is, no validation. Otherwise
-    falls back to the IRIS_HOST_IP-derived https://<host>:8080/ default."""
-    override = os.environ.get("IRIS_CONSOLE_URL", "").strip()
-    if override:
-        console = override
-    else:
-        host = os.environ.get("IRIS_HOST_IP", "").strip() or "localhost"
-        console = "https://%s:8080/" % host
+    (via _console_url) so it works without a restart once they're set."""
+    console = _console_url()
     return ("<!doctype html>\n<html><head><meta charset=\"utf-8\">"
             "<title>intelligent-release-image-staging swarm map has moved"
             "</title></head><body>"
@@ -847,14 +872,15 @@ def moved_page():
 
 
 def make_metrics_server(host, port, provider, swarm_provider=None, html=None,
-                        health=None):
+                        health=None, swarm_public=False):
     """HTTP server. `/healthz` is always served (JSON; `health` is an optional
     zero-arg callable adding the otlp_export block — spec 7.7. Status stays
     200: container HEALTHCHECK and orchestrator probes are status-code based);
     `/metrics` is served only when `provider` is given (None -> 404, the
-    observability-off posture); /swarm and /swarmmap are served when their
-    handlers are given. This is how the swarm map stays always-on while the
-    Prometheus surface is opt-in.
+    observability-off posture); /swarm answers only loopback peers unless
+    `swarm_public` (the console proxies it over container loopback — swarm
+    data is console-gated by default); /swarmmap serves the pointer page when
+    `html` is given.
 
     `html` may be a string, bytes, or a zero-arg callable returning either; a
     callable is read per request, so the page can be hot-updated without a
@@ -882,6 +908,15 @@ def make_metrics_server(host, port, provider, swarm_provider=None, html=None,
                 self._send(200, json.dumps(doc).encode(),
                            "application/json; charset=utf-8")
             elif path == "/swarm" and swarm_provider is not None:
+                if not swarm_peer_allowed(self.client_address[0],
+                                          swarm_public):
+                    body = json.dumps(
+                        {"error": "swarm data is served through the "
+                                  "authenticated console; set "
+                                  "IRIS_SWARM_PUBLIC=1 to expose it here",
+                         "console": _console_url()}).encode()
+                    self._send(403, body, "application/json; charset=utf-8")
+                    return
                 try:
                     body = json.dumps(swarm_provider()).encode()
                 except Exception:
