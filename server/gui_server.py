@@ -24,6 +24,7 @@ from urllib.parse import unquote, parse_qs
 import audit
 import gui_app
 import gui_onboard
+import live_samples
 
 WEBROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webroot")
 COOKIE = "iris_sid"
@@ -603,6 +604,20 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 except Exception:
                     self._json(200, {"peers": [], "error": "swarm data unavailable"})
                 return
+            if path == "/api/telemetry/health":
+                # Proxy the hub's /healthz JSON (spec 8.3) behind the console
+                # session so the badge never needs the unauthenticated :9101.
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                try:
+                    with urllib.request.urlopen(
+                            "http://127.0.0.1:%s/healthz"
+                            % os.environ.get("IRIS_METRICS_PORT", "9101"),
+                            timeout=3) as r:
+                        self._send(200, "application/json", r.read())
+                except Exception:
+                    self._json(200, {"ok": False, "error": "unavailable"})
+                return
             if path == "/swarmmap":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
@@ -1096,6 +1111,30 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                   % (catalog.PULL_TTL // 60))
                 self._json(200, {"ok": True,
                                  "expires_at": int(now) + catalog.PULL_TTL})
+                return
+            if path == "/api/telemetry/stream":
+                # Fleet-wide stream tuning (spec 8.2): writes the settings
+                # file the catalog echoes on every heartbeat response.
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                every = data.get("every", 1)
+                pause = data.get("pause", False)
+                if isinstance(every, bool) or not isinstance(every, int) \
+                        or not 1 <= every <= 60 or not isinstance(pause, bool):
+                    self._json(400, {"error":
+                                     "every must be an int 1..60, pause a bool"})
+                    return
+                live_samples.write_settings(
+                    os.path.join(os.environ.get("IRIS_STATE",
+                                                "/var/lib/iris"),
+                                 "telemetry-settings.json"), every, pause)
+                self._audit("telemetry_stream_tune", "telemetry",
+                            action="tune",
+                            detail="stream_every=%d pause=%s" % (every, pause),
+                            actor=actor)
+                self._json(200, {"ok": True, "stream_every": every,
+                                 "stream_pause": pause})
                 return
             if path.startswith("/api/devices/") and path.endswith("/adopt"):
                 # Adopt an already-deployed device that predates receipts, so it

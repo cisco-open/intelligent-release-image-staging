@@ -3194,3 +3194,53 @@ def test_source_guard_monitoring_nav_and_view():
     assert "refreshMonitoring" in js
     assert "audit-load-older" in js
     assert "audit-category" in js
+
+
+# ---- stream tuning API + export-health proxy (device transfer telemetry) ----
+
+def test_telemetry_stream_tune_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, _cat, stop = _serve_reports(tmp_path)
+    try:
+        assert _req(host, port, "POST", "/api/telemetry/stream",
+                    {"every": 4, "pause": True})[0] == 401
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, b = _req(host, port, "POST", "/api/telemetry/stream",
+                        {"every": 4, "pause": True}, headers=hh)
+        assert st == 200 and json.loads(b)["ok"] is True
+        with open(str(tmp_path / "state" / "telemetry-settings.json")) as f:
+            assert json.load(f) == {"stream_every": 4, "stream_pause": True}
+    finally:
+        stop()
+
+
+def test_telemetry_stream_tune_bad_values_400(tmp_path, monkeypatch):
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, _cat, stop = _serve_reports(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        for body in ({"every": 0}, {"every": 61}, {"every": True},
+                     {"every": "4"}, {"pause": "yes"}):
+            st, _, _ = _req(host, port, "POST", "/api/telemetry/stream",
+                            body, headers=hh)
+            assert st == 400, body
+    finally:
+        stop()
+
+
+def test_telemetry_health_proxy_fallback(tmp_path, monkeypatch):
+    # point the proxy at a dead port: the endpoint still answers 200 with
+    # ok:false so the console badge can render "unknown" rather than erroring
+    monkeypatch.setenv("IRIS_METRICS_PORT", "9")
+    host, port, _cat, stop = _serve_reports(tmp_path)
+    try:
+        assert _req(host, port, "GET", "/api/telemetry/health")[0] == 401
+        ck, _csrf = _auth(host, port)
+        st, _, b = _req(host, port, "GET", "/api/telemetry/health",
+                        headers={"Cookie": ck})
+        assert st == 200
+        assert json.loads(b)["ok"] is False
+    finally:
+        stop()
