@@ -19,6 +19,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
+import live_samples
 import metrics
 import otlp
 from peer_registry import PeerRegistry
@@ -171,10 +172,19 @@ class Telemetry:
 
     def __init__(self, registry=None, exporter=None, rpc=None,
                  interval=DEFAULT_INTERVAL, device_info=None,
-                 reports_info=None):
+                 reports_info=None, live_info=None, images_info=None):
         self.exporter = exporter
         self.rpc = rpc
         self.interval = interval
+        # Optional callable -> the catalog's live-samples.json doc (spec 6.3);
+        # aggregated per image each sample() pass. None -> no live streaming
+        # surface (tests/standalone keep working unchanged).
+        self._live_info = live_info
+        # Optional callable -> catalog.json's images map, for the inner join
+        # (spec 7.2 — second cardinality fence behind ingest).
+        self._images_info = images_info
+        self._transfers = []
+        self._extras = {"stream_devices": 0, "samples_rejected_total": 0}
         # Optional callable -> {device_id: heartbeat record}. The catalog writes
         # these (one process over); we read them to label each swarm peer with
         # its device model, joined by the heartbeat's source IP (== swarm peer
@@ -231,7 +241,9 @@ class Telemetry:
         with self._lock:
             counters = dict(self._counters)
         return metrics.render(swarm, self._seeder, counters,
-                              reports_stored=self._reports_stored())
+                              reports_stored=self._reports_stored(),
+                              transfers=self._transfers,
+                              extras=self._extras)
 
     def _reports_stored(self):
         """Total stored device reports (all devices), derived fresh at render
@@ -304,6 +316,13 @@ class Telemetry:
                 acc = self._peer_sent.setdefault(info_hash, {})
                 for ip, share in shares.items():
                     acc[ip] = acc.get(ip, 0) + share
+        if self._live_info is not None:
+            try:
+                self._transfers, self._extras = aggregate_transfers(
+                    self._live_info(),
+                    self._images_info() if self._images_info else {}, now)
+            except Exception:
+                pass                        # telemetry never breaks on bad input
         if self.exporter is not None and self._reports_info is not None:
             try:
                 self._export_new_reports()
@@ -374,6 +393,13 @@ class Telemetry:
                         report_by_device[str(device_id)] = summary
             except Exception:
                 pass                        # telemetry never breaks on bad input
+        live_by_device = {}
+        if self._live_info is not None:
+            try:
+                doc = self._live_info() or {}
+                live_by_device = doc.get("samples") or {}
+            except Exception:
+                pass                        # telemetry never breaks on bad input
         images = []
         for info_hash, peers in self._registry.snapshot(now=now).items():
             total = self._totals.get(info_hash)
@@ -400,7 +426,8 @@ class Telemetry:
                             "device_id": did,
                             "telemetry_enabled": tele_by_ip.get(p["ip"]),
                             "report": (report_by_device.get(did)
-                                       if did is not None else None)})
+                                       if did is not None else None),
+                            **_live_fields(live_by_device.get(did), now)})
             images.append({
                 "image": self._names.get(info_hash, info_hash),
                 "info_hash": info_hash,
@@ -467,8 +494,11 @@ def from_env(env=None):
     state_dir = env.get("IRIS_STATE", "/var/lib/iris")
     device_info = lambda: _read_devices(state_dir)
     reports_info = lambda: _read_reports(state_dir)
+    live_info = lambda: _read_live_samples(state_dir)
+    images_info = lambda: _read_images(state_dir)
     return Telemetry(exporter=exporter, rpc=rpc, interval=interval,
-                     device_info=device_info, reports_info=reports_info)
+                     device_info=device_info, reports_info=reports_info,
+                     live_info=live_info, images_info=images_info)
 
 
 def _read_devices(state_dir):
@@ -492,6 +522,99 @@ def _read_reports(state_dir):
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+
+
+def _live_fields(sample, now):
+    """/swarm enrichment from the device's live sample (spec 7.4): attaches
+    only to rows whose device_id the existing IP join resolved; {} keeps the
+    row unchanged for devices without samples."""
+    if not isinstance(sample, dict):
+        return {}
+    try:
+        return {"down_bps": _int(sample.get("down_bps")),
+                "up_bps": _int(sample.get("up_bps")),
+                "done_bytes": _int(sample.get("done_bytes")),
+                "sample_age_s": int(now - float(sample.get("received_at", now)))}
+    except (TypeError, ValueError):
+        return {}
+
+
+def _read_live_samples(state_dir):
+    """The catalog's live-samples.json snapshot (spec 6.3) or None when
+    absent/unreadable. Read fresh each call, like _read_devices."""
+    try:
+        with open(os.path.join(state_dir, "live-samples.json")) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _read_images(state_dir):
+    """catalog.json's images map ({image_id: entry}); {} when unreadable."""
+    try:
+        with open(os.path.join(state_dir, "catalog.json")) as f:
+            data = json.load(f)
+        images = data.get("images")
+        return images if isinstance(images, dict) else {}
+    except Exception:
+        return {}
+
+
+def aggregate_transfers(live_doc, images, now, write_interval=None):
+    """Per-image rollup of the live table snapshot (spec 7.2). INNER join on
+    the image catalog: samples with unknown image_ids are dropped (second
+    cardinality fence behind ingest). A stale snapshot (written_at older
+    than 2 x the snapshot WRITE interval — the catalog writer's cadence,
+    deliberately NOT the hub's sample interval) is treated as empty — with
+    the keep-fresh write rule that genuinely means the catalog stopped
+    writing."""
+    if write_interval is None:
+        write_interval = live_samples.SNAPSHOT_WRITE_INTERVAL
+    empty = ([], {"stream_devices": 0, "samples_rejected_total": 0})
+    if not isinstance(live_doc, dict):
+        return empty
+    try:
+        if now - float(live_doc.get("written_at", 0)) > 2 * write_interval:
+            return empty
+    except (TypeError, ValueError):
+        return empty
+    counters = live_doc.get("counters") or {}
+    rows = {}
+    streaming = 0
+    for sample in (live_doc.get("samples") or {}).values():
+        if not isinstance(sample, dict):
+            continue
+        entry = images.get(sample.get("image_id"))
+        if not entry:
+            continue
+        streaming += 1
+        row = rows.setdefault(sample["image_id"], {
+            "image": entry.get("filename", sample["image_id"]),
+            "info_hash": entry.get("info_hash_hex", ""),
+            "active": 0, "down_bps": 0, "up_bps": 0, "_done": 0,
+            "_total": 0, "stalled": 0, "tier_good": 0,
+            "tier_constrained": 0})
+        row["active"] += 1
+        row["down_bps"] += _int(sample.get("down_bps"))
+        row["up_bps"] += _int(sample.get("up_bps"))
+        row["_done"] += _int(sample.get("done_bytes"))
+        row["_total"] += _int(entry.get("size"))
+        if sample.get("phase") == "downloading" \
+                and _int(sample.get("down_bps")) == 0:
+            row["stalled"] += 1
+        tier_key = "tier_%s" % sample.get("tier")
+        if tier_key in row:
+            row[tier_key] += 1
+    out = []
+    for row in rows.values():
+        total = row.pop("_total")
+        done = row.pop("_done")
+        row["progress_ratio"] = (done / total) if total else 0.0
+        out.append(row)
+    return out, {"stream_devices": streaming,
+                 "samples_rejected_total":
+                     _int(counters.get("samples_rejected_total"))}
 
 
 def _report_summary(ring):

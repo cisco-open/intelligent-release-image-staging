@@ -1238,3 +1238,74 @@ def test_metrics_server_serves_moved_page_at_swarmmap_and_root(monkeypatch):
         assert _get(srv.server_address[1], "/metrics")[0] == 200
     finally:
         srv.shutdown()
+
+
+# ---- live transfer streaming: aggregation + /swarm enrichment (spec 7.2/7.4)
+
+IMAGES = {"img-1": {"id": "img-1", "filename": "cat9k.bin", "size": 1000,
+                    "info_hash_hex": "aa11"},
+          "img-2": {"id": "img-2", "filename": "ie3k.bin", "size": 2000,
+                    "info_hash_hex": "bb22"}}
+
+
+def _doc(now, samples):
+    return {"written_at": now, "counters": {"samples_rejected_total": 7},
+            "samples": samples}
+
+
+class TestAggregateTransfers:
+    def test_rollup_two_images(self):
+        samples = {
+            "d1": {"v": 1, "image_id": "img-1", "phase": "downloading",
+                   "done_bytes": 500, "down_bps": 100, "up_bps": 10,
+                   "peers": 2, "tier": "good", "received_at": 100.0,
+                   "effective_interval": 60},
+            "d2": {"v": 1, "image_id": "img-1", "phase": "downloading",
+                   "done_bytes": 250, "down_bps": 0, "up_bps": 0,
+                   "peers": 1, "tier": "constrained", "received_at": 100.0,
+                   "effective_interval": 240},
+            "d3": {"v": 1, "image_id": "img-2", "phase": "seeding",
+                   "done_bytes": 2000, "down_bps": 0, "up_bps": 50,
+                   "peers": 1, "tier": "good", "received_at": 100.0,
+                   "effective_interval": 60},
+            "dX": {"v": 1, "image_id": "unknown", "phase": "downloading",
+                   "done_bytes": 1, "down_bps": 1, "up_bps": 0, "peers": 1,
+                   "tier": "good", "received_at": 100.0,
+                   "effective_interval": 60},
+        }
+        rows, extras = telemetry.aggregate_transfers(
+            _doc(100.0, samples), IMAGES, 100.0)
+        assert extras == {"stream_devices": 3,           # unknown dropped
+                          "samples_rejected_total": 7}
+        by_image = {r["image"]: r for r in rows}
+        r1 = by_image["cat9k.bin"]
+        assert (r1["active"], r1["down_bps"], r1["up_bps"]) == (2, 100, 10)
+        assert r1["stalled"] == 1                        # d2 downloading @ 0
+        assert (r1["tier_good"], r1["tier_constrained"]) == (1, 1)
+        assert abs(r1["progress_ratio"] - 750 / 2000) < 1e-9
+        assert by_image["ie3k.bin"]["info_hash"] == "bb22"
+
+    def test_stale_or_missing_doc_is_empty(self):
+        assert telemetry.aggregate_transfers(None, IMAGES, 100.0) == \
+            ([], {"stream_devices": 0, "samples_rejected_total": 0})
+        rows, extras = telemetry.aggregate_transfers(
+            _doc(100.0, {}), IMAGES, 131.0)              # > 2 x 15s old
+        assert rows == [] and extras["stream_devices"] == 0
+
+
+class TestSwarmSampleEnrichment:
+    def test_rows_with_device_id_gain_live_fields(self):
+        hub = telemetry.Telemetry(
+            device_info=lambda: {"d1": {"swarm_ip": "10.0.0.2",
+                                        "model": "C9300"}},
+            live_info=lambda: _doc(100.0, {
+                "d1": {"v": 1, "image_id": "img-1", "phase": "downloading",
+                       "done_bytes": 500, "down_bps": 123, "up_bps": 4,
+                       "peers": 2, "tier": "good", "received_at": 90.0,
+                       "effective_interval": 60}}))
+        hub.registry.announce("aa11", "peer1", "10.0.0.2", 6881,
+                              left=500, now=100.0)
+        snap = hub.swarm_snapshot(now=100.0)
+        row = snap["images"][0]["peers"][0]
+        assert row["down_bps"] == 123 and row["done_bytes"] == 500
+        assert row["sample_age_s"] == 10

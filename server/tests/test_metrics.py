@@ -85,3 +85,31 @@ def test_render_reports_stored_defaults_to_zero():
 def test_render_reports_stored_bad_value_is_zero():
     out = metrics.render([], {}, {}, reports_stored="garbage")
     assert "iris_device_reports_stored 0" in out
+
+
+class TestTransferFamilies:
+    ROWS = [{"image": "cat9k.bin", "info_hash": "aa11", "active": 2,
+             "down_bps": 100, "up_bps": 10, "progress_ratio": 0.375,
+             "stalled": 1, "tier_good": 1, "tier_constrained": 1}]
+    EXTRAS = {"stream_devices": 3, "samples_rejected_total": 7}
+
+    def test_rendered_when_given(self):
+        text = metrics.render([], {"rpc_up": True}, {"announces_total": 0},
+                              transfers=self.ROWS, extras=self.EXTRAS,
+                              otlp_health={"failures_total": 2,
+                                           "last_success_ts": 12345})
+        for needle in (
+            'iris_transfer_active{image="cat9k.bin",info_hash="aa11"} 2',
+            'iris_transfer_down_bps_sum{image="cat9k.bin",info_hash="aa11"} 100',
+            'iris_transfer_progress_ratio{image="cat9k.bin",info_hash="aa11"} 0.375',
+            'iris_transfer_tier{image="cat9k.bin",info_hash="aa11",tier="good"} 1',
+            "iris_stream_devices 3",
+            "iris_transfer_samples_rejected_total 7",
+            "iris_otlp_export_failures_total 2",
+            "iris_otlp_last_export_success_seconds 12345",
+        ):
+            assert needle in text, needle
+
+    def test_absent_when_none(self):
+        text = metrics.render([], {}, {})
+        assert "iris_transfer_" not in text and "iris_stream_" not in text
