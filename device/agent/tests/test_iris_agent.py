@@ -2374,3 +2374,91 @@ def test_heartbeat_failure_feeds_link_fail_streak():
                                  "/stage/img1.bin.aria2": 1})
     assert iris_agent.run_once(CFG, deps2, state) == "downloading"
     assert state["link"]["fail_streak"] == 1
+
+
+# ---- live streaming samples (device transfer telemetry spec section 5) ----
+
+import types
+
+import telemetry_report
+
+
+def _fake_deps(stats=None, peers=None):
+    calls = {"stats": 0, "peers": 0}
+    def aria_stats(stage):
+        calls["stats"] += 1
+        return stats
+    def aria_peers(stage):
+        calls["peers"] += 1
+        return list(peers or [])
+    deps = types.SimpleNamespace(aria_stats=aria_stats, aria_peers=aria_peers,
+                                 emit=lambda *a: None)
+    return deps, calls
+
+
+STREAM_STATS = {"completedLength": "1000", "downloadSpeed": "10",
+                "uploadSpeed": "5", "connections": "2"}
+STREAM_CFG_ON = {"telemetry": "on", "telemetry_stream": "on",
+                 "device_id": "d1", "agent_version": "t"}
+
+
+class TestMaybeSample:
+    def test_disabled_makes_no_rpc(self):
+        deps, calls = _fake_deps(stats=STREAM_STATS)
+        cfg = dict(STREAM_CFG_ON, telemetry_stream="off")
+        sample, peers = iris_agent._maybe_sample(
+            cfg, deps, {}, "img", "/s/f.bin", "downloading", 1000.0)
+        assert sample is None and peers is None
+        assert calls == {"stats": 0, "peers": 0}
+
+    def test_due_sample_fetches_once_and_stamps(self):
+        deps, calls = _fake_deps(stats=STREAM_STATS,
+                                 peers=[{"ip": "10.0.0.2"}])
+        state = {}
+        sample, peers = iris_agent._maybe_sample(
+            STREAM_CFG_ON, deps, state, "img", "/s/f.bin", "downloading",
+            1000.0)
+        assert sample["phase"] == "downloading" and sample["peers"] == 2
+        assert peers == [{"ip": "10.0.0.2"}]
+        assert state["img"]["tele"]["stream_last_ts"] == 1000.0
+        assert calls == {"stats": 1, "peers": 1}
+
+    def test_never_raises(self):
+        deps = types.SimpleNamespace(
+            aria_stats=lambda s: (_ for _ in ()).throw(RuntimeError("boom")),
+            aria_peers=lambda s: [], emit=lambda *a: None)
+        assert iris_agent._maybe_sample(
+            STREAM_CFG_ON, deps, {}, "img", "/s", "downloading", 0.0) == \
+            (None, None)
+
+
+class TestHeartbeatPayload:
+    IMAGE = {"id": "img"}
+    DEPS = types.SimpleNamespace(free_bytes=lambda fs: 5,
+                                 version=lambda: "17",
+                                 model=lambda: "C9300")
+
+    def test_stream_flag_always_sample_only_when_given(self):
+        hb = iris_agent._heartbeat(self.IMAGE, self.DEPS, stream_on=True)
+        assert hb["telemetry_stream_enabled"] is True and "sample" not in hb
+        s = {"v": 1}
+        hb = iris_agent._heartbeat(self.IMAGE, self.DEPS, sample=s)
+        assert hb["sample"] is s and hb["telemetry_stream_enabled"] is False
+
+
+class TestTickDirectivesAndPeersReuse:
+    def test_tick_stores_directives_and_reuses_peers(self):
+        deps, calls = _fake_deps(stats=STREAM_STATS,
+                                 peers=[{"ip": "10.9.9.9",
+                                         "downloadSpeed": "1",
+                                         "uploadSpeed": "0"}])
+        deps.catalog = types.SimpleNamespace()   # no post_telemetry: no sends
+        state = {}
+        iris_agent._telemetry_tick(
+            STREAM_CFG_ON, deps, state, "img", "/s/f.bin", "downloading",
+            {"stream_every": 7}, 1000.0,
+            peers=[{"ip": "10.0.0.3", "downloadSpeed": "2",
+                    "uploadSpeed": "0"}])
+        assert state["stream_directives"]["every"] == 7
+        assert calls["peers"] == 0                     # reused, not re-fetched
+        assert "10.0.0.3" in state["img"]["tele"]["peers"]
