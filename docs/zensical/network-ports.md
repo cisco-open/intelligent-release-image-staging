@@ -32,12 +32,14 @@ Console-to-stage-host SSH hop.
 | 6881 | Device -> server seeder | BitTorrent | Initial image pieces from the origin seeder. |
 | 6881-6999 | Device <-> device | BitTorrent | Peer-to-peer fetch and reseed traffic. Router NAT uses static TCP PAT for 6881. |
 | 8080 | Operator browser -> Console | HTTPS | Console UI and API. The host port can be changed with `IRIS_GUI_PUBLISH`. |
-| 9101 | Prometheus or operator tooling -> server telemetry | HTTP | `/healthz`, `/swarm`, and optional `/metrics`. |
+| 9101 | Prometheus or operator tooling -> server telemetry | HTTP | `/healthz` and optional `/metrics`. `/swarm` answers only loopback peers unless `IRIS_SWARM_PUBLIC=1`. |
 | 22 | IOx agent -> its own IOS SVI | SSH/SCP | IOx SSH-to-self control; SCP image transfer before IOS `copy /verify` on IE-3400, or on a Catalyst 9300 falling back from the SSD share. |
 
-External telemetry is opt-in, and the 9101 listener runs either way: `/healthz`,
-the `/swarm` JSON, and the `/swarmmap` pointer are served regardless, while the
-Prometheus `/metrics` endpoint and OTLP export are gated. See
+External telemetry is opt-in, and the 9101 listener runs either way: `/healthz`
+and the `/swarmmap` pointer are served regardless, the Prometheus `/metrics`
+endpoint and OTLP export are gated on `IRIS_OBSERVABILITY`, and the `/swarm`
+JSON answers only loopback peers by default (`IRIS_SWARM_PUBLIC=1` opens it —
+per-device swarm data is otherwise reserved for the authenticated console). See
 [Telemetry variables](reference.md#telemetry-variables) for which variable does
 what.
 
@@ -92,3 +94,8 @@ The collector is external to IRIS and is not published by the Compose stack.
 - For **router-routed** devices, the operator must route the VPG app subnet to
   the IRIS server and peers. **router-nat** uses the configured outside
   interface; permit inbound TCP 6881 to its outside address for peer reachability.
+- The `/swarm` peer-address gate assumes a rootful container engine; on
+  rootless Docker/Podman or host networking a source-IP check is meaningless
+  (published-port connections can be re-originated inside the namespace) — set
+  `IRIS_METRICS_HOST=127.0.0.1` or drop the 9101 publish to keep swarm data
+  local there.

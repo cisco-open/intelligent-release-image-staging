@@ -115,7 +115,8 @@ collector and backend.
 | `IRIS_OTLP_ENDPOINT` | unset | OTLP/HTTP endpoint of your collector, e.g. `http://<collector-ip>:4318`. |
 | `IRIS_METRICS_PORT` | `9101` | Port for the telemetry listener. Empty or `0` disables the listener entirely. |
 | `IRIS_METRICS_HOST` | `0.0.0.0` | Bind host for the telemetry listener. Bind it to `127.0.0.1` when only the console's session-gated proxy consumes it. |
-| `IRIS_SWARM_URL` | `http://127.0.0.1:9101/swarm` | Where the console fetches swarm state from. |
+| `IRIS_SWARM_URL` | `http://127.0.0.1:9101/swarm` | Where the console fetches swarm state from. A non-loopback value requires `IRIS_SWARM_PUBLIC=1` on the target listener — `/swarm` answers only loopback peers by default. |
+| `IRIS_SWARM_PUBLIC` | unset (off) | Opens `:9101/swarm` to any peer that can reach the port. Default: loopback peers only — the console proxies swarm data over container loopback, so remote access is normally unnecessary. The flag relaxes only the peer-address gate; `IRIS_METRICS_HOST` still controls where the listener binds, so a `127.0.0.1` bind keeps everything local regardless. |
 | `IRIS_OTLP_HEADERS` | unset | Comma-separated `Name=Value` headers attached to every OTLP POST (collector authentication). Values are secrets: never logged, never echoed in errors, and the exporters refuse HTTP redirects so they cannot leak to a redirect target. |
 | `IRIS_OTLP_HEADERS_FILE` | unset | Read the header spec from a file instead (secret mounts). `IRIS_OTLP_HEADERS` wins when both are set. |
 | `IRIS_OTLP_DEVICE_METRICS` | unset (off) | Additionally export per-device OTLP gauges. Cardinality warning: at 10,000 devices this is ~30,000 datapoints per push at your backend. |
@@ -125,7 +126,7 @@ collector and backend.
 
 * Prometheus `/metrics` is served only while `IRIS_OBSERVABILITY` is enabled; otherwise the path answers 404.
 * OTLP export requires **both** `IRIS_OBSERVABILITY` enabled **and** `IRIS_OTLP_ENDPOINT` set. `IRIS_OTLP_ENDPOINT` on its own is inert — nothing is exported.
-* `/healthz`, `/swarm`, and the `/swarmmap` pointer page are served whenever the listener runs, regardless of either variable.
+* `/healthz` and the `/swarmmap` pointer page are served whenever the listener runs, regardless of either variable. `/swarm` answers only loopback peers by default (the console proxies it); `IRIS_SWARM_PUBLIC=1` opens it to remote peers.
 * The console reads `/swarm` over container loopback (`127.0.0.1:9101`), so port 9101 needs external reachability only for Prometheus scraping or operator tools — never for the console.
 
 `IRIS_OBSERVABILITY` and `IRIS_OTLP_ENDPOINT` are read at startup, so a change

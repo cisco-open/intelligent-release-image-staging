@@ -31,7 +31,7 @@ artifacts, and test output from the build context.
 | 8000 | HTTPS | Artifact server | Bootstrap, agent bundle, pinned certificate, and staged install assets. |
 | 6881 | BitTorrent | Seeder data | Initial image pieces from the server seeder. |
 | 8080 | HTTPS | Web console | Admin browser interface. |
-| 9101 | HTTP | Telemetry | Health, swarm view, and optional metrics (Prometheus exposition format). |
+| 9101 | HTTP | Telemetry | Health and optional metrics (Prometheus exposition format); the swarm view is loopback/console-gated. |
 | 6800 | HTTP | aria2 RPC | Local-only inside the container; not published by Compose. |
 
 ## Runtime identity

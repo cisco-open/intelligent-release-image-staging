@@ -106,6 +106,25 @@ flowchart TB
     Flash --> IOS
 ```
 
+### Swarm data is console-gated
+
+Per-device swarm state (device IDs, IPs, models, progress, live transfer
+rates) is reserved for the authenticated console: `:9101/swarm` answers only
+loopback peers by default, and the console proxies it over container loopback
+behind its session. `IRIS_SWARM_PUBLIC=1` reopens remote access for operators
+who scrape it on a trusted segment.
+
+Be honest about what that gate is: a peer-address check scoped to the
+container network namespace — defense in depth, not a hard boundary. Under a
+rootful container engine (the shipped Compose and Kubernetes postures),
+external connections to the published port never arrive as
+container-loopback, so the gate holds. Under a rootless engine
+(rootless Docker/Podman) published-port connections can be re-originated
+inside the namespace as `127.0.0.1`, and under host networking every
+host-local process is loopback — in those deployments the gate is void, and
+the hard control is `IRIS_METRICS_HOST=127.0.0.1` (bind the listener to
+loopback) or not publishing port 9101 at all.
+
 ## Secrets
 
 Server secret material is encrypted at rest with age recipients. Plaintext lives only in `/run/iris` while the container runs. Device enrollment tokens are short-lived and generated per device by the running server.

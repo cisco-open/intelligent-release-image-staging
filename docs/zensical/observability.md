@@ -13,7 +13,7 @@ IRIS reports network progress from the point of view that matters most: whether 
 | Surface | Purpose |
 | --- | --- |
 | `/healthz` on port 9101 | Basic service health. |
-| `/swarm` on port 9101 | Machine-readable swarm and peer state. |
+| `/swarm` on port 9101 | Machine-readable swarm and peer state — loopback peers only by default (the console proxies it); `IRIS_SWARM_PUBLIC=1` opens it. |
 | `/swarmmap` on port 9101 | Pointer to the console swarm view. |
 | Console monitoring | Human-readable network, image, and audit state. |
 
@@ -33,15 +33,15 @@ of that variable and of `IRIS_OTLP_ENDPOINT`.
 
 With telemetry off, `/metrics` is not served and answers 404, and nothing is
 pushed to a collector. Nothing else changes: the port 9101 listener still runs
-because `/healthz`, `/swarm`, and the `/swarmmap` pointer live there, and the
-console's swarm view, image state, device reports, and audit log are unaffected
-— they read the catalog's own state, not the metrics pipeline. The startup log
-says which posture is in effect.
+because `/healthz`, the loopback-gated `/swarm`, and the `/swarmmap` pointer
+live there, and the console's swarm view, image state, device reports, and
+audit log are unaffected — they read the catalog's own state, not the metrics
+pipeline. The startup log says which posture is in effect.
 
 A Prometheus job left scraping `<server>:9101/metrics` in that posture therefore
 reads the IRIS target as down and renders an operator dashboard blank. That is
 telemetry being off, not a broken server. Either set `IRIS_OBSERVABILITY=1` or
-remove the scrape job. Use the console and `/swarm` for network state in the
+remove the scrape job. Use the console's Swarm tab for network state in the
 meantime.
 
 ## Device reports
@@ -191,4 +191,5 @@ versioned and transport-independent by design.
 | Verification fails | Catalog hash, file name, IOS copy output, image integrity. |
 | Console stale | Telemetry health, catalog service logs, device report interval. |
 | Prometheus target down, dashboard blank | `IRIS_OBSERVABILITY` — unset means `/metrics` answers 404 by design; then check reachability to port 9101. |
+| `403` on `:9101/swarm` | Swarm data is console-gated by design: use the console's Swarm tab, the authenticated `GET /api/swarm`, or `docker compose -f server/docker-compose.yml exec iris curl -s http://127.0.0.1:9101/swarm` (`kubectl exec` on Kubernetes). `IRIS_SWARM_PUBLIC=1` reopens remote access. |
 

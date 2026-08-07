@@ -42,6 +42,14 @@ top-level `VERSION` file.
   dashboard link; unset renders no link).
 
 ### Changed
+- **Breaking:** `:9101/swarm` now answers only loopback peers by default (it
+  was open to any peer that could reach the port). The authenticated console
+  is unaffected — it already proxies swarm data over container loopback
+  (`GET /api/swarm`). Remote scrapers must set `IRIS_SWARM_PUBLIC=1` (or point
+  `IRIS_SWARM_URL` at a listener that sets it) or read the authenticated
+  console API instead. The peer-address gate assumes a rootful container
+  engine; see the security page for the rootless/host-networking caveat and
+  the `IRIS_METRICS_HOST` hard control.
 - **Breaking (OTLP logs, dark-by-default surface):** log records now use
   OpenTelemetry semantic-convention attribute names and a top-level
   `eventName` (`device_id` → `device.id`, `image_id` → `iris.image.id`,

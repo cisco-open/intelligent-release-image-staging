@@ -125,7 +125,9 @@ that must remain available for seeding.
 
 Startup, readiness, and liveness probes use `http://<pod>:9101/healthz`. The
 external Service publishes ports 6969, 8443, 8000, 6881, 8080, and 9101. Port
-6800 remains pod-local.
+6800 remains pod-local. Remote `/swarm` through the Service answers `403` by
+default — swarm data is console-gated; set `IRIS_SWARM_PUBLIC=1` in the pod
+environment or use the console (probes and `/healthz` are unaffected).
 
 ```bash
 kubectl -n iris rollout status deployment/iris-seed-server
