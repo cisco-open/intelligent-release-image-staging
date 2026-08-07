@@ -17,7 +17,10 @@ IRIS reports network progress from the point of view that matters most: whether 
 | `/swarmmap` on port 9101 | Pointer to the console swarm view. |
 | Console monitoring | Human-readable network, image, and audit state. |
 
-These stay on regardless of the telemetry settings below.
+These stay on whenever the telemetry listener runs, regardless of the
+telemetry settings below. The one exception is `IRIS_METRICS_PORT` set to
+empty or `0`, which disables the listener entirely and takes `/healthz`,
+`/swarm`, and `/swarmmap` with it.
 
 ## Running with telemetry off
 
@@ -38,7 +41,7 @@ says which posture is in effect.
 A Prometheus job left scraping `<server>:9101/metrics` in that posture therefore
 reads the IRIS target as down and renders an operator dashboard blank. That is
 telemetry being off, not a broken server. Either set `IRIS_OBSERVABILITY=1` or
-remove the scrape job, and use the console and `/swarm` for network state in the
+remove the scrape job. Use the console and `/swarm` for network state in the
 meantime.
 
 ## Device reports

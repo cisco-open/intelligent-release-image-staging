@@ -4,7 +4,7 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Container Deployments
+# Container deployments
 
 IRIS ships two container roles built around the same catalog and private-swarm
 protocol. The seed server coordinates and originates content; the app-hosting
@@ -14,7 +14,7 @@ IOS-managed storage without installing or activating it.
 | Role | Image architecture | Durable storage | Deployment target |
 | --- | --- | --- | --- |
 | Seed server | `linux/amd64` | State, encrypted config, images, served artifacts | Docker Compose or one Kubernetes pod |
-| App-hosting agent | `linux/arm64` or `linux/amd64` | CAF persistent disk | Cisco IE or Catalyst 9000 IOx app hosting |
+| App-hosting agent | `linux/arm64` or `linux/amd64` | CAF persistent disk | Cisco IE or Catalyst 9300 IOx app hosting |
 
 ## End-to-end data path
 
@@ -26,20 +26,21 @@ flowchart LR
     Catalog --> Agent["IOx agent container"]
     Swarm --> Scratch["Persistent /data/iris scratch"]
     Agent --> Scratch
-    Scratch --> Hand["Hand-off: SSD share write (C9k) or SCP push (IE-3x00)"]
+    Scratch --> Hand["Hand-off: SSD share write (Catalyst 9300) or SCP push (IE-3400 / share fallback)"]
     Hand --> Verify["IOS copy /verify"]
     Verify --> Target["Selected IOS filesystem root"]
 ```
 
 The final copy deliberately crosses back into IOS. The CAF persistent disk is
-available to the application (for example, as `/iox_data` on C9300), but it is
+available to the application (for example, as `/iox_data` on Catalyst 9300), but it is
 not an IOS filesystem root. The agent uses that disk for resumable swarm data,
 then hands the completed file to IOS for the signature-enforcing
-`copy /verify`: on C9k the app-hosting SSD share
+`copy /verify`. On Catalyst 9300 the app-hosting SSD share
 (`usbflash1:iox_host_data_share`) is bind-mounted into the container, so the
 hand-off is a disk-speed write followed by an IOS-internal copy onto
-bootflash; on IE-3x00 (where IOx cannot bind-mount the SD card) the agent
-SCP-pushes the file to `guest-share` through SSH-to-self instead. See
+bootflash. On IE-3400 (where IOx cannot bind-mount the SD card) — or on a
+Catalyst 9300 whose share mount is unavailable — the agent SCP-pushes the
+file to `guest-share` through SSH-to-self instead. See
 [IOx App](iox.md#runtime-behavior).
 
 ## Seed-server image
@@ -132,7 +133,7 @@ lab address is baked in:
 An explicit target is accepted only if `show file systems` reports it as a
 writable disk and it is not `crashinfo:`. If it is unavailable, the agent logs
 the fallback and uses platform-aware auto-detection. `device/iox/install.sh`
-defaults to `sdflash:`. Console-onboarded C9300 deployments use the SSD-share
+defaults to `sdflash:`. Console-onboarded Catalyst 9300 deployments use the SSD-share
 transfer with `flash:` (bootflash) as the final target — the same placement as
 Guest Shell — and `AppGigabitEthernet1/0/1`.
 
@@ -140,9 +141,9 @@ Guest Shell — and `AppGigabitEthernet1/0/1`.
 
 - The seed-server image is amd64 so the static binary packed into Catalyst
   Guest Shell bundles remains x86_64.
-- IOx packages are architecture-specific. On IE-3x00 the image hand-off uses
+- IOx packages are architecture-specific. On IE-3400 the image hand-off uses
   SSH-to-self SCP because IOx there does not expose the SD card as a container
-  bind mount; on C9k the app-hosting SSD share is bind-mounted and carries the
+  bind mount; on Catalyst 9300 the app-hosting SSD share is bind-mounted and carries the
   hand-off at disk speed.
 - Compose requires Docker Engine 23.0 or later, because the `/run/iris` tmpfs is
   mounted with `uid=`, `gid=`, and `mode=` mount options that older engines

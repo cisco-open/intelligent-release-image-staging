@@ -158,7 +158,7 @@ the file. Deleting an image only unlinks it when `source_dir` resolves to the
 uploads volume, so an image published in place from the import root is left on
 disk, and a same-named file in the uploads volume is never destroyed by
 mistake. Entries published before `source_dir` was recorded keep the older
-behaviour of unlinking `IRIS_IMAGES_DIR/<filename>`.
+behavior of unlinking `IRIS_IMAGES_DIR/<filename>`.
 
 ### Importing images already on disk
 

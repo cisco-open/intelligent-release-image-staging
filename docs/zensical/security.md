@@ -50,8 +50,8 @@ private to the runtime uid. Those options require Docker Engine 23.0 or later.
 Because the Dockerfile cannot change ownership of host paths, uid 10001 must be
 given access to the age identity file (`IRIS_AGE_KEY_FILE_HOST`, keeping mode
 600 or 400) and the artifacts directory (`IRIS_ARTIFACTS_HOST_DIR`) on every
-deploy, and a deployment upgraded from a root-runtime release needs a one-time
-ownership migration of its existing named volumes. `cap_drop: [ALL]` applies to
+deploy. A deployment upgraded from a root-runtime release additionally needs a
+one-time ownership migration of its existing named volumes. `cap_drop: [ALL]` applies to
 `docker compose run` as well, so that migration cannot be done through this
 service even as `--user 0`; it needs a throwaway container with default
 capabilities. The ownership gap is per volume, so a reset that removes some
@@ -150,8 +150,9 @@ pattern the catalog TLS context already uses. When the key is set **and** the
 file exists, SSH and SCP run with `StrictHostKeyChecking=yes` against that
 `known_hosts` file. Otherwise they keep `StrictHostKeyChecking=no` with
 `UserKnownHostsFile=/dev/null`, which is the default and is tolerable only
-because this is SSH-to-self over the app's point-to-point link to the device's
-own SVI. Nothing in IRIS writes this key, so pinning is opt-in: set it yourself
+because this is SSH-to-self over a link that never leaves the device (the SVI
+on switches, the VirtualPortGroup on routers, the operator's SVI inband).
+Nothing in IRIS writes this key, so pinning is opt-in: set it yourself
 in the agent configuration to enable it.
 
 ## Third-party tools

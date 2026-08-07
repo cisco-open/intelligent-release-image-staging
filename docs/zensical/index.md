@@ -18,9 +18,9 @@ IRIS, Intelligent Release and Image Staging, stages Cisco IOS-XE images across a
 | Server stack | Tracker, catalog, seeder, artifact server, console, telemetry, and encrypted state. |
 | Web console | Browser workflow for images, devices, assignments, onboarding, swarm status, settings, and audit events. |
 | Management types | Per-device **routed**, **inband**, **router-routed**, or **router-nat**, with a receipt-backed deployment lifecycle. |
-| Guest Shell agent | Catalyst 9300 path that downloads through `aria2c`, verifies hashes, and copies the approved image to `flash:`. |
-| Catalyst 8000 router | Guest Shell through VirtualPortGroup, staging to `bootflash:`. Designed for the Catalyst 8000 family; routed and NAT modes are lab-tested on C8000v through verified staging and receipt-backed undeploy. |
-| IOx app | The same agent model as an IOx Docker app: IE-3x00/IE-3400 (arm64, stages to `sdflash:`) and SSD-equipped Catalyst 9000 (amd64, stages to bootflash through the SSD share). |
+| Guest Shell agent | Catalyst 9300 path that downloads through `aria2c` into the bind-mounted guest-share, verifies hashes, and copies the approved image to `flash:`. |
+| Catalyst 8000 router | Guest Shell through VirtualPortGroup, staging to `bootflash:`. Designed for the Catalyst 8000 family; routed and NAT modes are lab-tested on Catalyst 8000V through verified staging and receipt-backed undeploy. |
+| IOx app | The same agent model as an IOx Docker app: IE-3400 (arm64, stages to `sdflash:`) and SSD-equipped Catalyst 9300 (amd64, stages to bootflash through the SSD share). |
 | Network tools | CSV-driven inventory, per-device installers, assignments, and release packaging. |
 | Observability | Swarm map, health endpoint, metrics (Prometheus exposition format), optional OTLP export, and structured audit trail. |
 
@@ -82,7 +82,7 @@ Read these before connecting production devices.
 | Page | What it covers |
 | --- | --- |
 | [Device Agents](device-agents.md) | Guest Shell and IOx agent behavior on the device. |
-| [Management Type and VLAN Ownership](network-attachment.md) | Switch and router attachments, VPG/NAT ownership, receipts, and network-preserving guarantees. |
+| [Management Type and VLAN Ownership](network-attachment.md) | Switch and router management types, VPG/NAT ownership, receipts, and network-preserving guarantees. |
 | [IOx App](iox.md) | Building, staging, and transfer paths for the IOx agent. |
 
 ### Operate

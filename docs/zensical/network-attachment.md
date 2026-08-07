@@ -4,7 +4,7 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Management Type And VLAN Ownership
+# Management type and VLAN ownership
 
 IRIS supports four explicit management type models for the staging agent. The
 choice is per device, recorded in inventory, and — critically — determines what
@@ -30,25 +30,27 @@ does not create, configure, select, claim ownership of, or delete that VLAN, its
 SVI, gateway, routes, or VRF. The operator-owned SVI (and any VRF it belongs to)
 supplies routing; preflight only proves the existing topology can reach IRIS.
 
-The supported inband cells:
+The supported management-type cells:
 
-| Attachment | Addressing | Platform | Status |
+| Management type | Addressing | Platform | Status |
 | --- | --- | --- | --- |
 | Routed | static | Guest Shell / IOx | supported (receipt/preflight hardened) |
 | Inband | static | Guest Shell | supported |
-| Inband | static | IOx (IE-3x00, C9300) | supported |
+| Inband | static | IOx (IE-3400, Catalyst 9300) | supported |
 | Inband | DHCP | any | rejected — separate capability gate |
+| `router-routed` | static | Guest Shell (Catalyst 8000) | supported, lab-tested on Catalyst 8000V |
+| `router-nat` | static | Guest Shell (Catalyst 8000) | supported, lab-tested on Catalyst 8000V |
 
 Inband install and teardown command streams never contain `vlan`,
 `interface Vlan`, `no vlan`, `no interface Vlan`, VRF, `ip route`, IS-IS, or
 DHCP. The one interface IRIS does touch inband is the AppGigabitEthernet
-app-hosting port: install sets `switchport mode trunk` and **adds** the inband
+app-hosting port. Install sets `switchport mode trunk` and **adds** the inband
 VLAN with `switchport trunk allowed vlan add` — the additive form only, so an
 existing allowed list is never replaced — because without it the agent's
 traffic has no L2 path off the box. Teardown never removes the VLAN from the
 trunk (it is operator-owned and the trunk may carry other apps) and removes
-only the app footprint (Guest Shell or the IOx app, IRIS EEM applets, agent
-files); it deliberately leaves shared globals (logging discriminator, PKI
+only the app footprint: Guest Shell or the IOx app, IRIS EEM applets, and
+agent files. It deliberately leaves shared globals (logging discriminator, PKI
 trustpoint, HTTP-client settings) in place because a receipt cannot prove those
 remain uniquely IRIS-owned.
 
@@ -69,7 +71,7 @@ improvement that applies equally to both.
 
 Catalyst 8000 routers use Guest Shell through `VirtualPortGroup<N>` (VPG), not
 a VLAN/SVI or AppGigabitEthernet interface. Support is **designed for the
-Catalyst 8000 family, lab-tested on C8000v**. Both router modes onboard, stage a
+Catalyst 8000 family, lab-tested on Catalyst 8000V**. Both router modes onboard, stage a
 verified image, and undeploy from their receipt, and both appear on the Swarm Map
 with telemetry when observability is enabled.
 
@@ -90,17 +92,17 @@ address matches the app IP recorded in the receipt, using targeted
 removes the NAT configuration. IOS refuses
 `no ip nat inside source list ... overload` while translations still reference
 that mapping. Teardown therefore verifies that the overload rule is gone before
-removing `IRIS-NAT-<vpg>`; on failure it preserves the ACL for safe
+removing `IRIS-NAT-<vpg>`, and on failure it preserves the ACL for safe
 reconciliation. It never flushes device-wide NAT state. Routed teardown does
 not clear translations because it configures no NAT.
 
 Both modes stage only to `bootflash:`. Allow roughly **2× the image size + 200
-MB** of free bootflash (about 4.2 GB for a 2 GB image); the agent refuses a
-stage safely when space is insufficient.
+MB** of free bootflash (about 4.2 GB for a 2 GB image); the agent safely
+refuses to stage when space is insufficient.
 
 ## Inventory (CSV v2)
 
-Inventory is an attachment-aware, named-header CSV. The header is required and
+Inventory is a management-type-aware, named-header CSV. The header is required and
 validated; extra, missing, or misplaced columns are rejected.
 
 ```text
@@ -114,7 +116,7 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
 - **router-routed** rows fill `app_ip`, `app_mask`, `app_gateway`, and
   `vpg_number`; router fields cannot be combined with switch VLAN/SVI fields.
 - **router-nat** rows additionally fill `nat_interface`. `platform=router` is
-  required (and selected automatically for a known C8xxx model).
+  required (and selected automatically for a known Catalyst 8000 (C8xxx) model).
 - `ios_ssh_host` is an OPTIONAL advanced override: the IOS endpoint the inband
   IOx app SSHes to for `copy /verify`. It defaults to the device's management IP
   (`device_ip`), which is on the same existing management VLAN. Only set it for an
@@ -177,7 +179,7 @@ teardown removes only resources proven by that receipt.
 The Console Add Device flow offers **Routed**, **Inband**, **Router routed**, and
 **Router NAT** management types. Router choices show VPG number and app
 addressing; Router NAT also shows the outside interface. The device table shows
-each device's **Attachment**, not a bare VLAN/SVI value. Onboarding is
+each device's **Management type**, not a bare VLAN/SVI value. Onboarding is
 receipt-backed. See
 [Web Console](console.md).
 

@@ -34,12 +34,12 @@ replica, a pod restart marks any in-flight (`planned`/`applying`) receipt
 operation. See
 [Management Type and VLAN Ownership](network-attachment.md).
 
-IOx onboarding (routed or inband, on IE-3x00 or C9300) needs the IOx app
+IOx onboarding (routed or inband, on IE-3400 or Catalyst 9300) needs the IOx app
 packages staged on the PVC: copy `iris-arm64.tar` and/or `iris-amd64.tar` into
 `/data/artifacts`. Kubernetes does not run the Compose host-side package
 builder, so build them elsewhere (`tools/provision-iox-packages.sh`) and copy
 them in with `kubectl cp`. Guest Shell onboarding, including Catalyst 8000
-router VPG attachments, needs no staged package.
+router VPG deployments, needs no staged package.
 
 The published console port shown on the Settings page follows `IRIS_CONSOLE_URL`
 when set (otherwise it defaults to the Service's `8080`); set it if you front
@@ -91,7 +91,7 @@ Secret readable only by root fails at startup.
     artifacts at uid 10001. Check the driver behind your storage class, then
     confirm ownership from inside the running pod. If the driver does not apply
     `fsGroup`, pre-create the volume's ownership out of band or choose a storage
-    class whose driver honours it.
+    class whose driver honors it.
 
 ```bash
 kubectl get csidriver \

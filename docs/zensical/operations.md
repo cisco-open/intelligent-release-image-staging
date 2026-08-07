@@ -47,7 +47,7 @@ for the command to run.
 
 ## Bulk device actions
 
-Fleet-sized changes come from the Devices toolbar, which acts on every checked
+Network-wide changes come from the Devices toolbar, which acts on every checked
 row instead of one row at a time. Bulk operations report per-device refusals
 rather than failing the batch, so a partial result is normal: the status line
 counts the successes and names the devices that refused. The controls and their
@@ -56,7 +56,7 @@ individual effects are documented in
 
 ## Backups
 
-Back up the Docker volumes that hold `/var/lib/iris` and `/etc/iris`, plus the offline age recipient material required to decrypt secrets. Keep image binaries and generated artifacts in their normal external storage path.
+Back up the Docker volumes that hold `/var/lib/iris` and `/etc/iris`, plus the offline age recipient material required to decrypt secrets, plus the `iris-images` uploads volume — console-uploaded images live there, and a restore without it loses them. Image binaries under the read-only import root and generated artifacts stay in their normal external storage path.
 
 For Kubernetes, snapshot the `iris-data` PVC and back up the age identity stored
 outside that PVC. Both are required for recovery.
@@ -65,7 +65,7 @@ outside that PVC. Both are required for recovery.
 
 Private BitTorrent reduces server load by letting devices exchange pieces after the seeder introduces the content. The server remains important for tracker announces, catalog policy, initial seeding, and telemetry. Watch the seeder data port, tracker health, and device storage pressure during large network waves.
 
-On C9k IOx devices the final agent-to-IOS transfer uses the bind-mounted SSD share and runs at disk speed. On IE-3x00 (or a C9k that fell back to the scp push) that transfer is capped by the platform's default control-plane policing — roughly 1.4 MB/s on Catalyst 9300; see [Transfer throughput and CoPP](iox.md#transfer-throughput-and-copp) for measurements and the operator-side mitigation.
+On Catalyst 9300 IOx devices the final agent-to-IOS transfer uses the bind-mounted SSD share and runs at disk speed; Catalyst 9300 Guest Shell writes through the guest-share; Catalyst 8000 routers stage over Guest Shell to `bootflash:`. On IE-3400 (or a Catalyst 9300 that fell back to the scp push) that transfer is capped by the platform's default control-plane policing at roughly 1.4 MB/s; IRIS never modifies CoPP.
 
 ## Cleanup
 
@@ -76,7 +76,7 @@ inventory row, so a later inventory edit cannot retarget cleanup. An
 **inband** device's teardown removes only the app footprint and preserves the
 operator-owned VLAN/SVI/routes/VRF. A device deployed before receipts existed
 has no active receipt and must be **adopted** (an explicit, audited, no-change
-recording of ownership) before it can be undeployed; a missing, drifted, or
+recording of ownership) before it can be undeployed. A missing, drifted, or
 uncertain receipt stops cleanup in `needs-reconcile` rather than guessing. See
 [Management Type and VLAN Ownership](network-attachment.md).
 
@@ -115,7 +115,7 @@ including the fallback for entries published before that field existed.
 1. Confirm `docker ps` shows the `iris` container.
 2. Check `docker logs iris` for catalog, tracker, seeder, or secretfs errors.
 3. Confirm the device can reach ports 8443, 8000, 6969, and 6881.
-4. Confirm the published image exists under `/opt/images` on the server host.
+4. Confirm the published image exists under one of the two image roots — the read-only import root (`/opt/images`) or the `iris-images` uploads volume.
 5. Confirm the age key, the artifacts directory, and every kept volume are owned by uid 10001 — a `not readable by the server` image or a secrets failure after a reset is an ownership problem, not a corrupt store.
 6. Check the console audit and latest device report.
 7. Re-run the generated installer only after confirming the device inventory row is still correct.

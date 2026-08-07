@@ -64,9 +64,9 @@ The public website source is in [docs/](docs/index.html). The GitHub Pages workf
 
 IRIS supports Catalyst 9300 Guest Shell, supported IE/Catalyst IOx paths, and
 router attachments designed for the Catalyst 8000 family, lab-tested on
-C8000v. Catalyst 8000 routers use Guest Shell through an IRIS-managed
+Catalyst 8000V. Catalyst 8000 routers use Guest Shell through an IRIS-managed
 VirtualPortGroup and stage to `bootflash:`. Both `router-routed` and
-`router-nat` have been lab-validated on C8000v through onboarding, verified
+`router-nat` have been lab-validated on Catalyst 8000V through onboarding, verified
 image staging, and receipt-backed undeploy; Swarm Map and OpenTelemetry (OTLP)
 export were also verified.
 Router onboarding repeats read-only preflight immediately before execution and
@@ -147,10 +147,10 @@ The seed-server image is self-contained and built from the repository root:
 docker build --platform linux/amd64 -f server/Dockerfile -t iris:docker-alpha .
 ```
 
-The Cisco app-hosting agent supports ARM64 IE platforms and x86_64 Catalyst 9000
+The Cisco app-hosting agent supports ARM64 IE platforms and x86_64 Catalyst 9300
 platforms. It downloads into the CAF persistent directory and hands the image
-to IOS for a signature-enforcing `copy /verify`: on Catalyst 9000 through the
-bind-mounted SSD share at disk speed, on IE-3x00 by SCP over SSH-to-self (see
+to IOS for a signature-enforcing `copy /verify`: on Catalyst 9300 through the
+bind-mounted SSD share at disk speed, on IE-3400 by SCP over SSH-to-self (see
 [IOx app](docs/zensical/iox.md)). Build an image for inspection, or package it
 with `ioxclient`:
 
@@ -159,13 +159,13 @@ with `ioxclient`:
 CATALOG_PEM=/path/to/iris-catalog.pem device/iox/build.sh --image-only
 CATALOG_PEM=/path/to/iris-catalog.pem device/iox/build.sh device/iox/out
 
-# x86_64 package for Catalyst 9000 app hosting
+# x86_64 package for Catalyst 9300 app hosting
 IOX_ARCH=amd64 PACKAGE_NAME=iris-amd64.tar \
   CATALOG_PEM=/path/to/iris-catalog.pem device/iox/build.sh device/iox/out
 ```
 
-`device/iox/install.sh` defaults to the IE-3x00 profile (`TARGET_FS=sdflash:`,
-`AppGigabitEthernet1/1`). Console-onboarded C9300 deployments use the amd64
+`device/iox/install.sh` defaults to the IE-3400 profile (`TARGET_FS=sdflash:`,
+`AppGigabitEthernet1/1`). Console-onboarded Catalyst 9300 deployments use the amd64
 package with `APP_INTF=AppGigabitEthernet1/0/1`, `TARGET_FS=flash:`, and the
 SSD-share pair `SHARE_HOST_PATH=/vol/usb1/iox_host_data_share` /
 `SHARE_IOS_PATH=usbflash1:iox_host_data_share` carrying the transfer. See

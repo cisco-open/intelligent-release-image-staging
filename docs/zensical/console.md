@@ -27,9 +27,9 @@ docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin
 | Area | What it does |
 | --- | --- |
 | Images | Shows published image metadata and staged network status, uploads new images, and imports images already on disk. |
-| Devices | Lists known devices, their network **attachment**, platform details, current assignment, and recent reports. |
+| Devices | Lists known devices, their **management type**, platform details, current assignment, and recent reports. |
 | Assignments | Maps each device to the image it should stage. |
-| Onboarding | Starts and tracks install or undeploy jobs when stage-host credentials are configured. |
+| Onboarding | Starts and tracks install or undeploy jobs when the device's assigned credential profile is configured. |
 | Swarm | Shows peer progress and seeder/device participation. With `IRIS_EVENTS_URL_TEMPLATE` configured, the peer drawer renders a "View this device's events" link into the operator's own backend; without it, no link renders. |
 | Monitoring | Links to health, swarm, metrics, and recent telemetry. Carries the *Telemetry export* badge (`ok` / `degraded` / `off`) fed by the hub's OTLP export health. |
 | Settings | Shows server configuration, version, and operational settings. |
@@ -61,8 +61,12 @@ reporting as an upload, and is recorded in Audit as `image_import` (also with
 A file is offered only when it is a `.bin`, passes the filename charset gate, is
 not a dotfile or a `.torrent`/`.upload` temporary, resolves inside its own root
 (so a symlink cannot reach outside it), is readable by the server, is not
-already published, and is not ambiguous. Everything else is listed greyed out
-with its reason. Two of the three reasons are actionable from this screen:
+already published, and is not ambiguous. Files failing the silent gates (wrong
+extension, dotfiles, temporaries, symlinks escaping the root) are hidden
+entirely; the remaining three failure reasons — `already published`,
+`ambiguous name in more than one location`, and `not readable by the server` —
+are listed greyed out with the reason named. Two of those three are actionable
+from this screen:
 
 - `ambiguous name in more than one location` — remove or rename the duplicate so
   exactly one file claims the ID, then re-check the panel.
@@ -75,10 +79,11 @@ derived ID. For the exact definitions see
 [Import skip reasons](reference.md#import-skip-reasons).
 
 Ambiguity is refused rather than guessed. Reseeding prefers the catalog entry's
-recorded `source_dir` and falls back to a basename walk only for entries
-published before that field existed or whose directory has since gone away; the
-seeder runs with `bt-seed-unverified`, so a wrong directory would serve the
-wrong bytes under correct piece hashes.
+recorded `source_dir`. Only for entries published before that field existed, or
+whose directory has since gone away, does it fall back to searching both image
+roots for a file with the entry's filename. The seeder runs with
+`bt-seed-unverified`, so a wrong directory would serve the wrong bytes under
+correct piece hashes.
 
 Because publishing records `source_dir`, **Delete** unlinks the file only when
 that directory resolves to the uploads volume: an image published in place from
@@ -88,7 +93,7 @@ the read-only import root is removed from the catalog and left on disk. See
 ## Management type
 
 The Add Device form has an explicit **Management type** choice, and the
-device table shows each device's attachment rather than a bare VLAN/SVI value:
+device table shows each device's management type rather than a bare VLAN/SVI value:
 
 - **Routed - IRIS-managed app network** — IRIS creates a dedicated VLAN and SVI.
   Onboarding is one-click and create-only.
@@ -101,7 +106,7 @@ device table shows each device's attachment rather than a bare VLAN/SVI value:
 
 Router choices show the VPG number and app addressing; Router NAT also requires
 the outside interface. Both target the Catalyst 8000 family and are validated on
-C8000v across onboarding, image staging, receipt-backed undeploy, Swarm Map, and
+Catalyst 8000V across onboarding, image staging, receipt-backed undeploy, Swarm Map, and
 OpenTelemetry (OTLP) export.
 
 Each onboard records a durable **receipt** of what it applied, and **Undeploy**
@@ -150,7 +155,7 @@ at once instead of after the next ten-second poll.
 
 ## Onboarding from the console
 
-GUI-driven onboarding uses stage-host credentials to run the same install logic that the CLI generates. The sensitive values belong in the console or the server secret store, not in Git. Generated per-device staging files are temporary and swept after their configured age.
+GUI-driven onboarding uses the device's assigned credential profile to run the same install logic that the CLI generates. The sensitive values belong in the console or the server secret store, not in Git. Generated per-device staging files are temporary and swept after their configured age.
 
 ## When to use the CLI
 

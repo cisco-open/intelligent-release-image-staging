@@ -224,7 +224,7 @@ Router deployments carry extra preflight and ownership rules — see
 | `GET /api/swarm` | The telemetry `/swarm` JSON, fetched over loopback. Answers 200 with `{"peers": [], "error": ...}` when the telemetry listener is unreachable. |
 | `GET /api/audit` | `{events: [...]}`; `category`, `limit` (max 500), `before_ts`, and `after_ts` query parameters. |
 | `GET /api/audit/histogram` | Per-bucket audit event counts for the activity strip. |
-| `POST /api/telemetry/stream` | `{"every": <int 1..60>, "pause": <bool>}` — fleet-wide stream tuning, echoed to every device on its next heartbeat. Audited. |
+| `POST /api/telemetry/stream` | `{"every": <int 1..60>, "pause": <bool>}` — network-wide stream tuning, echoed to every device on its next heartbeat. Audited. |
 | `GET /api/telemetry/health` | The hub's `/healthz` JSON (OTLP export health), proxied behind the console session. `{"ok": false, "error": "unavailable"}` when the hub is unreachable. |
 | `GET /swarmmap` | The swarm map page itself. Session-gated like the `/api` routes, but not under `/api`. |
 
@@ -284,7 +284,7 @@ The agent reads `key = value` lines from
 
 The pin is opt-in and verify-if-present, the same shape as the catalog client's
 TLS pinning: setting it on one device changes nothing elsewhere, and an agent
-upgrade on a fleet whose config omits it behaves identically. It applies to the
+upgrade on a network whose device configs omit it behaves identically. It applies to the
 container runtime mode (the IOx SSH-to-self path) only — the Guest Shell agent
 uses the on-box `cli` module and never opens an SSH session. Nothing in IRIS
 writes this key for you.
