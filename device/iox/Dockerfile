@@ -28,6 +28,7 @@ COPY agent/VERSION /opt/iris/agent/VERSION
 # pinned catalog server cert (public; used to VERIFY catalog TLS)
 COPY iris-catalog.pem /opt/iris/iris-catalog.pem
 COPY entrypoint.sh /entrypoint.sh
+COPY reconcile.sh /reconcile.sh
 RUN chmod +x /entrypoint.sh /opt/iris/bin/aria2c
 
 ENV PATH="/opt/iris/bin:${PATH}" \

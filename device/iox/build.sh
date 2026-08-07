@@ -156,7 +156,7 @@ else
 fi
 grep -q "BEGIN CERTIFICATE" "$CTX/iris-catalog.pem" || { echo "!! bad cert"; exit 1; }
 
-cp "$HERE/Dockerfile" "$HERE/entrypoint.sh" "$CTX/"
+cp "$HERE/Dockerfile" "$HERE/entrypoint.sh" "$HERE/reconcile.sh" "$CTX/"
 cp "$PACKAGE_DESCRIPTOR" "$CTX/package.yaml"
 
 echo ">> docker build ($DOCKER_PLATFORM)"
