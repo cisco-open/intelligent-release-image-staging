@@ -509,3 +509,124 @@ def test_module_constants_pin_contract_values():
         (250, 1048576, 3)
     assert (t.BACKOFF_CAP_TICKS, t.MAX_ATTEMPTS) == (16, 60)
     assert (t.ELAPSED_CLAMP, t.TICK_SECONDS) == (180.0, 60)
+
+
+# ---- live streaming samples (device transfer telemetry spec, section 5) ----
+
+class TestStreamOptIn:
+    def test_default_off(self):
+        assert not telemetry_report.stream_enabled({"telemetry": "on"})
+
+    def test_explicit_values_enable(self):
+        for v in ("on", "1", "true", "YES", " On "):
+            cfg = {"telemetry": "on", "telemetry_stream": v}
+            assert telemetry_report.stream_enabled(cfg), v
+
+    def test_garbage_stays_off_fail_closed(self):
+        for v in ("enabled", "On!", "", "  ", "off", "0", "no", None, 1):
+            cfg = {"telemetry": "on", "telemetry_stream": v}
+            assert not telemetry_report.stream_enabled(cfg), v
+
+    def test_requires_master_toggle(self):
+        assert not telemetry_report.stream_enabled(
+            {"telemetry": "off", "telemetry_stream": "on"})
+
+
+class TestStreamDirectives:
+    def test_parse_defaults_on_garbage(self):
+        for resp in (None, [], "x", 7,
+                     {"stream_every": "4"}, {"stream_every": True},
+                     {"stream_every": 0}, {"stream_every": 61},
+                     {"stream_pause": 1}, {"stream_pause": "true"}):
+            assert telemetry_report.parse_stream_directives(resp) == (1, False)
+
+    def test_parse_valid(self):
+        assert telemetry_report.parse_stream_directives(
+            {"stream_every": 10, "stream_pause": True}) == (10, True)
+
+    def test_store_overwrites_always_and_none_leaves_untouched(self):
+        state = {}
+        telemetry_report.store_directives(state, {"stream_every": 5}, 100.0)
+        assert state["stream_directives"] == {
+            "every": 5, "pause": False, "received_ts": 100.0}
+        telemetry_report.store_directives(state, None, 200.0)
+        assert state["stream_directives"]["received_ts"] == 100.0
+        telemetry_report.store_directives(state, {}, 300.0)
+        assert state["stream_directives"] == {
+            "every": 1, "pause": False, "received_ts": 300.0}
+
+    def test_active_fresh_vs_stale(self):
+        state = {}
+        telemetry_report.store_directives(
+            state, {"stream_every": 8, "stream_pause": True}, 1000.0)
+        assert telemetry_report.active_directives(state, 1179.0) == (8, True)
+        assert telemetry_report.active_directives(state, 1181.0) == (1, False)
+
+    def test_active_tolerates_hand_edited_state(self):
+        for junk in ("x", {"every": "9", "received_ts": "soon"},
+                     {"every": 99, "pause": True, "received_ts": 100.0}):
+            state = {"stream_directives": junk}
+            every, pause = telemetry_report.active_directives(state, 100.0)
+            assert every == 1
+
+
+class TestShouldSample:
+    def test_bad_tier_never_samples(self):
+        assert not telemetry_report.should_sample({}, {}, "bad", 0.0)
+
+    def test_pause_suppresses(self):
+        state = {}
+        telemetry_report.store_directives(state, {"stream_pause": True}, 100.0)
+        assert not telemetry_report.should_sample(state, {}, "good", 100.0)
+
+    def test_good_tier_every_tick_with_half_tick_slop(self):
+        tele = {"stream_last_ts": 1000.0}
+        assert telemetry_report.should_sample({}, tele, "good", 1031.0)
+        assert not telemetry_report.should_sample({}, tele, "good", 1029.0)
+
+    def test_constrained_every_fourth_tick(self):
+        tele = {"stream_last_ts": 1000.0}
+        assert not telemetry_report.should_sample({}, tele, "constrained", 1180.0)
+        assert telemetry_report.should_sample({}, tele, "constrained", 1211.0)
+
+    def test_stream_every_stretches_good_tier(self):
+        state = {}
+        telemetry_report.store_directives(state, {"stream_every": 10}, 1000.0)
+        tele = {"stream_last_ts": 1000.0}
+        assert not telemetry_report.should_sample(state, tele, "good", 1120.0)
+
+
+class TestBuildSample:
+    STATS = {"completedLength": "447741952", "downloadSpeed": "2914000",
+             "uploadSpeed": "187000", "connections": "6"}
+
+    def test_downloading_full_shape(self):
+        s = telemetry_report.build_sample("img-1", "downloading",
+                                          dict(self.STATS), "good")
+        assert s == {"v": 1, "image_id": "img-1", "phase": "downloading",
+                     "done_bytes": 447741952, "down_bps": 2914000,
+                     "up_bps": 187000, "peers": 6, "tier": "good"}
+
+    def test_seeding_only_maps_to_wire_seeding(self):
+        s = telemetry_report.build_sample("img-1", "seeding-only",
+                                          dict(self.STATS), "constrained")
+        assert s["phase"] == "seeding" and s["tier"] == "constrained"
+
+    def test_seeder_with_no_takers_is_silent(self):
+        stats = dict(self.STATS, connections="0")
+        assert telemetry_report.build_sample(
+            "i", "seeding-only", stats, "good") is None
+
+    def test_none_on_wrong_phase_tier_or_missing_stats(self):
+        assert telemetry_report.build_sample(
+            "i", "steady", dict(self.STATS), "good") is None
+        assert telemetry_report.build_sample(
+            "i", "downloading", dict(self.STATS), "bad") is None
+        assert telemetry_report.build_sample(
+            "i", "downloading", None, "good") is None
+
+
+class TestConfDefault:
+    def test_telemetry_stream_defaults_off(self):
+        import agent_config
+        assert agent_config.DEFAULTS["telemetry_stream"] == "off"

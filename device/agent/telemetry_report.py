@@ -274,3 +274,108 @@ def next_backoff_ts(attempts, now):
     ticks (1 -> 2 -> 4 -> 8 -> 16, capped at ~16 min). `attempts` is the count
     of sends already tried (0 -> one tick out)."""
     return now + TICK_SECONDS * min(2 ** attempts, BACKOFF_CAP_TICKS)
+
+
+# --- live streaming samples (device transfer telemetry spec, section 5) ----
+STREAM_TIER_TICKS = {"good": 1, "constrained": 4}   # 'bad' streams nothing
+STREAM_EVERY_MIN = 1
+STREAM_EVERY_MAX = 60
+STREAM_DIRECTIVE_FRESH_TICKS = 3    # expire without heartbeat renewal
+SAMPLE_V = 1
+
+
+def stream_enabled(cfg):
+    """Streaming opt-in: conf key `telemetry_stream`, default OFF. Fail-closed
+    (deliberately the inverse polarity of enabled()): ONLY an explicit
+    on/1/true/yes enables — anything else, including garbage, stays off.
+    Streaming also requires the master `telemetry` toggle."""
+    if not enabled(cfg):
+        return False
+    v = cfg.get("telemetry_stream", "off")
+    if not isinstance(v, str):
+        return False        # conf values are strings; any other type is garbage
+    return v.strip().lower() in ("on", "1", "true", "yes")
+
+
+def parse_stream_directives(resp):
+    """(stream_every, stream_pause) from a heartbeat response, with the
+    pull_requested() paranoia: resp must be a dict, stream_every a real int
+    (bool excluded) inside [STREAM_EVERY_MIN, STREAM_EVERY_MAX], stream_pause
+    literally True — anything else yields the defaults (1, False)."""
+    every, pause = 1, False
+    if isinstance(resp, dict):
+        raw = resp.get("stream_every")
+        if isinstance(raw, int) and not isinstance(raw, bool) \
+                and STREAM_EVERY_MIN <= raw <= STREAM_EVERY_MAX:
+            every = raw
+        if resp.get("stream_pause") is True:
+            pause = True
+    return every, pause
+
+
+def store_directives(state, resp, now):
+    """Overwrite state['stream_directives'] from THIS response — no merge:
+    absent or malformed keys overwrite with the defaults, so captive-portal
+    garbage can never accumulate into policy. resp None (failed heartbeat)
+    leaves the stored entry untouched to age out via the freshness rule."""
+    if resp is None:
+        return
+    every, pause = parse_stream_directives(resp)
+    state["stream_directives"] = {"every": every, "pause": pause,
+                                  "received_ts": float(now)}
+
+
+def active_directives(state, now):
+    """Directives currently in force: the stored entry while fresh. Every
+    successful heartbeat renews it (the catalog echoes unconditionally), so
+    freshness lapses only when heartbeats stop or an old server stops
+    echoing — then the device reverts to defaults within 3 ticks (the
+    anti-wedge rule, spec section 5.4)."""
+    d = state.get("stream_directives")
+    if isinstance(d, dict):
+        try:
+            age = now - float(d.get("received_ts", 0))
+        except (TypeError, ValueError):
+            age = -1.0
+        if 0 <= age <= STREAM_DIRECTIVE_FRESH_TICKS * TICK_SECONDS:
+            every = d.get("every")
+            if not (isinstance(every, int) and not isinstance(every, bool)
+                    and STREAM_EVERY_MIN <= every <= STREAM_EVERY_MAX):
+                every = 1
+            return every, d.get("pause") is True
+    return 1, False
+
+
+def should_sample(state, tele, tier, now):
+    """Cadence gate: one sample per effective interval (spec section 5.3),
+    hard-capped at one per tick by the caller's tick cycle. Half-a-tick slop
+    absorbs EEM timer drift (a 59.5 s gap still counts as the next tick)."""
+    if tier not in STREAM_TIER_TICKS:
+        return False
+    every, pause = active_directives(state, now)
+    if pause:
+        return False
+    interval_ticks = max(STREAM_TIER_TICKS[tier], every)
+    last = float(tele.get("stream_last_ts", 0) or 0)
+    return (now - last) >= (interval_ticks - 0.5) * TICK_SECONDS
+
+
+def build_sample(img_id, phase, stats, tier):
+    """The v1 wire sample (spec section 5.1) or None when nothing should be
+    sent. stats is the aria2 tellStatus subset (string values, exactly what
+    _aria_stats_impl already fetches). run_once phase 'seeding-only' maps to
+    wire 'seeding' (the server checks enums exactly). A seeder with zero
+    connections streams nothing."""
+    if phase not in ("downloading", "seeding-only") or not stats:
+        return None
+    if tier not in STREAM_TIER_TICKS:
+        return None
+    conns = int(stats.get("connections", "0") or 0)
+    wire = "downloading" if phase == "downloading" else "seeding"
+    if wire == "seeding" and conns <= 0:
+        return None
+    return {"v": SAMPLE_V, "image_id": img_id, "phase": wire,
+            "done_bytes": int(stats.get("completedLength", "0") or 0),
+            "down_bps": int(stats.get("downloadSpeed", "0") or 0),
+            "up_bps": int(stats.get("uploadSpeed", "0") or 0),
+            "peers": conns, "tier": tier}
