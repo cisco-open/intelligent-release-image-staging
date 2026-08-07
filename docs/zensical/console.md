@@ -30,8 +30,8 @@ docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin
 | Devices | Lists known devices, their network **attachment**, platform details, current assignment, and recent reports. |
 | Assignments | Maps each device to the image it should stage. |
 | Onboarding | Starts and tracks install or undeploy jobs when stage-host credentials are configured. |
-| Swarm | Shows peer progress and seeder/device participation. |
-| Monitoring | Links to health, swarm, metrics, and recent telemetry. |
+| Swarm | Shows peer progress and seeder/device participation. With `IRIS_EVENTS_URL_TEMPLATE` configured, the peer drawer renders a "View this device's events" link into the operator's own backend; without it, no link renders. |
+| Monitoring | Links to health, swarm, metrics, and recent telemetry. Carries the *Telemetry export* badge (`ok` / `degraded` / `off`) fed by the hub's OTLP export health. |
 | Settings | Shows server configuration, version, and operational settings. |
 | Audit | Records administrative and workflow actions. |
 
@@ -102,7 +102,7 @@ device table shows each device's attachment rather than a bare VLAN/SVI value:
 Router choices show the VPG number and app addressing; Router NAT also requires
 the outside interface. Both target the Catalyst 8000 family and are validated on
 C8000v across onboarding, image staging, receipt-backed undeploy, Swarm Map, and
-Grafana telemetry.
+OpenTelemetry (OTLP) export.
 
 Each onboard records a durable **receipt** of what it applied, and **Undeploy**
 runs only from that receipt, so editing inventory after onboarding cannot
@@ -120,6 +120,7 @@ without touching each device:
 | Control | What it does | Confirms first |
 | --- | --- | --- |
 | Onboard selected | Queues an onboard job per device and tracks them in the batch panel; the server runs a bounded number at a time and queues the rest. | No |
+| *Telemetry reports* / *Telemetry streaming* checkboxes | Set the deployed agent's telemetry posture for every onboard started from this toolbar (single-row onboards included). Reports default on; streaming defaults off ([Transfer streaming](observability.md#transfer-streaming)). A bulk redeploy with the boxes toggled is the site-scale enable/disable path. | No |
 | Undeploy selected | Runs receipt-driven cleanup on each device. | Yes — one dialog for the whole selection, naming what teardown removes and preserves |
 | Adopt selected | Records the ownership receipt for each device. | Yes — a dialog listing the selected devices |
 | Delete selected | Removes the inventory rows only. | Yes — the same confirmation text the per-row delete uses, listing the devices |

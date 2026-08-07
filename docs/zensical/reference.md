@@ -105,15 +105,21 @@ The host tree behind `IRIS_IMAGE_ROOT` must be readable and traversable by uid
 
 ### Telemetry variables
 
-External telemetry is off by default: IRIS does not assume a Prometheus, Loki, or
-Grafana stack exists.
+External telemetry is off by default: IRIS does not assume any observability
+stack exists — it emits OpenTelemetry (OTLP), and the operator chooses the
+collector and backend.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `IRIS_OBSERVABILITY` | unset (off) | Enables the external observability surface when set to `1`, `true`, `yes`, or `on`. Any other value, empty, or unset leaves it off. |
 | `IRIS_OTLP_ENDPOINT` | unset | OTLP/HTTP endpoint of your collector, e.g. `http://<collector-ip>:4318`. |
 | `IRIS_METRICS_PORT` | `9101` | Port for the telemetry listener. Empty or `0` disables the listener entirely. |
+| `IRIS_METRICS_HOST` | `0.0.0.0` | Bind host for the telemetry listener. Bind it to `127.0.0.1` when only the console's session-gated proxy consumes it. |
 | `IRIS_SWARM_URL` | `http://127.0.0.1:9101/swarm` | Where the console fetches swarm state from. |
+| `IRIS_OTLP_HEADERS` | unset | Comma-separated `Name=Value` headers attached to every OTLP POST (collector authentication). Values are secrets: never logged, never echoed in errors, and the exporters refuse HTTP redirects so they cannot leak to a redirect target. |
+| `IRIS_OTLP_HEADERS_FILE` | unset | Read the header spec from a file instead (secret mounts). `IRIS_OTLP_HEADERS` wins when both are set. |
+| `IRIS_OTLP_DEVICE_METRICS` | unset (off) | Additionally export per-device OTLP gauges. Cardinality warning: at 10,000 devices this is ~30,000 datapoints per push at your backend. |
+| `IRIS_EVENTS_URL_TEMPLATE` | unset | URL template with `{ip}` / `{device_id}` placeholders for the swarm-map drawer's "View this device's events" button. Unset renders no button. |
 
 #### Telemetry gating rule
 
@@ -127,8 +133,8 @@ takes effect on the next container restart. The startup log states which posture
 is in effect.
 
 !!! note "A down Prometheus target is not a fault"
-    With observability off, a Prometheus job scraping IRIS reads down and a
-    Grafana IRIS dashboard is blank. That is telemetry being off, not a broken
+    With observability off, a Prometheus job scraping IRIS reads down and an
+    operator dashboard is blank. That is telemetry being off, not a broken
     server. Set `IRIS_OBSERVABILITY` to get the scrape surface, and
     `IRIS_OTLP_ENDPOINT` as well to get event export.
 
@@ -218,6 +224,8 @@ Router deployments carry extra preflight and ownership rules — see
 | `GET /api/swarm` | The telemetry `/swarm` JSON, fetched over loopback. Answers 200 with `{"peers": [], "error": ...}` when the telemetry listener is unreachable. |
 | `GET /api/audit` | `{events: [...]}`; `category`, `limit` (max 500), `before_ts`, and `after_ts` query parameters. |
 | `GET /api/audit/histogram` | Per-bucket audit event counts for the activity strip. |
+| `POST /api/telemetry/stream` | `{"every": <int 1..60>, "pause": <bool>}` — fleet-wide stream tuning, echoed to every device on its next heartbeat. Audited. |
+| `GET /api/telemetry/health` | The hub's `/healthz` JSON (OTLP export health), proxied behind the console session. `{"ok": false, "error": "unavailable"}` when the hub is unreachable. |
 | `GET /swarmmap` | The swarm map page itself. Session-gated like the `/api` routes, but not under `/api`. |
 
 ### Import skip reasons
@@ -272,6 +280,7 @@ The agent reads `key = value` lines from
 | Key | Default | Effect |
 | --- | --- | --- |
 | `device_ssh_known_hosts` | unset | Path to a `known_hosts` file pinning the device's SSH host key. When the key is set and the file exists, the agent's SSH and SCP calls use `StrictHostKeyChecking=yes` against it. Otherwise they keep the default `StrictHostKeyChecking=no` with `UserKnownHostsFile=/dev/null`. |
+| `telemetry_stream` | `off` | Live transfer-sample streaming ([Transfer streaming](observability.md#transfer-streaming)). Fail-closed: only an explicit `on`/`1`/`true`/`yes` enables; requires `telemetry` on. Delivered by the installers (`TELEMETRY_STREAM`) and IOx deploy env (`IRIS_TELEMETRY_STREAM`), and changed by redeploy. |
 
 The pin is opt-in and verify-if-present, the same shape as the catalog client's
 TLS pinning: setting it on one device changes nothing elsewhere, and an agent

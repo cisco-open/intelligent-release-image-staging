@@ -67,8 +67,8 @@ router attachments designed for the Catalyst 8000 family, lab-tested on
 C8000v. Catalyst 8000 routers use Guest Shell through an IRIS-managed
 VirtualPortGroup and stage to `bootflash:`. Both `router-routed` and
 `router-nat` have been lab-validated on C8000v through onboarding, verified
-image staging, and receipt-backed undeploy; Swarm Map and Grafana telemetry
-were also verified.
+image staging, and receipt-backed undeploy; Swarm Map and OpenTelemetry (OTLP)
+export were also verified.
 Router onboarding repeats read-only preflight immediately before execution and
 before minting the enrollment token. Receipts bind management IP and
 processor-board identity; router adoption is refused, so re-onboard instead.

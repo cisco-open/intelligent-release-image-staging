@@ -9,6 +9,52 @@ This project uses **Calendar Versioning (CalVer)**: `YYYY.0M.0D` with an optiona
 `2026.06.11.1`). Releases are tagged `vYYYY.0M.0D`. The current version is in the
 top-level `VERSION` file.
 
+## [Unreleased]
+
+### Added
+- **Transfer streaming (opt-in, ships dark)**: while a transfer is active, a
+  device embeds one compact live sample (≤250 B, tier-adaptive cadence) in the
+  heartbeat it already sends — no new ports, tokens, or network flows. The
+  server keeps an in-memory live table (validated against the policy
+  assignment), aggregates per image, and serves new `iris_transfer_*` /
+  `iris_stream_devices` Prometheus families on `:9101` plus semconv-compliant
+  OTLP metrics (`iris.transfer.*`, `iris.stream.devices`,
+  `iris.telemetry.*`) to the configured collector. Enabled per device by the
+  fail-closed conf key `telemetry_stream` (default off), delivered by all
+  three platform installers and reconciled on IOx redeploy; tuned fleet-wide
+  without redeploys via `POST /api/telemetry/stream` (pause / stretch, echoed
+  on every heartbeat response, defaults restored within three ticks when
+  stale). Telemetry remains an add-on: no telemetry condition affects staging.
+- **OTLP export health**: console *Telemetry export* badge, `/healthz`
+  converted to JSON with an `otlp_export` block (status code unchanged —
+  probes unaffected), and one audit entry per degraded/recovered transition.
+- **Collector authentication**: `IRIS_OTLP_HEADERS` / `IRIS_OTLP_HEADERS_FILE`
+  attach operator-supplied headers to every OTLP POST; values are never
+  logged and the exporters refuse HTTP redirects.
+- **Console onboarding telemetry checkboxes** (*Telemetry reports* default on,
+  *Telemetry streaming* default off), applied to single and bulk onboards; the
+  IOx entrypoint now reconciles both `telemetry` and `telemetry_stream` from
+  deploy-time env on redeploy.
+- `IRIS_OTLP_DEVICE_METRICS` (per-device OTLP gauges, default off with a
+  cardinality warning), `IRIS_METRICS_HOST` (bind host for the `:9101`
+  listener, default unchanged), and `IRIS_EVENTS_URL_TEMPLATE` (operator-
+  configured swarm-drawer events link, replacing the previously hardcoded
+  dashboard link; unset renders no link).
+
+### Changed
+- **Breaking (OTLP logs, dark-by-default surface):** log records now use
+  OpenTelemetry semantic-convention attribute names and a top-level
+  `eventName` (`device_id` → `device.id`, `image_id` → `iris.image.id`,
+  `tier` → `iris.link.tier`, `avg_bps` → `iris.transfer.throughput_avg`,
+  `ip`/`port` → `network.peer.address`/`network.peer.port` +
+  `network.transport`, `info_hash` → `iris.torrent.info_hash`; the `event`
+  attribute is removed in favor of `eventName`). Update backend queries.
+  Report records additionally carry heartbeat enrichment
+  (`device.model.identifier`, `iris.device.flash.free`, `iris.stage.state`,
+  `iris.agent.*`) and the per-peer matrix as the structured attribute
+  `iris.transfer.peers`.
+- OTLP resource now carries `service.namespace=iris` and `service.version`.
+
 ## [2026.07.26]
 
 ### Added

@@ -14,7 +14,8 @@
               across ALL devices (flat gauge; no per-device labels)
 
 Aggregate metrics are labelled by image only (info_hash + image name) to keep
-Prometheus cardinality low; per-device detail goes to Loki, not here."""
+Prometheus cardinality low; per-device detail goes to the OTLP logs pipeline,
+not here."""
 
 
 def _esc(value):

@@ -22,7 +22,7 @@ IRIS, Intelligent Release and Image Staging, stages Cisco IOS-XE images across a
 | Catalyst 8000 router | Guest Shell through VirtualPortGroup, staging to `bootflash:`. Designed for the Catalyst 8000 family; routed and NAT modes are lab-tested on C8000v through verified staging and receipt-backed undeploy. |
 | IOx app | The same agent model as an IOx Docker app: IE-3x00/IE-3400 (arm64, stages to `sdflash:`) and SSD-equipped Catalyst 9000 (amd64, stages to bootflash through the SSD share). |
 | Network tools | CSV-driven inventory, per-device installers, assignments, and release packaging. |
-| Observability | Swarm map, health endpoint, Prometheus metrics, optional OTLP export, and structured audit trail. |
+| Observability | Swarm map, health endpoint, metrics (Prometheus exposition format), optional OTLP export, and structured audit trail. |
 
 ## Release model
 

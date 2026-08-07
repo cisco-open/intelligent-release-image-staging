@@ -40,7 +40,7 @@ For the commands and the pinned Zensical and Python versions, see
 | Attachment recorded | Device shows routed, inband, router-routed, or router-nat; onboarding records an applied receipt. |
 | Installer runs | Device has trustpoint, Guest Shell or IOx app, bootstrap, and agent config. |
 | Inband preserves network | For inband, before/after `show running-config` shows the existing VLAN/SVI/gateway/VRF unchanged. |
-| C8000v router path | `router-routed` and `router-nat` onboard, stage a verified image, and undeploy from their receipts. Swarm Map shows the device, and Grafana shows its telemetry when observability is enabled. |
+| C8000v router path | `router-routed` and `router-nat` onboard, stage a verified image, and undeploy from their receipts. Swarm Map shows the device, and the operator's OTLP backend (e.g., Splunk) shows its telemetry when observability is enabled. |
 | Assignment applies | Device reports the approved image id. |
 | Download completes | Swarm state shows completed pieces. |
 | Verification passes | Agent reports the staged file and IOS verify success. |
