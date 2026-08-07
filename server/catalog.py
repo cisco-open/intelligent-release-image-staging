@@ -14,11 +14,13 @@ import json
 import os
 import ssl
 import tempfile
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import audit
 import auth
+import live_samples
 import secretfs
 import secrets_store
 
@@ -288,9 +290,11 @@ class CatalogStore:
 
 class Catalog:
     def __init__(self, store, secrets_path,
-                 audit_path=None):
+                 audit_path=None, live_table=None, stream_settings=None):
         self.store = store
         self.secrets_path = secrets_path
+        self.live_table = live_table
+        self.stream_settings = stream_settings
         self.audit_path = (audit_path
                            or os.environ.get("IRIS_AUDIT",
                                              "/etc/iris/audit.jsonl"))
@@ -342,12 +346,31 @@ class Catalog:
                 "target_fs": data.get("target_fs"),
                 "model": data.get("model"),
                 "telemetry_enabled": data.get("telemetry_enabled"),
+                "telemetry_stream_enabled": data.get("telemetry_stream_enabled"),
                 # The heartbeat's source IP is the agent's Guest Shell IP — the
                 # SAME IP it announces to the tracker with — so the swarm map can
                 # join this device's model onto its swarm peer by IP.
                 "swarm_ip": src_ip,
             })
+            # Live streaming sample (spec 6.1): validated against the POLICY
+            # assignment (server truth), size/enum/bounds checked; a bad
+            # sample NEVER fails the heartbeat — drop and count.
+            sample = data.get("sample")
+            if sample is not None and self.live_table is not None:
+                approved = self.store.get_policy(parts[2]).get(
+                    "approved_image_id")
+                every = (self.stream_settings.read()[0]
+                         if self.stream_settings is not None else 1)
+                try:
+                    clean = live_samples.sanitize_sample(sample, approved)
+                    self.live_table.update(parts[2], clean, time.time(), every)
+                except ValueError:
+                    self.live_table.reject()
             resp = {"ok": True}
+            if self.stream_settings is not None:
+                every, pause = self.stream_settings.read()
+                resp["stream_every"] = every
+                resp["stream_pause"] = pause
             if self.store.pending_report(parts[2], time.time()):
                 resp["report_requested"] = True
             return self._json(200, resp)
@@ -502,8 +525,9 @@ class Catalog:
 
 
 def make_server(host, port, store, secrets_path, certfile=None,
-                audit_path=None):
-    cat = Catalog(store, secrets_path, audit_path=audit_path)
+                audit_path=None, live_table=None, stream_settings=None):
+    cat = Catalog(store, secrets_path, audit_path=audit_path,
+                  live_table=live_table, stream_settings=stream_settings)
 
     grace = int(os.environ.get("IRIS_TOKEN_SKEW_GRACE", "300"))
 
@@ -654,11 +678,22 @@ def make_server(host, port, store, secrets_path, certfile=None,
 def main():
     host = os.environ.get("IRIS_CATALOG_HOST", "0.0.0.0")
     port = int(os.environ.get("IRIS_CATALOG_PORT", "8443"))
-    store = CatalogStore(os.environ.get("IRIS_STATE", "/var/lib/iris"))
+    state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
+    store = CatalogStore(state_dir)
     secrets_path = os.environ.get("IRIS_SECRETS", "/run/iris/secrets.json")
     cert = os.environ.get("IRIS_CERT", "/etc/iris/tls/cert.pem")
     certfile = cert if os.path.exists(cert) else None
-    srv = make_server(host, port, store, secrets_path, certfile=certfile)
+    live_table = live_samples.LiveTable()
+    stream_settings = live_samples.StreamSettings(
+        os.path.join(state_dir, "telemetry-settings.json"))
+    stop = threading.Event()
+    threading.Thread(
+        target=live_samples.writer_loop,
+        args=(live_table, os.path.join(state_dir, "live-samples.json"),
+              live_samples.SNAPSHOT_WRITE_INTERVAL, stop),
+        daemon=True).start()
+    srv = make_server(host, port, store, secrets_path, certfile=certfile,
+                      live_table=live_table, stream_settings=stream_settings)
     scheme = "https" if certfile else "http"
     print("catalog on %s://%s:%d/v1/images" % (scheme, host, port), flush=True)
     srv.serve_forever()
