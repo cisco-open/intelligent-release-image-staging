@@ -17,6 +17,24 @@
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
   }
+  // Telemetry posture as the DEVICE last reported it (not what onboarding
+  // asked for). Tri-state: an agent that predates the flag reports nothing,
+  // which is "unknown" — never shown as "off", since off is a real choice.
+  function telemetryCell(d) {
+    if (d.telemetry_enabled === false) {
+      return '<span class="badge badge-off" title="the agent sends no telemetry">off</span>';
+    }
+    if (d.telemetry_stream_enabled === true) {
+      return '<span class="badge badge-ok" title="live samples ride this device\'s heartbeats">streaming</span>';
+    }
+    if (d.telemetry_stream_enabled === false) {
+      return '<span class="badge badge-queued" title="terminal reports only; re-onboard with Telemetry streaming ticked to enable">reports</span>';
+    }
+    if (d.telemetry_enabled === true) {
+      return '<span class="badge badge-queued" title="agent predates the streaming flag">reports</span>';
+    }
+    return '<span class="muted" title="no heartbeat yet">—</span>';
+  }
   function fmtSize(n) {
     if (n == null) return '';
     var u = ['B', 'KB', 'MB', 'GB']; var i = 0; n = Number(n);
@@ -213,6 +231,7 @@
         '<td><select class="platform">' + platSel + '</select></td>' +
         '<td><select class="cred">' + credSel + '</select></td>' +
         '<td><select class="assign">' + opts + '</select></td>' +
+        '<td>' + telemetryCell(d) + '</td>' +
         '<td>' + status + '</td>' +
         '<td><button class="linkish onboard">onboard</button> · <button class="linkish adopt">adopt</button> · <button class="linkish del">delete</button></td></tr>';
     }).join('');

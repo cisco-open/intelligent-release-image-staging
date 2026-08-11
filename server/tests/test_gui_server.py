@@ -3255,3 +3255,35 @@ def test_map_cfg_line_escapes_script_terminator(monkeypatch):
     line = gui_server._map_cfg_line()
     assert "</script>" not in line          # cannot break out of the block
     assert "\\u003c" in line                # '<' escaped
+
+
+def test_device_view_exposes_telemetry_flags(tmp_path):
+    """The devices table shows whether an agent is streaming live samples.
+    Both flags come from the device's own heartbeat, so they reflect what is
+    actually deployed — not what the console asked for at onboard time."""
+    host, port, (_app, _fleet, _creds, cat), stop = _serve_full(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        for did in ("d-stream", "d-quiet", "d-old"):
+            _req(host, port, "POST", "/api/devices",
+                 {"device_id": did, "device_ip": "10.0.0.1", "vlan": "666",
+                  "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
+                  "guest_ip": "10.0.0.3"}, headers=hh)
+        cat.record_heartbeat("d-stream", {"stage_state": "ready",
+                                          "telemetry_enabled": True,
+                                          "telemetry_stream_enabled": True})
+        cat.record_heartbeat("d-quiet", {"stage_state": "ready",
+                                         "telemetry_enabled": True,
+                                         "telemetry_stream_enabled": False})
+        cat.record_heartbeat("d-old", {"stage_state": "ready"})  # pre-feature agent
+        st, _, b = _req(host, port, "GET", "/api/devices", headers={"Cookie": ck})
+        assert st == 200
+        rows = {r["device_id"]: r for r in json.loads(b)["devices"]}
+        assert rows["d-stream"]["telemetry_stream_enabled"] is True
+        assert rows["d-quiet"]["telemetry_stream_enabled"] is False
+        # unknown stays None (tri-state): a pre-feature agent is not "off"
+        assert rows["d-old"]["telemetry_stream_enabled"] is None
+        assert rows["d-stream"]["telemetry_enabled"] is True
+    finally:
+        stop()

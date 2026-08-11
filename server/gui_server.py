@@ -668,6 +668,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 row["heartbeat_model"] = h.get("model")
                 # the "copying to <fs>" badge needs the heartbeat's target FS
                 row["target_fs"] = h.get("target_fs")
+                # telemetry posture as the DEVICE reports it, not as the last
+                # onboard requested: True/False from the agent, None when the
+                # agent predates the flag (tri-state — unknown is not "off").
+                row["telemetry_enabled"] = h.get("telemetry_enabled")
+                row["telemetry_stream_enabled"] = h.get(
+                    "telemetry_stream_enabled")
                 j = jobs.get(did)
                 if j:
                     row["onboard_action"] = j["action"]
