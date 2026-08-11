@@ -184,19 +184,60 @@ for line in sys.stdin:
       | "$RUN" "$DEVICE_IP" >/dev/null 2>&1 || true
   done <<< "$GLOBALS"
 
-  {
-    echo "configure terminal"
-    echo "no ip nat inside source list IRIS-NAT-$VPG_NUMBER interface $NAT_INTERFACE overload"
-    echo "end"
-  } | "$RUN" "$DEVICE_IP" >/dev/null 2>&1 || true
-  NAT_RUNNING="$(printf 'terminal width 512\nshow running-config\n' \
-    | "$RUN" "$DEVICE_IP" | grep -v '#' || true)"
+  # IOS refuses `no ip nat inside source list ... overload` while translations
+  # still reference the mapping, and releasing them is not instantaneous. A
+  # single immediate re-check therefore raced: it reported residue on routers
+  # that were clean seconds later. Retry the removal (re-clearing translations
+  # each pass) and only then decide.
   NAT_RULE="ip nat inside source list IRIS-NAT-$VPG_NUMBER interface $NAT_INTERFACE overload"
-  case "$NAT_RUNNING" in
-    *"$NAT_RULE"*)
-      echo "ERROR: IRIS NAT overload mapping is still active; preserving its ACL" >&2
-      exit 1 ;;
-  esac
+  NAT_REMOVE_ATTEMPTS="${NAT_REMOVE_ATTEMPTS:-4}"
+  NAT_REMOVE_SETTLE="${NAT_REMOVE_SETTLE:-3}"
+  nat_gone=0
+  attempt=1
+  while [ "$attempt" -le "$NAT_REMOVE_ATTEMPTS" ]; do
+    {
+      echo "configure terminal"
+      echo "no $NAT_RULE"
+      echo "end"
+    } | "$RUN" "$DEVICE_IP" >/dev/null 2>&1 || true
+    NAT_RUNNING="$(printf 'terminal width 512\nshow running-config\n' \
+      | "$RUN" "$DEVICE_IP" | grep -v '#' || true)"
+    case "$NAT_RUNNING" in
+      *"$NAT_RULE"*) : ;;
+      *) nat_gone=1; break ;;
+    esac
+    [ "$attempt" -lt "$NAT_REMOVE_ATTEMPTS" ] || break
+    echo "  NAT mapping still referenced; clearing translations and retrying" \
+         "($attempt/$NAT_REMOVE_ATTEMPTS)"
+    sleep "$NAT_REMOVE_SETTLE"
+    # re-clear: a translation created after the first sweep would hold the rule
+    RETRY_TRANSLATIONS="$(printf 'show ip nat translations | include %s\n' "$APP_IP" \
+      | "$RUN" "$DEVICE_IP" 2>/dev/null || true)"
+    while IFS= read -r global; do
+      [ -z "$global" ] && continue
+      printf 'clear ip nat translation inside %s %s forced\n' "$global" "$APP_IP" \
+        | "$RUN" "$DEVICE_IP" >/dev/null 2>&1 || true
+    done <<< "$(printf '%s\n' "$RETRY_TRANSLATIONS" | awk 'NF>=3 && $2 ~ /^[0-9]+\./ {split($2,g,":"); print g[1]}' | sort -u)"
+    attempt=$((attempt + 1))
+  done
+  if [ "$nat_gone" -ne 1 ]; then
+    {
+      echo "ERROR: could not remove the IRIS NAT overload mapping after" \
+           "$NAT_REMOVE_ATTEMPTS attempts. LEFT ON THE DEVICE:"
+      echo "         $NAT_RULE"
+      echo "         ip access-list standard IRIS-NAT-$VPG_NUMBER  (preserved deliberately)"
+      echo "       The ACL is kept so the mapping stays valid for reconciliation" \
+           "rather than dangling."
+      echo "       Cause is usually NAT translations still referencing the mapping."
+      echo "       Fix: re-run this undeploy once translations have drained" \
+           "(\`show ip nat translations\`), or remove both by hand:"
+      echo "         configure terminal"
+      echo "          no $NAT_RULE"
+      echo "          no ip access-list standard IRIS-NAT-$VPG_NUMBER"
+      echo "         end"
+    } >&2
+    exit 1
+  fi
 fi
 { echo "configure terminal"; config_cleanup; echo "end"; } | "$RUN" "$DEVICE_IP" >/dev/null
 

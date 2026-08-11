@@ -40,6 +40,12 @@ PKG="${PKG:-iris-arm64.tar}"; PKG_FS="${PKG_FS:-flash:}"
 # the shared CAF dir (transient image copies orphaned by a mid-transfer kill).
 # Never the share root — operator files there are not IRIS's to remove.
 SHARE_IOS_PATH="${SHARE_IOS_PATH:-}"
+# scp-push staging dir: on IE-3400 (and any C9300 that fell back from the
+# share mount) the agent SCP-pushes the image to <TARGET_FS>guest-share/iris
+# through the device's SCP server. That is OURS and must go — only the iris/
+# subdir, never guest-share itself, which the platform and other apps share.
+TARGET_FS="${TARGET_FS:-sdflash:}"
+IRIS_STAGE_DIR="${TARGET_FS}guest-share/iris"
 APPID=iris
 
 config_cleanup() {
@@ -89,7 +95,8 @@ if [ "$DRY" -eq 1 ]; then
     echo "delete /force $SHARE_IOS_PATH/iris-probe.txt"
     echo "delete /force /recursive $SHARE_IOS_PATH/iris"
   fi
-  echo "===== [4/4] verify no '$APPID' app / config footprint remains ====="
+  echo "delete /force /recursive $IRIS_STAGE_DIR"
+  echo "===== [4/4] verify no '$APPID' app / config footprint / $IRIS_STAGE_DIR remains ====="
    echo "===== PERSIST: copy running-config startup-config (after successful cleanup) ====="
    echo "===== LEFT IN PLACE: iox, file prompt quiet, AppGig trunk, ip scp server, sdflash image ====="
   exit 0
@@ -134,8 +141,13 @@ if [ -n "$SHARE_IOS_PATH" ]; then
   printf 'delete /force %s/iris-staged.bin\ndelete /force %s/iris-staged.bin.part\ndelete /force %s/iris-probe.txt\ndelete /force /recursive %s/iris\n\n' \
     "$SHARE_IOS_PATH" "$SHARE_IOS_PATH" "$SHARE_IOS_PATH" "$SHARE_IOS_PATH" | RUN >/dev/null 2>&1 || true
 fi
+# the scp-push staging dir (IE-3400 path, and the C9300 share-mount fallback).
+# Recursive so a mid-transfer scratch file cannot keep the directory alive;
+# guest-share itself is never touched.
+echo "  removing the scp-push staging dir $IRIS_STAGE_DIR"
+printf 'delete /force /recursive %s\n\n' "$IRIS_STAGE_DIR" | RUN >/dev/null 2>&1 || true
 
-echo "[4/4] verify no '$APPID' app and no config footprint remains"
+echo "[4/4] verify no '$APPID' app, config footprint, or $IRIS_STAGE_DIR remains"
 if [ "$NETWORK_ATTACHMENT" = "inband" ]; then
   inc="app-hosting appid $APPID|applet IRIS-"
   artifact_re="^$APPID |^app-hosting appid $APPID|^event manager applet IRIS-"
@@ -146,6 +158,13 @@ fi
 out="$(printf 'terminal width 512\nshow app-hosting list\nshow running-config | include %s\n' \
         "$inc" | RUN | grep -v "#" || true)"
 left="$(printf '%s\n' "$out" | grep -E "$artifact_re" || true)"
+# the staging dir is checked separately: `dir` on a removed path errors, which
+# is the success case, so only a real listing counts as residue.
+stage_out="$(printf 'dir %s\n' "$IRIS_STAGE_DIR" | RUN 2>/dev/null | grep -v "#" || true)"
+case "$stage_out" in
+  *"Directory of "*) left="$left
+$IRIS_STAGE_DIR still present" ;;
+esac
 if [ -n "$left" ]; then
   echo "ERROR: artifacts still present after undeploy:" >&2
   printf '%s\n' "$left" >&2
