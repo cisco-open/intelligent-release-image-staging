@@ -172,11 +172,10 @@ def test_swarmmap_peer_resolution_wired():
     assert "dedupePeers" in src
     assert "/api/devices" in src
     assert "seed server" in src
-    # per-peer report columns carry ↓/↑ direction + a legend so received-vs-sent
-    # asymmetry reads as expected, not as missing data
-    assert "↓ received" in src and "↑ sent" in src
     assert "avg download" in src           # renamed from the ambiguous "avg throughput"
-    assert "0 sent" in src                 # the legend that explains the asymmetry
+    # per-peer byte columns (↓ received / ↑ sent) and their legend were
+    # removed by design -- see test_swarmmap_per_peer_table_is_participation_only
+    # in test_telemetry.py for the participation-only replacement.
 
 
 def test_monitoring_timeline_wired():
@@ -2196,7 +2195,8 @@ _CANNED_REPORT = {
                  "sha_ok": True, "stage_state": "ready"},
     "link": {"tier": "good", "rtt_ms_median": 12, "rtt_samples": 8,
              "hb_failures": 0, "trimmed": False},
-    "peers": [{"ip": "10.0.0.7", "rx_bytes": 1234, "tx_bytes": 0}],
+    "peers": [{"ip": "10.0.0.7"}],
+    "peers_total": 1,
     "agent": {"version": "x", "runtime_mode": "guestshell"},
 }
 

@@ -892,30 +892,25 @@ def test_swarmmap_shows_announce_ip_as_secondary_detail():
         "the announce-ip sub-detail must be escaped before innerHTML insertion"
 
 
-def test_swarmmap_per_peer_table_received_and_avg_speed():
-    # The drawer's per-peer report table is the "who served me how much + how
-    # fast" view: received bytes via fmtBytes(rx_bytes) and average speed via
-    # fmtBps(avg_bps), with escaped peer identity. tx no longer has its own
-    # column (shown inline only when seeding).
+def test_swarmmap_per_peer_table_is_participation_only():
+    # Byte columns are gone BY DESIGN: per-peer rx/tx/avg were derived, not
+    # measured (aria2 has no per-peer byte counters; the even-split fallback
+    # fired on every multi-peer lab transfer). The drawer must not read any
+    # per-peer byte field, and must render the exact peers_total count
+    # number-gated (same stored-XSS discipline as rtt_ms_median).
     html = _swarmmap_html()
     body = html.split("function reportHtml")[1].split("\nfunction ")[0]
-    # header carries ↓/↑ direction so received-vs-sent asymmetry reads as
-    # this-device's-own-view, not a shared ledger
-    assert "<th>↓ received</th>" in body and "<th>↓ avg speed</th>" in body, \
-        "per-peer table header must be peer | ↓ received | ↓ avg speed | ↑ sent"
-    assert "<th>↑ sent</th>" in body, "sent column must be direction-labeled"
-    # received is rendered via fmtBytes(row.rx_bytes ...)
-    assert "fmtBytes(row.rx_bytes" in body, \
-        "received column must render rx_bytes via fmtBytes"
-    # avg speed is rendered via fmtBps(row.avg_bps)
-    assert "fmtBps(row.avg_bps)" in body, \
-        "avg speed column must render avg_bps via fmtBps"
-    # the peer identity resolves the announce ip -> its console device via byIp
+    assert "row.rx_bytes" not in body and "row.tx_bytes" not in body \
+        and "row.avg_bps" not in body, \
+        "per-peer byte fields are not measured and must not be rendered"
+    assert "<th>peers observed</th>" in body, \
+        "per-peer table header must be the single participation column"
+    # the peer identity still resolves the announce ip -> device via byIp
     assert "byIp[row.ip]" in body, \
         "per-peer row must resolve the announce ip to its device via byIp"
-    # seeding (tx) stays visible inline, without a dedicated column
-    assert "row.tx_bytes" in body, \
-        "nonzero tx (seeding) must still be surfaced inline"
+    # overflow count interpolates as a NUMBER only
+    assert "Number.isFinite(rep.peers_total)" in body, \
+        "peers_total must be finite-number-gated before interpolation"
 
 
 def test_swarmmap_drawer_widened():
