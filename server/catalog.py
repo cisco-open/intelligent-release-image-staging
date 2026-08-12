@@ -64,9 +64,9 @@ def _atomic_write_json(path, obj):
 MAX_BODY_BYTES = 65536
 
 _REPORT_KEYS = ("ts", "image_id", "event", "transfer", "link", "peers",
-                "agent")
+                "peers_total", "agent")
 _REPORT_EVENTS = ("staging-complete", "seeding-only", "pull")
-_REPORT_PEER_ROWS = 20
+_REPORT_PEER_ROWS = 64
 _REPORT_STR_MAX = 128
 
 
@@ -95,12 +95,12 @@ def _sanitize_report(data):
     """Server-side re-validation of a device telemetry report (spec issue #13).
 
     Whitelists top-level keys, requires a known event, re-trims peers to
-    _REPORT_PEER_ROWS rows of exactly
-    {ip[:64], rx_bytes:int, tx_bytes:int, avg_bps:int}, coerces the numeric
-    link fields to int, and caps every other string at _REPORT_STR_MAX chars.
-    The device already trims client-side, but ingest never trusts that.
-    Raises ValueError on a non-dict body or an unknown event (routes map that
-    to a 400)."""
+    _REPORT_PEER_ROWS rows of exactly {ip[:64]} — participation only, byte
+    fields are not part of the contract — and floors peers_total at the
+    named-row count, coerces the numeric link fields to int, and caps every
+    other string at _REPORT_STR_MAX chars. The device already trims
+    client-side, but ingest never trusts that. Raises ValueError on a
+    non-dict body or an unknown event (routes map that to a 400)."""
     if not isinstance(data, dict):
         raise ValueError("report must be a JSON object")
     if data.get("event") not in _REPORT_EVENTS:
@@ -125,13 +125,15 @@ def _sanitize_report(data):
         for row in peers:
             if not isinstance(row, dict):
                 continue
-            rows.append({"ip": str(row.get("ip", ""))[:64],
-                         "rx_bytes": _peer_int(row.get("rx_bytes")),
-                         "tx_bytes": _peer_int(row.get("tx_bytes")),
-                         "avg_bps": _peer_int(row.get("avg_bps"))})
+            rows.append({"ip": str(row.get("ip", ""))[:64]})
             if len(rows) >= _REPORT_PEER_ROWS:
                 break
     report["peers"] = rows
+    # Exact distinct-participation count, stored as an int (the drawer
+    # interpolates it unescaped as a number — same stored-XSS discipline as
+    # the link fields above), floored at the named rows so "and N more"
+    # arithmetic can never go negative.
+    report["peers_total"] = max(_peer_int(data.get("peers_total")), len(rows))
     # Hard per-report bound (spec §6: ring of 5 × ≤16 KB per device). The
     # 64 KiB transport cap bounds the wire body; this bounds what we STORE —
     # key-count in nested sections is otherwise uncapped.

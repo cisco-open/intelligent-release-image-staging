@@ -1153,8 +1153,7 @@ def _report(event="staging-complete", **over):
                      "sha_ok": True, "stage_state": "ready"},
         "link": {"tier": "good", "rtt_ms_median": 12, "rtt_samples": 8,
                  "hb_failures": 0, "trimmed": False},
-        "peers": [{"ip": "10.0.0.7", "rx_bytes": 123456, "tx_bytes": 0,
-                   "avg_bps": 10288}],
+        "peers": [{"ip": "10.0.0.7"}], "peers_total": 1,
         "agent": {"version": "2026.07.02", "runtime_mode": "guestshell"},
     }
     rep.update(over)
@@ -1181,52 +1180,57 @@ def _post(port, path, token, body, gzip_body=False):
 # --- _sanitize_report (pure unit tests) ------------------------------------
 
 def test_sanitize_report_whitelists_and_trims():
-    """Unknown top-level keys dropped; peers re-trimmed to 20 rows of exactly
-    {ip[:64], rx_bytes:int, tx_bytes:int, avg_bps:int}; every other string
+    """Unknown top-level keys dropped; peers re-trimmed to 64 rows of exactly
+    {ip[:64]} — legacy byte fields are never stored; every other string
     capped at 128."""
     data = _report()
     data["evil_key"] = "drop me"
     data["install"] = True                       # never store install intents
     data["image_id"] = "A" * 300
     data["link"]["tier"] = "B" * 300
-    data["peers"] = [{"ip": "10.0.0.%d" % i, "rx_bytes": i * 10,
-                      "tx_bytes": str(i), "avg_bps": i, "extra": "drop"}
-                     for i in range(30)]
+    data["peers"] = [{"ip": "10.0.%d.%d" % (i // 250, i % 250),
+                      "rx_bytes": i * 10, "extra": "drop"}
+                     for i in range(70)]
     data["peers"][0]["ip"] = "C" * 100
     data["peers"].insert(5, "junk-row")          # non-dict rows are skipped
+    data.pop("peers_total", None)                # absent -> floored at rows
     out = catalog._sanitize_report(data)
-    # unknown top-level keys dropped
     assert set(out) <= {"ts", "image_id", "event", "transfer", "link",
-                        "peers", "agent"}
+                        "peers", "peers_total", "agent"}
     assert "evil_key" not in out and "install" not in out
-    # strings capped at 128 (top-level and nested)
     assert out["image_id"] == "A" * 128
     assert out["link"]["tier"] == "B" * 128
-    # peers: exactly 20 rows, exact row shape, ip capped at 64, ints coerced
-    assert len(out["peers"]) == 20
-    assert set(out["peers"][0]) == {"ip", "rx_bytes", "tx_bytes", "avg_bps"}
+    # peers: exactly 64 rows of exactly {ip}, ip capped at 64 chars
+    assert len(out["peers"]) == 64
+    assert all(set(row) == {"ip"} for row in out["peers"])
     assert out["peers"][0]["ip"] == "C" * 64
-    assert out["peers"][1] == {"ip": "10.0.0.1", "rx_bytes": 10, "tx_bytes": 1,
-                               "avg_bps": 1}
-    # untouched fields survive
+    assert out["peers"][1] == {"ip": "10.0.0.1"}
+    # absent peers_total floors at the named-row count (invariant: >= rows)
+    assert out["peers_total"] == 64
     assert out["ts"] == 1783000000
     assert out["transfer"]["sha_ok"] is True
 
 
-def test_sanitize_report_accepts_and_coerces_avg_bps():
-    """The per-peer avg_bps int round-trips; a non-int value coerces to 0
-    (same int-coercion as rx_bytes/tx_bytes)."""
-    data = _report(peers=[
-        {"ip": "10.0.0.7", "rx_bytes": 100, "tx_bytes": 0, "avg_bps": 4200},
-        {"ip": "10.0.0.8", "rx_bytes": 200, "tx_bytes": 0,
-         "avg_bps": "not-a-number"},
-        {"ip": "10.0.0.9", "rx_bytes": 300, "tx_bytes": 0},   # avg_bps absent
-    ])
-    out = catalog._sanitize_report(data)
-    assert out["peers"] == [
-        {"ip": "10.0.0.7", "rx_bytes": 100, "tx_bytes": 0, "avg_bps": 4200},
-        {"ip": "10.0.0.8", "rx_bytes": 200, "tx_bytes": 0, "avg_bps": 0},
-        {"ip": "10.0.0.9", "rx_bytes": 300, "tx_bytes": 0, "avg_bps": 0}]
+def test_sanitize_report_drops_legacy_byte_fields():
+    """Per-peer byte fields are not part of the contract and must never be
+    stored — a row is exactly {ip}."""
+    data = _report(peers=[{"ip": "10.0.0.7", "rx_bytes": 100, "tx_bytes": 5,
+                           "avg_bps": 4200}], peers_total=1)
+    assert catalog._sanitize_report(data)["peers"] == [{"ip": "10.0.0.7"}]
+
+
+def test_sanitize_report_peers_total_coerced_and_floored():
+    """peers_total is stored as an int (the drawer interpolates it as a
+    number — same stored-XSS discipline as the link fields) and floored at
+    len(peers) so 'and N more' arithmetic can never go negative."""
+    out = catalog._sanitize_report(
+        _report(peers=[{"ip": "10.0.0.7"}], peers_total=9))
+    assert out["peers_total"] == 9
+    out = catalog._sanitize_report(
+        _report(peers=[{"ip": "10.0.0.7"}], peers_total="junk"))
+    assert out["peers_total"] == 1
+    out = catalog._sanitize_report(_report(peers=[], peers_total=-3))
+    assert out["peers_total"] == 0
 
 
 def test_sanitize_report_coerces_link_numeric_fields():
@@ -1364,8 +1368,8 @@ def test_telemetry_post_roundtrip(tmp_path):
     assert len(stored) == 1
     assert stored[0]["image_id"] == "img1"
     assert stored[0]["event"] == "staging-complete"
-    assert stored[0]["peers"] == [{"ip": "10.0.0.7", "rx_bytes": 123456,
-                                   "tx_bytes": 0, "avg_bps": 10288}]
+    assert stored[0]["peers"] == [{"ip": "10.0.0.7"}]
+    assert stored[0]["peers_total"] == 1
     assert "received_at" in stored[0]
 
 
