@@ -158,7 +158,7 @@
         <h2>Swarm</h2>
         <p class="muted" id="swarm-summary"></p>
         <iframe id="swarm-frame" class="swarm-frame" title="Live swarm map"></iframe>
-        <p><a class="btn" id="swarm-open" target="_blank" rel="noopener">Open the swarm map full-screen ↗</a></p>
+        <p><a class="btn ghost" id="swarm-open" target="_blank" rel="noopener">Open the swarm map full-screen ↗</a></p>
       </section>
       <section id="view-settings" hidden>
         <h2>Settings</h2>
@@ -193,17 +193,19 @@
         <h2>Monitoring <span id="telemetry-health" class="badge badge-queued" hidden></span></h2>
         <h3>Audit trail (90-day circular)</h3>
         <div class="toolbar">
-          <select id="audit-category">
-            <option value="">All categories</option>
-            <option value="auth">auth</option>
-            <option value="device">device</option>
-            <option value="image">image</option>
-            <option value="onboard">onboard</option>
-            <option value="settings">settings</option>
-            <option value="telemetry">telemetry</option>
-            <option value="token">token</option>
-          </select>
-          <button class="btn ghost" id="audit-refresh">Refresh</button>
+          <span class="joined">
+            <select id="audit-category">
+              <option value="">All categories</option>
+              <option value="auth">auth</option>
+              <option value="device">device</option>
+              <option value="image">image</option>
+              <option value="onboard">onboard</option>
+              <option value="settings">settings</option>
+              <option value="telemetry">telemetry</option>
+              <option value="token">token</option>
+            </select>
+            <button class="btn ghost" id="audit-refresh">Refresh</button>
+          </span>
         </div>
         <div id="audit-timeline">
           <div class="toolbar" id="audit-range-chips">

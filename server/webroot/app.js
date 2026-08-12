@@ -58,7 +58,7 @@
     document.getElementById('rows').innerHTML = imgs.map(function (i) {
       return '<tr data-id="' + esc(i.id) + '"><td>' + esc(i.id) + '</td><td>' + esc(i.filename || '') + '</td><td>' +
         esc(fmtSize(i.size)) + '</td><td>' + esc((i.sha256 || '').slice(0, 16)) + '…</td><td>' +
-        esc(fmtDate(i.published_at)) + '</td><td><button class="linkish del-img">delete</button></td></tr>';
+        esc(fmtDate(i.published_at)) + '</td><td><button class="linkish danger-link del-img">delete</button></td></tr>';
     }).join('');
     document.querySelectorAll('#rows .del-img').forEach(function (btn) {
       btn.addEventListener('click', async function () {
