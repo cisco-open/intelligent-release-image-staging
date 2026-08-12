@@ -255,6 +255,7 @@ def test_post_telemetry_small_body_plain_json(tele_client):
               "link": {"tier": "good", "rtt_ms_median": 12, "rtt_samples": 8,
                        "hb_failures": 0, "trimmed": False},
               "peers": [],
+              "peers_total": 0,
               "agent": {"version": "x", "runtime_mode": "guestshell"}}
     resp = tele_client.post_telemetry("sw1", report)
     assert resp == {"ok": True, "stored": 1}
@@ -270,9 +271,7 @@ def test_post_telemetry_small_body_plain_json(tele_client):
 def test_post_telemetry_large_body_arrives_gzipped(tele_client):
     """A report over GZIP_MIN bytes is gzip-compressed on the wire with a
     Content-Encoding: gzip header, and decompresses to the exact JSON."""
-    peers = [{"ip": "10.0.%d.%d" % (i // 250, i % 250),
-              "rx_bytes": 123456789 + i, "tx_bytes": 987654 + i}
-             for i in range(20)]
+    peers = [{"ip": "10.0.%d.%d" % (i // 250, i % 250)} for i in range(20)]
     report = {"ts": 1783000000, "image_id": "img1", "event": "pull",
               "peers": peers, "pad": "x" * 1200}
     raw = json.dumps(report).encode("ascii")

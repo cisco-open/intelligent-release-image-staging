@@ -1995,17 +1995,15 @@ def test_aria_peers_returns_simplified_rows():
               "amChoking": "false"}]
     rpc, calls = _tele_rpc(active=[_ACTIVE_ROW], peers=peers)
     out = iris_agent._aria_peers_impl(rpc, _TELE_STAGE)
-    # exactly the three keys the report integrator consumes; extras dropped
-    assert out == [
-        {"ip": "10.0.0.7", "downloadSpeed": "1024", "uploadSpeed": "0"},
-        {"ip": "10.0.0.8", "downloadSpeed": "0", "uploadSpeed": "2048"}]
+    # participation only: everything but ip is dropped (aria2 has no
+    # per-peer byte counters, so nothing else from getPeers is consumed)
+    assert out == [{"ip": "10.0.0.7"}, {"ip": "10.0.0.8"}]
     assert calls[-1] == ("aria2.getPeers", ["gidA"])
 
 
 def test_aria_peers_tolerates_missing_row_keys():
     rpc, _ = _tele_rpc(active=[_ACTIVE_ROW], peers=[{}])
-    assert iris_agent._aria_peers_impl(rpc, _TELE_STAGE) == \
-        [{"ip": "", "downloadSpeed": "0", "uploadSpeed": "0"}]
+    assert iris_agent._aria_peers_impl(rpc, _TELE_STAGE) == [{"ip": ""}]
 
 
 def test_aria_peers_empty_when_no_match():
@@ -2088,16 +2086,11 @@ def test_downloading_tick_samples_and_accumulates_peers():
     peers, calls = _counting_peers(
         [{"ip": "10.0.0.7", "downloadSpeed": "1024", "uploadSpeed": "0"}])
     deps = deps._replace(aria_peers=peers)
-    # Pre-seed a sample 100 s ago so this tick's integration window is real
-    # (first-ever sample integrates over elapsed=0 by design).
-    state = {"image_id": "img1",
-             "img1": {"tele": {"last_sample_ts": _time.time() - 100,
-                               "peers": {}}}}
+    state = {"image_id": "img1", "img1": {"tele": {"peers": {}}}}
     assert iris_agent.run_once(CFG, deps, state) == "downloading"
     assert calls == ["/stage/img1.bin"]
-    rx, tx = state["img1"]["tele"]["peers"]["10.0.0.7"]
-    # ~1024 B/s over ~100 s; generous bounds absorb wall-clock jitter.
-    assert 90_000 < rx < 190_000 and tx == 0
+    # participation only: one observation this tick -> count of 1
+    assert state["img1"]["tele"]["peers"]["10.0.0.7"] == 1
     assert state["img1"]["tele"]["started_ts"] > 0
 
 
@@ -2125,9 +2118,8 @@ def test_fast_download_reports_totals_only():
 
 def test_completion_hook_takes_one_final_peer_sample():
     # The one-time completion snapshot samples aria_peers ONCE more before
-    # marking done, so at least one real-elapsed per-peer sample lands (share
-    # accuracy). With a prior sample already on record, that final window makes
-    # the peer visible and it is attributed the accurate total.
+    # marking done, so peers connected at the end of a fast download still
+    # land in the observed set.
     cat = FakeCatalog({"approved_image_id": "img1"}, _IMG)
     deps, *_ = make_deps(cat, {"/stage/img1.bin": 5})
     # 200 MB over ~100 s -> ~2 MB/s: a healthy 'good'-tier download, so the
@@ -2139,22 +2131,16 @@ def test_completion_hook_takes_one_final_peer_sample():
     peers, peer_calls = _counting_peers(
         [{"ip": "10.0.0.7", "downloadSpeed": "2000000", "uploadSpeed": "0"}])
     deps = deps._replace(aria_peers=peers)
-    # A prior sample 100 s ago -> the completion sample integrates a real
-    # window (not elapsed 0), so 10.0.0.7 accrues non-zero rx weight.
     state = {"image_id": "img1",
-             "img1": {"tele": {"last_sample_ts": _time.time() - 100,
-                               "started_ts": _time.time() - 100,
+             "img1": {"tele": {"started_ts": _time.time() - 100,
                                "peers": {}}}}
     assert iris_agent.run_once(CFG, deps, state) == "complete"
     # completion path did take exactly one peer sample on the 'copied' tick
     assert peer_calls == ["/stage/img1.bin"]
     assert len(cat.telemetry) == 1
     _, report = cat.telemetry[0]
-    # the lone peer is attributed the whole accurate total, with avg_bps
-    assert report["peers"] == [{"ip": "10.0.0.7", "rx_bytes": 200000000,
-                                "tx_bytes": 0,
-                                "avg_bps": report["peers"][0]["avg_bps"]}]
-    assert report["peers"][0]["avg_bps"] > 0
+    assert report["peers"] == [{"ip": "10.0.0.7"}]
+    assert report["peers_total"] == 1
     assert report["transfer"]["total_bytes"] == 200000000
 
 
@@ -2204,7 +2190,6 @@ def test_pull_flag_on_steady_state_sends_pull_report():
              "img1": {"done": True, "copied": True, "sha": "abc",
                       "tele": {"report_pending": False, "report_sent_ts": 1.0,
                                "event": "staging-complete",
-                               "last_sample_ts": _time.time() - 30,
                                "peers": {}}}}
     assert iris_agent.run_once(CFG, deps, state) == "complete"
     assert len(cat.telemetry) == 1
@@ -2234,19 +2219,18 @@ def test_steady_pull_never_inflates_tx_or_adds_peers():
     tele = {"report_pending": False, "report_sent_ts": 1.0,
             "event": "staging-complete", "total_bytes": 100,
             "elapsed_s": 10.0, "done_ts": 50.0,
-            "last_sample_ts": _time.time() - 420,   # last sample: minutes ago
-            "peers": {"10.0.0.1": [100, 0]}}        # the real transfer table
+            "peers": {"10.0.0.1": [100, 0]}}        # legacy byte-shaped state
     state = {"schema_version": iris_agent._STATE_SCHEMA,
              "image_id": "img1", "stage_fs": "flash:",
              "img1": {"done": True, "copied": True, "sha": "abc",
                       "tele": tele}}
     assert iris_agent.run_once(CFG, deps, state) == "complete"
     _, report = cat.telemetry[0]
-    rows = {p["ip"]: p for p in report["peers"]}
-    assert "10.0.0.7" not in rows          # neighbor never enters the table
-    assert rows["10.0.0.1"]["tx_bytes"] == 0
-    assert rows["10.0.0.1"]["rx_bytes"] == 100   # frozen, not redistributed
-    assert tele["peers"] == {"10.0.0.1": [100, 0]}  # state untouched
+    assert report["peers"] == [{"ip": "10.0.0.1"}]   # frozen, keys only,
+    assert report["peers_total"] == 1                # no byte fields emitted
+    assert tele["peers"] == {"10.0.0.1": [100, 0]}   # state untouched (a
+    # steady tick never calls observe_peers, so even legacy-shaped state
+    # persists verbatim until the next live-transfer tick discards it)
 
 
 def test_steady_state_without_pull_stays_rpc_free_and_sends_nothing():
@@ -2329,15 +2313,17 @@ def test_constrained_tier_sends_trimmed_report():
     # High RTT median (> RTT_CONSTRAINED_MS), no failures -> 'constrained'.
     state = {"link": {"rtt_ms": [400.0, 500.0, 450.0], "fail_streak": 0},
              "image_id": "img1",
-             "img1": {"tele": {"peers": {"10.0.0.7": [999, 0]},
-                               "last_sample_ts": 1.0}}}
+             "img1": {"tele": {"peers": {"10.0.0.7": 1}}}}
     assert iris_agent.run_once(CFG, deps, state) == "complete"
     assert len(cat.telemetry) == 1
     _, report = cat.telemetry[0]
     assert report["peers"] == []                     # rows dropped
+    assert report["peers_total"] == 1        # participation count survives trim
     assert report["link"]["trimmed"] is True
-    # the accumulated rows are NOT lost — still in state for a later pull
-    assert state["img1"]["tele"]["peers"]["10.0.0.7"] == [999, 0]
+    # the accumulated participation state is NOT lost — still in state for a
+    # later pull (deps.aria_peers is stubbed empty this tick, so the count
+    # is unchanged, not re-observed)
+    assert state["img1"]["tele"]["peers"] == {"10.0.0.7": 1}
 
 
 def test_rtts_drained_from_catalog_client_into_state():
