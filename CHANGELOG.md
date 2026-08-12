@@ -59,8 +59,20 @@ top-level `VERSION` file.
   attribute is removed in favor of `eventName`). Update backend queries.
   Report records additionally carry heartbeat enrichment
   (`device.model.identifier`, `iris.device.flash.free`, `iris.stage.state`,
-  `iris.agent.*`) and the per-peer matrix as the structured attribute
+  `iris.agent.*`) and the peers observed as the structured attribute
   `iris.transfer.peers`.
+- **Breaking (device report + OTLP peers rows):** per-peer rows are now
+  participation-only — `{ip}` on the wire, `network.peer.address` +
+  resolved `device.id` in the log record. The per-peer `rx_bytes` /
+  `tx_bytes` / `avg_bps` fields (`iris.transfer.received` /
+  `iris.transfer.sent` / per-row `throughput_avg`) are removed: aria2
+  exposes no per-peer byte counters, so those figures were derived from
+  instantaneous rates — on fast transfers every multi-peer report
+  degenerated to an even split. Reports gain top-level `peers_total`
+  (exact distinct peers observed, exported as
+  `iris.transfer.peers_total`); the named-row cap rises 20 → 64.
+  Transfer-level figures (`transfer.total_bytes`, `avg_bps`) are exact
+  and unchanged.
 - OTLP resource now carries `service.namespace=iris` and `service.version`.
 
 ## [2026.07.26]

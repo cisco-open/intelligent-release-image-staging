@@ -156,10 +156,13 @@ OpenTelemetry semantic-convention names. Event identity is the top-level
 `iris.swarm.start|complete|stop|stale` for swarm events. Key attributes:
 `device.id`, `device.model.identifier`, `iris.image.id`, `iris.link.tier`,
 `iris.transfer.throughput_avg`, `network.peer.address` / `network.peer.port` /
-`network.transport`, `iris.torrent.info_hash`, and the per-peer matrix as the
-structured attribute `iris.transfer.peers` (each row: peer address, resolved
-`device.id` where known, `iris.transfer.received` / `iris.transfer.sent`,
-average throughput).
+`network.transport`, `iris.torrent.info_hash`, the peers observed during the
+transfer as the structured attribute `iris.transfer.peers` (each row: peer
+address, resolved `device.id` where known), and `iris.transfer.peers_total`
+(exact distinct peers observed; rows beyond the named cap are counted here,
+not listed). Per-peer byte counts are deliberately absent: BitTorrent clients
+expose only instantaneous per-peer rates, so any per-peer byte figure would
+be derived rather than measured. Exact byte totals are transfer-level.
 
 ### Sizing
 
