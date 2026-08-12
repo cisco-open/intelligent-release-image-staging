@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 import os
+import re
 
 import gui_server
 
@@ -10,6 +11,23 @@ def test_webroot_assets_exist():
     for name in ("login.html", "index.html", "styles.css", "login.js", "app.js",
                  "setup.html", "setup.js"):
         assert os.path.isfile(os.path.join(gui_server.WEBROOT, name)), name
+
+
+def test_no_orphaned_control_ids():
+    """Owner constraint for the toolbar rework: every element id referenced
+    from app.js must exist in index.html. A relocated-but-unwired control
+    would silently do nothing; a deleted element with a live binding would
+    throw at load and kill every later binding."""
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    ids = set(re.findall(r"getElementById\('([^']+)'\)", js))
+    ids |= set(re.findall(r"querySelector(?:All)?\('#([A-Za-z0-9_-]+)", js))
+    assert len(ids) > 30, "id extraction matched too little — patterns drifted"
+    missing = sorted(i for i in ids if ('id="%s"' % i) not in html)
+    assert not missing, \
+        "app.js references ids missing from index.html: %s" % missing
 
 
 def test_csv_download_buttons_and_multiselect_onboard_wired():
