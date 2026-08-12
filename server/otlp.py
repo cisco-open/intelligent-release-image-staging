@@ -98,11 +98,14 @@ def _enrich_int(value):
 def build_report_record(report, device_id, enrich=None):
     """One stored device report -> one OTLP LogRecord (spec 7.6). Attribute
     names follow the semantic conventions (device.id is the sanctioned
-    enterprise-managed-device identifier); the peer matrix rides as the
-    structured attribute iris.transfer.peers. enrich (optional):
-    {model, free_flash_bytes, stage_state, peer_devices: {ip: device_id}} —
-    heartbeat-sourced values are stored verbatim from devices, so they are
-    capped/coerced HERE at the export boundary. Garbage-tolerant throughout."""
+    enterprise-managed-device identifier); the peers observed during the
+    transfer ride as the structured attribute iris.transfer.peers
+    (participation only — per-peer bytes are not measured), with
+    iris.transfer.peers_total carrying the exact distinct count. enrich
+    (optional): {model, free_flash_bytes, stage_state,
+    peer_devices: {ip: device_id}} — heartbeat-sourced values are stored
+    verbatim from devices, so they are capped/coerced HERE at the export
+    boundary. Garbage-tolerant throughout."""
     if not isinstance(report, dict):
         report = {}
     enrich = enrich if isinstance(enrich, dict) else {}
@@ -121,6 +124,8 @@ def build_report_record(report, device_id, enrich=None):
              ("iris.link.tier", _enrich_str(link.get("tier"))),
              ("iris.transfer.throughput_avg",
               _enrich_int(transfer.get("avg_bps"))),
+             ("iris.transfer.peers_total",
+              _enrich_int(report.get("peers_total"))),
              ("device.model.identifier", _enrich_str(enrich.get("model"))),
              ("iris.device.flash.free",
               _enrich_int(enrich.get("free_flash_bytes"))),
@@ -136,11 +141,7 @@ def build_report_record(report, device_id, enrich=None):
         if not isinstance(row, dict):
             continue
         kv = [("network.peer.address", _enrich_str(row.get("ip"))),
-              ("device.id", _enrich_str(peer_devices.get(row.get("ip")))),
-              ("iris.transfer.received", _enrich_int(row.get("rx_bytes"))),
-              ("iris.transfer.sent", _enrich_int(row.get("tx_bytes"))),
-              ("iris.transfer.throughput_avg",
-               _enrich_int(row.get("avg_bps")))]
+              ("device.id", _enrich_str(peer_devices.get(row.get("ip"))))]
         rows.append({"kvlistValue": {"values": [
             {"key": k, "value": _any_value(v)}
             for k, v in kv if v is not None]}})

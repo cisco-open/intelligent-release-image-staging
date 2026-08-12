@@ -1406,16 +1406,15 @@ class TestReportExportEnrichment:
                                         "stage_state": "ready"}},
             reports_info=lambda: {"d1": [{"ts": 1, "image_id": "img-1",
                                           "received_at": 50.0,
-                                          "peers": [{"ip": "10.0.0.2",
-                                                     "rx_bytes": 1,
-                                                     "tx_bytes": 0,
-                                                     "avg_bps": 1}]}]})
+                                          "peers": [{"ip": "10.0.0.2"}],
+                                          "peers_total": 1}]})
         hub._export_new_reports()
         attrs = {a["key"]: a["value"] for a in emitted[0]["attributes"]}
         assert attrs["device.model.identifier"] == {"stringValue": "C9300"}
         row = attrs["iris.transfer.peers"]["arrayValue"]["values"][0]
         kv = {p["key"]: p["value"] for p in row["kvlistValue"]["values"]}
-        assert kv["device.id"] == {"stringValue": "d1"}
+        assert kv == {"network.peer.address": {"stringValue": "10.0.0.2"},
+                      "device.id": {"stringValue": "d1"}}
 
 
 # ---- :9101 /swarm loopback gate (console-only swarm data by default) ----

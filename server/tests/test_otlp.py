@@ -104,7 +104,7 @@ def _device_report():
                      "stage_state": "ready"},
         "link": {"tier": "good", "rtt_ms_median": 12, "rtt_samples": 8,
                  "hb_failures": 0, "trimmed": False},
-        "peers": [{"ip": "10.0.0.7", "rx_bytes": 123456789, "tx_bytes": 0}],
+        "peers": [{"ip": "10.0.0.7"}], "peers_total": 1,
         "agent": {"version": "x", "runtime_mode": "guestshell"},
         "received_at": 1783000042.5,
     }
@@ -204,8 +204,7 @@ class TestSemconvLogRecords:
                   "link": {"tier": "good"},
                   "transfer": {"avg_bps": 42},
                   "agent": {"version": "9", "runtime_mode": "container"},
-                  "peers": [{"ip": "10.0.0.3", "rx_bytes": 7, "tx_bytes": 1,
-                             "avg_bps": 3}]}
+                  "peers": [{"ip": "10.0.0.3"}], "peers_total": 5}
         enrich = {"model": "C9300", "free_flash_bytes": 5,
                   "stage_state": "ready",
                   "peer_devices": {"10.0.0.3": "d3"}}
@@ -221,12 +220,11 @@ class TestSemconvLogRecords:
         assert attrs["iris.stage.state"] == {"stringValue": "ready"}
         assert attrs["iris.agent.runtime"] == {"stringValue": "container"}
         assert attrs["iris.agent.version"] == {"stringValue": "9"}
+        assert attrs["iris.transfer.peers_total"] == {"intValue": "5"}
         row = attrs["iris.transfer.peers"]["arrayValue"]["values"][0]
         kv = {p["key"]: p["value"] for p in row["kvlistValue"]["values"]}
-        assert kv["network.peer.address"] == {"stringValue": "10.0.0.3"}
-        assert kv["device.id"] == {"stringValue": "d3"}
-        assert kv["iris.transfer.received"] == {"intValue": "7"}
-        assert kv["iris.transfer.sent"] == {"intValue": "1"}
+        assert kv == {"network.peer.address": {"stringValue": "10.0.0.3"},
+                      "device.id": {"stringValue": "d3"}}
 
     def test_enrichment_sanitized(self):
         rec = otlp.build_report_record(
