@@ -2083,8 +2083,7 @@ def test_downloading_tick_samples_and_accumulates_peers():
     cat = FakeCatalog({"approved_image_id": "img1"}, _IMG)
     deps, *_ = make_deps(cat, {"/stage/img1.bin": 2,
                                "/stage/img1.bin.aria2": 1})
-    peers, calls = _counting_peers(
-        [{"ip": "10.0.0.7", "downloadSpeed": "1024", "uploadSpeed": "0"}])
+    peers, calls = _counting_peers([{"ip": "10.0.0.7"}])
     deps = deps._replace(aria_peers=peers)
     state = {"image_id": "img1", "img1": {"tele": {"peers": {}}}}
     assert iris_agent.run_once(CFG, deps, state) == "downloading"
@@ -2110,6 +2109,7 @@ def test_fast_download_reports_totals_only():
     assert sid == "sw1"
     assert report["event"] == "staging-complete"
     assert report["peers"] == []
+    assert report["peers_total"] == 0
     assert report["transfer"]["total_bytes"] == 5
     assert report["transfer"]["sha_ok"] is True
     tele = state["img1"]["tele"]
@@ -2128,8 +2128,7 @@ def test_completion_hook_takes_one_final_peer_sample():
         "gid": "g", "completedLength": "200000000",
         "totalLength": "200000000", "downloadSpeed": "0",
         "uploadSpeed": "0", "connections": "0"})
-    peers, peer_calls = _counting_peers(
-        [{"ip": "10.0.0.7", "downloadSpeed": "2000000", "uploadSpeed": "0"}])
+    peers, peer_calls = _counting_peers([{"ip": "10.0.0.7"}])
     deps = deps._replace(aria_peers=peers)
     state = {"image_id": "img1",
              "img1": {"tele": {"started_ts": _time.time() - 100,
@@ -2179,8 +2178,7 @@ def test_pull_flag_on_steady_state_sends_pull_report():
     cat = FakeCatalog({"approved_image_id": "img1"}, _IMG)
     cat.hb_response = {"ok": True, "report_requested": True}
     deps, *_ = make_deps(cat, {"/stage/img1.bin": 5})
-    peers, peer_calls = _counting_peers(
-        [{"ip": "10.0.0.9", "downloadSpeed": "0", "uploadSpeed": "2048"}])
+    peers, peer_calls = _counting_peers([{"ip": "10.0.0.9"}])
     deps = deps._replace(aria_peers=peers)
     # Steady state: done + copied + root present -> the cheap short-circuit.
     # schema_version must be current or the upgrade-migration block (which
@@ -2212,9 +2210,9 @@ def test_steady_pull_never_inflates_tx_or_adds_peers():
     cat = FakeCatalog({"approved_image_id": "img1"}, _IMG)
     cat.hb_response = {"ok": True, "report_requested": True}
     deps, *_ = make_deps(cat, {"/stage/img1.bin": 5})
-    # neighbor downloading FROM us at 20 MB/s right now
-    peers, _calls = _counting_peers(
-        [{"ip": "10.0.0.7", "downloadSpeed": "0", "uploadSpeed": "20971520"}])
+    # neighbor downloading FROM us at 20 MB/s right now (participation-only
+    # rows carry no speed, so the row itself is just the ip)
+    peers, _calls = _counting_peers([{"ip": "10.0.0.7"}])
     deps = deps._replace(aria_peers=peers)
     tele = {"report_pending": False, "report_sent_ts": 1.0,
             "event": "staging-complete", "total_bytes": 100,
@@ -2435,16 +2433,13 @@ class TestHeartbeatPayload:
 class TestTickDirectivesAndPeersReuse:
     def test_tick_stores_directives_and_reuses_peers(self):
         deps, calls = _fake_deps(stats=STREAM_STATS,
-                                 peers=[{"ip": "10.9.9.9",
-                                         "downloadSpeed": "1",
-                                         "uploadSpeed": "0"}])
+                                 peers=[{"ip": "10.9.9.9"}])
         deps.catalog = types.SimpleNamespace()   # no post_telemetry: no sends
         state = {}
         iris_agent._telemetry_tick(
             STREAM_CFG_ON, deps, state, "img", "/s/f.bin", "downloading",
             {"stream_every": 7}, 1000.0,
-            peers=[{"ip": "10.0.0.3", "downloadSpeed": "2",
-                    "uploadSpeed": "0"}])
+            peers=[{"ip": "10.0.0.3"}])
         assert state["stream_directives"]["every"] == 7
         assert calls["peers"] == 0                     # reused, not re-fetched
         assert "10.0.0.3" in state["img"]["tele"]["peers"]

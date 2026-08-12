@@ -472,8 +472,9 @@ function openDrawer(p){
 function closeDrawer(){drawer.classList.remove("open");selPeer=null;selDev=null;pullReq=null;selTeleOff=false;}
 
 // ---- device report drawer section (#13) -----------------------------------
-// Latest stored report for the device + per-peer ~bytes table, plus the
-// manual pull. Console mode only (MAP.pull) — the bare file has no /api.
+// Latest stored report for the device + a per-peer participation table
+// (who this device was connected to; no per-peer bytes), plus the manual
+// pull. Console mode only (MAP.pull) — the bare file has no /api.
 // ip -> device identity for the per-peer report rows. Two sources, in
 // priority order: the LIVE swarm (has model from heartbeats), then the FLEET
 // inventory (guest_ip/device_ip of every registered device) — so a peer that
@@ -529,7 +530,7 @@ function reportHtml(reports){
   // byte figures live at the transfer level above, never per peer.
   const rows=(rep.peers||[]).map(row=>{
     const isSeed=row.ip===serverIP();
-    const dev=isSeed?null:byIp[row.ip];
+    const dev=isSeed?null:(Object.prototype.hasOwnProperty.call(byIp,row.ip)?byIp[row.ip]:null);
     const lead=isSeed?"seed server":(dev?dev.device_id:row.ip);
     const detail=[];
     if(isSeed)detail.push(row.ip);

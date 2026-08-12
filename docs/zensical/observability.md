@@ -159,10 +159,11 @@ OpenTelemetry semantic-convention names. Event identity is the top-level
 `network.transport`, `iris.torrent.info_hash`, the peers observed during the
 transfer as the structured attribute `iris.transfer.peers` (each row: peer
 address, resolved `device.id` where known), and `iris.transfer.peers_total`
-(exact distinct peers observed; rows beyond the named cap are counted here,
-not listed). Per-peer byte counts are deliberately absent: BitTorrent clients
-expose only instantaneous per-peer rates, so any per-peer byte figure would
-be derived rather than measured. Exact byte totals are transfer-level.
+(exact distinct peers observed, saturating at the device's 512-IP tracking
+cap; rows beyond the named cap are counted here, not listed). Per-peer byte
+counts are deliberately absent: aria2 (the on-device client) exposes only
+instantaneous per-peer rates, so any per-peer byte figure would be derived
+rather than measured. Exact byte totals are transfer-level.
 
 ### Sizing
 

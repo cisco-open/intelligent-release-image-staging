@@ -69,8 +69,9 @@ top-level `VERSION` file.
   exposes no per-peer byte counters, so those figures were derived from
   instantaneous rates — on fast transfers every multi-peer report
   degenerated to an even split. Reports gain top-level `peers_total`
-  (exact distinct peers observed, exported as
-  `iris.transfer.peers_total`); the named-row cap rises 20 → 64.
+  (exact distinct peers observed, saturating at the device's 512-IP
+  tracking cap; exported as `iris.transfer.peers_total`); the named-row
+  cap rises 20 → 64.
   Transfer-level figures (`transfer.total_bytes`, `avg_bps`) are exact
   and unchanged.
 - OTLP resource now carries `service.namespace=iris` and `service.version`.

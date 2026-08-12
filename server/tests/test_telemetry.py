@@ -859,7 +859,8 @@ def test_swarmmap_hub_drawer_has_sent_bytes_table():
 
 # ---------------------------------------------------------------------------
 # Telemetry (#18): swarm-map leads with the CONSOLE device IP (device_id),
-# richer per-peer drawer table (received + avg speed), wider drawer panel.
+# participation-only per-peer drawer table (who was connected, no bytes),
+# wider drawer panel.
 # Same HTML-source guard style as the escapeHtml tests above.
 # ---------------------------------------------------------------------------
 

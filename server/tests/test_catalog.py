@@ -1219,6 +1219,12 @@ def test_sanitize_report_drops_legacy_byte_fields():
     assert catalog._sanitize_report(data)["peers"] == [{"ip": "10.0.0.7"}]
 
 
+def test_sanitize_report_null_ip_becomes_empty_string():
+    """An explicit JSON null for ip must not become the string 'None'."""
+    out = catalog._sanitize_report(_report(peers=[{"ip": None}], peers_total=1))
+    assert out["peers"] == [{"ip": ""}]
+
+
 def test_sanitize_report_peers_total_coerced_and_floored():
     """peers_total is stored as an int (the drawer interpolates it as a
     number — same stored-XSS discipline as the link fields) and floored at
@@ -1231,6 +1237,10 @@ def test_sanitize_report_peers_total_coerced_and_floored():
     assert out["peers_total"] == 1
     out = catalog._sanitize_report(_report(peers=[], peers_total=-3))
     assert out["peers_total"] == 0
+    # clamped at int32 max so a hostile device can't push a value outside
+    # OTLP intValue encoding
+    out = catalog._sanitize_report(_report(peers=[], peers_total=10**300))
+    assert out["peers_total"] == 2**31 - 1
 
 
 def test_sanitize_report_coerces_link_numeric_fields():

@@ -204,7 +204,8 @@ class TestSemconvLogRecords:
                   "link": {"tier": "good"},
                   "transfer": {"avg_bps": 42},
                   "agent": {"version": "9", "runtime_mode": "container"},
-                  "peers": [{"ip": "10.0.0.3"}], "peers_total": 5}
+                  "peers": [{"ip": "10.0.0.3", "rx_bytes": 7, "tx_bytes": 1,
+                            "avg_bps": 3}], "peers_total": 5}
         enrich = {"model": "C9300", "free_flash_bytes": 5,
                   "stage_state": "ready",
                   "peer_devices": {"10.0.0.3": "d3"}}
@@ -223,6 +224,9 @@ class TestSemconvLogRecords:
         assert attrs["iris.transfer.peers_total"] == {"intValue": "5"}
         row = attrs["iris.transfer.peers"]["arrayValue"]["values"][0]
         kv = {p["key"]: p["value"] for p in row["kvlistValue"]["values"]}
+        # legacy byte fields ride along on the SAME input row: the exact
+        # equality below proves the builder drops them, not merely that
+        # they were absent from the input.
         assert kv == {"network.peer.address": {"stringValue": "10.0.0.3"},
                       "device.id": {"stringValue": "d3"}}
 

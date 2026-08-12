@@ -125,15 +125,17 @@ def _sanitize_report(data):
         for row in peers:
             if not isinstance(row, dict):
                 continue
-            rows.append({"ip": str(row.get("ip", ""))[:64]})
+            rows.append({"ip": str(row.get("ip") or "")[:64]})
             if len(rows) >= _REPORT_PEER_ROWS:
                 break
     report["peers"] = rows
     # Exact distinct-participation count, stored as an int (the drawer
     # interpolates it unescaped as a number — same stored-XSS discipline as
     # the link fields above), floored at the named rows so "and N more"
-    # arithmetic can never go negative.
-    report["peers_total"] = max(_peer_int(data.get("peers_total")), len(rows))
+    # arithmetic can never go negative, and clamped at int32 max so a
+    # hostile device can't push a value outside OTLP intValue encoding.
+    report["peers_total"] = min(
+        max(_peer_int(data.get("peers_total")), len(rows)), 2**31 - 1)
     # Hard per-report bound (spec §6: ring of 5 × ≤16 KB per device). The
     # 64 KiB transport cap bounds the wire body; this bounds what we STORE —
     # key-count in nested sections is otherwise uncapped.
