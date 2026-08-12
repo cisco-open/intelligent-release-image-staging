@@ -232,8 +232,7 @@
         '<td><select class="cred">' + credSel + '</select></td>' +
         '<td><select class="assign">' + opts + '</select></td>' +
         '<td>' + telemetryCell(d) + '</td>' +
-        '<td>' + status + '</td>' +
-        '<td><button class="linkish onboard">onboard</button> · <button class="linkish adopt">adopt</button> · <button class="linkish del">delete</button></td></tr>';
+        '<td>' + status + '</td></tr>';
     }).join('');
     document.querySelectorAll('#dev-rows .assign').forEach(function (sel) {
       sel.addEventListener('change', async function () {
@@ -263,43 +262,10 @@
         }
       });
     });
-    document.querySelectorAll('#dev-rows .del').forEach(function (btn) {
-      btn.addEventListener('click', async function () {
-        var id = btn.closest('tr').getAttribute('data-id');
-        if (!confirm(delWarning([id]))) return;
-        await fetch('/api/devices/' + encodeURIComponent(id), { method: 'DELETE', headers: csrfHdr() });
-        refreshDevices();
-      });
-    });
-    document.querySelectorAll('#dev-rows .onboard').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        var id = btn.closest('tr').getAttribute('data-id');
-        startOnboard(id);
-      });
-    });
-    document.querySelectorAll('#dev-rows .adopt').forEach(function (btn) {
-      btn.addEventListener('click', async function () {
-        var id = btn.closest('tr').getAttribute('data-id');
-        if (!confirm(
-            'Adopt ' + id + '?\n\n' +
-            'WHAT IT DOES: records an "applied receipt" for this device from its ' +
-            'CURRENT inventory. It makes NO changes to the device — it is a ' +
-            'bookkeeping/ownership action only, and it is audited.\n\n' +
-            'WHY: Undeploy runs only from a receipt. A device deployed by an older ' +
-            'IRIS (before receipts existed) has none, so undeploy is refused ' +
-            '("no active receipt"). Adopt creates that receipt so it can be ' +
-            'undeployed.\n\n' +
-            'WHEN NOT TO: you do NOT need this for a normal onboard — onboarding ' +
-            'writes the receipt automatically. Only adopt a device whose inventory ' +
-            'row actually matches what is deployed on the box; if unsure, re-onboard ' +
-            '(idempotent) instead.\n\nProceed with adopt?')) return;
-        var r = await jpost('/api/devices/' + encodeURIComponent(id) + '/adopt',
-                            { acknowledge_adopt: true });
-        devStatus.textContent = r.ok ? ('Adopted ' + id)
-          : ('Adopt failed: ' + ((await r.json()).error || r.status));
-      });
-    });
     document.getElementById('mark-all').checked = false;
+    document.getElementById('dev-count').textContent =
+      devs.length + ' device' + (devs.length === 1 ? '' : 's');
+    updateSelBar();
   }
   var onboardEs = null;
   var onboardJobId = null;
@@ -328,19 +294,6 @@
     return { telemetry: !t || t.checked,
              telemetry_stream: !!(s && s.checked) };
   }
-  function startOnboard(id) {
-    var log = openOnboardPanel(id);
-    jpost('/api/devices/' + encodeURIComponent(id) + '/onboard', telemetryFlags()).then(async function (r) {
-      if (!r.ok) {
-        var reason = '';
-        try { reason = (await r.json()).error || ''; } catch (e) { }
-        log.textContent = 'Failed to start onboarding (' + r.status + ')' +
-          (reason ? ': ' + reason : '');
-        return;
-      }
-      return r.json();
-    }).then(function (j) { if (j) streamOnboardJob(j.job_id, log); });
-  }
   document.getElementById('onboard-close').addEventListener('click', function () {
     if (onboardEs) { onboardEs.close(); onboardEs = null; }
     document.getElementById('onboard-panel').hidden = true;
@@ -356,6 +309,55 @@
   });
   document.getElementById('mark-all').addEventListener('change', function (e) {
     document.querySelectorAll('#dev-rows .mark').forEach(function (cb) { cb.checked = e.target.checked; });
+    updateSelBar();
+  });
+  // ---- menus / selection bar (toolbar rework, spec 2026-08-12) ----
+  // CSP-safe popovers: static hidden panels toggled by their trigger; a click
+  // on .menu-close (menu items, the Start button) closes; outside click and
+  // Escape close; the onboard popover's checkboxes keep it open.
+  var openMenuPanel = null;
+  function closeMenus() {
+    document.querySelectorAll('.menu').forEach(function (p) { p.hidden = true; });
+    document.querySelectorAll('.menu-wrap [aria-expanded]').forEach(function (b) {
+      b.setAttribute('aria-expanded', 'false');
+    });
+    openMenuPanel = null;
+  }
+  function wireMenu(btnId, panelId) {
+    var btn = document.getElementById(btnId), panel = document.getElementById(panelId);
+    btn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var opening = panel.hidden;
+      closeMenus();
+      if (opening) { panel.hidden = false; btn.setAttribute('aria-expanded', 'true'); openMenuPanel = panel; }
+    });
+    panel.addEventListener('click', function (e) {
+      if (e.target.closest('.menu-close')) closeMenus();
+      else e.stopPropagation();
+    });
+  }
+  document.addEventListener('click', function () { if (openMenuPanel) closeMenus(); });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && openMenuPanel) closeMenus(); });
+  wireMenu('csv-menu-btn', 'csv-menu');
+  wireMenu('onboard-menu-btn', 'onboard-pop');
+  function updateSelBar() {
+    var n = document.querySelectorAll('#dev-rows .mark:checked').length;
+    document.getElementById('sel-bar').hidden = n === 0;
+    document.getElementById('sel-count').textContent = n + ' selected';
+    document.getElementById('onboard-selected').textContent = 'Start onboard (' + n + ')';
+    document.querySelectorAll('#dev-rows tr').forEach(function (tr) {
+      var cb = tr.querySelector('.mark');
+      tr.classList.toggle('sel', !!(cb && cb.checked));
+    });
+    if (n === 0) closeMenus();
+  }
+  document.getElementById('dev-rows').addEventListener('change', function (e) {
+    if (e.target.classList.contains('mark')) updateSelBar();
+  });
+  document.getElementById('sel-clear').addEventListener('click', function () {
+    document.querySelectorAll('#dev-rows .mark:checked').forEach(function (cb) { cb.checked = false; });
+    document.getElementById('mark-all').checked = false;
+    updateSelBar();
   });
   // ---- Batch onboarding ----
   // "Onboard selected" fires every device's onboard POST; the SERVER caps how

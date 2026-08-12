@@ -39,8 +39,8 @@ def test_csv_download_buttons_and_multiselect_onboard_wired():
         them via a shared 'Onboard selected' button."""
     with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
         html = f.read()
-    assert '<button class="btn ghost" id="export-csv">' in html
-    assert '<button class="btn ghost" id="example-csv">' in html
+    assert '<button class="menu-item menu-close" id="export-csv">' in html
+    assert '<button class="menu-item menu-close" id="example-csv">' in html
     assert 'id="export-csv" href' not in html
     assert 'id="example-csv" href' not in html
     assert 'download' not in html.split('id="example-csv"')[1].split('>')[0]
@@ -55,6 +55,37 @@ def test_csv_download_buttons_and_multiselect_onboard_wired():
     assert "/credential'" in js or '/credential"' in js
     assert "onboard-selected" in js
     assert "#dev-rows .mark" in js
+
+
+def test_devices_toolbar_regrouped():
+    """Option-A layout (2026-08-12 spec §1-§4): quiet permanent toolbar; bulk
+    actions live in a selection bar that is hidden in static HTML; the three
+    CSV controls live inside the CSV menu; the telemetry checkboxes live
+    inside the onboard popover; Delete carries destructive styling; the
+    per-row action-links column is gone."""
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    assert '<div class="selbar" id="sel-bar" hidden>' in html
+    csv_menu = html.split('id="csv-menu"')[1].split('</div>')[0]
+    for cid in ('id="import-csv"', 'id="export-csv"', 'id="example-csv"'):
+        assert cid in csv_menu, cid + " must live inside the CSV menu"
+    pop = html.split('id="onboard-pop"')[1].split('</div>')[0]
+    for cid in ('id="onboard-telemetry"', 'id="onboard-telemetry-stream"',
+                'id="onboard-selected"'):
+        assert cid in pop, cid + " must live inside the onboard popover"
+    assert 'class="btn danger push" id="delete-selected"' in html
+    devices_thead = html.split('id="devices"')[1].split('</thead>')[0]
+    # '<th' alone also matches the '<thead>' tag itself; use '<th>' to count
+    # only real header cells.
+    assert devices_thead.count('<th>') == 10, "row action-links column removed"
+
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    assert "function wireMenu(" in js and "function updateSelBar(" in js
+    assert "#dev-rows .onboard" not in js and "#dev-rows .adopt" not in js \
+        and "#dev-rows .del'" not in js, "per-row action links must be gone"
+    assert "function startOnboard(" not in js, "dead single-row path removed"
+    assert "onclick=" not in js and "onclick=" not in html
 
 
 def test_import_from_disk_panel_wired():
@@ -88,8 +119,11 @@ def test_import_from_disk_panel_wired():
 
 
 def test_bulk_row_actions_wired():
-    """Adopt/delete selected, a bulk credential assign, and a confirmation on
-    every destructive delete (per-row included — it previously had none)."""
+    """Adopt/delete selected and a bulk credential assign, with a confirmation
+    on the destructive delete. Per-row action links were removed by the
+    toolbar rework (2026-08-12 spec) — a single row is deleted by checking
+    its row and using the selection bar's Delete, the same path as a bulk
+    delete, so there is exactly one confirm(delWarning(...)) call site."""
     with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
         html = f.read()
     for el in ('id="adopt-selected"', 'id="delete-selected"',
@@ -103,9 +137,9 @@ def test_bulk_row_actions_wired():
     assert "/adopt'" in js and "acknowledge_adopt: true" in js
     # bulk assign reuses the per-device credential route
     assert "'/credential'" in js or "+ '/credential'" in js
-    # BOTH delete paths confirm first, via one shared warning
+    # the single delete path confirms first
     assert "function delWarning(" in js
-    assert js.count("confirm(delWarning(") == 2
+    assert js.count("confirm(delWarning(") == 1
     # the warning must say deletion is not an undeploy — the dangerous part
     assert "does NOT " in js and "undeploy" in js
     # creating or deleting a profile re-renders the device rows, so a device
