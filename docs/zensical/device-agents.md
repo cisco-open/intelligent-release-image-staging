@@ -11,7 +11,7 @@ Device agents are the only part of IRIS that runs on IOS-XE devices. Their job i
 A device attaches through one of four management types: a dedicated IRIS-managed
 VLAN/SVI (**routed**), an existing operator-owned management VLAN (**inband**),
 or an IRIS-managed VirtualPortGroup (**router-routed** or **router-nat**).
-The attachment choice governs what the installer and uninstaller may configure
+The management-type choice governs what the installer and uninstaller may configure
 and remove; see
 [Management Type and VLAN Ownership](network-attachment.md).
 
@@ -22,7 +22,7 @@ onboarding is not saved.
 
 ## Guest Shell path
 
-Catalyst 9300 devices use Guest Shell. The generated installer configures the device-side plumbing and then the EEM timer keeps the agent alive.
+Catalyst 9300 devices and Catalyst 8000 routers use Guest Shell (routers through an IRIS-managed VirtualPortGroup, staging to `bootflash:`). The generated installer configures the device-side plumbing and then the EEM timer keeps the agent alive.
 
 ```mermaid
 flowchart TB
@@ -35,7 +35,7 @@ flowchart TB
     Agent --> Poll["Poll catalog"]
     Poll --> Download["Download with aria2c"]
     Download --> Hash["Verify sha256"]
-    Hash --> Copy["IOS copy /verify to flash:"]
+    Hash --> Copy["IOS copy /verify to the storage root"]
     Copy --> Report["Report status"]
 ```
 
@@ -98,9 +98,9 @@ it exists for operators who want the connection pinned.
 | Platform path | Storage target | Control path |
 | --- | --- | --- |
 | Catalyst 9300 Guest Shell | `flash:` | EEM timer and Guest Shell process. |
-| Catalyst 9300 IOx | `flash:` (via the SSD share) | IOx Docker app and SSH-to-self IOS commands. |
-| IE-3x00/IE-3400 IOx | `sdflash:` | IOx Docker app and SSH-to-self IOS commands. |
+| Catalyst 9300 IOx | `flash:` when console-onboarded (via the SSD share); the CLI installer defaults to `sdflash:` | IOx Docker app and SSH-to-self IOS commands. |
+| IE-3400 IOx | `sdflash:` | IOx Docker app and SSH-to-self IOS commands. |
 | Catalyst 8000 Guest Shell | `bootflash:` | Guest Shell through a VirtualPortGroup. |
 
-The router path targets the Catalyst 8000 family and is lab-tested on C8000v; see
+The router path targets the Catalyst 8000 family and is lab-tested on Catalyst 8000V; see
 [Router routed and router NAT](network-attachment.md#router-routed-and-router-nat-iris-managed-virtualportgroup).

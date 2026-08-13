@@ -4,7 +4,7 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# AI-Guided PoC Deployment
+# AI-guided PoC deployment
 
 Use this guide for a first proof-of-concept or proof-of-value deployment. It is
 not a production runbook: it does not cover high availability, scale hardening,
@@ -14,7 +14,7 @@ IRIS distributes, verifies, and stages IOS-XE images. It never installs,
 activates, reloads, changes boot variables, or otherwise changes a device's
 running software state.
 
-## Before You Start
+## Before you start
 
 Prepare a local, git-ignored credential file if an assistant will connect to
 the server or devices:
@@ -35,14 +35,14 @@ Gather these non-secret decisions before starting:
 | Stable server address | A device-reachable IPv4 address, used in the server certificate and tracker announces. |
 | Image source | A host path to the IOS-XE `.bin` file. |
 | Device inventory | Management IP, VLAN, SVI/guest addressing, and model for every device. |
-| C9300 hosting mode | Guest Shell, or IOx on an SSD-equipped C9300. |
-| IOx package availability | `iris-arm64.tar` for IE-3x00/IR; `iris-amd64.tar` for C9300 IOx. |
+| Catalyst 9300 hosting mode | Guest Shell, or IOx on an SSD-equipped Catalyst 9300. |
+| IOx package availability | `iris-arm64.tar` for IE-3400; `iris-amd64.tar` for Catalyst 9300 IOx. |
 
 Review [Network Ports and Flows](network-ports.md) before bringing up the
 server. Devices need reachability to the server and to each other for the
 private swarm.
 
-## Assistant Operating Rules
+## Assistant operating rules
 
 Give an assistant the following requirements when it helps operate a PoC:
 
@@ -66,16 +66,16 @@ for app-hosting prerequisites, and Network Ports and Flows for firewall rules.
 At the end of every step, state the next action required from me.
 ```
 
-## Guided Sequence
+## Guided sequence
 
 1. **Choose the runtime.** Use [Getting Started](getting-started.md) for Docker
    Compose on one server. Use [Kubernetes](kubernetes.md) only when a
    single-replica Kubernetes deployment and its persistent volume are intended.
-2. **Bring up the server.** Create the age identity outside the repository, give
-   uid `10001` the age key file and the host `artifacts/` directory (the
-   container runs non-root and cannot chown host paths — see
-   [Host paths to chown on every deploy](server.md#host-paths-to-chown-on-every-deploy)),
-   then run
+2. **Bring up the server.** Create the age identity outside the repository.
+   Give uid `10001` the age key file and the host `artifacts/` directory — the
+   container runs non-root and cannot chown host paths; see
+   [Host paths to chown on every deploy](server.md#host-paths-to-chown-on-every-deploy).
+   Then run
    `tools/start-compose-server.sh` on the Linux Compose host. It
    bootstraps encrypted state idempotently, starts Compose, waits for health,
    and builds/stages both supported IOx packages before any Console onboarding.
@@ -89,14 +89,14 @@ At the end of every step, state the next action required from me.
 5. **Add devices.** Use the Console Devices page or its example CSV. Set each
    model when known. Leave `platform` blank for automatic selection, force
    `guestshell` for the standard C9300 path, `iox` only for a supported IOx
-   device, or `router` for a Catalyst 8000 router VPG attachment.
+   device, or `router` for a Catalyst 8000 router VPG deployment.
 6. **Confirm IOx packages are ready.** The server bring-up step stages arm64
-   `iris-arm64.tar` for IE-3x00/IR and amd64 `iris-amd64.tar` for C9300 IOx. A C9300
-   IOx deployment also requires a USB SSD and the C9300 app-hosting interface.
+   `iris-arm64.tar` for IE-3400 and amd64 `iris-amd64.tar` for Catalyst 9300 IOx. A Catalyst 9300
+   IOx deployment also requires a USB SSD and the Catalyst 9300 app-hosting interface.
    See [IOx App](iox.md). Re-run `tools/provision-iox-packages.sh` after a
    server certificate rotation.
 7. **Onboard devices.** Start one-click onboarding from the Console and watch
-   each job to completion. A C9300 can use either Guest Shell or IOx; an
+   each job to completion. A Catalyst 9300 can use either Guest Shell or IOx; an
    explicit IOx choice with an unknown model fails before it touches the device.
    A successful lifecycle persists its configuration with `copy running-config
    startup-config`; a failed or partial lifecycle is not saved.
@@ -105,7 +105,7 @@ At the end of every step, state the next action required from me.
 9. **Stop at staged.** Handoff installation, activation, reload, and boot
    management to the normal device-management process. They are outside IRIS.
 
-## Completion Record
+## Completion record
 
 For a PoC handoff, record the server runtime and address, version, image id,
 device model/platform choice, staging target, Console audit entries, and whether

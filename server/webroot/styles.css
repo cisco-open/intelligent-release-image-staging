@@ -105,3 +105,32 @@ body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-
 .cat-settings { background:#eef1f6; color:#556; }
 .cat-telemetry { background:#e3f4e8; color:#1a7f43; }
 .cat-token { background:#faf3d9; color:#8a6d1a; }
+
+/* Devices toolbar rework (2026-08-12): selection bar, menus, destructive btn */
+.toolbar .push, .selbar .push { margin-left:auto; }
+.toolbar .sep, .selbar .sep { width:1px; height:22px; background:#dfe4ec; }
+.menu-wrap { position:relative; display:inline-block; }
+.menu { position:absolute; top:calc(100% + 4px); left:0; z-index:30; background:#fff;
+  border:1px solid #c7d0e0; border-radius:8px; box-shadow:0 6px 18px rgba(11,37,69,.18);
+  padding:6px; min-width:190px; }
+.menu label { display:block; padding:4px 8px; white-space:nowrap; }
+.menu .btn { margin:6px 8px 4px; }
+.menu-item { display:block; width:100%; text-align:left; background:none; border:0;
+  border-radius:6px; padding:8px 10px; font-size:13px; color:#1a2b45; cursor:pointer; }
+.menu-item:hover { background:#f2f7ff; color:var(--blue); }
+/* display lives on :not([hidden]) so the hidden attribute keeps working
+   (same pattern as .inline-form above) */
+.selbar { gap:8px; align-items:center; flex-wrap:wrap; background:#e7f1ff;
+  border:1px solid #b9d4fb; border-radius:8px; padding:8px 12px; margin:0 0 16px; }
+.selbar:not([hidden]) { display:flex; }
+.selbar .sel-count { font-weight:600; font-size:13px; color:var(--blue); }
+.btn.danger { background:#fff; color:#c0362c; border:1px solid #e5b8b3;
+  box-shadow:0 1px 2px rgba(11,37,69,.06); }
+.btn.danger:hover { background:#c0362c; border-color:#c0362c; color:#fff; }
+.btn.danger:focus-visible { outline:none; box-shadow:0 0 0 3px rgba(192,54,44,.35); }
+.linkish.danger-link { color:#c0362c; }
+.joined { display:inline-flex; }
+.joined select { border:1px solid #c7d0e0; border-radius:6px 0 0 6px; border-right:0;
+  padding:6px 8px; font-size:13px; background:#fff; }
+.joined .btn { border-radius:0 6px 6px 0; }
+#dev-rows tr.sel td { background:#f2f7ff; }

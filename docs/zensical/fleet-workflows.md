@@ -16,7 +16,7 @@ Start from the template:
 cp fleet/devices.csv.example fleet/devices.csv
 ```
 
-The inventory is an attachment-aware, named-header **CSV v2**. Every device
+The inventory is a management-type-aware, named-header **CSV v2**. Every device
 declares a `management_type`: `routed` (IRIS creates a dedicated VLAN and SVI),
 `inband` (the agent attaches to an existing operator-owned management VLAN),
 `router-routed` (an IRIS-managed VirtualPortGroup subnet), or `router-nat`
@@ -29,18 +29,18 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
 - **routed** — fill `iris_vlan`, `svi_ip`, `svi_mask`, `app_ip`, `app_mask`,
   `app_gateway`; leave `inband_vlan` blank.
 - **inband** — fill `inband_vlan`, `app_ip`, `app_mask`, `app_gateway`; leave
-  `iris_vlan`/`svi_*` blank. Static IPv4 on Guest Shell or IOx (IE-3x00, C9300);
+  `iris_vlan`/`svi_*` blank. Static IPv4 on Guest Shell or IOx (IE-3400, Catalyst 9300);
   DHCP is not supported. For inband **IOx**, `ios_ssh_host` (the IOS endpoint
   the app SSHes to) defaults to the device's management IP — only set it for
   an asymmetric topology (Guest Shell leaves it blank).
 - `model`/`platform` are optional; blank `platform` auto-selects from the model.
 - **router-routed** — fill `app_ip`, `app_mask`, `app_gateway`, and
-  `vpg_number`; use `platform=router` (automatic for a known C8xxx model). The
+  `vpg_number`; use `platform=router` (automatic for a known Catalyst 8000 (C8xxx) model). The
   operator must route the VPG subnet to IRIS and peers.
 - **router-nat** — additionally fill `nat_interface`. It creates static PAT
   for TCP 6881; the interface is canonicalized and teardown preserves an
   outside NAT marking that pre-dates IRIS. The router path targets the Catalyst
-  8000 family and is lab-tested on C8000v; see
+  8000 family and is lab-tested on Catalyst 8000V; see
   [Router routed and router NAT](network-attachment.md#router-routed-and-router-nat-iris-managed-virtualportgroup).
 
 See [Management Type and VLAN Ownership](network-attachment.md) for the full
@@ -75,7 +75,7 @@ devices before deleting their rows.
 
 ### Onboarding path
 
-Attachment-aware onboarding runs through the **Console / API**, which resolves
+Management-type-aware onboarding runs through the **Console / API**, which resolves
 an immutable plan, records a durable *receipt* of what it applies, and drives
 teardown from that receipt (not from the editable inventory). A router deployment
 runs its preflight again at execution time and cannot be adopted afterwards; see
@@ -119,8 +119,10 @@ The script validates all rows first, then applies assignments. That avoids parti
 
 ```mermaid
 flowchart LR
-    Inventory["fleet/devices.csv"] --> Installers["fleet/dist/install-*.sh"]
-    Installers --> Device["Device onboarding"]
+    Inventory["fleet/devices.csv"] --> Console["Console / API onboarding (receipts)"]
+    Console --> Device["Device onboarded"]
+    Inventory -. legacy, routed-only .-> Installers["fleet/dist/install-*.sh"]
+    Installers -.-> Device
     Images["Published images"] --> Assignments["fleet/assignments.csv"]
     Assignments --> Policy["Catalog policy"]
     Policy --> Agent["Agent polls policy"]

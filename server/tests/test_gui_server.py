@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 import os
+import re
 
 import gui_server
 
@@ -10,6 +11,23 @@ def test_webroot_assets_exist():
     for name in ("login.html", "index.html", "styles.css", "login.js", "app.js",
                  "setup.html", "setup.js"):
         assert os.path.isfile(os.path.join(gui_server.WEBROOT, name)), name
+
+
+def test_no_orphaned_control_ids():
+    """Owner constraint for the toolbar rework: every element id referenced
+    from app.js must exist in index.html. A relocated-but-unwired control
+    would silently do nothing; a deleted element with a live binding would
+    throw at load and kill every later binding."""
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    ids = set(re.findall(r"getElementById\('([^']+)'\)", js))
+    ids |= set(re.findall(r"querySelector(?:All)?\('#([A-Za-z0-9_-]+)", js))
+    assert len(ids) > 30, "id extraction matched too little — patterns drifted"
+    missing = sorted(i for i in ids if ('id="%s"' % i) not in html)
+    assert not missing, \
+        "app.js references ids missing from index.html: %s" % missing
 
 
 def test_csv_download_buttons_and_multiselect_onboard_wired():
@@ -21,8 +39,8 @@ def test_csv_download_buttons_and_multiselect_onboard_wired():
         them via a shared 'Onboard selected' button."""
     with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
         html = f.read()
-    assert '<button class="btn ghost" id="export-csv">' in html
-    assert '<button class="btn ghost" id="example-csv">' in html
+    assert '<button class="menu-item menu-close" id="export-csv">' in html
+    assert '<button class="menu-item menu-close" id="example-csv">' in html
     assert 'id="export-csv" href' not in html
     assert 'id="example-csv" href' not in html
     assert 'download' not in html.split('id="example-csv"')[1].split('>')[0]
@@ -37,6 +55,37 @@ def test_csv_download_buttons_and_multiselect_onboard_wired():
     assert "/credential'" in js or '/credential"' in js
     assert "onboard-selected" in js
     assert "#dev-rows .mark" in js
+
+
+def test_devices_toolbar_regrouped():
+    """Option-A layout (2026-08-12 spec §1-§4): quiet permanent toolbar; bulk
+    actions live in a selection bar that is hidden in static HTML; the three
+    CSV controls live inside the CSV menu; the telemetry checkboxes live
+    inside the onboard popover; Delete carries destructive styling; the
+    per-row action-links column is gone."""
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    assert '<div class="selbar" id="sel-bar" hidden>' in html
+    csv_menu = html.split('id="csv-menu"')[1].split('</div>')[0]
+    for cid in ('id="import-csv"', 'id="export-csv"', 'id="example-csv"'):
+        assert cid in csv_menu, cid + " must live inside the CSV menu"
+    pop = html.split('id="onboard-pop"')[1].split('</div>')[0]
+    for cid in ('id="onboard-telemetry"', 'id="onboard-telemetry-stream"',
+                'id="onboard-selected"'):
+        assert cid in pop, cid + " must live inside the onboard popover"
+    assert 'class="btn danger push" id="delete-selected"' in html
+    devices_thead = html.split('id="devices"')[1].split('</thead>')[0]
+    # '<th' alone also matches the '<thead>' tag itself; use '<th>' to count
+    # only real header cells.
+    assert devices_thead.count('<th>') == 10, "row action-links column removed"
+
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    assert "function wireMenu(" in js and "function updateSelBar(" in js
+    assert "#dev-rows .onboard" not in js and "#dev-rows .adopt" not in js \
+        and "#dev-rows .del'" not in js, "per-row action links must be gone"
+    assert "function startOnboard(" not in js, "dead single-row path removed"
+    assert "onclick=" not in js and "onclick=" not in html
 
 
 def test_import_from_disk_panel_wired():
@@ -70,8 +119,11 @@ def test_import_from_disk_panel_wired():
 
 
 def test_bulk_row_actions_wired():
-    """Adopt/delete selected, a bulk credential assign, and a confirmation on
-    every destructive delete (per-row included — it previously had none)."""
+    """Adopt/delete selected and a bulk credential assign, with a confirmation
+    on the destructive delete. Per-row action links were removed by the
+    toolbar rework (2026-08-12 spec) — a single row is deleted by checking
+    its row and using the selection bar's Delete, the same path as a bulk
+    delete, so there is exactly one confirm(delWarning(...)) call site."""
     with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
         html = f.read()
     for el in ('id="adopt-selected"', 'id="delete-selected"',
@@ -85,9 +137,9 @@ def test_bulk_row_actions_wired():
     assert "/adopt'" in js and "acknowledge_adopt: true" in js
     # bulk assign reuses the per-device credential route
     assert "'/credential'" in js or "+ '/credential'" in js
-    # BOTH delete paths confirm first, via one shared warning
+    # the single delete path confirms first
     assert "function delWarning(" in js
-    assert js.count("confirm(delWarning(") == 2
+    assert js.count("confirm(delWarning(") == 1
     # the warning must say deletion is not an undeploy — the dangerous part
     assert "does NOT " in js and "undeploy" in js
     # creating or deleting a profile re-renders the device rows, so a device
@@ -172,11 +224,10 @@ def test_swarmmap_peer_resolution_wired():
     assert "dedupePeers" in src
     assert "/api/devices" in src
     assert "seed server" in src
-    # per-peer report columns carry ↓/↑ direction + a legend so received-vs-sent
-    # asymmetry reads as expected, not as missing data
-    assert "↓ received" in src and "↑ sent" in src
     assert "avg download" in src           # renamed from the ambiguous "avg throughput"
-    assert "0 sent" in src                 # the legend that explains the asymmetry
+    # per-peer byte columns (↓ received / ↑ sent) and their legend were
+    # removed by design -- see test_swarmmap_per_peer_table_is_participation_only
+    # in test_telemetry.py for the participation-only replacement.
 
 
 def test_monitoring_timeline_wired():
@@ -2196,7 +2247,8 @@ _CANNED_REPORT = {
                  "sha_ok": True, "stage_state": "ready"},
     "link": {"tier": "good", "rtt_ms_median": 12, "rtt_samples": 8,
              "hb_failures": 0, "trimmed": False},
-    "peers": [{"ip": "10.0.0.7", "rx_bytes": 1234, "tx_bytes": 0}],
+    "peers": [{"ip": "10.0.0.7"}],
+    "peers_total": 1,
     "agent": {"version": "x", "runtime_mode": "guestshell"},
 }
 
@@ -2233,7 +2285,8 @@ def test_swarmmap_injects_cfg_nonce_and_csp(tmp_path, monkeypatch):
         st, hd, b = _req(host, port, "GET", "/swarmmap", headers={"Cookie": ck})
         assert st == 200 and "text/html" in hd.get("Content-Type", "")
         body = b.decode()
-        cfg = 'window.IRIS_MAP_CFG = {"swarmUrl":"/api/swarm","pull":true};'
+        cfg = ('window.IRIS_MAP_CFG = {"swarmUrl":"/api/swarm","pull":true,'
+               '"eventsUrlTemplate":""};')
         assert body.count(cfg) == 1                       # substituted exactly once
         assert "window.IRIS_MAP_CFG = null;" not in body  # placeholder consumed
         m = re.search(r'<script nonce="([^"]+)">', body)
@@ -3194,3 +3247,95 @@ def test_source_guard_monitoring_nav_and_view():
     assert "refreshMonitoring" in js
     assert "audit-load-older" in js
     assert "audit-category" in js
+
+
+# ---- stream tuning API + export-health proxy (device transfer telemetry) ----
+
+def test_telemetry_stream_tune_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, _cat, stop = _serve_reports(tmp_path)
+    try:
+        assert _req(host, port, "POST", "/api/telemetry/stream",
+                    {"every": 4, "pause": True})[0] == 401
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, b = _req(host, port, "POST", "/api/telemetry/stream",
+                        {"every": 4, "pause": True}, headers=hh)
+        assert st == 200 and json.loads(b)["ok"] is True
+        with open(str(tmp_path / "state" / "telemetry-settings.json")) as f:
+            assert json.load(f) == {"stream_every": 4, "stream_pause": True}
+    finally:
+        stop()
+
+
+def test_telemetry_stream_tune_bad_values_400(tmp_path, monkeypatch):
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, _cat, stop = _serve_reports(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        for body in ({"every": 0}, {"every": 61}, {"every": True},
+                     {"every": "4"}, {"pause": "yes"}):
+            st, _, _ = _req(host, port, "POST", "/api/telemetry/stream",
+                            body, headers=hh)
+            assert st == 400, body
+    finally:
+        stop()
+
+
+def test_telemetry_health_proxy_fallback(tmp_path, monkeypatch):
+    # point the proxy at a dead port: the endpoint still answers 200 with
+    # ok:false so the console badge can render "unknown" rather than erroring
+    monkeypatch.setenv("IRIS_METRICS_PORT", "9")
+    host, port, _cat, stop = _serve_reports(tmp_path)
+    try:
+        assert _req(host, port, "GET", "/api/telemetry/health")[0] == 401
+        ck, _csrf = _auth(host, port)
+        st, _, b = _req(host, port, "GET", "/api/telemetry/health",
+                        headers={"Cookie": ck})
+        assert st == 200
+        assert json.loads(b)["ok"] is False
+    finally:
+        stop()
+
+
+def test_map_cfg_line_escapes_script_terminator(monkeypatch):
+    # An inline <script> block must never see a literal '</script>' from the
+    # injected template value (operator-trusted env, sealed anyway).
+    monkeypatch.setenv("IRIS_EVENTS_URL_TEMPLATE",
+                       "https://x/e?ip={ip}</script><script>alert(1)</script>")
+    line = gui_server._map_cfg_line()
+    assert "</script>" not in line          # cannot break out of the block
+    assert "\\u003c" in line                # '<' escaped
+
+
+def test_device_view_exposes_telemetry_flags(tmp_path):
+    """The devices table shows whether an agent is streaming live samples.
+    Both flags come from the device's own heartbeat, so they reflect what is
+    actually deployed — not what the console asked for at onboard time."""
+    host, port, (_app, _fleet, _creds, cat), stop = _serve_full(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        for did in ("d-stream", "d-quiet", "d-old"):
+            _req(host, port, "POST", "/api/devices",
+                 {"device_id": did, "device_ip": "10.0.0.1", "vlan": "666",
+                  "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
+                  "guest_ip": "10.0.0.3"}, headers=hh)
+        cat.record_heartbeat("d-stream", {"stage_state": "ready",
+                                          "telemetry_enabled": True,
+                                          "telemetry_stream_enabled": True})
+        cat.record_heartbeat("d-quiet", {"stage_state": "ready",
+                                         "telemetry_enabled": True,
+                                         "telemetry_stream_enabled": False})
+        cat.record_heartbeat("d-old", {"stage_state": "ready"})  # pre-feature agent
+        st, _, b = _req(host, port, "GET", "/api/devices", headers={"Cookie": ck})
+        assert st == 200
+        rows = {r["device_id"]: r for r in json.loads(b)["devices"]}
+        assert rows["d-stream"]["telemetry_stream_enabled"] is True
+        assert rows["d-quiet"]["telemetry_stream_enabled"] is False
+        # unknown stays None (tri-state): a pre-feature agent is not "off"
+        assert rows["d-old"]["telemetry_stream_enabled"] is None
+        assert rows["d-stream"]["telemetry_enabled"] is True
+    finally:
+        stop()

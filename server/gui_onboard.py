@@ -388,7 +388,7 @@ class OnboardService:
             self._run_supports_proc = False
         self._lock = threading.Lock()
 
-    def _build_env(self, device_id, mint=True, resolved=None):
+    def _build_env(self, device_id, mint=True, resolved=None, env_extra=None):
         dev = self.fleet.get_device(device_id)
         if not dev:
             raise ValueError("unknown device: %s" % device_id)
@@ -459,6 +459,10 @@ class OnboardService:
         if sh:
             env["HOST_USER"] = sh["username"]
             env["HOST_PASS"] = sh["password"]
+        # Console-driven feature flags (e.g. the telemetry checkboxes) applied
+        # last: explicit operator intent beats any inherited process env.
+        if env_extra:
+            env.update(env_extra)
         resolved_dev = dict(dev)
         resolved_dev.update(target)
         resolved_dev["platform"] = target.get("platform", resolved_dev.get("platform"))
@@ -527,7 +531,7 @@ class OnboardService:
             return False
 
     def start(self, device_id, action="onboard", resolved=None, prepare=None,
-              pre_apply=None):
+              pre_apply=None, env_extra=None):
         """Create a job and run the action's script on a daemon thread.
         Returns the job id immediately. action is "onboard"
         (the platform's install recipe: device-install.sh, device/iox/install.sh
@@ -555,7 +559,7 @@ class OnboardService:
                 "state": "queued", "lines": [], "returncode": None,
                 "queued_at": int(self._now()),
                 "started_at": None, "finished_at": None, "receipt_id": None,
-                "resolved": resolved}
+                "resolved": resolved, "env_extra": env_extra}
         with self._lock:
             # Never run two scripts against the same device at once: the same
             # action again (double-click, overlapping batches) joins the
@@ -589,7 +593,8 @@ class OnboardService:
                 # execution time, immediately before its receipt becomes
                 # applying and before an enrollment token is created.
                 dev, env = self._build_env(device_id, mint=False,
-                                           resolved=j.get("resolved"))
+                                           resolved=j.get("resolved"),
+                                           env_extra=j.get("env_extra"))
                 platform, script = self._resolve(device_id, dev, env, action)
                 if action == "onboard" and platform == "router":
                     try:
@@ -606,7 +611,8 @@ class OnboardService:
                             if current is not None:
                                 current["resolved"] = final_resolved
                         dev, env = self._build_env(
-                            device_id, mint=False, resolved=final_resolved)
+                            device_id, mint=False, resolved=final_resolved,
+                            env_extra=j.get("env_extra"))
                         platform, script = self._resolve(
                             device_id, dev, env, action)
             except Exception as exc:

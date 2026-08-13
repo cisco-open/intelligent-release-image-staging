@@ -63,18 +63,40 @@
         <h2>Devices</h2>
         <div class="toolbar">
           <button class="btn" id="add-dev">+ Add device</button>
-          <button class="btn ghost" id="import-csv">Import CSV</button>
+          <span class="sep"></span>
+          <div class="menu-wrap">
+            <button class="btn ghost" id="csv-menu-btn" aria-expanded="false">CSV ▾</button>
+            <div class="menu" id="csv-menu" hidden>
+              <button class="menu-item menu-close" id="import-csv">Import CSV…</button>
+              <button class="menu-item menu-close" id="export-csv">Export CSV</button>
+              <button class="menu-item menu-close" id="example-csv">Download example</button>
+            </div>
+          </div>
           <input type="file" id="csv-file" accept=".csv" hidden>
-          <button class="btn ghost" id="export-csv">Export CSV</button>
-          <button class="btn ghost" id="example-csv">Example CSV</button>
           <button class="btn ghost" id="manage-creds">Credentials</button>
-          <button class="btn" id="onboard-selected">Onboard selected</button>
-          <button class="btn ghost" id="undeploy-selected">Undeploy selected</button>
-          <button class="btn ghost" id="adopt-selected">Adopt selected</button>
-          <button class="btn ghost" id="delete-selected">Delete selected</button>
-          <select id="cred-selected"><option value="">— credential for selected —</option></select>
-          <button class="btn ghost" id="apply-cred-selected">Apply</button>
+          <span class="muted push" id="dev-count"></span>
           <span class="muted" id="dev-status"></span>
+        </div>
+        <div class="selbar" id="sel-bar" hidden>
+          <span class="sel-count" id="sel-count"></span>
+          <button class="linkish" id="sel-clear">clear</button>
+          <span class="sep"></span>
+          <div class="menu-wrap">
+            <button class="btn" id="onboard-menu-btn" aria-expanded="false">Onboard ▾</button>
+            <div class="menu" id="onboard-pop" hidden>
+              <label class="muted"><input type="checkbox" id="onboard-telemetry" checked> Telemetry reports</label>
+              <label class="muted"><input type="checkbox" id="onboard-telemetry-stream"> Telemetry streaming (live samples)</label>
+              <button class="btn menu-close" id="onboard-selected">Start onboard</button>
+            </div>
+          </div>
+          <button class="btn ghost" id="undeploy-selected">Undeploy</button>
+          <button class="btn ghost" id="adopt-selected">Adopt</button>
+          <span class="sep"></span>
+          <span class="joined">
+            <select id="cred-selected"><option value="">— credential for selected —</option></select>
+            <button class="btn ghost" id="apply-cred-selected">Apply</button>
+          </span>
+          <button class="btn danger push" id="delete-selected">Delete…</button>
         </div>
         <form class="inline-form" id="dev-form" hidden>
           <input id="df-id" placeholder="Device ID / IP">
@@ -113,7 +135,7 @@
           </form>
         </div>
         <table class="tbl" id="devices">
-          <thead><tr><th><input type="checkbox" id="mark-all"></th><th>Device</th><th>IP</th><th>Model</th><th>Management type</th><th>Platform</th><th>Credential</th><th>Assigned image</th><th>Status</th><th></th></tr></thead>
+          <thead><tr><th><input type="checkbox" id="mark-all"></th><th>Device</th><th>IP</th><th>Model</th><th>Management type</th><th>Platform</th><th>Credential</th><th>Assigned image</th><th>Telemetry</th><th>Status</th></tr></thead>
           <tbody id="dev-rows"></tbody>
         </table>
         <div id="batch-panel" hidden>
@@ -136,7 +158,7 @@
         <h2>Swarm</h2>
         <p class="muted" id="swarm-summary"></p>
         <iframe id="swarm-frame" class="swarm-frame" title="Live swarm map"></iframe>
-        <p><a class="btn" id="swarm-open" target="_blank" rel="noopener">Open the swarm map full-screen ↗</a></p>
+        <p><a class="btn ghost" id="swarm-open" target="_blank" rel="noopener">Open the swarm map full-screen ↗</a></p>
       </section>
       <section id="view-settings" hidden>
         <h2>Settings</h2>
@@ -168,20 +190,22 @@
         </p>
       </section>
       <section id="view-monitoring" hidden>
-        <h2>Monitoring</h2>
+        <h2>Monitoring <span id="telemetry-health" class="badge badge-queued" hidden></span></h2>
         <h3>Audit trail (90-day circular)</h3>
         <div class="toolbar">
-          <select id="audit-category">
-            <option value="">All categories</option>
-            <option value="auth">auth</option>
-            <option value="device">device</option>
-            <option value="image">image</option>
-            <option value="onboard">onboard</option>
-            <option value="settings">settings</option>
-            <option value="telemetry">telemetry</option>
-            <option value="token">token</option>
-          </select>
-          <button class="btn ghost" id="audit-refresh">Refresh</button>
+          <span class="joined">
+            <select id="audit-category">
+              <option value="">All categories</option>
+              <option value="auth">auth</option>
+              <option value="device">device</option>
+              <option value="image">image</option>
+              <option value="onboard">onboard</option>
+              <option value="settings">settings</option>
+              <option value="telemetry">telemetry</option>
+              <option value="token">token</option>
+            </select>
+            <button class="btn ghost" id="audit-refresh">Refresh</button>
+          </span>
         </div>
         <div id="audit-timeline">
           <div class="toolbar" id="audit-range-chips">

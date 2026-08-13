@@ -133,7 +133,6 @@ const SVGNS="http://www.w3.org/2000/svg";
 // The bare file keeps read-only defaults and never calls /api/*.
 window.IRIS_MAP_CFG = null;
 const MAP = window.IRIS_MAP_CFG || {swarmUrl: "/swarm", pull: false};
-const CFG={lokiUID:"P8E80F9AEF21F6940",grafanaPort:3000};
 // Console mode only: CSRF for the pull POST comes from the same session-info
 // bootstrap the console shell (app.js) uses — never from the injected CFG.
 let CSRF=null;
@@ -426,15 +425,15 @@ function openDrawer(p){
   const total=p._total, pct=p.is_seeder?100:(p.progress!=null?Math.round(p.progress*100):0);
   const done=total!=null?(p.is_seeder?total:total-(p.left||0)):null;
   const roleColor=p.is_seeder?"var(--seed)":(pct>=100?"var(--leech)":"var(--accent)");
-  const ghost=`http://${location.hostname}:${CFG.grafanaPort}`;
-  // p.ip goes into a Loki LogQL string — encode it so a crafted IP cannot
-  // escape the quoted filter value or inject extra LogQL.
-  const safeIp=encodeURIComponent(p.ip||"");
-  const expr=`{service_name="iris-tracker"} | ip="${safeIp}"`;
-  const panes=encodeURIComponent(JSON.stringify({iris:{datasource:CFG.lokiUID,
-    queries:[{refId:"A",expr,datasource:{type:"loki",uid:CFG.lokiUID}}],
-    range:{from:"now-6h",to:"now"}}}));
-  const explore=`${ghost}/explore?schemaVersion=1&orgId=1&panes=${panes}`;
+  // Operator-configured events deep link (IRIS_EVENTS_URL_TEMPLATE, injected
+  // via IRIS_MAP_CFG): {ip}/{device_id} placeholders, values URL-encoded so a
+  // crafted IP or id cannot escape the query URL. No template -> no button —
+  // IRIS assumes no particular events backend.
+  const eventsTpl=(window.IRIS_MAP_CFG||{}).eventsUrlTemplate||"";
+  const eventsUrl=eventsTpl
+    ? eventsTpl.replace("{ip}",encodeURIComponent(p.ip||""))
+               .replace("{device_id}",encodeURIComponent(p.device_id||""))
+    : "";
   // title leads with the CONSOLE device IP (peerLabel); the announce/guest IP
   // rides in the sub-line only when it differs.
   const asub=peerAnnounceSub(p);
@@ -463,7 +462,7 @@ function openDrawer(p){
       :selTeleOff?`<div style="color:var(--muted);font-size:12px">telemetry is disabled on this device (telemetry = off in iris-agent.conf) — pull unavailable</div>`
       :`<button id="pullbtn" style="width:100%">⇣ Pull fresh data from device</button>`}
     <div id="repbox"><p style="color:var(--muted);font-size:12px">loading report…</p></div>`:""}
-    <a class="btn" href="${explore}" target="_blank">↗ View this device's events in Grafana / Loki</a>`;
+    ${eventsUrl?`<a class="btn" href="${eventsUrl}" target="_blank" rel="noopener">&#8599; View this device's events</a>`:""}`;
   drawer.querySelector(".close").addEventListener("click", closeDrawer);
   const pb=document.getElementById("pullbtn");
   if(pb)pb.addEventListener("click",requestPull);
@@ -473,8 +472,9 @@ function openDrawer(p){
 function closeDrawer(){drawer.classList.remove("open");selPeer=null;selDev=null;pullReq=null;selTeleOff=false;}
 
 // ---- device report drawer section (#13) -----------------------------------
-// Latest stored report for the device + per-peer ~bytes table, plus the
-// manual pull. Console mode only (MAP.pull) — the bare file has no /api.
+// Latest stored report for the device + a per-peer participation table
+// (who this device was connected to; no per-peer bytes), plus the manual
+// pull. Console mode only (MAP.pull) — the bare file has no /api.
 // ip -> device identity for the per-peer report rows. Two sources, in
 // priority order: the LIVE swarm (has model from heartbeats), then the FLEET
 // inventory (guest_ip/device_ip of every registered device) — so a peer that
@@ -523,30 +523,29 @@ function reportHtml(reports){
   const byIp=ipToDevice();
   const age=(rep.received_at||rep.ts)?ago((DATA&&DATA.now?DATA.now:Date.now()/1000)-(rep.received_at||rep.ts)):"—";
   const l=rep.link||{}, t=rep.transfer||{};
-  // Each peer row: WHO served me (resolve the announce ip -> its console
-  // device_id/model via byIp; lead with device_id when known), HOW MUCH I
-  // received (rx_bytes, ↓) + its avg download speed, and HOW MUCH I sent that
-  // peer (tx_bytes, ↑). Both are THIS device's own numbers over its own
-  // transfer window (tx accrues only while downloading/seeding-sampling or on
-  // a pull), so they don't reconcile with another device's report — the
-  // legend under the table spells that out.
+  // Each peer row is PARTICIPATION only: who this device was connected to
+  // at its sample instants (announce ip resolved -> console device_id/model
+  // via byIp; the seed host labeled as such). Per-peer byte counts are not
+  // measured by BitTorrent — aria2 exposes only instantaneous rates — so
+  // byte figures live at the transfer level above, never per peer.
   const rows=(rep.peers||[]).map(row=>{
     const isSeed=row.ip===serverIP();
-    const dev=isSeed?null:byIp[row.ip];
-    // console device id when known (live swarm OR fleet inventory), the seed
-    // host labeled as such — a bare announce IP is the last resort only
+    const dev=isSeed?null:(Object.prototype.hasOwnProperty.call(byIp,row.ip)?byIp[row.ip]:null);
     const lead=isSeed?"seed server":(dev?dev.device_id:row.ip);
     const detail=[];
     if(isSeed)detail.push(row.ip);
     if(dev){if(dev.ip&&dev.ip!==dev.device_id)detail.push("peer "+dev.ip);
             if(dev.model)detail.push(dev.model);}
     const sub=detail.join(" · ");
-    const tx=row.tx_bytes||0;
     return `<tr><td>${escapeHtml(lead)}`+
       (sub?`<div style="color:var(--muted);font-size:10px">${escapeHtml(sub)}</div>`:"")+
-      `</td><td>~${fmtBytes(row.rx_bytes||0)}</td><td>${row.avg_bps?fmtBps(row.avg_bps):"—"}</td>`+
-      `<td>${tx>0?"~"+fmtBytes(tx):"—"}</td></tr>`;
+      `</td></tr>`;
   }).join("");
+  // peers_total interpolates WITHOUT escapeHtml (it reads as a number) —
+  // same discipline as rtt_ms_median: gate on being a finite number.
+  const named=(rep.peers||[]).length;
+  const more=Number.isFinite(rep.peers_total)&&rep.peers_total>named
+    ?rep.peers_total-named:0;
   // rtt_ms_median is interpolated WITHOUT escapeHtml (it reads as a number),
   // so gate it on actually being a finite number — anything else, including a
   // string in a stored report, renders as the placeholder instead of markup.
@@ -556,15 +555,17 @@ function reportHtml(reports){
       <dt>rtt median</dt><dd>${Number.isFinite(l.rtt_ms_median)?l.rtt_ms_median+" ms":"—"}</dd>
       <dt>avg download</dt><dd>${t.avg_bps?fmtBps(t.avg_bps):"—"}</dd>
       <dt>transferred</dt><dd>${fmtBytes(t.total_bytes||0)} in ${fmtDur(t.elapsed_s)}</dd>
+      <dt>peers</dt><dd>${Number.isFinite(rep.peers_total)?rep.peers_total:"—"}</dd>
       <dt>reported</dt><dd>${age}</dd>
     </dl>`+
-    (rows?`<table class="reptbl"><thead><tr><th>peer</th><th>↓ received</th><th>↓ avg speed</th><th>↑ sent</th></tr></thead>`+
+    (rows?`<table class="reptbl"><thead><tr><th>peers observed</th></tr></thead>`+
           `<tbody>${rows}</tbody></table>`+
+          (more?`<p style="color:var(--muted);font-size:11px;margin:2px 0 0">and ${more} more (named rows are capped)</p>`:"")+
           `<p style="color:var(--muted);font-size:11px;margin:2px 0 14px;line-height:1.5">`+
-          `<b>↓</b> received / avg speed = what this device pulled from the peer (rescaled to its true `+
-          `total). <b>↑</b> sent = what it uploaded to the peer during its own transfer window. `+
-          `Each device only measures its own traffic while it was transferring, so a peer that served `+
-          `this one earlier can show <b>0 sent</b> in its own report — that is expected, not missing data.</p>`
+          `Peers this device observed during its transfer — connection snapshots, so a peer that `+
+          `joined and left between samples may be missing. Per-peer byte counts are not measured `+
+          `(BitTorrent exposes only instantaneous rates); the transferred figure above is the `+
+          `exact transfer-level total.</p>`
          :`<p style="color:var(--muted);font-size:12px">no per-peer rows (trimmed on a constrained link, or the download finished within one agent tick)</p>`);
 }
 

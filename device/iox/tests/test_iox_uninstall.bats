@@ -110,3 +110,31 @@ setup() {
   run bash "$UNINSTALL" --dry-run
   [[ "$output" != *"iox_host_data_share"* ]]
 }
+
+# --- guest-share/iris cleanup (IE-3400 scp-push staging dir) ---------------
+# The agent SCP-pushes the image to <target_fs>guest-share/iris on IE-3400
+# (and on any C9300 that falls back from the share mount). Undeploy left that
+# directory behind: the app package and the SSD-share files were removed, this
+# one never was. Mirrors the Guest Shell uninstaller, which has always cleaned
+# its guest-share.
+
+@test "dry-run removes the scp-push staging dir under guest-share" {
+  run bash "$UNINSTALL" --dry-run
+  [[ "$output" == *"delete /force /recursive sdflash:guest-share/iris"* ]]
+}
+
+@test "dry-run honors TARGET_FS for the staging dir" {
+  TARGET_FS=flash: run bash "$UNINSTALL" --dry-run
+  [[ "$output" == *"delete /force /recursive flash:guest-share/iris"* ]]
+}
+
+@test "dry-run never deletes the guest-share root itself" {
+  run bash "$UNINSTALL" --dry-run
+  [[ "$output" != *"delete /force /recursive sdflash:guest-share"$'\n'* ]] && \
+  [[ "$output" != *"delete /force sdflash:guest-share"$'\n'* ]]
+}
+
+@test "dry-run verification mentions the staging dir" {
+  run bash "$UNINSTALL" --dry-run
+  [[ "$output" == *"guest-share/iris"* ]]
+}

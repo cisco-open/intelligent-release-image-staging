@@ -220,21 +220,34 @@ def main():
     hub.start()
     mport = telemetry.metrics_port()
     if mport is not None:
-        # External Prometheus /metrics is gated on IRIS_OBSERVABILITY (default
-        # off) — IRIS doesn't assume a Grafana/Prometheus stack is around. The
-        # self-contained swarm JSON (/swarm) is ALWAYS on; the map PAGE moved
-        # into the console (:8080), so /swarmmap and / point there instead.
+        # External Prometheus-format /metrics is gated on IRIS_OBSERVABILITY
+        # (default off) — IRIS doesn't assume any observability stack is
+        # around. The swarm JSON (/swarm) answers loopback peers only unless
+        # IRIS_SWARM_PUBLIC opens it (the console proxies it over container
+        # loopback); the map PAGE moved into the console (:8080), so /swarmmap
+        # and / point there instead. IRIS_METRICS_HOST (default unchanged
+        # 0.0.0.0) remains the HARD control for this surface: a peer-address
+        # gate is namespace-scoped, the bind host is not (security.md).
         obs = telemetry.observability_enabled()
+        mhost = os.environ.get("IRIS_METRICS_HOST", "0.0.0.0")
+        swarm_public = os.environ.get(
+            "IRIS_SWARM_PUBLIC", "").strip().lower() in (
+                "1", "true", "yes", "on")
         try:
             msrv = telemetry.make_metrics_server(
-                "0.0.0.0", mport,
+                mhost, mport,
                 hub.metrics_text if obs else None,
                 swarm_provider=hub.swarm_snapshot,
-                html=telemetry.moved_page)   # map page retired -> console pointer
+                html=telemetry.moved_page,   # map page retired -> console pointer
+                health=hub.export_health.as_dict,
+                swarm_public=swarm_public)
             threading.Thread(target=msrv.serve_forever, daemon=True).start()
-            print("swarm JSON on http://0.0.0.0:%d/swarm "
-                  "(map page moved to the console :8080)%s"
-                  % (mport, "  (metrics on /metrics)" if obs else
+            print("swarm JSON on http://%s:%d/swarm %s%s"
+                  % (mhost, mport,
+                     "(open to any peer — IRIS_SWARM_PUBLIC)" if swarm_public
+                     else "(loopback only — console-gated; "
+                          "IRIS_SWARM_PUBLIC=1 to open)",
+                     "  (metrics on /metrics)" if obs else
                      "  (Prometheus /metrics disabled — IRIS_OBSERVABILITY=1 "
                      "to enable)"), flush=True)
         except OSError as e:

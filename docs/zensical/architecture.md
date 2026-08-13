@@ -8,7 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 
 IRIS uses a private BitTorrent swarm to distribute large Cisco IOS-XE images to routers and switches. The goal is simple: get the image staged on every approved device faster and with better transfer resilience, while leaving install and reload decisions to the operator.
 
-## The Simple Model
+## The simple model
 
 With a traditional file-server rollout, every device downloads the entire image from one server. That works for a few devices, but large images and large networks can overload the server or its uplink.
 
@@ -40,7 +40,7 @@ flowchart TB
     end
 ```
 
-## What This Delivers
+## What this delivers
 
 | Merit | What it means |
 | --- | --- |
@@ -52,7 +52,7 @@ flowchart TB
 !!! note "Central services still matter"
     IRIS improves image distribution, not every possible failure mode. The catalog and tracker still coordinate policy and swarm participation. The fault-tolerance benefit is in the transfer path: devices can resume piece downloads and use more than one source once the swarm has content.
 
-## Image Lifecycle
+## Image lifecycle
 
 ```mermaid
 sequenceDiagram
@@ -76,7 +76,7 @@ sequenceDiagram
     DeviceA->>Server: Report staged status
 ```
 
-## Under the Hood
+## Under the hood
 
 The public story is peer-assisted staging. The server implements that with a few focused services:
 
@@ -98,7 +98,7 @@ cross the container boundary — the age identity file, the artifacts directory,
 and the persistent volumes — have to be owned by that uid before the stack
 starts. See [Runtime identity](server.md#runtime-identity).
 
-## Storage and State
+## Storage and state
 
 The server keeps durable state under `/var/lib/iris`. Catalog records are small JSON documents written atomically with advisory locks so concurrent GUI and CLI operations do not corrupt state. Secret material is encrypted at rest under `/etc/iris` with age recipients and decrypted to `/run/iris` tmpfs only while the container is running.
 
@@ -107,13 +107,15 @@ Generated artifacts live under `artifacts/` on the host and are served by the ar
 Publishing does not move the image. The seeder seeds it from the directory it
 already occupies, the generated `.torrent` goes to the state directory, and the
 catalog entry records the source directory. That record is what the seeder
-resolves each torrent back to when it re-seeds at startup, and it is what decides
+resolves each torrent back to when it re-seeds at startup. It also decides
 whether deleting a catalog entry may unlink the file: only images sitting on the
 writable uploads volume are removed from disk, so an image published in place
 from the read-only image root survives. See
 [Catalog entry fields](reference.md#catalog-entry-fields).
 
 On an IOx device, `/data/iris` is persistent application scratch rather than an
-IOS-visible image destination. After swarm verification, the app pushes the file
-to the selected IOS filesystem and IOS performs the final `copy /verify`. This
-keeps signature enforcement and the final filesystem write inside IOS.
+IOS-visible image destination. After swarm verification, the app hands the file
+to IOS — a disk-speed write through the bind-mounted share where available, an
+scp push on IE-3400 or as the fallback — and IOS performs the final
+`copy /verify`. This keeps signature enforcement and the final filesystem
+write inside IOS.

@@ -14,11 +14,13 @@ import json
 import os
 import ssl
 import tempfile
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import audit
 import auth
+import live_samples
 import secretfs
 import secrets_store
 
@@ -62,9 +64,9 @@ def _atomic_write_json(path, obj):
 MAX_BODY_BYTES = 65536
 
 _REPORT_KEYS = ("ts", "image_id", "event", "transfer", "link", "peers",
-                "agent")
+                "peers_total", "agent")
 _REPORT_EVENTS = ("staging-complete", "seeding-only", "pull")
-_REPORT_PEER_ROWS = 20
+_REPORT_PEER_ROWS = 64
 _REPORT_STR_MAX = 128
 
 
@@ -93,12 +95,12 @@ def _sanitize_report(data):
     """Server-side re-validation of a device telemetry report (spec issue #13).
 
     Whitelists top-level keys, requires a known event, re-trims peers to
-    _REPORT_PEER_ROWS rows of exactly
-    {ip[:64], rx_bytes:int, tx_bytes:int, avg_bps:int}, coerces the numeric
-    link fields to int, and caps every other string at _REPORT_STR_MAX chars.
-    The device already trims client-side, but ingest never trusts that.
-    Raises ValueError on a non-dict body or an unknown event (routes map that
-    to a 400)."""
+    _REPORT_PEER_ROWS rows of exactly {ip[:64]} — participation only, byte
+    fields are not part of the contract — and floors peers_total at the
+    named-row count, coerces the numeric link fields to int, and caps every
+    other string at _REPORT_STR_MAX chars. The device already trims
+    client-side, but ingest never trusts that. Raises ValueError on a
+    non-dict body or an unknown event (routes map that to a 400)."""
     if not isinstance(data, dict):
         raise ValueError("report must be a JSON object")
     if data.get("event") not in _REPORT_EVENTS:
@@ -123,13 +125,17 @@ def _sanitize_report(data):
         for row in peers:
             if not isinstance(row, dict):
                 continue
-            rows.append({"ip": str(row.get("ip", ""))[:64],
-                         "rx_bytes": _peer_int(row.get("rx_bytes")),
-                         "tx_bytes": _peer_int(row.get("tx_bytes")),
-                         "avg_bps": _peer_int(row.get("avg_bps"))})
+            rows.append({"ip": str(row.get("ip") or "")[:64]})
             if len(rows) >= _REPORT_PEER_ROWS:
                 break
     report["peers"] = rows
+    # Exact distinct-participation count, stored as an int (the drawer
+    # interpolates it unescaped as a number — same stored-XSS discipline as
+    # the link fields above), floored at the named rows so "and N more"
+    # arithmetic can never go negative, and clamped at int32 max so a
+    # hostile device can't push a value outside OTLP intValue encoding.
+    report["peers_total"] = min(
+        max(_peer_int(data.get("peers_total")), len(rows)), 2**31 - 1)
     # Hard per-report bound (spec §6: ring of 5 × ≤16 KB per device). The
     # 64 KiB transport cap bounds the wire body; this bounds what we STORE —
     # key-count in nested sections is otherwise uncapped.
@@ -288,9 +294,11 @@ class CatalogStore:
 
 class Catalog:
     def __init__(self, store, secrets_path,
-                 audit_path=None):
+                 audit_path=None, live_table=None, stream_settings=None):
         self.store = store
         self.secrets_path = secrets_path
+        self.live_table = live_table
+        self.stream_settings = stream_settings
         self.audit_path = (audit_path
                            or os.environ.get("IRIS_AUDIT",
                                              "/etc/iris/audit.jsonl"))
@@ -342,12 +350,31 @@ class Catalog:
                 "target_fs": data.get("target_fs"),
                 "model": data.get("model"),
                 "telemetry_enabled": data.get("telemetry_enabled"),
+                "telemetry_stream_enabled": data.get("telemetry_stream_enabled"),
                 # The heartbeat's source IP is the agent's Guest Shell IP — the
                 # SAME IP it announces to the tracker with — so the swarm map can
                 # join this device's model onto its swarm peer by IP.
                 "swarm_ip": src_ip,
             })
+            # Live streaming sample (spec 6.1): validated against the POLICY
+            # assignment (server truth), size/enum/bounds checked; a bad
+            # sample NEVER fails the heartbeat — drop and count.
+            sample = data.get("sample")
+            if sample is not None and self.live_table is not None:
+                approved = self.store.get_policy(parts[2]).get(
+                    "approved_image_id")
+                every = (self.stream_settings.read()[0]
+                         if self.stream_settings is not None else 1)
+                try:
+                    clean = live_samples.sanitize_sample(sample, approved)
+                    self.live_table.update(parts[2], clean, time.time(), every)
+                except ValueError:
+                    self.live_table.reject()
             resp = {"ok": True}
+            if self.stream_settings is not None:
+                every, pause = self.stream_settings.read()
+                resp["stream_every"] = every
+                resp["stream_pause"] = pause
             if self.store.pending_report(parts[2], time.time()):
                 resp["report_requested"] = True
             return self._json(200, resp)
@@ -502,8 +529,9 @@ class Catalog:
 
 
 def make_server(host, port, store, secrets_path, certfile=None,
-                audit_path=None):
-    cat = Catalog(store, secrets_path, audit_path=audit_path)
+                audit_path=None, live_table=None, stream_settings=None):
+    cat = Catalog(store, secrets_path, audit_path=audit_path,
+                  live_table=live_table, stream_settings=stream_settings)
 
     grace = int(os.environ.get("IRIS_TOKEN_SKEW_GRACE", "300"))
 
@@ -654,11 +682,22 @@ def make_server(host, port, store, secrets_path, certfile=None,
 def main():
     host = os.environ.get("IRIS_CATALOG_HOST", "0.0.0.0")
     port = int(os.environ.get("IRIS_CATALOG_PORT", "8443"))
-    store = CatalogStore(os.environ.get("IRIS_STATE", "/var/lib/iris"))
+    state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
+    store = CatalogStore(state_dir)
     secrets_path = os.environ.get("IRIS_SECRETS", "/run/iris/secrets.json")
     cert = os.environ.get("IRIS_CERT", "/etc/iris/tls/cert.pem")
     certfile = cert if os.path.exists(cert) else None
-    srv = make_server(host, port, store, secrets_path, certfile=certfile)
+    live_table = live_samples.LiveTable()
+    stream_settings = live_samples.StreamSettings(
+        os.path.join(state_dir, "telemetry-settings.json"))
+    stop = threading.Event()
+    threading.Thread(
+        target=live_samples.writer_loop,
+        args=(live_table, os.path.join(state_dir, "live-samples.json"),
+              live_samples.SNAPSHOT_WRITE_INTERVAL, stop),
+        daemon=True).start()
+    srv = make_server(host, port, store, secrets_path, certfile=certfile,
+                      live_table=live_table, stream_settings=stream_settings)
     scheme = "https" if certfile else "http"
     print("catalog on %s://%s:%d/v1/images" % (scheme, host, port), flush=True)
     srv.serve_forever()

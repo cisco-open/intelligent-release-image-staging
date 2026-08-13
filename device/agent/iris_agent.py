@@ -43,15 +43,19 @@ Deps = collections.namedtuple(
 
 
 def _heartbeat(image, deps, stage_state="staging", target_fs=None,
-               tele_on=True, stage_error=None):
-    return {"current_image_id": image["id"],
-            "free_flash_bytes": deps.free_bytes(target_fs or "flash:"),
-            "version": deps.version(),
-             "model": deps.model(),
-             "stage_state": stage_state,
-             "stage_error": stage_error,
-             "target_fs": target_fs,
-            "telemetry_enabled": bool(tele_on)}
+               tele_on=True, stage_error=None, sample=None, stream_on=False):
+    hb = {"current_image_id": image["id"],
+          "free_flash_bytes": deps.free_bytes(target_fs or "flash:"),
+          "version": deps.version(),
+          "model": deps.model(),
+          "stage_state": stage_state,
+          "stage_error": stage_error,
+          "target_fs": target_fs,
+          "telemetry_enabled": bool(tele_on),
+          "telemetry_stream_enabled": bool(stream_on)}
+    if sample is not None:
+        hb["sample"] = sample
+    return hb
 
 
 def _send_heartbeat(deps, sid, payload):
@@ -107,7 +111,33 @@ def _send_report(cfg, deps, state, img_id, report):
         return False
 
 
-def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now):
+def _maybe_sample(cfg, deps, state, img_id, stage, phase, now):
+    """Build (sample, peers) BEFORE the heartbeat POST (spec section 5.2) —
+    the heartbeat is otherwise the last step of the tick and the live sample
+    must ride inside it. Best-effort, never raises. Returns the getPeers rows
+    too so _telemetry_tick reuses them: aria2 is sampled at most once per
+    tick. peers None means 'not fetched this tick' (cadence not due)."""
+    try:
+        if not telemetry_report.stream_enabled(cfg):
+            return None, None
+        if phase not in ("downloading", "seeding-only"):
+            return None, None
+        st = state.setdefault(img_id, {})
+        tele = st.setdefault("tele", {})
+        tier = telemetry_report.classify(state, tele.get("avg_bps"))
+        if not telemetry_report.should_sample(state, tele, tier, now):
+            return None, None
+        stats = deps.aria_stats(stage)
+        peers = deps.aria_peers(stage)
+        sample = telemetry_report.build_sample(img_id, phase, stats, tier)
+        tele["stream_last_ts"] = now
+        return sample, peers
+    except Exception:
+        return None, None
+
+
+def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now,
+                    peers=None):
     """Per-tick telemetry glue (issue #13). phase is which run_once path is
     calling: 'downloading' | 'seeding-only' | 'copied' | 'steady' | 'no-space'.
 
@@ -132,31 +162,24 @@ def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now):
         # backs off instead of resetting the streak every tick.
         if hb_resp is None:
             telemetry_report.record_failure(state)
+        # Streaming directives ride every heartbeat response; overwrite-always
+        # persistence with 3-tick freshness (spec section 5.4).
+        telemetry_report.store_directives(state, hb_resp, now)
         st = state.setdefault(img_id, {})
         tele = st.setdefault("tele", {})
-        # self-heal state poisoned by the pre-2026.07.04.7 pull-sampling bug
-        # (fabricated multi-GB tx rows on finished transfers) — cheap and
-        # idempotent, so it simply runs every tick
-        if telemetry_report.heal_post_completion_contamination(tele):
-            deps.emit("TELEMETRY-HEAL",
-                      "%s dropped fabricated post-completion peer rows" % img_id)
         if phase == "downloading" and "started_ts" not in tele:
             tele["started_ts"] = now
         if phase in ("downloading", "seeding-only"):
-            telemetry_report.integrate_peers(tele, deps.aria_peers(stage), now)
+            telemetry_report.observe_peers(
+                tele, peers if peers is not None else deps.aria_peers(stage))
         if phase in ("copied", "seeding-only") and not tele.get("done_ts"):
-            # One-time completion snapshot, taken while aria2 still holds the
-            # download (before purge/removeDownloadResult/daemon bounces).
-            # Take ONE final per-peer sample first so at least one real-elapsed
-            # window lands even on a fast download (the accumulated weights
-            # drive per-peer share when the total is attributed). The
-            # seeding-only path already sampled this tick above, so only the
-            # 'copied' completion needs the extra sample. Best-effort: a
-            # peer-RPC hiccup here must never block marking done.
+            # Take ONE final participation sample first so peers connected at
+            # the end of a fast download still land in the observed set (the
+            # seeding-only path already sampled this tick above). Best-effort:
+            # a peer-RPC hiccup here must never block marking done.
             if phase == "copied":
                 try:
-                    telemetry_report.integrate_peers(
-                        tele, deps.aria_peers(stage), now)
+                    telemetry_report.observe_peers(tele, deps.aria_peers(stage))
                 except Exception:
                     pass
             tele["done_ts"] = now
@@ -184,17 +207,17 @@ def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now):
             tele["report_next_ts"] = 0.0
         # GUI pull: fresh report THIS tick, independent of the pending
         # report's backoff. On a steady tick the pull re-sends the COMPLETED
-        # transfer's stats FROZEN — deliberately NO fresh sample. The per-peer
-        # numbers are rate-integrations (speed x elapsed-since-last-sample,
-        # clamped at ELAPSED_CLAMP) which are only meaningful while sampling
-        # runs every tick; a sparse pull-time sample extrapolates one
-        # instantaneous reading across the whole clamp window and MUTATES a
-        # finished transfer's table (hardware-observed: a device seeding a
-        # neighbor's download at LAN speed accumulated ~12 GB phantom tx on a
-        # 1.26 GB image across three pulls, and the neighbor got injected as a
-        # bogus rx row via the even-split fallback). No local retry
-        # bookkeeping: the server keeps the directive until a report ARRIVES,
-        # so a failed send is re-flagged on the next heartbeat anyway.
+        # transfer's observed peer set FROZEN — deliberately NO fresh sample
+        # (a steady tick never calls observe_peers). Historical rationale
+        # (hardware-observed, pre-2026.07.04.7): the old rate-integrating
+        # sampler took a sparse pull-time reading and extrapolated one
+        # instantaneous speed across a stalled-tick clamp window, MUTATING a
+        # finished transfer's table (~12 GB phantom tx on a 1.26 GB image
+        # across three pulls, with the neighbor injected as a bogus rx row via
+        # the even-split fallback) — the reason observe_peers no longer
+        # tracks bytes at all. No local retry bookkeeping: the server keeps
+        # the directive until a report ARRIVES, so a failed send is
+        # re-flagged on the next heartbeat anyway.
         if telemetry_report.pull_requested(hb_resp):
             _send_report(cfg, deps, state, img_id,
                          telemetry_report.build_report(cfg, state, img_id,
@@ -295,6 +318,7 @@ def run_once(cfg, deps, state):
     sid = cfg["device_id"]
     stage_dir = cfg["stage_dir"]
     tele_on = telemetry_report.enabled(cfg)
+    stream_on = telemetry_report.stream_enabled(cfg)
 
     # Upgrade from an older agent: clear "copied" so the next copy_to_root
     # re-verifies the flash-root copy instead of trusting the old flag.
@@ -349,7 +373,8 @@ def run_once(cfg, deps, state):
             hb = _send_heartbeat(deps, sid,
                                  _heartbeat(image, deps, "ready",
                                             target_fs=state.get("stage_fs"),
-                                            tele_on=tele_on))
+                                            tele_on=tele_on,
+                                            stream_on=stream_on))
             _telemetry_tick(cfg, deps, state, img_id, stage, "steady",
                             hb, time.time())
             return "complete"
@@ -455,13 +480,19 @@ def run_once(cfg, deps, state):
                                   "(free=%d need>=%d mode=%s)"
                                   % (image["filename"], free,
                                      size + flashcheck.HEADROOM, mode))
+                        sample, peers = _maybe_sample(
+                            cfg, deps, state, img_id, stage, "seeding-only",
+                            time.time())
                         hb = _send_heartbeat(
                             deps, sid, _heartbeat(image, deps,
                                                   "flash_full_seeding_only",
                                                   target_fs=state.get("stage_fs"),
-                                                  tele_on=tele_on))
+                                                  tele_on=tele_on,
+                                                  sample=sample,
+                                                  stream_on=stream_on))
                         _telemetry_tick(cfg, deps, state, img_id, stage,
-                                        "seeding-only", hb, time.time())
+                                        "seeding-only", hb, time.time(),
+                                        peers=peers)
                         return "seeding-only"
                 st.pop("blocked_no_space", None)
                 # Container-mode IOx devices must SCP the completed image into
@@ -472,7 +503,8 @@ def run_once(cfg, deps, state):
                     _send_heartbeat(
                         deps, sid, _heartbeat(image, deps, "transferring_to_ios",
                                               target_fs=target_prefix,
-                                              tele_on=tele_on))
+                                              tele_on=tele_on,
+                                              stream_on=stream_on))
                 if deps.copy_to_root(image["filename"], target_prefix):
                     st["copied"] = True
                     state["root_file"] = image["filename"]   # ours; safe to replace later
@@ -488,7 +520,8 @@ def run_once(cfg, deps, state):
                                        "ready" if st.get("copied") else "staging",
                                        target_fs=state.get("stage_fs"),
                                        tele_on=tele_on,
-                                       stage_error=st.get("stage_error")))
+                                       stage_error=st.get("stage_error"),
+                                       stream_on=stream_on))
             _telemetry_tick(cfg, deps, state, img_id, stage, "copied",
                             hb, time.time())
             return "complete"
@@ -524,7 +557,8 @@ def run_once(cfg, deps, state):
             hb = _send_heartbeat(
                 deps, sid, _heartbeat(image, deps, "flash_full",
                                       target_fs=state.get("stage_fs"),
-                                      tele_on=tele_on))
+                                      tele_on=tele_on,
+                                      stream_on=stream_on))
             _telemetry_tick(cfg, deps, state, img_id, stage, "no-space",
                             hb, time.time())
             return "no-space"
@@ -549,11 +583,15 @@ def run_once(cfg, deps, state):
         # old 10s IRIS-MONITOR raced and spammed). Computed from the on-disk size.
         deps.emit("PROGRESS", "%s %d%% (%dMB/%dMB)"
                   % (image["filename"], have * 100 // size, have >> 20, size >> 20))
+    sample, peers = _maybe_sample(cfg, deps, state, img_id, stage,
+                                  "downloading", time.time())
     hb = _send_heartbeat(deps, sid, _heartbeat(image, deps,
                                                target_fs=state.get("stage_fs"),
-                                               tele_on=tele_on))
+                                               tele_on=tele_on,
+                                               sample=sample,
+                                               stream_on=stream_on))
     _telemetry_tick(cfg, deps, state, img_id, stage, "downloading",
-                    hb, time.time())
+                    hb, time.time(), peers=peers)
     return "downloading"
 
 
@@ -732,18 +770,15 @@ def _aria_stats_impl(rpc, stage_path):
 
 
 def _aria_peers_impl(rpc, stage_path):
-    """Simplified aria2.getPeers rows for the staged file's download:
-    [{'ip', 'downloadSpeed', 'uploadSpeed'}] (values are aria2's strings;
-    missing keys default to ''/'0'). Returns [] on no matching download / ANY
+    """Observed peer rows for the staged file's download: [{'ip': str}].
+    Participation only — aria2 has no per-peer byte counters, so nothing
+    else from getPeers is consumed. Returns [] on no matching download / ANY
     error (getPeers on a stopped download is an aria2 error). NEVER raises."""
     try:
         gid = _find_aria_gid(rpc, stage_path)
         if gid is None:
             return []
-        return [{"ip": p.get("ip", ""),
-                 "downloadSpeed": p.get("downloadSpeed", "0"),
-                 "uploadSpeed": p.get("uploadSpeed", "0")}
-                for p in rpc("aria2.getPeers", [gid])]
+        return [{"ip": p.get("ip", "")} for p in rpc("aria2.getPeers", [gid])]
     except Exception:
         return []
 

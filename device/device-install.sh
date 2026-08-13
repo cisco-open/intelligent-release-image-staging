@@ -175,6 +175,7 @@ stage_dir = $STAGE
 rpc_secret = $RPC_SECRET
 catalog_ca = $CATALOG_CA
 telemetry = ${TELEMETRY:-on}
+telemetry_stream = ${TELEMETRY_STREAM:-off}
 token_expires_at = 0
 agent_version = $(cat "$HERE/../VERSION" 2>/dev/null || echo unknown)
 EOF

@@ -534,12 +534,29 @@ def test_metrics_server_serves_provider_text():
 
 
 def test_metrics_server_healthz_ok():
+    # JSON body (spec 7.7); status stays 200 — container HEALTHCHECK and
+    # orchestrator probes are status-code based and unaffected.
+    srv = telemetry.make_metrics_server(
+        "127.0.0.1", 0, lambda: "",
+        health=lambda: {"state": "ok", "last_success_ts": 0, "fail_streak": 0})
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        status, body = _get(srv.server_address[1], "/healthz")
+        assert status == 200
+        data = json.loads(body)
+        assert data["ok"] is True
+        assert data["otlp_export"]["state"] in ("ok", "degraded", "off")
+    finally:
+        srv.shutdown()
+
+
+def test_metrics_server_healthz_without_health_provider():
     srv = telemetry.make_metrics_server("127.0.0.1", 0, lambda: "")
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
         status, body = _get(srv.server_address[1], "/healthz")
         assert status == 200
-        assert body.strip() == b"ok"
+        assert json.loads(body)["ok"] is True
     finally:
         srv.shutdown()
 
@@ -842,7 +859,8 @@ def test_swarmmap_hub_drawer_has_sent_bytes_table():
 
 # ---------------------------------------------------------------------------
 # Telemetry (#18): swarm-map leads with the CONSOLE device IP (device_id),
-# richer per-peer drawer table (received + avg speed), wider drawer panel.
+# participation-only per-peer drawer table (who was connected, no bytes),
+# wider drawer panel.
 # Same HTML-source guard style as the escapeHtml tests above.
 # ---------------------------------------------------------------------------
 
@@ -875,30 +893,25 @@ def test_swarmmap_shows_announce_ip_as_secondary_detail():
         "the announce-ip sub-detail must be escaped before innerHTML insertion"
 
 
-def test_swarmmap_per_peer_table_received_and_avg_speed():
-    # The drawer's per-peer report table is the "who served me how much + how
-    # fast" view: received bytes via fmtBytes(rx_bytes) and average speed via
-    # fmtBps(avg_bps), with escaped peer identity. tx no longer has its own
-    # column (shown inline only when seeding).
+def test_swarmmap_per_peer_table_is_participation_only():
+    # Byte columns are gone BY DESIGN: per-peer rx/tx/avg were derived, not
+    # measured (aria2 has no per-peer byte counters; the even-split fallback
+    # fired on every multi-peer lab transfer). The drawer must not read any
+    # per-peer byte field, and must render the exact peers_total count
+    # number-gated (same stored-XSS discipline as rtt_ms_median).
     html = _swarmmap_html()
     body = html.split("function reportHtml")[1].split("\nfunction ")[0]
-    # header carries ↓/↑ direction so received-vs-sent asymmetry reads as
-    # this-device's-own-view, not a shared ledger
-    assert "<th>↓ received</th>" in body and "<th>↓ avg speed</th>" in body, \
-        "per-peer table header must be peer | ↓ received | ↓ avg speed | ↑ sent"
-    assert "<th>↑ sent</th>" in body, "sent column must be direction-labeled"
-    # received is rendered via fmtBytes(row.rx_bytes ...)
-    assert "fmtBytes(row.rx_bytes" in body, \
-        "received column must render rx_bytes via fmtBytes"
-    # avg speed is rendered via fmtBps(row.avg_bps)
-    assert "fmtBps(row.avg_bps)" in body, \
-        "avg speed column must render avg_bps via fmtBps"
-    # the peer identity resolves the announce ip -> its console device via byIp
+    assert "row.rx_bytes" not in body and "row.tx_bytes" not in body \
+        and "row.avg_bps" not in body, \
+        "per-peer byte fields are not measured and must not be rendered"
+    assert "<th>peers observed</th>" in body, \
+        "per-peer table header must be the single participation column"
+    # the peer identity still resolves the announce ip -> device via byIp
     assert "byIp[row.ip]" in body, \
         "per-peer row must resolve the announce ip to its device via byIp"
-    # seeding (tx) stays visible inline, without a dedicated column
-    assert "row.tx_bytes" in body, \
-        "nonzero tx (seeding) must still be surfaced inline"
+    # overflow count interpolates as a NUMBER only
+    assert "Number.isFinite(rep.peers_total)" in body, \
+        "peers_total must be finite-number-gated before interpolation"
 
 
 def test_swarmmap_drawer_widened():
@@ -1166,7 +1179,7 @@ def test_sample_exports_each_stored_report_exactly_once():
                               reports_info=lambda: reports)
     hub.sample()                    # first pass: both reports exported
     assert len(sent) == 1
-    assert sent[0].decode().count('"device_id"') == 2   # one attr per record
+    assert sent[0].decode().count('"device.id"') == 2   # one attr per record
     hub.sample()                    # same stored data -> nothing new to send
     assert len(sent) == 1
     # a NEW report lands (newer received_at) -> exported exactly once more
@@ -1174,7 +1187,7 @@ def test_sample_exports_each_stored_report_exactly_once():
     hub.sample()
     assert len(sent) == 2
     body = sent[1].decode()
-    assert body.count('"device_id"') == 1
+    assert body.count('"device.id"') == 1
     assert "999000000000" in body   # ts=999 -> timeUnixNano
 
 
@@ -1238,3 +1251,237 @@ def test_metrics_server_serves_moved_page_at_swarmmap_and_root(monkeypatch):
         assert _get(srv.server_address[1], "/metrics")[0] == 200
     finally:
         srv.shutdown()
+
+
+# ---- live transfer streaming: aggregation + /swarm enrichment (spec 7.2/7.4)
+
+IMAGES = {"img-1": {"id": "img-1", "filename": "cat9k.bin", "size": 1000,
+                    "info_hash_hex": "aa11"},
+          "img-2": {"id": "img-2", "filename": "ie3k.bin", "size": 2000,
+                    "info_hash_hex": "bb22"}}
+
+
+def _doc(now, samples):
+    return {"written_at": now, "counters": {"samples_rejected_total": 7},
+            "samples": samples}
+
+
+class TestAggregateTransfers:
+    def test_rollup_two_images(self):
+        samples = {
+            "d1": {"v": 1, "image_id": "img-1", "phase": "downloading",
+                   "done_bytes": 500, "down_bps": 100, "up_bps": 10,
+                   "peers": 2, "tier": "good", "received_at": 100.0,
+                   "effective_interval": 60},
+            "d2": {"v": 1, "image_id": "img-1", "phase": "downloading",
+                   "done_bytes": 250, "down_bps": 0, "up_bps": 0,
+                   "peers": 1, "tier": "constrained", "received_at": 100.0,
+                   "effective_interval": 240},
+            "d3": {"v": 1, "image_id": "img-2", "phase": "seeding",
+                   "done_bytes": 2000, "down_bps": 0, "up_bps": 50,
+                   "peers": 1, "tier": "good", "received_at": 100.0,
+                   "effective_interval": 60},
+            "dX": {"v": 1, "image_id": "unknown", "phase": "downloading",
+                   "done_bytes": 1, "down_bps": 1, "up_bps": 0, "peers": 1,
+                   "tier": "good", "received_at": 100.0,
+                   "effective_interval": 60},
+        }
+        rows, extras = telemetry.aggregate_transfers(
+            _doc(100.0, samples), IMAGES, 100.0)
+        assert extras == {"stream_devices": 3,           # unknown dropped
+                          "samples_rejected_total": 7}
+        by_image = {r["image"]: r for r in rows}
+        r1 = by_image["cat9k.bin"]
+        assert (r1["active"], r1["down_bps"], r1["up_bps"]) == (2, 100, 10)
+        assert r1["stalled"] == 1                        # d2 downloading @ 0
+        assert (r1["tier_good"], r1["tier_constrained"]) == (1, 1)
+        assert abs(r1["progress_ratio"] - 750 / 2000) < 1e-9
+        assert by_image["ie3k.bin"]["info_hash"] == "bb22"
+
+    def test_stale_or_missing_doc_is_empty(self):
+        assert telemetry.aggregate_transfers(None, IMAGES, 100.0) == \
+            ([], {"stream_devices": 0, "samples_rejected_total": 0})
+        rows, extras = telemetry.aggregate_transfers(
+            _doc(100.0, {}), IMAGES, 131.0)              # > 2 x 15s old
+        assert rows == [] and extras["stream_devices"] == 0
+
+
+class TestSwarmSampleEnrichment:
+    def test_rows_with_device_id_gain_live_fields(self):
+        hub = telemetry.Telemetry(
+            device_info=lambda: {"d1": {"swarm_ip": "10.0.0.2",
+                                        "model": "C9300"}},
+            live_info=lambda: _doc(100.0, {
+                "d1": {"v": 1, "image_id": "img-1", "phase": "downloading",
+                       "done_bytes": 500, "down_bps": 123, "up_bps": 4,
+                       "peers": 2, "tier": "good", "received_at": 90.0,
+                       "effective_interval": 60}}))
+        hub.registry.announce("aa11", "peer1", "10.0.0.2", 6881,
+                              left=500, now=100.0)
+        snap = hub.swarm_snapshot(now=100.0)
+        row = snap["images"][0]["peers"][0]
+        assert row["down_bps"] == 123 and row["done_bytes"] == 500
+        assert row["sample_age_s"] == 10
+
+
+# ---- OTLP export health + metrics push (spec 7.5/7.7) ----
+
+class TestExportHealth:
+    def test_transitions_fire_once_per_edge(self):
+        events = []
+        h = telemetry.ExportHealth(
+            on_transition=lambda name: events.append(name))
+        h.record(True, "logs", 100.0)
+        h.record(False, "metrics", 110.0)
+        h.record(False, "logs", 120.0)          # still degraded: no new event
+        h.record(True, "metrics", 130.0)
+        d = h.as_dict()
+        assert d["state"] == "ok" and d["last_success_ts"] == 130.0
+        assert d["failures_total"] == 2 and d["fail_streak"] == 0
+        assert d["failures_by_signal"] == {"logs": 1, "metrics": 1}
+        assert events == ["otlp-export-degraded", "otlp-export-recovered"]
+
+
+class TestSampleExportsMetrics:
+    def test_conflated_snapshot_exported(self):
+        exported = []
+        class _M:
+            def export(self, points):
+                exported.append(list(points))
+                return True
+        hub = telemetry.Telemetry(
+            live_info=lambda: {
+                "written_at": 100.0,        # fresh: aggregation runs for real
+                "counters": {"samples_rejected_total": 0},
+                "samples": {"d1": {"v": 1, "image_id": "img-1",
+                                   "phase": "downloading", "done_bytes": 500,
+                                   "down_bps": 5, "up_bps": 2, "peers": 1,
+                                   "tier": "good", "received_at": 100.0,
+                                   "effective_interval": 60}}},
+            images_info=lambda: {"img-1": {"id": "img-1",
+                                           "filename": "cat9k.bin",
+                                           "size": 1000,
+                                           "info_hash_hex": "aa11"}})
+        hub.metrics_exporter = _M()
+        hub.export_health = telemetry.ExportHealth()
+        hub.sample(now=100.0)
+        names = {p["name"] for p in exported[-1]}
+        assert "iris.transfer.throughput" in names
+        assert "iris.transfer.progress" in names
+        assert "iris.telemetry.export.failures" in names
+        assert not any(n.endswith("_total") for n in names)
+
+    def test_quiet_fleet_still_exports_counters(self):
+        exported = []
+        class _M:
+            def export(self, points):
+                exported.append(list(points))
+                return True
+        hub = telemetry.Telemetry(
+            live_info=lambda: {"written_at": 0, "counters":
+                               {"samples_rejected_total": 9}, "samples": {}},
+            images_info=lambda: {})
+        hub.metrics_exporter = _M()
+        hub.export_health = telemetry.ExportHealth()
+        hub.sample(now=100.0)
+        names = {p["name"] for p in exported[-1]}
+        assert "iris.telemetry.samples.rejected" in names
+
+
+class TestReportExportEnrichment:
+    def test_enrich_reaches_the_record(self):
+        emitted = []
+        class _E:
+            def emit(self, rec): emitted.append(rec)
+            def flush(self): return None
+        hub = telemetry.Telemetry(
+            exporter=_E(),
+            device_info=lambda: {"d1": {"swarm_ip": "10.0.0.2",
+                                        "model": "C9300",
+                                        "free_flash_bytes": 5,
+                                        "stage_state": "ready"}},
+            reports_info=lambda: {"d1": [{"ts": 1, "image_id": "img-1",
+                                          "received_at": 50.0,
+                                          "peers": [{"ip": "10.0.0.2"}],
+                                          "peers_total": 1}]})
+        hub._export_new_reports()
+        attrs = {a["key"]: a["value"] for a in emitted[0]["attributes"]}
+        assert attrs["device.model.identifier"] == {"stringValue": "C9300"}
+        row = attrs["iris.transfer.peers"]["arrayValue"]["values"][0]
+        kv = {p["key"]: p["value"] for p in row["kvlistValue"]["values"]}
+        assert kv == {"network.peer.address": {"stringValue": "10.0.0.2"},
+                      "device.id": {"stringValue": "d1"}}
+
+
+# ---- :9101 /swarm loopback gate (console-only swarm data by default) ----
+
+class TestSwarmPeerGate:
+    def test_predicate_loopback_allowed(self):
+        for p in ("127.0.0.1", "127.0.0.53", "::1", "::ffff:127.0.0.1",
+                  "::ffff:127.0.0.1%lo0"):
+            assert telemetry.swarm_peer_allowed(p, False), p
+
+    def test_predicate_non_loopback_denied(self):
+        for p in ("10.0.0.9", "192.168.1.5", "::ffff:10.0.0.9",
+                  "2001:db8::1", "not-an-ip", ""):
+            assert not telemetry.swarm_peer_allowed(p, False), p
+
+    def test_predicate_public_flag_allows_anything(self):
+        assert telemetry.swarm_peer_allowed("10.0.0.9", True)
+        assert telemetry.swarm_peer_allowed("garbage", True)
+
+
+class TestSwarmRouteGate:
+    """The deny path is unreachable by a real client (any connection to a
+    127.0.0.1-bound test server IS loopback), so these patch the predicate
+    the route consults at request time (module-global resolution)."""
+
+    def _server(self, swarm_public=False):
+        return telemetry.make_metrics_server(
+            "127.0.0.1", 0, lambda: "", swarm_provider=lambda: {"ok": 1},
+            health=lambda: {"state": "off"}, swarm_public=swarm_public)
+
+    def test_loopback_client_gets_swarm(self):
+        srv = self._server()
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1],
+                                           timeout=5)
+            c.request("GET", "/swarm")
+            r = c.getresponse()
+            assert r.status == 200 and b"ok" in r.read()
+        finally:
+            srv.shutdown()
+
+    def test_non_loopback_client_gets_403_but_healthz_ok(self, monkeypatch):
+        srv = self._server()
+        monkeypatch.setattr(telemetry, "swarm_peer_allowed",
+                            lambda peer, public: False)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1],
+                                           timeout=5)
+            c.request("GET", "/swarm")
+            r = c.getresponse()
+            body = r.read()
+            assert r.status == 403
+            assert b"console" in body               # self-describing
+            c2 = http.client.HTTPConnection("127.0.0.1",
+                                            srv.server_address[1], timeout=5)
+            c2.request("GET", "/healthz")            # probes unaffected
+            assert c2.getresponse().status == 200
+        finally:
+            srv.shutdown()
+
+    def test_swarm_public_true_serves_any_peer(self, monkeypatch):
+        srv = self._server(swarm_public=True)
+        monkeypatch.setattr(telemetry, "swarm_peer_allowed",
+                            lambda peer, public: public)  # only the flag saves it
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1],
+                                           timeout=5)
+            c.request("GET", "/swarm")
+            assert c.getresponse().status == 200
+        finally:
+            srv.shutdown()

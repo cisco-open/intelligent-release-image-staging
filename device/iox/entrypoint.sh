@@ -66,6 +66,7 @@ if [ ! -f "$CONF" ]; then
     echo "device_ssh_enable = ${IRIS_DEVICE_SSH_ENABLE:-${IRIS_DEVICE_SSH_PASS}}"
     echo "max_peers = ${MAX_PEERS}"
     echo "telemetry = ${IRIS_TELEMETRY:-on}"
+    echo "telemetry_stream = ${IRIS_TELEMETRY_STREAM:-off}"
     echo "rpc_port = ${RPC_PORT}"
     echo "share_dir = ${IRIS_SHARE_DIR:-}"
     echo "share_ios_path = ${IRIS_SHARE_IOS_PATH:-}"
@@ -91,6 +92,13 @@ if cfg.get("target_fs") != target:
     agent_config.write_conf(path, cfg)
 PY
 fi
+
+# Same operator-intent rule for the telemetry toggles: a console redeploy that
+# flips reports or streaming must take effect on a device with an existing
+# conf (spec section 5.5) — both keys reconcile, deploy-time env wins.
+. /opt/iris/agent/../reconcile.sh 2>/dev/null || . "$(dirname "$0")/reconcile.sh"
+reconcile_conf_key telemetry "${IRIS_TELEMETRY:-}"
+reconcile_conf_key telemetry_stream "${IRIS_TELEMETRY_STREAM:-}"
 
 # --- 2/3. aria2c supervisor + agent tick loop ----------------------------------
 read_secret() {

@@ -76,6 +76,7 @@ PKG="${PKG:-iris-arm64.tar}"; PKG_FS="${PKG_FS:-flash:}"
 DEVICE_SSH_USER="${DEVICE_SSH_USER:-dnac}"
 TARGET_FS="${TARGET_FS:-sdflash:}"
 IRIS_TELEMETRY="${IRIS_TELEMETRY:-on}"
+IRIS_TELEMETRY_STREAM="${IRIS_TELEMETRY_STREAM:-off}"
 [[ "$TARGET_FS" =~ ^[A-Za-z][A-Za-z0-9_-]*:$ ]] \
   || { echo "ERROR: TARGET_FS must be an IOS filesystem prefix such as sdflash:" >&2; exit 2; }
 APPID=iris
@@ -170,12 +171,13 @@ app-hosting appid $APPID
   run-opts 6 "-e IRIS_DEVICE_SSH_USER=$DEVICE_SSH_USER"
   run-opts 7 "-e IRIS_TARGET_FS=$TARGET_FS"
   run-opts 8 "-e IRIS_TELEMETRY=$IRIS_TELEMETRY"
+  run-opts 9 "-e IRIS_TELEMETRY_STREAM=$IRIS_TELEMETRY_STREAM"
 EOF
 if [ -n "$SHARE_HOST_PATH" ]; then
 cat <<EOF
-  run-opts 9 "-e IRIS_SHARE_DIR=/mnt/share"
-  run-opts 10 "-e IRIS_SHARE_IOS_PATH=$SHARE_IOS_PATH"
-  run-opts 11 "-v $SHARE_HOST_PATH:/mnt/share"
+  run-opts 10 "-e IRIS_SHARE_DIR=/mnt/share"
+  run-opts 11 "-e IRIS_SHARE_IOS_PATH=$SHARE_IOS_PATH"
+  run-opts 12 "-v $SHARE_HOST_PATH:/mnt/share"
 EOF
 fi
 echo "end"

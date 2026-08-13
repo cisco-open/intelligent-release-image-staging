@@ -102,12 +102,12 @@ setup() {
 @test "share run-opts render INSIDE the app-hosting docker block (before end)" {
   # app-hosting silently ignores run-opts rendered after the block's `end`,
   # so the mount would vanish while every substring gate still passed —
-  # assert the line that immediately follows run-opts 11 is `end`.
+  # assert the line that immediately follows run-opts 12 is `end`.
   VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
     SHARE_HOST_PATH=/vol/usb1/iox_host_data_share \
     SHARE_IOS_PATH=usbflash1:iox_host_data_share \
     run bash "$INSTALL" --dry-run
-  after="$(printf '%s\n' "$output" | grep -A1 'run-opts 11' | tail -1)"
+  after="$(printf '%s\n' "$output" | grep -A1 'run-opts 12' | tail -1)"
   [ "$after" = "end" ]
 }
 

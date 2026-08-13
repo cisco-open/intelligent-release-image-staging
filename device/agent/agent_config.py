@@ -21,6 +21,7 @@ DEFAULTS = {
     "rpc_port": "6800",
     "rpc_secret": "",
     "max_peers": "10",     # cap BT peer connections per torrent on a device
+    "telemetry_stream": "off",  # live sample streaming opt-in (fail-closed; spec §5.5)
     "catalog_ca": "",      # path to pinned server cert; "" => verify-if-present off (#12)
     "token_expires_at": "0",   # epoch secs of catalog_token expiry; 0 => refresh next tick
 }

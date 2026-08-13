@@ -15,7 +15,7 @@ This path brings up the IRIS server, publishes an IOS-XE image, generates device
 | Linux host with Docker Engine 23.0 or newer and Docker Compose | Runs the IRIS server container. The runtime tmpfs uses the `uid=`, `gid=`, and `mode=` mount options, which older engines reject. |
 | Reachable server IP | Devices must reach the host on the published IRIS ports. |
 | `age` identity | Encrypts server secrets at rest. Keep the private identity outside the repository. |
-| IOS-XE image files | Store outside Git, normally under `/opt/images`. The tree must be readable and traversable by uid `10001`. |
+| IOS-XE image files | Store outside Git, normally under `/opt/images`. The tree must be readable and traversable by uid `10001`. The required IOS-XE license tier is outside IRIS's scope — check it at [cisco.com](https://www.cisco.com/) for the respective platform. |
 | Device credentials | Used only for installation or GUI-driven onboarding. Do not commit real credentials. |
 
 ## Configure the server
@@ -72,8 +72,8 @@ port, console, and telemetry endpoints. Plaintext secrets are decrypted into
 rest.
 
 `start-compose-server.sh` runs `tools/provision-iox-packages.sh` after the
-container becomes healthy. It produces `iris-arm64.tar` for IE-3x00/IR and
-`iris-amd64.tar` for C9300 IOx, both pinned to the current server certificate.
+container becomes healthy. It produces `iris-arm64.tar` for IE-3400 and
+`iris-amd64.tar` for Catalyst 9300 IOx, both pinned to the current server certificate.
 
 ## Create the console admin
 
@@ -104,7 +104,7 @@ Uploading a multi-gigabyte file through the browser is unnecessary when the file
 is already on the server. The **Import from disk** panel on the Console Images
 screen lists every `.bin` under the uploads volume (`IRIS_IMAGES_DIR`) and under
 the read-only import root (`IMAGES_ROOT`) that is not yet in the catalog, and
-publishes it in place with one click: nothing is copied, and the `.torrent` is
+publishes it in place with one click. Nothing is copied, and the `.torrent` is
 written to the state directory rather than next to the image, so the read-only
 import root stays read-only. See
 [Importing images already on disk](server.md#importing-images-already-on-disk)
@@ -121,7 +121,7 @@ cp fleet/devices.csv.example fleet/devices.csv
 ```
 
 The inventory contains network onboarding information only, as an
-attachment-aware CSV v2. Each device declares `routed`, `inband`,
+management-type-aware CSV v2. Each device declares `routed`, `inband`,
 `router-routed`, or `router-nat` as its `management_type`:
 
 ```text
@@ -137,10 +137,10 @@ For a Catalyst 8000 router, use `router-routed` with a VPG number, plus routes
 you provide between the app subnet and IRIS, or `router-nat` with an outside
 interface, which adds static TCP PAT on port 6881. Both router modes stage to
 `bootflash:` only, so size it for about 2× the image plus 200 MB. Support is
-designed for the Catalyst 8000 family and lab-tested on C8000v; see
+designed for the Catalyst 8000 family and lab-tested on Catalyst 8000V; see
 [Router routed and router NAT](network-attachment.md#router-routed-and-router-nat-iris-managed-virtualportgroup).
 
-Attachment-aware onboarding runs through the **Console** (or API), which records
+Management-type-aware onboarding runs through the **Console** (or API), which records
 a durable receipt and drives teardown from it. The legacy CLI generator below is
 routed-only and refuses a v2 (`management_type`) header:
 

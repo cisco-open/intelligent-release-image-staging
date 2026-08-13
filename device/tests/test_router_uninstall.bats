@@ -104,3 +104,24 @@ setup() {
   grep -qF 'crypto pki trustpoint IRIS' "$UNINSTALL"
   grep -qF 'artifacts still present after undeploy' "$UNINSTALL"
 }
+
+# --- NAT overload teardown: settle + retry before declaring residue --------
+# IOS refuses `no ip nat inside source list ... overload` while translations
+# still reference the mapping. Clearing them is not instantaneous, so a single
+# immediate re-check raced and reported residue on a router that was actually
+# fine seconds later (observed on iris8kv-4: rule left configured, 0
+# translations). Retry with a settle before failing, and make the failure text
+# name the residue and the remedy instead of reading like a status note.
+
+@test "NAT removal is retried with a settle rather than checked once" {
+  run grep -cE "NAT_REMOVE_(ATTEMPTS|SETTLE)" "$UNINSTALL"
+  [ "$output" -ge 2 ]
+}
+
+@test "the residue failure names the leftover rule and the remedy" {
+  run grep -A12 "could not remove the IRIS NAT overload mapping" "$UNINSTALL"
+  [[ "$output" == *"LEFT ON THE DEVICE"* ]] && \
+  [[ "$output" == *"NAT_RULE"* ]] && \
+  [[ "$output" == *"access-list standard IRIS-NAT"* ]] && \
+  [[ "$output" == *"re-run this undeploy"* ]]
+}

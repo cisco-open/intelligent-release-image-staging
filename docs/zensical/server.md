@@ -31,7 +31,7 @@ artifacts, and test output from the build context.
 | 8000 | HTTPS | Artifact server | Bootstrap, agent bundle, pinned certificate, and staged install assets. |
 | 6881 | BitTorrent | Seeder data | Initial image pieces from the server seeder. |
 | 8080 | HTTPS | Web console | Admin browser interface. |
-| 9101 | HTTP | Telemetry | Health, swarm view, and optional Prometheus metrics. |
+| 9101 | HTTP | Telemetry | Health and optional metrics (Prometheus exposition format); the swarm view is loopback/console-gated. |
 | 6800 | HTTP | aria2 RPC | Local-only inside the container; not published by Compose. |
 
 ## Runtime identity
@@ -158,7 +158,7 @@ the file. Deleting an image only unlinks it when `source_dir` resolves to the
 uploads volume, so an image published in place from the import root is left on
 disk, and a same-named file in the uploads volume is never destroyed by
 mistake. Entries published before `source_dir` was recorded keep the older
-behaviour of unlinking `IRIS_IMAGES_DIR/<filename>`.
+behavior of unlinking `IRIS_IMAGES_DIR/<filename>`.
 
 ### Importing images already on disk
 

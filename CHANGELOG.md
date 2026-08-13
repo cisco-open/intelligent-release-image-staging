@@ -9,6 +9,73 @@ This project uses **Calendar Versioning (CalVer)**: `YYYY.0M.0D` with an optiona
 `2026.06.11.1`). Releases are tagged `vYYYY.0M.0D`. The current version is in the
 top-level `VERSION` file.
 
+## [Unreleased]
+
+### Added
+- **Transfer streaming (opt-in, ships dark)**: while a transfer is active, a
+  device embeds one compact live sample (≤250 B, tier-adaptive cadence) in the
+  heartbeat it already sends — no new ports, tokens, or network flows. The
+  server keeps an in-memory live table (validated against the policy
+  assignment), aggregates per image, and serves new `iris_transfer_*` /
+  `iris_stream_devices` Prometheus families on `:9101` plus semconv-compliant
+  OTLP metrics (`iris.transfer.*`, `iris.stream.devices`,
+  `iris.telemetry.*`) to the configured collector. Enabled per device by the
+  fail-closed conf key `telemetry_stream` (default off), delivered by all
+  three platform installers and reconciled on IOx redeploy; tuned fleet-wide
+  without redeploys via `POST /api/telemetry/stream` (pause / stretch, echoed
+  on every heartbeat response, defaults restored within three ticks when
+  stale). Telemetry remains an add-on: no telemetry condition affects staging.
+- **OTLP export health**: console *Telemetry export* badge, `/healthz`
+  converted to JSON with an `otlp_export` block (status code unchanged —
+  probes unaffected), and one audit entry per degraded/recovered transition.
+- **Collector authentication**: `IRIS_OTLP_HEADERS` / `IRIS_OTLP_HEADERS_FILE`
+  attach operator-supplied headers to every OTLP POST; values are never
+  logged and the exporters refuse HTTP redirects.
+- **Console onboarding telemetry checkboxes** (*Telemetry reports* default on,
+  *Telemetry streaming* default off), applied to single and bulk onboards; the
+  IOx entrypoint now reconciles both `telemetry` and `telemetry_stream` from
+  deploy-time env on redeploy.
+- `IRIS_OTLP_DEVICE_METRICS` (per-device OTLP gauges, default off with a
+  cardinality warning), `IRIS_METRICS_HOST` (bind host for the `:9101`
+  listener, default unchanged), and `IRIS_EVENTS_URL_TEMPLATE` (operator-
+  configured swarm-drawer events link, replacing the previously hardcoded
+  dashboard link; unset renders no link).
+
+### Changed
+- **Breaking:** `:9101/swarm` now answers only loopback peers by default (it
+  was open to any peer that could reach the port). The authenticated console
+  is unaffected — it already proxies swarm data over container loopback
+  (`GET /api/swarm`). Remote scrapers must set `IRIS_SWARM_PUBLIC=1` (or point
+  `IRIS_SWARM_URL` at a listener that sets it) or read the authenticated
+  console API instead. The peer-address gate assumes a rootful container
+  engine; see the security page for the rootless/host-networking caveat and
+  the `IRIS_METRICS_HOST` hard control.
+- **Breaking (OTLP logs, dark-by-default surface):** log records now use
+  OpenTelemetry semantic-convention attribute names and a top-level
+  `eventName` (`device_id` → `device.id`, `image_id` → `iris.image.id`,
+  `tier` → `iris.link.tier`, `avg_bps` → `iris.transfer.throughput_avg`,
+  `ip`/`port` → `network.peer.address`/`network.peer.port` +
+  `network.transport`, `info_hash` → `iris.torrent.info_hash`; the `event`
+  attribute is removed in favor of `eventName`). Update backend queries.
+  Report records additionally carry heartbeat enrichment
+  (`device.model.identifier`, `iris.device.flash.free`, `iris.stage.state`,
+  `iris.agent.*`) and the peers observed as the structured attribute
+  `iris.transfer.peers`.
+- **Breaking (device report + OTLP peers rows):** per-peer rows are now
+  participation-only — `{ip}` on the wire, `network.peer.address` +
+  resolved `device.id` in the log record. The per-peer `rx_bytes` /
+  `tx_bytes` / `avg_bps` fields (`iris.transfer.received` /
+  `iris.transfer.sent` / per-row `throughput_avg`) are removed: aria2
+  exposes no per-peer byte counters, so those figures were derived from
+  instantaneous rates — on fast transfers every multi-peer report
+  degenerated to an even split. Reports gain top-level `peers_total`
+  (exact distinct peers observed, saturating at the device's 512-IP
+  tracking cap; exported as `iris.transfer.peers_total`); the named-row
+  cap rises 20 → 64.
+  Transfer-level figures (`transfer.total_bytes`, `avg_bps`) are exact
+  and unchanged.
+- OTLP resource now carries `service.namespace=iris` and `service.version`.
+
 ## [2026.07.26]
 
 ### Added

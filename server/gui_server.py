@@ -24,6 +24,7 @@ from urllib.parse import unquote, parse_qs
 import audit
 import gui_app
 import gui_onboard
+import live_samples
 
 WEBROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webroot")
 COOKIE = "iris_sid"
@@ -33,7 +34,19 @@ SWARMMAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # server/swarmmap.html for the console config line (the file on disk keeps
 # working standalone; only the served copy is rewritten):
 _MAP_PLACEHOLDER = "window.IRIS_MAP_CFG = null;"
-_MAP_CFG_LINE = 'window.IRIS_MAP_CFG = {"swarmUrl":"/api/swarm","pull":true};'
+# eventsUrlTemplate: operator-configured deep link ({ip}/{device_id}
+# placeholders) rendered by the swarm-map drawer; unset -> no button (the map
+# assumes no particular events backend). Read at request time via a callable
+# so tests can monkeypatch the env.
+def _map_cfg_line():
+    payload = json.dumps(os.environ.get("IRIS_EVENTS_URL_TEMPLATE", ""))
+    # Belt-and-suspenders: this line lands inside an inline <script> block, so
+    # the value must never contain a literal '</script>'. \uXXXX-escaping
+    # < > & keeps the JSON valid and the parsed value byte-identical.
+    payload = (payload.replace("<", "\\u003c").replace(">", "\\u003e")
+                      .replace("&", "\\u0026"))
+    return ('window.IRIS_MAP_CFG = {"swarmUrl":"/api/swarm","pull":true,'
+            '"eventsUrlTemplate":%s};' % payload)
 _CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".js": "application/javascript",
@@ -396,7 +409,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 self._send(404, "text/plain", b"not found")
                 return
             nonce = secrets.token_urlsafe(16)
-            html = html.replace(_MAP_PLACEHOLDER, _MAP_CFG_LINE)
+            html = html.replace(_MAP_PLACEHOLDER, _map_cfg_line())
             html = html.replace("<script>", '<script nonce="%s">' % nonce)
             html = html.replace("<style>", '<style nonce="%s">' % nonce)
             body = html.encode("utf-8")
@@ -603,6 +616,20 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 except Exception:
                     self._json(200, {"peers": [], "error": "swarm data unavailable"})
                 return
+            if path == "/api/telemetry/health":
+                # Proxy the hub's /healthz JSON (spec 8.3) behind the console
+                # session so the badge never needs the unauthenticated :9101.
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                try:
+                    with urllib.request.urlopen(
+                            "http://127.0.0.1:%s/healthz"
+                            % os.environ.get("IRIS_METRICS_PORT", "9101"),
+                            timeout=3) as r:
+                        self._send(200, "application/json", r.read())
+                except Exception:
+                    self._json(200, {"ok": False, "error": "unavailable"})
+                return
             if path == "/swarmmap":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
@@ -641,6 +668,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 row["heartbeat_model"] = h.get("model")
                 # the "copying to <fs>" badge needs the heartbeat's target FS
                 row["target_fs"] = h.get("target_fs")
+                # telemetry posture as the DEVICE reports it, not as the last
+                # onboard requested: True/False from the agent, None when the
+                # agent predates the flag (tri-state — unknown is not "off").
+                row["telemetry_enabled"] = h.get("telemetry_enabled")
+                row["telemetry_stream_enabled"] = h.get(
+                    "telemetry_stream_enabled")
                 j = jobs.get(did)
                 if j:
                     row["onboard_action"] = j["action"]
@@ -1097,6 +1130,30 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 self._json(200, {"ok": True,
                                  "expires_at": int(now) + catalog.PULL_TTL})
                 return
+            if path == "/api/telemetry/stream":
+                # Fleet-wide stream tuning (spec 8.2): writes the settings
+                # file the catalog echoes on every heartbeat response.
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                every = data.get("every", 1)
+                pause = data.get("pause", False)
+                if isinstance(every, bool) or not isinstance(every, int) \
+                        or not 1 <= every <= 60 or not isinstance(pause, bool):
+                    self._json(400, {"error":
+                                     "every must be an int 1..60, pause a bool"})
+                    return
+                live_samples.write_settings(
+                    os.path.join(os.environ.get("IRIS_STATE",
+                                                "/var/lib/iris"),
+                                 "telemetry-settings.json"), every, pause)
+                self._audit("telemetry_stream_tune", "telemetry",
+                            action="tune",
+                            detail="stream_every=%d pause=%s" % (every, pause),
+                            actor=actor)
+                self._json(200, {"ok": True, "stream_every": every,
+                                 "stream_pause": pause})
+                return
             if path.startswith("/api/devices/") and path.endswith("/adopt"):
                 # Adopt an already-deployed device that predates receipts, so it
                 # can be undeployed. Creates an ACTIVE receipt from the current
@@ -1154,6 +1211,18 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 receipt_ref = {}
                 prepare = None
                 pre_apply = None
+                # Telemetry flags from the onboard form (spec 8.1): reports
+                # default on, streaming default off — both installer-style and
+                # IOx-style env names so every platform recipe picks them up.
+                body_flags = self._json_body(raw)
+                if body_flags is None:
+                    return
+                t_on = body_flags.get("telemetry", True) is not False
+                s_on = body_flags.get("telemetry_stream", False) is True
+                env_extra = {"TELEMETRY": "on" if t_on else "off",
+                             "TELEMETRY_STREAM": "on" if s_on else "off"}
+                env_extra["IRIS_TELEMETRY"] = env_extra["TELEMETRY"]
+                env_extra["IRIS_TELEMETRY_STREAM"] = env_extra["TELEMETRY_STREAM"]
                 if act == "onboard":
                     # With a receipt store (always in production via main()), an
                     # onboard resolves an immutable plan and records a receipt.
@@ -1267,7 +1336,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 try:
                     jid = onboard.start(
                         did, action=act, resolved=resolved, prepare=prepare,
-                        pre_apply=pre_apply)
+                        pre_apply=pre_apply,
+                        env_extra=env_extra if act == "onboard" else None)
                 except ValueError as exc:
                     if receipt_ref.get("id") and act == "onboard":
                         receipts.transition(receipt_ref["id"], "needs-reconcile")

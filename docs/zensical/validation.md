@@ -37,17 +37,17 @@ For the commands and the pinned Zensical and Python versions, see
 | Admin exists | Console login succeeds. |
 | Image publishes | Catalog lists image id, hashes, and info hash. |
 | Import publishes in place | A file already under the read-only image root imports from the Console, and the read-only root is unchanged: no copy of the image and no `.torrent` beside it. |
-| Attachment recorded | Device shows routed, inband, router-routed, or router-nat; onboarding records an applied receipt. |
+| Management type recorded | Device shows routed, inband, router-routed, or router-nat; onboarding records an applied receipt. |
 | Installer runs | Device has trustpoint, Guest Shell or IOx app, bootstrap, and agent config. |
 | Inband preserves network | For inband, before/after `show running-config` shows the existing VLAN/SVI/gateway/VRF unchanged. |
-| C8000v router path | `router-routed` and `router-nat` onboard, stage a verified image, and undeploy from their receipts. Swarm Map shows the device, and Grafana shows its telemetry when observability is enabled. |
+| Catalyst 8000V router path | `router-routed` and `router-nat` onboard, stage a verified image, and undeploy from their receipts. Swarm Map shows the device, and the operator's OTLP backend (e.g., Splunk) shows its telemetry when observability is enabled. |
 | Assignment applies | Device reports the approved image id. |
 | Download completes | Swarm state shows completed pieces. |
 | Verification passes | Agent reports the staged file and IOS verify success. |
 | Undeploy from receipt | Teardown targets only receipt-owned resources; router adoption is refused and requires re-onboarding. For `router-nat`, teardown clears only translations for the receipt's app IP, verifies the overload rule is gone before deleting its ACL, and reports no leftover IRIS NAT rule. |
 | No activation occurs | Boot variables, install state, and reload state remain operator-controlled. |
 
-Automated coverage for the attachment/receipt behavior lives in
+Automated coverage for the management-type/receipt behavior lives in
 `server/tests/test_deployment_receipts.py`, `server/tests/test_gui_fleet.py`,
 the inband command-stream assertions in
 `device/tests/test_device_uninstall.bats`, and the router install/teardown

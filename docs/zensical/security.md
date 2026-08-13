@@ -50,8 +50,8 @@ private to the runtime uid. Those options require Docker Engine 23.0 or later.
 Because the Dockerfile cannot change ownership of host paths, uid 10001 must be
 given access to the age identity file (`IRIS_AGE_KEY_FILE_HOST`, keeping mode
 600 or 400) and the artifacts directory (`IRIS_ARTIFACTS_HOST_DIR`) on every
-deploy, and a deployment upgraded from a root-runtime release needs a one-time
-ownership migration of its existing named volumes. `cap_drop: [ALL]` applies to
+deploy. A deployment upgraded from a root-runtime release additionally needs a
+one-time ownership migration of its existing named volumes. `cap_drop: [ALL]` applies to
 `docker compose run` as well, so that migration cannot be done through this
 service even as `--user 0`; it needs a throwaway container with default
 capabilities. The ownership gap is per volume, so a reset that removes some
@@ -106,6 +106,25 @@ flowchart TB
     Flash --> IOS
 ```
 
+### Swarm data is console-gated
+
+Per-device swarm state (device IDs, IPs, models, progress, live transfer
+rates) is reserved for the authenticated console: `:9101/swarm` answers only
+loopback peers by default, and the console proxies it over container loopback
+behind its session. `IRIS_SWARM_PUBLIC=1` reopens remote access for operators
+who scrape it on a trusted segment.
+
+Be honest about what that gate is: a peer-address check scoped to the
+container network namespace — defense in depth, not a hard boundary. Under a
+rootful container engine (the shipped Compose and Kubernetes postures),
+external connections to the published port never arrive as
+container-loopback, so the gate holds. Under a rootless engine
+(rootless Docker/Podman) published-port connections can be re-originated
+inside the namespace as `127.0.0.1`, and under host networking every
+host-local process is loopback — in those deployments the gate is void, and
+the hard control is `IRIS_METRICS_HOST=127.0.0.1` (bind the listener to
+loopback) or not publishing port 9101 at all.
+
 ## Secrets
 
 Server secret material is encrypted at rest with age recipients. Plaintext lives only in `/run/iris` while the container runs. Device enrollment tokens are short-lived and generated per device by the running server.
@@ -150,8 +169,9 @@ pattern the catalog TLS context already uses. When the key is set **and** the
 file exists, SSH and SCP run with `StrictHostKeyChecking=yes` against that
 `known_hosts` file. Otherwise they keep `StrictHostKeyChecking=no` with
 `UserKnownHostsFile=/dev/null`, which is the default and is tolerable only
-because this is SSH-to-self over the app's point-to-point link to the device's
-own SVI. Nothing in IRIS writes this key, so pinning is opt-in: set it yourself
+because this is SSH-to-self over a link that never leaves the device (the SVI
+on switches, the VirtualPortGroup on routers, the operator's SVI inband).
+Nothing in IRIS writes this key, so pinning is opt-in: set it yourself
 in the agent configuration to enable it.
 
 ## Third-party tools
