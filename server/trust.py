@@ -174,7 +174,7 @@ def remove(name):
     file is absent, rebuilds the bundle on success."""
     if (not isinstance(name, str) or not name
             or name != os.path.basename(name) or name in (".", "..")
-            or not name.endswith(".pem")):
+            or not name.endswith(".pem") or "\x00" in name):
         return False
     try:
         os.remove(os.path.join(trust_dir(), name))

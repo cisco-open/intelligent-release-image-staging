@@ -196,6 +196,10 @@ def test_remove_refuses_traversal_and_missing(trust_env, tmp_path):
     assert len(trust.list_entries()) == 1  # store untouched
 
 
+def test_remove_refuses_null_byte_in_name(trust_env):
+    assert trust.remove("evil\x00.pem") is False
+
+
 def test_rebuild_bundle_sorted_and_deterministic(trust_env, tmp_path):
     tdir, bundle = trust_env
     crt_a, _, _ = _throwaway_cert(tmp_path, "detera")
