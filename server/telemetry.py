@@ -340,8 +340,9 @@ class Telemetry:
 
     # --- hooks called from the tracker (announce path) ---
     def on_swarm_event(self, event):
-        if self.exporter is not None:
-            self.exporter.emit(event)
+        exp = self.exporter
+        if exp is not None:
+            exp.emit(event)
         # Prune per-IP accumulators when a peer leaves (stopped or stale) so
         # _peer_sent/_peer_sent_since don't grow unbounded over a long run.
         if event.get("event") in ("stop", "stale"):
@@ -385,8 +386,10 @@ class Telemetry:
         and build/swap/drop the exporters when it changed. With no exporters
         the pass's export stages exit early (the existing None checks below).
         CPython attribute assignment is atomic, so the announce-path reader
-        (on_swarm_event) is race-benign across a swap — worst case one event
-        lands in the old exporter's queue (bounded, best-effort by design).
+        (on_swarm_event) is race-benign across object→object swaps — worst
+        case one event lands in the old exporter's queue (bounded, best-effort
+        by design). Readers must snapshot the attribute once (e.g. exp =
+        self.exporter) because a swap-to-None is not otherwise safe.
         ExportHealth is hub-owned and survives every swap: a destination
         change while degraded gives the new endpoint a fresh chance on the
         next pass. No-op when no DestinationSettings is wired (direct

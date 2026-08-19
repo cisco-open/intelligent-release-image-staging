@@ -1625,6 +1625,57 @@ class TestEditableDestination:
         assert d["state"] == "ok"                   # recovered on new dest
         assert d["failures_total"] == fails         # history preserved
 
+    def test_memoization_skips_rebuild_without_config_change(
+            self, tmp_path, monkeypatch):
+        # The memoization line (if effective == self._effective: return) is
+        # untested. If it were deleted, exporters would rebuild EVERY pass,
+        # silently discarding each interval's queued announce events. This
+        # test verifies that with a stable file override, exporters stay the
+        # same object across two sample() passes, and a queued event between
+        # passes still flushes.
+        posts = []
+        hub, path = _dest_hub(tmp_path, monkeypatch, posts,
+                              env_endpoint="http://env-collector:4318",
+                              env_enabled=True)
+        hub.sample(now=100.0)
+        first_log_exporter = hub.exporter
+        first_metrics_exporter = hub.metrics_exporter
+        # console override lands and stays stable
+        telemetry_destination.write(path, "http://console:4318", None)
+        os.utime(path, (150, 150))
+        hub.sample(now=115.0)          # config changes: rebuild
+        console_log_exporter = hub.exporter
+        console_metrics_exporter = hub.metrics_exporter
+        assert console_log_exporter is not first_log_exporter
+        assert console_metrics_exporter is not first_metrics_exporter
+        # queue an event
+        hub.on_swarm_event({"event": "join", "peer_id": "p1", "ts": 100.0})
+        # same config (file unchanged): no rebuild
+        hub.sample(now=130.0)
+        assert hub.exporter is console_log_exporter
+        assert hub.metrics_exporter is console_metrics_exporter
+        # queued event flushed to the same exporter
+        assert len(posts) >= 1 and posts[-1][0] == "http://console:4318/v1/metrics"
+
+    def test_enabled_true_no_endpoint_keeps_exporters_none(
+            self, tmp_path, monkeypatch):
+        # Mismatch cell of the truth table: file enabled=True but no endpoint
+        # anywhere (env empty) → exporters stay None after sample(). This is
+        # gated after the endpoint check, so the code path can be skipped if
+        # tests only exercise common cases.
+        posts = []
+        hub, path = _dest_hub(tmp_path, monkeypatch, posts,
+                              env_endpoint="", env_enabled=False)
+        hub.sample(now=100.0)
+        assert hub.exporter is None and hub.metrics_exporter is None
+        # console sets enabled=True but no endpoint
+        telemetry_destination.write(path, None, True)
+        os.utime(path, (150, 150))
+        hub.sample(now=115.0)
+        assert hub.exporter is None
+        assert hub.metrics_exporter is None
+        assert posts == []  # no export attempted
+
 
 class TestFromEnvDestination:
     def test_from_env_always_builds_hub_and_wires_destination(self,
