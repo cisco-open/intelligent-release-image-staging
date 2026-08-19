@@ -29,6 +29,10 @@ DOWNLOADED_BUNDLE = "downloaded-bundle.pem"
 
 _PEM_CERT_RE = re.compile(
     r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", re.DOTALL)
+# `openssl cms -cmsout -print -noout`'s marker for an empty SignerInfos SET
+# (see _signer_infos_populated); whitespace is not pinned exactly since it
+# is indentation, not signal.
+_EMPTY_SIGNER_INFOS_RE = re.compile(rb"signerInfos:\s*\r?\n\s*<EMPTY>")
 _OPENSSL_TIMEOUT = 10
 _MAX_BUNDLE_BYTES = 2 * 1024 * 1024
 _DOWNLOAD_TIMEOUT = 30
@@ -283,32 +287,88 @@ def _pkcs7_certs(data):
     return []
 
 
+def _signer_infos_populated(data, inform):
+    """True/False for whether `data` parses as a PKCS#7/CMS SignedData
+    structure (in the given `inform`, "DER" or "PEM") whose SignerInfos set
+    is populated (a real signed wrapper) rather than empty (a certs-only
+    degenerate bundle — what `openssl crl2pkcs7 -nocrl` and ordinary .p7b
+    cert files produce). None when `data` does not parse as SignedData in
+    this inform at all.
+
+    Discriminator: `openssl cms -cmsout -print -noout`'s structured field
+    dump always prints the literal
+
+        signerInfos:
+              <EMPTY>
+
+    for a certs-only bundle — OpenSSL's generic ASN.1 SET-OF printer, not
+    stderr prose, so it does not depend on OpenSSL's error-message wording
+    and has been verified stable across 3.0.x and 3.6.x. A populated
+    SignerInfo prints real field data there instead, so its absence is the
+    signal, not any particular field content."""
+    out = _openssl_stdout(
+        ["openssl", "cms", "-cmsout", "-print", "-noout",
+         "-inform", inform], data)
+    if not out:
+        return None
+    return _EMPTY_SIGNER_INFOS_RE.search(out) is None
+
+
+def _signed_data_shape(raw):
+    """"signed" (populated SignerInfos — a real signed wrapper),
+    "certs_only" (empty SignerInfos — a degenerate certs-only bundle), or
+    None (not a PKCS#7/CMS SignedData structure in either inform) for
+    `raw`. Tries DER then PEM, the same probe order `_pkcs7_certs` uses,
+    so a PEM-armored certs-only .p7b classifies correctly."""
+    for inform in ("DER", "PEM"):
+        populated = _signer_infos_populated(raw, inform)
+        if populated is None:
+            continue
+        return "signed" if populated else "certs_only"
+    return None
+
+
 def _extract_pem_certs(raw):
     """Normalized PEM certificate blocks from a downloaded bundle in any
     supported container, in probe order:
 
       1. plain PEM concat (unchanged fast path);
-      2. DER CMS SignedData wrapper — `openssl cms -verify -noverify`: when
-         the unwrap succeeds the PAYLOAD is the bundle, extracted as plain
-         PEM or as a nested certs-only PKCS#7 (the Cisco Trusted Root Store
-         ios.p7b shape). The wrapper's transport-signer certificates are
-         never returned, even when the payload yields nothing;
-      3. certs-only PKCS#7, DER then PEM (`openssl pkcs7 -print_certs`).
+      2. a PKCS#7/CMS SignedData structure, DER then PEM inform, its shape
+         read STRUCTURALLY via `_signed_data_shape` (never by matching
+         subprocess stderr text):
+           - empty SignerInfos = a certs-only degenerate bundle (the Cisco
+             Trusted Root Store's nested-payload shape, or an ordinary
+             .p7b cert file) — extracted via `_pkcs7_certs`, unchanged;
+           - populated SignerInfos = a real signed wrapper (the Cisco
+             Trusted Root Store ios.p7b transport shape) — its signature
+             must verify (`openssl cms -verify -noverify`) before the
+             PAYLOAD is trusted and extracted as plain PEM or a nested
+             certs-only PKCS#7. On verification FAILURE (a tampered
+             signature over an otherwise-intact structure) the whole
+             bundle is rejected: the raw bytes are never probed as a
+             certs-only file, so a wrapper's transport-signer certificates
+             can never leak into the trust store.
 
-    A certs-only PKCS#7 fails the CMS probe ("no content"), so stage 2 only
-    fires for real wrappers. Returns [] when nothing parses; never raises."""
+    Returns [] when nothing parses, when the blob is neither a plain-PEM
+    concat nor a recognizable SignedData structure, or when a signed
+    wrapper's signature fails to verify. Never raises."""
     if not isinstance(raw, (bytes, bytearray)):
         return []
     raw = bytes(raw)
     blocks = split_pem_certs(raw.decode("utf-8", "replace"))
     if blocks:
         return blocks
+    shape = _signed_data_shape(raw)
+    if shape == "certs_only":
+        return _pkcs7_certs(raw)
+    if shape != "signed":
+        return []
     payload = _openssl_stdout(
         ["openssl", "cms", "-verify", "-noverify", "-inform", "DER"], raw)
-    if payload:
-        inner = split_pem_certs(payload.decode("utf-8", "replace"))
-        return inner if inner else _pkcs7_certs(payload)
-    return _pkcs7_certs(raw)
+    if not payload:
+        return []          # signature verification failed: reject the bundle
+    inner = split_pem_certs(payload.decode("utf-8", "replace"))
+    return inner if inner else _pkcs7_certs(payload)
 
 
 def download_bundle(url):

@@ -520,3 +520,60 @@ def test_download_bundle_der_garbage_keeps_previous_file(trust_env, tmp_path):
     assert res == {"ok": False, "certs": 0,
                    "error": "no certificates found in download"}
     assert _read(prev) == good              # previous good bundle untouched
+
+
+def _tamper_signature(der_path):
+    """Flip the last byte of a `_cms_wrap`-produced DER file. With
+    -nodetach -binary and no unsigned attributes, the SignerInfo's
+    encryptedDigest OCTET STRING (the RSA signature) is the trailing bytes
+    of the file, so this corrupts the signature while leaving the ASN.1
+    structure -- including a populated SignerInfos set -- fully intact:
+    exactly the "signature tampered, structure intact" shape that makes
+    `openssl cms -verify -noverify` fail with CMS_SignerInfo_verify while
+    `openssl cms -cmsout -print -noout` still parses it as a signed
+    wrapper. Returns the tampered file's path."""
+    with open(der_path, "rb") as f:
+        data = bytearray(f.read())
+    data[-1] ^= 0xFF
+    out = der_path + ".tampered"
+    with open(out, "wb") as f:
+        f.write(bytes(data))
+    return out
+
+
+def test_download_bundle_tampered_cms_signature_rejects_whole_bundle(
+        trust_env, tmp_path):
+    """A CMS wrapper whose signature was tampered (structure intact, CMS
+    verify fails) must be rejected outright -- it must never fall back to
+    dumping the wrapper's transport-signer certs via the certs-only PKCS#7
+    path (the vulnerability this test guards against)."""
+    tdir, bundle = trust_env
+    crt, _, combined = _throwaway_cert(tmp_path, "tampersrv")
+    root_a, _, _ = _throwaway_cert(tmp_path, "tamperroota")
+    root_b, _, _ = _throwaway_cert(tmp_path, "tamperrootb")
+    inner = _certs_only_p7b(tmp_path, [root_a, root_b], "DER")
+    wrapped, signer_crt = _cms_wrap(tmp_path, inner, "tampersigner")
+    tampered = _tamper_signature(wrapped)
+    good_crt, _, _ = _throwaway_cert(tmp_path, "tampergood")
+    good = _read(good_crt)
+    srv = _serve_tls(combined, payload=_read_bytes(tampered))
+    try:
+        trust.add_pem(_read(crt))           # the download URL's own CA
+        prev = os.path.join(tdir, trust.DOWNLOADED_BUNDLE)
+        with open(prev, "w") as f:
+            f.write(good)
+        res = trust.download_bundle(
+            "https://127.0.0.1:%d/ios.p7b" % srv.server_address[1])
+    finally:
+        srv.shutdown()
+    assert res == {"ok": False, "certs": 0,
+                   "error": "no certificates found in download"}
+    assert _read(prev) == good              # previous good bundle untouched
+    # the wrapper's transport-signer cert must never enter the trust store,
+    # in ANY store file or the rebuilt runtime bundle
+    signer_block = trust.split_pem_certs(_read(signer_crt))[0]
+    for name in os.listdir(tdir):
+        with open(os.path.join(tdir, name)) as f:
+            assert signer_block not in f.read()
+    if os.path.exists(bundle):
+        assert signer_block not in _read(bundle)
