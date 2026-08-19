@@ -118,6 +118,10 @@ top-level `VERSION` file.
   Transfer-level figures (`transfer.total_bytes`, `avg_bps`) are exact
   and unchanged.
 - OTLP resource now carries `service.namespace=iris` and `service.version`.
+- OTLP exporters verify collector TLS against the system store plus the IRIS
+  trust bundle, so an `https://` collector fronted by a private CA works once
+  its root is installed from the console — previously such an endpoint failed
+  silently (best-effort drop + `otlp-export-degraded`).
 
 ## [2026.07.26]
 
