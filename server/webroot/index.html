@@ -182,6 +182,49 @@
           <button class="btn ghost" type="button" id="sh-clear">Clear</button>
           <span class="err" id="sh-msg"></span>
         </form>
+        <h3>Certificate</h3>
+        <p class="muted">Serves the console only — the device-facing catalog and
+          artifact certificates are untouched, so enrolled devices keep working.
+          The private key is stored age-encrypted and never shown again.</p>
+        <p class="muted" id="cert-status"></p>
+        <form class="inline-form" id="cert-form">
+          <textarea id="cert-pem" rows="4" spellcheck="false" placeholder="Certificate PEM — leaf or full chain (-----BEGIN CERTIFICATE-----)"></textarea>
+          <textarea id="cert-key" rows="4" spellcheck="false" placeholder="Private key PEM (-----BEGIN PRIVATE KEY-----)"></textarea>
+          <button class="btn" type="submit">Replace certificate</button>
+          <button class="linkish danger-link" type="button" id="cert-revert" hidden>Use built-in certificate</button>
+          <span class="err" id="cert-msg"></span>
+        </form>
+        <h3>Trusted CAs</h3>
+        <p class="muted">Root CAs trusted by outbound TLS (telemetry export, CA
+          bundle download) in addition to the system store.</p>
+        <table class="tbl" id="trust-tbl">
+          <thead><tr><th>Subject</th><th>Expires</th><th>SHA-256</th><th>Source</th><th>Certs</th><th></th></tr></thead>
+          <tbody id="trust-rows"></tbody>
+        </table>
+        <form class="inline-form" id="trust-form">
+          <textarea id="trust-pem" rows="4" spellcheck="false" placeholder="CA certificate PEM — one or more -----BEGIN CERTIFICATE----- blocks"></textarea>
+          <button class="btn" type="submit">Add CA</button>
+          <span class="err" id="trust-msg"></span>
+        </form>
+        <p class="muted">Optional public CA bundle: both the daily auto-refresh and
+          Download now need an https:// URL saved first. A failed download never
+          replaces the previous bundle.</p>
+        <form class="inline-form" id="ca-form">
+          <input id="ca-url" placeholder="Public CA bundle URL (https://…)">
+          <label class="muted"><input type="checkbox" id="ca-auto"> Refresh daily</label>
+          <button class="btn ghost" type="submit">Save</button>
+          <button class="btn ghost" type="button" id="ca-refresh">Download now</button>
+          <span class="err" id="ca-msg"></span>
+        </form>
+        <h3>Telemetry destination</h3>
+        <p class="muted" id="td-status"></p>
+        <form class="inline-form" id="td-form">
+          <input id="td-endpoint" placeholder="OTLP endpoint (https://collector:4318)">
+          <label class="muted"><input type="checkbox" id="td-enabled"> Export enabled</label>
+          <button class="btn" type="submit">Save</button>
+          <button class="linkish danger-link" type="button" id="td-revert" hidden>Revert to deployment default</button>
+          <span class="err" id="td-msg"></span>
+        </form>
         <h3>Sessions</h3>
         <p class="muted" id="sessions-info"></p>
         <p>

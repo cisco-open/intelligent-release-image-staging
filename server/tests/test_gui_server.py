@@ -343,6 +343,103 @@ def test_device_form_has_model_field():
     assert "model:" in js
 
 
+def test_settings_tls_trust_and_destination_sections_wired():
+    """Source guards for the 2026-08-19 TLS/trust/telemetry-destination spec:
+    the Settings view gains three sections — Certificate (replace/revert the
+    console cert), Trusted CAs (install/remove CA PEMs + public-bundle
+    download with job polling), Telemetry destination (editable OTLP
+    override). Conventions pinned: jpost + csrfHdr on every mutation, one
+    solid .btn per form (the ca-form has none — Add CA is that section's
+    primary), danger links confirm with consequence-naming text, no inline
+    handlers/styles, key material never echoed or left in the DOM."""
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    # section headings, in the Settings view
+    settings = html.split('id="view-settings"')[1].split("</section>")[0]
+    assert "<h3>Certificate</h3>" in settings
+    assert "<h3>Trusted CAs</h3>" in settings
+    assert "<h3>Telemetry destination</h3>" in settings
+    # element inventory (the global orphan guard checks the JS side)
+    for el in ('id="cert-status"', 'id="cert-form"', 'id="cert-pem"',
+               'id="cert-key"', 'id="cert-msg"', 'id="cert-revert"',
+               'id="trust-tbl"', 'id="trust-rows"', 'id="trust-form"',
+               'id="trust-pem"', 'id="trust-msg"', 'id="ca-form"',
+               'id="ca-url"', 'id="ca-auto"', 'id="ca-msg"',
+               'id="ca-refresh"', 'id="td-status"', 'id="td-form"',
+               'id="td-endpoint"', 'id="td-enabled"', 'id="td-msg"',
+               'id="td-revert"'):
+        assert el in settings, el
+    # revert affordances start hidden — no flash before the first render
+    assert 'id="cert-revert" hidden' in settings
+    assert 'id="td-revert" hidden' in settings
+    # one solid button per form; auxiliaries are ghost or linkish.
+    # ('class="btn"' does NOT substring-match 'class="btn ghost"'.)
+    cert_form = settings.split('id="cert-form"')[1].split('</form>')[0]
+    assert cert_form.count('class="btn"') == 1            # Replace certificate
+    assert 'class="linkish danger-link"' in cert_form     # Use built-in cert
+    trust_form = settings.split('id="trust-form"')[1].split('</form>')[0]
+    assert trust_form.count('class="btn"') == 1           # Add CA
+    ca_form = settings.split('id="ca-form"')[1].split('</form>')[0]
+    assert ca_form.count('class="btn"') == 0              # no second primary
+    assert ca_form.count('class="btn ghost"') == 2        # Save + Download now
+    td_form = settings.split('id="td-form"')[1].split('</form>')[0]
+    assert td_form.count('class="btn"') == 1              # Save
+    assert 'class="linkish danger-link"' in td_form       # Revert to default
+    # trust table columns: subject/expiry/fingerprint/source/count
+    assert ("<th>Subject</th><th>Expires</th><th>SHA-256</th>"
+            "<th>Source</th><th>Certs</th>") in settings
+    # the operator is told the key is write-only and that the bundle URL
+    # gates both download paths
+    assert "never shown again" in settings
+    assert "https:// URL" in settings
+    # CSP: still no inline styles or handlers anywhere in the page
+    assert " style=" not in html and "onclick=" not in html
+
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    # endpoint literals — POST via jpost (csrfHdr inside), DELETE via fetch
+    assert js.count("'/api/settings/gui-cert'") == 2          # POST + DELETE
+    assert "'/api/settings/trust'" in js                      # POST add
+    assert "'/api/settings/trust/' + encodeURIComponent(" in js   # DELETE row
+    assert "'/api/settings/ca-trust'" in js                   # POST config
+    assert "'/api/settings/ca-trust/refresh'" in js           # POST job start
+    assert "'/api/settings/ca-trust/refresh/' + encodeURIComponent(" in js
+    assert js.count("'/api/settings/telemetry-destination'") == 2
+    # every DELETE carries the CSRF header (4 pre-existing + 3 new)
+    assert js.count("{ method: 'DELETE', headers: csrfHdr() }") >= 7
+    # per-row remove is a danger link rendered into the trust table
+    assert "#trust-rows .trust-del" in js
+    assert "danger-link trust-del" in js
+    # destructive paths confirm with consequence-naming messages
+    assert "serves the bootstrap certificate again" in js     # cert revert
+    assert "stops trusting certificates issued" in js         # trust remove
+    assert "goes back to the environment configuration" in js # dest revert
+    # download-now polls the job like the image publish poller
+    assert "function pollCaRefresh(" in js
+    assert "j.state === 'failed'" in js
+    # settings render consumes the new GET blocks; the old read-only
+    # Observability row is gone (superseded by the editable block)
+    assert "s.gui_cert" in js and "s.trust" in js and "s.ca_trust" in js
+    assert "s.telemetry_destination" in js
+    assert "effective_endpoint" in js and "fingerprint_sha256" in js
+    assert "['Observability'" not in js
+    # key hygiene: submit posts the PEMs, success wipes the textareas
+    assert "cert_pem" in js and "key_pem" in js
+    assert "getElementById('cert-form').reset()" in js
+    # all 8 new audit events have human verbs (keys quoted — hyphens)
+    verbs = js.split("var AUDIT_VERBS = {")[1].split("};")[0]
+    for ev in ("gui-cert-replace", "gui-cert-revert", "trust-add",
+               "trust-remove", "ca-trust-config", "ca-trust-refresh",
+               "telemetry-destination-set", "telemetry-destination-clear"):
+        assert "'%s'" % ev in verbs, ev
+    # no inline on*= crept into the new JS-built markup
+    assert not re.search(r'\bon[a-z]+\s*=\s*["\']', js)
+
+    with open(os.path.join(gui_server.WEBROOT, "styles.css")) as f:
+        css = f.read()
+    assert ".inline-form textarea" in css
+
+
 def test_read_version_env_handling(monkeypatch):
     monkeypatch.setenv("IRIS_VERSION", " 2026.07.02\n")
     assert gui_server._read_version() == "2026.07.02"

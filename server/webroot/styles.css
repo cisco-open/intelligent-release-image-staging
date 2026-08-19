@@ -134,3 +134,9 @@ body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-
   padding:6px 8px; font-size:13px; background:#fff; }
 .joined .btn { border-radius:0 6px 6px 0; }
 #dev-rows tr.sel td { background:#f2f7ff; }
+
+/* Settings: certificate / trust store / telemetry destination (2026-08-19) */
+.inline-form textarea { flex:1 1 100%; max-width:640px; min-height:88px; resize:vertical;
+  padding:7px 9px; border:1px solid #c7d0e0; border-radius:6px; font-size:12px;
+  font-family:ui-monospace,Menlo,Consolas,monospace; }
+#trust-tbl { margin:0 0 12px; }

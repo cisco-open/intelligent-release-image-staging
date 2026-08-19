@@ -820,9 +820,7 @@
       ['Host IP', s.host_ip || '(unset)'],
       ['Ports', 'tracker ' + s.ports.tracker + ' · catalog ' + s.ports.catalog +
                 ' · artifacts ' + s.ports.artifacts + ' · swarm ' + s.ports.swarm +
-                ' · console ' + s.ports.console],
-      ['Observability', s.observability.enabled
-        ? ('on — ' + (s.observability.metrics_url || '')) : 'off']
+                ' · console ' + s.ports.console]
     ];
     document.querySelector('#settings-info tbody').innerHTML = rows.map(function (kv) {
       return '<tr><td class="muted">' + esc(kv[0]) + '</td><td>' + esc(kv[1]) + '</td></tr>';
@@ -838,6 +836,68 @@
       : 'Not configured — needed when the Console runs in Docker, so the onboard ' +
         'installer can ssh to the stage host to stage per-device artifacts. ' +
         'Stored age-encrypted; the password is never shown again.';
+    // --- Certificate (metadata only — key material never reaches this page) ---
+    var gc = s.gui_cert || {};
+    var certStatus = document.getElementById('cert-status');
+    if (gc.source === 'custom' || gc.source === 'built-in') {
+      certStatus.innerHTML = (gc.source === 'custom'
+          ? '<span class="badge badge-running">custom</span> '
+          : '<span class="badge badge-queued">built-in</span> ') +
+        esc(gc.subject || 'unknown') +
+        ' — expires ' + esc(gc.not_after || 'unknown') +
+        ' — sha256 ' + esc((gc.fingerprint_sha256 || '').slice(0, 16)) + '…';
+    } else {
+      certStatus.textContent =
+        'No TLS certificate — the console is serving plain HTTP.';
+    }
+    document.getElementById('cert-revert').hidden = gc.source !== 'custom';
+    // --- Trusted CAs table (rows rebuilt per render, like the images table) ---
+    var trust = s.trust || [];
+    document.getElementById('trust-rows').innerHTML = trust.length
+      ? trust.map(function (t) {
+          return '<tr data-name="' + esc(t.name) + '"><td>' + esc(t.subject || 'unknown') +
+            '</td><td>' + esc(t.not_after || 'unknown') +
+            '</td><td>' + esc((t.fingerprint_sha256 || '').slice(0, 16)) + '…</td><td>' +
+            (t.source === 'downloaded'
+              ? '<span class="badge badge-queued">downloaded</span>'
+              : '<span class="badge badge-ok">manual</span>') +
+            '</td><td>' + esc(t.cert_count) +
+            '</td><td><button class="linkish danger-link trust-del">remove</button></td></tr>';
+        }).join('')
+      : '<tr><td colspan="6" class="muted">No CA certificates installed — ' +
+        'outbound TLS uses the system store only.</td></tr>';
+    document.querySelectorAll('#trust-rows .trust-del').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        var name = btn.closest('tr').getAttribute('data-name');
+        if (!confirm('Remove trusted CA ' + name + '?\n\nOutbound TLS (telemetry ' +
+            'export, CA bundle download) stops trusting certificates issued by it ' +
+            'on the next connection.')) return;
+        var msg = document.getElementById('trust-msg');
+        msg.textContent = ''; msg.classList.remove('ok');
+        var r = await fetch('/api/settings/trust/' + encodeURIComponent(name),
+                            { method: 'DELETE', headers: csrfHdr() });
+        if (!r.ok) { msg.textContent = 'Remove failed (' + r.status + ')'; return; }
+        refreshSettings();
+      });
+    });
+    var ct = s.ca_trust || {};
+    document.getElementById('ca-url').value = ct.url || '';
+    document.getElementById('ca-auto').checked = !!ct.auto;
+    // --- Telemetry destination (replaces the old read-only Observability row) ---
+    var td = s.telemetry_destination || {};
+    var obs = s.observability || {};
+    document.getElementById('td-status').innerHTML =
+      (td.source === 'override'
+        ? '<span class="badge badge-running">console override</span> '
+        : '<span class="badge badge-queued">deployment default</span> ') +
+      (td.effective_enabled
+        ? ('export on — ' + esc(td.effective_endpoint || '(no endpoint)'))
+        : 'export off') +
+      (obs.metrics_url
+        ? ' · Prometheus scrape ' + esc(obs.metrics_url) : '');
+    document.getElementById('td-endpoint').value = td.effective_endpoint || '';
+    document.getElementById('td-enabled').checked = !!td.effective_enabled;
+    document.getElementById('td-revert').hidden = td.source !== 'override';
   }
   document.getElementById('pw-form').addEventListener('submit', async function (e) {
     e.preventDefault();
@@ -880,6 +940,119 @@
     var r = await fetch('/api/settings/stage-host', { method: 'DELETE', headers: csrfHdr() });
     if (!r.ok) { msg.textContent = 'Failed (' + r.status + ')'; return; }
     msg.textContent = 'Stage host credentials cleared.'; msg.classList.add('ok');
+    refreshSettings();
+  });
+
+  // ---- Settings: certificate / trust store / telemetry destination ----
+  document.getElementById('cert-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var msg = document.getElementById('cert-msg'); msg.textContent = ''; msg.classList.remove('ok');
+    var cert = document.getElementById('cert-pem').value.trim();
+    var key = document.getElementById('cert-key').value.trim();
+    if (cert.indexOf('BEGIN CERTIFICATE') < 0) {
+      msg.textContent = 'Certificate PEM is required (-----BEGIN CERTIFICATE-----).'; return;
+    }
+    if (key.indexOf('PRIVATE KEY') < 0) {
+      msg.textContent = 'Private key PEM is required (-----BEGIN ... PRIVATE KEY-----).'; return;
+    }
+    var r = await jpost('/api/settings/gui-cert', { cert_pem: cert, key_pem: key });
+    if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
+    document.getElementById('cert-form').reset();   // never leave the key in the DOM
+    msg.textContent = 'Certificate replaced. New connections use it now; reload to see it on this one.';
+    msg.classList.add('ok');
+    refreshSettings();
+  });
+  document.getElementById('cert-revert').addEventListener('click', async function () {
+    var msg = document.getElementById('cert-msg'); msg.textContent = ''; msg.classList.remove('ok');
+    if (!confirm('Use the built-in certificate?\n\nThe uploaded certificate and key ' +
+        'are deleted and the console serves the bootstrap certificate again. New ' +
+        'connections switch immediately; open sessions continue.')) return;
+    var r = await fetch('/api/settings/gui-cert', { method: 'DELETE', headers: csrfHdr() });
+    if (!r.ok) { msg.textContent = 'Revert failed (' + r.status + ')'; return; }
+    msg.textContent = 'Reverted to the built-in certificate.'; msg.classList.add('ok');
+    refreshSettings();
+  });
+  document.getElementById('trust-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var msg = document.getElementById('trust-msg'); msg.textContent = ''; msg.classList.remove('ok');
+    var pem = document.getElementById('trust-pem').value.trim();
+    if (pem.indexOf('BEGIN CERTIFICATE') < 0) {
+      msg.textContent = 'Paste at least one PEM certificate block.'; return;
+    }
+    var r = await jpost('/api/settings/trust', { pem: pem });
+    if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
+    document.getElementById('trust-form').reset();
+    msg.textContent = 'CA installed.'; msg.classList.add('ok');
+    refreshSettings();
+  });
+  document.getElementById('ca-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var msg = document.getElementById('ca-msg'); msg.textContent = ''; msg.classList.remove('ok');
+    var url = document.getElementById('ca-url').value.trim();
+    var auto = document.getElementById('ca-auto').checked;
+    if (url && url.indexOf('https://') !== 0) { msg.textContent = 'Bundle URL must be https://'; return; }
+    if (auto && !url) { msg.textContent = 'Auto-refresh needs a bundle URL.'; return; }
+    var r = await jpost('/api/settings/ca-trust', { url: url || null, auto: auto });
+    if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
+    msg.textContent = 'CA download settings saved.'; msg.classList.add('ok');
+    refreshSettings();
+  });
+  // "Download now" starts the server-side job and polls it, like image publish
+  var caPollTimer = null;
+  function pollCaRefresh(jobId) {
+    var msg = document.getElementById('ca-msg');
+    if (caPollTimer) { clearInterval(caPollTimer); caPollTimer = null; }
+    caPollTimer = setInterval(async function () {
+      var r = await fetch('/api/settings/ca-trust/refresh/' + encodeURIComponent(jobId));
+      if (!r.ok) {
+        clearInterval(caPollTimer); caPollTimer = null;
+        msg.textContent = 'Download status lost (' + r.status + ')'; return;
+      }
+      var j = await r.json();
+      if (j.state === 'done') {
+        clearInterval(caPollTimer); caPollTimer = null;
+        msg.textContent = 'Downloaded ' + (j.certs == null ? '?' : j.certs) +
+          ' certificate(s).'; msg.classList.add('ok');
+        refreshSettings();
+      } else if (j.state === 'failed') {
+        clearInterval(caPollTimer); caPollTimer = null;
+        msg.textContent = 'Download failed: ' + (j.detail || 'unknown error');
+      } else {
+        msg.textContent = 'Downloading…';
+      }
+    }, 1000);
+  }
+  document.getElementById('ca-refresh').addEventListener('click', async function () {
+    var msg = document.getElementById('ca-msg'); msg.textContent = ''; msg.classList.remove('ok');
+    var r = await jpost('/api/settings/ca-trust/refresh', {});
+    if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
+    msg.textContent = 'Downloading…';
+    pollCaRefresh((await r.json()).job);
+  });
+  document.getElementById('td-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var msg = document.getElementById('td-msg'); msg.textContent = ''; msg.classList.remove('ok');
+    var endpoint = document.getElementById('td-endpoint').value.trim().replace(/\/+$/, '');
+    var enabled = document.getElementById('td-enabled').checked;
+    if (enabled && !endpoint) { msg.textContent = 'An endpoint is required when export is enabled.'; return; }
+    if (endpoint && !(endpoint.indexOf('http://') === 0 || endpoint.indexOf('https://') === 0)) {
+      msg.textContent = 'Endpoint must be an http:// or https:// URL.'; return;
+    }
+    var r = await jpost('/api/settings/telemetry-destination',
+                        { endpoint: endpoint || null, enabled: enabled });
+    if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
+    msg.textContent = 'Telemetry destination saved. The exporter picks it up on the next sample pass.';
+    msg.classList.add('ok');
+    refreshSettings();
+  });
+  document.getElementById('td-revert').addEventListener('click', async function () {
+    var msg = document.getElementById('td-msg'); msg.textContent = ''; msg.classList.remove('ok');
+    if (!confirm('Revert the telemetry destination to the deployment default?\n\n' +
+        'The console override is deleted and the exporter goes back to the environment configuration ' +
+        '(IRIS_OTLP_ENDPOINT / IRIS_OBSERVABILITY) on the next sample pass.')) return;
+    var r = await fetch('/api/settings/telemetry-destination', { method: 'DELETE', headers: csrfHdr() });
+    if (!r.ok) { msg.textContent = 'Revert failed (' + r.status + ')'; return; }
+    msg.textContent = 'Reverted to the deployment default.'; msg.classList.add('ok');
     refreshSettings();
   });
 
@@ -967,6 +1140,14 @@
     revoke_other_sessions: 'revoked other console sessions',
     stage_host_set: 'set stage-host credentials',
     stage_host_clear: 'cleared stage-host credentials',
+    'gui-cert-replace': 'replaced the console TLS certificate',
+    'gui-cert-revert': 'reverted the console to the built-in certificate',
+    'trust-add': 'installed a trusted CA certificate',
+    'trust-remove': 'removed a trusted CA certificate',
+    'ca-trust-config': 'changed the CA bundle download settings',
+    'ca-trust-refresh': 'refreshed the public CA bundle',
+    'telemetry-destination-set': 'changed the telemetry destination',
+    'telemetry-destination-clear': 'reverted the telemetry destination to the deployment default',
     device_csv_import: 'imported devices from CSV',
     revoke: 'had all secrets revoked',
     auth_fail: 'failed token authentication'
