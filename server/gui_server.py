@@ -1033,16 +1033,23 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                detail="rejected: %s" % err,
                                src_ip=self.client_address[0])
                     self._json(400, {"error": err}); return
-                gui_tls.persist_override(cert_pem, key_pem)
-                reload_tls()  # new handshakes serve the new chain immediately
-                cert_info = gui_tls.active_info()
-                self._audit("gui-cert-replace", "settings", action="replace",
-                           target="gui-cert", actor=actor,
-                           detail="subject %s, fingerprint %s"
-                                  % (cert_info.get("subject"),
-                                     cert_info.get("fingerprint_sha256")),
-                           src_ip=self.client_address[0])
-                self._json(200, {"gui_cert": cert_info}); return
+                try:
+                    gui_tls.persist_override(cert_pem, key_pem)
+                    reload_tls()  # new handshakes serve the new chain immediately
+                    cert_info = gui_tls.active_info()
+                    self._audit("gui-cert-replace", "settings", action="replace",
+                               target="gui-cert", actor=actor,
+                               detail="subject %s, fingerprint %s"
+                                      % (cert_info.get("subject"),
+                                         cert_info.get("fingerprint_sha256")),
+                               src_ip=self.client_address[0])
+                    self._json(200, {"gui_cert": cert_info}); return
+                except Exception as exc:
+                    self._audit("gui-cert-replace", "settings", action="replace",
+                               target="gui-cert", actor=actor, result="fail",
+                               detail="persist failed: %s" % exc.__class__.__name__,
+                               src_ip=self.client_address[0])
+                    self._json(500, {"error": "certificate install failed"}); return
             if path == "/api/devices":
                 if fleet is None:
                     self._json(404, {"error": "not found"}); return

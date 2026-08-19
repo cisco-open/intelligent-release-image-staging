@@ -3674,3 +3674,42 @@ def test_settings_gui_cert_rejects_bad_pairs(tmp_path, monkeypatch):
         assert json.loads(b)["gui_cert"]["source"] != "custom"
     finally:
         stop()
+
+
+def test_settings_gui_cert_persist_failure_audited(tmp_path, monkeypatch):
+    """When gui_tls.persist_override raises (e.g. age subprocess fails or
+    disk-full OSError), the POST route must audit the failure, respond 500
+    with a static error message, and never expose key material."""
+    import subprocess
+    import gui_tls
+    _gui_cert_env(tmp_path, monkeypatch)
+    cert_pem, key_pem = _gen_cert_pair(tmp_path, "iris-custom", "custom")
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        # Monkeypatch persist_override to raise CalledProcessError (simulating
+        # age subprocess failure or similar).
+        orig_persist = gui_tls.persist_override
+        def failing_persist(c, k):
+            raise subprocess.CalledProcessError(1, ["age"])
+        monkeypatch.setattr(gui_tls, "persist_override", failing_persist)
+        # POST a valid cert/key pair: should return 500
+        st, _, b = _req(host, port, "POST", "/api/settings/gui-cert",
+                        {"cert_pem": cert_pem, "key_pem": key_pem}, headers=hh)
+        assert st == 500, "expected 500 on persist_override failure, got %d" % st
+        resp = json.loads(b)
+        assert resp["error"] == "certificate install failed"
+        assert b"PRIVATE KEY" not in b, "key material leaked in error response"
+        # Audit log must contain a fail row with CalledProcessError in detail,
+        # but NO key material.
+        rows = [e for e in _read_audit_lines(audit_path)
+                if e.get("event") == "gui-cert-replace"]
+        fail_rows = [e for e in rows if e.get("result") == "fail"]
+        assert fail_rows, "no fail audit row for persist_override exception"
+        assert "CalledProcessError" in fail_rows[-1]["detail"]
+        assert "PRIVATE KEY" not in open(audit_path).read()
+        assert key_pem not in open(audit_path).read(), \
+            "key material must never appear in audit log"
+    finally:
+        stop()
