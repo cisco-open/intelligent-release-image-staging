@@ -399,3 +399,124 @@ def test_download_bundle_untrusted_server_fails_cleanly(trust_env, tmp_path):
     assert res["ok"] is False and res["certs"] == 0
     assert res["error"]
     assert not os.path.exists(os.path.join(tdir, trust.DOWNLOADED_BUNDLE))
+
+
+# --- download_bundle: PKCS#7 / CMS container extraction ----------------------
+
+def _read_bytes(path):
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def _certs_only_p7b(dirpath, cert_paths, outform):
+    """certs-only PKCS#7 holding the given certs (the Cisco TRS inner-payload
+    shape), built with `openssl crl2pkcs7 -nocrl`. Returns the output path."""
+    certfile = os.path.join(str(dirpath),
+                            "p7b-src-" + outform.lower() + ".pem")
+    with open(certfile, "w") as f:
+        for p in cert_paths:
+            f.write(_read(p))
+    out = os.path.join(str(dirpath), "certs-" + outform.lower() + ".p7b")
+    subprocess.run(
+        ["openssl", "crl2pkcs7", "-nocrl", "-certfile", certfile,
+         "-outform", outform, "-out", out],
+        check=True, capture_output=True)
+    return out
+
+
+def _cms_wrap(dirpath, inner_path, signer_cn):
+    """DER CMS SignedData wrapping the bytes of `inner_path` (the ios.p7b
+    transport shape): signed by a throwaway cert, -nodetach -binary.
+    Returns (wrapped_path, signer_crt_path)."""
+    signer_crt, signer_key, _ = _throwaway_cert(dirpath, signer_cn)
+    out = os.path.join(str(dirpath), "wrapped-" + signer_cn + ".der")
+    subprocess.run(
+        ["openssl", "cms", "-sign", "-in", inner_path,
+         "-signer", signer_crt, "-inkey", signer_key,
+         "-outform", "DER", "-nodetach", "-binary", "-out", out],
+        check=True, capture_output=True)
+    return out, signer_crt
+
+
+def test_download_bundle_der_certs_only_p7b(trust_env, tmp_path):
+    tdir, _ = trust_env
+    crt, _, combined = _throwaway_cert(tmp_path, "derp7bsrv")
+    root_a, _, _ = _throwaway_cert(tmp_path, "derroota")
+    root_b, _, _ = _throwaway_cert(tmp_path, "derrootb")
+    p7b = _certs_only_p7b(tmp_path, [root_a, root_b], "DER")
+    srv = _serve_tls(combined, payload=_read_bytes(p7b))
+    try:
+        trust.add_pem(_read(crt))
+        res = trust.download_bundle(
+            "https://127.0.0.1:%d/ios.p7b" % srv.server_address[1])
+    finally:
+        srv.shutdown()
+    assert res == {"ok": True, "certs": 2, "error": None}
+    stored = _read(os.path.join(tdir, trust.DOWNLOADED_BUNDLE))
+    # stored form is normalized PEM the rest of the store can re-parse
+    assert len(trust.split_pem_certs(stored)) == 2
+    for root in (root_a, root_b):
+        assert trust.split_pem_certs(_read(root))[0] in stored
+
+
+def test_download_bundle_pem_certs_only_p7b(trust_env, tmp_path):
+    tdir, _ = trust_env
+    crt, _, combined = _throwaway_cert(tmp_path, "pemp7bsrv")
+    root_a, _, _ = _throwaway_cert(tmp_path, "pemroota")
+    root_b, _, _ = _throwaway_cert(tmp_path, "pemrootb")
+    p7b = _certs_only_p7b(tmp_path, [root_a, root_b], "PEM")
+    srv = _serve_tls(combined, payload=_read_bytes(p7b))
+    try:
+        trust.add_pem(_read(crt))
+        res = trust.download_bundle(
+            "https://127.0.0.1:%d/bundle.p7b" % srv.server_address[1])
+    finally:
+        srv.shutdown()
+    assert res == {"ok": True, "certs": 2, "error": None}
+    stored = _read(os.path.join(tdir, trust.DOWNLOADED_BUNDLE))
+    assert len(trust.split_pem_certs(stored)) == 2
+
+
+def test_download_bundle_cms_wrapper_imports_payload_not_signer(
+        trust_env, tmp_path):
+    tdir, _ = trust_env
+    crt, _, combined = _throwaway_cert(tmp_path, "cmssrv")
+    root_a, _, _ = _throwaway_cert(tmp_path, "cmsroota")
+    root_b, _, _ = _throwaway_cert(tmp_path, "cmsrootb")
+    inner = _certs_only_p7b(tmp_path, [root_a, root_b], "DER")
+    wrapped, signer_crt = _cms_wrap(tmp_path, inner, "cmssigner")
+    srv = _serve_tls(combined, payload=_read_bytes(wrapped))
+    try:
+        trust.add_pem(_read(crt))
+        res = trust.download_bundle(
+            "https://127.0.0.1:%d/ios.p7b" % srv.server_address[1])
+    finally:
+        srv.shutdown()
+    assert res == {"ok": True, "certs": 2, "error": None}
+    stored = _read(os.path.join(tdir, trust.DOWNLOADED_BUNDLE))
+    assert stored.count("BEGIN CERTIFICATE") == 2
+    for root in (root_a, root_b):
+        assert trust.split_pem_certs(_read(root))[0] in stored
+    # the CMS transport signer must never enter the trust store
+    signer_block = trust.split_pem_certs(_read(signer_crt))[0]
+    assert signer_block not in stored
+
+
+def test_download_bundle_der_garbage_keeps_previous_file(trust_env, tmp_path):
+    tdir, _ = trust_env
+    crt, _, combined = _throwaway_cert(tmp_path, "garbsrv")
+    good_crt, _, _ = _throwaway_cert(tmp_path, "goodca3")
+    good = _read(good_crt)
+    srv = _serve_tls(combined, payload=os.urandom(4096))
+    try:
+        trust.add_pem(_read(crt))
+        prev = os.path.join(tdir, trust.DOWNLOADED_BUNDLE)
+        with open(prev, "w") as f:
+            f.write(good)
+        res = trust.download_bundle(
+            "https://127.0.0.1:%d/b.p7b" % srv.server_address[1])
+    finally:
+        srv.shutdown()
+    assert res == {"ok": False, "certs": 0,
+                   "error": "no certificates found in download"}
+    assert _read(prev) == good              # previous good bundle untouched

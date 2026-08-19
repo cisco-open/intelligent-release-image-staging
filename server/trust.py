@@ -256,13 +256,70 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def _openssl_stdout(argv, data):
+    """stdout bytes of one openssl invocation fed `data` on stdin, or b""
+    on ANY failure (missing binary, non-zero exit, timeout). Mirrors the
+    cert_info subprocess style; nothing from the input ever reaches an
+    exception message."""
+    try:
+        proc = subprocess.run(argv, input=data, capture_output=True,
+                              timeout=_OPENSSL_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return b""
+    if proc.returncode != 0:
+        return b""
+    return proc.stdout
+
+
+def _pkcs7_certs(data):
+    """Certificate blocks from a certs-only PKCS#7 blob via `openssl pkcs7
+    -print_certs`, trying DER first then PEM. [] when neither form parses."""
+    for inform in ("DER", "PEM"):
+        out = _openssl_stdout(
+            ["openssl", "pkcs7", "-inform", inform, "-print_certs"], data)
+        blocks = split_pem_certs(out.decode("utf-8", "replace"))
+        if blocks:
+            return blocks
+    return []
+
+
+def _extract_pem_certs(raw):
+    """Normalized PEM certificate blocks from a downloaded bundle in any
+    supported container, in probe order:
+
+      1. plain PEM concat (unchanged fast path);
+      2. DER CMS SignedData wrapper — `openssl cms -verify -noverify`: when
+         the unwrap succeeds the PAYLOAD is the bundle, extracted as plain
+         PEM or as a nested certs-only PKCS#7 (the Cisco Trusted Root Store
+         ios.p7b shape). The wrapper's transport-signer certificates are
+         never returned, even when the payload yields nothing;
+      3. certs-only PKCS#7, DER then PEM (`openssl pkcs7 -print_certs`).
+
+    A certs-only PKCS#7 fails the CMS probe ("no content"), so stage 2 only
+    fires for real wrappers. Returns [] when nothing parses; never raises."""
+    if not isinstance(raw, (bytes, bytearray)):
+        return []
+    raw = bytes(raw)
+    blocks = split_pem_certs(raw.decode("utf-8", "replace"))
+    if blocks:
+        return blocks
+    payload = _openssl_stdout(
+        ["openssl", "cms", "-verify", "-noverify", "-inform", "DER"], raw)
+    if payload:
+        inner = split_pem_certs(payload.decode("utf-8", "replace"))
+        return inner if inner else _pkcs7_certs(payload)
+    return _pkcs7_certs(raw)
+
+
 def download_bundle(url):
     """Fetch the operator-configured public-CA bundle into
     trust_dir()/DOWNLOADED_BUNDLE and rebuild the runtime bundle.
 
     Hardening (spec feature A3): https-only URL, redirects refused, 2 MiB
     size cap read-enforced (Content-Length is not trusted), response must
-    contain >=1 PEM certificate block, atomic write. Never raises; returns
+    yield >=1 certificate via _extract_pem_certs (plain PEM, certs-only
+    PKCS#7, or a CMS-wrapped Cisco TRS .p7b), atomic write. Never raises;
+    returns
     {"ok": bool, "certs": int, "error": str|None}. On ANY failure the
     previous downloaded file is left untouched (validation happens entirely
     before the write). TLS is verified via ssl_context(), so the bundle host
@@ -283,10 +340,10 @@ def download_bundle(url):
     if len(data) > _MAX_BUNDLE_BYTES:
         return {"ok": False, "certs": 0,
                 "error": "bundle exceeds the 2 MiB cap"}
-    blocks = split_pem_certs(data.decode("utf-8", "replace"))
+    blocks = _extract_pem_certs(data)
     if not blocks:
         return {"ok": False, "certs": 0,
-                "error": "no PEM certificate blocks in response"}
+                "error": "no certificates found in download"}
     d = trust_dir()
     os.makedirs(d, exist_ok=True)
     _atomic_write(os.path.join(d, DOWNLOADED_BUNDLE),
