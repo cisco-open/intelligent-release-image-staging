@@ -114,6 +114,24 @@ def _read_version():
     return "unknown"
 
 
+def _resolve_certfile():
+    """Serve-time TLS cert resolution for the console listener.
+
+    The console-specific override (IRIS_GUI_CERT, combined cert+key built by
+    the cert-upload flow and the entrypoint) wins WHEN ITS FILE EXISTS; else
+    the shared combined IRIS_CERT file all three TLS services load; else
+    None -> plain-HTTP fallback (unchanged, tested behavior). Catalog and
+    artifact server keep loading IRIS_CERT directly, so device pinning is
+    untouched."""
+    gui = os.environ.get("IRIS_GUI_CERT", "/run/iris/tls/gui-cert.pem")
+    if os.path.exists(gui):
+        return gui
+    cert = os.environ.get("IRIS_CERT", "/run/iris/tls/cert.pem")
+    if os.path.exists(cert):
+        return cert
+    return None
+
+
 def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=None,
                  onboard=None, swarm_fetch=None, certfile=None, audit_path=None,
                  receipts=None):
@@ -1491,8 +1509,7 @@ def main():
     secrets_enc = os.environ.get("IRIS_SECRETS_ENC", "/etc/iris/secrets.json.age")
     state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
     images_dir = os.environ.get("IRIS_IMAGES_DIR", "/var/lib/iris-images")
-    cert = os.environ.get("IRIS_CERT", "/run/iris/tls/cert.pem")
-    certfile = cert if os.path.exists(cert) else None
+    certfile = _resolve_certfile()
     audit_path = os.environ.get("IRIS_AUDIT", "/etc/iris/audit.jsonl")
     app = gui_app.GuiApp(secrets_path, recipients_csv=recipients, secrets_enc=secrets_enc)
 

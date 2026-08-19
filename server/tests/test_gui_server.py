@@ -554,6 +554,7 @@ def test_module_run_as_script_actually_starts_the_server(tmp_path):
     env["IRIS_STATE"] = str(tmp_path / "state")
     env["IRIS_IMAGES_DIR"] = str(tmp_path / "images")
     env["IRIS_CERT"] = "/nonexistent-so-plain-http"
+    env["IRIS_GUI_CERT"] = "/nonexistent-so-plain-http-too"
 
     proc = subprocess.Popen(
         [sys.executable, "gui_server.py"],
@@ -3339,3 +3340,46 @@ def test_device_view_exposes_telemetry_flags(tmp_path):
         assert rows["d-stream"]["telemetry_enabled"] is True
     finally:
         stop()
+
+
+# ---- gui-cert TLS resolution + hot reload (make_server) ----
+
+import ssl
+
+
+def _gen_cert_pair(tmp_path, cn, tag):
+    """Self-signed cert+key PEM pair via the openssl CLI (guaranteed in the
+    image; iris-bootstrap generates the builtin identity the same way)."""
+    key = str(tmp_path / ("pair-%s-key.pem" % tag))
+    crt = str(tmp_path / ("pair-%s-crt.pem" % tag))
+    subprocess.run(
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+         "-days", "2", "-keyout", key, "-out", crt, "-subj", "/CN=%s" % cn],
+        check=True, capture_output=True)
+    with open(crt) as f:
+        cert_pem = f.read()
+    with open(key) as f:
+        key_pem = f.read()
+    return cert_pem, key_pem
+
+
+def test_gui_cert_resolution_order(tmp_path, monkeypatch):
+    """Serve-time resolution: gui-cert override > IRIS_CERT combined file >
+    None (plain-HTTP fallback). File EXISTENCE decides, not the env being
+    set. Unit-level parallel of the subprocess fallback test
+    test_module_run_as_script_actually_starts_the_server above."""
+    gui = tmp_path / "gui-cert.pem"
+    combined = tmp_path / "cert.pem"
+    monkeypatch.setenv("IRIS_GUI_CERT", str(gui))
+    monkeypatch.setenv("IRIS_CERT", str(combined))
+    # neither file exists -> plain-HTTP fallback (unchanged behavior)
+    assert gui_server._resolve_certfile() is None
+    # only the shared combined file -> IRIS_CERT
+    combined.write_text("x")
+    assert gui_server._resolve_certfile() == str(combined)
+    # both present -> the console-specific override wins
+    gui.write_text("y")
+    assert gui_server._resolve_certfile() == str(gui)
+    # override removed -> back on IRIS_CERT (the revert path)
+    os.unlink(str(gui))
+    assert gui_server._resolve_certfile() == str(combined)
