@@ -4372,3 +4372,61 @@ def test_settings_telemetry_destination_credentials_rejected(tmp_path, monkeypat
     finally:
         stop()
 
+
+def test_settings_telemetry_destination_malformed_ipv6_rejected(tmp_path, monkeypatch):
+    """Verify malformed IPv6 URLs in endpoint validators are safely rejected
+    with a clean 400 error, not a ValueError crash that drops the connection."""
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, _deps, stop = _serve_full(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        # Malformed IPv6 bracket URLs must be rejected, not crash the request thread
+        for bad in ("http://[::1:4318", "http://[bad"):
+            st, _, b = _req(host, port, "POST",
+                            "/api/settings/telemetry-destination",
+                            {"endpoint": bad, "enabled": True},
+                            headers=hh)
+            assert st == 400, f"malformed IPv6 {bad!r} should return 400, not crash"
+            # Response must be valid JSON with an error message (proves connection stayed alive)
+            data = json.loads(b)
+            assert "error" in data, f"response should contain error key"
+        # Valid IPv6 must still work
+        st, _, b = _req(host, port, "POST",
+                        "/api/settings/telemetry-destination",
+                        {"endpoint": "https://[::1]:4318", "enabled": True},
+                        headers=hh)
+        assert st == 200, "valid IPv6 https://[::1]:4318 should return 200"
+        assert json.loads(b) == {"ok": True,
+                                 "endpoint": "https://[::1]:4318",
+                                 "enabled": True}
+    finally:
+        stop()
+
+
+def test_settings_ca_trust_malformed_ipv6_rejected(tmp_path, monkeypatch):
+    """Verify malformed IPv6 URLs in ca-trust validator are safely rejected
+    with a clean 400 error, not a ValueError crash that drops the connection."""
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, _deps, stop = _serve_full(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        # Malformed IPv6 bracket URLs must be rejected, not crash the request thread
+        st, _, b = _req(host, port, "POST", "/api/settings/ca-trust",
+                        {"url": "https://[bad", "auto": False},
+                        headers=hh)
+        assert st == 400, f"malformed IPv6 https://[bad should return 400, not crash"
+        # Response must be valid JSON with an error message (proves connection stayed alive)
+        data = json.loads(b)
+        assert "error" in data, f"response should contain error key"
+        # Valid IPv6 must still work
+        st, _, b = _req(host, port, "POST", "/api/settings/ca-trust",
+                        {"url": "https://[::1]:4318/ca.pem", "auto": False},
+                        headers=hh)
+        assert st == 200, "valid IPv6 https://[::1]:4318/ca.pem should return 200"
+        assert json.loads(b)["ca_trust"] == {
+            "url": "https://[::1]:4318/ca.pem", "auto": False}
+    finally:
+        stop()
+

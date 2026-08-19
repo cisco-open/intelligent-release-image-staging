@@ -210,16 +210,19 @@ def _validate_otlp_endpoint(raw):
     rstrip('/') too — otlp.py:252). Returns (endpoint, None) on success or
     (None, error-message)."""
     url = raw.strip()
-    parts = urlsplit(url)
-    if parts.scheme not in ("http", "https") or not parts.netloc:
+    try:
+        parts = urlsplit(url)
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            return None, "endpoint must be an http:// or https:// URL with a host"
+        if parts.username is not None or parts.password is not None:
+            return None, "endpoint must not contain credentials"
+        if parts.hostname is None:
+            return None, "endpoint must be an http:// or https:// URL with a host"
+        if parts.query or parts.fragment:
+            return None, "endpoint must not have a query or fragment"
+        return url.rstrip("/"), None
+    except ValueError:
         return None, "endpoint must be an http:// or https:// URL with a host"
-    if parts.username is not None or parts.password is not None:
-        return None, "endpoint must not contain credentials"
-    if parts.hostname is None:
-        return None, "endpoint must be an http:// or https:// URL with a host"
-    if parts.query or parts.fragment:
-        return None, "endpoint must not have a query or fragment"
-    return url.rstrip("/"), None
 
 
 _CA_JOB_TTL = 3600                  # evict terminal refresh jobs after (s)
@@ -1280,8 +1283,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if url is not None:
                     url = url.strip() or None   # blank == unset (falls back to the default)
                 if url is not None:
-                    parts = urlsplit(url)
-                    if parts.scheme != "https" or not parts.netloc:
+                    try:
+                        parts = urlsplit(url)
+                        if parts.scheme != "https" or not parts.netloc:
+                            self._json(400, {"error": "url must be an https:// URL"})
+                            return
+                    except ValueError:
                         self._json(400, {"error": "url must be an https:// URL"})
                         return
                 spath = ca_trust_settings_path(
