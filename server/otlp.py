@@ -17,6 +17,8 @@ import os
 import threading
 import urllib.request
 
+import trust
+
 # OTLP severityNumber for INFO (see logs proto)
 _SEVERITY_INFO = 9
 
@@ -219,15 +221,19 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-_OPENER = urllib.request.build_opener(_NoRedirect())
-
-
 def _http_post(url, body, headers=None):
     hdrs = {"Content-Type": "application/json"}
     hdrs.update(headers or {})
     req = urllib.request.Request(url, data=body, headers=hdrs)
+    # Opener built per call so HTTPS verifies against trust.ssl_context()
+    # (system roots + the IRIS bundle): a console trust-store edit reaches
+    # the next export without a restart. trust.ssl_context() is mtime-cached,
+    # so per-call cost is opener assembly only (2 POSTs per sampler pass).
+    opener = urllib.request.build_opener(
+        _NoRedirect(),
+        urllib.request.HTTPSHandler(context=trust.ssl_context()))
     try:
-        with _OPENER.open(req, timeout=5) as resp:
+        with opener.open(req, timeout=5) as resp:
             resp.read()
     except Exception:
         # Deliberately generic: exception text from urllib can embed request
