@@ -30,6 +30,8 @@ DOWNLOADED_BUNDLE = "downloaded-bundle.pem"
 _PEM_CERT_RE = re.compile(
     r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", re.DOTALL)
 _OPENSSL_TIMEOUT = 10
+_MAX_BUNDLE_BYTES = 2 * 1024 * 1024
+_DOWNLOAD_TIMEOUT = 30
 
 
 def trust_dir():
@@ -243,3 +245,51 @@ def ssl_context():
     with _CTX_LOCK:
         _CTX_CACHE["key"], _CTX_CACHE["ctx"] = key, ctx
     return ctx
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse ALL redirects — the same hardening stance as otlp._NoRedirect
+    (duplicated here, not imported: otlp imports trust, so trust must never
+    import otlp). A bundle URL answering 3xx fails the download instead of
+    fetching whatever Location it names."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def download_bundle(url):
+    """Fetch the operator-configured public-CA bundle into
+    trust_dir()/DOWNLOADED_BUNDLE and rebuild the runtime bundle.
+
+    Hardening (spec feature A3): https-only URL, redirects refused, 2 MiB
+    size cap read-enforced (Content-Length is not trusted), response must
+    contain >=1 PEM certificate block, atomic write. Never raises; returns
+    {"ok": bool, "certs": int, "error": str|None}. On ANY failure the
+    previous downloaded file is left untouched (validation happens entirely
+    before the write). TLS is verified via ssl_context(), so the bundle host
+    may itself sit behind an already-installed private CA."""
+    parsed = urllib.parse.urlsplit(url if isinstance(url, str) else "")
+    if parsed.scheme != "https" or not parsed.netloc:
+        return {"ok": False, "certs": 0, "error": "URL must be https"}
+    opener = urllib.request.build_opener(
+        _NoRedirect(), urllib.request.HTTPSHandler(context=ssl_context()))
+    try:
+        with opener.open(url, timeout=_DOWNLOAD_TIMEOUT) as resp:
+            data = resp.read(_MAX_BUNDLE_BYTES + 1)
+    except urllib.error.HTTPError as exc:
+        return {"ok": False, "certs": 0, "error": "HTTP %d" % exc.code}
+    except Exception as exc:
+        # class name only: urllib error text can embed request details
+        return {"ok": False, "certs": 0, "error": exc.__class__.__name__}
+    if len(data) > _MAX_BUNDLE_BYTES:
+        return {"ok": False, "certs": 0,
+                "error": "bundle exceeds the 2 MiB cap"}
+    blocks = split_pem_certs(data.decode("utf-8", "replace"))
+    if not blocks:
+        return {"ok": False, "certs": 0,
+                "error": "no PEM certificate blocks in response"}
+    d = trust_dir()
+    os.makedirs(d, exist_ok=True)
+    _atomic_write(os.path.join(d, DOWNLOADED_BUNDLE),
+                  "\n".join(blocks) + "\n")
+    rebuild_bundle()
+    return {"ok": True, "certs": len(blocks), "error": None}

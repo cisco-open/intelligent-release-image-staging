@@ -271,3 +271,131 @@ def test_ssl_context_survives_corrupt_bundle(trust_env):
                 "-----END CERTIFICATE-----\n")
     ctx = trust.ssl_context()                 # must not raise
     assert isinstance(ctx, ssl.SSLContext)
+
+
+# --- download_bundle ---------------------------------------------------------
+
+def _serve_tls(combined, payload=b"", location=None):
+    """One-endpoint TLS GET server: returns `payload` with 200, or a 302 to
+    `location` when given. Fresh handler class per server — no shared state."""
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if location is not None:
+                self.send_response(302)
+                self.send_header("Location", location)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(combined)
+    srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def test_download_bundle_success_and_source_downloaded(trust_env, tmp_path):
+    tdir, bundle = trust_env
+    crt, _, combined = _throwaway_cert(tmp_path, "dlsrv")
+    payload_crt, _, _ = _throwaway_cert(tmp_path, "publicca")
+    srv = _serve_tls(combined, payload=_read(payload_crt).encode())
+    try:
+        trust.add_pem(_read(crt))   # the bundle URL's own CA must be trusted
+        res = trust.download_bundle(
+            "https://127.0.0.1:%d/bundle.pem" % srv.server_address[1])
+    finally:
+        srv.shutdown()
+    assert res == {"ok": True, "certs": 1, "error": None}
+    assert os.path.isfile(os.path.join(tdir, trust.DOWNLOADED_BUNDLE))
+    by_name = {e["name"]: e for e in trust.list_entries()}
+    assert by_name[trust.DOWNLOADED_BUNDLE]["source"] == "downloaded"
+    assert "publicca" in by_name[trust.DOWNLOADED_BUNDLE]["subject"]
+    # runtime bundle rebuilt: server CA + downloaded cert
+    assert _read(bundle).count("BEGIN CERTIFICATE") == 2
+
+
+def test_download_bundle_rejects_non_https_url(trust_env):
+    tdir, _ = trust_env
+    for url in ("http://127.0.0.1:1/x.pem", "ftp://x/y", "not a url", ""):
+        res = trust.download_bundle(url)
+        assert res["ok"] is False and res["certs"] == 0, url
+        assert "https" in res["error"]
+    assert not os.path.exists(os.path.join(tdir, trust.DOWNLOADED_BUNDLE))
+
+
+def test_download_bundle_refuses_redirect(trust_env, tmp_path):
+    crt, _, combined = _throwaway_cert(tmp_path, "redirsrv")
+    srv = _serve_tls(combined, location="https://127.0.0.1:9/next.pem")
+    try:
+        trust.add_pem(_read(crt))
+        res = trust.download_bundle(
+            "https://127.0.0.1:%d/b.pem" % srv.server_address[1])
+    finally:
+        srv.shutdown()
+    assert res["ok"] is False
+    assert "302" in res["error"]
+
+
+def test_download_bundle_oversize_keeps_previous_file(trust_env, tmp_path):
+    tdir, _ = trust_env
+    crt, _, combined = _throwaway_cert(tmp_path, "bigsrv")
+    good_crt, _, _ = _throwaway_cert(tmp_path, "goodca")
+    good = _read(good_crt)
+    srv = _serve_tls(combined,
+                     payload=good.encode() + b"#" * (2 * 1024 * 1024))
+    try:
+        trust.add_pem(_read(crt))
+        prev = os.path.join(tdir, trust.DOWNLOADED_BUNDLE)
+        with open(prev, "w") as f:
+            f.write(good)
+        res = trust.download_bundle(
+            "https://127.0.0.1:%d/b.pem" % srv.server_address[1])
+    finally:
+        srv.shutdown()
+    assert res["ok"] is False and res["certs"] == 0
+    assert "2 MiB" in res["error"]
+    assert _read(prev) == good              # previous good bundle untouched
+
+
+def test_download_bundle_non_pem_keeps_previous_file(trust_env, tmp_path):
+    tdir, _ = trust_env
+    crt, _, combined = _throwaway_cert(tmp_path, "htmlsrv")
+    good_crt, _, _ = _throwaway_cert(tmp_path, "goodca2")
+    good = _read(good_crt)
+    srv = _serve_tls(combined, payload=b"<html>certainly not PEM</html>")
+    try:
+        trust.add_pem(_read(crt))
+        prev = os.path.join(tdir, trust.DOWNLOADED_BUNDLE)
+        with open(prev, "w") as f:
+            f.write(good)
+        res = trust.download_bundle(
+            "https://127.0.0.1:%d/b.pem" % srv.server_address[1])
+    finally:
+        srv.shutdown()
+    assert res["ok"] is False and res["certs"] == 0
+    assert "certificate" in res["error"]
+    assert _read(prev) == good
+
+
+def test_download_bundle_untrusted_server_fails_cleanly(trust_env, tmp_path):
+    # the download itself verifies TLS via trust.ssl_context(): a server
+    # whose CA is NOT installed is refused, with a clean error dict
+    tdir, _ = trust_env
+    _, _, combined = _throwaway_cert(tmp_path, "untrustedsrv")
+    srv = _serve_tls(combined, payload=b"irrelevant")
+    try:
+        res = trust.download_bundle(
+            "https://127.0.0.1:%d/b.pem" % srv.server_address[1])
+    finally:
+        srv.shutdown()
+    assert res["ok"] is False and res["certs"] == 0
+    assert res["error"]
+    assert not os.path.exists(os.path.join(tdir, trust.DOWNLOADED_BUNDLE))
