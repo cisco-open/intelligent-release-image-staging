@@ -4214,7 +4214,7 @@ def test_settings_telemetry_destination_roundtrip(tmp_path, monkeypatch):
             "effective_endpoint": "http://env-collector:4318",
             "effective_enabled": True}
         # validation -> 400: bad types, bad scheme, missing netloc,
-        # query/fragment, bool pedantry
+        # query/fragment, bool pedantry, credentials, hostless netloc
         for bad in ({"endpoint": 42, "enabled": True},
                     {"endpoint": "ftp://c:4318", "enabled": True},
                     {"endpoint": "https://", "enabled": True},
@@ -4223,7 +4223,10 @@ def test_settings_telemetry_destination_roundtrip(tmp_path, monkeypatch):
                     {"endpoint": "https://c:4318#frag", "enabled": True},
                     {"endpoint": "", "enabled": True},
                     {"endpoint": "https://c:4318", "enabled": 1},
-                    {"endpoint": "https://c:4318", "enabled": "on"}):
+                    {"endpoint": "https://c:4318", "enabled": "on"},
+                    {"endpoint": "http://user:pass@collector:4318", "enabled": True},
+                    {"endpoint": "http://a@b", "enabled": True},
+                    {"endpoint": "https://:4318", "enabled": True}):
             st, _, _ = _req(host, port, "POST",
                             "/api/settings/telemetry-destination", bad,
                             headers=hh)
@@ -4245,6 +4248,20 @@ def test_settings_telemetry_destination_roundtrip(tmp_path, monkeypatch):
                       / "telemetry-destination.json")) as f:
             assert json.load(f) == {"endpoint": "https://collector:4318",
                                     "enabled": True}
+        # IPv6 addresses still work (guard case)
+        st, _, b = _req(host, port, "POST",
+                        "/api/settings/telemetry-destination",
+                        {"endpoint": "https://[::1]:4318", "enabled": True},
+                        headers=hh)
+        assert st == 200
+        assert json.loads(b) == {"ok": True,
+                                 "endpoint": "https://[::1]:4318",
+                                 "enabled": True}
+        # Set back to collector:4318 for subsequent tests
+        assert _req(host, port, "POST",
+                    "/api/settings/telemetry-destination",
+                    {"endpoint": "https://collector:4318", "enabled": True},
+                    headers=hh)[0] == 200
         st, _, b = _req(host, port, "GET", "/api/settings",
                         headers={"Cookie": ck})
         assert json.loads(b)["telemetry_destination"] == {
@@ -4313,6 +4330,45 @@ def test_settings_telemetry_destination_audited(tmp_path, monkeypatch):
         assert clr_ev[0]["category"] == "telemetry"
         assert ("was endpoint https://collector:4318"
                 in clr_ev[0]["detail"])
+    finally:
+        stop()
+
+
+def test_settings_telemetry_destination_credentials_rejected(tmp_path, monkeypatch):
+    """Verify credentialed endpoints are rejected and credentials don't leak
+    into response or audit logs. Endpoints with embedded userinfo are rejected
+    at validation time before any audit event is generated."""
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        # Attempt 1: user:pass@ format
+        st, _, b = _req(host, port, "POST",
+                        "/api/settings/telemetry-destination",
+                        {"endpoint": "http://user:pass@collector:4318",
+                         "enabled": True},
+                        headers=hh)
+        assert st == 400
+        # Verify "pass" doesn't leak into response body
+        assert b"pass" not in b.lower()
+        # Attempt 2: user@ format
+        st, _, b = _req(host, port, "POST",
+                        "/api/settings/telemetry-destination",
+                        {"endpoint": "http://a@b", "enabled": True},
+                        headers=hh)
+        assert st == 400
+        assert b"a@b" not in b
+        # Check audit log: no telemetry-destination-set event should be created
+        # (validation happens before audit logging)
+        events = _read_audit_lines(audit_path)
+        set_ev = [e for e in events
+                  if e["event"] == "telemetry-destination-set"]
+        assert len(set_ev) == 0, "rejected endpoint should not create audit event"
+        # Verify "pass" and other credential markers don't appear anywhere in audit
+        audit_text = json.dumps(events)
+        assert "pass" not in audit_text
+        assert "user:pass" not in audit_text
     finally:
         stop()
 

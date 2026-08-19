@@ -213,6 +213,10 @@ def _validate_otlp_endpoint(raw):
     parts = urlsplit(url)
     if parts.scheme not in ("http", "https") or not parts.netloc:
         return None, "endpoint must be an http:// or https:// URL with a host"
+    if parts.username is not None or parts.password is not None:
+        return None, "endpoint must not contain credentials"
+    if parts.hostname is None:
+        return None, "endpoint must be an http:// or https:// URL with a host"
     if parts.query or parts.fragment:
         return None, "endpoint must not have a query or fragment"
     return url.rstrip("/"), None
