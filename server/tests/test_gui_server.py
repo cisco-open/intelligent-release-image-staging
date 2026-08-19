@@ -3477,3 +3477,54 @@ def test_reload_tls_corrupt_file_keeps_old_cert(tmp_path, monkeypatch):
         assert _peer_cert_der(host, port) == _first_cert_der(bi_cert)
     finally:
         stop()
+
+
+def test_make_server_falls_back_to_iris_cert_when_gui_cert_is_corrupt(
+        tmp_path, monkeypatch):
+    """Startup crash-window guard (Task 6 review finding): a durable
+    mismatched cert/key pair can land in the gui-cert override file (e.g. a
+    crash between writing the cert and the key). _resolve_certfile() picks
+    it on existence alone, so make_server must not crash trying to load it
+    -- it probes with a throwaway context first, and on failure falls back
+    to the next candidate (IRIS_CERT) rather than taking the console down."""
+    bi_cert, bi_key = _gen_cert_pair(tmp_path, "iris-builtin", "startup-fb-bi")
+    builtin = tmp_path / "cert.pem"
+    builtin.write_text(bi_cert + bi_key)
+    gui = tmp_path / "gui-cert.pem"
+    gui.write_text("-----BEGIN CERTIFICATE-----\nnot a cert\n"
+                   "-----END CERTIFICATE-----\n")
+    monkeypatch.setenv("IRIS_CERT", str(builtin))
+    monkeypatch.setenv("IRIS_GUI_CERT", str(gui))
+    certfile = gui_server._resolve_certfile()  # picks the corrupt override
+    assert certfile == str(gui)
+    app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
+    srv = gui_server.make_server("127.0.0.1", 0, app, certfile=certfile)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        assert _peer_cert_der("127.0.0.1", port) == _first_cert_der(bi_cert)
+    finally:
+        srv.shutdown()
+
+
+def test_make_server_falls_back_to_plain_http_when_all_candidates_corrupt(
+        tmp_path, monkeypatch):
+    """Both the gui-cert override and IRIS_CERT are unusable at startup --
+    make_server must still not crash; it serves plain HTTP (no tls_ctx),
+    same as the certfile=None path, rather than taking the process down."""
+    builtin = tmp_path / "cert.pem"
+    builtin.write_text("-----BEGIN CERTIFICATE-----\nnot a cert\n"
+                       "-----END CERTIFICATE-----\n")
+    gui = tmp_path / "gui-cert.pem"
+    gui.write_text("-----BEGIN CERTIFICATE-----\nalso not a cert\n"
+                   "-----END CERTIFICATE-----\n")
+    monkeypatch.setenv("IRIS_CERT", str(builtin))
+    monkeypatch.setenv("IRIS_GUI_CERT", str(gui))
+    certfile = gui_server._resolve_certfile()  # picks the corrupt override
+    assert certfile == str(gui)
+    app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
+    srv = gui_server.make_server("127.0.0.1", 0, app, certfile=certfile)
+    try:
+        assert srv.reload_tls() is False  # no live TLS context to hot-swap
+    finally:
+        srv.server_close()

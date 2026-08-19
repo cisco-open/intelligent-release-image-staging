@@ -1491,9 +1491,30 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
     srv = ThreadingHTTPServer((host, port), Handler)
     tls_ctx = None
     if certfile:
-        tls_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        tls_ctx.load_cert_chain(certfile)
-        srv.socket = tls_ctx.wrap_socket(srv.socket, server_side=True)
+        # Startup crash-window guard: the preferred cert file (normally the
+        # gui-cert override, since _resolve_certfile() picks it on existence
+        # alone) can be a corrupt or mismatched cert/key pair -- e.g. a crash
+        # between writing the cert and the key. Probe with a throwaway
+        # context BEFORE wrapping the listening socket; on failure, fall
+        # back to the next candidate (IRIS_CERT) rather than crashing the
+        # process. If that also fails, serve plain HTTP -- never take the
+        # console down over a bad cert file.
+        candidates = [certfile]
+        iris_cert = os.environ.get("IRIS_CERT", "/run/iris/tls/cert.pem")
+        if iris_cert != certfile:
+            candidates.append(iris_cert)
+        for cand in candidates:
+            if not os.path.exists(cand):
+                continue
+            try:
+                probe = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                probe.load_cert_chain(cand)      # validate before wrapping
+            except (ssl.SSLError, OSError):
+                continue                          # corrupt/mismatched pair
+            tls_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            tls_ctx.load_cert_chain(cand)
+            srv.socket = tls_ctx.wrap_socket(srv.socket, server_side=True)
+            break
 
     def reload_tls():
         """Hot-swap the serving certificate: re-resolve the active combined
