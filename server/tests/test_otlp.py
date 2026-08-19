@@ -395,3 +395,13 @@ class TestTrustStoreWiring:
                 otlp._http_post(url, b"{}")      # 3xx is an export failure
         finally:
             srv.shutdown()
+
+    def test_trust_context_failure_is_caught_and_wrapped(self, monkeypatch):
+        """If trust.ssl_context() raises (unreadable bundle, ssl error),
+        the exception must be caught and wrapped in the generic RuntimeError,
+        not escape as a raw exception."""
+        monkeypatch.setattr(trust, "ssl_context",
+                           lambda: (_ for _ in ()).throw(
+                               ssl.SSLError("boom")))
+        with pytest.raises(RuntimeError, match="OTLP POST to"):
+            otlp._http_post("https://collector.local/v1/logs", b"{}")

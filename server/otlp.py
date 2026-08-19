@@ -229,10 +229,10 @@ def _http_post(url, body, headers=None):
     # (system roots + the IRIS bundle): a console trust-store edit reaches
     # the next export without a restart. trust.ssl_context() is mtime-cached,
     # so per-call cost is opener assembly only (2 POSTs per sampler pass).
-    opener = urllib.request.build_opener(
-        _NoRedirect(),
-        urllib.request.HTTPSHandler(context=trust.ssl_context()))
     try:
+        opener = urllib.request.build_opener(
+            _NoRedirect(),
+            urllib.request.HTTPSHandler(context=trust.ssl_context()))
         with opener.open(req, timeout=5) as resp:
             resp.read()
     except Exception:
