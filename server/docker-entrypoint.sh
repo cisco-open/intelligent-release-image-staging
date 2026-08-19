@@ -115,6 +115,12 @@ PY
     echo "WARNING: could not decrypt tls/gui-key.pem.age — console keeps the built-in certificate" >&2
     rm -f "$IRIS_RUN/tls/gui-key.pem" "$IRIS_GUI_CERT"
   fi
+else
+  # Durable override pair absent (never uploaded, or removed via Settings).
+  # RuntimeDirectoryPreserve=yes keeps /run/iris across restarts, so a
+  # PREVIOUS boot's override must not silently keep serving — sweep it the
+  # same way an empty trust dir sweeps a stale CA bundle below.
+  rm -f "$IRIS_RUN/tls/gui-key.pem" "$IRIS_GUI_CERT"
 fi
 
 # Build the outbound-TLS trust bundle from the durable trust dir (installed
@@ -126,8 +132,25 @@ shopt -s nullglob
 trust_srcs=("$IRIS_TRUST_DIR"/*.pem)
 shopt -u nullglob
 if [ "${#trust_srcs[@]}" -gt 0 ]; then
-  cat "${trust_srcs[@]}" > "$IRIS_CA_BUNDLE"
-  chmod 600 "$IRIS_CA_BUNDLE"
+  # Per-file, not one `cat "${trust_srcs[@]}"`: a single unreadable entry
+  # (e.g. a directory named *.pem) would otherwise abort the WHOLE container
+  # start under set -e. Mirrors trust.py rebuild_bundle(), which skips a bad
+  # entry (except OSError: continue) rather than failing the whole rebuild.
+  : > "$IRIS_CA_BUNDLE"
+  bundle_wrote=0
+  for f in "${trust_srcs[@]}"; do
+    if cat "$f" >> "$IRIS_CA_BUNDLE" 2>/dev/null; then
+      bundle_wrote=1
+    else
+      echo "WARNING: skipping unreadable trust entry $f" >&2
+    fi
+  done
+  if [ "$bundle_wrote" -eq 1 ]; then
+    chmod 600 "$IRIS_CA_BUNDLE"
+  else
+    # every entry was bad — same as an empty trust dir
+    rm -f "$IRIS_CA_BUNDLE"
+  fi
 else
   rm -f "$IRIS_CA_BUNDLE"
 fi

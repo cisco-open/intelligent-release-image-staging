@@ -188,6 +188,8 @@ gen_ec_pair() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"WARNING"* ]]
   [ ! -f "$TMP/run/tls/gui-cert.pem" ]
+  # the intermediate decrypted key must not survive a mismatched pair either
+  [ ! -f "$TMP/run/tls/gui-key.pem" ]
   [ -f "$TMP/run/tls/cert.pem" ]
 }
 
@@ -217,4 +219,73 @@ gen_ec_pair() {
   [ "$status" -eq 0 ]
   [ -d "$TMP/config/tls/trust" ]
   [ ! -f "$TMP/run/tls/ca-bundle.pem" ]
+}
+
+# ---------------------------------------------------------------------------
+# Review findings (per-file trust-bundle guard + stale gui-cert sweep).
+# ---------------------------------------------------------------------------
+
+@test "entrypoint tolerates one bad trust entry and keeps the good cert (per-file guard)" {
+  # A single un-cat-able entry (here: a directory named *.pem) must not abort
+  # the whole container start under set -e — mirrors trust.py rebuild_bundle()
+  # skipping a bad entry rather than failing the whole rebuild.
+  printf 'AGE-SECRET-KEY-FAKE\n' > "$TMP/agekey"
+  mkdir -p "$TMP/config/tls/trust"
+  printf 'GOOD-CA\n' > "$TMP/config/tls/trust/good.pem"
+  mkdir -p "$TMP/config/tls/trust/bad.pem"
+  run env IRIS_CONFIG="$TMP/config" IRIS_STATE="$TMP/state" IRIS_LOG="$TMP/log" \
+      IRIS_RUN="$TMP/run" IRIS_AGE_BIN="$TMP/fake-age" \
+      IRIS_AGE_KEY_FILE="$TMP/agekey" SKIP_SUPERVISE=1 \
+      bash "$BATS_TEST_DIRNAME/../docker-entrypoint.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARNING"* ]]
+  [ -f "$TMP/run/tls/ca-bundle.pem" ]
+  run cat "$TMP/run/tls/ca-bundle.pem"
+  [ "$output" = "GOOD-CA" ]
+}
+
+@test "entrypoint's CA bundle only includes *.pem entries (stray non-pem files ignored)" {
+  printf 'AGE-SECRET-KEY-FAKE\n' > "$TMP/agekey"
+  mkdir -p "$TMP/config/tls/trust"
+  printf 'GOOD-CA\n' > "$TMP/config/tls/trust/good.pem"
+  printf 'not a cert\n' > "$TMP/config/tls/trust/stray.txt"
+  run env IRIS_CONFIG="$TMP/config" IRIS_STATE="$TMP/state" IRIS_LOG="$TMP/log" \
+      IRIS_RUN="$TMP/run" IRIS_AGE_BIN="$TMP/fake-age" \
+      IRIS_AGE_KEY_FILE="$TMP/agekey" SKIP_SUPERVISE=1 \
+      bash "$BATS_TEST_DIRNAME/../docker-entrypoint.sh"
+  [ "$status" -eq 0 ]
+  run cat "$TMP/run/tls/ca-bundle.pem"
+  [ "$output" = "GOOD-CA" ]
+}
+
+@test "entrypoint sweeps a stale runtime CA bundle when the trust dir is empty" {
+  # mirrors the equivalent iris-secretfs test — RuntimeDirectoryPreserve-style
+  # staleness applies to the container's tmpfs too if the trust dir is emptied
+  # between restarts.
+  printf 'AGE-SECRET-KEY-FAKE\n' > "$TMP/agekey"
+  mkdir -p "$TMP/run/tls"
+  printf 'stale-ca\n' > "$TMP/run/tls/ca-bundle.pem"
+  run env IRIS_CONFIG="$TMP/config" IRIS_STATE="$TMP/state" IRIS_LOG="$TMP/log" \
+      IRIS_RUN="$TMP/run" IRIS_AGE_BIN="$TMP/fake-age" \
+      IRIS_AGE_KEY_FILE="$TMP/agekey" SKIP_SUPERVISE=1 \
+      bash "$BATS_TEST_DIRNAME/../docker-entrypoint.sh"
+  [ "$status" -eq 0 ]
+  [ ! -f "$TMP/run/tls/ca-bundle.pem" ]
+}
+
+@test "entrypoint sweeps a stale runtime gui-cert override when the durable pair is absent" {
+  # RuntimeDirectoryPreserve=yes keeps /run/iris across restarts — a PREVIOUS
+  # boot's override must not silently keep serving once the durable pair is
+  # gone (never uploaded, or removed via Settings).
+  printf 'AGE-SECRET-KEY-FAKE\n' > "$TMP/agekey"
+  mkdir -p "$TMP/run/tls"
+  printf 'stale-cert\n' > "$TMP/run/tls/gui-cert.pem"
+  printf 'stale-key\n' > "$TMP/run/tls/gui-key.pem"
+  run env IRIS_CONFIG="$TMP/config" IRIS_STATE="$TMP/state" IRIS_LOG="$TMP/log" \
+      IRIS_RUN="$TMP/run" IRIS_AGE_BIN="$TMP/fake-age" \
+      IRIS_AGE_KEY_FILE="$TMP/agekey" SKIP_SUPERVISE=1 \
+      bash "$BATS_TEST_DIRNAME/../docker-entrypoint.sh"
+  [ "$status" -eq 0 ]
+  [ ! -f "$TMP/run/tls/gui-cert.pem" ]
+  [ ! -f "$TMP/run/tls/gui-key.pem" ]
 }
