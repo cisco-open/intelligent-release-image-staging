@@ -187,3 +187,54 @@ def test_decrypt_bad_key_fails_closed_no_plaintext(tmp_path, fake_age):
     with pytest.raises(subprocess.CalledProcessError):
         secretfs.decrypt_to(str(enc), str(out), str(key), age_bin=fake_age)
     assert not out.exists()
+
+
+def test_encrypt_from_timeout_on_hung_age(tmp_path, monkeypatch):
+    """If age hangs (e.g., subprocess stalls), timeout kills it and raises
+    TimeoutExpired rather than hanging the request thread forever."""
+    # Create a fake age binary that sleeps longer than the timeout.
+    slow_age = tmp_path / "slow-age"
+    slow_age.write_text(r'''#!/usr/bin/env bash
+# Fake age that sleeps longer than any reasonable timeout.
+sleep 10
+exit 0
+''')
+    slow_age.chmod(0o755)
+
+    plain = tmp_path / "run" / "secrets.json"
+    plain.parent.mkdir()
+    plain.write_text("{\"test\": 1}\n")
+    enc = tmp_path / "secrets.json.age"
+
+    # Monkeypatch the timeout to ~1s so the test finishes quickly.
+    monkeypatch.setattr(secretfs, "_AGE_TIMEOUT", 1)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        secretfs.encrypt_from(
+            str(plain), str(enc), "age1rec", age_bin=str(slow_age)
+        )
+
+
+def test_decrypt_to_timeout_on_hung_age(tmp_path, monkeypatch):
+    """If age hangs during decryption, timeout kills it and raises
+    TimeoutExpired instead of hanging."""
+    # Create a fake age binary that sleeps longer than the timeout.
+    slow_age = tmp_path / "slow-age"
+    slow_age.write_text(r'''#!/usr/bin/env bash
+# Fake age that sleeps longer than any reasonable timeout.
+sleep 10
+exit 0
+''')
+    slow_age.chmod(0o755)
+
+    enc = tmp_path / "secrets.json.age"
+    enc.write_text("AGEFAKE\n{\"test\": 1}\n")
+    key = tmp_path / "key"
+    key.write_text("AGE-SECRET-KEY-FAKE\n")
+    out = tmp_path / "run" / "secrets.json"
+
+    # Monkeypatch the timeout to ~1s so the test finishes quickly.
+    monkeypatch.setattr(secretfs, "_AGE_TIMEOUT", 1)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        secretfs.decrypt_to(str(enc), str(out), str(key), age_bin=str(slow_age))

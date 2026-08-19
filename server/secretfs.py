@@ -18,6 +18,7 @@ import subprocess
 import tempfile
 
 AGE_BIN = os.environ.get("IRIS_AGE_BIN", "age")
+_AGE_TIMEOUT = 30
 
 
 def decrypt_to(enc_path, out_path, key_file, age_bin=AGE_BIN):
@@ -33,6 +34,7 @@ def decrypt_to(enc_path, out_path, key_file, age_bin=AGE_BIN):
         subprocess.run(
             [age_bin, "-d", "-i", key_file, "-o", tmp, enc_path],
             check=True,
+            timeout=_AGE_TIMEOUT,
         )
         os.chmod(tmp, 0o600)
         os.replace(tmp, out_path)
@@ -64,7 +66,7 @@ def encrypt_from(plain_path, enc_path, recipients_csv, age_bin=AGE_BIN):
     os.close(fd)
     try:
         cmd += ["-o", tmp, plain_path]
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True, timeout=_AGE_TIMEOUT)
         if mode is not None:
             os.chmod(tmp, mode)
         os.replace(tmp, enc_path)
