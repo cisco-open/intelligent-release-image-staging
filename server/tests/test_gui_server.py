@@ -4185,3 +4185,134 @@ def test_ca_refresh_due_pure_decision():
     assert due({}) is None
     assert due(None) is None
 
+
+# ---- editable telemetry destination (feature B, console side) ----
+
+def test_settings_telemetry_destination_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    monkeypatch.setenv("IRIS_OTLP_ENDPOINT", "http://env-collector:4318")
+    monkeypatch.setenv("IRIS_OBSERVABILITY", "1")
+    host, port, _deps, stop = _serve_full(tmp_path)
+    try:
+        # auth: no session -> 401; session without CSRF -> 403 (POST + DELETE)
+        assert _req(host, port, "POST", "/api/settings/telemetry-destination",
+                    {"endpoint": "https://c:4318", "enabled": True})[0] == 401
+        ck, csrf = _auth(host, port)
+        assert _req(host, port, "POST", "/api/settings/telemetry-destination",
+                    {"endpoint": "https://c:4318", "enabled": True},
+                    headers={"Cookie": ck})[0] == 403
+        assert _req(host, port, "DELETE",
+                    "/api/settings/telemetry-destination",
+                    headers={"Cookie": ck})[0] == 403
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        # no override yet: env is both the source and the effective config
+        st, _, b = _req(host, port, "GET", "/api/settings",
+                        headers={"Cookie": ck})
+        assert st == 200
+        assert json.loads(b)["telemetry_destination"] == {
+            "endpoint": None, "enabled": None, "source": "env",
+            "effective_endpoint": "http://env-collector:4318",
+            "effective_enabled": True}
+        # validation -> 400: bad types, bad scheme, missing netloc,
+        # query/fragment, bool pedantry
+        for bad in ({"endpoint": 42, "enabled": True},
+                    {"endpoint": "ftp://c:4318", "enabled": True},
+                    {"endpoint": "https://", "enabled": True},
+                    {"endpoint": "collector:4318", "enabled": True},
+                    {"endpoint": "https://c:4318?x=1", "enabled": True},
+                    {"endpoint": "https://c:4318#frag", "enabled": True},
+                    {"endpoint": "", "enabled": True},
+                    {"endpoint": "https://c:4318", "enabled": 1},
+                    {"endpoint": "https://c:4318", "enabled": "on"}):
+            st, _, _ = _req(host, port, "POST",
+                            "/api/settings/telemetry-destination", bad,
+                            headers=hh)
+            assert st == 400, bad
+        hh_json = dict(hh); hh_json["Content-Type"] = "application/json"
+        assert _req(host, port, "POST",
+                    "/api/settings/telemetry-destination",
+                    raw=b"[]", headers=hh_json)[0] == 400
+        # set: the trailing slash is stripped before persisting
+        st, _, b = _req(host, port, "POST",
+                        "/api/settings/telemetry-destination",
+                        {"endpoint": "https://collector:4318/",
+                         "enabled": True}, headers=hh)
+        assert st == 200
+        assert json.loads(b) == {"ok": True,
+                                 "endpoint": "https://collector:4318",
+                                 "enabled": True}
+        with open(str(tmp_path / "state"
+                      / "telemetry-destination.json")) as f:
+            assert json.load(f) == {"endpoint": "https://collector:4318",
+                                    "enabled": True}
+        st, _, b = _req(host, port, "GET", "/api/settings",
+                        headers={"Cookie": ck})
+        assert json.loads(b)["telemetry_destination"] == {
+            "endpoint": "https://collector:4318", "enabled": True,
+            "source": "override",
+            "effective_endpoint": "https://collector:4318",
+            "effective_enabled": True}
+        # per-field inherit: a null endpoint keeps the env endpoint effective
+        assert _req(host, port, "POST",
+                    "/api/settings/telemetry-destination",
+                    {"endpoint": None, "enabled": False},
+                    headers=hh)[0] == 200
+        st, _, b = _req(host, port, "GET", "/api/settings",
+                        headers={"Cookie": ck})
+        assert json.loads(b)["telemetry_destination"] == {
+            "endpoint": None, "enabled": False, "source": "override",
+            "effective_endpoint": "http://env-collector:4318",
+            "effective_enabled": False}
+        # DELETE reverts the GET reflection to the deployment default (env)
+        st, _, b = _req(host, port, "DELETE",
+                        "/api/settings/telemetry-destination", headers=hh)
+        assert st == 200 and json.loads(b)["deleted"] is True
+        assert not os.path.exists(str(tmp_path / "state"
+                                      / "telemetry-destination.json"))
+        st, _, b = _req(host, port, "GET", "/api/settings",
+                        headers={"Cookie": ck})
+        dest = json.loads(b)["telemetry_destination"]
+        assert dest["source"] == "env"
+        assert dest["effective_endpoint"] == "http://env-collector:4318"
+        assert dest["effective_enabled"] is True
+        # a second DELETE reports there was nothing to delete
+        st, _, b = _req(host, port, "DELETE",
+                        "/api/settings/telemetry-destination", headers=hh)
+        assert st == 200 and json.loads(b)["deleted"] is False
+    finally:
+        stop()
+
+
+def test_settings_telemetry_destination_audited(tmp_path, monkeypatch):
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        assert _req(host, port, "POST",
+                    "/api/settings/telemetry-destination",
+                    {"endpoint": "https://collector:4318", "enabled": True},
+                    headers=hh)[0] == 200
+        assert _req(host, port, "DELETE",
+                    "/api/settings/telemetry-destination",
+                    headers=hh)[0] == 200
+        events = _read_audit_lines(audit_path)
+        set_ev = [e for e in events
+                  if e["event"] == "telemetry-destination-set"]
+        clr_ev = [e for e in events
+                  if e["event"] == "telemetry-destination-clear"]
+        assert len(set_ev) == 1 and len(clr_ev) == 1
+        assert set_ev[0]["category"] == "telemetry"
+        assert set_ev[0]["actor"] == "console:admin"
+        assert set_ev[0]["target"] == "otlp-endpoint"
+        # non-secret before -> after (endpoint URLs are not secrets; headers
+        # stay env-only and never pass through this route)
+        assert ("endpoint (inherit) -> https://collector:4318"
+                in set_ev[0]["detail"])
+        assert "enabled (inherit) -> True" in set_ev[0]["detail"]
+        assert clr_ev[0]["category"] == "telemetry"
+        assert ("was endpoint https://collector:4318"
+                in clr_ev[0]["detail"])
+    finally:
+        stop()
+

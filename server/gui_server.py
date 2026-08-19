@@ -28,6 +28,8 @@ import gui_app
 import gui_onboard
 import gui_tls
 import live_samples
+import telemetry
+import telemetry_destination
 import trust
 
 WEBROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webroot")
@@ -199,6 +201,21 @@ def write_ca_trust_settings(path, url, auto):
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
+
+
+def _validate_otlp_endpoint(raw):
+    """Telemetry-destination endpoint validation (design doc, feature B):
+    http or https, host required, no query/fragment; the trailing slash is
+    stripped so the exporters derive <endpoint>/v1/logs cleanly (they
+    rstrip('/') too — otlp.py:252). Returns (endpoint, None) on success or
+    (None, error-message)."""
+    url = raw.strip()
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        return None, "endpoint must be an http:// or https:// URL with a host"
+    if parts.query or parts.fragment:
+        return None, "endpoint must not have a query or fragment"
+    return url.rstrip("/"), None
 
 
 _CA_JOB_TTL = 3600                  # evict terminal refresh jobs after (s)
@@ -940,6 +957,13 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 tail = os.environ.get("IRIS_CONSOLE_URL", "").rstrip("/").rsplit(":", 1)[-1]
                 raw = tail if tail.isdigit() else ""
             console_port = int(raw) if raw.isdigit() else 8080
+            state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
+            dest = telemetry_destination.read(
+                telemetry_destination.settings_path(state_dir))
+            env_endpoint = os.environ.get("IRIS_OTLP_ENDPOINT", "").strip()
+            env_enabled = telemetry.observability_enabled()
+            override = (dest["endpoint"] is not None
+                        or dest["enabled"] is not None)
             return {
                 "admin_username": admin_username,
                 "version": _read_version(),
@@ -962,7 +986,20 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 # installed root CAs: name/subject/expiry/fingerprint/source
                 "trust": trust.list_entries(),
                 "ca_trust": read_ca_trust_settings(ca_trust_settings_path(
-                    os.environ.get("IRIS_STATE", "/var/lib/iris"))),
+                    state_dir)),
+                "telemetry_destination": {
+                    "endpoint": dest["endpoint"],
+                    "enabled": dest["enabled"],
+                    "source": "override" if override else "env",
+                    # effective = file-if-not-null else env, PER FIELD —
+                    # exactly the hub's rule, so this view never lies
+                    "effective_endpoint": (dest["endpoint"]
+                                           if dest["endpoint"] is not None
+                                           else env_endpoint),
+                    "effective_enabled": (dest["enabled"]
+                                          if dest["enabled"] is not None
+                                          else env_enabled),
+                },
             }
 
         def _sse_onboard(self, onboard, job_id):
@@ -1259,6 +1296,42 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                   % (prev_url_audit, url_after_audit,
                                      prev_raw["auto"], auto))
                 self._json(200, {"ok": True, "ca_trust": saved})
+                return
+            if path == "/api/settings/telemetry-destination":
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                endpoint = data.get("endpoint")
+                enabled = data.get("enabled")
+                # null = inherit the deployment env, per field (feature B)
+                if enabled is not None and not isinstance(enabled, bool):
+                    self._json(400, {"error": "enabled must be a bool or null"})
+                    return
+                if endpoint is not None:
+                    if not isinstance(endpoint, str):
+                        self._json(400, {"error":
+                                         "endpoint must be a string or null"})
+                        return
+                    endpoint, err = _validate_otlp_endpoint(endpoint)
+                    if err:
+                        self._json(400, {"error": err}); return
+                dpath = telemetry_destination.settings_path(
+                    os.environ.get("IRIS_STATE", "/var/lib/iris"))
+                prev = telemetry_destination.read(dpath)
+                telemetry_destination.write(dpath, endpoint, enabled)
+                # endpoint URLs are non-secret (headers stay env-only), so a
+                # before -> after detail is safe — stage-host precedent.
+                self._audit("telemetry-destination-set", "telemetry",
+                           action="set", target="otlp-endpoint", actor=actor,
+                           detail="endpoint %s -> %s, enabled %s -> %s"
+                                  % (prev["endpoint"] or "(inherit)",
+                                     endpoint or "(inherit)",
+                                     "(inherit)" if prev["enabled"] is None
+                                     else prev["enabled"],
+                                     "(inherit)" if enabled is None
+                                     else enabled))
+                self._json(200, {"ok": True, "endpoint": endpoint,
+                                 "enabled": enabled})
                 return
             if path == "/api/settings/gui-cert":
                 data = self._json_body(raw)
@@ -1751,6 +1824,20 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                            detail=("cleared (was user %s)" % prev["username"])
                                   if deleted else "nothing was configured")
                 self._json(200, {"deleted": deleted}); return
+            if path == "/api/settings/telemetry-destination":
+                dpath = telemetry_destination.settings_path(
+                    os.environ.get("IRIS_STATE", "/var/lib/iris"))
+                prev = telemetry_destination.read(dpath)
+                existed = os.path.exists(dpath)
+                telemetry_destination.clear(dpath)
+                self._audit("telemetry-destination-clear", "telemetry",
+                           action="clear", target="otlp-endpoint", actor=actor,
+                           detail=("cleared (was endpoint %s, enabled %s)"
+                                   % (prev["endpoint"] or "(inherit)",
+                                      "(inherit)" if prev["enabled"] is None
+                                      else prev["enabled"]))
+                                  if existed else "nothing was overridden")
+                self._json(200, {"deleted": existed}); return
             if path == "/api/settings/gui-cert":
                 was_active = gui_tls.override_active()
                 gui_tls.remove_override()
