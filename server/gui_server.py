@@ -1489,10 +1489,41 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             pass
 
     srv = ThreadingHTTPServer((host, port), Handler)
+    tls_ctx = None
     if certfile:
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ctx.load_cert_chain(certfile)
-        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+        tls_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls_ctx.load_cert_chain(certfile)
+        srv.socket = tls_ctx.wrap_socket(srv.socket, server_side=True)
+
+    def reload_tls():
+        """Hot-swap the serving certificate: re-resolve the active combined
+        file (gui-cert override if present, else IRIS_CERT) and re-run
+        load_cert_chain on the retained listening SSLContext. New handshakes
+        serve the new chain; established sessions continue; no rebind.
+
+        Returns True on success. Returns False as a safe no-op when the
+        server is not serving TLS (certfile was None -- persisted config
+        then takes effect at the next restart), when resolution finds no
+        file, or when the file fails to load. Atomicity: a throwaway
+        context validates the file FIRST, so a bad file can never leave the
+        live context half-swapped or kill serving.
+
+        Closure on purpose: Handler methods (defined above, also closures
+        of make_server) call this bare as reload_tls()."""
+        if tls_ctx is None:
+            return False
+        path = _resolve_certfile()
+        if path is None:
+            return False
+        try:
+            probe = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            probe.load_cert_chain(path)      # validate on a throwaway first
+            tls_ctx.load_cert_chain(path)    # only then touch the live one
+        except (ssl.SSLError, OSError):
+            return False
+        return True
+
+    srv.reload_tls = reload_tls
     return srv
 
 

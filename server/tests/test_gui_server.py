@@ -3383,3 +3383,97 @@ def test_gui_cert_resolution_order(tmp_path, monkeypatch):
     # override removed -> back on IRIS_CERT (the revert path)
     os.unlink(str(gui))
     assert gui_server._resolve_certfile() == str(combined)
+
+
+def _serve_tls(tmp_path, certfile):
+    """Start gui_server over TLS on an ephemeral port. Returns
+    (host, port, srv, stop_fn) -- srv is exposed so tests can call
+    srv.reload_tls() directly (the endpoints call the same closure)."""
+    app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
+    srv = gui_server.make_server("127.0.0.1", 0, app, certfile=certfile)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return "127.0.0.1", port, srv, srv.shutdown
+
+
+def _peer_cert_der(host, port):
+    """Fresh TLS handshake; returns the server certificate in DER.
+    binary_form=True works without validation (the dict form would be
+    empty under CERT_NONE)."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    with socket.create_connection((host, port), timeout=5) as sock:
+        with ctx.wrap_socket(sock, server_hostname=host) as tls:
+            return tls.getpeercert(binary_form=True)
+
+
+def _first_cert_der(pem_text):
+    """DER of the first CERTIFICATE block (combined files carry cert+key)."""
+    m = re.search(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
+                  pem_text, re.S)
+    return ssl.PEM_cert_to_DER_cert(m.group(0))
+
+
+def test_reload_tls_false_on_plain_http_server(tmp_path, monkeypatch):
+    """Every pytest _serve* server runs certfile=None; reload_tls() must be
+    a safe no-op there, EVEN when a valid override file exists on disk
+    (upload-while-plain-HTTP: the persisted config takes effect at next
+    restart -- the message the gui-cert endpoint surfaces)."""
+    cert_pem, key_pem = _gen_cert_pair(tmp_path, "would-be-served", "plain")
+    gui = tmp_path / "gui-cert.pem"
+    gui.write_text(cert_pem + key_pem)
+    monkeypatch.setenv("IRIS_GUI_CERT", str(gui))
+    app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
+    srv = gui_server.make_server("127.0.0.1", 0, app, certfile=None)
+    try:
+        assert srv.reload_tls() is False
+    finally:
+        srv.server_close()
+
+
+def test_reload_tls_serves_new_cert_and_reverts(tmp_path, monkeypatch):
+    """Handshake before/after: replacing the gui-cert file + reload_tls()
+    serves the NEW certificate to fresh handshakes; removing the file +
+    reload_tls() lands back on IRIS_CERT (revert path)."""
+    bi_cert, bi_key = _gen_cert_pair(tmp_path, "iris-builtin", "builtin")
+    cu_cert, cu_key = _gen_cert_pair(tmp_path, "iris-custom", "custom")
+    builtin = tmp_path / "cert.pem"
+    builtin.write_text(bi_cert + bi_key)
+    gui = tmp_path / "gui-cert.pem"          # absent for now
+    monkeypatch.setenv("IRIS_CERT", str(builtin))
+    monkeypatch.setenv("IRIS_GUI_CERT", str(gui))
+    host, port, srv, stop = _serve_tls(tmp_path, str(builtin))
+    try:
+        assert _peer_cert_der(host, port) == _first_cert_der(bi_cert)
+        # the upload flow drops the combined override, then hot-reloads
+        gui.write_text(cu_cert + cu_key)
+        assert srv.reload_tls() is True
+        assert _peer_cert_der(host, port) == _first_cert_der(cu_cert)
+        # revert: override removed -> reload resolves back to IRIS_CERT
+        os.unlink(str(gui))
+        assert srv.reload_tls() is True
+        assert _peer_cert_der(host, port) == _first_cert_der(bi_cert)
+    finally:
+        stop()
+
+
+def test_reload_tls_corrupt_file_keeps_old_cert(tmp_path, monkeypatch):
+    """A corrupt combined file must not crash serving and must not leave the
+    live context half-swapped: reload_tls() returns False and fresh
+    handshakes still get the OLD certificate (throwaway-context probe runs
+    before the live load)."""
+    bi_cert, bi_key = _gen_cert_pair(tmp_path, "iris-builtin", "corrupt-bi")
+    builtin = tmp_path / "cert.pem"
+    builtin.write_text(bi_cert + bi_key)
+    gui = tmp_path / "gui-cert.pem"
+    monkeypatch.setenv("IRIS_CERT", str(builtin))
+    monkeypatch.setenv("IRIS_GUI_CERT", str(gui))
+    host, port, srv, stop = _serve_tls(tmp_path, str(builtin))
+    try:
+        gui.write_text("-----BEGIN CERTIFICATE-----\nnot a cert\n"
+                       "-----END CERTIFICATE-----\n")
+        assert srv.reload_tls() is False
+        assert _peer_cert_der(host, port) == _first_cert_der(bi_cert)
+    finally:
+        stop()
