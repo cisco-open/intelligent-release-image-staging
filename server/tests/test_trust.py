@@ -169,6 +169,29 @@ def test_list_entries_empty_or_missing_dir(trust_env):
     assert trust.list_entries() == []      # dir does not even exist yet
 
 
+def test_list_entries_tolerates_undecodable_file(trust_env, tmp_path):
+    """A binary *.pem dropped into the trust dir by an operator (not text at
+    all -- not even garbage PEM) must not blow up list_entries() with a
+    UnicodeDecodeError. It degrades to an "unknown"/zero-cert row like any
+    other unparseable store file."""
+    tdir, _ = trust_env
+    crt, _, _ = _throwaway_cert(tmp_path, "gooddecode")
+    good = trust.add_pem(_read(crt))
+    os.makedirs(tdir, exist_ok=True)
+    with open(os.path.join(tdir, "junk.pem"), "wb") as f:
+        f.write(os.urandom(64))
+    entries = trust.list_entries()
+    assert len(entries) == 2
+    by_name = {e["name"]: e for e in entries}
+    assert by_name[good["name"]] == good
+    junk = by_name["junk.pem"]
+    assert junk["cert_count"] == 0
+    assert junk["subject"] == "unknown"
+    assert junk["not_after"] == "unknown"
+    assert junk["fingerprint_sha256"] == "unknown"
+    assert junk["source"] == "manual"
+
+
 def test_remove_deletes_file_and_empties_bundle(trust_env, tmp_path):
     tdir, bundle = trust_env
     crt, _, _ = _throwaway_cert(tmp_path, "gonecase")
@@ -209,6 +232,19 @@ def test_rebuild_bundle_sorted_and_deterministic(trust_env, tmp_path):
     first = _read(bundle)
     assert trust.rebuild_bundle() == 2     # returns total cert count
     assert _read(bundle) == first          # same inputs -> identical bytes
+
+
+def test_rebuild_bundle_tolerates_undecodable_file(trust_env, tmp_path):
+    """A binary *.pem in the trust dir must not raise UnicodeDecodeError
+    out of rebuild_bundle() -- the bad file is skipped and the bundle is
+    still rebuilt from every readable/decodable store file."""
+    tdir, bundle = trust_env
+    crt, _, _ = _throwaway_cert(tmp_path, "gooddecode2")
+    trust.add_pem(_read(crt))
+    with open(os.path.join(tdir, "junk.pem"), "wb") as f:
+        f.write(os.urandom(64))
+    assert trust.rebuild_bundle() == 1     # only the good cert counted
+    assert _read(bundle).count("BEGIN CERTIFICATE") == 1
 
 
 # --- ssl_context: mtime cache + end-to-end verification ---------------------

@@ -130,7 +130,7 @@ def _entry(name):
     try:
         with open(os.path.join(trust_dir(), name)) as f:
             blocks = split_pem_certs(f.read())
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         blocks = []
     info = cert_info(blocks[0]) if blocks else {
         "subject": "unknown", "issuer": "unknown", "not_after": "unknown",
@@ -206,7 +206,7 @@ def rebuild_bundle():
         try:
             with open(os.path.join(trust_dir(), n)) as f:
                 blocks.extend(split_pem_certs(f.read()))
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             continue
     if not blocks:
         try:
