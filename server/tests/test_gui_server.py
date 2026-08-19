@@ -3815,3 +3815,86 @@ def test_settings_trust_delete_rejects_traversal(tmp_path, monkeypatch):
                     if e.get("event") == "trust-remove"]
     finally:
         stop()
+
+
+def test_settings_trust_add_includes_fingerprint_in_audit(tmp_path, monkeypatch):
+    """Verify that trust-add success audit detail includes fingerprint_sha256."""
+    trust_dir, bundle = _trust_env(tmp_path, monkeypatch)
+    ca_pem, _key = _gen_cert_pair(tmp_path, "corp-root-ca", "ca")
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, b = _req(host, port, "POST", "/api/settings/trust",
+                        {"pem": ca_pem}, headers=hh)
+        assert st == 200
+        entry = json.loads(b)["entry"]
+        # verify audit detail includes fingerprint alongside name/count/subject
+        ok_rows = [e for e in _read_audit_lines(audit_path)
+                   if e.get("event") == "trust-add" and e["result"] == "ok"]
+        assert ok_rows, "no success audit row found"
+        detail = ok_rows[-1]["detail"]
+        assert "fingerprint" in detail, "fingerprint not in detail: %s" % detail
+        assert entry["fingerprint_sha256"] in detail, \
+            "fingerprint_sha256 value not in detail: %s" % detail
+    finally:
+        stop()
+
+
+def test_settings_trust_add_audits_os_error(tmp_path, monkeypatch):
+    """Verify that OSError from trust.add_pem is caught and audited correctly."""
+    trust_dir, bundle = _trust_env(tmp_path, monkeypatch)
+    ca_pem, _key = _gen_cert_pair(tmp_path, "corp-root-ca", "ca")
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        # monkeypatch trust.add_pem to raise OSError
+        import trust as trust_mod
+        orig_add_pem = trust_mod.add_pem
+        def mock_add_pem(pem):
+            raise OSError("disk full")
+        monkeypatch.setattr(trust_mod, "add_pem", mock_add_pem)
+        # send valid PEM; should get 500 with static error body
+        st, _, b = _req(host, port, "POST", "/api/settings/trust",
+                        {"pem": ca_pem}, headers=hh)
+        assert st == 500
+        resp = json.loads(b)
+        assert resp["error"] == "trust install failed"
+        # verify audit contains class name only, not "disk full" or PEM text
+        fail_rows = [e for e in _read_audit_lines(audit_path)
+                     if e.get("event") == "trust-add" and e["result"] == "fail"]
+        assert fail_rows, "no fail audit row found"
+        detail = fail_rows[-1]["detail"]
+        assert "OSError" in detail, "OSError class name not in detail: %s" % detail
+        assert "disk full" not in detail, "error message leaked to detail: %s" % detail
+        assert "BEGIN CERTIFICATE" not in detail, "PEM text leaked to detail"
+    finally:
+        stop()
+
+
+def test_settings_trust_delete_rejects_null_and_no_suffix(tmp_path, monkeypatch):
+    """Verify DELETE /api/settings/trust/<name> rejects names with null bytes
+    and names without .pem suffix."""
+    trust_dir, _bundle = _trust_env(tmp_path, monkeypatch)
+    ca_pem, _key = _gen_cert_pair(tmp_path, "keep-me", "keep")
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, b = _req(host, port, "POST", "/api/settings/trust",
+                        {"pem": ca_pem}, headers=hh)
+        assert st == 200
+        name = json.loads(b)["entry"]["name"]
+        # test null-byte-encoded and no-suffix names -> 400, no audit
+        for bad in ("%00name.pem",  # null byte encoded
+                    "somename"):     # no .pem suffix
+            st, _, _ = _req(host, port, "DELETE",
+                            "/api/settings/trust/" + bad, headers=hh)
+            assert st == 400, bad
+        # nothing was deleted, nothing was audited as a remove
+        assert (trust_dir / name).is_file()
+        assert not [e for e in _read_audit_lines(audit_path)
+                    if e.get("event") == "trust-remove"]
+    finally:
+        stop()

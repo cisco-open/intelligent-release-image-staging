@@ -1069,11 +1069,17 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                detail="rejected: %s" % exc,
                                src_ip=self.client_address[0])
                     self._json(400, {"error": str(exc)}); return
+                except Exception as exc:
+                    self._audit("trust-add", "settings", action="add",
+                               target="trust-store", actor=actor, result="fail",
+                               detail="persist failed: %s" % exc.__class__.__name__,
+                               src_ip=self.client_address[0])
+                    self._json(500, {"error": "trust install failed"}); return
                 self._audit("trust-add", "settings", action="add",
                            target=entry["name"], actor=actor,
-                           detail="installed %s (%s cert(s), subject %s)"
+                           detail="installed %s (%s cert(s), subject %s, fingerprint %s)"
                                   % (entry["name"], entry["cert_count"],
-                                     entry["subject"]),
+                                     entry["subject"], entry["fingerprint_sha256"]),
                            src_ip=self.client_address[0])
                 self._json(200, {"entry": entry}); return
             if path == "/api/devices":
@@ -1517,7 +1523,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 # basename-only: no separators, no dot-dirs — a traversal
                 # attempt is a client bug (400), never a store lookup
                 if (not name or name in (".", "..") or "/" in name
-                        or "\\" in name or name != os.path.basename(name)):
+                        or "\\" in name or name != os.path.basename(name)
+                        or "\x00" in name or not name.endswith(".pem")):
                     self._json(400, {"error": "bad name"}); return
                 removed = trust.remove(name)
                 self._audit("trust-remove", "settings", action="remove",
