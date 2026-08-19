@@ -81,12 +81,14 @@ def test_destination_settings_mtime_cache(tmp_path):
     telemetry_destination.write(p, "http://one:4318", True)
     os.utime(p, (1000, 1000))
     assert s.current() == ("http://one:4318", True)
-    # same mtime -> the CACHED tuple is returned even if content changed
-    with open(p, "w") as f:
-        json.dump({"endpoint": "http://two:4318", "enabled": False}, f)
+    # same cache key (mtime_ns, ino, size) -> cached tuple returned
     os.utime(p, (1000, 1000))
     assert s.current() == ("http://one:4318", True)
-    # mtime bump -> re-read picks up the new content
+    # different cache key -> re-read picks up new content
+    os.utime(p, (2000, 2000))
+    assert s.current() == ("http://one:4318", True)  # still same file, just touched
+    # actual file replacement detected via cache key change -> re-read
+    telemetry_destination.write(p, "http://two:4318", False)
     os.utime(p, (2000, 2000))
     assert s.current() == ("http://two:4318", False)
 
@@ -106,3 +108,18 @@ def test_destination_settings_corrupt_file_inherits(tmp_path):
         f.write("{nope")
     assert telemetry_destination.DestinationSettings(p).current() == \
         (None, None)
+
+
+def test_destination_settings_cache_invalidates_on_file_replacement(tmp_path):
+    """Regression: cache key must account for file identity, not just mtime.
+    Write A at mtime 5000 -> cache. Clear. Write B at same mtime 5000.
+    Must detect file replacement and return B, not cached A."""
+    p = str(tmp_path / telemetry_destination.BASENAME)
+    s = telemetry_destination.DestinationSettings(p)
+    telemetry_destination.write(p, "http://one:4318", True)
+    os.utime(p, (5000, 5000))
+    assert s.current() == ("http://one:4318", True)
+    telemetry_destination.clear(p)
+    telemetry_destination.write(p, "http://two:4318", False)
+    os.utime(p, (5000, 5000))
+    assert s.current() == ("http://two:4318", False)

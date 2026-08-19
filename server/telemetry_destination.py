@@ -72,22 +72,25 @@ def clear(path):
 
 
 class DestinationSettings:
-    """mtime-cached reader (the live_samples.StreamSettings idiom) consulted
+    """Cache-keyed reader (the live_samples.StreamSettings idiom) consulted
     by the hub at the top of each sample() pass. Missing file -> (None, None)
-    without disturbing the cache key; unchanged mtime -> cached tuple."""
+    with cache invalidation; unchanged file key -> cached tuple. Cache key is
+    (mtime_ns, inode, size) matching the trust.ssl_context convention."""
 
     def __init__(self, path):
         self.path = path
-        self._mtime = None
+        self._cache_key = None
         self._value = (None, None)
 
     def current(self):
         try:
-            mtime = os.stat(self.path).st_mtime
+            st = os.stat(self.path)
+            cache_key = (st.st_mtime_ns, st.st_ino, st.st_size)
         except OSError:
+            self._cache_key = None
             return (None, None)
-        if mtime != self._mtime:
+        if cache_key != self._cache_key:
             data = read(self.path)
-            self._mtime = mtime
+            self._cache_key = cache_key
             self._value = (data["endpoint"], data["enabled"])
         return self._value
