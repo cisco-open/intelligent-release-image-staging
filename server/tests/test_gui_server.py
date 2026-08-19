@@ -4164,6 +4164,37 @@ def test_settings_ca_trust_config_audited(tmp_path, monkeypatch):
         stop()
 
 
+def test_settings_ca_trust_persist_failure_audited(tmp_path, monkeypatch):
+    """When write_ca_trust_settings raises (e.g. disk-full OSError), the
+    POST route must audit the failure and respond 500 with a static error
+    message rather than dropping the connection."""
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+
+        def failing_write(path, url, auto):
+            raise OSError("disk full")
+        monkeypatch.setattr(gui_server, "write_ca_trust_settings",
+                            failing_write)
+        st, _, b = _req(host, port, "POST", "/api/settings/ca-trust",
+                        {"url": "https://ca.example/bundle.pem",
+                         "auto": True}, headers=hh)
+        assert st == 500
+        resp = json.loads(b)
+        assert resp["error"] == "settings save failed"
+        fail_rows = [e for e in _read_audit_lines(audit_path)
+                     if e.get("event") == "ca-trust-config"
+                     and e.get("result") == "fail"]
+        assert fail_rows, "no fail audit row for write_ca_trust_settings exception"
+        detail = fail_rows[-1]["detail"]
+        assert "OSError" in detail
+        assert "disk full" not in detail
+    finally:
+        stop()
+
+
 def _poll_ca_job(host, port, ck, jid, timeout=3):
     deadline = time.time() + timeout
     job = None
@@ -4427,6 +4458,38 @@ def test_settings_telemetry_destination_audited(tmp_path, monkeypatch):
         assert clr_ev[0]["category"] == "telemetry"
         assert ("was endpoint https://collector:4318"
                 in clr_ev[0]["detail"])
+    finally:
+        stop()
+
+
+def test_settings_telemetry_destination_persist_failure_audited(tmp_path, monkeypatch):
+    """When telemetry_destination.write raises (e.g. disk-full OSError), the
+    POST route must audit the failure and respond 500 with a static error
+    message rather than dropping the connection."""
+    import telemetry_destination
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+
+        def failing_write(path, endpoint, enabled):
+            raise OSError("disk full")
+        monkeypatch.setattr(telemetry_destination, "write", failing_write)
+        st, _, b = _req(host, port, "POST",
+                        "/api/settings/telemetry-destination",
+                        {"endpoint": "https://collector:4318",
+                         "enabled": True}, headers=hh)
+        assert st == 500
+        resp = json.loads(b)
+        assert resp["error"] == "settings save failed"
+        fail_rows = [e for e in _read_audit_lines(audit_path)
+                     if e.get("event") == "telemetry-destination-set"
+                     and e.get("result") == "fail"]
+        assert fail_rows, "no fail audit row for telemetry_destination.write exception"
+        detail = fail_rows[-1]["detail"]
+        assert "OSError" in detail
+        assert "disk full" not in detail
     finally:
         stop()
 

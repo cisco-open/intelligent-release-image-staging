@@ -1298,9 +1298,15 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 # never-configured from explicitly-set.
                 prev_raw = _read_ca_trust_raw(spath)
                 prev_url_audit = prev_raw["url"] or "(none)"
-                write_ca_trust_settings(spath, url, auto)
-                saved = read_ca_trust_settings(spath)
                 url_after_audit = url if url is not None else "(none)"
+                try:
+                    write_ca_trust_settings(spath, url, auto)
+                except Exception as exc:
+                    self._audit("ca-trust-config", "settings", action="set",
+                               target="ca-trust", actor=actor, result="fail",
+                               detail="persist failed: %s" % exc.__class__.__name__)
+                    self._json(500, {"error": "settings save failed"}); return
+                saved = read_ca_trust_settings(spath)
                 self._audit("ca-trust-config", "settings", action="set",
                            target="ca-trust", actor=actor,
                            detail="url %s -> %s, auto %s -> %s"
@@ -1329,7 +1335,14 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 dpath = telemetry_destination.settings_path(
                     os.environ.get("IRIS_STATE", "/var/lib/iris"))
                 prev = telemetry_destination.read(dpath)
-                telemetry_destination.write(dpath, endpoint, enabled)
+                try:
+                    telemetry_destination.write(dpath, endpoint, enabled)
+                except Exception as exc:
+                    self._audit("telemetry-destination-set", "telemetry",
+                               action="set", target="otlp-endpoint",
+                               actor=actor, result="fail",
+                               detail="persist failed: %s" % exc.__class__.__name__)
+                    self._json(500, {"error": "settings save failed"}); return
                 # endpoint URLs are non-secret (headers stay env-only), so a
                 # before -> after detail is safe — stage-host precedent.
                 self._audit("telemetry-destination-set", "telemetry",
