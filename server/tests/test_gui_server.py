@@ -4031,6 +4031,7 @@ def test_settings_ca_trust_config_audited(tmp_path, monkeypatch):
     try:
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        # Fresh state → POST url: audit shows "(none)" -> url, not default
         assert _req(host, port, "POST", "/api/settings/ca-trust",
                     {"url": "https://ca.example/bundle.pem", "auto": True},
                     headers=hh)[0] == 200
@@ -4040,12 +4041,28 @@ def test_settings_ca_trust_config_audited(tmp_path, monkeypatch):
         ev = evs[0]
         assert ev["category"] == "settings" and ev["result"] == "ok"
         assert ev["actor"] == "console:admin" and ev["target"] == "ca-trust"
-        # prior state was "nothing configured", which resolves to the
-        # built-in default -- the audit trail records the effective url,
-        # not a bare "(none)", since that IS what was in force
-        assert ("url %s -> https://ca.example/bundle.pem" % _CA_DEFAULT_URL
-                in ev["detail"])
+        # Audit logs the raw stored value, not the resolved default:
+        # never-configured renders as "(none)"
+        assert "url (none) -> https://ca.example/bundle.pem" in ev["detail"]
         assert "auto False -> True" in ev["detail"]
+        # POST different url: detail contains first url as before-value
+        assert _req(host, port, "POST", "/api/settings/ca-trust",
+                    {"url": "https://ca.other/bundle.pem", "auto": True},
+                    headers=hh)[0] == 200
+        evs = [e for e in _read_audit_lines(audit_path)
+               if e["event"] == "ca-trust-config"]
+        assert len(evs) == 2
+        ev = evs[1]
+        assert "url https://ca.example/bundle.pem -> https://ca.other/bundle.pem" in ev["detail"]
+        # Clearing (url null) → after-side "(none)"
+        assert _req(host, port, "POST", "/api/settings/ca-trust",
+                    {"url": None, "auto": False},
+                    headers=hh)[0] == 200
+        evs = [e for e in _read_audit_lines(audit_path)
+               if e["event"] == "ca-trust-config"]
+        assert len(evs) == 3
+        ev = evs[2]
+        assert "url https://ca.other/bundle.pem -> (none)" in ev["detail"]
     finally:
         stop()
 

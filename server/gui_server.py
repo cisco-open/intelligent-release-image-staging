@@ -155,11 +155,11 @@ def ca_trust_settings_path(state_dir):
     return os.path.join(state_dir, _CA_TRUST_BASENAME)
 
 
-def read_ca_trust_settings(path):
-    """Tolerant reader: missing/corrupt file or wrong types -> defaults. A
-    missing/null/blank configured url falls back to the built-in default CA
-    bundle source (_CA_TRUST_DEFAULT_URL); auto stays off unless the file
-    explicitly says otherwise. A settings reader never raises."""
+def _read_ca_trust_raw(path):
+    """Tolerant raw reader: missing/corrupt file or wrong types -> None.
+    Returns {"url": str|None, "auto": bool} WITHOUT applying the default-URL
+    fallback. Used by audit logging to distinguish never-configured from
+    explicitly-set. A settings reader never raises."""
     url, auto = None, False
     try:
         with open(path) as f:
@@ -170,7 +170,16 @@ def read_ca_trust_settings(path):
         auto = data.get("auto") is True
     except (OSError, ValueError, AttributeError):
         pass
-    return {"url": url or _CA_TRUST_DEFAULT_URL, "auto": auto}
+    return {"url": url, "auto": auto}
+
+
+def read_ca_trust_settings(path):
+    """Tolerant reader: missing/corrupt file or wrong types -> defaults. A
+    missing/null/blank configured url falls back to the built-in default CA
+    bundle source (_CA_TRUST_DEFAULT_URL); auto stays off unless the file
+    explicitly says otherwise. A settings reader never raises."""
+    raw = _read_ca_trust_raw(path)
+    return {"url": raw["url"] or _CA_TRUST_DEFAULT_URL, "auto": raw["auto"]}
 
 
 def write_ca_trust_settings(path, url, auto):
@@ -1236,14 +1245,19 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                         return
                 spath = ca_trust_settings_path(
                     os.environ.get("IRIS_STATE", "/var/lib/iris"))
-                prev = read_ca_trust_settings(spath)
+                # Read raw (stored) value for audit before-side, not the
+                # resolved value with fallback: allows distinguishing
+                # never-configured from explicitly-set.
+                prev_raw = _read_ca_trust_raw(spath)
+                prev_url_audit = prev_raw["url"] or "(none)"
                 write_ca_trust_settings(spath, url, auto)
                 saved = read_ca_trust_settings(spath)
+                url_after_audit = url if url is not None else "(none)"
                 self._audit("ca-trust-config", "settings", action="set",
                            target="ca-trust", actor=actor,
                            detail="url %s -> %s, auto %s -> %s"
-                                  % (prev["url"], saved["url"],
-                                     prev["auto"], auto))
+                                  % (prev_url_audit, url_after_audit,
+                                     prev_raw["auto"], auto))
                 self._json(200, {"ok": True, "ca_trust": saved})
                 return
             if path == "/api/settings/gui-cert":
