@@ -3555,3 +3555,122 @@ def test_make_server_serves_gui_cert_when_both_candidates_valid(
         assert _peer_cert_der(host, port) == _first_cert_der(gu_cert)
     finally:
         stop()
+
+
+# ---- console TLS cert replacement + root-CA trust store (Settings API) ----
+
+def _gui_cert_env(tmp_path, monkeypatch):
+    """Point every gui_tls path at tmp_path: durable override files under
+    $IRIS_CONFIG/tls, runtime combined file at $IRIS_GUI_CERT, and no age
+    recipients (plaintext degradation, the secretfs no-recipients test mode)."""
+    cfg = tmp_path / "config" / "tls"
+    run = tmp_path / "run" / "tls"
+    cfg.mkdir(parents=True)
+    run.mkdir(parents=True)
+    monkeypatch.setenv("IRIS_CONFIG", str(tmp_path / "config"))
+    monkeypatch.setenv("IRIS_GUI_CERT", str(run / "gui-cert.pem"))
+    monkeypatch.delenv("IRIS_AGE_RECIPIENTS", raising=False)
+    return run
+
+
+def test_settings_gui_cert_roundtrip(tmp_path, monkeypatch):
+    run = _gui_cert_env(tmp_path, monkeypatch)
+    # a distinct "built-in" combined cert so the revert path is observable
+    bi_cert, bi_key = _gen_cert_pair(tmp_path, "iris-builtin", "builtin")
+    builtin = run / "cert.pem"
+    builtin.write_text(bi_cert + bi_key)
+    monkeypatch.setenv("IRIS_CERT", str(builtin))
+    cert_pem, key_pem = _gen_cert_pair(tmp_path, "iris-custom", "custom")
+
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        # auth: no session -> 401; session without CSRF -> 403
+        assert _req(host, port, "POST", "/api/settings/gui-cert",
+                    {"cert_pem": cert_pem, "key_pem": key_pem})[0] == 401
+        ck, csrf = _auth(host, port)
+        assert _req(host, port, "POST", "/api/settings/gui-cert",
+                    {"cert_pem": cert_pem, "key_pem": key_pem},
+                    headers={"Cookie": ck})[0] == 403
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        # per-field validation -> 400
+        assert _req(host, port, "POST", "/api/settings/gui-cert",
+                    {"key_pem": key_pem}, headers=hh)[0] == 400
+        assert _req(host, port, "POST", "/api/settings/gui-cert",
+                    {"cert_pem": cert_pem}, headers=hh)[0] == 400
+        assert _req(host, port, "POST", "/api/settings/gui-cert",
+                    {"cert_pem": "", "key_pem": key_pem}, headers=hh)[0] == 400
+        assert _req(host, port, "POST", "/api/settings/gui-cert",
+                    {"cert_pem": 42, "key_pem": key_pem}, headers=hh)[0] == 400
+        # before any upload the settings view shows the built-in cert
+        st, _, b = _req(host, port, "GET", "/api/settings",
+                        headers={"Cookie": ck})
+        assert st == 200
+        assert json.loads(b)["gui_cert"]["source"] == "built-in"
+        # replace
+        st, _, b = _req(host, port, "POST", "/api/settings/gui-cert",
+                        {"cert_pem": cert_pem, "key_pem": key_pem}, headers=hh)
+        assert st == 200
+        gc = json.loads(b)["gui_cert"]
+        assert gc["source"] == "custom"
+        assert "iris-custom" in gc["subject"]
+        assert gc["fingerprint_sha256"] not in ("", "unknown")
+        # GET reflects it — and NEVER echoes key material
+        st, _, b = _req(host, port, "GET", "/api/settings",
+                        headers={"Cookie": ck})
+        got = json.loads(b)["gui_cert"]
+        assert got["source"] == "custom" and "iris-custom" in got["subject"]
+        assert b"PRIVATE KEY" not in b
+        # audit: the replace row carries subject+fingerprint, never the key
+        rows = [e for e in _read_audit_lines(audit_path)
+                if e.get("event") == "gui-cert-replace"]
+        assert rows and rows[-1]["result"] == "ok"
+        assert rows[-1]["category"] == "settings"
+        assert rows[-1]["target"] == "gui-cert"
+        assert gc["fingerprint_sha256"] in rows[-1]["detail"]
+        assert "PRIVATE KEY" not in open(audit_path).read()
+        # revert
+        st, _, b = _req(host, port, "DELETE", "/api/settings/gui-cert",
+                        headers=hh)
+        assert st == 200 and json.loads(b)["deleted"] is True
+        st, _, b = _req(host, port, "GET", "/api/settings",
+                        headers={"Cookie": ck})
+        got = json.loads(b)["gui_cert"]
+        assert got["source"] == "built-in" and "iris-builtin" in got["subject"]
+        rows = [e for e in _read_audit_lines(audit_path)
+                if e.get("event") == "gui-cert-revert"]
+        assert rows and rows[-1]["result"] == "ok"
+        # a second revert still answers 200 (idempotent), deleted False
+        st, _, b = _req(host, port, "DELETE", "/api/settings/gui-cert",
+                        headers=hh)
+        assert st == 200 and json.loads(b)["deleted"] is False
+    finally:
+        stop()
+
+
+def test_settings_gui_cert_rejects_bad_pairs(tmp_path, monkeypatch):
+    _gui_cert_env(tmp_path, monkeypatch)
+    cert_a, _key_a = _gen_cert_pair(tmp_path, "pair-a", "a")
+    _cert_b, key_b = _gen_cert_pair(tmp_path, "pair-b", "b")
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        # key does not match the cert
+        st, _, b = _req(host, port, "POST", "/api/settings/gui-cert",
+                        {"cert_pem": cert_a, "key_pem": key_b}, headers=hh)
+        assert st == 400 and json.loads(b)["error"]
+        # garbage PEM
+        st, _, _ = _req(host, port, "POST", "/api/settings/gui-cert",
+                        {"cert_pem": "hello", "key_pem": key_b}, headers=hh)
+        assert st == 400
+        # both rejections audited as failures; no key material in the file;
+        # no override was persisted
+        rows = [e for e in _read_audit_lines(audit_path)
+                if e.get("event") == "gui-cert-replace"]
+        assert len(rows) == 2 and all(e["result"] == "fail" for e in rows)
+        assert "PRIVATE KEY" not in open(audit_path).read()
+        st, _, b = _req(host, port, "GET", "/api/settings",
+                        headers={"Cookie": ck})
+        assert json.loads(b)["gui_cert"]["source"] != "custom"
+    finally:
+        stop()

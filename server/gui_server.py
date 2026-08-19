@@ -24,6 +24,7 @@ from urllib.parse import unquote, parse_qs
 import audit
 import gui_app
 import gui_onboard
+import gui_tls
 import live_samples
 
 WEBROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webroot")
@@ -771,6 +772,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 # server-side in the age-encrypted store
                 "stage_host": (creds.get_stage_host() if creds is not None
                                else {"configured": False, "username": ""}),
+                # console cert metadata only — key material is never echoed
+                "gui_cert": gui_tls.active_info(),
             }
 
         def _sse_onboard(self, onboard, job_id):
@@ -1010,6 +1013,36 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                            detail="user %s -> %s"
                                   % (prev["username"] or "(none)", user))
                 self._json(200, {"stage_host": saved}); return
+            if path == "/api/settings/gui-cert":
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                cert_pem = data.get("cert_pem"); key_pem = data.get("key_pem")
+                if not isinstance(cert_pem, str) or not cert_pem.strip():
+                    self._json(400, {"error": "cert_pem must be a non-empty string"})
+                    return
+                if not isinstance(key_pem, str) or not key_pem.strip():
+                    self._json(400, {"error": "key_pem must be a non-empty string"})
+                    return
+                err = gui_tls.validate_pair(cert_pem, key_pem)
+                if err:
+                    # validate_pair messages describe the failure only —
+                    # they never contain key material
+                    self._audit("gui-cert-replace", "settings", action="replace",
+                               target="gui-cert", actor=actor, result="fail",
+                               detail="rejected: %s" % err,
+                               src_ip=self.client_address[0])
+                    self._json(400, {"error": err}); return
+                gui_tls.persist_override(cert_pem, key_pem)
+                reload_tls()  # new handshakes serve the new chain immediately
+                cert_info = gui_tls.active_info()
+                self._audit("gui-cert-replace", "settings", action="replace",
+                           target="gui-cert", actor=actor,
+                           detail="subject %s, fingerprint %s"
+                                  % (cert_info.get("subject"),
+                                     cert_info.get("fingerprint_sha256")),
+                           src_ip=self.client_address[0])
+                self._json(200, {"gui_cert": cert_info}); return
             if path == "/api/devices":
                 if fleet is None:
                     self._json(404, {"error": "not found"}); return
@@ -1435,6 +1468,17 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                            detail=("cleared (was user %s)" % prev["username"])
                                   if deleted else "nothing was configured")
                 self._json(200, {"deleted": deleted}); return
+            if path == "/api/settings/gui-cert":
+                was_active = gui_tls.override_active()
+                gui_tls.remove_override()
+                reload_tls()  # fall back to the built-in IRIS_CERT chain
+                self._audit("gui-cert-revert", "settings", action="revert",
+                           target="gui-cert", actor=actor,
+                           detail="reverted to built-in certificate"
+                                  if was_active else "no override was active",
+                           src_ip=self.client_address[0])
+                self._json(200, {"deleted": was_active,
+                                 "gui_cert": gui_tls.active_info()}); return
             if path.startswith("/api/devices/") and fleet is not None:
                 did = unquote(path[len("/api/devices/"):])
                 prev = fleet.get_device(did)
