@@ -206,9 +206,10 @@
           <button class="btn" type="submit">Add CA</button>
           <span class="err" id="trust-msg"></span>
         </form>
-        <p class="muted">Optional public CA bundle: both the daily auto-refresh and
-          Download now need an https:// URL saved first. A failed download never
-          replaces the previous bundle.</p>
+        <p class="muted">Optional public CA bundle: Download now fetches the
+          https:// URL below (Cisco's Trusted Root Store by default); enable the
+          daily auto-refresh to keep it current. A failed download never replaces
+          the previous bundle.</p>
         <form class="inline-form" id="ca-form">
           <input id="ca-url" placeholder="Public CA bundle URL (https://…)">
           <label class="muted"><input type="checkbox" id="ca-auto"> Refresh daily</label>
