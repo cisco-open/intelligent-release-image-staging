@@ -3445,6 +3445,7 @@ def test_reload_tls_serves_new_cert_and_reverts(tmp_path, monkeypatch):
     monkeypatch.setenv("IRIS_GUI_CERT", str(gui))
     host, port, srv, stop = _serve_tls(tmp_path, str(builtin))
     try:
+        assert srv.tls_active is True
         assert _peer_cert_der(host, port) == _first_cert_der(bi_cert)
         # the upload flow drops the combined override, then hot-reloads
         gui.write_text(cu_cert + cu_key)
@@ -3526,5 +3527,31 @@ def test_make_server_falls_back_to_plain_http_when_all_candidates_corrupt(
     srv = gui_server.make_server("127.0.0.1", 0, app, certfile=certfile)
     try:
         assert srv.reload_tls() is False  # no live TLS context to hot-swap
+        assert srv.tls_active is False
+        assert not isinstance(srv.socket, ssl.SSLSocket)
     finally:
         srv.server_close()
+
+
+def test_make_server_serves_gui_cert_when_both_candidates_valid(
+        tmp_path, monkeypatch):
+    """When both gui-cert and IRIS_CERT files exist and are valid, make_server
+    serves the gui-cert (first candidate in the probe loop), not the IRIS_CERT.
+    Handshake DER proves the correct cert was loaded."""
+    bi_cert, bi_key = _gen_cert_pair(tmp_path, "iris-builtin", "both-valid-bi")
+    gu_cert, gu_key = _gen_cert_pair(tmp_path, "iris-guicert", "both-valid-gu")
+    builtin = tmp_path / "cert.pem"
+    builtin.write_text(bi_cert + bi_key)
+    gui = tmp_path / "gui-cert.pem"
+    gui.write_text(gu_cert + gu_key)
+    monkeypatch.setenv("IRIS_CERT", str(builtin))
+    monkeypatch.setenv("IRIS_GUI_CERT", str(gui))
+    certfile = gui_server._resolve_certfile()  # picks gui-cert on existence
+    assert certfile == str(gui)
+    host, port, srv, stop = _serve_tls(tmp_path, certfile)
+    try:
+        assert srv.tls_active is True
+        # Handshake proves we got the GUI cert, not the builtin IRIS_CERT
+        assert _peer_cert_der(host, port) == _first_cert_der(gu_cert)
+    finally:
+        stop()

@@ -30,6 +30,7 @@ WEBROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webroot")
 COOKIE = "iris_sid"
 SWARMMAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "swarmmap.html")
+_IRIS_CERT_DEFAULT = "/run/iris/tls/cert.pem"
 # GET /swarmmap swaps this exact placeholder line in the single-source
 # server/swarmmap.html for the console config line (the file on disk keeps
 # working standalone; only the served copy is rewritten):
@@ -126,7 +127,7 @@ def _resolve_certfile():
     gui = os.environ.get("IRIS_GUI_CERT", "/run/iris/tls/gui-cert.pem")
     if os.path.exists(gui):
         return gui
-    cert = os.environ.get("IRIS_CERT", "/run/iris/tls/cert.pem")
+    cert = os.environ.get("IRIS_CERT", _IRIS_CERT_DEFAULT)
     if os.path.exists(cert):
         return cert
     return None
@@ -1500,7 +1501,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
         # process. If that also fails, serve plain HTTP -- never take the
         # console down over a bad cert file.
         candidates = [certfile]
-        iris_cert = os.environ.get("IRIS_CERT", "/run/iris/tls/cert.pem")
+        iris_cert = os.environ.get("IRIS_CERT", _IRIS_CERT_DEFAULT)
         if iris_cert != certfile:
             candidates.append(iris_cert)
         for cand in candidates:
@@ -1515,6 +1516,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             tls_ctx.load_cert_chain(cand)
             srv.socket = tls_ctx.wrap_socket(srv.socket, server_side=True)
             break
+
+    srv.tls_active = tls_ctx is not None
 
     def reload_tls():
         """Hot-swap the serving certificate: re-resolve the active combined
@@ -1582,7 +1585,7 @@ def main():
         clear_state_fn=catalog.forget_device, receipts=receipts)
     srv = make_server(host, port, app, images, fleet, creds, catalog, onboard,
                        None, certfile=certfile, audit_path=audit_path, receipts=receipts)
-    scheme = "https" if certfile else "http"
+    scheme = "https" if srv.tls_active else "http"
     print("iris-gui on %s://%s:%d/" % (scheme, host, port), flush=True)
     srv.serve_forever()
 
