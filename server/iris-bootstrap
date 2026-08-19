@@ -53,8 +53,8 @@ python3 -c 'import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1])' \
   "$IRIS_HOST_IP" 2>/dev/null \
   || die "IRIS_HOST_IP must be a valid device-reachable IPv4 address"
 
-# ---- ensure config dirs ----
-mkdir -p "$IRIS_CONFIG/tls"
+# ---- ensure config dirs (tls/trust holds console-installed root CAs) ----
+mkdir -p "$IRIS_CONFIG/tls" "$IRIS_CONFIG/tls/trust"
 
 # ---- idempotency: check whether all three .age files exist ----
 AGE_SECRETS="$IRIS_CONFIG/secrets.json.age"

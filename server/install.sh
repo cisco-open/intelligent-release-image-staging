@@ -51,7 +51,7 @@ install() {
   priv "id -u '$SERVICE_USER' >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin '$SERVICE_USER'"
 
   # 2. directories
-  run "mkdir -p '$IRIS_ROOT/server' '$IRIS_ROOT/bin' '$IRIS_STATE/torrents' '$IRIS_CONFIG/tls' '$IRIS_LOG'"
+  run "mkdir -p '$IRIS_ROOT/server' '$IRIS_ROOT/bin' '$IRIS_STATE/torrents' '$IRIS_CONFIG/tls' '$IRIS_CONFIG/tls/trust' '$IRIS_LOG'"
   # operator-held key dir, kept OFF the config volume (0700, never world-readable)
   run "mkdir -p '$IRIS_KEY_DIR'"
   run "chmod 700 '$IRIS_KEY_DIR'"

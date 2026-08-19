@@ -154,3 +154,12 @@ teardown() { rm -rf "$TMP"; }
   [ "$status" -eq 0 ]
   [ -x "$IRIS_ROOT/server/iris-secretfs" ]
 }
+
+# The console's trust-store feature reads/writes $IRIS_CONFIG/tls/trust; the
+# installer provisions it (and the recursive chown at step 8 then covers it)
+# so the gui unit never has to create a root-owned dir at runtime.
+@test "install creates the durable CA trust dir" {
+  run bash "$INSTALL"
+  [ "$status" -eq 0 ]
+  [ -d "$IRIS_CONFIG/tls/trust" ]
+}

@@ -164,3 +164,137 @@ SEEDER="$SYSTEMD_DIR/iris-seeder.service"
 @test "tracker unit drops the retired IRIS_TOKENS env" {
   ! grep -q 'IRIS_TOKENS' "$TRACKER"
 }
+
+# ---------------------------------------------------------------------------
+# Console cert override + CA trust bundle at unseal (server TLS trust
+# feature). iris-secretfs mirrors docker-entrypoint.sh: build
+# $IRIS_RUN/tls/gui-cert.pem when the durable override pair exists (decrypt
+# failure = warn + skip, NEVER fatal — this helper is every unit's
+# ExecStartPre, and a bad CONSOLE cert must not take the tracker down), and
+# build $IRIS_RUN/tls/ca-bundle.pem from the trust dir when non-empty.
+# Behavioral tests use a fake age (same AGEFAKE convention as
+# test_entrypoint_secretfs.bats) and a temp stand-in for /etc/iris + /run/iris.
+# ---------------------------------------------------------------------------
+
+make_unseal_fixture() {
+  FIX="$BATS_TEST_TMPDIR/fix"
+  mkdir -p "$FIX/config/tls" "$FIX/run"
+  cat > "$FIX/fake-age" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+mode="$1"; shift
+out=""; inp=""
+if [ "$mode" = "-d" ]; then
+  while [ "$#" -gt 0 ]; do case "$1" in
+    -i) shift 2 ;; -o) out="$2"; shift 2 ;; *) inp="$1"; shift ;; esac; done
+  head -n1 "$inp" | grep -q '^AGEFAKE$' || { echo "age: bad" >&2; exit 1; }
+  tail -n +2 "$inp" > "$out"
+else
+  while [ "$#" -gt 0 ]; do case "$1" in
+    -r) shift 2 ;; -o) out="$2"; shift 2 ;; *) inp="$1"; shift ;; esac; done
+  { echo "AGEFAKE"; cat "$inp"; } > "$out"
+fi
+EOF
+  chmod +x "$FIX/fake-age"
+  printf 'AGEFAKE\n{"devices":{},"seeder":{}}\n' > "$FIX/config/secrets.json.age"
+  printf 'AGEFAKE\nrpcsecretval\n' > "$FIX/config/rpc-secret.age"
+  printf 'AGEFAKE\nkeypem\n' > "$FIX/config/tls/key.pem.age"
+  printf 'crtpem\n' > "$FIX/config/tls/crt.pem"
+  printf 'AGE-SECRET-KEY-FAKE\n' > "$FIX/agekey"
+}
+
+run_secretfs() {
+  run env IRIS_CONFIG="$FIX/config" IRIS_RUN="$FIX/run" \
+      IRIS_AGE_BIN="$FIX/fake-age" IRIS_AGE_KEY_FILE="$FIX/agekey" \
+      bash "$SECRETFS"
+}
+
+# Real openssl-generated cert/key material: the pair-validation code path
+# runs the real `openssl x509 -pubkey` / `openssl pkey -pubout` compare
+# against these files, so (unlike the other secret fixtures in this suite)
+# they have to be something openssl can actually parse.
+gen_ec_pair() {
+  openssl ecparam -genkey -name prime256v1 -noout -out "$1" 2>/dev/null
+  openssl req -x509 -key "$1" -days 1 -out "$2" -subj "/CN=$3" 2>/dev/null
+}
+
+@test "iris-secretfs builds the console cert override when the durable gui files exist" {
+  make_unseal_fixture
+  gen_ec_pair "$FIX/gui-key-plain.pem" "$FIX/config/tls/gui-crt.pem" "gui-a"
+  { printf 'AGEFAKE\n'; cat "$FIX/gui-key-plain.pem"; } > "$FIX/config/tls/gui-key.pem.age"
+  run_secretfs
+  [ "$status" -eq 0 ]
+  [ -f "$FIX/run/tls/gui-cert.pem" ]
+  run cat "$FIX/run/tls/gui-cert.pem"
+  [[ "$output" == *"BEGIN CERTIFICATE"* ]]
+  [[ "$output" == *"BEGIN EC PRIVATE KEY"* ]]
+}
+
+@test "iris-secretfs skips an undecryptable gui key WITHOUT failing the unseal" {
+  make_unseal_fixture
+  printf 'guicrtpem\n' > "$FIX/config/tls/gui-crt.pem"
+  printf 'NOT-AGEFAKE\ncorrupt\n' > "$FIX/config/tls/gui-key.pem.age"
+  run_secretfs
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARNING"* ]]
+  [ ! -f "$FIX/run/tls/gui-cert.pem" ]
+  # the identity cert the units serve is untouched by the failure
+  [ -f "$FIX/run/tls/cert.pem" ]
+}
+
+@test "iris-secretfs discards a mismatched gui cert/key pair WITHOUT failing the unseal" {
+  # Crash-window regression guard: gui_tls.persist_override writes the
+  # durable key first, then the cert, so a crash between the two can leave a
+  # decryptable key paired with a stale cert. A bad CONSOLE cert must never
+  # take the tracker/catalog/seeder down.
+  make_unseal_fixture
+  gen_ec_pair "$FIX/gui-key-a.pem" "$FIX/gui-crt-a.pem" "gui-a"
+  gen_ec_pair "$FIX/gui-key-b.pem" "$FIX/gui-crt-b.pem" "gui-b"
+  cp "$FIX/gui-crt-a.pem" "$FIX/config/tls/gui-crt.pem"
+  { printf 'AGEFAKE\n'; cat "$FIX/gui-key-b.pem"; } > "$FIX/config/tls/gui-key.pem.age"
+  run_secretfs
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARNING"* ]]
+  [ ! -f "$FIX/run/tls/gui-cert.pem" ]
+  [ -f "$FIX/run/tls/cert.pem" ]
+}
+
+@test "iris-secretfs builds the runtime CA bundle from a non-empty trust dir" {
+  make_unseal_fixture
+  mkdir -p "$FIX/config/tls/trust"
+  printf 'BBB-CA\n' > "$FIX/config/tls/trust/bbb.pem"
+  printf 'AAA-CA\n' > "$FIX/config/tls/trust/aaa.pem"
+  run_secretfs
+  [ "$status" -eq 0 ]
+  [ -f "$FIX/run/tls/ca-bundle.pem" ]
+  run cat "$FIX/run/tls/ca-bundle.pem"
+  [ "${lines[0]}" = "AAA-CA" ]
+  [ "${lines[1]}" = "BBB-CA" ]
+}
+
+@test "iris-secretfs removes a stale CA bundle when the trust dir is empty" {
+  # RuntimeDirectoryPreserve=yes keeps /run/iris across unit restarts, so a
+  # bundle built before the operator removed the last CA must not survive
+  # the next unseal.
+  make_unseal_fixture
+  mkdir -p "$FIX/config/tls/trust" "$FIX/run/tls"
+  printf 'stale\n' > "$FIX/run/tls/ca-bundle.pem"
+  run_secretfs
+  [ "$status" -eq 0 ]
+  [ ! -f "$FIX/run/tls/ca-bundle.pem" ]
+}
+
+@test "iris-secretfs never creates the durable trust dir (non-console units mount /etc/iris read-only)" {
+  make_unseal_fixture
+  run_secretfs
+  [ "$status" -eq 0 ]
+  [ ! -d "$FIX/config/tls/trust" ]
+}
+
+@test "iris-secretfs builds gui-cert.pem atomically (temp + mv, not in-place)" {
+  grep -Eq 'mv -f "\$gui_tmp" "\$IRIS_GUI_CERT"' "$SECRETFS"
+}
+
+@test "iris-secretfs builds ca-bundle.pem atomically (temp + mv, not in-place)" {
+  grep -Eq 'mv -f "\$bundle_tmp" "\$IRIS_CA_BUNDLE"' "$SECRETFS"
+}
