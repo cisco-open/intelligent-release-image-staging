@@ -112,20 +112,24 @@ class LiveTable:
 
 
 class StreamSettings:
-    """mtime-cached reader of telemetry-settings.json (written by the console,
-    spec 6.4). Missing/garbage file -> defaults; values clamped."""
+    """Cache-keyed reader of telemetry-settings.json (written by the console,
+    spec 6.4). Missing file -> defaults with cache invalidation; unchanged
+    file key -> cached tuple. Cache key is (mtime_ns, inode, size) matching
+    the trust.ssl_context convention. Garbage file -> defaults."""
 
     def __init__(self, path):
         self.path = path
-        self._mtime = None
+        self._cache_key = None
         self._value = (1, False)
 
     def read(self):
         try:
-            mtime = os.stat(self.path).st_mtime
+            st = os.stat(self.path)
+            cache_key = (st.st_mtime_ns, st.st_ino, st.st_size)
         except OSError:
+            self._cache_key = None
             return (1, False)
-        if mtime != self._mtime:
+        if cache_key != self._cache_key:
             every, pause = 1, False
             try:
                 with open(self.path) as f:
@@ -137,7 +141,7 @@ class StreamSettings:
                 pause = data.get("stream_pause") is True
             except (OSError, ValueError, AttributeError):
                 pass
-            self._mtime, self._value = mtime, (every, pause)
+            self._cache_key, self._value = cache_key, (every, pause)
         return self._value
 
 

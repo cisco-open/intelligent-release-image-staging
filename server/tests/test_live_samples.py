@@ -83,6 +83,21 @@ class TestSettings:
             json.dump({"stream_every": 999, "stream_pause": "yes"}, f)
         assert live_samples.StreamSettings(p).read() == (1, False)
 
+    def test_cache_invalidates_on_file_replacement(self, tmp_path):
+        """Regression: cache key must account for file identity, not just mtime.
+        Write A at mtime 5000 -> cache. Clear. Write B at same mtime 5000.
+        Must detect file replacement and return B, not cached A."""
+        p = str(tmp_path / "telemetry-settings.json")
+        s = live_samples.StreamSettings(p)
+        live_samples.write_settings(p, 5, True)
+        os.utime(p, (5000, 5000))
+        assert s.read() == (5, True)
+        # Delete and rewrite with different settings at same mtime
+        os.remove(p)
+        live_samples.write_settings(p, 10, False)
+        os.utime(p, (5000, 5000))
+        assert s.read() == (10, False)
+
 
 class TestWriterLoop:
     def test_keeps_fresh_and_final_empty_write(self, tmp_path):
