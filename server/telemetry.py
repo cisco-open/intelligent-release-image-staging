@@ -24,6 +24,7 @@ import ipaddress
 import live_samples
 import metrics
 import otlp
+import telemetry_destination
 from peer_registry import PeerRegistry
 
 DEFAULT_INTERVAL = 15
@@ -272,7 +273,8 @@ class Telemetry:
                  interval=DEFAULT_INTERVAL, device_info=None,
                  reports_info=None, live_info=None, images_info=None,
                  metrics_exporter=None, export_health=None,
-                 device_metrics=False):
+                 device_metrics=False, dest_settings=None,
+                 env_endpoint="", env_enabled=False, headers=None):
         self.exporter = exporter
         self.rpc = rpc
         self.interval = interval
@@ -282,6 +284,18 @@ class Telemetry:
         self.metrics_exporter = metrics_exporter
         self.export_health = export_health or ExportHealth()
         self.device_metrics = bool(device_metrics)
+        # Console-editable OTLP destination (design 2026-08-19 feature B):
+        # dest_settings is a telemetry_destination.DestinationSettings the
+        # sampler consults at the top of every pass; a non-null file field
+        # overrides the deployment env captured here, per field. None
+        # (tests, direct construction) -> the explicitly passed exporters
+        # are kept as-is forever. Headers stay startup-env (secrets) and are
+        # re-applied to every rebuilt exporter.
+        self._dest = dest_settings
+        self._env_endpoint = (env_endpoint or "").strip()
+        self._env_enabled = bool(env_enabled)
+        self._headers = dict(headers or {})
+        self._effective = None      # (endpoint, enabled) the exporters match
         # Optional callable -> the catalog's live-samples.json doc (spec 6.3);
         # aggregated per image each sample() pass. None -> no live streaming
         # surface (tests/standalone keep working unchanged).
@@ -365,8 +379,43 @@ class Telemetry:
             return 0
 
     # --- sampler ---
+    def _refresh_exporters(self):
+        """Re-resolve the effective OTLP destination (console override file
+        overrides deployment env, per field — design 2026-08-19 feature B)
+        and build/swap/drop the exporters when it changed. With no exporters
+        the pass's export stages exit early (the existing None checks below).
+        CPython attribute assignment is atomic, so the announce-path reader
+        (on_swarm_event) is race-benign across a swap — worst case one event
+        lands in the old exporter's queue (bounded, best-effort by design).
+        ExportHealth is hub-owned and survives every swap: a destination
+        change while degraded gives the new endpoint a fresh chance on the
+        next pass. No-op when no DestinationSettings is wired (direct
+        construction: tests and standalone keep their explicit exporters)."""
+        if self._dest is None:
+            return
+        file_endpoint, file_enabled = self._dest.current()
+        endpoint = self._env_endpoint if file_endpoint is None \
+            else file_endpoint
+        enabled = self._env_enabled if file_enabled is None else file_enabled
+        effective = (endpoint, bool(enabled))
+        if effective == self._effective:
+            return
+        self._effective = effective
+        if enabled and endpoint:
+            self.exporter = otlp.OTLPLogExporter(endpoint,
+                                                 headers=self._headers)
+            self.metrics_exporter = otlp.OTLPMetricsExporter(
+                endpoint, headers=self._headers)
+        else:
+            # Disabled, or no endpoint anywhere: drop the exporters. The
+            # rest of the pass still runs (seeder poll, live aggregation) —
+            # the swarm map and /metrics text don't depend on OTLP export.
+            self.exporter = None
+            self.metrics_exporter = None
+
     def sample(self, now=None):
         now = time.time() if now is None else now
+        self._refresh_exporters()
         if self.rpc is not None:
             seeder, names, totals = poll_seeder(self.rpc)
             self._seeder = seeder

@@ -9,6 +9,7 @@ import threading
 
 import otlp
 import telemetry
+import telemetry_destination
 from peer_registry import PeerRegistry
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1485,3 +1486,141 @@ class TestSwarmRouteGate:
             assert c.getresponse().status == 200
         finally:
             srv.shutdown()
+
+
+# ---- editable telemetry destination (design 2026-08-19 feature B):
+# the hub resolves (endpoint, enabled) per sample pass — console override
+# file wins per field, else the deployment env captured at startup ----
+
+def _dest_hub(tmp_path, monkeypatch, posts, env_endpoint="",
+              env_enabled=False, headers=None):
+    """A hub wired the way from_env wires it (DestinationSettings + captured
+    env) whose REBUILT exporters record every POST into `posts` instead of
+    touching the network. Exporters resolve otlp._http_post from the module
+    at construction time (`sender or _http_post`), so patching the module
+    global first is inherited by every exporter _refresh_exporters builds."""
+    def fake_post(url, body, headers=None):
+        posts.append((url, dict(headers or {})))
+    monkeypatch.setattr(otlp, "_http_post", fake_post)
+    path = telemetry_destination.settings_path(str(tmp_path))
+    hub = telemetry.Telemetry(
+        PeerRegistry(),
+        dest_settings=telemetry_destination.DestinationSettings(path),
+        env_endpoint=env_endpoint, env_enabled=env_enabled, headers=headers)
+    return hub, path
+
+
+class TestEditableDestination:
+    def test_refresh_is_noop_without_destination_settings(self):
+        # Direct construction (tests/standalone) keeps explicitly-passed
+        # exporters untouched pass after pass — nothing regresses for the
+        # dozens of existing hubs built without dest_settings.
+        exp = otlp.OTLPLogExporter("http://c:4318", sender=lambda u, b: None)
+        hub = telemetry.Telemetry(PeerRegistry(), exporter=exp)
+        hub.sample()
+        assert hub.exporter is exp
+
+    def test_override_change_mid_run_swaps_exporter_url(
+            self, tmp_path, monkeypatch):
+        posts = []
+        hub, path = _dest_hub(tmp_path, monkeypatch, posts,
+                              env_endpoint="http://env-collector:4318",
+                              env_enabled=True)
+        hub.sample(now=100.0)
+        assert hub.exporter.url == "http://env-collector:4318/v1/logs"
+        assert posts[-1][0] == "http://env-collector:4318/v1/metrics"
+        first_log_exporter = hub.exporter
+        # console override lands mid-run: endpoint only (enabled inherits)
+        telemetry_destination.write(path, "http://other:4318", None)
+        os.utime(path, (200, 200))
+        hub.sample(now=115.0)
+        assert hub.exporter is not first_log_exporter   # rebuilt, not mutated
+        assert hub.exporter.url == "http://other:4318/v1/logs"
+        assert hub.metrics_exporter.url == "http://other:4318/v1/metrics"
+        assert posts[-1][0] == "http://other:4318/v1/metrics"
+
+    def test_override_disable_drops_exporters(self, tmp_path, monkeypatch):
+        posts = []
+        hub, path = _dest_hub(tmp_path, monkeypatch, posts,
+                              env_endpoint="http://env-collector:4318",
+                              env_enabled=True)
+        hub.sample(now=100.0)
+        assert hub.exporter is not None
+        n = len(posts)
+        telemetry_destination.write(path, None, False)
+        os.utime(path, (200, 200))
+        hub.sample(now=115.0)
+        assert hub.exporter is None
+        assert hub.metrics_exporter is None
+        assert len(posts) == n          # disabled pass attempts no export
+
+    def test_override_enables_export_when_env_off(
+            self, tmp_path, monkeypatch):
+        posts = []
+        hub, path = _dest_hub(tmp_path, monkeypatch, posts)  # env fully off
+        hub.sample(now=100.0)
+        assert hub.exporter is None and hub.metrics_exporter is None
+        assert posts == []
+        telemetry_destination.write(path, "http://console:4318", True)
+        os.utime(path, (200, 200))
+        hub.sample(now=115.0)
+        assert hub.exporter.url == "http://console:4318/v1/logs"
+        assert posts[-1][0] == "http://console:4318/v1/metrics"
+
+    def test_override_removed_reverts_to_env_config(
+            self, tmp_path, monkeypatch):
+        posts = []
+        hub, path = _dest_hub(tmp_path, monkeypatch, posts,
+                              env_endpoint="http://env-collector:4318",
+                              env_enabled=True)
+        telemetry_destination.write(path, "http://other:4318", None)
+        os.utime(path, (100, 100))
+        hub.sample(now=100.0)
+        assert hub.exporter.url == "http://other:4318/v1/logs"
+        telemetry_destination.clear(path)   # "Revert to deployment default"
+        hub.sample(now=115.0)
+        assert hub.exporter.url == "http://env-collector:4318/v1/logs"
+        assert posts[-1][0] == "http://env-collector:4318/v1/metrics"
+
+    def test_headers_reapplied_to_rebuilt_exporters(
+            self, tmp_path, monkeypatch):
+        posts = []
+        hub, path = _dest_hub(tmp_path, monkeypatch, posts,
+                              env_endpoint="http://env-collector:4318",
+                              env_enabled=True,
+                              headers={"Authorization": "Bearer s3cr3t"})
+        hub.sample(now=100.0)
+        telemetry_destination.write(path, "http://other:4318", None)
+        os.utime(path, (200, 200))
+        hub.sample(now=115.0)               # exporter swap
+        url, hdrs = posts[-1]
+        assert url == "http://other:4318/v1/metrics"
+        assert hdrs["Authorization"] == "Bearer s3cr3t"
+
+    def test_export_health_survives_destination_swap(
+            self, tmp_path, monkeypatch):
+        posts = []
+        hub, path = _dest_hub(tmp_path, monkeypatch, posts,
+                              env_endpoint="http://env-collector:4318",
+                              env_enabled=True)
+        # every POST fails -> health degrades on the first pass
+        def boom(url, body, headers=None):
+            raise RuntimeError("collector down")
+        monkeypatch.setattr(otlp, "_http_post", boom)
+        health = hub.export_health
+        hub.sample(now=100.0)
+        assert health.as_dict()["state"] == "degraded"
+        fails = health.as_dict()["failures_total"]
+        assert fails >= 1
+        # destination changes while degraded: the SAME health object rides
+        # along and the new endpoint gets a fresh chance on the next pass
+        def ok_post(url, body, headers=None):
+            posts.append((url, dict(headers or {})))
+        monkeypatch.setattr(otlp, "_http_post", ok_post)
+        telemetry_destination.write(path, "http://other:4318", None)
+        os.utime(path, (200, 200))
+        hub.sample(now=115.0)
+        assert hub.export_health is health          # hub-owned, not rebuilt
+        d = health.as_dict()
+        assert d["state"] == "ok"                   # recovered on new dest
+        assert d["failures_total"] == fails         # history preserved
