@@ -3898,3 +3898,273 @@ def test_settings_trust_delete_rejects_null_and_no_suffix(tmp_path, monkeypatch)
                     if e.get("event") == "trust-remove"]
     finally:
         stop()
+
+
+# ---- CA-trust settings + refresh job + daily thread (server TLS trust) ----
+
+import trust as trust_mod
+
+# Built-in default CA-bundle source (spec update after the brief was
+# drafted): a missing/null/blank configured url falls back to this so
+# "Download now" (and auto-refresh, once enabled) work with zero
+# configuration. Pinned as a literal here so a change to the constant in
+# gui_server.py is caught by test failures, not silently drifts.
+_CA_DEFAULT_URL = "https://www.cisco.com/security/pki/trs/ios.p7b"
+
+
+def test_ca_trust_default_url_is_prefilled(tmp_path, monkeypatch):
+    """Spec update: nothing configured -> the reader AND the console's
+    settings view both surface the built-in Cisco CA-bundle URL, not None,
+    so the UI shows it prefilled and 'Download now' works out of the box."""
+    assert gui_server._CA_TRUST_DEFAULT_URL == _CA_DEFAULT_URL
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    p = str(tmp_path / "state" / "ca-trust-settings.json")
+    assert gui_server.read_ca_trust_settings(p) == {
+        "url": _CA_DEFAULT_URL, "auto": False}
+    host, port, _deps, stop = _serve_full(tmp_path)
+    try:
+        ck, _csrf = _auth(host, port)
+        st, _, b = _req(host, port, "GET", "/api/settings",
+                        headers={"Cookie": ck})
+        assert st == 200
+        assert json.loads(b)["ca_trust"] == {
+            "url": _CA_DEFAULT_URL, "auto": False}
+    finally:
+        stop()
+
+
+def test_settings_ca_trust_roundtrip_and_validation(tmp_path, monkeypatch):
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, _deps, stop = _serve_full(tmp_path)
+    try:
+        # auth: no session -> 401; session without CSRF -> 403
+        assert _req(host, port, "POST", "/api/settings/ca-trust",
+                    {"url": "https://ca.example/bundle.pem",
+                     "auto": True})[0] == 401
+        ck, csrf = _auth(host, port)
+        assert _req(host, port, "POST", "/api/settings/ca-trust",
+                    {"url": "https://ca.example/bundle.pem", "auto": True},
+                    headers={"Cookie": ck})[0] == 403
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        # defaults before any write: the built-in URL, auto off
+        st, _, b = _req(host, port, "GET", "/api/settings",
+                        headers={"Cookie": ck})
+        assert st == 200
+        assert json.loads(b)["ca_trust"] == {
+            "url": _CA_DEFAULT_URL, "auto": False}
+        # validation: https only, host required, auto must be a real bool
+        for bad in ({"url": "http://ca.example/b.pem", "auto": True},
+                    {"url": "ftp://ca.example/b.pem", "auto": True},
+                    {"url": "https://", "auto": True},
+                    {"url": "ca.example/b.pem", "auto": True},
+                    {"url": 42, "auto": True},
+                    {"url": "https://ca.example/b.pem", "auto": "yes"},
+                    {"url": "https://ca.example/b.pem", "auto": 1}):
+            st, _, _ = _req(host, port, "POST", "/api/settings/ca-trust",
+                            bad, headers=hh)
+            assert st == 400, bad
+        hh_json = dict(hh); hh_json["Content-Type"] = "application/json"
+        assert _req(host, port, "POST", "/api/settings/ca-trust",
+                    raw=b"[]", headers=hh_json)[0] == 400
+        # save, then the settings view reflects it
+        st, _, b = _req(host, port, "POST", "/api/settings/ca-trust",
+                        {"url": "https://ca.example/bundle.pem", "auto": True},
+                        headers=hh)
+        assert st == 200
+        assert json.loads(b)["ca_trust"] == {
+            "url": "https://ca.example/bundle.pem", "auto": True}
+        st, _, b = _req(host, port, "GET", "/api/settings",
+                        headers={"Cookie": ck})
+        assert json.loads(b)["ca_trust"] == {
+            "url": "https://ca.example/bundle.pem", "auto": True}
+        # the settings file is atomic JSON under IRIS_STATE
+        with open(str(tmp_path / "state" / "ca-trust-settings.json")) as f:
+            assert json.load(f) == {"url": "https://ca.example/bundle.pem",
+                                    "auto": True}
+        # null url clears it (unset is first-class on disk: {"url": null});
+        # but a cleared url is not "no source" -- it falls back to the
+        # built-in default, both in the save response and on GET
+        st, _, b = _req(host, port, "POST", "/api/settings/ca-trust",
+                        {"url": None, "auto": False}, headers=hh)
+        assert st == 200
+        assert json.loads(b)["ca_trust"] == {
+            "url": _CA_DEFAULT_URL, "auto": False}
+        st, _, b = _req(host, port, "GET", "/api/settings",
+                        headers={"Cookie": ck})
+        assert json.loads(b)["ca_trust"] == {
+            "url": _CA_DEFAULT_URL, "auto": False}
+        with open(str(tmp_path / "state" / "ca-trust-settings.json")) as f:
+            assert json.load(f) == {"url": None, "auto": False}
+    finally:
+        stop()
+
+
+def test_ca_trust_settings_reader_tolerant(tmp_path):
+    p = str(tmp_path / "ca-trust-settings.json")
+    # missing file -> the built-in default url, auto off
+    assert gui_server.read_ca_trust_settings(p) == {
+        "url": _CA_DEFAULT_URL, "auto": False}
+    # garbage -> same defaults (a settings reader never raises)
+    with open(p, "w") as f:
+        f.write("{not json")
+    assert gui_server.read_ca_trust_settings(p) == {
+        "url": _CA_DEFAULT_URL, "auto": False}
+    # wrong types -> same defaults
+    with open(p, "w") as f:
+        json.dump({"url": 42, "auto": "yes"}, f)
+    assert gui_server.read_ca_trust_settings(p) == {
+        "url": _CA_DEFAULT_URL, "auto": False}
+    # roundtrip through the atomic writer: an explicit url is returned as-is
+    gui_server.write_ca_trust_settings(p, "https://ca.example/b.pem", True)
+    assert gui_server.read_ca_trust_settings(p) == {
+        "url": "https://ca.example/b.pem", "auto": True}
+    # writing an explicit null (first-class "unset") falls back to the
+    # default url again; auto is independent and is preserved as written
+    gui_server.write_ca_trust_settings(p, None, True)
+    assert gui_server.read_ca_trust_settings(p) == {
+        "url": _CA_DEFAULT_URL, "auto": True}
+
+
+def test_settings_ca_trust_config_audited(tmp_path, monkeypatch):
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        assert _req(host, port, "POST", "/api/settings/ca-trust",
+                    {"url": "https://ca.example/bundle.pem", "auto": True},
+                    headers=hh)[0] == 200
+        evs = [e for e in _read_audit_lines(audit_path)
+               if e["event"] == "ca-trust-config"]
+        assert len(evs) == 1
+        ev = evs[0]
+        assert ev["category"] == "settings" and ev["result"] == "ok"
+        assert ev["actor"] == "console:admin" and ev["target"] == "ca-trust"
+        # prior state was "nothing configured", which resolves to the
+        # built-in default -- the audit trail records the effective url,
+        # not a bare "(none)", since that IS what was in force
+        assert ("url %s -> https://ca.example/bundle.pem" % _CA_DEFAULT_URL
+                in ev["detail"])
+        assert "auto False -> True" in ev["detail"]
+    finally:
+        stop()
+
+
+def _poll_ca_job(host, port, ck, jid, timeout=3):
+    deadline = time.time() + timeout
+    job = None
+    while time.time() < deadline:
+        s, _, jb = _req(host, port, "GET",
+                        "/api/settings/ca-trust/refresh/" + jid,
+                        headers={"Cookie": ck})
+        assert s == 200
+        job = json.loads(jb)
+        if job["state"] != "running":
+            return job
+        time.sleep(0.02)
+    return job
+
+
+def test_ca_trust_refresh_job_flow(tmp_path, monkeypatch):
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        # poll route is session-gated; unknown id -> 404
+        assert _req(host, port, "GET",
+                    "/api/settings/ca-trust/refresh/deadbeef")[0] == 401
+        assert _req(host, port, "GET",
+                    "/api/settings/ca-trust/refresh/deadbeef",
+                    headers={"Cookie": ck})[0] == 404
+        # nothing configured yet -- refresh uses the built-in default url
+        # ("Download now" works out of the box); stub the downloader (no
+        # network in unit tests, and never the real Cisco URL)
+        seen = {}
+
+        def fake_download(url):
+            seen["url"] = url
+            return {"ok": True, "certs": 3, "error": None}
+
+        monkeypatch.setattr(trust_mod, "download_bundle", fake_download)
+        st, _, b = _req(host, port, "POST", "/api/settings/ca-trust/refresh",
+                        {}, headers=hh)
+        assert st == 200
+        jid = json.loads(b)["job"]
+        job = _poll_ca_job(host, port, ck, jid)
+        assert job == {"state": "done", "certs": 3,
+                       "detail": "downloaded 3 certificate(s) from "
+                                 + _CA_DEFAULT_URL}
+        assert seen["url"] == _CA_DEFAULT_URL
+
+        # configuring an explicit url overrides the default
+        assert _req(host, port, "POST", "/api/settings/ca-trust",
+                    {"url": "https://ca.example/bundle.pem", "auto": False},
+                    headers=hh)[0] == 200
+        st, _, b = _req(host, port, "POST", "/api/settings/ca-trust/refresh",
+                        {}, headers=hh)
+        assert st == 200
+        jid = json.loads(b)["job"]
+        job = _poll_ca_job(host, port, ck, jid)
+        assert job == {"state": "done", "certs": 3,
+                       "detail": "downloaded 3 certificate(s) from "
+                                 "https://ca.example/bundle.pem"}
+        assert seen["url"] == "https://ca.example/bundle.pem"
+
+        # the audit event is emitted BEFORE the job turns terminal, so a
+        # poller that saw done can rely on the line being there already
+        evs = [e for e in _read_audit_lines(audit_path)
+               if e["event"] == "ca-trust-refresh"]
+        assert len(evs) == 2
+        assert all(e["result"] == "ok" for e in evs)
+        assert all(e["category"] == "settings" for e in evs)
+        assert all(e["actor"] == "console:admin" for e in evs)
+        assert all(e["target"] == "ca-trust" for e in evs)
+        assert "3 certificate(s)" in evs[0]["detail"]
+        assert "3 certificate(s)" in evs[1]["detail"]
+    finally:
+        stop()
+
+
+def test_ca_trust_refresh_failure_reported_and_audited(tmp_path, monkeypatch):
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        assert _req(host, port, "POST", "/api/settings/ca-trust",
+                    {"url": "https://ca.example/bundle.pem", "auto": False},
+                    headers=hh)[0] == 200
+        monkeypatch.setattr(
+            trust_mod, "download_bundle",
+            lambda url: {"ok": False, "certs": 0, "error": "no PEM blocks"})
+        st, _, b = _req(host, port, "POST", "/api/settings/ca-trust/refresh",
+                        {}, headers=hh)
+        assert st == 200
+        jid = json.loads(b)["job"]
+        job = _poll_ca_job(host, port, ck, jid)
+        assert job == {"state": "failed", "certs": None,
+                       "detail": "no PEM blocks"}
+        evs = [e for e in _read_audit_lines(audit_path)
+               if e["event"] == "ca-trust-refresh"]
+        assert len(evs) == 1 and evs[0]["result"] == "fail"
+        assert "no PEM blocks" in evs[0]["detail"]
+    finally:
+        stop()
+
+
+def test_ca_refresh_due_pure_decision():
+    """The daily thread's 'should this cycle download' decision is a pure
+    function so it is testable without threads or sleeping."""
+    due = gui_server.ca_refresh_due
+    assert due({"url": "https://ca.example/b.pem", "auto": True}) == \
+        "https://ca.example/b.pem"
+    assert due({"url": " https://ca.example/b.pem ", "auto": True}) == \
+        "https://ca.example/b.pem"
+    assert due({"url": "https://ca.example/b.pem", "auto": False}) is None
+    assert due({"url": None, "auto": True}) is None
+    assert due({"url": "   ", "auto": True}) is None
+    assert due({"url": "https://ca.example/b.pem", "auto": 1}) is None
+    assert due({}) is None
+    assert due(None) is None
+

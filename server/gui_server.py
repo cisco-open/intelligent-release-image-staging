@@ -16,10 +16,12 @@ import os
 import re
 import secrets
 import ssl
+import tempfile
+import threading
 import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import unquote, parse_qs
+from urllib.parse import unquote, parse_qs, urlsplit
 
 import audit
 import gui_app
@@ -133,6 +135,171 @@ def _resolve_certfile():
     if os.path.exists(cert):
         return cert
     return None
+
+
+# ---- CA-trust settings + refresh jobs (spec A3) ---------------------------
+# $IRIS_STATE/ca-trust-settings.json {"url": str|null, "auto": bool}. The
+# console is both writer AND consumer (the daily thread below runs in this
+# process), so the helpers live here rather than in a shared module the way
+# telemetry-settings.json does.
+_CA_TRUST_BASENAME = "ca-trust-settings.json"
+# Built-in default CA-bundle source (Cisco's published trust store). A
+# missing/null/blank configured url falls back to this so a fresh install
+# can hit "Download now" (or enable auto) with zero configuration.
+_CA_TRUST_DEFAULT_URL = "https://www.cisco.com/security/pki/trs/ios.p7b"
+_CA_REFRESH_PERIOD = 24 * 60 * 60   # daily auto-download cadence (s)
+_CA_REFRESH_FIRST_DELAY = 60        # "shortly after start" first pass (s)
+
+
+def ca_trust_settings_path(state_dir):
+    return os.path.join(state_dir, _CA_TRUST_BASENAME)
+
+
+def read_ca_trust_settings(path):
+    """Tolerant reader: missing/corrupt file or wrong types -> defaults. A
+    missing/null/blank configured url falls back to the built-in default CA
+    bundle source (_CA_TRUST_DEFAULT_URL); auto stays off unless the file
+    explicitly says otherwise. A settings reader never raises."""
+    url, auto = None, False
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        raw = data.get("url")
+        if isinstance(raw, str) and raw.strip():
+            url = raw.strip()
+        auto = data.get("auto") is True
+    except (OSError, ValueError, AttributeError):
+        pass
+    return {"url": url or _CA_TRUST_DEFAULT_URL, "auto": auto}
+
+
+def write_ca_trust_settings(path, url, auto):
+    """Atomic write: mkstemp in the same dir + os.replace (house idiom).
+    url may be None -- that is stored literally (first-class "unset"); the
+    default-URL fallback lives in the reader, not here, so an operator can
+    tell "never configured" apart from "explicitly cleared" if it ever
+    matters, and both read back through read_ca_trust_settings() as the
+    built-in default."""
+    d = os.path.dirname(path) or "."
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".ca-trust-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump({"url": url, "auto": bool(auto)}, f, sort_keys=True)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+_CA_JOB_TTL = 3600                  # evict terminal refresh jobs after (s)
+# In-memory refresh jobs (the gui_images.start_publish idiom): id -> dict,
+# a daemon thread runs the download, GET /api/settings/ca-trust/refresh/<id>
+# polls. Per-process: a restart abandons in-flight jobs.
+_CA_JOBS = {}
+_CA_JOBS_LOCK = threading.Lock()
+
+
+def ca_refresh_due(settings):
+    """Pure decision for the daily loop: the URL to download this cycle, or
+    None to skip (auto off / no URL). No clock, no I/O. settings is whatever
+    the caller passes -- typically read_ca_trust_settings()'s output, whose
+    url is never empty (default-URL fallback), so in practice this reduces
+    to the auto flag; the url checks stay so the function is correct against
+    a raw/partial dict too."""
+    if not isinstance(settings, dict) or settings.get("auto") is not True:
+        return None
+    url = settings.get("url")
+    if not isinstance(url, str) or not url.strip():
+        return None
+    return url.strip()
+
+
+def _run_ca_download(url, download_fn=None):
+    """One CA-bundle download attempt -> (ok, detail, certs). Never raises;
+    detail is audit/UI-safe (URL + error text only, never cert material --
+    and download_bundle never puts key/cert bytes in its error strings)."""
+    try:
+        result = (download_fn or trust.download_bundle)(url)
+    except Exception as exc:    # download_bundle reports; belt and suspenders
+        result = {"ok": False, "certs": 0, "error": str(exc)}
+    if result.get("ok") is True:
+        certs = int(result.get("certs") or 0)
+        return (True, "downloaded %d certificate(s) from %s" % (certs, url),
+                certs)
+    return False, str(result.get("error") or "download failed"), None
+
+
+def start_ca_refresh(url, audit_fn=None, download_fn=None):
+    """Run one CA-bundle download on a daemon thread; returns a job id for
+    the poll route immediately. audit_fn(result=..., detail=...) is called
+    BEFORE the job turns terminal so a poller that sees done/failed can rely
+    on the audit line already existing."""
+    job_id = secrets.token_hex(8)
+    job = {"state": "running", "detail": "", "certs": None,
+           "finished_at": None}
+    now = time.time()
+    with _CA_JOBS_LOCK:
+        stale = [jid for jid, j in _CA_JOBS.items()
+                 if j["finished_at"] is not None
+                 and j["finished_at"] <= now - _CA_JOB_TTL]
+        for jid in stale:
+            del _CA_JOBS[jid]
+        _CA_JOBS[job_id] = job
+
+    def run():
+        ok, detail, certs = _run_ca_download(url, download_fn=download_fn)
+        if audit_fn is not None:
+            try:
+                audit_fn(result="ok" if ok else "fail", detail=detail)
+            except Exception:
+                pass                # audit must never break the job
+        with _CA_JOBS_LOCK:
+            job["state"] = "done" if ok else "failed"
+            job["detail"] = detail
+            job["certs"] = certs
+            job["finished_at"] = time.time()
+
+    threading.Thread(target=run, daemon=True).start()
+    return job_id
+
+
+def get_ca_job(job_id):
+    """Poll view {"state","detail","certs"}, or None for an unknown id."""
+    with _CA_JOBS_LOCK:
+        job = _CA_JOBS.get(job_id)
+        if job is None:
+            return None
+        return {"state": job["state"], "detail": job["detail"],
+                "certs": job["certs"]}
+
+
+def ca_trust_refresh_loop(stop_event, state_dir, audit_fn=None,
+                          period=_CA_REFRESH_PERIOD,
+                          first_delay=_CA_REFRESH_FIRST_DELAY,
+                          download_fn=None):
+    """Daily public-CA auto-refresh (spec A3): stop-event wait loop like
+    telemetry.run_forever, with a short first delay so an enabled config is
+    honored shortly after start. Re-reads the settings file every cycle,
+    skips quietly unless auto && url (ca_refresh_due), audits completions as
+    ca-trust-refresh with actor system, and never lets a failure kill the
+    thread -- a failed download just retries next cycle."""
+    delay = first_delay
+    while not stop_event.wait(delay):
+        delay = period
+        try:
+            url = ca_refresh_due(
+                read_ca_trust_settings(ca_trust_settings_path(state_dir)))
+            if url is None:
+                continue
+            ok, detail, _certs = _run_ca_download(url,
+                                                  download_fn=download_fn)
+            if audit_fn is not None:
+                audit_fn(event="ca-trust-refresh", category="settings",
+                         action="refresh", target="ca-trust", actor="system",
+                         result="ok" if ok else "fail", detail=detail)
+        except Exception:
+            pass                    # the daily thread must never die
 
 
 def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=None,
@@ -655,6 +822,14 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
                 self._serve_swarmmap(); return
+            if path.startswith("/api/settings/ca-trust/refresh/"):
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                job = get_ca_job(
+                    path[len("/api/settings/ca-trust/refresh/"):])
+                self._json(200, job) if job else self._json(
+                    404, {"error": "no such job"})
+                return
             if path == "/api/settings":
                 info = app.session_info(self._sid())
                 if info is None:
@@ -777,6 +952,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 "gui_cert": gui_tls.active_info(),
                 # installed root CAs: name/subject/expiry/fingerprint/source
                 "trust": trust.list_entries(),
+                "ca_trust": read_ca_trust_settings(ca_trust_settings_path(
+                    os.environ.get("IRIS_STATE", "/var/lib/iris"))),
             }
 
         def _sse_onboard(self, onboard, job_id):
@@ -1016,6 +1193,59 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                            detail="user %s -> %s"
                                   % (prev["username"] or "(none)", user))
                 self._json(200, {"stage_host": saved}); return
+            if path == "/api/settings/ca-trust/refresh":
+                spath = ca_trust_settings_path(
+                    os.environ.get("IRIS_STATE", "/var/lib/iris"))
+                cfg = read_ca_trust_settings(spath)
+                if not cfg["url"]:
+                    # read_ca_trust_settings() always falls back to the
+                    # built-in default url, so this is defense-in-depth only
+                    # (e.g. a future empty _CA_TRUST_DEFAULT_URL) -- normal
+                    # operation always has a url, so "Download now" works
+                    # with zero configuration.
+                    self._json(400, {"error": "no CA bundle URL configured"})
+                    return
+
+                def _refresh_audit(result, detail):
+                    # safe from the worker thread: _audit only closes over
+                    # audit_path, never per-request state
+                    self._audit("ca-trust-refresh", "settings",
+                               action="refresh", target="ca-trust",
+                               actor=actor, result=result, detail=detail)
+
+                self._json(200, {"job": start_ca_refresh(
+                    cfg["url"], audit_fn=_refresh_audit)})
+                return
+            if path == "/api/settings/ca-trust":
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                url = data.get("url")
+                auto = data.get("auto", False)
+                if not isinstance(auto, bool):
+                    self._json(400, {"error": "auto must be a bool"}); return
+                if url is not None and not isinstance(url, str):
+                    self._json(400, {"error": "url must be a string or null"})
+                    return
+                if url is not None:
+                    url = url.strip() or None   # blank == unset (falls back to the default)
+                if url is not None:
+                    parts = urlsplit(url)
+                    if parts.scheme != "https" or not parts.netloc:
+                        self._json(400, {"error": "url must be an https:// URL"})
+                        return
+                spath = ca_trust_settings_path(
+                    os.environ.get("IRIS_STATE", "/var/lib/iris"))
+                prev = read_ca_trust_settings(spath)
+                write_ca_trust_settings(spath, url, auto)
+                saved = read_ca_trust_settings(spath)
+                self._audit("ca-trust-config", "settings", action="set",
+                           target="ca-trust", actor=actor,
+                           detail="url %s -> %s, auto %s -> %s"
+                                  % (prev["url"], saved["url"],
+                                     prev["auto"], auto))
+                self._json(200, {"ok": True, "ca_trust": saved})
+                return
             if path == "/api/settings/gui-cert":
                 data = self._json_body(raw)
                 if data is None:
@@ -1684,6 +1914,12 @@ def main():
         clear_state_fn=catalog.forget_device, receipts=receipts)
     srv = make_server(host, port, app, images, fleet, creds, catalog, onboard,
                        None, certfile=certfile, audit_path=audit_path, receipts=receipts)
+    # Daily public-CA bundle auto-refresh (spec A3): in-process daemon
+    # thread, the repo's periodic-work idiom -- no cron/timer/extra process.
+    ca_stop = threading.Event()     # never set in production; loop dies with us
+    threading.Thread(target=ca_trust_refresh_loop,
+                     args=(ca_stop, state_dir, _bg_audit),
+                     daemon=True).start()
     scheme = "https" if srv.tls_active else "http"
     print("iris-gui on %s://%s:%d/" % (scheme, host, port), flush=True)
     srv.serve_forever()
