@@ -40,6 +40,49 @@ top-level `VERSION` file.
   listener, default unchanged), and `IRIS_EVENTS_URL_TEMPLATE` (operator-
   configured swarm-drawer events link, replacing the previously hardcoded
   dashboard link; unset renders no link).
+- **Console certificate replacement**: Settings → Certificate uploads a
+  cert/key PEM pair for the web console only, validated by a real
+  `load_cert_chain` (garbage PEM and key/cert mismatch are rejected
+  per-field) and hot-applied — no restart, and no change to the certificate
+  devices pin for catalog/artifact traffic. Persisted durable-first as
+  `tls/gui-crt.pem` + age-encrypted `tls/gui-key.pem.age`; boot rebuilds the
+  combined runtime cert (`IRIS_GUI_CERT`, default
+  `/run/iris/tls/gui-cert.pem`), and an override that fails to decrypt is
+  skipped with a warning so the console always falls back to the built-in
+  certificate — a bad upload can never lock the operator out. *Use built-in
+  certificate* reverts. New `POST`/`DELETE /api/settings/gui-cert`, audited
+  as `gui-cert-replace` / `gui-cert-revert` (never key material).
+- **Root-CA trust store**: Settings → Trusted CAs installs and removes CA
+  PEMs under `IRIS_TRUST_DIR` (default `/etc/iris/tls/trust`, one
+  fingerprint-named file per install); every change — and every boot —
+  rebuilds the runtime bundle `IRIS_CA_BUNDLE` (default
+  `/run/iris/tls/ca-bundle.pem`). Outbound TLS (OTLP export, the CA-bundle
+  download) verifies against the system store *plus* this bundle. New
+  `POST /api/settings/trust` and `DELETE /api/settings/trust/<name>`,
+  audited as `trust-add` / `trust-remove`.
+- **Daily public-CA bundle download** (optional): the operator supplies an
+  `https://` URL and an auto flag (`POST /api/settings/ca-trust`, stored in
+  `$IRIS_STATE/ca-trust-settings.json`); *Download now* runs the job on
+  demand (`POST /api/settings/ca-trust/refresh`, polled). Downloads refuse
+  redirects, cap at 2 MiB, must parse as PEM certificates — plain PEM, a
+  certs-only PKCS#7 bundle, or a CMS-signed wrapper such as Cisco's Trusted
+  Root Store (`https://www.cisco.com/security/pki/trs/ios.p7b`, the default
+  URL when none is configured; the wrapper's own signer certificates are
+  never imported, and a tampered signature rejects the whole bundle) — and
+  never overwrite the previous good bundle on failure. Downloaded certs land
+  as the distinguished trust entry `downloaded-bundle.pem`. The console
+  re-runs the download every 24 h while auto is enabled.
+- **Editable telemetry destination**: the console's Observability row is now
+  an editable form — endpoint and enabled flag, hot-applied by the telemetry
+  hub on its next sample pass, no restart. Stored in
+  `$IRIS_STATE/telemetry-destination.json`; each field overrides its
+  deployment default (`IRIS_OTLP_ENDPOINT` / `IRIS_OBSERVABILITY`) and
+  *Revert to deployment default* deletes the file, restoring exact env
+  behavior. Collector auth headers stay env-only
+  (`IRIS_OTLP_HEADERS[_FILE]`). New
+  `POST`/`DELETE /api/settings/telemetry-destination`, audited as
+  `telemetry-destination-set` / `telemetry-destination-clear` (never header
+  values).
 
 ### Changed
 - **Breaking:** `:9101/swarm` now answers only loopback peers by default (it

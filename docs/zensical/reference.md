@@ -88,6 +88,38 @@ services. What each directory holds is in
 The Kubernetes alpha maps the durable paths into one PVC under `/data` instead —
 see [Kubernetes](kubernetes.md).
 
+### TLS trust and console certificate
+
+The console's *Settings → Certificate* and *Settings → Trusted CAs* sections
+manage these; none needs to be set anywhere — the defaults below are the
+container and bare-metal paths, and with no override installed and an empty
+trust dir the behavior is identical to releases without the feature.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `IRIS_GUI_CERT` | `/run/iris/tls/gui-cert.pem` | Combined cert+key the web console serves **when the file exists**; otherwise the console serves the shared `IRIS_CERT`. Only the console reads it — the catalog and artifact server keep the device-pinned certificate either way. |
+| `IRIS_TRUST_DIR` | `/etc/iris/tls/trust` | Durable directory of installed root-CA PEMs: one `<sha256-fingerprint>.pem` per manual install, plus the downloaded public bundle as the distinguished file `downloaded-bundle.pem`. |
+| `IRIS_CA_BUNDLE` | `/run/iris/tls/ca-bundle.pem` | Runtime concatenation of the trust dir, rebuilt at every boot and on every trust change. Absent while the trust dir is empty. Outbound TLS (OTLP export, the CA-bundle download) verifies against the system store plus this bundle. |
+
+The console certificate override persists as
+`/etc/iris/tls/gui-crt.pem` (plaintext certificate, leaf or fullchain) plus
+`/etc/iris/tls/gui-key.pem.age` (private key, age-encrypted to the same
+recipients as the rest of the secret store); boot rebuilds `IRIS_GUI_CERT`
+from the pair. An override that fails to decrypt is skipped with a warning —
+the console falls back to the built-in certificate, so a bad upload can never
+lock you out of the console.
+
+The public-CA download settings live in `$IRIS_STATE/ca-trust-settings.json`
+(`{"url": ..., "auto": ...}`, console-owned): the URL must be `https://`, and
+while `auto` is on the console re-downloads the bundle every 24 hours. The
+default URL when none is configured is Cisco's Trusted Root Store,
+`https://www.cisco.com/security/pki/trs/ios.p7b` (updated by Cisco roughly
+daily and with releases). The downloader accepts plain PEM, a certs-only
+PKCS#7 bundle (DER or PEM), or a CMS-signed wrapper in that shape — a signed
+wrapper's own transport-signer certificates are never imported, only the
+payload once its signature verifies, and a tampered wrapper is rejected
+outright. Failed downloads never overwrite the previous good bundle.
+
 ### Image path variables
 
 The server reads images from two places, and the distinction decides what a
@@ -111,8 +143,8 @@ collector and backend.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `IRIS_OBSERVABILITY` | unset (off) | Enables the external observability surface when set to `1`, `true`, `yes`, or `on`. Any other value, empty, or unset leaves it off. |
-| `IRIS_OTLP_ENDPOINT` | unset | OTLP/HTTP endpoint of your collector, e.g. `http://<collector-ip>:4318`. |
+| `IRIS_OBSERVABILITY` | unset (off) | Enables the external observability surface when set to `1`, `true`, `yes`, or `on`. Any other value, empty, or unset leaves it off. For OTLP export this is the deployment default only — a console override (below) takes precedence. The Prometheus `:9101` surface stays startup-gated by this variable alone. |
+| `IRIS_OTLP_ENDPOINT` | unset | OTLP/HTTP endpoint of your collector, e.g. `http://<collector-ip>:4318`. Deployment default only — the console's *Settings → Telemetry destination* can override it at runtime. |
 | `IRIS_METRICS_PORT` | `9101` | Port for the telemetry listener. Empty or `0` disables the listener entirely. |
 | `IRIS_METRICS_HOST` | `0.0.0.0` | Bind host for the telemetry listener. Bind it to `127.0.0.1` when only the console's session-gated proxy consumes it. |
 | `IRIS_SWARM_URL` | `http://127.0.0.1:9101/swarm` | Where the console fetches swarm state from. A non-loopback value requires `IRIS_SWARM_PUBLIC=1` on the target listener — `/swarm` answers only loopback peers by default. |
@@ -125,13 +157,18 @@ collector and backend.
 #### Telemetry gating rule
 
 * Prometheus `/metrics` is served only while `IRIS_OBSERVABILITY` is enabled; otherwise the path answers 404.
-* OTLP export requires **both** `IRIS_OBSERVABILITY` enabled **and** `IRIS_OTLP_ENDPOINT` set. `IRIS_OTLP_ENDPOINT` on its own is inert — nothing is exported.
+* OTLP export requires **both** an effective enabled flag **and** an effective endpoint. Each field is the console override from `$IRIS_STATE/telemetry-destination.json` when set, else the deployment env (`IRIS_OBSERVABILITY` / `IRIS_OTLP_ENDPOINT`). An endpoint on its own is inert — nothing is exported.
 * `/healthz` and the `/swarmmap` pointer page are served whenever the listener runs, regardless of either variable. `/swarm` answers only loopback peers by default (the console proxies it); `IRIS_SWARM_PUBLIC=1` opens it to remote peers.
 * The console reads `/swarm` over container loopback (`127.0.0.1:9101`), so port 9101 needs external reachability only for Prometheus scraping or operator tools — never for the console.
 
-`IRIS_OBSERVABILITY` and `IRIS_OTLP_ENDPOINT` are read at startup, so a change
-takes effect on the next container restart. The startup log states which posture
-is in effect.
+`IRIS_OBSERVABILITY` still decides the Prometheus `/metrics` surface at
+startup — that gate is unchanged and takes effect on the next restart. The
+OTLP destination, by contrast, is re-read on every sample pass: the console's
+*Settings → Telemetry destination* stores a per-field override in
+`$IRIS_STATE/telemetry-destination.json` (`endpoint`, `enabled`; a `null`
+field inherits the env), applied within seconds without a restart. *Revert to
+deployment default* deletes the file, restoring exact env behavior. The
+startup log states which posture is in effect at boot.
 
 !!! note "A down Prometheus target is not a fault"
     With observability off, a Prometheus job scraping IRIS reads down and an
@@ -157,11 +194,20 @@ at 8 MiB and the streamed image upload at 4 GiB.
 | `POST /api/setup` | Pre-auth, first run only. `{username, password}` creates the admin account; 409 once one exists. |
 | `POST /api/logout` | Revokes the current session and expires the cookie. |
 | `GET /api/session` | The current session's info, or 401. |
-| `GET /api/settings` | Console settings, published port, and the running version. |
+| `GET /api/settings` | Console settings, published port, and the running version — plus the active console certificate (`gui_cert`), the installed trust entries (`trust`), the CA download settings (`ca_trust`), and the effective telemetry destination with its source (`telemetry_destination`). |
 | `POST /api/settings/password` | `{current, new, confirm}`; changes the admin password and revokes every other session. |
 | `POST /api/settings/sessions/revoke-others` | Revokes every session except the caller's. |
 | `POST /api/settings/stage-host` | Stores the stage-host SSH credential; returns the redacted record. |
 | `DELETE /api/settings/stage-host` | `{deleted: <bool>}` — clears that credential. |
+| `POST /api/settings/gui-cert` | `{cert_pem, key_pem}` — validates (real `load_cert_chain`; per-field errors on garbage PEM or key mismatch) and installs the console certificate, hot-applied. |
+| `DELETE /api/settings/gui-cert` | Reverts the console to the built-in certificate, hot-applied. |
+| `POST /api/settings/trust` | `{pem}` — installs one or more CA certificates as one trust entry; returns `{entry}`, the new trust-store row. |
+| `DELETE /api/settings/trust/<name>` | Removes one trust entry and rebuilds the runtime bundle. |
+| `POST /api/settings/ca-trust` | `{url, auto}` — configures the public-CA bundle download; the URL must be `https://`. |
+| `POST /api/settings/ca-trust/refresh` | Starts a download-now job; returns `{job}`. Downloads refuse redirects, cap at 2 MiB, and must parse as PEM certificates. |
+| `GET /api/settings/ca-trust/refresh/<id>` | `{state, detail, certs}` — `running`, `done`, or `failed`. |
+| `POST /api/settings/telemetry-destination` | `{endpoint, enabled}` — telemetry destination override, hot-applied by the hub. The endpoint must be an `http`/`https` URL with a host, no query or fragment; a trailing slash is stripped. |
+| `DELETE /api/settings/telemetry-destination` | Removes the override — telemetry reverts to the deployment env defaults. |
 
 ### Images
 
