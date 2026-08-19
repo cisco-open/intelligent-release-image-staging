@@ -677,17 +677,18 @@ def _read_rpc_secret(env):
 def from_env(env=None):
     """Build a Telemetry hub from IRIS_* env vars. The seeder RPC is always
     wired (it is local; failures just surface as iris_seeder_rpc_up 0) so the
-    swarm map keeps working. External event export over OTLP is enabled
-    ONLY when IRIS_OBSERVABILITY=1 AND IRIS_OTLP_ENDPOINT is set — IRIS makes
+    swarm map keeps working, and the hub is ALWAYS constructed — the sampler
+    always runs. External OTLP export is resolved per sample PASS from the
+    effective config: the console's telemetry-destination.json override when
+    a field is non-null, else the deployment env (IRIS_OBSERVABILITY AND
+    IRIS_OTLP_ENDPOINT both required — the default-off posture). IRIS makes
     no assumptions about any observability stack being around."""
     env = os.environ if env is None else env
     endpoint = env.get("IRIS_OTLP_ENDPOINT", "").strip()
-    gate = bool(endpoint) and observability_enabled(env)
-    headers = otlp.read_headers_env(env) if gate else {}
-    exporter = (otlp.OTLPLogExporter(endpoint, headers=headers)
-                if gate else None)
-    metrics_exporter = (otlp.OTLPMetricsExporter(endpoint, headers=headers)
-                        if gate else None)
+    # Headers stay startup-env only (they are secrets with an existing
+    # file-based path — never console-editable); read unconditionally so a
+    # console enable-from-off still authenticates to the collector.
+    headers = otlp.read_headers_env(env)
     device_metrics = env.get("IRIS_OTLP_DEVICE_METRICS",
                              "").strip().lower() in ("1", "true", "yes", "on")
     audit_path = env.get("IRIS_AUDIT", "/etc/iris/audit.jsonl")
@@ -709,12 +710,22 @@ def from_env(env=None):
     reports_info = lambda: _read_reports(state_dir)
     live_info = lambda: _read_live_samples(state_dir)
     images_info = lambda: _read_images(state_dir)
-    return Telemetry(exporter=exporter, rpc=rpc, interval=interval,
-                     device_info=device_info, reports_info=reports_info,
-                     live_info=live_info, images_info=images_info,
-                     metrics_exporter=metrics_exporter,
-                     export_health=export_health,
-                     device_metrics=device_metrics)
+    dest = telemetry_destination.DestinationSettings(
+        telemetry_destination.settings_path(state_dir))
+    hub = Telemetry(rpc=rpc, interval=interval,
+                    device_info=device_info, reports_info=reports_info,
+                    live_info=live_info, images_info=images_info,
+                    export_health=export_health,
+                    device_metrics=device_metrics,
+                    dest_settings=dest,
+                    env_endpoint=endpoint,
+                    env_enabled=observability_enabled(env),
+                    headers=headers)
+    # Build the initial exporters NOW (not on the first pass) so swarm events
+    # from the announce path are captured from process start, exactly as the
+    # construction-time exporters were before the destination became editable.
+    hub._refresh_exporters()
+    return hub
 
 
 def _read_devices(state_dir):

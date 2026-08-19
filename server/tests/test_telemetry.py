@@ -1624,3 +1624,46 @@ class TestEditableDestination:
         d = health.as_dict()
         assert d["state"] == "ok"                   # recovered on new dest
         assert d["failures_total"] == fails         # history preserved
+
+
+class TestFromEnvDestination:
+    def test_from_env_always_builds_hub_and_wires_destination(self,
+                                                              tmp_path):
+        hub = telemetry.from_env({"IRIS_STATE": str(tmp_path)})
+        assert hub.exporter is None            # env off, no override: inert
+        assert hub._dest is not None
+        assert hub._dest.path == \
+            str(tmp_path / "telemetry-destination.json")
+        assert hub._env_endpoint == "" and hub._env_enabled is False
+
+    def test_from_env_captures_env_fields_and_builds_exporters(self,
+                                                               tmp_path):
+        hub = telemetry.from_env({
+            "IRIS_STATE": str(tmp_path),
+            "IRIS_OBSERVABILITY": "1",
+            "IRIS_OTLP_ENDPOINT": "http://collector:4318",
+            "IRIS_OTLP_HEADERS": "Authorization=Bearer x"})
+        assert hub._env_endpoint == "http://collector:4318"
+        assert hub._env_enabled is True
+        assert hub._headers == {"Authorization": "Bearer x"}
+        # initial exporters exist BEFORE start() so announce-path events are
+        # captured from process start, as construction-time exporters were
+        assert hub.exporter is not None
+        assert hub.exporter.url == "http://collector:4318/v1/logs"
+        assert hub.metrics_exporter.url == "http://collector:4318/v1/metrics"
+
+    def test_from_env_file_override_enables_export_with_env_off(self,
+                                                                tmp_path):
+        path = telemetry_destination.settings_path(str(tmp_path))
+        telemetry_destination.write(path, "http://console:4318", True)
+        hub = telemetry.from_env({"IRIS_STATE": str(tmp_path)})
+        assert hub.exporter is not None
+        assert hub.exporter.url == "http://console:4318/v1/logs"
+
+    def test_from_env_headers_read_even_when_env_gate_off(self, tmp_path):
+        # enable-from-off via the console must still authenticate to the
+        # collector: headers are captured regardless of the env gate.
+        hub = telemetry.from_env({
+            "IRIS_STATE": str(tmp_path),
+            "IRIS_OTLP_HEADERS": "Authorization=Bearer x"})
+        assert hub._headers == {"Authorization": "Bearer x"}

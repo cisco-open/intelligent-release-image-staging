@@ -212,8 +212,10 @@ def main():
     port = int(os.environ.get("IRIS_TRACKER_PORT", "6969"))
     secrets_path = os.environ.get("IRIS_SECRETS", "/run/iris/secrets.json")
 
-    # Telemetry owns a registry wired to its event hook; it is inert unless
-    # IRIS_OTLP_ENDPOINT / IRIS_METRICS_PORT are configured.
+    # Telemetry owns a registry wired to its event hook. The hub always
+    # runs; its OTLP destination is resolved per sample pass (deployment
+    # env, overridable from the console's telemetry-destination.json).
+    # Prometheus /metrics exposure stays startup-gated below.
     hub = telemetry.from_env()
     registry = hub.registry
     _start_pruner(registry)
