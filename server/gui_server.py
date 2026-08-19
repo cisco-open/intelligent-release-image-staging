@@ -26,6 +26,7 @@ import gui_app
 import gui_onboard
 import gui_tls
 import live_samples
+import trust
 
 WEBROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webroot")
 COOKIE = "iris_sid"
@@ -774,6 +775,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                else {"configured": False, "username": ""}),
                 # console cert metadata only — key material is never echoed
                 "gui_cert": gui_tls.active_info(),
+                # installed root CAs: name/subject/expiry/fingerprint/source
+                "trust": trust.list_entries(),
             }
 
         def _sse_onboard(self, onboard, job_id):
@@ -1050,6 +1053,29 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                detail="persist failed: %s" % exc.__class__.__name__,
                                src_ip=self.client_address[0])
                     self._json(500, {"error": "certificate install failed"}); return
+            if path == "/api/settings/trust":
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                pem = data.get("pem")
+                if not isinstance(pem, str) or not pem.strip():
+                    self._json(400, {"error": "pem must be a non-empty string"})
+                    return
+                try:
+                    entry = trust.add_pem(pem)
+                except ValueError as exc:
+                    self._audit("trust-add", "settings", action="add",
+                               target="trust-store", actor=actor, result="fail",
+                               detail="rejected: %s" % exc,
+                               src_ip=self.client_address[0])
+                    self._json(400, {"error": str(exc)}); return
+                self._audit("trust-add", "settings", action="add",
+                           target=entry["name"], actor=actor,
+                           detail="installed %s (%s cert(s), subject %s)"
+                                  % (entry["name"], entry["cert_count"],
+                                     entry["subject"]),
+                           src_ip=self.client_address[0])
+                self._json(200, {"entry": entry}); return
             if path == "/api/devices":
                 if fleet is None:
                     self._json(404, {"error": "not found"}); return
@@ -1486,6 +1512,21 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                            src_ip=self.client_address[0])
                 self._json(200, {"deleted": was_active,
                                  "gui_cert": gui_tls.active_info()}); return
+            if path.startswith("/api/settings/trust/"):
+                name = unquote(path[len("/api/settings/trust/"):])
+                # basename-only: no separators, no dot-dirs — a traversal
+                # attempt is a client bug (400), never a store lookup
+                if (not name or name in (".", "..") or "/" in name
+                        or "\\" in name or name != os.path.basename(name)):
+                    self._json(400, {"error": "bad name"}); return
+                removed = trust.remove(name)
+                self._audit("trust-remove", "settings", action="remove",
+                           target=name, actor=actor,
+                           result="ok" if removed else "fail",
+                           detail=("removed %s" % name) if removed
+                                  else "no such certificate",
+                           src_ip=self.client_address[0])
+                self._json(200, {"deleted": removed}); return
             if path.startswith("/api/devices/") and fleet is not None:
                 did = unquote(path[len("/api/devices/"):])
                 prev = fleet.get_device(did)

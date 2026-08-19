@@ -3713,3 +3713,105 @@ def test_settings_gui_cert_persist_failure_audited(tmp_path, monkeypatch):
             "key material must never appear in audit log"
     finally:
         stop()
+
+
+# ---- trust-store add/remove + settings listing ----
+
+def _trust_env(tmp_path, monkeypatch):
+    """Point the trust store at tmp_path: durable PEMs in $IRIS_TRUST_DIR,
+    runtime concat bundle at $IRIS_CA_BUNDLE."""
+    trust_dir = tmp_path / "trust"
+    run = tmp_path / "trun"
+    run.mkdir()
+    monkeypatch.setenv("IRIS_TRUST_DIR", str(trust_dir))
+    monkeypatch.setenv("IRIS_CA_BUNDLE", str(run / "ca-bundle.pem"))
+    return trust_dir, run / "ca-bundle.pem"
+
+
+def test_settings_trust_roundtrip(tmp_path, monkeypatch):
+    trust_dir, bundle = _trust_env(tmp_path, monkeypatch)
+    ca_pem, _key = _gen_cert_pair(tmp_path, "corp-root-ca", "ca")
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        # auth: no session -> 401; session without CSRF -> 403
+        assert _req(host, port, "POST", "/api/settings/trust",
+                    {"pem": ca_pem})[0] == 401
+        ck, csrf = _auth(host, port)
+        assert _req(host, port, "POST", "/api/settings/trust",
+                    {"pem": ca_pem}, headers={"Cookie": ck})[0] == 403
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        # validation -> 400: missing / empty / non-string / no PEM blocks
+        assert _req(host, port, "POST", "/api/settings/trust",
+                    {}, headers=hh)[0] == 400
+        assert _req(host, port, "POST", "/api/settings/trust",
+                    {"pem": ""}, headers=hh)[0] == 400
+        assert _req(host, port, "POST", "/api/settings/trust",
+                    {"pem": 42}, headers=hh)[0] == 400
+        st, _, _ = _req(host, port, "POST", "/api/settings/trust",
+                        {"pem": "this is not a certificate"}, headers=hh)
+        assert st == 400
+        fails = [e for e in _read_audit_lines(audit_path)
+                 if e.get("event") == "trust-add"]
+        assert fails and fails[-1]["result"] == "fail"
+        # install
+        st, _, b = _req(host, port, "POST", "/api/settings/trust",
+                        {"pem": ca_pem}, headers=hh)
+        assert st == 200
+        entry = json.loads(b)["entry"]
+        assert re.fullmatch(r"[0-9a-f]{64}\.pem", entry["name"])
+        assert entry["source"] == "manual" and entry["cert_count"] == 1
+        assert "corp-root-ca" in entry["subject"]
+        # GET reflects the store; the runtime bundle was rebuilt
+        st, _, b = _req(host, port, "GET", "/api/settings",
+                        headers={"Cookie": ck})
+        listed = json.loads(b)["trust"]
+        assert [e["name"] for e in listed] == [entry["name"]]
+        assert "BEGIN CERTIFICATE" in bundle.read_text()
+        ok_rows = [e for e in _read_audit_lines(audit_path)
+                   if e.get("event") == "trust-add" and e["result"] == "ok"]
+        assert ok_rows and ok_rows[-1]["target"] == entry["name"]
+        assert ok_rows[-1]["category"] == "settings"
+        # remove: unknown name answers 200/deleted:false with a fail audit row
+        st, _, b = _req(host, port, "DELETE",
+                        "/api/settings/trust/" + "0" * 64 + ".pem", headers=hh)
+        assert st == 200 and json.loads(b)["deleted"] is False
+        # remove the real entry: store empties, bundle disappears
+        st, _, b = _req(host, port, "DELETE",
+                        "/api/settings/trust/" + entry["name"], headers=hh)
+        assert st == 200 and json.loads(b)["deleted"] is True
+        st, _, b = _req(host, port, "GET", "/api/settings",
+                        headers={"Cookie": ck})
+        assert json.loads(b)["trust"] == []
+        assert not bundle.exists()
+        rm = [e for e in _read_audit_lines(audit_path)
+              if e.get("event") == "trust-remove"]
+        assert [e["result"] for e in rm] == ["fail", "ok"]
+    finally:
+        stop()
+
+
+def test_settings_trust_delete_rejects_traversal(tmp_path, monkeypatch):
+    trust_dir, _bundle = _trust_env(tmp_path, monkeypatch)
+    ca_pem, _key = _gen_cert_pair(tmp_path, "keep-me", "keep")
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, b = _req(host, port, "POST", "/api/settings/trust",
+                        {"pem": ca_pem}, headers=hh)
+        assert st == 200
+        name = json.loads(b)["entry"]["name"]
+        # every traversal shape -> 400, before any store access
+        for bad in ("..%2F..%2Fsecrets.json",   # ../../secrets.json
+                    "..", ".",
+                    "..%5C..%5Csecrets.json",   # ..\..\secrets.json
+                    "%2e%2e%2fx.pem"):          # ../x.pem
+            st, _, _ = _req(host, port, "DELETE",
+                            "/api/settings/trust/" + bad, headers=hh)
+            assert st == 400, bad
+        # nothing was deleted, nothing was audited as a remove
+        assert (trust_dir / name).is_file()
+        assert not [e for e in _read_audit_lines(audit_path)
+                    if e.get("event") == "trust-remove"]
+    finally:
+        stop()
