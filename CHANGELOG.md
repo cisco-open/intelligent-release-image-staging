@@ -47,9 +47,10 @@ top-level `VERSION` file.
   devices pin for catalog/artifact traffic. Persisted durable-first as
   `tls/gui-crt.pem` + age-encrypted `tls/gui-key.pem.age`; boot rebuilds the
   combined runtime cert (`IRIS_GUI_CERT`, default
-  `/run/iris/tls/gui-cert.pem`), and an override that fails to decrypt is
-  skipped with a warning so the console always falls back to the built-in
-  certificate — a bad upload can never lock the operator out. *Use built-in
+  `/run/iris/tls/gui-cert.pem`), and an override that fails to decrypt — or
+  whose certificate and key do not form a matching pair — is skipped with a
+  warning, so the console always falls back to the built-in certificate — a bad
+  upload can never lock the operator out. *Use built-in
   certificate* reverts. New `POST`/`DELETE /api/settings/gui-cert`, audited
   as `gui-cert-replace` / `gui-cert-revert` (never key material).
 - **Root-CA trust store**: Settings → Trusted CAs installs and removes CA

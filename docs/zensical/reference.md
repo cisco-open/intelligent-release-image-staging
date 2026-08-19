@@ -105,16 +105,17 @@ The console certificate override persists as
 `/etc/iris/tls/gui-crt.pem` (plaintext certificate, leaf or fullchain) plus
 `/etc/iris/tls/gui-key.pem.age` (private key, age-encrypted to the same
 recipients as the rest of the secret store); boot rebuilds `IRIS_GUI_CERT`
-from the pair. An override that fails to decrypt is skipped with a warning —
-the console falls back to the built-in certificate, so a bad upload can never
-lock you out of the console.
+from the pair. An override that fails to decrypt — or whose certificate and key
+do not form a matching pair — is skipped with a warning, so the console falls
+back to the built-in certificate and a bad upload can never lock you out of the
+console.
 
 The public-CA download settings live in `$IRIS_STATE/ca-trust-settings.json`
 (`{"url": ..., "auto": ...}`, console-owned): the URL must be `https://`, and
 while `auto` is on the console re-downloads the bundle every 24 hours. The
 default URL when none is configured is Cisco's Trusted Root Store,
-`https://www.cisco.com/security/pki/trs/ios.p7b` (updated by Cisco roughly
-daily and with releases). The downloader accepts plain PEM, a certs-only
+`https://www.cisco.com/security/pki/trs/ios.p7b` (Cisco refreshes this bundle
+over time; enable the daily auto-download to track it). The downloader accepts plain PEM, a certs-only
 PKCS#7 bundle (DER or PEM), or a CMS-signed wrapper in that shape — a signed
 wrapper's own transport-signer certificates are never imported, only the
 payload once its signature verifies, and a tampered wrapper is rejected
