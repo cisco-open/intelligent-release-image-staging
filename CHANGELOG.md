@@ -160,13 +160,16 @@ top-level `VERSION` file.
   directive, so re-adding the same device id silently restaged the old
   image. Device deletion now purges all catalog-side state — a re-added
   device always comes back unassigned.
-- **IOx packages built on containerd-store Docker engines never started**:
-  `docker save` (and therefore `ioxclient docker package`) on such engines
-  emits a nested OCI index with buildx attestation manifests, which IE3x00
-  CAF (dockerd 19.03) installs and activates but refuses to start — with
-  nothing in syslog. `device/iox/build.sh` now exports an attestation-free
-  docker-archive `rootfs.tar` itself, packages the staged directory, and
-  fails closed if an attestation manifest still appears.
+- **IOx packages built on modern Docker engines never ran on IE3x00**:
+  containerd-store `docker save` (and therefore `ioxclient docker package`)
+  emits a nested OCI index with buildx attestation manifests — CAF
+  (dockerd 19.03) installs and activates the app but refuses to start it,
+  with nothing in syslog — and the buildx `type=docker` export fails
+  activation outright ("Image blobs/… cannot be loaded"). `device/iox/
+  build.sh` now packages via skopeo's `docker-archive:` transport (the
+  classic docker-save layout, lab-verified on IOS-XE 17.15), requires
+  skopeo with an actionable message, and fails closed on OCI-index or
+  attestation layouts. IOx packaging now needs `skopeo` on the build host.
 - **Unassigned devices never registered**: the agent returned before its
   first heartbeat when no image was assigned, so a freshly onboarded device
   stayed invisible to the console (and IOx onboarding without an assignment
