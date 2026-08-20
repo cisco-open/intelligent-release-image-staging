@@ -103,6 +103,13 @@ fi
 . "$(dirname "$0")/reconcile.sh"
 reconcile_conf_key telemetry "${IRIS_TELEMETRY:-}"
 reconcile_conf_key telemetry_stream "${IRIS_TELEMETRY_STREAM:-}"
+# agent_version is a fact about the IMAGE, not operator state: after a package
+# upgrade a persistent conf still carries the previous build's number and every
+# telemetry report mis-states what is actually running (field observation
+# 2026-08-20: the 3400 kept reporting 2026.07.26 from a pre-release-cut
+# package). The baked VERSION file wins on every start.
+reconcile_conf_key agent_version \
+  "$(cat /opt/iris/agent/VERSION 2>/dev/null || echo unknown)"
 
 # --- 2/3. aria2c supervisor + agent tick loop ----------------------------------
 read_secret() {
