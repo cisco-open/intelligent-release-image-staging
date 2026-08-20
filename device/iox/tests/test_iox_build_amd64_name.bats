@@ -42,13 +42,18 @@ setup() { BUILD="$BATS_TEST_DIRNAME/../build.sh"; }
 # activates the app but refuses to start it. build.sh must export a classic
 # docker-archive rootfs.tar itself and package the directory.
 
-@test "build.sh exports rootfs.tar as a classic docker-archive" {
-  run grep -F -- '--output "type=docker,dest=$CTX/rootfs.tar"' "$BUILD"
+@test "build.sh exports rootfs.tar via skopeo docker-archive" {
+  run grep -F -- 'skopeo copy "docker-daemon:$IMAGE_TAG" "docker-archive:$CTX/rootfs.tar:$IMAGE_TAG"' "$BUILD"
   [ "$status" -eq 0 ]
 }
 
-@test "build.sh disables buildx attestation manifests" {
-  run grep -F -- '--provenance=false --sbom=false' "$BUILD"
+@test "build.sh requires skopeo with an actionable message" {
+  run grep -F 'skopeo is required' "$BUILD"
+  [ "$status" -eq 0 ]
+}
+
+@test "build.sh rejects OCI-index rootfs archives" {
+  run grep -F 'grep -qx "index.json"' "$BUILD"
   [ "$status" -eq 0 ]
 }
 

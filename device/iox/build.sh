@@ -167,23 +167,29 @@ if [ "$PACKAGE" -eq 0 ]; then
   exit 0
 fi
 
-# IOx CAF ships a legacy docker runtime (dockerd 19.03 on IE3x00). Engines
-# using the containerd image store (the default on new installs) make
-# `docker save` — and therefore `ioxclient docker package` — emit a NESTED
-# OCI index carrying buildx attestation manifests; CAF then installs and
-# activates the app but refuses to start it ("Failed to place <app> in
-# running state", with nothing in syslog). Plain single-level OCI-with-compat
-# saves (classic-store engines) start fine. Export the rootfs ourselves with
-# attestations disabled and fail closed if one still sneaks in.
-echo ">> exporting docker-archive rootfs.tar (no buildx attestation manifests)"
-docker buildx build --platform "$DOCKER_PLATFORM" --provenance=false --sbom=false \
-  --output "type=docker,dest=$CTX/rootfs.tar" "$CTX"
-if tar xOf "$CTX/rootfs.tar" index.json 2>/dev/null | grep -q "attestation-manifest"; then
+# IOx CAF ships a legacy docker runtime (dockerd 19.03 on IE3x00) that only
+# loads CLASSIC docker-save archives (manifest.json + uncompressed layer
+# tars). Modern engines break this two ways: containerd-store `docker save`
+# emits a nested OCI index with buildx attestation manifests (app installs
+# and activates but never starts), and `docker buildx --output type=docker`
+# emits gzip layers without the legacy layout (activation fails with "Image
+# blobs/... cannot be loaded"). skopeo's docker-archive transport writes the
+# classic layout from any engine — lab-verified on IE-3400 (IOS-XE 17.15).
+echo ">> exporting classic docker-archive rootfs.tar via skopeo (CAF cannot load modern save layouts)"
+command -v skopeo >/dev/null 2>&1 \
+  || { echo "!! skopeo is required to package for IOx (apt-get/brew install skopeo)" >&2; exit 1; }
+rm -f "$CTX/rootfs.tar"
+skopeo copy "docker-daemon:$IMAGE_TAG" "docker-archive:$CTX/rootfs.tar:$IMAGE_TAG"
+tar tf "$CTX/rootfs.tar" | grep -q "manifest.json" \
+  || { echo "!! rootfs.tar has no manifest.json — not a docker-archive" >&2; exit 1; }
+if tar tf "$CTX/rootfs.tar" | grep -qx "index.json"; then
+  echo "!! rootfs.tar carries an OCI index — not the classic layout IE3x00 CAF can load" >&2
+  exit 1
+fi
+if tar xOf "$CTX/rootfs.tar" manifest.json 2>/dev/null | grep -q "attestation-manifest"; then
   echo "!! rootfs.tar carries buildx attestation manifests — IE3x00 CAF cannot start such images" >&2
   exit 1
 fi
-tar tf "$CTX/rootfs.tar" | grep -q "manifest.json" \
-  || { echo "!! rootfs.tar has no manifest.json — not a docker-archive" >&2; exit 1; }
 
 echo ">> ioxclient package -> $PACKAGE_NAME"
 ( cd "$CTX" && "$IOXCLIENT" package . )
