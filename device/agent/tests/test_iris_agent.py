@@ -118,11 +118,30 @@ CFG = {"device_id": "sw1", "stage_dir": "/stage",
        "token_expires_at": str(int(_time.time()) + 604_800)}
 
 
-def test_no_assignment_does_nothing():
+def test_no_assignment_still_heartbeats():
+    # An unassigned device must register with the catalog (devices.json /
+    # swarm map / telemetry posture) — assignment gates staging, not presence.
     cat = FakeCatalog({"approved_image_id": None}, None)
     deps, emitted, _, aria, _, _, _, _ = make_deps(cat, {})
     assert iris_agent.run_once(CFG, deps, {}) == "no-assignment"
     assert emitted == [] and aria == []
+    assert len(cat.heartbeats) == 1
+    hb = cat.heartbeats[0]
+    assert hb["current_image_id"] is None
+    assert hb["stage_state"] == "unassigned"
+    assert hb["stage_error"] is None
+
+
+def test_missing_assigned_image_heartbeats_error():
+    cat = FakeCatalog({"approved_image_id": "gone1"}, None)
+    deps, emitted, _, aria, _, _, _, _ = make_deps(cat, {})
+    assert iris_agent.run_once(CFG, deps, {}) == "no-image"
+    assert ("ERROR", "assigned image gone1 not in catalog") in emitted
+    assert len(cat.heartbeats) == 1
+    hb = cat.heartbeats[0]
+    assert hb["current_image_id"] is None
+    assert hb["stage_state"] == "error"
+    assert "gone1" in hb["stage_error"]
 
 
 def test_complete_and_verified_emits_done_once():

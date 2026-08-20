@@ -44,7 +44,7 @@ Deps = collections.namedtuple(
 
 def _heartbeat(image, deps, stage_state="staging", target_fs=None,
                tele_on=True, stage_error=None, sample=None, stream_on=False):
-    hb = {"current_image_id": image["id"],
+    hb = {"current_image_id": image["id"] if image else None,
           "free_flash_bytes": deps.free_bytes(target_fs or "flash:"),
           "version": deps.version(),
           "model": deps.model(),
@@ -337,10 +337,23 @@ def run_once(cfg, deps, state):
     policy = deps.catalog.get_policy(sid)
     img_id = policy.get("approved_image_id")
     if not img_id:
+        # Still heartbeat: an unassigned device must register (devices.json,
+        # swarm map, telemetry posture) or console onboarding can never see
+        # it come up — assignment only gates staging, not presence.
+        _send_heartbeat(deps, sid,
+                        _heartbeat(None, deps, "unassigned",
+                                   target_fs=cfg.get("target_fs"),
+                                   tele_on=tele_on, stream_on=stream_on))
         return "no-assignment"
     image = deps.catalog.get_image(img_id)
     if image is None:
         deps.emit("ERROR", "assigned image %s not in catalog" % img_id)
+        _send_heartbeat(deps, sid,
+                        _heartbeat(None, deps, "error",
+                                   target_fs=cfg.get("target_fs"),
+                                   tele_on=tele_on, stream_on=stream_on,
+                                   stage_error="assigned image %s not in catalog"
+                                               % img_id))
         return "no-image"
 
     # Reject a bad catalog filename before it reaches any IOS command.
