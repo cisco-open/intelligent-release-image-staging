@@ -142,6 +142,31 @@ top-level `VERSION` file.
   its root is installed from the console — previously such an endpoint failed
   silently (best-effort drop + `otlp-export-degraded`).
 
+### Removed
+- **Bare-metal / systemd server install.** `server/install.sh`, the five
+  `server/systemd/*.service` units, `server/logrotate.d/iris`, and
+  `server/iris-secretfs` are gone, along with their two test files. Docker
+  Compose and the Kubernetes manifests (same image) are now the only supported
+  server runtimes. The path was undocumented, was never exercised by CI, and
+  could not run console-driven onboarding at all — `install.sh` never copied
+  `device/` or `lab/` into the install root, so every onboarding action failed
+  at subprocess launch.
+
+  Migrating an existing bare-metal server to Compose keeps all state, because
+  the same age key decrypts the same `.age` files:
+
+  1. Set `IRIS_AGE_KEY_FILE_HOST` to the existing key path, normally
+     `/etc/iris-key/.iris_age_key`.
+  2. `sudo chown 10001 "$IRIS_AGE_KEY_FILE_HOST"`, keeping mode 600.
+  3. Copy the existing `/etc/iris` and `/var/lib/iris` contents into the
+     `iris-config` and `iris-state` named volumes, then `chown -R 10001:10001`.
+
+  Two behaviors do not carry over. All five services now share one container, so
+  a crash in any of them restarts the whole set rather than just that service —
+  this already applied to every Compose and Kubernetes deployment. And seeder
+  logs go to Docker's `json-file` driver (10 MB × 3) instead of the 14-day
+  compressed rotation `logrotate.d/iris` provided.
+
 ## [2026.07.26]
 
 ### Added
