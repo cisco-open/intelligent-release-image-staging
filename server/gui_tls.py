@@ -22,6 +22,7 @@ the environment at call time. Never logs or returns key material."""
 import os
 import shutil
 import ssl
+import subprocess
 import tempfile
 
 import secretfs
@@ -51,6 +52,54 @@ def _durable_key_path():
     return os.path.join(_tls_config_dir(), "gui-key.pem.age")
 
 
+def key_is_encrypted(key_pem):
+    """True when the key PEM is passphrase-protected, covering both PKCS#8
+    ('ENCRYPTED PRIVATE KEY') and legacy PEM ('Proc-Type: 4,ENCRYPTED')."""
+    return ("ENCRYPTED PRIVATE KEY" in key_pem
+            or "Proc-Type: 4,ENCRYPTED" in key_pem)
+
+
+def decrypt_key_pem(key_pem, passphrase):
+    """(clear_key_pem, None) on success, (None, safe_error) on failure.
+
+    An unencrypted key passes through untouched (the passphrase is ignored).
+    Decryption shells out to `openssl pkey` — the same CLI trust.py already
+    depends on — with the passphrase fed over STDIN, never argv, so it can't
+    appear in `ps` or logs. Temp files follow the validate_pair idiom: 0600
+    inside a private mkdtemp, removed before returning."""
+    if not key_is_encrypted(key_pem):
+        return key_pem, None
+    run_dir = os.path.dirname(combined_path()) or "."
+    base = run_dir if os.path.isdir(run_dir) else None
+    tmpdir = tempfile.mkdtemp(dir=base, prefix=".gui-tls-dec-")
+    try:
+        enc_tmp = os.path.join(tmpdir, "enc.pem")
+        clear_tmp = os.path.join(tmpdir, "clear.pem")
+        fd = os.open(enc_tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(key_pem)
+        try:
+            proc = subprocess.run(
+                ["openssl", "pkey", "-in", enc_tmp,
+                 "-passin", "stdin", "-out", clear_tmp],
+                input=(passphrase or "") + "\n", text=True,
+                capture_output=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            return None, "key decryption unavailable on this server"
+        if proc.returncode != 0 or not os.path.exists(clear_tmp):
+            # openssl's stderr can quote file paths but never key material;
+            # stay conservative and return a fixed message anyway.
+            return None, ("could not decrypt the private key — wrong "
+                          "passphrase, or an unsupported encryption scheme")
+        with open(clear_tmp) as f:
+            clear = f.read()
+        if "PRIVATE KEY" not in clear:
+            return None, "could not decrypt the private key"
+        return clear, None
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def validate_pair(cert_pem, key_pem):
     """None when cert_pem+key_pem load as a servable pair, else a safe
     per-upload error message (never echoes PEM or key material back).
@@ -66,6 +115,17 @@ def validate_pair(cert_pem, key_pem):
         return "certificate PEM is required"
     if not isinstance(key_pem, str) or not key_pem.strip():
         return "private key PEM is required"
+    # A passphrase-protected key can never load here (no way to prompt), and
+    # load_cert_chain surfaces it as a bare OSError with no reason — detect
+    # both encodings up front so the operator learns the actual problem. The
+    # console offers a passphrase field for this case, which routes through
+    # decrypt_key_pem() BEFORE validation; reaching this line means no (or an
+    # empty) passphrase was supplied with an encrypted key.
+    # (At-rest protection is IRIS's job: the key is age-encrypted on upload.)
+    if key_is_encrypted(key_pem):
+        return ("private key is passphrase-protected — enter the key "
+                "passphrase to import it; IRIS stores the key encrypted "
+                "at rest")
     run_dir = os.path.dirname(combined_path()) or "."
     base = run_dir if os.path.isdir(run_dir) else None
     tmpdir = tempfile.mkdtemp(dir=base, prefix=".gui-tls-check-")

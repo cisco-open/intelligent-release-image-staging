@@ -61,6 +61,12 @@ def _svc(run_fn, stage_host=None, **kw):
     # stage_host=None -> a plain _Creds WITHOUT stage_host_secrets, proving the
     # service tolerates credential stores that predate stage-host support
     creds = _Creds(profs) if stage_host is None else _CredsSH(profs, stage_host)
+    # This fleet resolves to guestshell, which now gets a live job-start
+    # reachability probe (gui_onboard.py's onboard job-start gate). Default
+    # it to "reachable" so the many tests unrelated to that gate keep
+    # exercising run_fn as before; tests of the gate itself override
+    # probe_fn explicitly via **kw.
+    kw.setdefault("probe_fn", lambda dev, env: "C9300")
     return gui_onboard.OnboardService(
         fleet, creds, device_install="/fake/device-install.sh",
         crt_public="/fake/crt.pem", host_ip="10.9.9.9",
@@ -99,6 +105,37 @@ def test_onboard_nonzero_exit_is_error(tmp_path):
     assert job["state"] == "error" and job["returncode"] == 2
 
 
+# --- job-start reachability gate (console onboard of an unreachable device
+# must never go silent -- issue: a mistyped device IP produced no visible
+# error, no batch-panel job, and no audit record) -----------------------
+
+def test_job_start_reachability_gate_fails_before_run_and_audits():
+    run_calls = []
+    audit_calls = []
+    svc = _svc(lambda p, e, on: run_calls.append(1) or 0,
+               probe_fn=lambda dev, env: None,   # unreachable: probe fails
+               audit_fn=lambda **kw: audit_calls.append(kw))
+    job = _wait(svc, svc.start("d1"))
+    assert job["state"] == "error"
+    assert any("cannot reach device 10.0.0.1" in l for l in job["lines"])
+    assert not run_calls   # the installer must never run against an unreachable box
+    finishes = [c for c in audit_calls if c.get("event") == "onboard_finished"]
+    assert finishes, "probe failure must still emit the existing onboard audit event"
+    assert finishes[0]["category"] == "onboard"
+    assert finishes[0]["result"] == "fail"
+    assert finishes[0]["target"] == "d1"
+    assert "cannot reach device 10.0.0.1" in finishes[0]["detail"]
+
+
+def test_job_start_reachability_gate_passes_reachable_device_through():
+    run_calls = []
+    svc = _svc(lambda p, e, on: run_calls.append(1) or 0,
+               probe_fn=lambda dev, env: "C9300")
+    job = _wait(svc, svc.start("d1"))
+    assert job["state"] == "done"
+    assert run_calls == [1]
+
+
 def test_onboard_unknown_device_errors(tmp_path):
     svc = _svc(lambda p, e, on: 0)
     job = _wait(svc, svc.start("nope"))
@@ -125,7 +162,8 @@ def test_enable_secret_defaults_to_device_pass(tmp_path):
     seen = {}
     svc = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
                                      mint_fn=lambda d: "t",
-                                     run_fn=lambda p, e, on: seen.update(e) or 0)
+                                     run_fn=lambda p, e, on: seen.update(e) or 0,
+                                     probe_fn=lambda dev, env: "C9300")
     _wait(svc, svc.start("d1"))
     assert seen["DEVICE_ENABLE"] == "pw"
 
@@ -154,7 +192,8 @@ def test_old_terminal_onboard_jobs_evicted():
     svc = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
                                      mint_fn=lambda d: "t",
                                      run_fn=lambda p, e, on: 0,
-                                     now_fn=lambda: clock["t"])
+                                     now_fn=lambda: clock["t"],
+                                     probe_fn=lambda dev, env: "C9300")
     j1 = svc.start("d1")
     assert _wait(svc, j1)["state"] == "done"
     assert svc.get_job(j1) is not None            # retained while fresh
@@ -343,6 +382,16 @@ def _iox_creds():
                            "enable_secret": "en"}})
 
 
+def _iox_preflight_ok(identity="FDO2547X9AB", model=None):
+    """A fake iox_preflight_fn returning passing evidence -- mirrors how the
+    router tests fake preflight_fn, so these tests don't make a real 'show
+    version' SSH probe over lab/device-run.sh."""
+    evidence = {"status": "passed", "device_identity": identity}
+    if model:
+        evidence["detected_model"] = model
+    return lambda dev, env, resolved: evidence
+
+
 def test_probe_resolves_iox_and_caches_model(tmp_path):
     art_dir = tmp_path
     (art_dir / "iris-arm64.tar").write_text("fake")
@@ -357,6 +406,7 @@ def test_probe_resolves_iox_and_caches_model(tmp_path):
     svc = gui_onboard.OnboardService(
         fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
         run_fn=fake_run, probe_fn=lambda dev, env: "IE-3400",
+        iox_preflight_fn=_iox_preflight_ok(),
         artifacts_dir=str(art_dir))
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done"
@@ -397,7 +447,8 @@ def test_iox_env_has_ssh_creds(tmp_path):
 
     svc = gui_onboard.OnboardService(
         fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
-        run_fn=fake_run, artifacts_dir=str(art_dir))
+        run_fn=fake_run, iox_preflight_fn=_iox_preflight_ok(),
+        artifacts_dir=str(art_dir))
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done"
     assert seen["env"]["DEVICE_SSH_PASS"] == "s3cret"
@@ -620,6 +671,118 @@ def test_default_router_preflight_rejects_populated_guest_share(monkeypatch):
             _router_resolved("router-routed"), "/repo")
 
 
+# --- IOx preflight: device/iox/install.sh hard-requires EXPECTED_DEVICE_
+# IDENTITY (and MODEL) via ':?' on every non-dry-run install -- a guard so a
+# typo'd DEVICE_IP can't tear down the app on the wrong switch. The console
+# never supplied device_identity for IOx devices (only the router flow
+# probed for it), so every console onboard of an IOx device died at that
+# guard. These tests cover the fix: a live 'show version' preflight that
+# mirrors the router flow and threads device_identity (+ model) through
+# resolved -> _build_env -> the installer env.
+
+def _iox_show_version(model="IE-3400", identity="9ABC123"):
+    return "Cisco IOS XE Software\ncisco %s (ARMv7) processor\nProcessor board ID %s\n" % (
+        model, identity)
+
+
+def test_default_iox_preflight_extracts_identity_and_model(monkeypatch):
+    def run(argv, input=None, **kwargs):
+        assert input.strip() == "show version"
+        return SimpleNamespace(returncode=0, stdout=_iox_show_version())
+    monkeypatch.setattr(gui_onboard.subprocess, "run", run)
+    evidence = gui_onboard._default_iox_preflight(
+        {}, {"DEVICE_IP": "192.0.2.30"}, {}, "/repo")
+    assert evidence == {"status": "passed", "device_identity": "9ABC123",
+                        "detected_model": "IE-3400"}
+
+
+def test_default_iox_preflight_raises_when_command_fails(monkeypatch):
+    def run(argv, input=None, **kwargs):
+        return SimpleNamespace(returncode=1, stdout="")
+    monkeypatch.setattr(gui_onboard.subprocess, "run", run)
+    with pytest.raises(ValueError, match="could not run"):
+        gui_onboard._default_iox_preflight(
+            {}, {"DEVICE_IP": "192.0.2.30"}, {}, "/repo")
+
+
+def test_default_iox_preflight_raises_when_identity_unparseable(monkeypatch):
+    """A 'show version' that never mentions a Processor board ID (odd
+    output, unexpected prompt, truncated capture) must fail closed rather
+    than let an empty identity through to the installer's guard."""
+    def run(argv, input=None, **kwargs):
+        return SimpleNamespace(returncode=0,
+                               stdout="Cisco IOS XE Software\ncisco IE-3400 (ARMv7) processor\n")
+    monkeypatch.setattr(gui_onboard.subprocess, "run", run)
+    with pytest.raises(ValueError, match="processor board ID"):
+        gui_onboard._default_iox_preflight(
+            {}, {"DEVICE_IP": "192.0.2.30"}, {}, "/repo")
+
+
+def test_apply_iox_preflight_binds_identity_and_model():
+    result = gui_onboard.apply_iox_preflight(
+        {"model": ""}, {"status": "passed", "device_identity": "9ABC123",
+                        "detected_model": "IE-3400"})
+    assert result["device_identity"] == "9ABC123"
+    assert result["model"] == "IE-3400"
+
+
+def test_apply_iox_preflight_rejects_unsafe_identity():
+    with pytest.raises(ValueError, match="safe device identity"):
+        gui_onboard.apply_iox_preflight(
+            {}, {"status": "passed", "device_identity": "; rm -rf /"})
+
+
+def test_apply_iox_preflight_rejects_identity_drift_while_queued():
+    with pytest.raises(ValueError, match="changed while the job was queued"):
+        gui_onboard.apply_iox_preflight(
+            {"device_identity": "OLD123"},
+            {"status": "passed", "device_identity": "NEW456"})
+
+
+def test_iox_onboard_runs_preflight_and_exports_identity_and_model(tmp_path):
+    """Console onboard of an IOx-platform device runs the preflight and
+    threads a non-empty EXPECTED_DEVICE_IDENTITY (and MODEL) into the
+    installer env -- the CRITICAL defect fix."""
+    (tmp_path / "iris-arm64.tar").write_text("fake")
+    fleet = _iox_fleet(platform="iox", model="IE-3400")
+    events, seen = [], {}
+    svc = gui_onboard.OnboardService(
+        fleet, _iox_creds(), host_ip="10.9.9.9",
+        mint_fn=lambda d: events.append("mint") or "TOK",
+        run_fn=lambda p, e, on: (events.append("run"), seen.update(e), 0)[2],
+        iox_preflight_fn=lambda dev, env, resolved: (
+            events.append("preflight") or {
+                "status": "passed", "device_identity": "FDO2547X9AB",
+                "detected_model": "IE-3400"}),
+        artifacts_dir=str(tmp_path))
+    job = _wait(svc, svc.start("d1"))
+    assert job["state"] == "done"
+    assert events == ["preflight", "mint", "run"]
+    assert seen["EXPECTED_DEVICE_IDENTITY"] == "FDO2547X9AB"
+    assert seen["MODEL"] == "IE-3400"
+
+
+def test_iox_preflight_parse_failure_fails_job_before_installer_runs(tmp_path):
+    """A preflight that cannot determine the live identity must fail the
+    job (fail-closed) before the installer ever runs or the token is
+    minted -- an empty EXPECTED_DEVICE_IDENTITY would make install.sh's
+    identity guard a no-op."""
+    (tmp_path / "iris-arm64.tar").write_text("fake")
+    fleet = _iox_fleet(platform="iox", model="IE-3400")
+    minted, ran = [], []
+    svc = gui_onboard.OnboardService(
+        fleet, _iox_creds(), host_ip="10.9.9.9",
+        mint_fn=lambda d: minted.append(d) or "TOK",
+        run_fn=lambda p, e, on: ran.append(1) or 0,
+        iox_preflight_fn=lambda dev, env, resolved: (_ for _ in ()).throw(
+            ValueError("could not determine the device's processor board ID")),
+        artifacts_dir=str(tmp_path))
+    job = _wait(svc, svc.start("d1"))
+    assert job["state"] == "error"
+    assert minted == [] and ran == []
+    assert any("preflight failed" in l for l in job["lines"])
+
+
 def test_iox_missing_iris_tar_errors_before_run(tmp_path):
     fleet = _iox_fleet(platform="iox", model="IE-3400")
     creds = _iox_creds()
@@ -631,7 +794,8 @@ def test_iox_missing_iris_tar_errors_before_run(tmp_path):
 
     svc = gui_onboard.OnboardService(
         fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
-  run_fn=fake_run, artifacts_dir=str(tmp_path))  # no iris-arm64.tar written
+        run_fn=fake_run, iox_preflight_fn=_iox_preflight_ok(),
+        artifacts_dir=str(tmp_path))  # no iris-arm64.tar written
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "error"
     assert called == []
@@ -650,7 +814,8 @@ def test_iox_present_iris_tar_proceeds(tmp_path):
 
     svc = gui_onboard.OnboardService(
         fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
-        run_fn=fake_run, artifacts_dir=str(tmp_path))
+        run_fn=fake_run, iox_preflight_fn=_iox_preflight_ok(),
+        artifacts_dir=str(tmp_path))
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done"
     assert seen["install_path"].endswith("device/iox/install.sh")
@@ -662,7 +827,8 @@ def test_job_lines_note_platform_and_recipe(tmp_path):
     creds = _iox_creds()
     svc = gui_onboard.OnboardService(
         fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
-        run_fn=lambda p, e, on: 0, artifacts_dir=str(tmp_path))
+        run_fn=lambda p, e, on: 0, iox_preflight_fn=_iox_preflight_ok(),
+        artifacts_dir=str(tmp_path))
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done"
     assert any("platform: iox" in l and "device/iox/install.sh" in l
@@ -768,6 +934,7 @@ def _multi_svc(n, run_fn, **kw):
                      "model": "C9300", "credential_profile_id": "lab"}
     creds = _Creds({"lab": {"device_user": "admin", "device_pass": "s3cret",
                             "enable_secret": "en"}})
+    kw.setdefault("probe_fn", lambda dev, env: "C9300")  # see _svc: guestshell reachability gate
     return gui_onboard.OnboardService(
         _Fleet(devs), creds, device_install="/fake/device-install.sh",
         crt_public="/fake/crt.pem", host_ip="10.9.9.9",
@@ -922,9 +1089,8 @@ def test_start_dedups_active_device_job():
     assert _wait(svc, j1b)["state"] == "done"
 
 
-def test_no_eviction_while_any_job_active():
-    """Terminal jobs must survive past the TTL while a batch is still running,
-    so the batch panel's done/failed record can't shrink mid-batch."""
+def test_terminal_jobs_evicted_even_while_a_job_is_active():
+    """Terminal records expire independently of active jobs."""
     clock = {"t": 1000}
     release = threading.Event()
 
@@ -940,14 +1106,12 @@ def test_no_eviction_while_any_job_active():
     assert _wait_for(lambda: svc.get_job(j2)["state"] == "running")
     clock["t"] = 1000 + 7200               # way past the TTL
     j3 = svc.start("d3")                   # would trigger the sweep
-    assert svc.get_job(j1) is not None     # retained: j2/j3 still active
+    # The old active-job exemption was deliberately removed: it allowed
+    # long-running jobs to pin unbounded completed-job state in memory.
+    assert svc.get_job(j1) is None
     release.set()
     assert _wait(svc, j2)["state"] == "done"
     assert _wait(svc, j3)["state"] == "done"
-    clock["t"] = 1000 + 7200 + 3601
-    j4 = svc.start("d1")                   # all terminal now -> sweep runs
-    assert _wait(svc, j4)["state"] == "done"
-    assert svc.get_job(j1) is None
 
 
 # --- undeploy action (shares the pool/job model with onboarding) ----------
@@ -1183,7 +1347,8 @@ def test_c9k_iox_gets_amd64_env(tmp_path):
     seen = {}
     svc = gui_onboard.OnboardService(
         fleet, _iox_creds(), host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
-        run_fn=_run_capture(seen), artifacts_dir=str(tmp_path))
+        run_fn=_run_capture(seen), iox_preflight_fn=_iox_preflight_ok(),
+        artifacts_dir=str(tmp_path))
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done"
     env = seen["env"]
@@ -1203,7 +1368,8 @@ def test_ie3k_iox_keeps_arm_defaults(tmp_path):
     seen = {}
     svc = gui_onboard.OnboardService(
         fleet, _iox_creds(), host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
-        run_fn=_run_capture(seen), artifacts_dir=str(tmp_path))
+        run_fn=_run_capture(seen), iox_preflight_fn=_iox_preflight_ok(),
+        artifacts_dir=str(tmp_path))
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done"
     env = seen["env"]
@@ -1222,7 +1388,7 @@ def test_c9k_guestshell_override_runs_guestshell(tmp_path):
     svc = gui_onboard.OnboardService(
         fleet, _iox_creds(), host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
         run_fn=_run_capture(seen), device_install="/fake/device-install.sh",
-        artifacts_dir=str(tmp_path))
+        artifacts_dir=str(tmp_path), probe_fn=lambda dev, env: "C9300-48UXM")
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done"
     assert seen["install_path"] == "/fake/device-install.sh"
@@ -1235,7 +1401,8 @@ def test_c9k_stacked_member_app_intf_override_wins(tmp_path):
     seen = {}
     svc = gui_onboard.OnboardService(
         fleet, _iox_creds(), host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
-        run_fn=_run_capture(seen), artifacts_dir=str(tmp_path))
+        run_fn=_run_capture(seen), iox_preflight_fn=_iox_preflight_ok(),
+        artifacts_dir=str(tmp_path))
     # simulate an operator/env override for a stacked member 2/0/1
     import os as _os
     old = _os.environ.get("APP_INTF")
@@ -1290,7 +1457,8 @@ def test_c9k_iox_notfound_names_amd64_tar(tmp_path):
     called = []
     svc = gui_onboard.OnboardService(
         fleet, _iox_creds(), host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
-        run_fn=lambda p, e, on: called.append(p) or 0, artifacts_dir=str(tmp_path))
+        run_fn=lambda p, e, on: called.append(p) or 0,
+        iox_preflight_fn=_iox_preflight_ok(), artifacts_dir=str(tmp_path))
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "error"
     assert called == []

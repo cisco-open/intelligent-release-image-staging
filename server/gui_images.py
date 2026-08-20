@@ -52,6 +52,9 @@ class ImageService:
         # not exist until the job finishes, so this is the only thing that makes
         # a concurrent import of the same image visible to discovery.
         self._publishing = set()
+        # Reserve identity while bytes stream, before the catalog-visible
+        # publish starts. derive_id makes foo.bin/foo.SPA.bin aliases collide.
+        self._upload_reservations = {}
         self._lock = threading.Lock()
         os.makedirs(images_dir, exist_ok=True)
 
@@ -84,23 +87,22 @@ class ImageService:
         the uploads volume and the import root can hold the same basename, and
         inferring location from the name would delete the wrong file. Entries
         published before source_dir was recorded keep the legacy behaviour of
-        removing images_dir/<filename>. The assigned check and the catalog removal
-        are not one atomic transaction: a delete racing a concurrent assign of the
-        same image can leave a device pointing at a removed image, but that is
-        bounded by the stage-only invariant (the agent finds no image and never
-        stages) and is acceptable under the single-admin model."""
-        store = self._store()
-        entry = store.get_image(image_id)
-        if entry is None:
-            raise KeyError(image_id)
-        pol = store.list_policies()
-        assigned = sorted(
-            did for did, p in pol.items()
-            if p.get("approved_image_id") == image_id
-            and (live_device_ids is None or did in live_device_ids))
-        if assigned:
-            return assigned
-        store.delete_image(image_id)
+        removing images_dir/<filename>. Assignment and deletion share the
+        catalog image-policy lock, so no new assignment can persist after this
+        method's final policy check and before catalog removal."""
+        with catalog_mod._IMAGE_POLICY_LOCK:
+            store = self._store()
+            entry = store.get_image(image_id)
+            if entry is None:
+                raise KeyError(image_id)
+            pol = store.list_policies()
+            assigned = sorted(
+                did for did, p in pol.items()
+                if p.get("approved_image_id") == image_id
+                and (live_device_ids is None or did in live_device_ids))
+            if assigned:
+                return assigned
+            store.delete_image(image_id)
         fn = entry.get("filename")
         if fn and self._file_is_ours(entry):
             try:
@@ -204,7 +206,7 @@ class ImageService:
         taken = {entry.get("id") for entry in self.list_images()}
         taken |= {entry.get("filename") for entry in self.list_images()}
         with self._lock:
-            in_flight = set(self._publishing)
+            in_flight = set(self._publishing) | set(self._upload_reservations)
         names = {}
         ids = {}
         for cand in found:
@@ -259,7 +261,8 @@ class ImageService:
         catalog entry does not exist yet during that window, so this is what
         stops a second concurrent import of the same image."""
         with self._lock:
-            return image_id in self._publishing
+            return image_id in self._publishing \
+                or image_id in self._upload_reservations
 
     def image_path(self, filename):
         return os.path.join(self.images_dir, filename)
@@ -273,6 +276,16 @@ class ImageService:
         bad filename, oversize, or incomplete upload (leaving no final file)."""
         if not self.valid_filename(filename):
             raise ValueError("bad filename")
+        image_id = publish_mod.derive_id(filename)
+        final = self.image_path(filename)
+        with self._lock:
+            entries = self.list_images()
+            if image_id in {entry.get("id") for entry in entries} \
+                    or filename in {entry.get("filename") for entry in entries} \
+                    or image_id in self._publishing \
+                    or image_id in self._upload_reservations:
+                raise ValueError("image already published or publishing")
+            self._upload_reservations[image_id] = final
         os.makedirs(self.images_dir, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=self.images_dir, prefix=".upload-",
                                    suffix=".tmp")
@@ -290,9 +303,12 @@ class ImageService:
             if expected is not None and total != expected:
                 raise ValueError(
                     "incomplete upload: got %d of %d bytes" % (total, expected))
-            final = self.image_path(filename)
             os.replace(tmp, final)
             return final
+        except Exception:
+            with self._lock:
+                self._upload_reservations.pop(image_id, None)
+            raise
         finally:
             if os.path.exists(tmp):
                 os.remove(tmp)
@@ -316,8 +332,18 @@ class ImageService:
         }
         pending_id = publish_mod.derive_id(job["filename"])
         with self._lock:
+            reserved = self._upload_reservations.get(pending_id)
+            if reserved is not None and os.path.realpath(reserved) != \
+                    os.path.realpath(image_path):
+                raise ValueError("image already publishing")
+            if pending_id in self._publishing:
+                raise ValueError("image already publishing")
+            if self.get_image(pending_id) is not None:
+                self._upload_reservations.pop(pending_id, None)
+                raise ValueError("image already published")
             self._evict_old(self._now())
             self._jobs[job_id] = job
+            self._upload_reservations.pop(pending_id, None)
             self._publishing.add(pending_id)
 
         def run():

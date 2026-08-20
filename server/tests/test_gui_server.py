@@ -440,17 +440,25 @@ def test_settings_tls_trust_and_destination_sections_wired():
     assert ".inline-form textarea" in css
 
 
-def test_settings_split_into_tabbed_subpages():
-    """Source guard for the Settings-view restructure: the eight stacked
-    sections are grouped into three sub-pages (General / TLS & trust /
-    Telemetry) switched by a tab bar, so the operator isn't staring at one
-    long undifferentiated column. Panes are siblings inside #view-settings,
-    toggled with the `hidden` attribute — no routing/sidebar changes."""
+def test_settings_uses_sidebar_feature_submenus():
+    """Source guard for the Settings navigation: the three feature sub-pages
+    (General / TLS & trust / Telemetry) are reached from an indented sidebar
+    sub-menu under Settings — deep-linkable as #settings/<sub> — not from an
+    in-page tab strip. Panes stay siblings inside #view-settings, toggled
+    with the `hidden` attribute; the sub-menu lives in the sidebar and is
+    revealed only while a settings sub-page is active."""
     with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
         html = f.read()
+    side = html.split('<nav class="side">')[1].split("</nav>")[0]
+    # the sub-menu container starts hidden (revealed by the router) and holds
+    # one deep-linkable entry per feature sub-page
+    assert 'id="settings-submenu" hidden' in side
+    for sub in ("general", "tls", "telemetry"):
+        assert ('id="nav-settings-%s"' % sub) in side, sub
+        assert ('href="#settings/%s"' % sub) in side, sub
     settings = html.split('id="view-settings"')[1].split("</section>")[0]
-    for tab_id in ("settings-tab-general", "settings-tab-tls", "settings-tab-telemetry"):
-        assert ('id="%s"' % tab_id) in settings, tab_id
+    # the old in-page tab strip is gone everywhere
+    assert "settings-tab" not in html
     for pane_id in ("settings-pane-general", "settings-pane-tls", "settings-pane-telemetry"):
         assert ('id="%s"' % pane_id) in settings, pane_id
     # exactly one pane is visible in the static markup: General (the default)
@@ -463,13 +471,16 @@ def test_settings_split_into_tabbed_subpages():
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
     # app.js builds the six ids by concatenation ('settings-pane-' + t) rather
-    # than spelling each one out, so assert the prefixes plus the tab-name
+    # than spelling each one out, so assert the prefixes plus the sub-name
     # array that drives the concatenation (mirrors the orphan guard's own
     # getElementById/querySelector extraction, which only catches literals).
     assert "'settings-pane-' + t" in js
-    assert "'settings-tab-' + t" in js
+    assert "'nav-settings-' + t" in js
     assert re.search(
-        r"SETTINGS_TABS\s*=\s*\[\s*'general'\s*,\s*'tls'\s*,\s*'telemetry'\s*\]", js)
+        r"SETTINGS_SUBS\s*=\s*\[\s*'general'\s*,\s*'tls'\s*,\s*'telemetry'\s*\]", js)
+    # the router owns sub-page selection: #settings/<sub> deep-links resolve
+    assert "showSettingsSub(" in js
+    assert "settings-submenu" in js
 
 
 def test_read_version_env_handling(monkeypatch):
@@ -1349,6 +1360,12 @@ def _serve_onboard(tmp_path, run_fn, **svc_kw):
                   "credential_profile_id": "lab"})
     creds = gui_creds.CredentialStore(secrets_path)
     creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
+    # These devices resolve to guestshell, which now gets a live job-start
+    # reachability probe (gui_onboard.py's onboard job-start gate) before
+    # run_fn is invoked. Default it to "reachable" so tests of unrelated
+    # onboard behavior keep exercising run_fn as before; a test of the gate
+    # itself would override probe_fn via svc_kw.
+    svc_kw.setdefault("probe_fn", lambda dev, env: "C9300")
     onboard = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
                                          mint_fn=lambda d: "TOK", run_fn=run_fn,
                                          **svc_kw)
@@ -1637,7 +1654,15 @@ def _serve_inband(tmp_path, run_fn, device=None):
         open(os.path.join(art, pkg), "w").close()   # IOx package-presence gate
     onboard = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
                                          mint_fn=lambda d: "TOK", run_fn=run_fn,
-                                         receipts=receipts, artifacts_dir=art)
+                                         receipts=receipts, artifacts_dir=art,
+                                         # this device is platform=guestshell, so
+                                         # the job-start reachability gate (see
+                                         # gui_onboard.py) probes it before run_fn
+                                         probe_fn=lambda dev, env: "C9300",
+                                         iox_preflight_fn=lambda dev, env, resolved: {
+                                             "status": "passed",
+                                             "device_identity": "FCW0000TEST",
+                                             "detected_model": "IE-3400"})
     srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, creds, None,
                                  onboard, certfile=None, receipts=receipts)
     port = srv.server_address[1]
@@ -2039,6 +2064,7 @@ def _serve_onboard_audit(tmp_path, run_fn, **svc_kw):
     def audit_fn(**kw):
         audit_mod.append_event(audit_path, kw.pop("event"), **kw)
 
+    svc_kw.setdefault("probe_fn", lambda dev, env: "C9300")  # see _serve_onboard
     onboard = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
                                          mint_fn=lambda d: "TOK", run_fn=run_fn,
                                          audit_fn=audit_fn, **svc_kw)
@@ -2151,23 +2177,51 @@ def _serve_fresh(tmp_path):
     return "127.0.0.1", port, app, srv.shutdown
 
 
+def _setup_headers(host, port):
+    return {"Origin": "http://%s:%d" % (host, port)}
+
+
+def _default_login_grant(host, port):
+    """Sign in with the documented default first-run credential
+    (iris/irisisgreat!) and return the one-time setup grant from the
+    response. No session cookie is issued for this login."""
+    st, hd, b = _req(host, port, "POST", "/api/login",
+                     {"username": gui_server.DEFAULT_SETUP_USER,
+                      "password": gui_server.DEFAULT_SETUP_PASS})
+    assert st == 200
+    body = json.loads(b)
+    assert body["setup"] is True and body["setup_grant"]
+    assert "Set-Cookie" not in hd            # no session for the default pair
+    return body["setup_grant"]
+
+
 def test_setup_serves_wizard_and_creates_admin(tmp_path):
     host, port, app, stop = _serve_fresh(tmp_path)
     try:
-        # while no admin exists, GET / serves the setup wizard
+        # while no admin exists, GET / serves the LOGIN page (the default
+        # iris credential there is what mints the setup grant); the setup
+        # page itself stays reachable as a static page for the redirect.
         st, hd, b = _req(host, port, "GET", "/")
-        assert st == 200 and b"setup" in b.lower()
-        # /api/setup (no auth) creates the admin
+        assert st == 200 and b'id="login-form"' in b
+        st, hd, b = _req(host, port, "GET", "/setup.html")
+        assert st == 200 and b'id="setup-form"' in b
+        # The operator signs in with the documented default credential; the
+        # server hands back a one-time grant instead of a session.
+        grant = _default_login_grant(host, port)
         st, _, _ = _req(host, port, "POST", "/api/setup",
-                        {"username": "admin", "password": "pw"})
+                        {"username": "admin", "password": "password",
+                         "setup_grant": grant},
+                        headers=_setup_headers(host, port))
         assert st == 200
         assert app.needs_setup() is False
         # it is now self-disabled (409) and the login flow works
         st, _, _ = _req(host, port, "POST", "/api/setup",
-                        {"username": "x", "password": "y"})
+                        {"username": "x", "password": "password",
+                         "setup_grant": grant},
+                        headers=_setup_headers(host, port))
         assert st == 409
         st, _, _ = _req(host, port, "POST", "/api/login",
-                        {"username": "admin", "password": "pw"})
+                        {"username": "admin", "password": "password"})
         assert st == 200
     finally:
         stop()
@@ -2194,12 +2248,218 @@ def test_normal_mode_serves_login_not_setup(tmp_path):
         # GET / serves the console shell (app.js), NOT the setup wizard, once set up
         st, _, b = _req("127.0.0.1", port, "GET", "/")
         assert st == 200 and b"/app.js" in b and b"First-run setup" not in b
-        # setup is refused now
+        # setup is refused now, even with a syntactically plausible grant
         st, _, _ = _req("127.0.0.1", port, "POST", "/api/setup",
-                        {"username": "x", "password": "y"})
+                        {"username": "x", "password": "password",
+                         "setup_grant": "unavailable-after-setup"},
+                        headers=_setup_headers("127.0.0.1", port))
         assert st == 409
+        # the default credential is not special once an admin exists: it is
+        # an ordinary failed login (no special-case leak), not a setup grant
+        st, _, b = _req("127.0.0.1", port, "POST", "/api/login",
+                        {"username": gui_server.DEFAULT_SETUP_USER,
+                         "password": gui_server.DEFAULT_SETUP_PASS})
+        assert st == 401
+        assert "setup" not in json.loads(b)
     finally:
         srv.shutdown()
+
+
+def test_setup_requires_and_consumes_grant(tmp_path):
+    host, port, app, stop = _serve_fresh(tmp_path)
+    try:
+        headers = _setup_headers(host, port)
+        payload = {"username": "admin", "password": "password"}
+
+        st, _, _ = _req(host, port, "POST", "/api/setup", payload, headers=headers)
+        assert st == 403                         # no grant
+
+        grant = _default_login_grant(host, port)
+        st, _, _ = _req(host, port, "POST", "/api/setup",
+                        payload | {"setup_grant": "wrong-grant"}, headers=headers)
+        assert st == 403                         # wrong grant
+
+        st, _, _ = _req(host, port, "POST", "/api/setup",
+                        payload | {"setup_grant": grant + "\n"}, headers=headers)
+        assert st == 200 and app.needs_setup() is False  # stray whitespace is stripped
+
+        st, _, _ = _req(host, port, "POST", "/api/setup",
+                        {"username": "other", "password": "password",
+                         "setup_grant": grant}, headers=headers)
+        assert st == 409                         # grant cannot be reused
+    finally:
+        stop()
+
+
+def test_setup_grant_expires(tmp_path, monkeypatch):
+    host, port, app, stop = _serve_fresh(tmp_path)
+    try:
+        monkeypatch.setattr(gui_server.time, "time", lambda: 10000.0)
+        grant = _default_login_grant(host, port)
+        monkeypatch.setattr(gui_server.time, "time",
+                            lambda: 10000.0 + gui_server._SETUP_GRANT_TTL)
+        st, _, _ = _req(host, port, "POST", "/api/setup",
+                        {"username": "admin", "password": "password",
+                         "setup_grant": grant},
+                        headers=_setup_headers(host, port))
+        assert st == 403
+        assert app.needs_setup() is True
+    finally:
+        stop()
+
+
+def test_setup_grant_regenerated_on_each_default_login_latest_wins(tmp_path):
+    host, port, app, stop = _serve_fresh(tmp_path)
+    try:
+        grant1 = _default_login_grant(host, port)
+        grant2 = _default_login_grant(host, port)
+        assert grant1 != grant2
+        headers = _setup_headers(host, port)
+        # the superseded grant no longer works
+        st, _, _ = _req(host, port, "POST", "/api/setup",
+                        {"username": "admin", "password": "password",
+                         "setup_grant": grant1}, headers=headers)
+        assert st == 403
+        # the latest grant does
+        st, _, _ = _req(host, port, "POST", "/api/setup",
+                        {"username": "admin", "password": "password",
+                         "setup_grant": grant2}, headers=headers)
+        assert st == 200
+    finally:
+        stop()
+
+
+def test_wrong_default_credentials_are_ordinary_failed_login(tmp_path):
+    """A near-miss on the default pair (right user/wrong password or vice
+    versa) while needs_setup does NOT mint a grant -- it is an ordinary
+    failed login, audited like any other (spec: default-cred-setup, Feature
+    1: "Failed default-credential attempts while needs_setup are audited as
+    category 'auth'")."""
+    host, port, app, stop = _serve_fresh(tmp_path)
+    try:
+        for creds in (
+            {"username": gui_server.DEFAULT_SETUP_USER, "password": "wrong"},
+            {"username": "not-iris", "password": gui_server.DEFAULT_SETUP_PASS},
+        ):
+            st, _, b = _req(host, port, "POST", "/api/login", creds)
+            assert st == 401
+            assert "setup" not in json.loads(b)
+        assert app.needs_setup() is True
+    finally:
+        stop()
+
+
+def test_default_credential_full_happy_path(tmp_path):
+    """End to end: default login -> grant -> /api/setup -> real session."""
+    host, port, app, stop = _serve_fresh(tmp_path)
+    try:
+        grant = _default_login_grant(host, port)
+        st, _, _ = _req(host, port, "POST", "/api/setup",
+                        {"username": "opuser", "password": "opuserpassword",
+                         "setup_grant": grant},
+                        headers=_setup_headers(host, port))
+        assert st == 200
+        assert app.needs_setup() is False
+        st, hd, b = _req(host, port, "POST", "/api/login",
+                         {"username": "opuser", "password": "opuserpassword"})
+        assert st == 200 and "iris_sid=" in hd.get("Set-Cookie", "")
+        assert json.loads(b)["username"] == "opuser"
+    finally:
+        stop()
+
+
+def test_admin_may_be_named_iris(tmp_path):
+    """The default-credential special case is gated purely on needs_setup(),
+    never on the chosen username: an operator may legitimately name the real
+    admin account "iris" (even reusing "irisisgreat!" as its password). Once
+    that admin exists, iris/irisisgreat! is checked against the stored admin
+    hash like any other login -- no reserved word, no special-casing."""
+    host, port, app, stop = _serve_fresh(tmp_path)
+    try:
+        grant = _default_login_grant(host, port)
+        st, _, _ = _req(host, port, "POST", "/api/setup",
+                        {"username": "iris", "password": "a-real-password",
+                         "setup_grant": grant},
+                        headers=_setup_headers(host, port))
+        assert st == 200
+        assert app.needs_setup() is False
+
+        # iris + the real chosen password -> ordinary successful login
+        st, hd, b = _req(host, port, "POST", "/api/login",
+                         {"username": "iris", "password": "a-real-password"})
+        assert st == 200 and "iris_sid=" in hd.get("Set-Cookie", "")
+        assert json.loads(b)["username"] == "iris"
+
+        # iris/irisisgreat! no longer means anything special post-setup, and
+        # does not match this admin's real (different) password
+        st, _, b = _req(host, port, "POST", "/api/login",
+                        {"username": gui_server.DEFAULT_SETUP_USER,
+                         "password": gui_server.DEFAULT_SETUP_PASS})
+        assert st == 401
+        assert "setup" not in json.loads(b)
+    finally:
+        stop()
+
+
+def test_admin_named_iris_with_default_password(tmp_path):
+    """Degenerate but legal case: the operator's chosen admin password IS
+    "irisisgreat!". Post-setup, iris/irisisgreat! must succeed as an
+    ordinary authenticated login (it matches the real stored credential),
+    not be diverted into the setup flow -- needs_setup() is false, so the
+    default-credential branch never triggers."""
+    host, port, app, stop = _serve_fresh(tmp_path)
+    try:
+        grant = _default_login_grant(host, port)
+        st, _, _ = _req(host, port, "POST", "/api/setup",
+                        {"username": "iris",
+                         "password": gui_server.DEFAULT_SETUP_PASS,
+                         "setup_grant": grant},
+                        headers=_setup_headers(host, port))
+        assert st == 200
+        assert app.needs_setup() is False
+
+        st, hd, b = _req(host, port, "POST", "/api/login",
+                         {"username": gui_server.DEFAULT_SETUP_USER,
+                          "password": gui_server.DEFAULT_SETUP_PASS})
+        assert st == 200 and "iris_sid=" in hd.get("Set-Cookie", "")
+        assert json.loads(b)["username"] == "iris"
+        assert "setup" not in json.loads(b)
+    finally:
+        stop()
+
+
+def test_bootstrap_token_strings_removed_repo_wide():
+    """Source guard (spec: default-cred-setup-and-tls-ux, Feature 1): the old
+    bootstrap-token mechanism -- the runtime file, its basename, the startup
+    banner -- is fully removed from every live file. CHANGELOG.md is exempt:
+    it documents the change, including the removed path, as project history.
+    This test's own file is exempt too: its name and this docstring
+    necessarily spell out the strings it is checking are gone everywhere
+    else. Scoped to git-tracked files so it never walks build output,
+    caches, or unrelated local directories."""
+    repo_root = os.path.normpath(os.path.join(gui_server.WEBROOT, "..", ".."))
+    tracked = subprocess.run(
+        ["git", "ls-files"], cwd=repo_root, capture_output=True,
+        text=True, check=True).stdout.splitlines()
+    needles = ("gui-bootstrap-token", "bootstrap_token")
+    self_path = "server/tests/" + os.path.basename(__file__)
+    hits = []
+    for rel in tracked:
+        if rel in (self_path, "CHANGELOG.md"):
+            continue
+        try:
+            with open(os.path.join(repo_root, rel), "rb") as f:
+                data = f.read()
+        except OSError:
+            continue
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            continue                      # binary file, not a text reference
+        for needle in needles:
+            if needle in text:
+                hits.append("%s: %s" % (rel, needle))
+    assert not hits, hits
 
 
 def test_delete_image_route(tmp_path):
@@ -3170,14 +3430,67 @@ def test_setup_emits_enriched_audit(tmp_path):
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
+        grant = _default_login_grant("127.0.0.1", port)
         st, _, _ = _req("127.0.0.1", port, "POST", "/api/setup",
-                        {"username": "root", "password": "pw12345678"})
+                        {"username": "root", "password": "pw12345678",
+                         "setup_grant": grant},
+                        headers=_setup_headers("127.0.0.1", port))
         assert st == 200
         ev = [e for e in _read_audit_lines(audit_path)
               if e.get("event") == "setup"][0]
         assert ev["target"] == "root"
         assert ev["detail"] == "initial admin account created"
         assert ev["src_ip"] == "127.0.0.1"
+        # the default-credential login that produced the grant is itself
+        # audited as an ordinary successful login (category "auth")
+        login_ev = [e for e in _read_audit_lines(audit_path)
+                    if e.get("event") == "login"][0]
+        assert login_ev["actor"] == "console:" + gui_server.DEFAULT_SETUP_USER
+        assert login_ev["category"] == "auth" and login_ev["result"] == "ok"
+    finally:
+        srv.shutdown()
+
+
+def test_setup_wrong_grant_is_audited(tmp_path):
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path)          # no admin yet -> needs_setup
+    audit_path = str(tmp_path / "audit.jsonl")
+    srv = gui_server.make_server("127.0.0.1", 0, app, audit_path=audit_path,
+                                 certfile=None)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        st, _, _ = _req("127.0.0.1", port, "POST", "/api/setup",
+                        {"username": "admin", "password": "password",
+                         "setup_grant": "bogus"},
+                        headers=_setup_headers("127.0.0.1", port))
+        assert st == 403
+        ev = [e for e in _read_audit_lines(audit_path)
+              if e.get("event") == "setup_fail"][0]
+        assert ev["category"] == "auth" and ev["result"] == "fail"
+    finally:
+        srv.shutdown()
+
+
+def test_default_login_failure_is_audited_category_auth(tmp_path):
+    """The Problem section's explicit requirement: a failed attempt at the
+    default credential while needs_setup is audited as category "auth" --
+    exercised here through the ordinary login_fail path (no grant issued)."""
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path)
+    audit_path = str(tmp_path / "audit.jsonl")
+    srv = gui_server.make_server("127.0.0.1", 0, app, audit_path=audit_path,
+                                 certfile=None)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        st, _, _ = _req("127.0.0.1", port, "POST", "/api/login",
+                        {"username": gui_server.DEFAULT_SETUP_USER,
+                         "password": "wrong"})
+        assert st == 401
+        ev = [e for e in _read_audit_lines(audit_path)
+              if e.get("event") == "login_fail"][0]
+        assert ev["category"] == "auth" and ev["result"] == "fail"
     finally:
         srv.shutdown()
 
@@ -3898,6 +4211,44 @@ def test_settings_gui_cert_persist_failure_audited(tmp_path, monkeypatch):
         assert "PRIVATE KEY" not in open(audit_path).read()
         assert key_pem not in open(audit_path).read(), \
             "key material must never appear in audit log"
+    finally:
+        stop()
+
+
+def test_gui_cert_upload_encrypted_key_with_passphrase(tmp_path, monkeypatch):
+    """A passphrase-protected key uploads successfully when key_passphrase is
+    supplied (decrypted at import, stored age-encrypted like any key); a
+    wrong passphrase and a missing passphrase both fail with messages that
+    say 'passphrase' and never echo PEM or the passphrase itself."""
+    _gui_cert_env(tmp_path, monkeypatch)
+    cert_pem, key_pem = _gen_cert_pair(tmp_path, "iris-encpass", "encpass")
+    src = tmp_path / "clear.pem"; dst = tmp_path / "enc.pem"
+    src.write_text(key_pem)
+    subprocess.run(["openssl", "pkey", "-in", str(src), "-aes-256-cbc",
+                    "-passout", "pass:s3same!", "-out", str(dst)],
+                   check=True, capture_output=True)
+    enc_key = dst.read_text()
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        # no passphrase -> 400 naming the problem
+        st, _, b = _req(host, port, "POST", "/api/settings/gui-cert",
+                        {"cert_pem": cert_pem, "key_pem": enc_key}, headers=hh)
+        assert st == 400 and b"passphrase" in b
+        # wrong passphrase -> 400, safe message
+        st, _, b = _req(host, port, "POST", "/api/settings/gui-cert",
+                        {"cert_pem": cert_pem, "key_pem": enc_key,
+                         "key_passphrase": "nope"}, headers=hh)
+        assert st == 400 and b"passphrase" in b and b"BEGIN" not in b
+        # right passphrase -> accepted
+        st, _, _ = _req(host, port, "POST", "/api/settings/gui-cert",
+                        {"cert_pem": cert_pem, "key_pem": enc_key,
+                         "key_passphrase": "s3same!"}, headers=hh)
+        assert st == 200
+        # neither the passphrase nor key material may reach the audit log
+        audit = open(audit_path).read()
+        assert "s3same!" not in audit and "PRIVATE KEY" not in audit
     finally:
         stop()
 
@@ -4679,4 +5030,3 @@ def test_settings_ca_trust_malformed_ipv6_rejected(tmp_path, monkeypatch):
             "url": "https://[::1]:4318/ca.pem", "auto": False}
     finally:
         stop()
-

@@ -3,9 +3,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 (async function () {
+  try {
   var res = await fetch('/api/session');
   if (res.status === 401) { window.location.href = '/login.html'; return; }
+  if (!res.ok) throw new Error('Session check failed (' + res.status + ')');
   var info = await res.json();
+  if (!info || typeof info !== 'object' || !info.csrf) throw new Error('Session check returned invalid data');
   document.getElementById('who').textContent = info.username;
   document.getElementById('logout').addEventListener('click', async function () {
     await fetch('/api/logout', { method: 'POST', headers: { 'X-CSRF-Token': info.csrf } });
@@ -51,6 +54,7 @@
   var statusEl = document.getElementById('status');
   var prog = document.getElementById('prog');
   var bar = document.getElementById('bar');
+  var imageJobGen = 0;
   async function refreshImages() {
     var r = await fetch('/api/images'); if (!r.ok) return;
     var imgs = (await r.json()).images || [];
@@ -71,14 +75,21 @@
     });
   }
   function pollJob(jobId) {
-    var iv = setInterval(async function () {
-      var r = await fetch('/api/images/jobs/' + jobId);
-      if (!r.ok) { clearInterval(iv); return; }
-      var j = await r.json();
-      if (j.state === 'done') { clearInterval(iv); statusEl.textContent = 'Published ' + (j.image_id || '') + ' ✓'; prog.hidden = true; refreshImages(); refreshImportable(); }
-      else if (j.state === 'error') { clearInterval(iv); statusEl.textContent = 'Publish failed: ' + j.message; prog.hidden = true; refreshImportable(); }
-      else { statusEl.textContent = 'Publishing ' + j.filename + '…'; }
-    }, 1000);
+    var gen = ++imageJobGen;
+    function next() { setTimeout(poll, 1000); }
+    async function poll() {
+      try {
+        var r = await fetch('/api/images/jobs/' + jobId);
+        if (gen !== imageJobGen) return;
+        if (!r.ok) { statusEl.textContent = 'Publish status unavailable (' + r.status + '); retrying…'; next(); return; }
+        var j = await r.json();
+        if (gen !== imageJobGen) return;
+        if (j.state === 'done') { statusEl.textContent = 'Published ' + (j.image_id || '') + ' ✓'; prog.hidden = true; refreshImages().catch(function () {}); refreshImportable().catch(function () {}); }
+        else if (j.state === 'error') { statusEl.textContent = 'Publish failed: ' + j.message; prog.hidden = true; refreshImportable().catch(function () {}); }
+        else { statusEl.textContent = 'Publishing ' + j.filename + '…'; next(); }
+      } catch (e) { statusEl.textContent = 'Publish status unavailable; retrying…'; next(); }
+    }
+    poll();
   }
   // Images already on disk but not in the catalog: orphaned uploads after a
   // catalog reset, and operator-staged files under the read-only image root.
@@ -151,12 +162,19 @@
   // but never while the operator is interacting with a row control (redrawing
   // innerHTML would yank an open dropdown out from under them) and never in a
   // hidden browser tab.
-  setInterval(function () {
-    if (document.hidden) return;
-    var a = document.activeElement;
-    if (a && a.closest && a.closest('#dev-rows')) return;
-    refreshDevices();
-  }, 10000);
+  function scheduleDevices() {
+    setTimeout(async function () {
+      if (!document.hidden) {
+        var a = document.activeElement;
+        if (!(a && a.closest && a.closest('#dev-rows'))) {
+          try { await refreshDevices(); }
+          catch (e) { devStatus.textContent = 'Device refresh unavailable; retrying…'; }
+        }
+      }
+      scheduleDevices();
+    }, 10000);
+  }
+  scheduleDevices();
   async function refreshDevices() {
     var [dr, ir, cr] = await Promise.all([fetch('/api/devices'), fetch('/api/images'), fetch('/api/credentials')]);
     if (!dr.ok) return;
@@ -283,9 +301,15 @@
   function streamOnboardJob(jobId, log) {
     onboardJobId = jobId;
     onboardEs = new EventSource('/api/onboard/jobs/' + encodeURIComponent(jobId) + '/stream');
-    onboardEs.onmessage = function (e) { log.textContent += e.data + '\n'; log.scrollTop = log.scrollHeight; };
-    onboardEs.addEventListener('end', function (e) { log.textContent += '\n— ' + e.data + ' —\n'; onboardEs.close(); onboardEs = null; onboardJobId = null; document.getElementById('onboard-abort').hidden = true; refreshDevices(); });
-    onboardEs.onerror = function () { log.textContent += '\n[stream closed]\n'; if (onboardEs) { onboardEs.close(); onboardEs = null; } };
+    var lines = [], flushPending = false, MAX_LOG_LINES = 500;
+    function flush() { flushPending = false; log.textContent = lines.join('\n') + (lines.length ? '\n' : ''); log.scrollTop = log.scrollHeight; }
+    function append(text) {
+      lines = lines.concat(String(text).split('\n')).slice(-MAX_LOG_LINES);
+      if (!flushPending) { flushPending = true; requestAnimationFrame(flush); }
+    }
+    onboardEs.onmessage = function (e) { append(e.data); };
+    onboardEs.addEventListener('end', function (e) { append('— ' + e.data + ' —'); flush(); onboardEs.close(); onboardEs = null; onboardJobId = null; document.getElementById('onboard-abort').hidden = true; refreshDevices().catch(function () {}); });
+    onboardEs.onerror = function () { append('[stream closed]'); if (onboardEs) { onboardEs.close(); onboardEs = null; } };
   }
   // Telemetry flags for onboard job bodies (reports default on, streaming
   // default off — the server treats an absent key the same way).
@@ -381,10 +405,17 @@
     return s < 60 ? s + 's' : Math.floor(s / 60) + 'm' + String(s % 60).padStart(2, '0') + 's';
   }
   function stopBatchPoll() {
-    if (batchTimer) { clearInterval(batchTimer); batchTimer = null; }
+    if (batchTimer) { clearTimeout(batchTimer); batchTimer = null; }
   }
   function startBatchPoll(gen) {
-    if (gen === batchGen && !batchTimer) batchTimer = setInterval(pollBatch, 2000);
+    if (gen !== batchGen || batchTimer) return;
+    batchTimer = setTimeout(async function run() {
+      batchTimer = null;
+      var active;
+      try { active = await pollBatch(); }
+      catch (e) { document.getElementById('batch-summary').textContent = 'Job refresh unavailable; retrying…'; active = true; }
+      if (active && gen === batchGen) startBatchPoll(gen);
+    }, 2000);
   }
   function renderBatch(listing) {
     // running durations are server-clock minus server-clock: the listing's
@@ -438,7 +469,7 @@
     var listing = await r.json();
     if (seq !== pollSeq) return true;   // a newer poll already rendered
     var active = renderBatch(listing);
-    if (!active) { stopBatchPoll(); refreshDevices(); }
+    if (!active) { stopBatchPoll(); refreshDevices().catch(function () {}); }
     return active;
   }
   // After a reload (or an accidental panel close + reload), re-attach to
@@ -457,6 +488,17 @@
     document.getElementById('batch-panel').hidden = false;
     renderBatch(listing);
     startBatchPoll(gen);
+  }
+  // Per-device submission rejections (a router preflight failure, a busy
+  // device, an unreachable device, etc.) must never read as a silent no-op:
+  // paint them in the same .err red the rest of the page uses for validation
+  // failures (see styles.css), one line per device, "<device_id>: <reason>".
+  function renderOnboardOutcome(action, startedCount, failed) {
+    var msg = 'Started ' + action + ' for ' + startedCount + ' device(s)';
+    if (failed.length) msg += '; refused: ' + failed.join(', ');
+    devStatus.textContent = msg;
+    devStatus.classList.toggle('err', failed.length > 0);
+    devStatus.classList.toggle('muted', failed.length === 0);
   }
   async function startBatch(action) {
     var ids = claimSelection();
@@ -483,7 +525,7 @@
             // surface WHY it was refused — a bare id reads as a mystery
             var reason = '';
             try { reason = (await r.json()).error || ''; } catch (e2) { }
-            failed.push(reason ? id + ' (' + reason + ')' : id);
+            failed.push(reason ? id + ': ' + reason : id);
           }
         } catch (e) { failed.push(id); }   // one blipped POST must not kill the batch
       }));
@@ -491,8 +533,7 @@
       setBulkBusy(false);
     }
     if (gen !== batchGen) return;    // panel was closed mid-start
-    devStatus.textContent = 'Started ' + action + ' for ' + Object.keys(batchJobs).length + ' device(s)' +
-      (failed.length ? '; failed to start: ' + failed.join(', ') : '');
+    renderOnboardOutcome(action, Object.keys(batchJobs).length, failed);
     if (await pollBatch()) startBatchPoll(gen);
   }
   document.getElementById('onboard-selected').addEventListener('click', function () { startBatch('onboard'); });
@@ -812,6 +853,11 @@
   }
 
   // ---- Settings ----
+  // CA bundle source presets (Feature 3): the select is a client-side view
+  // over the same stored URL the free-text input always wrote — "cisco"
+  // means "no override" (server default), "mozilla" is this curated URL,
+  // anything else is "custom" and shows the raw input.
+  var CA_MOZILLA_URL = 'https://curl.se/ca/cacert.pem';
   async function refreshSettings() {
     var r = await fetch('/api/settings'); if (!r.ok) return;
     var s = await r.json();
@@ -846,7 +892,9 @@
           : '<span class="badge badge-queued">built-in</span> ') +
         esc(gc.subject || 'unknown') +
         ' — expires ' + esc(gc.not_after || 'unknown') +
-        ' — sha256 ' + esc((gc.fingerprint_sha256 || '').slice(0, 16)) + '…';
+        ' — sha256 ' + esc((gc.fingerprint_sha256 || '').slice(0, 16)) + '…' +
+        (gc.source === 'custom' ? ''
+          : ' <span class="muted">(the revert button appears once a custom certificate is installed)</span>');
     } else {
       certStatus.textContent =
         'No TLS certificate — the console is serving plain HTTP.';
@@ -854,16 +902,26 @@
     document.getElementById('cert-revert').hidden = gc.source !== 'custom';
     // --- Trusted CAs table (rows rebuilt per render, like the images table) ---
     var trust = s.trust || [];
+    var caSrcNow = (s.ca_trust || {}).url;
+    var bundleLabel = !caSrcNow ? 'Cisco Trusted Root Store'
+      : (caSrcNow === CA_MOZILLA_URL ? 'Mozilla CA bundle (curl.se)' : 'Custom URL');
     document.getElementById('trust-rows').innerHTML = trust.length
       ? trust.map(function (t) {
-          return '<tr data-name="' + esc(t.name) + '"><td>' + esc(t.subject || 'unknown') +
+          // The downloaded bundle is ONE store file holding the whole public
+          // CA set — name it as such, not by its (arbitrary) first cert.
+          var isBundle = t.source === 'downloaded';
+          return '<tr data-name="' + esc(t.name) + '"><td>' +
+            (isBundle
+              ? esc('Public CA bundle — ' + bundleLabel)
+              : esc(t.subject || 'unknown')) +
             '</td><td>' + esc(t.not_after || 'unknown') +
             '</td><td>' + esc((t.fingerprint_sha256 || '').slice(0, 16)) + '…</td><td>' +
-            (t.source === 'downloaded'
+            (isBundle
               ? '<span class="badge badge-queued">downloaded</span>'
               : '<span class="badge badge-ok">manual</span>') +
             '</td><td>' + esc(t.cert_count) +
-            '</td><td><button class="linkish danger-link trust-del">remove</button></td></tr>';
+            '</td><td><button class="linkish danger-link trust-del">' +
+            (isBundle ? 'remove bundle' : 'remove') + '</button></td></tr>';
         }).join('')
       : '<tr><td colspan="6" class="muted">No CA certificates installed — ' +
         'outbound TLS uses the system store only.</td></tr>';
@@ -884,6 +942,9 @@
     var ct = s.ca_trust || {};
     document.getElementById('ca-url').value = ct.url || '';
     document.getElementById('ca-auto').checked = !!ct.auto;
+    var caSourceSel = document.getElementById('ca-source');
+    caSourceSel.value = !ct.url ? 'cisco' : (ct.url === CA_MOZILLA_URL ? 'mozilla' : 'custom');
+    document.getElementById('ca-url').hidden = caSourceSel.value !== 'custom';
     // --- Telemetry destination (replaces the old read-only Observability row) ---
     var td = s.telemetry_destination || {};
     var obs = s.observability || {};
@@ -945,6 +1006,87 @@
   });
 
   // ---- Settings: certificate / trust store / telemetry destination ----
+
+  // Drag-and-drop onto the TLS pane (Feature 2). Client-side only: a
+  // FileReader read plus content sniffing, then the existing textareas /
+  // endpoints do the rest — no new backend surface. Recognition is by PEM
+  // block content, never filename/extension, since operators name these
+  // files all sorts of things.
+  var PEM_PRIVATE_KEY_RE = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
+  // Mirrors gui_tls.key_is_encrypted: PKCS#8 and legacy PEM encodings. An
+  // encrypted key reveals the passphrase field; the server decrypts at
+  // import and stores the key age-encrypted at rest.
+  function keyLooksEncrypted(text) {
+    return text.indexOf('ENCRYPTED PRIVATE KEY') > -1
+        || text.indexOf('Proc-Type: 4,ENCRYPTED') > -1;
+  }
+  function syncPassphraseRow() {
+    var t = document.getElementById('cert-key').value;
+    document.getElementById('cert-passphrase-row').hidden = !keyLooksEncrypted(t);
+  }
+  document.getElementById('cert-key').addEventListener('input', syncPassphraseRow);
+  var PEM_CERTIFICATE_RE = /-----BEGIN CERTIFICATE-----/;
+  function readFileAsText(file) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () { resolve(String(reader.result || '')); };
+      reader.onerror = function () { reject(reader.error || new Error('read failed')); };
+      reader.readAsText(file);
+    });
+  }
+  // Wires a focusable drop-zone div to: click/Enter/Space -> hidden file
+  // input; dragover/dragleave -> 'drag' class for the dashed-border hover
+  // state; and a drop/file-pick callback receiving a FileList. Shared by
+  // both TLS drop zones below.
+  function wireDropzone(zone, input, onFiles) {
+    zone.addEventListener('click', function () { input.click(); });
+    zone.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+        e.preventDefault();
+        input.click();
+      }
+    });
+    ['dragenter', 'dragover'].forEach(function (ev) {
+      zone.addEventListener(ev, function (e) { e.preventDefault(); zone.classList.add('drag'); });
+    });
+    ['dragleave', 'drop'].forEach(function (ev) {
+      zone.addEventListener(ev, function (e) { e.preventDefault(); zone.classList.remove('drag'); });
+    });
+    zone.addEventListener('drop', function (e) {
+      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) onFiles(e.dataTransfer.files);
+    });
+    input.addEventListener('change', function (e) {
+      if (e.target.files && e.target.files.length) onFiles(e.target.files);
+      input.value = '';   // allow re-dropping/re-picking the same file
+    });
+  }
+  wireDropzone(document.getElementById('cert-dropzone'), document.getElementById('cert-dropzone-input'),
+    async function (files) {
+      var msg = document.getElementById('cert-msg'); msg.textContent = ''; msg.classList.remove('ok');
+      var recognized = [], errors = [];
+      for (var i = 0; i < files.length; i++) {
+        var file = files[i];
+        var text;
+        try { text = await readFileAsText(file); } catch (err) { errors.push(file.name + ': could not read file'); continue; }
+        var hasKey = PEM_PRIVATE_KEY_RE.test(text);
+        var hasCert = PEM_CERTIFICATE_RE.test(text);
+        if (!hasKey && !hasCert) { errors.push(file.name + ': no PEM block recognized'); continue; }
+        var what = [];
+        if (hasCert) { document.getElementById('cert-pem').value = text; what.push('certificate'); }
+        if (hasKey) {
+          document.getElementById('cert-key').value = text;
+          what.push(keyLooksEncrypted(text)
+            ? 'private key (passphrase-protected — enter it below)'
+            : 'private key');
+          syncPassphraseRow();
+        }
+        recognized.push(file.name + ': ' + what.join(' + ') + ' recognized');
+      }
+      msg.textContent = recognized.concat(errors).join('; ') || 'No files recognized.';
+      if (recognized.length && !errors.length) msg.classList.add('ok');
+      // Filled the textareas only — the existing Upload button still owns
+      // the actual /api/settings/gui-cert submit.
+    });
   document.getElementById('cert-form').addEventListener('submit', async function (e) {
     e.preventDefault();
     var msg = document.getElementById('cert-msg'); msg.textContent = ''; msg.classList.remove('ok');
@@ -956,7 +1098,17 @@
     if (key.indexOf('PRIVATE KEY') < 0) {
       msg.textContent = 'Private key PEM is required (-----BEGIN ... PRIVATE KEY-----).'; return;
     }
-    var r = await jpost('/api/settings/gui-cert', { cert_pem: cert, key_pem: key });
+    var body = { cert_pem: cert, key_pem: key };
+    if (keyLooksEncrypted(key)) {
+      var pw = document.getElementById('cert-passphrase').value;
+      if (!pw) {
+        document.getElementById('cert-passphrase-row').hidden = false;
+        msg.textContent = 'This private key is passphrase-protected — enter its passphrase.';
+        return;
+      }
+      body.key_passphrase = pw;
+    }
+    var r = await jpost('/api/settings/gui-cert', body);
     if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
     document.getElementById('cert-form').reset();   // never leave the key in the DOM
     msg.textContent = 'Certificate replaced. New connections use it now; reload to see it on this one.';
@@ -986,10 +1138,40 @@
     msg.textContent = 'CA installed.'; msg.classList.add('ok');
     refreshSettings();
   });
+  wireDropzone(document.getElementById('trust-dropzone'), document.getElementById('trust-dropzone-input'),
+    async function (files) {
+      var msg = document.getElementById('trust-msg'); msg.textContent = ''; msg.classList.remove('ok');
+      var ok = 0, fail = 0, skipped = 0;
+      for (var i = 0; i < files.length; i++) {
+        var file = files[i];
+        var text;
+        try { text = await readFileAsText(file); } catch (err) { fail++; continue; }
+        if (!PEM_CERTIFICATE_RE.test(text)) { skipped++; continue; }
+        var r = await jpost('/api/settings/trust', { pem: text });
+        if (r.ok) ok++; else fail++;
+      }
+      var parts = [];
+      if (ok) parts.push(ok + ' added');
+      if (fail) parts.push(fail + ' failed');
+      if (skipped) parts.push(skipped + ' skipped (no certificate PEM found)');
+      msg.textContent = parts.length ? (parts.join(', ') + '.') : 'No files processed.';
+      if (ok && !fail && !skipped) msg.classList.add('ok');
+      refreshSettings();
+    });
+  document.getElementById('ca-source').addEventListener('change', function () {
+    document.getElementById('ca-url').hidden = this.value !== 'custom';
+  });
   document.getElementById('ca-form').addEventListener('submit', async function (e) {
     e.preventDefault();
     var msg = document.getElementById('ca-msg'); msg.textContent = ''; msg.classList.remove('ok');
-    var url = document.getElementById('ca-url').value.trim();
+    var source = document.getElementById('ca-source').value;
+    // cisco -> null (server default, existing semantics); mozilla -> the
+    // curated curl.se URL; custom -> whatever is typed in the (now visible)
+    // free-text input. Either way this still posts to the one existing
+    // ca-trust endpoint — the preset is purely a client-side URL picker.
+    var url = source === 'cisco' ? '' :
+      source === 'mozilla' ? CA_MOZILLA_URL :
+      document.getElementById('ca-url').value.trim();
     var auto = document.getElementById('ca-auto').checked;
     if (url && url.indexOf('https://') !== 0) { msg.textContent = 'Bundle URL must be https://'; return; }
     if (auto && !url) { msg.textContent = 'Auto-refresh needs a bundle URL.'; return; }
@@ -1000,28 +1182,34 @@
   });
   // "Download now" starts the server-side job and polls it, like image publish
   var caPollTimer = null;
+  var caPollGen = 0;
   function pollCaRefresh(jobId) {
+    var gen = ++caPollGen;
     var msg = document.getElementById('ca-msg');
-    if (caPollTimer) { clearInterval(caPollTimer); caPollTimer = null; }
-    caPollTimer = setInterval(async function () {
+    if (caPollTimer) { clearTimeout(caPollTimer); caPollTimer = null; }
+    function next() { caPollTimer = setTimeout(poll, 1000); }
+    async function poll() {
+      try {
       var r = await fetch('/api/settings/ca-trust/refresh/' + encodeURIComponent(jobId));
-      if (!r.ok) {
-        clearInterval(caPollTimer); caPollTimer = null;
-        msg.textContent = 'Download status lost (' + r.status + ')'; return;
-      }
+      if (gen !== caPollGen) return;
+      if (!r.ok) { msg.textContent = 'Download status unavailable (' + r.status + '); retrying…'; next(); return; }
       var j = await r.json();
+      if (gen !== caPollGen) return;
       if (j.state === 'done') {
-        clearInterval(caPollTimer); caPollTimer = null;
+        caPollTimer = null;
         msg.textContent = 'Downloaded ' + (j.certs == null ? '?' : j.certs) +
           ' certificate(s).'; msg.classList.add('ok');
-        refreshSettings();
+        refreshSettings().catch(function () {});
       } else if (j.state === 'failed') {
-        clearInterval(caPollTimer); caPollTimer = null;
+        caPollTimer = null;
         msg.textContent = 'Download failed: ' + (j.detail || 'unknown error');
       } else {
         msg.textContent = 'Downloading…';
+        next();
       }
-    }, 1000);
+      } catch (e) { msg.textContent = 'Download status unavailable; retrying…'; next(); }
+    }
+    poll();
   }
   document.getElementById('ca-refresh').addEventListener('click', async function () {
     var msg = document.getElementById('ca-msg'); msg.textContent = ''; msg.classList.remove('ok');
@@ -1057,21 +1245,21 @@
     refreshSettings();
   });
 
-  // ---- Settings: sub-page tabs (General / TLS & trust / Telemetry) ----
+  // ---- Settings: sidebar feature sub-menu (General / TLS & trust / Telemetry) ----
   // refreshSettings() above always populates all panes' ids regardless of
-  // which is visible, so switching tabs is pure class/hidden toggling.
-  var SETTINGS_TABS = ['general', 'tls', 'telemetry'];
-  function showSettingsTab(tab) {
-    SETTINGS_TABS.forEach(function (t) {
-      document.getElementById('settings-pane-' + t).hidden = t !== tab;
-      document.getElementById('settings-tab-' + t).classList.toggle('active', t === tab);
+  // which is visible, so switching sub-pages is pure class/hidden toggling.
+  // The sub-menu entries live in the sidebar under Settings and are plain
+  // hash links (#settings/<sub>), so the router below owns selection and the
+  // sub-pages are deep-linkable; the menu itself is revealed only while a
+  // settings sub-page is showing.
+  var SETTINGS_SUBS = ['general', 'tls', 'telemetry'];
+  function showSettingsSub(sub) {
+    if (SETTINGS_SUBS.indexOf(sub) < 0) sub = 'general';
+    SETTINGS_SUBS.forEach(function (t) {
+      document.getElementById('settings-pane-' + t).hidden = t !== sub;
+      document.getElementById('nav-settings-' + t).classList.toggle('active', t === sub);
     });
   }
-  SETTINGS_TABS.forEach(function (t) {
-    document.getElementById('settings-tab-' + t).addEventListener('click', function () {
-      showSettingsTab(t);
-    });
-  });
 
   // ---- Monitoring (audit trail + draggable time brush) ----
   var auditOldestTs = null;
@@ -1501,12 +1689,18 @@
   // ---- hash router ----
   var VIEWS = ['overview', 'images', 'devices', 'swarm', 'settings', 'monitoring'];
   function show(view) {
+    // "#settings/tls" style hashes: the part before the slash picks the view,
+    // the rest picks the settings sub-page (showSettingsSub validates it).
+    var sub = view.indexOf('/') > -1 ? view.slice(view.indexOf('/') + 1) : '';
+    view = view.split('/')[0];
     if (VIEWS.indexOf(view) < 0) view = 'overview';
     VIEWS.forEach(function (v) {
       document.getElementById('view-' + v).hidden = v !== view;
       var nav = document.getElementById('nav-' + v);
       if (nav) nav.classList.toggle('active', v === view);
     });
+    document.getElementById('settings-submenu').hidden = view !== 'settings';
+    if (view === 'settings') showSettingsSub(sub || 'general');
     if (view === 'overview') refreshOverview();
     else if (view === 'images') { refreshImages(); refreshImportable(); }
     else if (view === 'devices') refreshDevices();
@@ -1517,4 +1711,11 @@
   function current() { return (location.hash || '#overview').slice(1); }
   window.addEventListener('hashchange', function () { show(current()); });
   show(current());
+  } catch (e) {
+    var notice = document.createElement('div');
+    notice.textContent = 'Console initialization failed: ' + (e && e.message ? e.message : e) + '. Reload to retry.';
+    notice.setAttribute('role', 'alert');
+    notice.style.cssText = 'position:fixed;top:12px;left:12px;right:12px;z-index:9999;padding:12px;background:#5b1d1d;color:#fff;border:1px solid #d66;border-radius:4px';
+    document.body.appendChild(notice);
+  }
 })();

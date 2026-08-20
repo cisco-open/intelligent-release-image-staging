@@ -128,6 +128,68 @@ def test_validate_pair_mismatched_key_message_is_safe(tls_env, tmp_path):
     assert "BEGIN" not in err
 
 
+def _encrypt_key(dirpath, key_pem, passphrase):
+    """Passphrase-protect a key PEM via the openssl CLI (PKCS#8 PBES2)."""
+    src = os.path.join(str(dirpath), "clear-key.pem")
+    dst = os.path.join(str(dirpath), "enc-key.pem")
+    with open(src, "w") as f:
+        f.write(key_pem)
+    subprocess.run(
+        ["openssl", "pkey", "-in", src, "-aes-256-cbc",
+         "-passout", "pass:" + passphrase, "-out", dst],
+        check=True, capture_output=True)
+    with open(dst) as f:
+        return f.read()
+
+
+def test_decrypt_key_pem_right_passphrase_roundtrips(tls_env, tmp_path):
+    cert_pem, key_pem = _gen_pair(tmp_path, "decpair")
+    enc = _encrypt_key(tmp_path, key_pem, "sw0rdfish")
+    clear, err = gui_tls.decrypt_key_pem(enc, "sw0rdfish")
+    assert err is None
+    assert "PRIVATE KEY" in clear and "ENCRYPTED" not in clear
+    # the decrypted key must pair with the original cert
+    assert gui_tls.validate_pair(cert_pem, clear) is None
+
+
+def test_decrypt_key_pem_wrong_passphrase_says_so(tls_env, tmp_path):
+    _, key_pem = _gen_pair(tmp_path, "wrongpass")
+    enc = _encrypt_key(tmp_path, key_pem, "right")
+    clear, err = gui_tls.decrypt_key_pem(enc, "wrong")
+    assert clear is None
+    assert err is not None and "passphrase" in err
+    assert "BEGIN" not in err          # never echo PEM material
+
+
+def test_decrypt_key_pem_unencrypted_passthrough(tls_env, tmp_path):
+    _, key_pem = _gen_pair(tmp_path, "plainpass")
+    clear, err = gui_tls.decrypt_key_pem(key_pem, "ignored")
+    assert err is None and clear == key_pem
+
+
+def test_validate_pair_encrypted_key_names_the_problem(tls_env, tmp_path):
+    """A passphrase-protected key can never load (no way to prompt); the
+    message must say so specifically — the generic '(OSError)' fallback sent
+    an operator hunting a cert problem that was really a key passphrase.
+    Covers both encodings: PKCS#8 'ENCRYPTED PRIVATE KEY' and legacy PEM
+    'Proc-Type: 4,ENCRYPTED' headers."""
+    cert_pem, _ = _gen_pair(tmp_path, "encpair")
+    pkcs8 = ("-----BEGIN ENCRYPTED PRIVATE KEY-----\n"
+             "MIIFDjBABgkqhkiG9w0BBQ0wMzAbBgkqhkiG9w0BBQwwDgQI\n"
+             "-----END ENCRYPTED PRIVATE KEY-----\n")
+    legacy = ("-----BEGIN RSA PRIVATE KEY-----\n"
+              "Proc-Type: 4,ENCRYPTED\n"
+              "DEK-Info: AES-256-CBC,ABCDEF0123456789\n"
+              "\nMIIEo\n"
+              "-----END RSA PRIVATE KEY-----\n")
+    for enc_key in (pkcs8, legacy):
+        err = gui_tls.validate_pair(cert_pem, enc_key)
+        assert err is not None
+        assert "passphrase" in err
+        assert "OSError" not in err
+        assert "BEGIN" not in err   # never echo PEM material
+
+
 def test_validate_pair_garbage_cert(tls_env, tmp_path):
     _, key_pem = _gen_pair(tmp_path, "goodkey")
     err = gui_tls.validate_pair(

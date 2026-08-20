@@ -117,9 +117,9 @@ PY
   fi
 else
   # Durable override pair absent (never uploaded, or removed via Settings).
-  # RuntimeDirectoryPreserve=yes keeps /run/iris across restarts, so a
-  # PREVIOUS boot's override must not silently keep serving — sweep it the
-  # same way an empty trust dir sweeps a stale CA bundle below.
+  # Runtime files are derived state on the Compose tmpfs or Kubernetes memory
+  # emptyDir; when the durable pair is absent, sweep any stale override rather
+  # than serving it, just as an empty trust dir sweeps a stale CA bundle below.
   rm -f "$IRIS_RUN/tls/gui-key.pem" "$IRIS_GUI_CERT"
 fi
 
@@ -218,11 +218,9 @@ RPC_PORT="${RPC_PORT:-6800}" IRIS_ROOT=/opt/iris IRIS_LOG="$IRIS_LOG" \
 # the per-device PKI trustpoint the installer pushes first. No auth here — the
 # trustpoint gives confidentiality + server-auth and the payload IS the
 # credential bundle (transport-security only; nothing installed/activated/reloaded).
-mkdir -p "$IRIS_ARTIFACTS_DIR" 2>/dev/null || true
 # staging/ holds the ephemeral per-device configs gui_onboard.py
 # (IRIS_STAGE_LOCAL=1) writes when the console is co-located with this artifact
 # server; artifact_server.py sweeps them after STAGING_MAX_AGE_SECONDS.
-mkdir -p "${IRIS_ARTIFACTS_DIR:-/srv/artifacts}/staging" 2>/dev/null || true
 # Log to the container log like the other services — discarding stdout/stderr
 # here hides artifact-server startup/serving failures (the device fetches its
 # agent bundle + per-device conf from this port, so silent failures matter).
@@ -236,11 +234,7 @@ python3 gui_server.py & G=$!
 PIDS=("$T" "$C" "$S" "$A" "$G")
 
 echo "iris container up: tracker :6969  catalog :8443 (https)  artifacts :8000 (https)  console :8080 (https)  seeder rpc :6800"
-if wait -n "$T" "$C" "$S" "$A" "$G"; then
-  :
-else
-  :
-fi
+wait -n "$T" "$C" "$S" "$A" "$G" || true
 echo "an iris service exited — stopping container" >&2
 stop_services
 exit 1

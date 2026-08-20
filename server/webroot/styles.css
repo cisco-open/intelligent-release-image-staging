@@ -54,12 +54,9 @@ body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-
 .nav-group { padding:14px 18px 2px; font-size:11px; text-transform:uppercase; letter-spacing:.4px; color:#889; }
 .nav.sub { padding-left:30px; font-size:13px; }
 .nav.sub.active { padding-left:27px; }
-.settings-tabs { display:flex; gap:4px; border-bottom:1px solid var(--line); margin:14px 0 20px; }
-.settings-tab { background:none; border:0; border-bottom:2px solid transparent; color:#67728a; font-size:14px;
-  font-weight:500; padding:9px 14px; margin-bottom:-1px; cursor:pointer; }
-.settings-tab:hover { color:var(--blue); }
-.settings-tab:focus-visible { outline:none; box-shadow:0 0 0 3px rgba(11,92,214,.35); }
-.settings-tab.active { color:var(--blue); font-weight:600; border-bottom-color:var(--blue); }
+.nav.subsub { padding-left:44px; font-size:13px; color:#556; }
+.nav.subsub.active { padding-left:41px; }
+.nav.subsub:focus-visible { outline:none; box-shadow:inset 0 0 0 3px rgba(11,92,214,.35); }
 .tbl .act { font-family:inherit; }
 .linkish { color:var(--blue); background:none; border:0; cursor:pointer; font:inherit; padding:0; }
 .log { background:#0b1626; color:#cfe3ff; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px; padding:12px; border-radius:8px; max-height:340px; overflow:auto; white-space:pre-wrap; }
@@ -146,3 +143,13 @@ body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-
   padding:7px 9px; border:1px solid #c7d0e0; border-radius:6px; font-size:12px;
   font-family:ui-monospace,Menlo,Consolas,monospace; }
 #trust-tbl { margin:0 0 12px; }
+.dropzone { border:2px dashed #c7d0e0; border-radius:10px; padding:20px 16px; text-align:center;
+  color:#334; font-size:14px; cursor:pointer; margin:0 0 12px; background:#fafbfd;
+  transition:border-color .12s ease, background .12s ease; }
+.dropzone::before { content:"⤓"; display:block; font-size:20px; color:#67728a; margin-bottom:4px; }
+.dropzone:hover { border-color:var(--blue); background:#f2f7ff; }
+.dropzone:focus-visible { outline:none; box-shadow:0 0 0 3px rgba(11,92,214,.35); }
+.dropzone.drag { border-color:var(--blue); background:#e7f1ff; }
+.dropzone.drag::before, .dropzone:hover::before { color:var(--blue); }
+.dropzone p { margin:0; }
+.dropzone .hint { display:block; margin-top:3px; color:#67728a; font-size:12px; }

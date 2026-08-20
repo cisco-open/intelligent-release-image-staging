@@ -25,9 +25,12 @@ from urllib.parse import unquote, parse_qs, urlsplit
 
 import audit
 import gui_app
+import gui_auth
 import gui_onboard
 import gui_tls
 import live_samples
+import secretfs
+import secrets_store
 import telemetry
 import telemetry_destination
 import trust
@@ -74,6 +77,65 @@ _SECURITY_HEADERS = [
     ("Content-Security-Policy",
      "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'"),
 ]
+# Default first-run credential (spec: default-cred-setup-and-tls-ux, Feature 1).
+# Hardcoded and non-configurable by design -- this deliberately re-accepts the
+# first-comer-wins race the old bootstrap token closed, bounded by the
+# deployment's own network perimeter. It never creates a persistent account:
+# signing in with this pair only ever mints a one-time setup grant (below),
+# and becomes an ordinary failed login the moment a real admin exists.
+DEFAULT_SETUP_USER = "iris"
+DEFAULT_SETUP_PASS = "irisisgreat!"
+_SETUP_GRANT_TTL = 600  # seconds (10 minutes)
+
+
+def _is_default_credential(username, password):
+    """Constant-time compare of both fields against the hardcoded default
+    setup pair. Both must match -- there is no partial/near-miss case."""
+    return (hmac.compare_digest(username.encode("utf-8"),
+                                DEFAULT_SETUP_USER.encode("utf-8"))
+            and hmac.compare_digest(password.encode("utf-8"),
+                                    DEFAULT_SETUP_PASS.encode("utf-8")))
+
+
+def _mint_setup_grant(app):
+    """Issue a fresh one-time setup grant on *app* (36-byte urlsafe, 10-minute
+    expiry), replacing any previous one -- the latest grant always wins, and
+    the value lives only in process memory: never written to disk or logs."""
+    grant = secrets.token_urlsafe(36)
+    app._setup_grant = (grant, time.time() + _SETUP_GRANT_TTL)
+    return grant
+
+
+def _grant_valid(app, supplied):
+    """Constant-time check of *supplied* against the live setup grant on
+    *app*. False for no grant, an expired grant, or a mismatch. Does not
+    consume the grant -- callers that accept it must clear app._setup_grant
+    themselves so a claim is atomic with the admin-account write."""
+    current = getattr(app, "_setup_grant", None)
+    if current is None or not supplied:
+        return False
+    grant, expires_at = current
+    if time.time() >= expires_at:
+        return False
+    return hmac.compare_digest(supplied.encode("utf-8"), grant.encode("utf-8"))
+
+
+def _claim_admin(app, supplied_grant, username, password):
+    """Atomically consume the one-time setup grant and create the admin."""
+    with secrets_store.store_lock(app.secrets_path):
+        store = secrets_store.load(app.secrets_path)
+        if gui_auth.get_admin(store) is not None:
+            return "configured"
+        if not _grant_valid(app, supplied_grant):
+            return "grant"
+        gui_auth.set_admin(store, username, password, app._now())
+        secretfs.persist_store(store, app.secrets_path,
+                               recipients_csv=app.recipients_csv,
+                               enc_path=app.secrets_enc)
+        # Single-use: the account now permanently disables setup, so the
+        # grant has nothing left to authorize.
+        app._setup_grant = None
+        return "ok"
 
 
 def _fmt_bytes(n):
@@ -338,6 +400,8 @@ def ca_trust_refresh_loop(stop_event, state_dir, audit_fn=None,
 def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=None,
                  onboard=None, swarm_fetch=None, certfile=None, audit_path=None,
                  receipts=None):
+    login_limiter = gui_auth.LoginRateLimiter()
+
     class Handler(BaseHTTPRequestHandler):
         timeout = 60  # socket inactivity timeout (s): a stalled upload frees its thread
 
@@ -868,8 +932,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if info is None:
                     self._json(401, {"error": "unauthorized"}); return
                 self._json(200, self._settings_info(info["username"])); return
-            if path in ("/", "/index.html", "/login.html") and app.needs_setup():
-                self._serve_static("/setup.html"); return
+            if path in ("/", "/index.html") and app.needs_setup():
+                # First-run: land on the LOGIN page — the default iris
+                # credential there is what mints the setup grant. setup.html
+                # itself stays a plain static page; visiting it grantless just
+                # bounces back to login client-side.
+                self._serve_static("/login.html"); return
             self._serve_static(path)
 
         def _device_view(self):
@@ -1116,14 +1184,37 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if data is None:
                     return
                 username = str(data.get("username", ""))
+                password = str(data.get("password", ""))
                 src_ip = self.client_address[0]
-                res = app.login(username, str(data.get("password", "")))
+                retry = login_limiter.retry_after(src_ip)
+                if retry:
+                    self._json(429, {"error": "too many login attempts"},
+                               extra_headers=[("Retry-After", str(retry))])
+                    return
+                if app.needs_setup() and _is_default_credential(username, password):
+                    # No admin exists yet: the default pair does not create a
+                    # session, it hands back a one-time grant so the client can
+                    # complete /api/setup. A wrong/partial attempt at the
+                    # default pair falls through to the ordinary login below,
+                    # which fails closed (no admin -> no match) and is audited
+                    # the same as any other failed login.
+                    login_limiter.success(src_ip)
+                    grant = _mint_setup_grant(app)
+                    self._audit("login", "auth", action="login",
+                               actor="console:" + username, result="ok",
+                               detail="default credential -> setup grant issued",
+                               src_ip=src_ip)
+                    self._json(200, {"setup": True, "setup_grant": grant})
+                    return
+                res = app.login(username, password)
                 if res is None:
+                    login_limiter.failure(src_ip)
                     self._audit("login_fail", "auth", action="login",
                                actor="console:" + username, result="fail",
                                detail="invalid credentials", src_ip=src_ip)
                     self._json(401, {"error": "invalid credentials"})
                     return
+                login_limiter.success(src_ip)
                 sid, csrf = res
                 self._audit("login", "auth", action="login",
                            actor="console:" + username, result="ok", src_ip=src_ip)
@@ -1133,17 +1224,52 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 return
 
             if path == "/api/setup":
-                if not app.needs_setup():
-                    self._json(409, {"error": "already set up"}); return
+                content_type = self.headers.get("Content-Type", "")
+                if content_type.split(";", 1)[0].strip().lower() != "application/json":
+                    self._json(415, {"error": "application/json required"}); return
+                fetch_site = self.headers.get("Sec-Fetch-Site", "")
+                if fetch_site and fetch_site != "same-origin":
+                    self._json(403, {"error": "cross-origin setup denied"}); return
+                origin = self.headers.get("Origin")
+                if origin:
+                    try:
+                        parsed_origin = urlsplit(origin)
+                        origin_ok = (parsed_origin.scheme in ("http", "https")
+                                     and parsed_origin.netloc.lower()
+                                     == self.headers.get("Host", "").lower()
+                                     and not parsed_origin.path
+                                     and not parsed_origin.query
+                                     and not parsed_origin.fragment)
+                    except ValueError:
+                        origin_ok = False
+                    if not origin_ok:
+                        self._json(403, {"error": "cross-origin setup denied"}); return
                 data = self._json_body(raw)
                 if data is None:
                     return
                 user = str(data.get("username", "")).strip()
                 pw = str(data.get("password", ""))
+                # strip: the grant rides in from sessionStorage via setup.js,
+                # but keep the same defensive strip the old token had in case
+                # of stray whitespace from any manual replay
+                grant = str(data.get("setup_grant", "")).strip()
                 if not user or not pw:
                     self._json(400, {"error": "username and password required"})
                     return
-                app.set_admin(user, pw)
+                if len(pw) < 8:
+                    self._json(400, {"error": "password must be at least 8 characters"})
+                    return
+                if not app.needs_setup():
+                    self._json(409, {"error": "already set up"}); return
+                result = _claim_admin(app, grant, user, pw)
+                if result == "configured":
+                    self._json(409, {"error": "already set up"}); return
+                if result == "grant":
+                    self._audit("setup_fail", "auth", action="setup",
+                               actor="console:" + user, target=user, result="fail",
+                               detail="invalid or expired setup grant",
+                               src_ip=self.client_address[0])
+                    self._json(403, {"error": "invalid setup grant"}); return
                 self._audit("setup", "auth", action="setup", actor="console:" + user,
                            target=user, detail="initial admin account created",
                            src_ip=self.client_address[0])
@@ -1368,6 +1494,19 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if not isinstance(key_pem, str) or not key_pem.strip():
                     self._json(400, {"error": "key_pem must be a non-empty string"})
                     return
+                # Optional passphrase for an encrypted key: decrypted here at
+                # import, then stored age-encrypted like any other key. Fed to
+                # openssl over stdin; never audited, logged, or echoed.
+                passphrase = data.get("key_passphrase")
+                if passphrase is not None and (
+                        not isinstance(passphrase, str) or len(passphrase) > 4096):
+                    self._json(400, {"error": "key_passphrase must be a short string"})
+                    return
+                if passphrase and gui_tls.key_is_encrypted(key_pem):
+                    key_pem, dec_err = gui_tls.decrypt_key_pem(key_pem, passphrase)
+                    if dec_err:
+                        self._json(400, {"error": dec_err})
+                        return
                 err = gui_tls.validate_pair(cert_pem, key_pem)
                 if err:
                     # validate_pair messages describe the failure only —
@@ -1649,10 +1788,25 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 did = unquote(path[len("/api/devices/"):-len("/" + act)])
                 if not did.strip():
                     self._json(400, {"error": "bad device id"}); return
+
+                def _reject(status, error):
+                    # Every submission refusal from here on is audited under
+                    # the SAME event a successful start uses below (varying
+                    # only result), so the trail never goes quiet after an
+                    # operator hits onboard/undeploy: a rejected router
+                    # preflight, a busy-device conflict, an unreachable
+                    # device, etc. all leave a result=fail onboard_start /
+                    # undeploy_start record naming this device -- never a
+                    # "create" (or a click) followed by nothing.
+                    self._audit("%s_start" % act, "onboard", action="start",
+                               target=did, actor=actor, result="fail",
+                               detail=error)
+                    self._json(status, {"error": error})
+
                 # Reject unknown devices HERE, before start() creates a job +
                 # parked worker thread — junk ids must not accumulate either.
                 if fleet is not None and fleet.get_device(did) is None:
-                    self._json(404, {"error": "no such device"}); return
+                    _reject(404, "no such device"); return
                 resolved = None
                 receipt_ref = {}
                 prepare = None
@@ -1678,11 +1832,11 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                         try:
                             plan = self._plan(did, device)
                         except ValueError as exc:
-                            self._json(409, {"error": str(exc)}); return
+                            _reject(409, str(exc)); return
                         try:
                             preflight = onboard.preflight(did, plan["resolved"])
                         except (ValueError, OSError) as exc:
-                            self._json(409, {"error": "preflight failed: %s" % exc}); return
+                            _reject(409, "preflight failed: %s" % exc); return
                         if plan["resolved"].get("platform") == "router":
                             try:
                                 # Any receipt IRIS already applied blocks a
@@ -1692,16 +1846,16 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                 # enabled" instead of naming the real fix.
                                 existing = receipts.recoverable_for_device(did)
                             except ValueError as exc:
-                                self._json(409, {"error": str(exc)}); return
+                                _reject(409, str(exc)); return
                             if existing is not None:
-                                self._json(409, {"error": "router already has a %s "
-                                                 "deployment receipt; undeploy it before "
-                                                 "onboarding again"
-                                                 % existing.get("state", "recorded")}); return
+                                _reject(409, "router already has a %s "
+                                        "deployment receipt; undeploy it before "
+                                        "onboarding again"
+                                        % existing.get("state", "recorded")); return
                             try:
                                 plan = self._apply_router_preflight(plan, preflight)
                             except ValueError as exc:
-                                self._json(409, {"error": "preflight failed: %s" % exc}); return
+                                _reject(409, "preflight failed: %s" % exc); return
                         resolved = plan["resolved"]
 
                         def prepare():
@@ -1736,10 +1890,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                         try:
                             degraded_plan = self._plan(did, fleet.get_device(did))
                         except ValueError as exc:
-                            self._json(409, {"error": str(exc)}); return
+                            _reject(409, str(exc)); return
                         if degraded_plan["resolved"].get("platform") == "router":
-                            self._json(503, {"error": "router onboarding requires the "
-                                             "deployment receipt store"}); return
+                            _reject(503, "router onboarding requires the "
+                                    "deployment receipt store"); return
                 else:
                     # Undeploy renders exclusively from an active receipt so a
                     # post-deploy inventory edit cannot retarget cleanup. Without
@@ -1758,15 +1912,15 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             # duplicate actives should be impossible (activation
                             # supersedes siblings; startup collapses legacy dupes)
                             # — but surface the reason instead of a 500 if not.
-                            self._json(409, {"error": str(exc)}); return
+                            _reject(409, str(exc)); return
                         if receipt is None:
-                            self._json(409, {"error": "no deployment receipt for this "
-                                             "device; adopt it first, then undeploy"}); return
+                            _reject(409, "no deployment receipt for this "
+                                    "device; adopt it first, then undeploy"); return
                         try:
                             resolved = self._router_teardown_resolved(receipt)
                         except ValueError as exc:
                             receipts.transition(receipt["receipt_id"], "needs-reconcile")
-                            self._json(409, {"error": str(exc)}); return
+                            _reject(409, str(exc)); return
 
                         def prepare():
                             receipt_ref["id"] = receipt["receipt_id"]
@@ -1775,10 +1929,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                         try:
                             degraded_plan = self._plan(did, fleet.get_device(did))
                         except ValueError as exc:
-                            self._json(409, {"error": str(exc)}); return
+                            _reject(409, str(exc)); return
                         if degraded_plan["resolved"].get("platform") == "router":
-                            self._json(503, {"error": "router undeploy requires an "
-                                             "active deployment receipt"}); return
+                            _reject(503, "router undeploy requires an "
+                                    "active deployment receipt"); return
                 try:
                     jid = onboard.start(
                         did, action=act, resolved=resolved, prepare=prepare,
@@ -1788,7 +1942,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     if receipt_ref.get("id") and act == "onboard":
                         receipts.transition(receipt_ref["id"], "needs-reconcile")
                     # the device is busy with the OPPOSITE action
-                    self._json(409, {"error": str(exc)}); return
+                    _reject(409, str(exc)); return
                 # Emitted AFTER start() so the job id correlates this start with
                 # its *_finished event when jobs run concurrently.
                 self._audit("%s_start" % act, "onboard", action="start",

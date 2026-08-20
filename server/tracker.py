@@ -8,6 +8,7 @@
 peer lifecycle via peer_registry, bencoded responses, optional compact peers.
 Stdlib only. Run as a service: python3 tracker.py (reads IRIS_* env)."""
 import binascii
+import ipaddress
 import os
 import socket
 import threading
@@ -38,6 +39,21 @@ def _valid_ipv4(addr):
         return False
 
 
+def _private_override(addr):
+    """Allow NAT overrides only for non-routable fleet address space.
+
+    Containerized seeders need this because their socket source is loopback or
+    bridge-local. RFC1918 and carrier-grade NAT (used by deployed fleets) are
+    accepted; public arbitrary endpoint injection is not.
+    """
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return False
+    return ip.version == 4 and (ip.is_private or ip in ipaddress.ip_network(
+        "100.64.0.0/10"))
+
+
 def parse_announce(query):
     """Parse /announce query, preserving the BINARY info_hash (unquote_to_bytes —
     a raw 20-byte hash is not valid UTF-8). Returns a dict of typed fields."""
@@ -56,11 +72,12 @@ def parse_announce(query):
     raw_port = as_int("port", 6881)
     port = raw_port if 1 <= raw_port <= 65535 else None
 
-    # BEP3 optional ip= override — accept ONLY valid dotted-quad IPv4 so a
-    # client cannot inject an IPv6 address or hostname that would later cause
-    # compact_peers to raise when encoding the peer list for other clients.
+    # BEP3 optional ip= override — retain it for container/NAT deployments, but
+    # only for private/CGNAT dotted-quad IPv4. Public endpoints always come
+    # from the authenticated connection's socket source.
     raw_ip = raw.get("ip") or None
-    ip = raw_ip if raw_ip is not None and _valid_ipv4(raw_ip) else None
+    ip = raw_ip if raw_ip is not None and _valid_ipv4(raw_ip) \
+        and _private_override(raw_ip) else None
 
     return {
         "info_hash": binascii.hexlify(
@@ -150,6 +167,9 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None):
             if on_announce is not None:
                 on_announce()
             a = parse_announce(query)
+            if len(a["info_hash"]) != 40:
+                self._send(400, build_failure("info_hash must be 20 bytes"))
+                return
             # ip=None means the override was absent or invalid; fall back to
             # the socket source address.
             # port=None means the client sent an out-of-range value (>65535 or
@@ -189,6 +209,9 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None):
                 self._send(400, build_failure("scrape requires info_hash"))
                 return
             info_hex = binascii.hexlify(unquote_to_bytes(quoted)).decode()
+            if len(info_hex) != 40:
+                self._send(400, build_failure("info_hash must be 20 bytes"))
+                return
             stats = registry.scrape(info_hex)
             self._send(200, build_scrape_response(info_hex, stats))
 

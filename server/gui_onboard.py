@@ -19,6 +19,7 @@ them from the env)."""
 import inspect
 import ipaddress
 import os
+import queue
 import re
 import secrets
 import subprocess
@@ -28,6 +29,14 @@ import time
 _JOB_TTL = 3600  # seconds a terminal onboard job is retained before eviction
 _TERMINAL = ("done", "error", "cancelled")
 _DEFAULT_CONCURRENCY = 25  # simultaneous installer runs (env IRIS_ONBOARD_CONCURRENCY)
+# A fleet action may legitimately be large, but a request storm must not retain
+# unlimited closures/jobs. 1,000 pending jobs is ample operational headroom.
+_MAX_QUEUED_JOBS = 1000
+# Installer output can be very noisy. Bound both object count and encoded bytes;
+# the byte cap is the stronger memory guarantee for unusually long lines.
+_MAX_JOB_LOG_LINES = 2000
+_MAX_JOB_LOG_BYTES = 256 * 1024
+_LOG_TRUNCATED = "[additional job output truncated: retention limit reached]"
 
 
 def _fmt_dur(secs):
@@ -170,6 +179,18 @@ def _default_runner(install_path, env, on_line, on_proc=None):
 
 
 _MODEL_RE = re.compile(r"^cisco\s+(\S+)\s+\(", re.MULTILINE)
+_DEVICE_IDENTITY_RE = re.compile(r"(?im)^Processor board ID\s+(\S+)\s*$")
+
+
+def _parse_show_version(version_text):
+    """Extract (model, device_identity) from 'show version' output. Either
+    element is '' when its line is not present. Shared by the router and
+    IOx preflights so both trust the same real-device parsing (a single
+    regex pair to keep in sync instead of two)."""
+    model_match = _MODEL_RE.search(version_text)
+    identity_match = _DEVICE_IDENTITY_RE.search(version_text)
+    return (model_match.group(1) if model_match else "",
+            identity_match.group(1) if identity_match else "")
 
 
 def _default_probe(dev, env, repo_root):
@@ -202,15 +223,12 @@ def _default_router_preflight(dev, env, resolved, repo_root):
         return out.stdout or ""
 
     version = show("show version")
-    match = _MODEL_RE.search(version)
-    model = match.group(1) if match else ""
+    model, device_identity = _parse_show_version(version)
     if not re.match(r"^C8[0-9]{3}", model, re.IGNORECASE):
         raise ValueError("router modes support the Catalyst 8000 family only; %s is not yet supported"
                          % (model or "detected model"))
-    identity_match = re.search(r"(?im)^Processor board ID\s+(\S+)\s*$", version)
-    if not identity_match:
+    if not device_identity:
         raise ValueError("could not determine the router's processor board ID")
-    device_identity = identity_match.group(1)
 
     running = show("show running-config")
     vpg = str(resolved.get("vpg_number", ""))
@@ -334,13 +352,60 @@ def apply_router_preflight(resolved, evidence):
     return result
 
 
+def _default_iox_preflight(dev, env, resolved, repo_root):
+    """Read-only 'show version' probe that resolves an IOx device's live
+    processor board ID (and model) over the same lab/device-run.sh channel
+    the router preflight uses. device/iox/install.sh hard-requires
+    EXPECTED_DEVICE_IDENTITY (and MODEL) so a typo'd DEVICE_IP can't tear
+    down the app on the wrong switch -- but the console has no other source
+    for the live identity, so IOx gets its own single-purpose probe instead
+    of the router's fuller collision-check preflight. Raises ValueError
+    (fail-closed) when the identity can't be parsed; never proceeds with an
+    empty value."""
+    runner = os.path.join(repo_root, "lab", "device-run.sh")
+    out = subprocess.run(["bash", runner, env["DEVICE_IP"]],
+                         input="show version\n", capture_output=True,
+                         text=True, env=env, timeout=60)
+    if out.returncode != 0:
+        raise ValueError("iox preflight could not run 'show version'")
+    model, device_identity = _parse_show_version(out.stdout or "")
+    if not device_identity:
+        raise ValueError("could not determine the device's processor board ID")
+    evidence = {"status": "passed", "device_identity": device_identity}
+    if model:
+        evidence["detected_model"] = model
+    return evidence
+
+
+def apply_iox_preflight(resolved, evidence):
+    """Return renderer input bound to validated live IOx device identity --
+    the IOx counterpart of apply_router_preflight. Fails closed: a missing
+    or unsafe identity, or a mismatch against an identity already bound to
+    this job, raises rather than letting an empty/stale value through to
+    _build_env's EXPECTED_DEVICE_IDENTITY export."""
+    if evidence.get("status") != "passed":
+        raise ValueError("iox preflight did not pass")
+    identity = str(evidence.get("device_identity") or "").strip()
+    if not identity or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", identity):
+        raise ValueError("iox preflight did not return a safe device identity")
+    result = dict(resolved)
+    bound_identity = str(result.get("device_identity") or "").strip()
+    if bound_identity and bound_identity != identity:
+        raise ValueError("device identity changed while the job was queued")
+    result["device_identity"] = identity
+    detected_model = str(evidence.get("detected_model") or "").strip()
+    if detected_model:
+        result["model"] = detected_model
+    return result
+
+
 class OnboardService:
     def __init__(self, fleet, creds, server_dir=None, device_install=None,
                  crt_public=None, host_ip=None, catalog_url=None,
                  mint_fn=None, run_fn=_default_runner, now_fn=time.time,
                  probe_fn=None, artifacts_dir=None, audit_fn=None,
                  max_concurrent=None, clear_state_fn=None, receipts=None,
-                 preflight_fn=None):
+                 preflight_fn=None, iox_preflight_fn=None):
         self.fleet = fleet
         self.creds = creds
         self.server_dir = server_dir or os.path.dirname(os.path.abspath(__file__))
@@ -363,6 +428,9 @@ class OnboardService:
         self._router_preflight = preflight_fn or (
             lambda dev, env, resolved: _default_router_preflight(
                 dev, env, resolved, self.repo_root))
+        self._iox_preflight = iox_preflight_fn or (
+            lambda dev, env, resolved: _default_iox_preflight(
+                dev, env, resolved, self.repo_root))
         self.artifacts_dir = artifacts_dir or os.environ.get("IRIS_ARTIFACTS_DIR", "/srv/artifacts")
         self._audit = audit_fn
         # Injected callback(device_id) run after a successful undeploy to drop
@@ -375,9 +443,11 @@ class OnboardService:
             max_concurrent = int(os.environ.get(
                 "IRIS_ONBOARD_CONCURRENCY", str(_DEFAULT_CONCURRENCY)))
         self.max_concurrent = max(1, int(max_concurrent))
-        # Bounds simultaneous installer runs; excess jobs sit in state
-        # "queued" (their threads parked here) until a slot frees.
-        self._slots = threading.Semaphore(self.max_concurrent)
+        # A bounded queue plus at most max_concurrent workers prevents one
+        # parked daemon thread per submission. Workers are created lazily so a
+        # service that never onboards does not consume 25 idle threads.
+        self._work_queue = queue.Queue(maxsize=_MAX_QUEUED_JOBS)
+        self._workers = []
         self._jobs = {}
         self._procs = {}   # job_id -> live installer Popen (for abort)
         # Whether the injected runner can report its process for abort support.
@@ -387,6 +457,29 @@ class OnboardService:
         except (TypeError, ValueError):
             self._run_supports_proc = False
         self._lock = threading.Lock()
+
+    def _worker_loop(self):
+        while True:
+            try:
+                work = self._work_queue.get(timeout=60)
+            except queue.Empty:
+                # TTL cleanup does not depend on another submission; idle pool
+                # wakeups provide periodic maintenance without another thread.
+                with self._lock:
+                    self._evict_old(self._now())
+                continue
+            try:
+                work()
+            finally:
+                self._work_queue.task_done()
+
+    def _ensure_workers(self):
+        """Grow the fixed-size pool lazily, never beyond max_concurrent."""
+        wanted = min(self.max_concurrent, len(self._jobs))
+        while len(self._workers) < wanted:
+            worker = threading.Thread(target=self._worker_loop, daemon=True)
+            self._workers.append(worker)
+            worker.start()
 
     def _build_env(self, device_id, mint=True, resolved=None, env_extra=None):
         dev = self.fleet.get_device(device_id)
@@ -538,9 +631,8 @@ class OnboardService:
         or device/router-install.sh) or "undeploy" (the platform's teardown
         recipe: device-uninstall.sh, device/iox/uninstall.sh or
         device/router-uninstall.sh). At most max_concurrent
-        installers run at once; beyond that a job stays "queued" (its thread
-        parked on the slot semaphore — threads are cheap, hundreds queue
-        fine) until a slot frees or cancel_queued() flips it to "cancelled".
+        installers run at once; beyond that a job stays in a bounded work queue
+        until a worker is free or cancel_queued() flips it to "cancelled".
 
         prepare() (optional) is called EXACTLY ONCE, under the job lock, only
         when a genuinely new job is registered — never when this start joins an
@@ -556,7 +648,8 @@ class OnboardService:
             raise ValueError("unknown action: %s" % action)
         job_id = secrets.token_hex(8)
         job = {"id": job_id, "device_id": device_id, "action": action,
-                "state": "queued", "lines": [], "returncode": None,
+                 "state": "queued", "lines": [], "returncode": None,
+                 "_line_bytes": 0, "_log_truncated": False,
                 "queued_at": int(self._now()),
                 "started_at": None, "finished_at": None, "receipt_id": None,
                 "resolved": resolved, "env_extra": env_extra}
@@ -596,6 +689,23 @@ class OnboardService:
                                            resolved=j.get("resolved"),
                                            env_extra=j.get("env_extra"))
                 platform, script = self._resolve(device_id, dev, env, action)
+                if action == "onboard" and platform == "guestshell":
+                    # Job-start reachability gate. Router deployments already
+                    # get a REAL, live preflight -- at HTTP submit time (see
+                    # gui_server's preflight()) and again just below, before
+                    # minting -- and IOx onboard runs its own live identity
+                    # preflight a few lines down, so both platforms already
+                    # fail loud (existing error path + audit) on an
+                    # unreachable device. Guest Shell has no live check at
+                    # all before the installer runs, so a mistyped device_ip
+                    # would otherwise sail straight into device-install.sh
+                    # and only surface (if at all) as an opaque SSH timeout
+                    # deep in its output. Probe first and fail clearly.
+                    if not self._probe(dev, env):
+                        raise ValueError(
+                            "cannot reach device %s — ping/SSH probe "
+                            "failed; check the device IP and credentials"
+                            % env.get("DEVICE_IP", device_id))
                 if action == "onboard" and platform == "router":
                     try:
                         evidence = self._router_preflight(
@@ -615,6 +725,31 @@ class OnboardService:
                             env_extra=j.get("env_extra"))
                         platform, script = self._resolve(
                             device_id, dev, env, action)
+                elif action == "onboard" and platform == "iox":
+                    # The console never supplies device_identity for IOx
+                    # devices (unlike router, there is no separate
+                    # collision-check preflight that already probes 'show
+                    # version'), so device/iox/install.sh's identity guard
+                    # would otherwise always see an empty
+                    # EXPECTED_DEVICE_IDENTITY -- a no-op guard against
+                    # reconfiguring the wrong switch. Probe live here, at
+                    # execution time, the same as the router flow.
+                    try:
+                        evidence = self._iox_preflight(
+                            dev, env, j.get("resolved") or dev)
+                    except Exception as exc:
+                        raise ValueError("preflight failed: %s" % exc)
+                    final_resolved = apply_iox_preflight(
+                        j.get("resolved") or dev, evidence)
+                    with self._lock:
+                        current = self._jobs.get(job_id)
+                        if current is not None:
+                            current["resolved"] = final_resolved
+                    dev, env = self._build_env(
+                        device_id, mint=False, resolved=final_resolved,
+                        env_extra=j.get("env_extra"))
+                    platform, script = self._resolve(
+                        device_id, dev, env, action)
             except Exception as exc:
                 # Nothing has reached the device yet. A planned onboarding
                 # receipt must not become teardown authority: another actor
@@ -687,18 +822,40 @@ class OnboardService:
                 self._transition_or_note(job_id, receipt_id, "removed")
             self._finish(job_id, "done" if rc == 0 else "error", rc)
 
-        def run_slotted():
-            with self._slots:
-                run()
-
-        threading.Thread(target=run_slotted, daemon=True).start()
+        try:
+            self._work_queue.put_nowait(run)
+        except queue.Full:
+            with self._lock:
+                self._jobs.pop(job_id, None)
+            if job.get("receipt_id"):
+                self._transition_or_note(job_id, job["receipt_id"], "removed")
+            raise ValueError("onboarding queue is full")
+        with self._lock:
+            self._ensure_workers()
         return job_id
 
     def _append(self, job_id, line):
         with self._lock:
             j = self._jobs.get(job_id)
             if j is not None:
-                j["lines"].append(line)
+                self._append_locked(j, line)
+
+    def _append_locked(self, job, line):
+        size = len(line.encode("utf-8", "replace"))
+        if len(job["lines"]) < _MAX_JOB_LOG_LINES \
+                and job["_line_bytes"] + size <= _MAX_JOB_LOG_BYTES:
+            job["lines"].append(line)
+            job["_line_bytes"] += size
+        elif not job["_log_truncated"]:
+            marker_bytes = len(_LOG_TRUNCATED.encode())
+            # Keep the marker itself inside both advertised limits.
+            while job["lines"] and (len(job["lines"]) >= _MAX_JOB_LOG_LINES
+                    or job["_line_bytes"] + marker_bytes > _MAX_JOB_LOG_BYTES):
+                removed = job["lines"].pop()
+                job["_line_bytes"] -= len(removed.encode("utf-8", "replace"))
+            job["lines"].append(_LOG_TRUNCATED)
+            job["_line_bytes"] += marker_bytes
+            job["_log_truncated"] = True
 
     def _register_proc(self, job_id, proc):
         with self._lock:
@@ -713,7 +870,7 @@ class OnboardService:
             proc = self._procs.get(job_id)
             if j is None or j["state"] != "running" or proc is None:
                 return False
-            j["lines"].append("[abort requested by operator]")
+            self._append_locked(j, "[abort requested by operator]")
         try:
             proc.terminate()
         except Exception:
@@ -758,17 +915,21 @@ class OnboardService:
 
     def get_job(self, job_id):
         with self._lock:
+            self._evict_old(self._now())
             j = self._jobs.get(job_id)
-            return dict(j, lines=list(j["lines"])) if j else None
+            return ({k: v for k, v in j.items() if not k.startswith("_")} |
+                    {"lines": list(j["lines"])}) if j else None
 
     def list_jobs(self):
         """Summaries of every retained job (no 'lines' — cheap to poll from
         the console's batch panel; 'last_line' carries the newest line for a
         one-glance status). Oldest-queued first."""
         with self._lock:
+            self._evict_old(self._now())
             out = []
             for j in self._jobs.values():
-                s = {k: v for k, v in j.items() if k != "lines"}
+                s = {k: v for k, v in j.items()
+                     if k != "lines" and not k.startswith("_")}
                 s["last_line"] = j["lines"][-1] if j["lines"] else None
                 out.append(s)
         out.sort(key=lambda s: (s["queued_at"], s["id"]))
@@ -783,6 +944,7 @@ class OnboardService:
         first heartbeat."""
         best = {}
         with self._lock:
+            self._evict_old(self._now())
             for j in self._jobs.values():
                 did = j["device_id"]
                 cur = best.get(did)
@@ -818,7 +980,7 @@ class OnboardService:
                 if j["state"] == "queued":
                     j["state"] = "cancelled"
                     j["finished_at"] = now
-                    j["lines"].append("cancelled before start")
+                    self._append_locked(j, "cancelled before start")
                     if j.get("receipt_id"):
                         receipt_ids.append((jid, j["receipt_id"]))
                     n += 1
@@ -829,12 +991,8 @@ class OnboardService:
 
     def _evict_old(self, now):
         """Drop terminal (done/error/cancelled) jobs finished more than
-        _JOB_TTL ago — but never while ANY job is still queued/running, so an
-        in-flight batch's done/failed record can't shrink under the operator
-        mid-run (long batches easily outlive the TTL). Caller must hold
-        self._lock."""
-        if any(v["state"] not in _TERMINAL for v in self._jobs.values()):
-            return
+        _JOB_TTL ago. Active jobs do not prevent unrelated terminal records
+        from being reclaimed. Caller must hold self._lock."""
         cutoff = int(now) - _JOB_TTL
         stale = [jid for jid, v in self._jobs.items()
                  if v.get("finished_at") is not None

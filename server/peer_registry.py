@@ -10,6 +10,13 @@ import time
 
 INTERVAL = 30          # client re-announce interval (seconds)
 NUMWANT_CAP = 200      # never hand back more than this many peers
+# Completion counts are operational telemetry, not durable accounting. Keeping
+# them for one day after the swarm disappears preserves useful scrape history
+# while bounding attacker-created inactive keys.
+DOWNLOADED_TTL = 24 * 60 * 60
+# Even inside the TTL, cap inactive/active completion records. Ten thousand is
+# far above a realistic IRIS catalog while keeping memory deterministic.
+MAX_DOWNLOADED_SWARMS = 10000
 
 
 class PeerRegistry:
@@ -17,7 +24,7 @@ class PeerRegistry:
         self._interval = interval
         # info_hash -> {peer_id: {"ip","port","last_seen","left"}}
         self._swarms = {}
-        # info_hash -> int completed-announce count (scrape "downloaded")
+        # info_hash -> {count, last_seen}; expired once no swarm remains.
         self._downloaded = {}
         # optional telemetry hook: on_event({event, info_hash, peer_id, ip,
         # port, left, ts}) for join/complete/stop/stale. Best-effort — it is
@@ -49,6 +56,8 @@ class PeerRegistry:
             if event == "stopped":
                 if swarm.pop(peer_id, None) is not None:
                     pending.append(("stop", info_hash, peer_id, ip, port, left, now))
+                if not swarm:
+                    self._swarms.pop(info_hash, None)
             else:
                 prev = swarm.get(peer_id)
                 if prev is None:
@@ -79,8 +88,15 @@ class PeerRegistry:
                 if completed_at is None and left == 0:
                     completed_at = now
                 if event == "completed":
-                    self._downloaded[info_hash] = (
-                        self._downloaded.get(info_hash, 0) + 1)
+                    completed = self._downloaded.get(
+                        info_hash, {"count": 0, "last_seen": now})
+                    self._downloaded[info_hash] = {
+                        "count": completed["count"] + 1, "last_seen": now}
+                    if len(self._downloaded) > MAX_DOWNLOADED_SWARMS:
+                        oldest = min(self._downloaded,
+                                     key=lambda key: self._downloaded[key]["last_seen"])
+                        if oldest != info_hash or len(self._downloaded) > 1:
+                            self._downloaded.pop(oldest, None)
                     pending.append(
                         ("complete", info_hash, peer_id, ip, port, left, now))
                     if completed_at is None:
@@ -108,11 +124,21 @@ class PeerRegistry:
                 ("stale", info_hash, pid, r["ip"], r["port"], r["left"], now))
         return pending
 
+    def _cleanup_empty(self, info_hash, swarm, now):
+        """Drop empty swarm state and completion history after its grace TTL."""
+        if swarm:
+            return
+        self._swarms.pop(info_hash, None)
+        completed = self._downloaded.get(info_hash)
+        if completed and completed["last_seen"] < now - DOWNLOADED_TTL:
+            self._downloaded.pop(info_hash, None)
+
     def peers(self, info_hash, peer_id, numwant=50, now=None):
         now = time.time() if now is None else now
         with self._lock:
             swarm = self._swarms.get(info_hash, {})
             pending = self._prune(info_hash, swarm, now)
+            self._cleanup_empty(info_hash, swarm, now)
             limit = min(max(0, numwant), NUMWANT_CAP)
             out = []
             for pid, r in swarm.items():
@@ -130,8 +156,9 @@ class PeerRegistry:
         with self._lock:
             swarm = self._swarms.get(info_hash, {})
             pending = self._prune(info_hash, swarm, now)
+            self._cleanup_empty(info_hash, swarm, now)
             records = list(swarm.values())
-            downloaded = self._downloaded.get(info_hash, 0)
+            downloaded = self._downloaded.get(info_hash, {}).get("count", 0)
         for args in pending:
             self._emit(*args)
         complete = sum(1 for r in records if r["left"] == 0)
@@ -153,9 +180,12 @@ class PeerRegistry:
                 swarm = self._swarms.get(info_hash, {})
                 pending = self._prune(info_hash, swarm, now)
                 all_pending.extend(pending)
+                self._cleanup_empty(info_hash, swarm, now)
+                if info_hash not in self._swarms and info_hash not in self._downloaded:
+                    continue
                 snapshots[info_hash] = (
                     list(swarm.values()),
-                    self._downloaded.get(info_hash, 0),
+                    self._downloaded.get(info_hash, {}).get("count", 0),
                 )
         for args in all_pending:
             self._emit(*args)
@@ -187,6 +217,7 @@ class PeerRegistry:
                 swarm = self._swarms.get(info_hash, {})
                 pending = self._prune(info_hash, swarm, now)
                 all_pending.extend(pending)
+                self._cleanup_empty(info_hash, swarm, now)
                 raw[info_hash] = list(swarm.values())
         for args in all_pending:
             self._emit(*args)
@@ -210,5 +241,10 @@ class PeerRegistry:
         with self._lock:
             for info_hash, swarm in list(self._swarms.items()):
                 all_pending.extend(self._prune(info_hash, swarm, now))
+                self._cleanup_empty(info_hash, swarm, now)
+            # Counters can outlive their swarm, so sweep them independently.
+            for info_hash in list(self._downloaded):
+                if info_hash not in self._swarms:
+                    self._cleanup_empty(info_hash, {}, now)
         for args in all_pending:
             self._emit(*args)

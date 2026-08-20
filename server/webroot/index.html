@@ -25,6 +25,11 @@
       <a href="#swarm" class="nav" id="nav-swarm">Swarm</a>
       <div class="nav-group">System</div>
       <a href="#settings" class="nav sub" id="nav-settings">Settings</a>
+      <div id="settings-submenu" hidden>
+        <a href="#settings/general" class="nav subsub" id="nav-settings-general">General</a>
+        <a href="#settings/tls" class="nav subsub" id="nav-settings-tls">TLS &amp; trust</a>
+        <a href="#settings/telemetry" class="nav subsub" id="nav-settings-telemetry">Telemetry</a>
+      </div>
       <a href="#monitoring" class="nav sub" id="nav-monitoring">Monitoring</a>
     </nav>
     <main class="main">
@@ -162,11 +167,6 @@
       </section>
       <section id="view-settings" hidden>
         <h2>Settings</h2>
-        <div class="settings-tabs">
-          <button class="settings-tab active" type="button" id="settings-tab-general">General</button>
-          <button class="settings-tab" type="button" id="settings-tab-tls">TLS &amp; trust</button>
-          <button class="settings-tab" type="button" id="settings-tab-telemetry">Telemetry</button>
-        </div>
         <div id="settings-pane-general">
           <h3>Server &amp; build</h3>
           <table class="tbl" id="settings-info"><tbody></tbody></table>
@@ -201,9 +201,18 @@
             artifact certificates are untouched, so enrolled devices keep working.
             The private key is stored age-encrypted and never shown again.</p>
           <p class="muted" id="cert-status"></p>
+          <div class="dropzone" id="cert-dropzone" tabindex="0" role="button"
+              aria-label="Drop a certificate and/or private key PEM file, or press Enter to browse for files">
+            <input type="file" id="cert-dropzone-input" multiple hidden>
+            <p>Drop the certificate and private key here<span class="hint">PEM files — or click / press Enter to browse</span></p>
+          </div>
           <form class="inline-form" id="cert-form">
             <textarea id="cert-pem" rows="4" spellcheck="false" placeholder="Certificate PEM — leaf or full chain (-----BEGIN CERTIFICATE-----)"></textarea>
             <textarea id="cert-key" rows="4" spellcheck="false" placeholder="Private key PEM (-----BEGIN PRIVATE KEY-----)"></textarea>
+            <label id="cert-passphrase-row" hidden>Key passphrase
+              <input type="password" id="cert-passphrase" autocomplete="off"
+                     placeholder="passphrase for the encrypted key">
+            </label>
             <button class="btn" type="submit">Replace certificate</button>
             <button class="linkish danger-link" type="button" id="cert-revert" hidden>Use built-in certificate</button>
             <span class="err" id="cert-msg"></span>
@@ -215,6 +224,11 @@
             <thead><tr><th>Subject</th><th>Expires</th><th>SHA-256</th><th>Source</th><th>Certs</th><th></th></tr></thead>
             <tbody id="trust-rows"></tbody>
           </table>
+          <div class="dropzone" id="trust-dropzone" tabindex="0" role="button"
+              aria-label="Drop CA certificate PEM files, or press Enter to browse for files">
+            <input type="file" id="trust-dropzone-input" multiple hidden>
+            <p>Drop CA certificates here<span class="hint">one or many PEM files — or click / press Enter to browse</span></p>
+          </div>
           <form class="inline-form" id="trust-form">
             <textarea id="trust-pem" rows="4" spellcheck="false" placeholder="CA certificate PEM — one or more -----BEGIN CERTIFICATE----- blocks"></textarea>
             <button class="btn" type="submit">Add CA</button>
@@ -225,7 +239,12 @@
             daily auto-refresh to keep it current. A failed download never replaces
             the previous bundle.</p>
           <form class="inline-form" id="ca-form">
-            <input id="ca-url" placeholder="Public CA bundle URL (https://…)">
+            <select id="ca-source">
+              <option value="cisco">Cisco Trusted Root Store</option>
+              <option value="mozilla">Mozilla CA bundle (curl.se)</option>
+              <option value="custom">Custom URL</option>
+            </select>
+            <input id="ca-url" placeholder="Public CA bundle URL (https://…)" hidden>
             <label class="muted"><input type="checkbox" id="ca-auto"> Refresh daily</label>
             <button class="btn ghost" type="submit">Save</button>
             <button class="btn ghost" type="button" id="ca-refresh">Download now</button>

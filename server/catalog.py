@@ -10,6 +10,7 @@ auth on every endpoint. The server publishes images and a per-device
 install-approval flag but NEVER triggers install (spec §6). Stdlib only."""
 import gzip
 import hashlib
+import io
 import json
 import os
 import ssl
@@ -62,6 +63,10 @@ def _atomic_write_json(path, obj):
 
 # Global POST body cap (also applied to gzip-DECOMPRESSED bodies — bomb guard).
 MAX_BODY_BYTES = 65536
+
+# Image assignment and deletion span two JSON stores but need one process-local
+# decision. ImageService shares this lock with set_policy to close that race.
+_IMAGE_POLICY_LOCK = threading.RLock()
 
 _REPORT_KEYS = ("ts", "image_id", "event", "transfer", "link", "peers",
                 "peers_total", "agent")
@@ -240,11 +245,17 @@ class CatalogStore:
 
     # --- policy (install-approval gate) ---
     def set_policy(self, device_id, approved_image_id=None, install_allowed=False):
-        with secrets_store.store_lock(self.policy_path):
-            pol = self._read(self.policy_path)
-            pol[device_id] = {"approved_image_id": approved_image_id,
-                              "install_allowed": bool(install_allowed)}
-            _atomic_write_json(self.policy_path, pol)
+        with _IMAGE_POLICY_LOCK:
+            # Re-check at persistence time. Missing catalog.json remains valid
+            # for legacy bootstrap callers; an existing catalog fails closed.
+            if approved_image_id and os.path.exists(self.catalog_path) \
+                    and self.get_image(approved_image_id) is None:
+                raise ValueError("no such image")
+            with secrets_store.store_lock(self.policy_path):
+                pol = self._read(self.policy_path)
+                pol[device_id] = {"approved_image_id": approved_image_id,
+                                  "install_allowed": bool(install_allowed)}
+                _atomic_write_json(self.policy_path, pol)
 
     def get_policy(self, device_id):
         return self._read(self.policy_path).get(
@@ -660,6 +671,10 @@ def make_server(host, port, store, secrets_path, certfile=None,
                 self._send((400, "application/json",
                             json.dumps({"error": "bad content-length"}).encode()))
                 return
+            if length < 0:
+                self._send((400, "application/json",
+                            json.dumps({"error": "bad content-length"}).encode()))
+                return
             if length > MAX_BODY_BYTES:
                 # Refuse before reading: the declared length is untrusted and
                 # could be arbitrarily large.
@@ -670,7 +685,10 @@ def make_server(host, port, store, secrets_path, certfile=None,
             enc = self.headers.get("Content-Encoding", "")
             if enc.strip().lower() == "gzip":
                 try:
-                    body = gzip.decompress(body)
+                    # A bounded streaming read avoids allocating an attacker's
+                    # complete decompressed payload before enforcing the cap.
+                    with gzip.GzipFile(fileobj=io.BytesIO(body)) as gz:
+                        body = gz.read(MAX_BODY_BYTES + 1)
                 except Exception:
                     self._send((400, "application/json",
                                 json.dumps(

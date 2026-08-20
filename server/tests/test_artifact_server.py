@@ -74,6 +74,20 @@ def test_directory_listing_returns_404(tls_server):
     assert exc_info.value.code == 404
 
 
+def test_device_id_alone_cannot_fetch_staging_conf(tls_server, tmp_path):
+    srv, port, crt = tls_server
+    staging = tmp_path / "artifacts" / "staging"
+    staging.mkdir()
+    (staging / ("iris-agent-device-1-" + "a" * 32 + ".conf")).write_text(
+        "catalog_token=SECRET\n")
+    ctx = ssl.create_default_context(cafile=crt)
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(
+            "https://127.0.0.1:%d/staging/iris-agent-device-1.conf" % port,
+            context=ctx, timeout=5)
+    assert exc_info.value.code == 404
+
+
 def test_staging_conf_swept_after_window(tmp_path):
     # Staging confs are swept (deleted) once they are older than the exposure
     # window — not immediately after a single GET.  This lets device-install.sh
@@ -83,7 +97,7 @@ def test_staging_conf_swept_after_window(tmp_path):
     served_dir = tmp_path / "artifacts"
     staging = served_dir / "staging"
     staging.mkdir(parents=True, exist_ok=True)
-    conf = staging / "iris-agent-DEADBEEF.conf"
+    conf = staging / ("iris-agent-DEADBEEF-" + "a" * 32 + ".conf")
     conf.write_text("catalog_token=SECRETTOKEN\n")
 
     now = time.time()
@@ -131,11 +145,12 @@ def test_staging_retry_within_window_succeeds(tls_server, tmp_path):
     served_dir = tmp_path / "artifacts"
     staging = served_dir / "staging"
     staging.mkdir(parents=True, exist_ok=True)
-    conf = staging / "iris-agent-RETRY.conf"
+    conf = staging / ("iris-agent-RETRY-" + "b" * 32 + ".conf")
     conf.write_text("catalog_token=RETRYTOKEN\n")
 
     ctx = ssl.create_default_context(cafile=crt)
-    url = "https://127.0.0.1:%d/staging/iris-agent-RETRY.conf" % port
+    url = ("https://127.0.0.1:%d/staging/iris-agent-RETRY-" + "b" * 32
+           + ".conf") % port
 
     # First GET (simulates the installer's attempt 1).
     with urllib.request.urlopen(url, context=ctx, timeout=5) as r:
@@ -159,11 +174,12 @@ def test_staging_304_does_not_delete(tls_server, tmp_path):
     served_dir = tmp_path / "artifacts"
     staging = served_dir / "staging"
     staging.mkdir(parents=True, exist_ok=True)
-    conf = staging / "iris-agent-304.conf"
+    conf = staging / ("iris-agent-304-" + "c" * 32 + ".conf")
     conf.write_text("catalog_token=304TOKEN\n")
 
     ctx = ssl.create_default_context(cafile=crt)
-    url = "https://127.0.0.1:%d/staging/iris-agent-304.conf" % port
+    url = ("https://127.0.0.1:%d/staging/iris-agent-304-" + "c" * 32
+           + ".conf") % port
 
     # First GET to capture the Last-Modified header.
     with urllib.request.urlopen(url, context=ctx, timeout=5) as r:
@@ -191,6 +207,78 @@ def test_staging_304_does_not_delete(tls_server, tmp_path):
         )
 
 
+def test_staging_file_served_when_foreign_owned_but_mode_already_tight(
+        tls_server, tmp_path, monkeypatch):
+    # Staged files written from OUTSIDE the container (remote SSH staging via
+    # device-install.sh, or a stage-host-local CLI run) are owned by a
+    # foreign uid.  chmod by a non-owner always raises EPERM.  If the file's
+    # mode is ALREADY tight (installers write with umask 077 => no
+    # group/other access), that's not a reason to fail the request — the
+    # security property (least privilege) already holds without our chmod.
+    srv, port, crt = tls_server
+    served_dir = tmp_path / "artifacts"
+    staging = served_dir / "staging"
+    staging.mkdir(parents=True, exist_ok=True)
+    conf = staging / ("iris-agent-FOREIGN-" + "f" * 32 + ".conf")
+    conf.write_text("catalog_token=FOREIGNTOKEN\n")
+    os.chmod(str(conf), 0o600)
+
+    real_chmod = os.chmod
+    conf_path = os.path.abspath(str(conf))
+
+    def fake_chmod(path, mode, *args, **kwargs):
+        if os.path.abspath(path) == conf_path:
+            raise PermissionError(1, "Operation not permitted")
+        return real_chmod(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(artifact_server.os, "chmod", fake_chmod)
+
+    ctx = ssl.create_default_context(cafile=crt)
+    url = ("https://127.0.0.1:%d/staging/iris-agent-FOREIGN-" + "f" * 32
+           + ".conf") % port
+    with urllib.request.urlopen(url, context=ctx, timeout=5) as r:
+        assert r.status == 200, (
+            "a foreign-owned staging file with an already-tight mode (0600) "
+            "must still be served even though this process cannot chmod it"
+        )
+        assert b"catalog_token" in r.read()
+
+
+def test_staging_file_403_when_foreign_owned_and_mode_loose(
+        tls_server, tmp_path, monkeypatch):
+    # A foreign-owned staging file with a LOOSE mode (group/other accessible)
+    # must still fail closed with 403 when we cannot chmod it — the failure
+    # mode changes (from "chmod raised" to "mode is loose and unfixable"),
+    # but the security outcome (403, not served) does not.
+    srv, port, crt = tls_server
+    served_dir = tmp_path / "artifacts"
+    staging = served_dir / "staging"
+    staging.mkdir(parents=True, exist_ok=True)
+    conf = staging / ("iris-agent-LOOSE-" + "g" * 32 + ".conf")
+    conf.write_text("catalog_token=LOOSETOKEN\n")
+    os.chmod(str(conf), 0o644)
+
+    real_chmod = os.chmod
+    conf_path = os.path.abspath(str(conf))
+
+    def fake_chmod(path, mode, *args, **kwargs):
+        if os.path.abspath(path) == conf_path:
+            raise PermissionError(1, "Operation not permitted")
+        return real_chmod(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(artifact_server.os, "chmod", fake_chmod)
+
+    ctx = ssl.create_default_context(cafile=crt)
+    url = ("https://127.0.0.1:%d/staging/iris-agent-LOOSE-" + "g" * 32
+           + ".conf") % port
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(url, context=ctx, timeout=5)
+    assert exc_info.value.code == 403, (
+        "a foreign-owned staging file with a loose mode (0644) that cannot "
+        "be chmod'd must fail closed with 403"
+    )
+
+
 def test_staging_file_swept_after_window(tmp_path):
     # Exposure is time-bounded: staging files older than STAGING_MAX_AGE_SECONDS
     # are swept.  We call the sweep function directly with a fake clock to avoid
@@ -198,8 +286,8 @@ def test_staging_file_swept_after_window(tmp_path):
     served_dir = tmp_path / "artifacts"
     staging = served_dir / "staging"
     staging.mkdir(parents=True, exist_ok=True)
-    old_conf = staging / "iris-agent-OLD.conf"
-    new_conf = staging / "iris-agent-NEW.conf"
+    old_conf = staging / ("iris-agent-OLD-" + "d" * 32 + ".conf")
+    new_conf = staging / ("iris-agent-NEW-" + "e" * 32 + ".conf")
     old_conf.write_text("catalog_token=OLD\n")
     new_conf.write_text("catalog_token=NEW\n")
 
