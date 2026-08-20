@@ -239,6 +239,28 @@ ssh_host() {                       # run a command on STAGE_HOST
 echo "[1/7] flash pre-check on $DEVICE_IP"
 printf 'dir flash: | include bytes free\n' | "$HERE/../lab/device-run.sh" "$DEVICE_IP" | grep -i 'bytes free' || true
 
+echo "[pre] prerequisite checks (ip routing, device clock)"
+# 2026-08-20 incident: an IE-3400 lost `ip routing` on re-image; onboarding still
+# reported success (agent running) while the app's VLAN traffic had no L3 path
+# out of the box — a silent, invisible failure the operator burned hours
+# chasing. Catch that (and a clock so wrong TLS will fail) here, in plain
+# language, before any config is touched. Only the routed path creates an
+# IRIS-managed SVI that depends on global routing; inband rides the operator's
+# own already-routed network.
+if [ "$NETWORK_ATTACHMENT" = "routed" ]; then
+  routing_out="$(printf 'show running-config | include ^ip routing\n' \
+    | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>/dev/null || true)"
+  if ! printf '%s\n' "$routing_out" | grep -qE '^ip routing[[:space:]]*$'; then
+    echo "PREREQ: ip routing is disabled on this switch — the app network (VLAN $VLAN -> SVI $SVI_IP) cannot reach $STAGE_HOST. Enable it first:  configure terminal ; ip routing ; end ; write" >&2
+    exit 1
+  fi
+fi
+clock_out="$(printf 'show clock\n' | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>/dev/null || true)"
+clock_year="$(printf '%s' "$clock_out" | grep -oE '[0-9]{4}' | tail -1)"
+if [ -n "$clock_year" ] && [ "$clock_year" -lt 2024 ]; then
+  echo "PREREQ WARNING: device clock is $clock_year — TLS certificate validation may fail; set the clock or NTP"
+fi
+
 echo "[2/7] stage per-device agent config into artifacts/ (served on :8000 by the container)"
 CONF="iris-agent-$DEVICE_ID.conf"
 ART="${IRIS_ARTIFACTS_DIR:-$(cd "$HERE/.." && pwd)/artifacts}"

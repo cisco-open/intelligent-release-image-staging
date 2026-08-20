@@ -252,6 +252,33 @@ printf 'app-hosting stop appid %s\napp-hosting deactivate appid %s\napp-hosting 
 sleep 6
 printf 'configure terminal\nno app-hosting appid %s\nend\n' "$APPID" | RUN >/dev/null 2>&1 || true
 
+echo "[pre] prerequisite checks (ip routing, IOx storage, device clock)"
+# 2026-08-20 incident: an IE-3400 lost `ip routing` on re-image; onboarding still
+# reported success (app RUNNING) while the app's VLAN traffic had no L3 path out
+# of the box — a silent, invisible failure the operator burned hours chasing.
+# Catch that (and a missing IOx SD partition, and a clock so wrong TLS will
+# fail) here, in plain language, before any config is touched.
+if [ "$NETWORK_ATTACHMENT" = "routed" ]; then
+  routing_out="$(printf 'show running-config | include ^ip routing\n' | RUN 2>/dev/null || true)"
+  if ! printf '%s\n' "$routing_out" | grep -qE '^ip routing[[:space:]]*$'; then
+    echo "PREREQ: ip routing is disabled on this switch — the app network (VLAN $VLAN -> SVI $SVI_IP) cannot reach $STAGE_HOST. Enable it first:  configure terminal ; ip routing ; end ; write" >&2
+    exit 1
+  fi
+fi
+if [ "$TARGET_FS" = "sdflash:" ]; then
+  storage_out="$(printf 'show sdflash: filesys\n' | RUN 2>/dev/null || true)"
+  case "$storage_out" in
+    *"IOx Partition Exists"*) : ;;
+    *) echo "PREREQ: no IOx partition on the SD card — IOx apps need the SD formatted with an IOx partition on IE3x00" >&2
+       exit 1 ;;
+  esac
+fi
+clock_out="$(printf 'show clock\n' | RUN 2>/dev/null || true)"
+clock_year="$(printf '%s' "$clock_out" | grep -oE '[0-9]{4}' | tail -1)"
+if [ -n "$clock_year" ] && [ "$clock_year" -lt 2024 ]; then
+  echo "PREREQ WARNING: device clock is $clock_year — TLS certificate validation may fail; set the clock or NTP"
+fi
+
 echo "[2/9] apply IOx networking ($NETWORK_ATTACHMENT: IOx enable$([ "$NETWORK_ATTACHMENT" = inband ] && echo ", existing VLAN preserved" || echo ", VLAN $VLAN, $APP_INTF, Vlan$VLAN SVI"))"
 { echo "configure terminal"; ios_net; } | RUN >/dev/null
 

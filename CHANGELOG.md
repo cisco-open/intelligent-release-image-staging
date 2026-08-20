@@ -84,6 +84,16 @@ top-level `VERSION` file.
   `POST`/`DELETE /api/settings/telemetry-destination`, audited as
   `telemetry-destination-set` / `telemetry-destination-clear` (never header
   values).
+- **Installer prerequisite checks**: `device/device-install.sh` and
+  `device/iox/install.sh` now verify, before touching any config, that
+  `ip routing` is enabled on a routed (IRIS-managed SVI) attachment — a
+  disabled global routing table lets onboarding "succeed" while the app's
+  VLAN traffic silently never reaches the server — and that IE3x00 IOx
+  targets have an SD-card IOx partition; both fail closed with a plain
+  `PREREQ:` line and the exact remediation command. A wildly stale device
+  clock is a `PREREQ WARNING:` (TLS validation risk) that does not block the
+  install. Every line is single, grep-able, and streams straight into the
+  operator-visible job log.
 
 ### Changed
 - **Breaking:** `:9101/swarm` now answers only loopback peers by default (it

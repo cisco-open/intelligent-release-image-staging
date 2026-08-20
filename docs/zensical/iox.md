@@ -75,6 +75,14 @@ writable non-crash disk; otherwise it logs the fallback and retains automatic
 platform selection. `device/iox/install.sh` exposes this as `TARGET_FS` and
 defaults it to `sdflash:`.
 
+When `TARGET_FS` is `sdflash:` (the IE3x00 default), the installer checks
+`show sdflash: filesys` for an IOx partition before applying any config and
+fails closed with a `PREREQ:` line if the SD card was never formatted for
+IOx. The installer also checks `ip routing` on a routed attachment (see
+[Management type and VLAN ownership](network-attachment.md#routed--iris-managed-app-network))
+and warns — without blocking — on a device clock old enough to break TLS
+certificate validation.
+
 ## Build modes
 
 ```bash

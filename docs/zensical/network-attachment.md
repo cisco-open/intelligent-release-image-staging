@@ -22,6 +22,14 @@ create-only: preflight requires the proposed VLAN/SVI to be absent, the applied
 receipt records the resources IRIS created, and teardown removes exactly those.
 IRIS never silently adopts a pre-existing VLAN or SVI.
 
+Global `ip routing` is a switch-wide setting IRIS never enables on the
+operator's behalf — it is an operator decision. Both installers
+(`device/device-install.sh`, `device/iox/install.sh`) check for it before
+applying any config on a routed attachment and fail closed with a `PREREQ:`
+line and the exact command to run if it is off. Without that check, onboarding
+can report success while the new VLAN/SVI has no path off the box — a silent
+failure that is otherwise invisible until traffic is debugged.
+
 ## Inband — existing management VLAN
 
 Inband attachment connects the staging agent — Guest Shell or an IOx app — to an
