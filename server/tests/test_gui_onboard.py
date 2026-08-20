@@ -67,10 +67,11 @@ def _svc(run_fn, stage_host=None, **kw):
     # exercising run_fn as before; tests of the gate itself override
     # probe_fn explicitly via **kw.
     kw.setdefault("probe_fn", lambda dev, env: "C9300")
+    kw.setdefault("mint_fn", lambda did: "TOK-" + did)
     return gui_onboard.OnboardService(
         fleet, creds, device_install="/fake/device-install.sh",
         crt_public="/fake/crt.pem", host_ip="10.9.9.9",
-        mint_fn=lambda did: "TOK-" + did, run_fn=run_fn, **kw)
+        run_fn=run_fn, **kw)
 
 
 def test_onboard_assembles_env_and_streams(tmp_path):
@@ -1468,6 +1469,7 @@ def test_c9k_iox_notfound_names_amd64_tar(tmp_path):
 def test_abort_terminates_running_job():
     """abort() signals the running installer's process; the job then errors."""
     release = threading.Event()
+    proc_ready = threading.Event()
     aborted = {"v": False}
 
     class FakeProc:
@@ -1477,17 +1479,88 @@ def test_abort_terminates_running_job():
 
     def run_fn(p, e, on, on_proc):
         on_proc(FakeProc())
+        proc_ready.set()
         on("running")
         release.wait(5)          # blocks until aborted (or timeout)
         return 137
 
     svc = _multi_svc(1, run_fn, max_concurrent=1)
     j = svc.start("d1")
-    assert _wait_for(lambda: svc.get_job(j)["state"] == "running")
+    # Wait for the proc to REGISTER, not merely for state=="running": the job
+    # reports running before the installer is spawned, and this test pins the
+    # direct terminate() path (the pre-registration window has its own tests).
+    assert proc_ready.wait(5)
+    assert svc.get_job(j)["state"] == "running"
     assert svc.abort(j) is True
     assert aborted["v"] is True
     assert _wait(svc, j)["state"] == "error"
     assert svc.abort(j) is False     # not running anymore -> nothing to abort
+
+
+def test_abort_before_proc_registration_terminates_on_register():
+    """abort() in the window where the job is "running" but the installer has
+    not been spawned yet must still take effect: the request is recorded and
+    the process is terminated the moment it registers. mint_fn runs after the
+    job reports running and just before the installer launches, so blocking
+    there lands the abort deterministically inside that window."""
+    in_window = threading.Event()
+    proceed = threading.Event()
+    release = threading.Event()
+    aborted = {"v": False}
+
+    class FakeProc:
+        def terminate(self):
+            aborted["v"] = True
+            release.set()
+
+    def mint(did):
+        in_window.set()
+        assert proceed.wait(5)
+        return "TOK"
+
+    def run_fn(p, e, on, on_proc):
+        on_proc(FakeProc())      # registration must honor the pending abort
+        release.wait(5)
+        return 137
+
+    svc = _svc(run_fn, mint_fn=mint)
+    j = svc.start("d1")
+    assert in_window.wait(5)
+    assert svc.get_job(j)["state"] == "running"
+    assert svc.abort(j) is True
+    proceed.set()
+    job = _wait(svc, j)
+    assert job["state"] == "error"
+    assert aborted["v"] is True
+    assert any("abort" in l for l in job["lines"])
+
+
+def test_abort_during_preflight_never_launches_installer():
+    """abort() while the worker is still in preflight stops the job before the
+    installer is ever spawned: the device stays untouched."""
+    in_probe = threading.Event()
+    proceed = threading.Event()
+    called = []
+
+    def probe(dev, env):
+        in_probe.set()
+        assert proceed.wait(5)
+        return "C9300"
+
+    def run_fn(p, e, on, on_proc):
+        called.append(p)
+        return 0
+
+    svc = _svc(run_fn, probe_fn=probe)
+    j = svc.start("d1")
+    assert in_probe.wait(5)
+    assert svc.get_job(j)["state"] == "running"
+    assert svc.abort(j) is True
+    proceed.set()
+    job = _wait(svc, j)
+    assert job["state"] == "error"
+    assert called == []              # device untouched
+    assert any("abort" in l for l in job["lines"])
 
 
 def test_abort_unknown_job_is_false():

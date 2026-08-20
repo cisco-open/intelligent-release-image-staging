@@ -781,6 +781,24 @@ class OnboardService:
                                              "removed")
                     self._finish(job_id, "error", None)
                     return
+            # An operator abort can land while the job is "running" but the
+            # installer has not been spawned yet (env build, preflight, the
+            # artifacts guard). Stop here, before minting a token or touching
+            # the device: an onboard's planned receipt is retired outright; an
+            # undeploy receipt still describes the live deployment, so leave
+            # it, as in the pre-apply error path above.
+            with self._lock:
+                cur = self._jobs.get(job_id)
+                abort_pending = cur is not None and cur.get("_abort_requested",
+                                                            False)
+            if abort_pending:
+                self._append(job_id, "ERROR: aborted by operator before the "
+                             "installer started; device untouched")
+                if action == "onboard":
+                    self._transition_or_note(job_id, j.get("receipt_id"),
+                                             "removed")
+                self._finish(job_id, "error", None)
+                return
             try:
                 receipt_id = j.get("receipt_id")
                 if not self._transition_or_note(job_id, receipt_id, "applying"):
@@ -860,16 +878,39 @@ class OnboardService:
     def _register_proc(self, job_id, proc):
         with self._lock:
             self._procs[job_id] = proc
+            j = self._jobs.get(job_id)
+            abort_pending = j is not None and j.get("_abort_requested", False)
+        if abort_pending:
+            # abort() landed while the job was "running" but before the
+            # installer existed; honor it the moment the process appears.
+            try:
+                proc.terminate()
+            except Exception:
+                pass
 
     def abort(self, job_id):
         """Terminate a running installer subprocess. Returns True if a running
         job's process was signalled. The run loop then finishes with a non-zero
-        rc, so the job errors and its receipt moves to needs-reconcile."""
+        rc, so the job errors and its receipt moves to needs-reconcile.
+
+        A job reports "running" before its installer process exists (env
+        build, preflight). An abort in that window is recorded instead of
+        dropped: the worker stops before spawning the installer, or
+        _register_proc terminates it on registration."""
         with self._lock:
             j = self._jobs.get(job_id)
             proc = self._procs.get(job_id)
-            if j is None or j["state"] != "running" or proc is None:
+            if j is None or j["state"] != "running":
                 return False
+            if proc is None:
+                if not self._run_supports_proc:
+                    # Legacy runner that never reports its process: there is
+                    # nothing to signal once the installer is in flight, so
+                    # keep the old "cannot abort" contract.
+                    return False
+                j["_abort_requested"] = True
+                self._append_locked(j, "[abort requested by operator]")
+                return True
             self._append_locked(j, "[abort requested by operator]")
         try:
             proc.terminate()
