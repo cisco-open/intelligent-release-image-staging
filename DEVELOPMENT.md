@@ -29,10 +29,17 @@ software state of a device.
    Compose from the repository root. Bootstrap is needed once per fresh config
    volume:
    ```
+   tools/get-aria2c.sh amd64
    docker compose -f server/docker-compose.yml build
    docker compose -f server/docker-compose.yml run --rm iris iris-bootstrap
    docker compose -f server/docker-compose.yml up
    ```
+
+   The first step installs the handed-in `aria2c` binary that the image build
+   copies in; it verifies the binary against `tools/aria2c.sha256` and fails
+   closed on a mismatch. Without a deliverable to hand, build one from the
+   corresponding source described in `tools/aria2c-patches/README.md` and
+   point `ARIA2C_DELIVERABLE` at it.
 
 The seed-server Dockerfile uses the repository root as its build context so the
 image can carry the device installers and console onboarding helper. Build it

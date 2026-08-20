@@ -191,8 +191,8 @@ at 8 MiB and the streamed image upload at 4 GiB.
 
 | Route | Body / result |
 | --- | --- |
-| `POST /api/login` | Pre-auth. `{username, password}` → `{username, csrf}` plus the session cookie; 401 on bad credentials. |
-| `POST /api/setup` | Pre-auth, first run only. `{username, password}` creates the admin account; 409 once one exists. |
+| `POST /api/login` | Pre-auth. `{username, password}` → `{username, csrf}` plus the session cookie; 401 on bad credentials. Before any admin exists, signing in with the default `iris` / `irisisgreat!` credential instead returns `{setup: true, setup_grant}` — no session — for use with `POST /api/setup` below. |
+| `POST /api/setup` | Pre-auth, first run only. `{username, password, setup_grant}` creates the admin account, where `setup_grant` is the one-time, 10-minute grant from the default-credential login above; 403 on a missing/invalid/expired grant, 409 once an admin exists. |
 | `POST /api/logout` | Revokes the current session and expires the cookie. |
 | `GET /api/session` | The current session's info, or 401. |
 | `GET /api/settings` | Console settings, published port, and the running version — plus the active console certificate (`gui_cert`), the installed trust entries (`trust`), the CA download settings (`ca_trust`), and the effective telemetry destination with its source (`telemetry_destination`). |

@@ -14,6 +14,7 @@ This path brings up the IRIS server, publishes an IOS-XE image, generates device
 | --- | --- |
 | Linux host with Docker Engine 23.0 or newer and Docker Compose | Runs the IRIS server container. The runtime tmpfs uses the `uid=`, `gid=`, and `mode=` mount options, which older engines reject. |
 | Reachable server IP | Devices must reach the host on the published IRIS ports. |
+| Handed-in `aria2c` binary | Not downloaded or built by this repository. `tools/get-aria2c.sh amd64` installs the pinned static binary before the first build — the Dockerfile's `COPY bin/aria2c` step fails without it. |
 | `age` identity | Encrypts server secrets at rest. Keep the private identity outside the repository. |
 | IOS-XE image files | Store outside Git, normally under `/opt/images`. The tree must be readable and traversable by uid `10001`. The required IOS-XE license tier is outside IRIS's scope — check it at [cisco.com](https://www.cisco.com/) for the respective platform. |
 | Device credentials | Used only for installation or GUI-driven onboarding. Do not commit real credentials. |
@@ -58,10 +59,13 @@ root-owned and need a one-time migration first:
 
 ## Start the server
 
-Build the image, initialize a fresh encrypted config volume, start the stack,
-and prepare both IOx packages from the repository root:
+`start-compose-server.sh` builds the image, so hand in the pinned `aria2c`
+binary first — the Dockerfile's `COPY bin/aria2c` step fails without it.
+Then build the image, initialize a fresh encrypted config volume, start the
+stack, and prepare both IOx packages from the repository root:
 
 ```bash
+tools/get-aria2c.sh amd64
 tools/start-compose-server.sh
 ```
 
@@ -77,7 +81,10 @@ container becomes healthy. It produces `iris-arm64.tar` for IE-3400 and
 
 ## Create the console admin
 
-Use the first-run browser flow at `https://<server-ip>:8080/`, or set the admin account from the container:
+Open `https://<server-ip>:8080/` and sign in with the default credential
+`iris` / `irisisgreat!`. This only works before an admin account exists — it
+does not create a session, it takes you straight to first-run setup to create
+the real admin account. Or set the admin account from the container instead:
 
 ```bash
 docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin
@@ -149,6 +156,10 @@ routed-only and refuses a v2 (`management_type`) header:
 tools/gen-device-installers.sh fleet/devices.csv
 ```
 
+It requires the running `iris` container to mint enrollment tokens and read
+the server certificate; set `IRIS_CONTAINER=<name>` if yours is named
+differently.
+
 ## Assign images
 
 Create assignments from the template:
@@ -168,6 +179,9 @@ Apply the assignments from the server host:
 ```bash
 tools/apply-assignments.sh fleet/assignments.csv
 ```
+
+This requires the running `iris` container by that name; set
+`IRIS_CONTAINER=<name>` if yours differs.
 
 Agents poll the catalog on a short interval, download the approved image, verify it, and stage it on the target storage. A changed assignment causes the agent to clean up the previous staged image before staging the replacement.
 

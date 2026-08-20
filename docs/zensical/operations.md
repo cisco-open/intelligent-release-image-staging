@@ -19,6 +19,10 @@ This page collects the actions operators perform after the first deployment.
 | Apply assignments | `tools/apply-assignments.sh fleet/assignments.csv` |
 | Create or reset admin | `docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin` |
 
+`apply-assignments.sh` and `gen-device-installers.sh`
+([Prepare devices](getting-started.md#prepare-devices)) require the running
+`iris` container by that name; set `IRIS_CONTAINER=<name>` if yours differs.
+
 For Kubernetes, the equivalent process and logs are available through the
 single deployment:
 
@@ -44,6 +48,16 @@ migration, and because it applies per volume, any reset that removes some
 volumes while keeping others needs it again for the kept ones — see
 [Upgrading from a root-runtime deployment](server.md#upgrading-from-a-root-runtime-deployment)
 for the command to run.
+
+## Unreachable devices at onboard
+
+A Guest Shell onboard job probes the device before running the installer. An
+unreachable device — wrong IP, wrong credentials, no network path — fails the
+job immediately with `cannot reach device <ip> — ping/SSH probe failed; check
+the device IP and credentials` instead of silently doing nothing. Router and
+IOx onboarding already ran a live preflight and failed the same way.
+Submit-time rejections render in the console and are audited like any other
+onboarding failure.
 
 ## Bulk device actions
 
@@ -109,6 +123,20 @@ A later delete of an entry published in place leaves the file on disk: the unlin
 decision comes from the entry's recorded directory, not from its filename. See
 [Catalog entry fields](reference.md#catalog-entry-fields) for the exact rule,
 including the fallback for entries published before that field existed.
+
+## TLS rotation and IOx packages
+
+Rotating or regenerating the server's TLS certificate invalidates IOx packages
+that were already built: each `iris-arm64.tar` / `iris-amd64.tar` bakes the
+catalog CA in at build time, and the server only refreshes the *served*
+`iris-catalog.pem` on start — it does not rebuild the tars.
+
+Symptom: the IOx app runs and its TCP connection to the catalog succeeds, but
+the device never heartbeats, because the pinned certificate is rejected.
+
+Remedy: re-run `tools/provision-iox-packages.sh`, then re-onboard the affected
+IOx devices. Guest Shell devices need no such fix — the installer pushes the
+current certificate on every run, so they heal on re-onboard automatically.
 
 ## Recovery checklist
 

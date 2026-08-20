@@ -25,10 +25,18 @@ IRIS never silently adopts a pre-existing VLAN or SVI.
 Global `ip routing` is a switch-wide setting IRIS never enables on the
 operator's behalf — it is an operator decision. Both installers
 (`device/device-install.sh`, `device/iox/install.sh`) check for it before
-applying any config on a routed attachment and fail closed with a `PREREQ:`
-line and the exact command to run if it is off. Without that check, onboarding
-can report success while the new VLAN/SVI has no path off the box — a silent
-failure that is otherwise invisible until traffic is debugged.
+applying any config on a routed attachment. The check is semantic, not a grep
+for a positive `ip routing` line: that line is absent whenever routing is the
+platform default (seen on IE-3x00), which used to false-fail a healthy switch.
+Instead the installers treat an explicit `no ip routing` line, or a route
+table answering in host mode (`Default gateway ...`), as the authoritative
+signal that routing is off — and treat a session that never echoes the
+command back as a transport failure, reported as "could not verify ip
+routing" rather than misrepresented as a routing problem. When routing is
+confirmed off, the installer fails closed with a `PREREQ:` line and the exact
+command to run. Without this check, onboarding can report success while the
+new VLAN/SVI has no path off the box — a silent failure that is otherwise
+invisible until traffic is debugged.
 
 ## Inband — existing management VLAN
 
@@ -93,6 +101,16 @@ with telemetry when observability is enabled.
   rules. The outside interface is canonicalized before rendering. Its receipt
   records whether `ip nat outside` already existed; a pre-existing marking is
   preserved and undeploy removes that marking only when IRIS created it.
+
+`device/router-install.sh` destroys any pre-existing Guest Shell before
+applying config, instead of reusing one already `RUNNING`. A re-onboard over a
+running guest left it on its old networking — `guestshell enable` sees
+`RUNNING` and never rebuilds the guest, so the freshly applied VPG gateway
+never reaches it and the agent loses egress, silently (inbound ping still
+answers). Destroying the guest first forces `guestshell enable` to always
+build it from the config this run applies. Agent state persists on
+`bootflash:guest-share`, so a re-onboard only costs the ~60-second guest
+rebuild.
 
 Undeploy of a **router-nat** device clears only translations whose inside-local
 address matches the app IP recorded in the receipt, using targeted

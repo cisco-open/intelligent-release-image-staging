@@ -9,7 +9,7 @@ This project uses **Calendar Versioning (CalVer)**: `YYYY.0M.0D` with an optiona
 `2026.06.11.1`). Releases are tagged `vYYYY.0M.0D`. The current version is in the
 top-level `VERSION` file.
 
-## [Unreleased]
+## [2026.08.20]
 
 ### Added
 - **Transfer streaming (opt-in, ships dark)**: while a transfer is active, a
@@ -96,10 +96,37 @@ top-level `VERSION` file.
   operator-visible job log.
 
 ### Changed
+- **Operator tools require the running container.** `tools/apply-assignments.sh`
+  and `tools/gen-device-installers.sh` no longer fall back to invoking server
+  code directly on the host — that path existed only for the removed
+  bare-metal install. Both now fail with an explicit message when the `iris`
+  container is not running, and both honor an `IRIS_CONTAINER` override for a
+  non-default container name, matching `tools/stage-iox-package.sh`.
+- **First-run setup uses a default credential, not a bootstrap token.** Before
+  any admin exists, signing in at the console with `iris` / `irisisgreat!`
+  does not open a session — it hands the client a one-time, 10-minute setup
+  grant and redirects to `/setup` to create the real admin account. This
+  removes the `docker exec … cat /run/iris/gui-bootstrap-token` step (and the
+  `0600` token file and startup log banner) in favor of a documented,
+  hardcoded credential that only ever works pre-setup; once an admin exists
+  it is an ordinary failed login, rate-limited and audited like any other.
 - **Settings is split into sub-pages** — General (server info, admin
   password, stage host, sessions), TLS & trust (certificate, trusted CAs,
   public CA bundle download), and Telemetry (destination) — replacing the
-  single long page.
+  single long page. The sub-pages are reached from an indented feature
+  sub-menu in the sidebar under Settings and are deep-linkable
+  (`#settings/general`, `#settings/tls`, `#settings/telemetry`).
+- **Drag and drop on the TLS & trust page**: drop a certificate and key (or
+  one combined PEM) onto the Certificate section, or several CA files onto
+  Trusted CAs. Files are classified by PEM content rather than extension, and
+  pasting still works — the drop zone fills the same fields the Upload button
+  already submits.
+- **A choice of public CA bundle source**: Cisco Trusted Root Store (the
+  existing default), the Mozilla CA bundle from `https://curl.se/ca/cacert.pem`,
+  or a custom URL. Both presets go through the same https-only,
+  redirect-refusing, size-capped, PEM-validated fetcher. The downloaded bundle
+  shows as one row in the trusted-CA table, named for its source, and removing
+  that row is how an operator reverts to the system store alone.
 - **Unassign from the device table**: the assign dropdown's empty option now
   clears a device's image assignment (audited as `device_assign`
   action=`unassign`); previously the only way to unassign was deleting and
@@ -166,6 +193,78 @@ top-level `VERSION` file.
   this already applied to every Compose and Kubernetes deployment. And seeder
   logs go to Docker's `json-file` driver (10 MB × 3) instead of the 14-day
   compressed rotation `logrotate.d/iris` provided.
+
+### Fixed
+- **A live-but-unresponsive `aria2c` no longer blocks its own relaunch.**
+  `device/bootstrap.sh` decided whether to start the daemon with
+  `pgrep aria2c` — process *liveness* — so an `aria2c` that was running but
+  not answering RPC was never replaced. The agent then failed on
+  `ECONNREFUSED` to `127.0.0.1:6800` on every 60-second tick and crashed
+  **before its first heartbeat**, leaving the device permanently invisible in
+  the console with no error anywhere; recovery happened only if the stale
+  process happened to die. Bootstrap now delegates unconditionally to
+  `device/guestshell-start.sh`, which was already idempotent (it probes the
+  RPC and exits early when the daemon is healthy), and that script now clears
+  a non-serving `aria2c` before relaunching — it still owns the RPC port, and
+  `cp -f` over a running binary fails with `ETXTBSY`. Copy and `chmod`
+  failures are reported instead of being swallowed by `|| true`.
+  `device/iox/entrypoint.sh` carried the identical condition and gained the
+  same RPC health probe, covering both the arm64 (IE-3400) and amd64 (C9k)
+  packages, which share one entrypoint.
+- **`ip routing` detection is semantic, not textual.** The prerequisite check
+  added above grepped the running config for a literal `ip routing` line, but
+  on platforms where routing is the default (observed on IE3x00) *enabled*
+  routing renders no line at all — so the check failed healthy switches and
+  no amount of configuration could satisfy it. It now looks for an explicit
+  `no ip routing` line or a host-mode route table (`Default gateway ...`), and
+  distinguishes a dead device session (`PREREQ: could not verify ip routing`)
+  from routing genuinely being off, instead of blaming routing for a
+  transport failure.
+- **Re-onboarding a router rebuilds its Guest Shell networking.**
+  `device/router-install.sh` applied the app-hosting config while a previous
+  Guest Shell was still `RUNNING`; the enable step then saw `RUNNING` and
+  never re-enabled, so the guest kept its old networking and the agent had no
+  egress — silently, since the device still answered pings. The installer now
+  destroys a pre-existing Guest Shell before applying config, waiting for it
+  to actually disappear.
+- **An unreachable device fails loudly at onboard.** A Guest Shell onboard
+  probes reachability before running the installer and fails the job with
+  `cannot reach device <ip> — ping/SSH probe failed; check the device IP and
+  credentials`; submit-time rejections are rendered in the console and
+  audited. A mistyped device IP previously produced no job, no error, and no
+  audit record.
+- **An encrypted private key can be imported from the console.** A
+  passphrase-protected key failed TLS replacement with an opaque
+  `certificate/key pair rejected (OSError)`. The TLS page now offers a
+  passphrase field when the key is encrypted and decrypts it at import
+  (passphrase fed to `openssl pkey` over stdin, never argv); the key is still
+  stored age-encrypted at rest.
+- **The release tarball can install `aria2c` again.** `tools/make-release.sh`
+  shipped `tools/get-aria2c.sh` but not `tools/aria2c.sha256`, and the
+  fail-closed script exits when the checksum file is missing. It now ships
+  both, plus `tools/start-compose-server.sh` — the documented Compose entry
+  point, previously omitted. That script now skips IOx staging with a clear
+  message when the IOx packaging tools are absent, as they are in a tarball.
+
+### Security
+- **Staged device credentials are capability-addressed.** The artifact server
+  served `staging/iris-agent-<DEVICE_ID>.conf` — containing a live catalog
+  bearer token — with no authentication, and device IDs are guessable. Each
+  install now mints a 128-bit capability and stages
+  `iris-agent-<DEVICE_ID>-<CAP>.conf` and `rpc-secret-<CAP>`; the capability
+  rides the existing installer→device channel, so no new mechanism was
+  needed. `rpc-secret` was previously one shared filename for every device
+  and is now per-device. Retention stays 600 s. The artifact server serves a
+  mode-tight staging file regardless of which uid wrote it, so remote-SSH and
+  stage-host-local staging work rather than 403-ing.
+- **`aria2c` is handed in, not downloaded.** The server and both IOx packages
+  ship Aria2 Next 2.5.6, built from a pinned source with four local security
+  patches and verified against `tools/aria2c.sha256`, which fails closed on
+  mismatch. Nothing in the repository downloads a prebuilt client any more:
+  `device/iox/build.sh` resolved `aria2c` from a third-party release when no
+  local bundle was present, which silently shipped an unpatched build —
+  including a peer-blocklist use-after-free that crashes the client — into
+  IE-3400 images. Its network fallback is removed entirely.
 
 ## [2026.07.26]
 

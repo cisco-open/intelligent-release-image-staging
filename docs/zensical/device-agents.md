@@ -39,6 +39,105 @@ flowchart TB
     Copy --> Report["Report status"]
 ```
 
+## Agent installation
+
+### Guest Shell and router: what the installer pushes
+
+`device/device-install.sh` (Catalyst 9300 Guest Shell) and
+`device/router-install.sh` (Catalyst 8000 router) push the same file set to
+the guest-share root, over a `copy https://` that the PKI trustpoint step
+(pasted over SSH first) lets IOS verify:
+
+| File served from the artifact server | Device-side name | Purpose |
+| --- | --- | --- |
+| staged as `iris-agent-<DEVICE_ID>-<CAP>.conf` | `iris-agent.conf` | catalog URL, device id, and an empty `rpc_secret` — the agent fetches the real secret on its first token refresh |
+| staged as `rpc-secret-<CAP>` | `rpc-secret` | seeds aria2c's RPC secret; bootstrap.sh reconciles it against the conf on every tick |
+| `iris-agent.tgz` (`iris-agent-arm.tgz` on IE-3x00) | `bundle.tgz` | the agent Python, `bootstrap.sh`, `guestshell-start.sh`, `rotate-logs.sh`, and an architecture-matched `aria2c`, packed by `tools/make-agent-bundle.sh` |
+| the bare server cert | `iris-catalog.pem` | pinned TLS trust anchor for the agent's catalog calls |
+| — | `bootstrap.sh` | the EEM entry point itself |
+
+`CAP` is a fresh 128-bit random capability minted per install run (not one
+fixed filename reused by every device — that was the old shared
+`rpc-secret`). The staged copies live under the artifact server's `staging/`
+prefix and are only reachable for the ~600 seconds it retains them, ample
+headroom for the installer's own 3-attempt retry loop.
+
+The installer then installs one EEM applet:
+
+```text
+event manager applet IRIS-AGENT authorization bypass
+ event timer watchdog time 60 maxrun 900
+ action 100 cli command "enable"
+ action 200 cli command "guestshell run bash <fs>guest-share/bootstrap.sh"
+```
+
+Every 60 seconds it runs `bootstrap.sh` inside Guest Shell, which moves any
+freshly dropped files into its own guest-owned working directory, unpacks a
+new `bundle.tgz` if one arrived (copying its `bootstrap.sh` back over the
+running copy), makes sure `aria2c` is up and serving, and finally runs
+`iris_agent.py --once`.
+
+**Dropping a new `bundle.tgz` on the device is the agent upgrade** for Guest
+Shell and router — the next tick unpacks it and runs the new code. There is no
+separate upgrade command. Re-running the installer has the same effect (it
+mints a new capability and re-copies the bundle). `router-install.sh`
+additionally destroys any pre-existing Guest Shell before re-applying config,
+so a re-onboard never leaves the guest running on stale networking from a
+previous install — see
+[Router routed and router NAT](network-attachment.md#router-routed-and-router-nat-iris-managed-virtualportgroup).
+
+### IOx: what the installer pushes
+
+`device/iox/install.sh` never touches Guest Shell. It copies the built
+package (`iris-arm64.tar` or `iris-amd64.tar`) to the target IOS filesystem
+over the same verified `copy https://`, then drives the app-hosting lifecycle
+directly: `app-hosting install` → `activate` → `start`. Deployment-specific
+values — the enrollment token, device id, SSH-to-self credentials, target
+filesystem — are passed as numbered `run-opts -e` Docker options at deploy
+time and never baked into the image; `device/iox/entrypoint.sh` (PID 1 inside
+the container) writes them into `iris-agent.conf` on first boot only if no
+config already exists on the persistent mount. There is no EEM timer on IOx:
+`entrypoint.sh` is its own supervisor loop, running the agent once every
+`IRIS_TICK_SECONDS` (default 60s).
+
+**Upgrade on IOx is uninstall, then reinstall** — there is no in-place package
+update. `device/iox/install.sh` is idempotent by design: its first step always
+stops, deactivates, and uninstalls any existing `iris` app before copying the
+new package and reinstalling, so re-running the installer with a freshly
+built package is the supported upgrade path. `device/iox/uninstall.sh`
+performs the same teardown standalone, for a clean removal with no reinstall.
+
+### Confirming it worked
+
+Assignment only gates staging, not presence: an unassigned device still
+heartbeats so it registers in `devices.json`, the Swarm Map, and telemetry
+posture. The agent's first successful heartbeat is therefore the signal that
+installation succeeded — that is what makes a device appear in the Console
+device table and Swarm Map (see [Web Console](console.md)). Nothing before
+that point is visible outside device-side logs.
+
+### Failure mode: aria2c alive but not serving
+
+Fixed 2026-08-20 after a field incident. `device/bootstrap.sh`,
+`device/guestshell-start.sh` (Guest Shell and router), and
+`device/iox/entrypoint.sh` (IOx) used to gate a relaunch on aria2c *process*
+liveness (`pgrep`). An aria2c that was running but not answering its RPC port
+blocked its own relaunch — it still owned the port, and `cp -f` over a running
+binary fails `ETXTBSY` — so the agent hit `ECONNREFUSED` on
+`127.0.0.1:6800` every 60-second tick and crashed before ever sending its
+first heartbeat. The device stayed invisible in the Console indefinitely, with
+no self-healing path.
+
+All three now key supervision on RPC *health* instead of process liveness.
+`guestshell-start.sh` probes `aria2c.getVersion` over the RPC port before
+deciding whether to relaunch, and kills a non-serving aria2c before copying a
+fresh binary over it; `bootstrap.sh` delegates to it unconditionally on every
+tick (it is idempotent — it exits 0 immediately once the RPC answers);
+`entrypoint.sh` gained the same `rpc_healthy()` check in its own supervisor
+loop. Copy and chmod failures during relaunch are no longer swallowed, so a
+failed relaunch now surfaces in the logs instead of silently leaving a dead
+binary in place.
+
 ## Agent loop
 
 The agent loop is deliberately boring:

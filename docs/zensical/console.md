@@ -16,7 +16,10 @@ Open:
 https://<server-ip>:8080/
 ```
 
-The server uses a self-signed certificate by default. Create the initial admin in the browser or with:
+The server uses a self-signed certificate by default. Before an admin account
+exists, sign in with the default credential `iris` / `irisisgreat!` — it only
+works pre-setup — which takes you straight to the setup wizard to create the
+real admin account. Or create the initial admin from the container instead:
 
 ```bash
 docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin
@@ -156,6 +159,41 @@ at once instead of after the next ten-second poll.
 ## Onboarding from the console
 
 GUI-driven onboarding uses the device's assigned credential profile to run the same install logic that the CLI generates. The sensitive values belong in the console or the server secret store, not in Git. Generated per-device staging files are temporary and swept after their configured age.
+
+Guest Shell onboards probe device reachability before running the installer:
+an unpingable or unreachable IP fails the job immediately with `cannot reach
+device <ip> — ping/SSH probe failed; check the device IP and credentials`,
+instead of hanging inside an opaque SSH timeout. Router and IOx onboards
+already run their own live preflight, so all three platforms now fail loud on
+an unreachable device. Every onboarding rejection — a failed preflight, a
+busy device, an unreachable device, a router already holding a deployment
+receipt — is rendered in the console and recorded in Audit, whether it is
+refused at submit time or fails once the job is running.
+
+## Settings
+
+Settings is a sidebar feature with its own sub-menu — **General**, **TLS &
+trust**, and **Telemetry** — rather than an in-page tab strip. Each sub-page
+is deep-linkable: `#settings/general`, `#settings/tls`, `#settings/telemetry`.
+
+### TLS & trust
+
+- **Certificate** — drop (or browse to) a certificate and private key, or
+  paste PEM directly. Files are classified by their PEM content rather than
+  extension, so a single combined cert+key file works. Dropping an encrypted
+  private key reveals a passphrase field; the key is decrypted at import
+  (`openssl pkey`, passphrase piped over stdin, never on the command line)
+  instead of being rejected, and is still stored age-encrypted at rest either
+  way. **Use built-in certificate** reverts to the shipped self-signed cert
+  and appears only once a custom certificate is installed.
+- **Trusted CAs** — drop one or many CA certificate files to install them
+  individually, or use the CA bundle source picker to download and trust a
+  whole public bundle: Cisco Trusted Root Store (default), the Mozilla CA
+  bundle (`https://curl.se/ca/cacert.pem`), or a custom URL. The downloaded
+  bundle appears as a single row in the trusted-CA table, labelled with its
+  source; removing that row (**remove bundle**) is how you revert to
+  system-store-only trust. A failed download never replaces the previous
+  bundle.
 
 ## When to use the CLI
 

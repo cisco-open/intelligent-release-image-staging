@@ -101,7 +101,9 @@ docker compose -f server/docker-compose.yml up -d
 TLS certificate on a fresh config volume; subsequent runs leave existing state
 untouched.
 
-Create the console admin:
+Create the console admin — either in the browser with the default first-run
+credential or from the CLI, both covered in
+[Getting Started](docs/zensical/getting-started.md#create-the-console-admin):
 
 ```bash
 docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin
@@ -114,20 +116,24 @@ docker compose -f server/docker-compose.yml exec iris \
   iris-publish /opt/images/iosxe/c9300/<image>.bin
 ```
 
-Generate per-device installers and apply assignments:
+Prepare the management-aware inventory and assignments:
 
 ```bash
 cp fleet/devices.csv.example fleet/devices.csv
-tools/gen-device-installers.sh fleet/devices.csv
-
 cp fleet/assignments.csv.example fleet/assignments.csv
+```
+
+Fill in `fleet/devices.csv` and import it from the console's Devices page. Then
+apply the assignments:
+
+```bash
 tools/apply-assignments.sh fleet/assignments.csv
 ```
 
-Each generated installer contains a short-lived enrollment token. On first
-contact, the agent exchanges it for rotating catalog, announce, and local RPC
-credentials; no permanent network token is baked into the installer. Re-provision
-a device when replacing its bootstrap configuration or enrollment material.
+Onboarding gives each device a short-lived enrollment token. On first contact,
+the agent exchanges it for rotating catalog, announce, and local RPC credentials;
+no permanent network token is baked into the installer. Re-provision a device
+when replacing its bootstrap configuration or enrollment material.
 That cutover still only changes the staging agent and never installs or reloads
 an IOS-XE image.
 

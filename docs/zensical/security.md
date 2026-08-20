@@ -125,6 +125,21 @@ host-local process is loopback — in those deployments the gate is void, and
 the hard control is `IRIS_METRICS_HOST=127.0.0.1` (bind the listener to
 loopback) or not publishing port 9101 at all.
 
+## First-run admin claim
+
+Before an admin account exists, the console's normal login page accepts the
+documented default credential `iris` / `irisisgreat!` and, instead of a
+session, mints a one-time, single-use, 10-minute setup grant that leads into
+admin creation. That pair authorizes nothing else and stops working the
+moment a real admin account exists — afterwards it is an ordinary failed
+login, rate-limited and audited like any other. The operator may name the
+real admin `iris` too.
+
+This is a deliberate trade: a documented, unauthenticated default credential
+means whoever reaches a brand-new console first can claim the admin account.
+Complete setup immediately after deploying, and keep the console on a
+trusted network until you have.
+
 ## Secrets
 
 Server secret material is encrypted at rest with age recipients. Plaintext lives only in `/run/iris` while the container runs. Device enrollment tokens are short-lived and generated per device by the running server.
@@ -167,6 +182,12 @@ and the refusal reasons are in
 ## TLS and certificates
 
 The catalog and artifact server use HTTPS. The generated device installer installs the catalog certificate into the device trust path so the bootstrap and catalog calls can validate the server identity.
+
+The console's own certificate and key, imported through Settings → TLS &
+trust, get the same careful handling: an encrypted private key is decrypted
+with `openssl pkey`, its passphrase piped over stdin and never passed as an
+argument or written to a log, and the key is stored age-encrypted at rest
+either way.
 
 ## Device SSH host keys
 

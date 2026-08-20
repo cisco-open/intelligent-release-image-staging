@@ -96,9 +96,13 @@ its heartbeat:
 | `peers` | Connected peer count. |
 | `tier` | Link quality tier, `good` or `constrained`. |
 
-The sample schema is versioned and transport-independent by design; the server
-validates every field against its own policy state and drops anything
-malformed without ever failing the heartbeat.
+The sample is transport-independent by design — it rides inside the heartbeat
+only because that is the current carrier — and carries an explicit schema
+version (`v`), but that version is not yet forward-compatible: the server
+accepts only `v == 1` today and drops anything else the same way it drops any
+other malformed field, silently and without ever failing the heartbeat. A
+future `v2` agent talking to an older server would have every sample rejected
+until the server is upgraded.
 
 ### Cadence and tuning
 
@@ -182,8 +186,9 @@ heartbeat itself already costs.
 | OTLP egress | < 10 KB/s, LAN-side; per-device metrics safe to enable |
 | NIC | 1 GbE — sized by image seeding (~1–2 × image size per rollout wave), not telemetry |
 
-Scale-out telemetry ingestion is on the roadmap; the sample schema is
-versioned and transport-independent by design.
+Scale-out telemetry ingestion is on the roadmap; see
+[The live sample](#the-live-sample) for the schema's current version gate and
+what a future bump will require.
 
 ## Failure interpretation
 

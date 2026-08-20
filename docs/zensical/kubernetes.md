@@ -41,6 +41,11 @@ builder, so build them elsewhere (`tools/provision-iox-packages.sh`) and copy
 them in with `kubectl cp`. Guest Shell onboarding, including Catalyst 8000
 router VPG deployments, needs no staged package.
 
+Rebuild and re-copy those packages after any certificate rotation — each tar
+bakes the catalog CA in at build time, so a package built against an older
+certificate connects but never heartbeats; see
+[TLS rotation and IOx packages](operations.md#tls-rotation-and-iox-packages).
+
 The published console port shown on the Settings page follows `IRIS_CONSOLE_URL`
 when set (otherwise it defaults to the Service's `8080`); set it if you front
 the console on a different external port.
