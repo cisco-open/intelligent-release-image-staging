@@ -30,7 +30,8 @@ cp -R "$REPO/device/." "$OUT/device/"
 # tools
 mkdir -p "$OUT/tools"
 for f in get-aria2c.sh make-torrent.sh make-agent-bundle.sh \
-         gen-device-installers.sh apply-assignments.sh; do
+         gen-device-installers.sh apply-assignments.sh \
+         start-compose-server.sh; do
   cp "$REPO/tools/$f" "$OUT/tools/"
 done
 
@@ -47,7 +48,8 @@ mkdir -p "$OUT/fleet"
 cp "$REPO/fleet/README.md" "$REPO/fleet/devices.csv.example" \
    "$REPO/fleet/assignments.csv.example" "$REPO/fleet/iris-fleet.conf.example" "$OUT/fleet/"
 
-# bin placeholder (the binary itself is fetched by tools/get-aria2c.sh)
+# bin placeholder — aria2c is fetched by tools/get-aria2c.sh for the DEVICE
+# agent bundle; the server gets its own copy baked into the image at build time.
 mkdir -p "$OUT/bin"; : > "$OUT/bin/.gitkeep"
 
 # artifacts dir: ship it (empty) so it exists + is owned by the unpacking user BEFORE
