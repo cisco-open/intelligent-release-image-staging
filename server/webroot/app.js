@@ -175,7 +175,13 @@
     async function poll() {
       try {
         var r = await fetch('/api/images/jobs/' + jobId);
-        if (!r.ok) { next(); return; }
+        if (!r.ok) {
+          // A non-OK status (401 session gone, 404 job evicted/unknown) never
+          // heals — stop the poller and surface it in the row instead of
+          // spinning forever. Network blips (catch below) still retry.
+          ui.error('publish status unavailable (' + r.status + ')');
+          return;
+        }
         var j = await r.json();
         if (j.state === 'done') {
           ui.done('published ' + (j.image_id || '') + ' ✓');
@@ -512,10 +518,13 @@
       lines = lines.concat(String(text).split('\n')).slice(-MAX_LOG_LINES);
       if (!flushPending) { flushPending = true; requestAnimationFrame(flush); }
     }
+    // Tracks whether the job is still parked in the queue: log lines only
+    // exist once a job runs, so the first streamed message means it started.
+    var isQueued = !!queued;
     if (queued) append('(queued — waiting for a free install slot; the log streams once it starts)');
     var es = new EventSource('/api/onboard/jobs/' + encodeURIComponent(jobId) + '/stream');
     entry.es = es;
-    es.onmessage = function (e) { append(e.data); };
+    es.onmessage = function (e) { isQueued = false; append(e.data); };
     es.addEventListener('end', function (e) {
       append('— ' + e.data + ' —'); flush();
       es.close(); entry.es = null; abortBtn.hidden = true;
@@ -526,6 +535,17 @@
       if (!confirm('Abort this ' + action + ' of ' + deviceId + '?\n\nThis stops ' +
           'the running installer. The device may be left partially configured; ' +
           're-onboard (idempotent) or undeploy to clean up.')) return;
+      // A queued job has no registered process, so the abort route can only
+      // 409 — take it out of the queue instead, scoped to just this job
+      // (same endpoint the batch panel's cancel uses).
+      if (isQueued) {
+        var qr = await jpost('/api/onboard/cancel-queued', { job_ids: [jobId] });
+        if (!qr.ok) { append('[cancel failed (' + qr.status + ')]'); return; }
+        var cancelled = 0;
+        try { cancelled = (await qr.json()).cancelled || 0; } catch (e2) { }
+        if (cancelled) { append('[cancelled while queued]'); return; }
+        isQueued = false;   // won a slot between open and click: abort the running job
+      }
       var r = await jpost('/api/onboard/jobs/' + encodeURIComponent(jobId) + '/abort', {});
       append(r.ok ? '[abort requested]' : '[abort failed (' + r.status + ')]');
     });
@@ -583,7 +603,11 @@
       var cb = tr.querySelector('.mark');
       tr.classList.toggle('sel', !!(cb && cb.checked));
     });
-    if (n === 0) closeMenus();
+    // An empty selection closes the selection-scoped popovers — but never
+    // the header help popover: the 10s devices poll re-renders the (empty)
+    // table and lands here with n === 0, and yanking an open "?" panel out
+    // from under the operator reads as a broken control.
+    if (n === 0 && openMenuPanel && openMenuPanel.id !== 'help-pop') closeMenus();
   }
   document.getElementById('dev-rows').addEventListener('change', function (e) {
     if (e.target.classList.contains('mark')) updateSelBar();
@@ -1880,16 +1904,25 @@
     return jobBadge(l.state || 'done') +
       (l.rc == null ? '' : ' <span class="muted">rc=' + esc(l.rc) + '</span>');
   }
+  // Generation counter (same idiom as imageJobGen / caPollGen): two quick
+  // "view" clicks race their fetches, and without this the SLOWER response
+  // would paint the shared <pre> after the newer one — only the latest
+  // requested file may render.
+  var deployLogGen = 0;
   async function showDeployLog(file, pre) {
+    var gen = ++deployLogGen;
     pre.hidden = false;
     pre.textContent = 'Loading ' + file + '…';
     var r = null;
     try { r = await fetch('/api/deploy-logs/' + encodeURIComponent(file)); } catch (e) { }
+    if (gen !== deployLogGen) return;   // a newer view request superseded this one
     if (!r || !r.ok) {
       pre.textContent = 'Log unavailable' + (r ? ' (' + r.status + ')' : '') + '.';
       return;
     }
-    pre.textContent = await r.text();
+    var text = await r.text();
+    if (gen !== deployLogGen) return;
+    pre.textContent = text;
   }
   async function refreshDeployLogs() {
     var tbody = document.getElementById('dl-rows');

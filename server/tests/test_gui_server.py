@@ -2123,8 +2123,9 @@ def _serve_overview(tmp_path, swarm_fetch=None):
     # d1 finished staging (stage_state=ready); d3 is mid-download (staging); d2 never checked in
     cat.record_heartbeat("d1", {"current_image_id": "img1", "stage_state": "ready"}, now=10)
     cat.record_heartbeat("d3", {"current_image_id": "img1", "stage_state": "staging"}, now=11)
+    # clock injected just past the heartbeats, so both devices read as fresh
     srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, None, cat, None,
-                                 swarm_fetch, certfile=None)
+                                 swarm_fetch, certfile=None, now_fn=lambda: 100)
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return "127.0.0.1", port, srv.shutdown
@@ -2168,7 +2169,8 @@ def test_overview_staging_counts_only_heartbeating_stagers(tmp_path):
         fleet.upsert({"device_id": did, "device_ip": "10.0.0.%d" % (i + 1)})
         cat.set_policy(did, approved_image_id="img1")
     srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, None, cat,
-                                 None, None, certfile=None)
+                                 None, None, certfile=None,
+                                 now_fn=lambda: 100)   # heartbeats stay fresh
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
@@ -2189,6 +2191,40 @@ def test_overview_staging_counts_only_heartbeating_stagers(tmp_path):
                              headers={"Cookie": ck})[2])
         assert ov["staging_now"] == 2     # sw0 + sw1 only
         assert ov["staged"] == 1          # sw2: ready with its assigned image
+    finally:
+        srv.shutdown()
+
+
+def test_overview_staging_excludes_stale_and_error_devices(tmp_path):
+    """Regression: staging_now counted devices whose LAST heartbeat said
+    'staging' no matter how old it was — a device that died mid-stage read
+    as staging forever — and counted terminal stage_state=error rows too.
+    Only devices fresh within the UI's 600s offline horizon count, error is
+    out, but a retryable condition (flash_full) on a live agent still
+    counts."""
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
+    state = str(tmp_path / "state")
+    fleet = gui_fleet.FleetStore(state)
+    cat = catalog_mod.CatalogStore(state)
+    for did in ("fresh", "stale", "err", "flash"):
+        fleet.upsert({"device_id": did, "device_ip": "10.0.0.1"})
+    now = 10000
+    cat.record_heartbeat("fresh", {"stage_state": "staging"}, now=now - 30)
+    cat.record_heartbeat("stale", {"stage_state": "staging"}, now=now - 601)
+    cat.record_heartbeat("err", {"stage_state": "error"}, now=now - 30)
+    cat.record_heartbeat("flash", {"stage_state": "flash_full"}, now=now - 30)
+    srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, None, cat,
+                                 None, None, certfile=None,
+                                 now_fn=lambda: now)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        ck, _csrf = _auth("127.0.0.1", port)
+        ov = json.loads(_req("127.0.0.1", port, "GET", "/api/overview",
+                             headers={"Cookie": ck})[2])
+        # fresh + flash only: the stale stager is offline, error is terminal
+        assert ov["staging_now"] == 2
     finally:
         srv.shutdown()
 

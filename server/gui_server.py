@@ -42,6 +42,10 @@ COOKIE = "iris_sid"
 SWARMMAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "swarmmap.html")
 _IRIS_CERT_DEFAULT = "/run/iris/tls/cert.pem"
+# heartbeat freshness horizon (s): a device whose last_seen is older than
+# this is what the UI badges "offline" (app.js uses the same 600), so the
+# overview must not count it as actively staging
+_HEARTBEAT_FRESH = 600
 # GET /swarmmap swaps this exact placeholder line in the single-source
 # server/swarmmap.html for the console config line (the file on disk keeps
 # working standalone; only the served copy is rewritten):
@@ -516,7 +520,7 @@ def ca_trust_refresh_loop(stop_event, state_dir, audit_fn=None,
 
 def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=None,
                  onboard=None, swarm_fetch=None, certfile=None, audit_path=None,
-                 receipts=None):
+                 receipts=None, now_fn=time.time):
     login_limiter = gui_auth.LoginRateLimiter()
 
     class Handler(BaseHTTPRequestHandler):
@@ -1187,16 +1191,22 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             assigned_total = sum(r["assigned"] for r in rollout)
             staged_total = sum(r["staged"] for r in rollout)
             # "Staging" must mean devices ACTUALLY staging: enrolled (their
-            # agent heartbeats) and reporting a non-terminal stage_state.
-            # The old assigned-minus-staged arithmetic counted inventory
-            # rows that never heartbeated, so an idle install with 6 fleet
-            # rows read "6 staging". ready (seeding) and unassigned agents
-            # are not staging either — ready feeds the staged count above.
+            # agent heartbeats), FRESH (last_seen inside the same 600s the
+            # UI uses for its "offline" badge — a device that died mid-stage
+            # is offline, not staging), and reporting a non-terminal
+            # stage_state. The old assigned-minus-staged arithmetic counted
+            # inventory rows that never heartbeated, so an idle install with
+            # 6 fleet rows read "6 staging". ready (seeding) and unassigned
+            # agents are not staging either — ready feeds the staged count
+            # above — and error is terminal (flash_full etc. still count:
+            # the agent is alive and retrying).
+            now = now_fn()
             staging_now = sum(
                 1 for row in rows
                 if row.get("last_seen") is not None
+                and (now - row["last_seen"]) < _HEARTBEAT_FRESH
                 and row.get("stage_state") not in (None, "", "unassigned",
-                                                   "ready"))
+                                                   "ready", "error"))
             # devices freshly onboarded whose agent hasn't heartbeated yet —
             # surfaced so an operator doesn't read the gap as "undeployed"
             awaiting = sum(1 for row in rows
@@ -1625,12 +1635,16 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     self._json(400, {"error": err}); return
                 spath = audit_export.settings_path(
                     os.environ.get("IRIS_STATE", "/var/lib/iris"))
-                prev = audit_export.read_settings(spath)
-                # the destination changed, not the run history: keep it
-                candidate["last_run_ts"] = prev["last_run_ts"]
-                candidate["last_result"] = prev["last_result"]
                 try:
-                    audit_export.write_settings(spath, candidate)
+                    # the settings lock covers the whole read-modify-write:
+                    # an export finishing mid-save (_record_result) must not
+                    # clobber this edit, nor this edit its result
+                    with audit_export.SETTINGS_LOCK:
+                        prev = audit_export.read_settings(spath)
+                        # the destination changed, not the run history: keep it
+                        candidate["last_run_ts"] = prev["last_run_ts"]
+                        candidate["last_result"] = prev["last_result"]
+                        audit_export.write_settings(spath, candidate)
                     if password:    # absent/empty keeps the stored password
                         creds.set_audit_export_secret(password)
                 except Exception as exc:
@@ -2297,9 +2311,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             if path == "/api/settings/audit-export" and creds is not None:
                 spath = audit_export.settings_path(
                     os.environ.get("IRIS_STATE", "/var/lib/iris"))
-                prev = audit_export.read_settings(spath)
-                existed = os.path.exists(spath)
-                audit_export.clear_settings(spath)
+                # under the settings lock so an export finishing mid-delete
+                # (_record_result) cannot resurrect the file we just removed
+                with audit_export.SETTINGS_LOCK:
+                    prev = audit_export.read_settings(spath)
+                    existed = os.path.exists(spath)
+                    audit_export.clear_settings(spath)
                 deleted = creds.clear_audit_export_secret() or existed
                 self._audit("audit_export_config", "settings", action="clear",
                            target="audit-export", actor=actor,

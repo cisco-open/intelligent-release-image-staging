@@ -52,6 +52,12 @@ _DEFAULTS = {"host": "", "port": 22, "user": "", "path": "",
              "age_recipient": "", "auto": False,
              "last_run_ts": None, "last_result": None}
 
+# Serializes every read-modify-write of the settings file, here AND in the
+# gui_server config routes (POST save / DELETE clear import it): without it a
+# _record_result landing mid-save (an export takes up to ~150s) could lose the
+# operator's edit -- or resurrect a file a DELETE just removed.
+SETTINGS_LOCK = threading.Lock()
+
 
 def settings_path(state_dir):
     return os.path.join(state_dir, BASENAME)
@@ -165,13 +171,20 @@ def _stderr_snippet(raw):
 
 def _record_result(spath, ok, detail, now_fn):
     """Best-effort last_run_ts/last_result update on the settings file so the
-    console status line always reflects the latest attempt. Never raises."""
+    console status line always reflects the latest attempt. Never raises.
+    Takes SETTINGS_LOCK (the config routes hold it too), and if the settings
+    file is gone -- the operator DELETEd the config mid-export -- the result
+    is dropped rather than resurrecting the file with defaults."""
     try:
-        current = read_settings(spath)
-        current["last_run_ts"] = int(now_fn())
-        current["last_result"] = ("ok:%s" % detail if ok
-                                  else "fail:%s" % detail[:_FAIL_DETAIL_MAX])
-        write_settings(spath, current)
+        with SETTINGS_LOCK:
+            if not os.path.exists(spath):
+                return
+            current = read_settings(spath)
+            current["last_run_ts"] = int(now_fn())
+            current["last_result"] = ("ok:%s" % detail if ok
+                                      else "fail:%s"
+                                           % detail[:_FAIL_DETAIL_MAX])
+            write_settings(spath, current)
     except Exception:
         pass
 
@@ -192,8 +205,12 @@ def _run_export(audit_path, settings, password, state_dir, now_fn):
             data = f.read()
     except (OSError, TypeError):
         data = b""
-    filename = "audit-%s.jsonl.age" % time.strftime("%Y%m%d-%H%M%S",
-                                                    time.gmtime(now_fn()))
+    # timestamp for the operator, short random suffix so two exports in the
+    # same UTC second (manual run racing the scheduler) can't silently
+    # overwrite each other at the destination
+    filename = "audit-%s-%s.jsonl.age" % (
+        time.strftime("%Y%m%d-%H%M%S", time.gmtime(now_fn())),
+        secrets.token_hex(3))
     age_bin = os.environ.get("IRIS_AGE_BIN", "age")
     with tempfile.TemporaryDirectory(prefix="audit-export-") as tmpdir:
         enc_path = os.path.join(tmpdir, filename)
@@ -267,9 +284,18 @@ def start_export(audit_path, settings, password, state_dir, audit_fn=None,
         _JOBS[job_id] = job
 
     def run():
-        ok, detail = (export_fn or export_once)(audit_path, settings,
-                                                password, state_dir,
-                                                now_fn=now_fn)
+        try:
+            ok, detail = (export_fn or export_once)(audit_path, settings,
+                                                    password, state_dir,
+                                                    now_fn=now_fn)
+        except Exception as exc:
+            # A raising export fn (tempfile.TemporaryDirectory on a full
+            # /tmp, say) must not strand the job at state=running forever --
+            # TTL eviction only looks at finished_at. Treat it as any other
+            # failed attempt (the export_loop posture): last_result moves,
+            # the audit trail gets its fail line, the job turns terminal.
+            ok, detail = False, "export failed: %s" % exc
+            _record_result(settings_path(state_dir), ok, detail, now_fn)
         if audit_fn is not None:
             try:
                 audit_fn(result="ok" if ok else "fail", detail=detail)

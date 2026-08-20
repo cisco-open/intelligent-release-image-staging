@@ -117,6 +117,9 @@ def test_validate_settings_rejects_dangerous_values():
 
 def test_export_once_refuses_without_recipient(tmp_path):
     # encryption is mandatory: no recipient means no export, full stop
+    audit_export.write_settings(
+        audit_export.settings_path(str(tmp_path)),
+        _valid_settings(age_recipient=""))
     ok, detail = audit_export.export_once(
         str(tmp_path / "audit.jsonl"), _valid_settings(age_recipient=""),
         "pw", str(tmp_path))
@@ -152,14 +155,17 @@ def test_export_once_ok_with_fake_subprocess(tmp_path, monkeypatch):
 
     monkeypatch.setattr(audit_export.subprocess, "run", fake_run)
     settings = _valid_settings(port=2022)
+    audit_export.write_settings(
+        audit_export.settings_path(str(tmp_path)), settings)
     ok, detail = audit_export.export_once(
         str(audit_file), settings, "scp-pw", str(tmp_path),
         now_fn=lambda: 1755640000.0)
     assert ok is True
-    # filename shape: audit-<UTCyyyymmdd-HHMMSS>.jsonl.age, from now_fn
-    assert re.match(r"^audit-\d{8}-\d{6}\.jsonl\.age$", detail)
-    assert detail == "audit-%s.jsonl.age" % time.strftime(
-        "%Y%m%d-%H%M%S", time.gmtime(1755640000.0))
+    # filename shape: audit-<UTCyyyymmdd-HHMMSS>-<random>.jsonl.age -- the
+    # timestamp from now_fn, plus a suffix so same-second runs never collide
+    assert re.match(r"^audit-\d{8}-\d{6}-[0-9a-f]{6}\.jsonl\.age$", detail)
+    assert detail.startswith("audit-%s-" % time.strftime(
+        "%Y%m%d-%H%M%S", time.gmtime(1755640000.0)))
     age_call, scp_call = calls
     assert age_call["argv"][0] == "age"
     assert age_call["argv"][1:3] == ["-r", settings["age_recipient"]]
@@ -198,6 +204,8 @@ def test_export_once_scp_failure_records_capped_detail(tmp_path, monkeypatch):
         return p
 
     monkeypatch.setattr(audit_export.subprocess, "run", fake_run)
+    audit_export.write_settings(
+        audit_export.settings_path(str(tmp_path)), _valid_settings())
     ok, detail = audit_export.export_once(
         str(tmp_path / "audit.jsonl"), _valid_settings(), "pw", str(tmp_path))
     assert ok is False and "Connection refused" in detail
@@ -254,6 +262,92 @@ def test_export_once_missing_binary_is_a_clean_failure(tmp_path, monkeypatch):
     assert ok is False and "age failed to start" in detail
 
 
+def test_export_filenames_unique_within_a_second(tmp_path, monkeypatch):
+    """Regression: two exports in the same UTC second (a manual run racing
+    the daily scheduler) used to produce the SAME destination filename, so
+    the second upload silently overwrote the first at the backup host."""
+    def fake_run(argv, input=None, capture_output=None, timeout=None, env=None):
+        if argv[0] != "sshpass":
+            with open(argv[argv.index("-o") + 1], "wb") as f:
+                f.write(b"agedata")
+
+        class _Proc:
+            returncode = 0
+            stderr = b""
+        return _Proc()
+
+    monkeypatch.setattr(audit_export.subprocess, "run", fake_run)
+    audit_export.write_settings(
+        audit_export.settings_path(str(tmp_path)), _valid_settings())
+    names = set()
+    for _ in range(2):
+        ok, detail = audit_export.export_once(
+            str(tmp_path / "audit.jsonl"), _valid_settings(), "pw",
+            str(tmp_path), now_fn=lambda: 1755640000.0)   # frozen second
+        assert ok is True
+        assert re.match(r"^audit-\d{8}-\d{6}-[0-9a-f]{6}\.jsonl\.age$", detail)
+        names.add(detail)
+    assert len(names) == 2
+
+
+# ---- _record_result vs the config routes (shared settings lock) -----------
+
+def test_record_result_drops_when_settings_deleted_mid_export(tmp_path):
+    """Regression: a DELETE landing during a long (~150s) export must stand.
+    The finishing export's _record_result used to do an unlocked
+    read-modify-write, resurrecting the just-removed settings file with
+    defaults plus a stale status line."""
+    spath = audit_export.settings_path(str(tmp_path))
+    audit_export.write_settings(spath, _valid_settings())
+    audit_export.clear_settings(spath)      # the operator's DELETE mid-export
+    ok, _detail = audit_export.export_once(
+        str(tmp_path / "audit.jsonl"), _valid_settings(age_recipient=""),
+        "pw", str(tmp_path))
+    assert ok is False
+    assert not os.path.exists(spath)        # the delete stands: no file back
+
+
+def test_record_result_serializes_with_settings_saves(tmp_path, monkeypatch):
+    """A console save landing while _record_result is mid read-modify-write
+    must wait on SETTINGS_LOCK (the gui_server routes hold the same lock) --
+    and afterwards BOTH writes survive: the save's destination edit and the
+    record's last_result."""
+    spath = audit_export.settings_path(str(tmp_path))
+    audit_export.write_settings(spath, _valid_settings())
+    entered, release = threading.Event(), threading.Event()
+    real_read = audit_export.read_settings
+
+    def slow_read(path):        # holds _record_result's critical section open
+        out = real_read(path)
+        entered.set()
+        release.wait(3.0)
+        return out
+
+    monkeypatch.setattr(audit_export, "read_settings", slow_read)
+    rec = threading.Thread(
+        target=audit_export._record_result,
+        args=(spath, True, "audit-x.jsonl.age", time.time), daemon=True)
+    rec.start()
+    assert entered.wait(3.0)
+    saved = threading.Event()
+
+    def save():                 # the POST route's locked read-modify-write
+        with audit_export.SETTINGS_LOCK:
+            cur = real_read(spath)
+            cur["host"] = "other.example.com"
+            audit_export.write_settings(spath, cur)
+        saved.set()
+
+    threading.Thread(target=save, daemon=True).start()
+    assert not saved.wait(0.2)              # blocked behind the record
+    release.set()
+    assert saved.wait(3.0)
+    rec.join(3.0)
+    got = real_read(spath)
+    assert got["host"] == "other.example.com"           # the save survived
+    assert got["last_result"] == "ok:audit-x.jsonl.age"  # and so did the record
+
+
 # ---- start_export / get_job (one-shot job table) --------------------------
 
 def _wait_job(job_id, timeout=3.0):
@@ -295,6 +389,41 @@ def test_start_export_survives_a_raising_audit_fn(tmp_path):
         str(tmp_path / "a.jsonl"), _valid_settings(), "pw", str(tmp_path),
         audit_fn=bad_audit, export_fn=lambda *a, **k: (True, "f"))
     assert _wait_job(jid)["state"] == "done"
+
+
+def test_start_export_raising_export_fn_turns_terminal(tmp_path):
+    """Regression: an export fn that RAISED (tempfile.TemporaryDirectory on
+    a full /tmp, say) killed the worker thread, stranding the job at
+    state=running with finished_at=None FOREVER -- TTL eviction only looks
+    at finished_at -- and neither the audit trail nor last_result ever
+    showed the attempt."""
+    audit_export.write_settings(
+        audit_export.settings_path(str(tmp_path)), _valid_settings())
+    audits = []
+
+    def boom(*a, **k):
+        raise OSError("no space left on device")
+
+    jid = audit_export.start_export(
+        str(tmp_path / "a.jsonl"), _valid_settings(), "pw", str(tmp_path),
+        audit_fn=lambda **kw: audits.append(kw), export_fn=boom)
+    job = _wait_job(jid)                    # polls until done/error
+    assert job["state"] == "error"
+    assert "no space left on device" in job["detail"]
+    # the fail audit fired, and last_result moved, just like a (False, ...)
+    assert audits == [{"result": "fail", "detail": job["detail"]}]
+    got = audit_export.read_settings(audit_export.settings_path(str(tmp_path)))
+    assert got["last_result"].startswith("fail:export failed:")
+    with audit_export._JOBS_LOCK:
+        assert audit_export._JOBS[jid]["finished_at"] is not None
+        # age the terminal job past the TTL: the next start must evict it
+        audit_export._JOBS[jid]["finished_at"] = \
+            time.time() - audit_export._JOB_TTL - 1
+    jid2 = audit_export.start_export(
+        str(tmp_path / "a.jsonl"), _valid_settings(), "pw", str(tmp_path),
+        export_fn=lambda *a, **k: (True, "f"))
+    assert audit_export.get_job(jid) is None        # evicted, not immortal
+    _wait_job(jid2)
 
 
 # ---- export_loop (daily scheduler) ----------------------------------------
