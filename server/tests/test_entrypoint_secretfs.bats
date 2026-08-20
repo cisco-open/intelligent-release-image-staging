@@ -289,3 +289,12 @@ gen_ec_pair() {
   [ ! -f "$TMP/run/tls/gui-cert.pem" ]
   [ ! -f "$TMP/run/tls/gui-key.pem" ]
 }
+
+@test "entrypoint unseals via the shared secretfs.decrypt_to, not an inline reimplementation" {
+  # Anti-drift guard, ported from the deleted test_systemd_units.bats. The
+  # entrypoint must route decryption through server/secretfs.py so there is one
+  # implementation of the at-rest format, not two that can diverge.
+  local entrypoint="$BATS_TEST_DIRNAME/../docker-entrypoint.sh"
+  grep -q 'import secretfs' "$entrypoint"
+  grep -q 'secretfs\.decrypt_to(' "$entrypoint"
+}
