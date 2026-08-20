@@ -4,8 +4,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# Build and exec the aria2c seeder for IRIS. systemd runs this in the
-# foreground (Type=simple). RPC is enabled so iris-publish can add new torrents
+# Build and exec the aria2c seeder for IRIS. The container entrypoint runs this
+# in the foreground. RPC is enabled so iris-publish can add new torrents
 # live; every torrent already in the state dir is (re)seeded at startup.
 # Private swarm: DHT / PEX / LPD all OFF.
 set -euo pipefail
@@ -20,8 +20,10 @@ IMAGES_DIR="${IMAGES_DIR:-/opt/images/iosxe/c9300}"
 RPC_PORT="${RPC_PORT:-6800}"
 ARIA2="${ARIA2:-$IRIS_ROOT/bin/aria2c}"
 
-# Plaintext rpc-secret lives in tmpfs (decrypted at entrypoint); fall back to
-# the legacy volume path only when the broker env var is unset (bare-metal).
+# Plaintext rpc-secret lives in tmpfs (decrypted at entrypoint). The volume-path
+# fallback below is legacy and unreached in practice: the entrypoint always sets
+# IRIS_RPC_SECRET_FILE. Left in place deliberately — removing it would force a
+# rewrite of test_seed_launch.bats for no behavior change.
 RPC_SECRET_FILE="${IRIS_RPC_SECRET_FILE:-$IRIS_CONFIG/rpc-secret}"
 RPC_SECRET="$(cat "$RPC_SECRET_FILE" 2>/dev/null)" \
   || { echo "FATAL: rpc-secret missing or unreadable: $RPC_SECRET_FILE" >&2; exit 1; }
@@ -30,7 +32,7 @@ if [ -z "$RPC_SECRET" ]; then
   exit 1
 fi
 # SEEDER_LOG=- sends the log to stdout (the container does this so docker's
-# json-file rotation caps it); bare-metal keeps the file + logrotate.d policy.
+# json-file rotation caps it).
 LOGFILE="${SEEDER_LOG:-$IRIS_LOG/seeder.log}"
 # Pin the BT data port (so docker can publish it) and, in the container, tell the
 # tracker our EXTERNAL address — otherwise peers are handed the container's

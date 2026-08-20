@@ -259,9 +259,8 @@ gen_ec_pair() {
 }
 
 @test "entrypoint sweeps a stale runtime CA bundle when the trust dir is empty" {
-  # mirrors the equivalent iris-secretfs test — RuntimeDirectoryPreserve-style
-  # staleness applies to the container's tmpfs too if the trust dir is emptied
-  # between restarts.
+  # A stale runtime bundle can survive a restart if the trust dir was emptied
+  # in between; the entrypoint must sweep it rather than serve stale trust.
   printf 'AGE-SECRET-KEY-FAKE\n' > "$TMP/agekey"
   mkdir -p "$TMP/run/tls"
   printf 'stale-ca\n' > "$TMP/run/tls/ca-bundle.pem"

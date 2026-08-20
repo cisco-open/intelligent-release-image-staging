@@ -11,7 +11,7 @@ certificates are public material, like crt.pem) plus gui-key.pem.age
 (age-encrypted to the same IRIS_AGE_RECIPIENTS the secrets store uses;
 plaintext keys never touch the volume). The serving copy is the combined
 cert(+chain)+key file at IRIS_GUI_CERT (default /run/iris/tls/gui-cert.pem,
-tmpfs, 0600) — the same shape docker-entrypoint.sh / iris-secretfs rebuild
+tmpfs, 0600) — the same shape docker-entrypoint.sh rebuilds
 from the durable pair at boot. Persistence is durable-FIRST with rollback,
 mirroring secretfs.persist_store: a failed runtime commit rolls the durable
 pair back, so a restart can never materialise an upload that was reported

@@ -6,16 +6,12 @@
 
 # One-shot, idempotent bootstrap for the IRIS secrets broker.
 # Creates the initial encrypted secret material on the iris-config volume so
-# docker-entrypoint.sh / install.sh can start without pre-existing .age files.
+# docker-entrypoint.sh can start without pre-existing .age files.
 #
 # Designed to run INSIDE the iris image (which has age, age-keygen if available,
 # openssl, python3, and the secretfs/secrets_store modules) as a one-shot:
 #
 #   docker compose run --rm iris iris-bootstrap
-#
-# or bare-metal:
-#
-#   IRIS_HOST_IP=10.0.0.5 IRIS_CONFIG=/etc/iris iris-bootstrap
 #
 # Idempotent: existing .age files are NOT overwritten unless --force is given.
 # Plaintext is written to a tmpfs (TMPDIR or /dev/shm or /tmp) and wiped

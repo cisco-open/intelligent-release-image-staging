@@ -334,8 +334,8 @@ def test_sample_aria2_restart_rebaselines_without_misattribution():
 
 
 def test_sample_first_sighting_baselines_historical_upload():
-    # Telemetry (re)starting while aria2 has been seeding for days (separate
-    # processes in bare-metal deploys): the counter's history is
+    # Telemetry (re)starting while aria2 has been seeding for days: the
+    # counter's history is
     # unattributable and must NOT be dumped onto whoever is connected at that
     # moment. Baseline only; nothing distributed.
     upload_len = {"abc": 5_000_000_000}

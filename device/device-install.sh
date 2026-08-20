@@ -275,8 +275,8 @@ if [ "${IRIS_STAGE_LOCAL:-0}" = "1" ] || ip -o addr 2>/dev/null | grep -qw "$STA
   agent_conf > "$ART/staging/$CONF"
   printf '%s\n' "$RPC_SECRET" > "$ART/staging/rpc-secret"
   # static served files are normally provisioned at container startup by
-  # server/provision-served.sh (or by tools/make-agent-bundle.sh on bare
-  # metal); the copy-if-absent is a fallback for bare-metal runs only.
+  # server/provision-served.sh (or by tools/make-agent-bundle.sh); the
+  # copy-if-absent below also covers CLI runs from a stage host.
   [ -e "$ART/bootstrap.sh" ]     || cp "$HERE/bootstrap.sh" "$ART/bootstrap.sh"
   [ -e "$ART/iris-catalog.pem" ] || cp "$IRIS_CRT_FILE" "$ART/iris-catalog.pem"
 else

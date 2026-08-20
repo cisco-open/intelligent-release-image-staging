@@ -70,6 +70,6 @@ Each source file must carry, after any shebang line:
 
 Copy that block verbatim into any new source file (adjusting the comment
 character to match the file's syntax). Non-source assets and files that can't
-carry an inline comment header — for example IOS-XE EEM `.cfg` applets and
-systemd `.service` units — are left unannotated; they inherit the repository's
+carry an inline comment header — for example IOS-XE EEM `.cfg` applets — are
+left unannotated; they inherit the repository's
 Apache-2.0 license.
