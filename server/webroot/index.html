@@ -162,76 +162,87 @@
       </section>
       <section id="view-settings" hidden>
         <h2>Settings</h2>
-        <h3>Server &amp; build</h3>
-        <table class="tbl" id="settings-info"><tbody></tbody></table>
-        <h3>Change admin password</h3>
-        <form class="inline-form" id="pw-form">
-          <input id="pw-cur" type="password" placeholder="Current password" autocomplete="current-password">
-          <input id="pw-new" type="password" placeholder="New password (min 8)" autocomplete="new-password">
-          <input id="pw-confirm" type="password" placeholder="Confirm new password" autocomplete="new-password">
-          <button class="btn" type="submit">Change password</button>
-          <span class="err" id="pw-msg"></span>
-        </form>
-        <h3>Stage host (Docker onboarding)</h3>
-        <p class="muted" id="sh-status"></p>
-        <form class="inline-form" id="sh-form">
-          <input id="sh-user" placeholder="Stage host username" autocomplete="username">
-          <input id="sh-pass" type="password" placeholder="Stage host password" autocomplete="new-password">
-          <input id="sh-pass2" type="password" placeholder="Confirm password" autocomplete="new-password">
-          <button class="btn" type="submit">Save</button>
-          <button class="btn ghost" type="button" id="sh-clear">Clear</button>
-          <span class="err" id="sh-msg"></span>
-        </form>
-        <h3>Certificate</h3>
-        <p class="muted">Serves the console only — the device-facing catalog and
-          artifact certificates are untouched, so enrolled devices keep working.
-          The private key is stored age-encrypted and never shown again.</p>
-        <p class="muted" id="cert-status"></p>
-        <form class="inline-form" id="cert-form">
-          <textarea id="cert-pem" rows="4" spellcheck="false" placeholder="Certificate PEM — leaf or full chain (-----BEGIN CERTIFICATE-----)"></textarea>
-          <textarea id="cert-key" rows="4" spellcheck="false" placeholder="Private key PEM (-----BEGIN PRIVATE KEY-----)"></textarea>
-          <button class="btn" type="submit">Replace certificate</button>
-          <button class="linkish danger-link" type="button" id="cert-revert" hidden>Use built-in certificate</button>
-          <span class="err" id="cert-msg"></span>
-        </form>
-        <h3>Trusted CAs</h3>
-        <p class="muted">Root CAs trusted by outbound TLS (telemetry export, CA
-          bundle download) in addition to the system store.</p>
-        <table class="tbl" id="trust-tbl">
-          <thead><tr><th>Subject</th><th>Expires</th><th>SHA-256</th><th>Source</th><th>Certs</th><th></th></tr></thead>
-          <tbody id="trust-rows"></tbody>
-        </table>
-        <form class="inline-form" id="trust-form">
-          <textarea id="trust-pem" rows="4" spellcheck="false" placeholder="CA certificate PEM — one or more -----BEGIN CERTIFICATE----- blocks"></textarea>
-          <button class="btn" type="submit">Add CA</button>
-          <span class="err" id="trust-msg"></span>
-        </form>
-        <p class="muted">Optional public CA bundle: Download now fetches the
-          https:// URL below (Cisco's Trusted Root Store by default); enable the
-          daily auto-refresh to keep it current. A failed download never replaces
-          the previous bundle.</p>
-        <form class="inline-form" id="ca-form">
-          <input id="ca-url" placeholder="Public CA bundle URL (https://…)">
-          <label class="muted"><input type="checkbox" id="ca-auto"> Refresh daily</label>
-          <button class="btn ghost" type="submit">Save</button>
-          <button class="btn ghost" type="button" id="ca-refresh">Download now</button>
-          <span class="err" id="ca-msg"></span>
-        </form>
-        <h3>Telemetry destination</h3>
-        <p class="muted" id="td-status"></p>
-        <form class="inline-form" id="td-form">
-          <input id="td-endpoint" placeholder="OTLP endpoint (https://collector:4318)">
-          <label class="muted"><input type="checkbox" id="td-enabled"> Export enabled</label>
-          <button class="btn" type="submit">Save</button>
-          <button class="linkish danger-link" type="button" id="td-revert" hidden>Revert to deployment default</button>
-          <span class="err" id="td-msg"></span>
-        </form>
-        <h3>Sessions</h3>
-        <p class="muted" id="sessions-info"></p>
-        <p>
-          <button class="btn ghost" id="revoke-others">Sign out other sessions</button>
-          <span class="muted" id="revoke-msg"></span>
-        </p>
+        <div class="settings-tabs">
+          <button class="settings-tab active" type="button" id="settings-tab-general">General</button>
+          <button class="settings-tab" type="button" id="settings-tab-tls">TLS &amp; trust</button>
+          <button class="settings-tab" type="button" id="settings-tab-telemetry">Telemetry</button>
+        </div>
+        <div id="settings-pane-general">
+          <h3>Server &amp; build</h3>
+          <table class="tbl" id="settings-info"><tbody></tbody></table>
+          <h3>Change admin password</h3>
+          <form class="inline-form" id="pw-form">
+            <input id="pw-cur" type="password" placeholder="Current password" autocomplete="current-password">
+            <input id="pw-new" type="password" placeholder="New password (min 8)" autocomplete="new-password">
+            <input id="pw-confirm" type="password" placeholder="Confirm new password" autocomplete="new-password">
+            <button class="btn" type="submit">Change password</button>
+            <span class="err" id="pw-msg"></span>
+          </form>
+          <h3>Stage host (Docker onboarding)</h3>
+          <p class="muted" id="sh-status"></p>
+          <form class="inline-form" id="sh-form">
+            <input id="sh-user" placeholder="Stage host username" autocomplete="username">
+            <input id="sh-pass" type="password" placeholder="Stage host password" autocomplete="new-password">
+            <input id="sh-pass2" type="password" placeholder="Confirm password" autocomplete="new-password">
+            <button class="btn" type="submit">Save</button>
+            <button class="btn ghost" type="button" id="sh-clear">Clear</button>
+            <span class="err" id="sh-msg"></span>
+          </form>
+          <h3>Sessions</h3>
+          <p class="muted" id="sessions-info"></p>
+          <p>
+            <button class="btn ghost" id="revoke-others">Sign out other sessions</button>
+            <span class="muted" id="revoke-msg"></span>
+          </p>
+        </div>
+        <div id="settings-pane-tls" hidden>
+          <h3>Certificate</h3>
+          <p class="muted">Serves the console only — the device-facing catalog and
+            artifact certificates are untouched, so enrolled devices keep working.
+            The private key is stored age-encrypted and never shown again.</p>
+          <p class="muted" id="cert-status"></p>
+          <form class="inline-form" id="cert-form">
+            <textarea id="cert-pem" rows="4" spellcheck="false" placeholder="Certificate PEM — leaf or full chain (-----BEGIN CERTIFICATE-----)"></textarea>
+            <textarea id="cert-key" rows="4" spellcheck="false" placeholder="Private key PEM (-----BEGIN PRIVATE KEY-----)"></textarea>
+            <button class="btn" type="submit">Replace certificate</button>
+            <button class="linkish danger-link" type="button" id="cert-revert" hidden>Use built-in certificate</button>
+            <span class="err" id="cert-msg"></span>
+          </form>
+          <h3>Trusted CAs</h3>
+          <p class="muted">Root CAs trusted by outbound TLS (telemetry export, CA
+            bundle download) in addition to the system store.</p>
+          <table class="tbl" id="trust-tbl">
+            <thead><tr><th>Subject</th><th>Expires</th><th>SHA-256</th><th>Source</th><th>Certs</th><th></th></tr></thead>
+            <tbody id="trust-rows"></tbody>
+          </table>
+          <form class="inline-form" id="trust-form">
+            <textarea id="trust-pem" rows="4" spellcheck="false" placeholder="CA certificate PEM — one or more -----BEGIN CERTIFICATE----- blocks"></textarea>
+            <button class="btn" type="submit">Add CA</button>
+            <span class="err" id="trust-msg"></span>
+          </form>
+          <p class="muted">Optional public CA bundle: Download now fetches the
+            https:// URL below (Cisco's Trusted Root Store by default); enable the
+            daily auto-refresh to keep it current. A failed download never replaces
+            the previous bundle.</p>
+          <form class="inline-form" id="ca-form">
+            <input id="ca-url" placeholder="Public CA bundle URL (https://…)">
+            <label class="muted"><input type="checkbox" id="ca-auto"> Refresh daily</label>
+            <button class="btn ghost" type="submit">Save</button>
+            <button class="btn ghost" type="button" id="ca-refresh">Download now</button>
+            <span class="err" id="ca-msg"></span>
+          </form>
+        </div>
+        <div id="settings-pane-telemetry" hidden>
+          <h3>Telemetry destination</h3>
+          <p class="muted" id="td-status"></p>
+          <form class="inline-form" id="td-form">
+            <input id="td-endpoint" placeholder="OTLP endpoint (https://collector:4318)">
+            <label class="muted"><input type="checkbox" id="td-enabled"> Export enabled</label>
+            <button class="btn" type="submit">Save</button>
+            <button class="linkish danger-link" type="button" id="td-revert" hidden>Revert to deployment default</button>
+            <span class="err" id="td-msg"></span>
+          </form>
+        </div>
       </section>
       <section id="view-monitoring" hidden>
         <h2>Monitoring <span id="telemetry-health" class="badge badge-queued" hidden></span></h2>

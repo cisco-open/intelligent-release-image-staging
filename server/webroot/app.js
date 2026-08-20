@@ -1056,6 +1056,22 @@
     refreshSettings();
   });
 
+  // ---- Settings: sub-page tabs (General / TLS & trust / Telemetry) ----
+  // refreshSettings() above always populates all panes' ids regardless of
+  // which is visible, so switching tabs is pure class/hidden toggling.
+  var SETTINGS_TABS = ['general', 'tls', 'telemetry'];
+  function showSettingsTab(tab) {
+    SETTINGS_TABS.forEach(function (t) {
+      document.getElementById('settings-pane-' + t).hidden = t !== tab;
+      document.getElementById('settings-tab-' + t).classList.toggle('active', t === tab);
+    });
+  }
+  SETTINGS_TABS.forEach(function (t) {
+    document.getElementById('settings-tab-' + t).addEventListener('click', function () {
+      showSettingsTab(t);
+    });
+  });
+
   // ---- Monitoring (audit trail + draggable time brush) ----
   var auditOldestTs = null;
   // Preset ranges: window in seconds + bucket count (server-side retention

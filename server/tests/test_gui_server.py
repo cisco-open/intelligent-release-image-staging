@@ -440,6 +440,38 @@ def test_settings_tls_trust_and_destination_sections_wired():
     assert ".inline-form textarea" in css
 
 
+def test_settings_split_into_tabbed_subpages():
+    """Source guard for the Settings-view restructure: the eight stacked
+    sections are grouped into three sub-pages (General / TLS & trust /
+    Telemetry) switched by a tab bar, so the operator isn't staring at one
+    long undifferentiated column. Panes are siblings inside #view-settings,
+    toggled with the `hidden` attribute — no routing/sidebar changes."""
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    settings = html.split('id="view-settings"')[1].split("</section>")[0]
+    for tab_id in ("settings-tab-general", "settings-tab-tls", "settings-tab-telemetry"):
+        assert ('id="%s"' % tab_id) in settings, tab_id
+    for pane_id in ("settings-pane-general", "settings-pane-tls", "settings-pane-telemetry"):
+        assert ('id="%s"' % pane_id) in settings, pane_id
+    # exactly one pane is visible in the static markup: General (the default)
+    hidden_panes = [p for p in ("settings-pane-general", "settings-pane-tls",
+                                 "settings-pane-telemetry")
+                    if ('id="%s" hidden' % p) in settings]
+    assert hidden_panes == ["settings-pane-tls", "settings-pane-telemetry"]
+    assert 'id="settings-pane-general" hidden' not in settings
+
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    # app.js builds the six ids by concatenation ('settings-pane-' + t) rather
+    # than spelling each one out, so assert the prefixes plus the tab-name
+    # array that drives the concatenation (mirrors the orphan guard's own
+    # getElementById/querySelector extraction, which only catches literals).
+    assert "'settings-pane-' + t" in js
+    assert "'settings-tab-' + t" in js
+    assert re.search(
+        r"SETTINGS_TABS\s*=\s*\[\s*'general'\s*,\s*'tls'\s*,\s*'telemetry'\s*\]", js)
+
+
 def test_read_version_env_handling(monkeypatch):
     monkeypatch.setenv("IRIS_VERSION", " 2026.07.02\n")
     assert gui_server._read_version() == "2026.07.02"
