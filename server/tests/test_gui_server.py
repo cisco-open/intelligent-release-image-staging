@@ -2140,11 +2140,57 @@ def test_overview_aggregates(tmp_path):
         ov = json.loads(b)
         assert ov["images"] == 1 and ov["devices"] == 3
         assert ov["assigned"] == 3 and ov["staged"] == 1   # only d1 (ready) counts
-        assert ov["staging_now"] == 2                       # d2 + d3 not yet staged
+        # only d3 is ACTUALLY staging (heartbeating, stage_state=staging);
+        # d2 never checked in — an inventory row is not a staging device
+        assert ov["staging_now"] == 1
         r = [x for x in ov["rollout"] if x["image_id"] == "img1"][0]
         assert r["assigned"] == 3 and r["staged"] == 1
     finally:
         stop()
+
+
+def test_overview_staging_counts_only_heartbeating_stagers(tmp_path):
+    """Regression (operator report): an install with 6 inventory rows and NO
+    device ever heartbeating showed '6 staging'. staging_now was computed as
+    assigned - staged, i.e. it counted fleet/policy rows, not devices. It must
+    count devices that are ACTUALLY staging: enrolled (heartbeat present) with
+    a non-terminal stage_state — not inventory-only rows, not unassigned
+    agents, not ready/seeding devices (those feed the staged count)."""
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
+    state = str(tmp_path / "state")
+    fleet = gui_fleet.FleetStore(state)
+    cat = catalog_mod.CatalogStore(state)
+    cat.save_image({"id": "img1", "filename": "img1.bin", "sha256": "ab",
+                    "published_at": 1})
+    for i in range(6):
+        did = "sw%d" % i
+        fleet.upsert({"device_id": did, "device_ip": "10.0.0.%d" % (i + 1)})
+        cat.set_policy(did, approved_image_id="img1")
+    srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, None, cat,
+                                 None, None, certfile=None)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        ck, _csrf = _auth("127.0.0.1", port)
+        ov = json.loads(_req("127.0.0.1", port, "GET", "/api/overview",
+                             headers={"Cookie": ck})[2])
+        assert ov["devices"] == 6 and ov["assigned"] == 6
+        assert ov["staging_now"] == 0     # nothing has ever heartbeated
+        # devices actively staging ARE counted...
+        cat.record_heartbeat("sw0", {"stage_state": "staging"}, now=10)
+        cat.record_heartbeat("sw1", {"stage_state": "downloading"}, now=11)
+        # ...but a ready (seeding) device counts as staged, not staging,
+        # and an unassigned agent is not staging anything
+        cat.record_heartbeat("sw2", {"current_image_id": "img1",
+                                     "stage_state": "ready"}, now=12)
+        cat.record_heartbeat("sw3", {"stage_state": "unassigned"}, now=13)
+        ov = json.loads(_req("127.0.0.1", port, "GET", "/api/overview",
+                             headers={"Cookie": ck})[2])
+        assert ov["staging_now"] == 2     # sw0 + sw1 only
+        assert ov["staged"] == 1          # sw2: ready with its assigned image
+    finally:
+        srv.shutdown()
 
 
 def test_swarm_proxy_and_error(tmp_path):
@@ -5030,3 +5076,350 @@ def test_settings_ca_trust_malformed_ipv6_rejected(tmp_path, monkeypatch):
             "url": "https://[::1]:4318/ca.pem", "auto": False}
     finally:
         stop()
+
+
+# ---- GET /api/devices/<id>/deployment (deployment config visibility) ------
+
+def _serve_receipts(tmp_path, now_fn=None):
+    """A server with ONLY a receipt store wired (the deployment route needs
+    nothing else). Returns the store so tests can seed records directly."""
+    import deployment_receipts
+    app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
+    app.set_admin("admin", "pw")
+    state = str(tmp_path / "state")
+    receipts = (deployment_receipts.ReceiptStore(state, now_fn=now_fn)
+                if now_fn else deployment_receipts.ReceiptStore(state))
+    srv = gui_server.make_server("127.0.0.1", 0, app, certfile=None,
+                                 receipts=receipts)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return "127.0.0.1", port, receipts, srv.shutdown
+
+
+def _receipt_stub(device_id):
+    return {"controller_id": "iris", "device_id": device_id,
+            "inventory_revision": 1, "plan_hash": "h",
+            "resolved": {"attachment": "routed", "platform": "guestshell"},
+            "preflight": {"status": "not-required"},
+            "resources": [{"kind": "guestshell", "ownership": "iris-created"}]}
+
+
+def test_deployment_route_auth_and_receipts_unavailable(tmp_path):
+    # no receipt store wired at all -> 404 "receipts unavailable"
+    host, port, _app, stop = _serve(tmp_path)
+    try:
+        assert _req(host, port, "GET", "/api/devices/d1/deployment")[0] == 401
+        ck, _csrf = _auth(host, port)
+        st, _, b = _req(host, port, "GET", "/api/devices/d1/deployment",
+                        headers={"Cookie": ck})
+        assert st == 404 and json.loads(b)["error"] == "receipts unavailable"
+    finally:
+        stop()
+
+
+def test_deployment_route_null_then_newest_then_active(tmp_path):
+    clock = {"t": 100}
+    host, port, receipts, stop = _serve_receipts(tmp_path,
+                                                 now_fn=lambda: clock["t"])
+    try:
+        ck, _csrf = _auth(host, port)
+        # no receipts for the device: record is null, total 0
+        st, _, b = _req(host, port, "GET", "/api/devices/d1/deployment",
+                        headers={"Cookie": ck})
+        assert st == 200
+        assert json.loads(b) == {"receipt": None, "total": 0}
+        # two non-active, non-recoverable receipts -> the newest by
+        # timestamps.planned_at wins
+        r1 = receipts.create(_receipt_stub("d1"))
+        receipts.transition(r1["receipt_id"], "removed")
+        clock["t"] = 200
+        r2 = receipts.create(_receipt_stub("d1"))
+        _, _, b = _req(host, port, "GET", "/api/devices/d1/deployment",
+                       headers={"Cookie": ck})
+        got = json.loads(b)
+        assert got["total"] == 2
+        assert got["receipt"]["receipt_id"] == r2["receipt_id"]
+        assert got["receipt"]["state"] == "planned"
+        # the record is the stored receipt as-is (resolved/preflight/
+        # resources ride along)
+        assert got["receipt"]["resolved"]["platform"] == "guestshell"
+        assert got["receipt"]["preflight"] == {"status": "not-required"}
+        assert got["receipt"]["resources"][0]["kind"] == "guestshell"
+        assert got["receipt"]["timestamps"]["planned_at"] == 200
+        # once a receipt goes active it wins regardless of age
+        receipts.transition(r2["receipt_id"], "applying")
+        receipts.transition(r2["receipt_id"], "active")
+        clock["t"] = 300
+        r3 = receipts.create(_receipt_stub("d1"))     # newer, but only planned
+        _, _, b = _req(host, port, "GET", "/api/devices/d1/deployment",
+                       headers={"Cookie": ck})
+        got = json.loads(b)
+        assert got["total"] == 3
+        assert got["receipt"]["receipt_id"] == r2["receipt_id"]
+        assert got["receipt"]["state"] == "active"
+        assert r3["receipt_id"] != r2["receipt_id"]
+        # receipts are per-device: another device still sees null
+        _, _, b = _req(host, port, "GET", "/api/devices/other/deployment",
+                       headers={"Cookie": ck})
+        assert json.loads(b) == {"receipt": None, "total": 0}
+    finally:
+        stop()
+
+
+def test_deployment_route_recoverable_beats_newer_planned(tmp_path):
+    clock = {"t": 100}
+    host, port, receipts, stop = _serve_receipts(tmp_path,
+                                                 now_fn=lambda: clock["t"])
+    try:
+        ck, _csrf = _auth(host, port)
+        r1 = receipts.create(_receipt_stub("d1"))
+        receipts.transition(r1["receipt_id"], "needs-reconcile")
+        clock["t"] = 200
+        receipts.create(_receipt_stub("d1"))          # newer, merely planned
+        _, _, b = _req(host, port, "GET", "/api/devices/d1/deployment",
+                       headers={"Cookie": ck})
+        got = json.loads(b)
+        # the recoverable receipt still describes what is ON the box
+        assert got["receipt"]["receipt_id"] == r1["receipt_id"]
+        assert got["receipt"]["state"] == "needs-reconcile"
+        assert got["total"] == 2
+    finally:
+        stop()
+
+
+# ---- GET /api/deploy-logs (persistent deployment logs) --------------------
+
+def test_deploy_logs_routes_list_filter_and_serve(tmp_path):
+    log_dir = str(tmp_path / "deploy-logs")
+
+    def run_fn(p, e, on):
+        on("[1/6] hello"); on("[6/6] done"); return 0
+
+    host, port, stop = _serve_onboard(tmp_path, run_fn, log_dir=log_dir)
+    try:
+        assert _req(host, port, "GET", "/api/deploy-logs")[0] == 401
+        ck, csrf = _auth(host, port)
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/onboard", {},
+                        headers={"Cookie": ck, "X-CSRF-Token": csrf})
+        assert st == 200
+        jid = json.loads(b)["job_id"]
+        import time as _t
+        deadline = _t.time() + 3
+        while _t.time() < deadline:
+            _, _, jb = _req(host, port, "GET", "/api/onboard/jobs/" + jid,
+                            headers={"Cookie": ck})
+            if json.loads(jb)["state"] in ("done", "error"):
+                break
+            _t.sleep(0.02)
+        st, _, b = _req(host, port, "GET", "/api/deploy-logs",
+                        headers={"Cookie": ck})
+        assert st == 200
+        logs = json.loads(b)["logs"]
+        assert len(logs) == 1
+        entry = logs[0]
+        assert entry["device_id"] == "d1" and entry["action"] == "onboard"
+        assert entry["state"] == "done" and entry["rc"] == 0
+        assert entry["file"].endswith("-d1-onboard-%s.log" % jid)
+        assert entry["finished_at"] and entry["size"] > 0
+        # the device filter compares the raw id from the header
+        _, _, b = _req(host, port, "GET", "/api/deploy-logs?device_id=d1",
+                       headers={"Cookie": ck})
+        assert len(json.loads(b)["logs"]) == 1
+        _, _, b = _req(host, port, "GET", "/api/deploy-logs?device_id=ghost",
+                       headers={"Cookie": ck})
+        assert json.loads(b)["logs"] == []
+        # the full text is served as text/plain: header line + job lines
+        assert _req(host, port, "GET",
+                    "/api/deploy-logs/" + entry["file"])[0] == 401
+        st, hd, body = _req(host, port, "GET",
+                            "/api/deploy-logs/" + entry["file"],
+                            headers={"Cookie": ck})
+        assert st == 200 and hd["Content-Type"].startswith("text/plain")
+        text = body.decode()
+        first = text.splitlines()[0]
+        assert first.startswith("# job=%s device=d1 action=onboard "
+                                "state=done rc=0" % jid)
+        assert "[1/6] hello" in text and "[6/6] done" in text
+    finally:
+        stop()
+
+
+def test_deploy_logs_survive_job_eviction(tmp_path):
+    """The whole point of persistence: after the in-memory job is TTL-evicted
+    (server restart, or an hour passing), the log is still listed and
+    readable."""
+    log_dir = str(tmp_path / "deploy-logs")
+    clock = {"t": 1000.0}
+    host, port, stop = _serve_onboard(tmp_path, lambda p, e, on: 0,
+                                      log_dir=log_dir,
+                                      now_fn=lambda: clock["t"])
+    try:
+        ck, csrf = _auth(host, port)
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/onboard", {},
+                        headers={"Cookie": ck, "X-CSRF-Token": csrf})
+        assert st == 200
+        jid = json.loads(b)["job_id"]
+        import time as _t
+        deadline = _t.time() + 3
+        while _t.time() < deadline:
+            st, _, jb = _req(host, port, "GET", "/api/onboard/jobs/" + jid,
+                             headers={"Cookie": ck})
+            if st == 200 and json.loads(jb)["state"] in ("done", "error"):
+                break
+            _t.sleep(0.02)
+        clock["t"] += 3600 * 2 + 1     # push the job past _JOB_TTL
+        st, _, _b = _req(host, port, "GET", "/api/onboard/jobs/" + jid,
+                         headers={"Cookie": ck})
+        assert st == 404               # in-memory job gone
+        _, _, b = _req(host, port, "GET", "/api/deploy-logs",
+                       headers={"Cookie": ck})
+        logs = json.loads(b)["logs"]
+        assert len(logs) == 1 and logs[0]["device_id"] == "d1"
+        st, _, body = _req(host, port, "GET",
+                           "/api/deploy-logs/" + logs[0]["file"],
+                           headers={"Cookie": ck})
+        assert st == 200 and b"# job=" in body
+    finally:
+        stop()
+
+
+def test_deploy_logs_list_falls_back_to_filename_and_skips_garbage(tmp_path):
+    log_dir = str(tmp_path / "deploy-logs")
+    os.makedirs(log_dir)
+    # headerless file: metadata comes from the filename fields
+    with open(os.path.join(log_dir, "50-legacy-undeploy-aaaa.log"), "w") as f:
+        f.write("some output\n")
+    # a proper header wins over the (sanitized) filename
+    with open(os.path.join(log_dir, "99-sw_1-onboard-bbbb.log"), "w") as f:
+        f.write("# job=bbbb device=sw 1 action=onboard state=error rc=7 "
+                "queued_at=90 started_at=91 finished_at=99 platform=iox\n")
+        f.write("ERROR: boom\n")
+    # unparseable either way -> skipped
+    with open(os.path.join(log_dir, "junk.log"), "w") as f:
+        f.write("not a header\n")
+    host, port, stop = _serve_onboard(tmp_path, lambda p, e, on: 0,
+                                      log_dir=log_dir)
+    try:
+        ck, _csrf = _auth(host, port)
+        _, _, b = _req(host, port, "GET", "/api/deploy-logs",
+                       headers={"Cookie": ck})
+        logs = json.loads(b)["logs"]
+        assert [e["file"] for e in logs] == [       # newest first
+            "99-sw_1-onboard-bbbb.log", "50-legacy-undeploy-aaaa.log"]
+        assert logs[0]["device_id"] == "sw 1"       # RAW id from the header
+        assert logs[0]["state"] == "error" and logs[0]["rc"] == 7
+        assert logs[1] == {"file": "50-legacy-undeploy-aaaa.log",
+                           "device_id": "legacy", "action": "undeploy",
+                           "state": None, "rc": None, "finished_at": 50,
+                           "size": logs[1]["size"]}
+        # filtering on the raw header id finds the header-borne row only
+        _, _, b = _req(host, port, "GET", "/api/deploy-logs?device_id=sw%201",
+                       headers={"Cookie": ck})
+        assert [e["file"] for e in json.loads(b)["logs"]] == [
+            "99-sw_1-onboard-bbbb.log"]
+    finally:
+        stop()
+
+
+def test_deploy_log_file_route_rejects_traversal_and_bad_names(tmp_path):
+    log_dir = str(tmp_path / "deploy-logs")
+    os.makedirs(log_dir)
+    with open(str(tmp_path / "outside.log"), "w") as f:
+        f.write("must never be served\n")
+    # a symlink INSIDE log_dir pointing outside must not escape either
+    os.symlink(str(tmp_path / "outside.log"),
+               os.path.join(log_dir, "1-esc-onboard-cafe.log"))
+    host, port, stop = _serve_onboard(tmp_path, lambda p, e, on: 0,
+                                      log_dir=log_dir)
+    try:
+        ck, _csrf = _auth(host, port)
+        for name in ("../outside.log", "..%2Foutside.log", "no.txt",
+                     "missing.log", "1-esc-onboard-cafe.log"):
+            st, _, _b = _req(host, port, "GET", "/api/deploy-logs/" + name,
+                             headers={"Cookie": ck})
+            assert st == 404, name
+    finally:
+        stop()
+
+
+def test_deploy_logs_empty_without_log_dir(tmp_path):
+    # no onboard service at all (plain _serve): listing is empty, files 404
+    host, port, _app, stop = _serve(tmp_path)
+    try:
+        ck, _csrf = _auth(host, port)
+        st, _, b = _req(host, port, "GET", "/api/deploy-logs",
+                        headers={"Cookie": ck})
+        assert st == 200 and json.loads(b) == {"logs": []}
+        st, _, _b = _req(host, port, "GET", "/api/deploy-logs/x.log",
+                         headers={"Cookie": ck})
+        assert st == 404
+    finally:
+        stop()
+
+
+# ---- GET /api/help + instance id + static guide pages (help "?" feature) ---
+
+def test_read_instance_id_minted_once_mode_0600(tmp_path):
+    state = str(tmp_path / "state")  # dir does not exist yet: reader creates it
+    first = gui_server.read_instance_id(state)
+    assert re.fullmatch(r"[0-9a-f]{32}", first)
+    p = os.path.join(state, "instance-id")
+    assert os.path.isfile(p)
+    assert os.stat(p).st_mode & 0o777 == 0o600
+    # stable across calls, and the file content matches (newline stripped)
+    assert gui_server.read_instance_id(state) == first
+    with open(p) as f:
+        assert f.read().strip() == first
+    # a pre-existing id is read back verbatim, never rewritten
+    with open(p, "w") as f:
+        f.write("deadbeef" * 4 + "\n")
+    assert gui_server.read_instance_id(state) == "deadbeef" * 4
+
+
+def test_help_route_auth_shape_and_stable_deployment_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, _app, stop = _serve(tmp_path)
+    try:
+        assert _req(host, port, "GET", "/api/help")[0] == 401
+        ck, _csrf = _auth(host, port)
+        st, _, b = _req(host, port, "GET", "/api/help",
+                        headers={"Cookie": ck})
+        assert st == 200
+        doc = json.loads(b)
+        assert doc["version"] == gui_server._read_version()
+        assert re.fullmatch(r"[0-9a-f]{32}", doc["deployment_id"])
+        assert doc["docs_url"] == gui_server._DOCS_URL
+        assert doc["docs_url"].startswith("https://")
+        assert doc["guides"] == {"device": "/help-device.html",
+                                 "server": "/help-server.html"}
+        # deployment id is durable: same value on every later call
+        st2, _, b2 = _req(host, port, "GET", "/api/help",
+                          headers={"Cookie": ck})
+        assert st2 == 200
+        assert json.loads(b2)["deployment_id"] == doc["deployment_id"]
+    finally:
+        stop()
+
+
+def test_help_guide_pages_exist_and_header_help_control_wired():
+    """Source guard for the "?" help feature: both static guide pages exist
+    in the webroot (the /api/help "guides" links must not 404), each is a
+    standalone CSP-clean page linking the shared stylesheet, and index.html
+    carries the header "?" control that opens the popover."""
+    for name in ("help-device.html", "help-server.html"):
+        p = os.path.join(gui_server.WEBROOT, name)
+        assert os.path.isfile(p), name
+        with open(p) as f:
+            page = f.read()
+        assert "SPDX-License-Identifier: Apache-2.0" in page, name
+        assert '<link rel="stylesheet" href="/styles.css">' in page, name
+        assert 'href="/"' in page, name           # link back to the console
+        assert gui_server._DOCS_URL in page, name  # link to the official docs
+        # CSP: no inline handlers/styles/scripts on the static guide pages
+        assert " style=" not in page and "onclick=" not in page, name
+        assert "<script" not in page, name
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    assert 'id="help-btn"' in html
+    assert 'href="/help-device.html"' in html
+    assert 'href="/help-server.html"' in html

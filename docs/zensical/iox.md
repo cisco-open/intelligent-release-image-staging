@@ -138,8 +138,10 @@ and places the result in `/srv/artifacts`. When the served host directory is not
 writable by the invoking user — the normal case, since the server runs as uid
 10001 and its artifacts directory is owned by that uid — the helper places the
 package with `docker cp` rather than requiring a host ownership change. On an
-amd64 server, the arm64 build automatically registers Docker's ARM64 emulation
-handler when it is missing.
+amd64 server, the arm64 build registers Docker's ARM64 emulation handler when
+it is missing, using the audited `tonistiigi/binfmt` image digest supplied via
+the required `BINFMT_IMAGE_DIGEST` environment variable; with the digest unset
+the build fails closed rather than pull an unpinned image.
 
 Rebuild both packages after rotating the server certificate, because each
 package contains the pinned catalog certificate. The helper only builds and

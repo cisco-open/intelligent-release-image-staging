@@ -28,14 +28,14 @@ const workflow = {
   report: {
     title: "Report staged and stop",
     body: "The device reports that the image is staged. IRIS does not install, activate, change boot variables, or reload.",
-    command: "GET https://<server-ip>:8443/v1/catalog",
+    command: "POST https://<server-ip>:8443/v1/devices/<device>/heartbeat",
   },
 };
 
 const paths = {
   guest: {
     title: "Catalyst 9300 Guest Shell",
-    copy: "Generate a per-device installer, bootstrap Guest Shell, and let EEM keep the staging agent alive.",
+    copy: "Generate a per-device installer, bootstrap Guest Shell, and let EEM keep the staging agent alive — or run the amd64 IOx app on switches with app-hosting SSD storage.",
     items: [
       "Installs catalog trust material.",
       "Downloads image pieces through the private swarm.",

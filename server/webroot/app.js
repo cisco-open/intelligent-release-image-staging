@@ -132,25 +132,88 @@
       });
     });
   }
+  // Per-file upload rows: every picked/dropped file gets its OWN row (name,
+  // progress bar, state text) and its OWN publish poller, so concurrent
+  // uploads never fight over shared elements. The legacy #status/#prog/#bar
+  // singletons above now serve only the import-from-disk flow.
+  var uploadsEl = document.getElementById('uploads');
+  function uploadRowUi(name) {
+    var row = document.createElement('div');
+    row.className = 'upload-row';
+    var label = document.createElement('span');
+    label.className = 'up-name'; label.textContent = name; label.title = name;
+    var rowProg = document.createElement('div'); rowProg.className = 'progress';
+    var rowBar = document.createElement('div'); rowBar.className = 'bar';
+    rowProg.appendChild(rowBar);
+    var state = document.createElement('span'); state.className = 'up-state muted';
+    var dismiss = document.createElement('button');
+    dismiss.type = 'button'; dismiss.className = 'linkish up-dismiss';
+    dismiss.textContent = '×'; dismiss.title = 'Dismiss'; dismiss.hidden = true;
+    dismiss.addEventListener('click', function () { row.remove(); });
+    row.appendChild(label); row.appendChild(rowProg);
+    row.appendChild(state); row.appendChild(dismiss);
+    uploadsEl.appendChild(row);
+    return {
+      progress: function (pct) {
+        rowBar.style.width = pct + '%';
+        state.textContent = Math.round(pct) + '%';
+      },
+      publishing: function () { rowBar.style.width = '100%'; state.textContent = 'publishing…'; },
+      done: function (text) {
+        rowBar.style.width = '100%'; state.textContent = text;
+        state.classList.remove('err'); dismiss.hidden = false;
+        // auto-fade finished rows; errors stay until dismissed
+        setTimeout(function () { row.remove(); }, 8000);
+      },
+      error: function (text) {
+        state.textContent = text; state.classList.add('err'); dismiss.hidden = false;
+      }
+    };
+  }
+  function pollUploadJob(jobId, ui) {
+    function next() { setTimeout(poll, 1000); }
+    async function poll() {
+      try {
+        var r = await fetch('/api/images/jobs/' + jobId);
+        if (!r.ok) { next(); return; }
+        var j = await r.json();
+        if (j.state === 'done') {
+          ui.done('published ' + (j.image_id || '') + ' ✓');
+          refreshImages().catch(function () {}); refreshImportable().catch(function () {});
+        } else if (j.state === 'error') {
+          ui.error('publish failed: ' + j.message);
+          refreshImportable().catch(function () {});
+        } else { next(); }
+      } catch (e) { next(); }
+    }
+    poll();
+  }
   function upload(file) {
     if (!file) return;
+    var ui = uploadRowUi(file.name);
     var MAX = 4 * 1024 * 1024 * 1024;
-    if (file.size > MAX) { prog.hidden = true; statusEl.textContent = 'File too large: ' + fmtSize(file.size) + ' (max 4 GB). Not uploaded.'; return; }
-    prog.hidden = false; bar.style.width = '0'; statusEl.textContent = 'Uploading ' + file.name + '…';
+    if (file.size > MAX) { ui.error('too large: ' + fmtSize(file.size) + ' (max 4 GB) — not uploaded'); return; }
+    ui.progress(0);
     var xhr = new XMLHttpRequest();
     xhr.open('PUT', '/api/images/upload/' + encodeURIComponent(file.name));
     xhr.setRequestHeader('X-CSRF-Token', info.csrf);
-    xhr.upload.onprogress = function (e) { if (e.lengthComputable) bar.style.width = (e.loaded / e.total * 100) + '%'; };
-    xhr.onload = function () { if (xhr.status === 200) { statusEl.textContent = 'Upload done, publishing…'; pollJob(JSON.parse(xhr.responseText).job_id); } else { prog.hidden = true; statusEl.textContent = 'Upload failed (' + xhr.status + ')'; } };
-    xhr.onerror = function () { prog.hidden = true; statusEl.textContent = 'Upload error'; };
+    xhr.upload.onprogress = function (e) { if (e.lengthComputable) ui.progress(e.loaded / e.total * 100); };
+    xhr.onload = function () {
+      if (xhr.status === 200) { ui.publishing(); pollUploadJob(JSON.parse(xhr.responseText).job_id, ui); }
+      else { ui.error('upload failed (' + xhr.status + ')'); }
+    };
+    xhr.onerror = function () { ui.error('upload error'); };
     xhr.send(file);
   }
   document.getElementById('pick').addEventListener('click', function () { document.getElementById('file').click(); });
-  document.getElementById('file').addEventListener('change', function (e) { upload(e.target.files[0]); });
+  document.getElementById('file').addEventListener('change', function (e) {
+    Array.prototype.forEach.call(e.target.files, upload);
+    e.target.value = '';   // allow re-picking the same file
+  });
   var drop = document.getElementById('drop');
   ['dragenter', 'dragover'].forEach(function (ev) { drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.add('drag'); }); });
   ['dragleave', 'drop'].forEach(function (ev) { drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.remove('drag'); }); });
-  drop.addEventListener('drop', function (e) { upload(e.dataTransfer.files[0]); });
+  drop.addEventListener('drop', function (e) { Array.prototype.forEach.call(e.dataTransfer.files, upload); });
 
   // ---- Devices ----
   var devStatus = document.getElementById('dev-status');
@@ -250,7 +313,8 @@
         '<td><select class="cred">' + credSel + '</select></td>' +
         '<td><select class="assign">' + opts + '</select></td>' +
         '<td>' + telemetryCell(d) + '</td>' +
-        '<td>' + status + '</td></tr>';
+        '<td>' + status +
+        ' <button class="linkish dinfo" title="Deployment details">ⓘ</button></td></tr>';
     }).join('');
     document.querySelectorAll('#dev-rows .assign').forEach(function (sel) {
       sel.addEventListener('change', async function () {
@@ -281,35 +345,192 @@
         }
       });
     });
+    document.querySelectorAll('#dev-rows .dinfo').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        openDeployInfo(btn.closest('tr').getAttribute('data-id'));
+      });
+    });
     document.getElementById('mark-all').checked = false;
     document.getElementById('dev-count').textContent =
       devs.length + ' device' + (devs.length === 1 ? '' : 's');
     updateSelBar();
   }
-  var onboardEs = null;
-  var onboardJobId = null;
-  function openOnboardPanel(label) {
-    var panel = document.getElementById('onboard-panel');
-    var log = document.getElementById('onboard-log');
-    document.getElementById('onboard-dev').textContent = label;
-    log.textContent = ''; panel.hidden = false;
-    onboardJobId = null;
-    document.getElementById('onboard-abort').hidden = false;
-    if (onboardEs) { onboardEs.close(); onboardEs = null; }
-    return log;
+  // ---- Device deployment details (per-row ⓘ) ----
+  // The panel lives OUTSIDE #dev-rows so the 10s table re-render never
+  // touches it. deployInfoDev guards against a slow fetch for one device
+  // painting over the panel after another row was opened.
+  var deployInfoDev = null;
+  var DEPLOY_STATE_BADGE = { active: 'badge-ok', removed: 'badge-queued',
+                             superseded: 'badge-cancelled', 'needs-reconcile': 'badge-fail' };
+  function deployReceiptRows(rec, total) {
+    var res = rec.resolved || {};
+    var ts = rec.timestamps || {};
+    var pf = rec.preflight || {};
+    var attach = res.attachment || '';
+    var mgmt = attach.indexOf('router-') === 0
+      ? (res.vpg_number ? 'VPG' + res.vpg_number : '')
+      : ((res.inband_vlan || res.iris_vlan) ? 'VLAN ' + (res.inband_vlan || res.iris_vlan) : '');
+    var svi = res.svi_ip ? res.svi_ip + (res.svi_mask ? ' / ' + res.svi_mask : '') : '';
+    var app = res.app_ip
+      ? res.app_ip + (res.app_mask ? ' / ' + res.app_mask : '') +
+        (res.app_gateway ? ' → gw ' + res.app_gateway : '')
+      : '';
+    var stateCls = DEPLOY_STATE_BADGE[rec.state] || 'badge-queued';
+    var pairs = [
+      ['State', '<span class="badge ' + stateCls + '">' + esc(rec.state || 'unknown') + '</span>' +
+        (rec.adopted ? ' <span class="muted">(adopted)</span>' : '')],
+      ['Receipt', esc(rec.receipt_id || '') +
+        ' <span class="muted">(' + esc(total) + ' stored for this device)</span>'],
+      ['Planned', esc(fmtDate(ts.planned_at) || '—')],
+      ['Finished', esc(fmtDate(ts.finished_at) || '—')],
+      ['Preflight', esc(pf.status || '—')],
+      ['Attachment', esc(attach || '—')],
+      ['Management VLAN / VPG', esc(mgmt || '—')],
+      ['SVI', esc(svi || '—')],
+      ['App IP', esc(app || '—')],
+      ['NAT interface', esc(res.nat_interface || '—')],
+      ['Swarm port', esc(res.swarm_port || '—')],
+      ['Model', esc(res.model || '—')],
+      ['Platform', esc(res.platform || '—')],
+      ['Device identity', esc(res.device_identity || '—')]
+    ];
+    return pairs.map(function (kv) {
+      return '<tr><td class="muted">' + esc(kv[0]) + '</td><td>' + kv[1] + '</td></tr>';
+    }).join('');
   }
-  function streamOnboardJob(jobId, log) {
-    onboardJobId = jobId;
-    onboardEs = new EventSource('/api/onboard/jobs/' + encodeURIComponent(jobId) + '/stream');
-    var lines = [], flushPending = false, MAX_LOG_LINES = 500;
+  async function openDeployInfo(id) {
+    deployInfoDev = id;
+    var note = document.getElementById('di-note');
+    document.getElementById('di-dev').textContent = id;
+    document.getElementById('di-rows').innerHTML = '';
+    document.getElementById('di-log-rows').innerHTML = '';
+    var lt = document.getElementById('di-log-text');
+    lt.hidden = true; lt.textContent = '';
+    note.textContent = 'Loading…';
+    document.getElementById('deploy-info-panel').hidden = false;
+    var r = null;
+    try { r = await fetch('/api/devices/' + encodeURIComponent(id) + '/deployment'); } catch (e) { }
+    if (deployInfoDev !== id) return;      // another row was opened meanwhile
+    if (!r) {
+      note.textContent = 'Deployment details unavailable.';
+    } else if (r.status === 404) {
+      note.textContent = 'Deployment receipts are unavailable on this server.';
+    } else if (!r.ok) {
+      note.textContent = 'Deployment details unavailable (' + r.status + ').';
+    } else {
+      var body = await r.json();
+      if (deployInfoDev !== id) return;
+      if (!body.receipt) {
+        note.textContent = 'No deployment receipt — onboarded before receipts ' +
+          'existed, or added manually; adopt or re-onboard to create one.';
+      } else {
+        note.textContent = '';
+        document.getElementById('di-rows').innerHTML =
+          deployReceiptRows(body.receipt, body.total || 0);
+      }
+    }
+    renderDeviceDeployLogs(id);
+  }
+  async function renderDeviceDeployLogs(id) {
+    var tbody = document.getElementById('di-log-rows');
+    var r = null;
+    try { r = await fetch('/api/deploy-logs?device_id=' + encodeURIComponent(id)); } catch (e) { }
+    if (deployInfoDev !== id) return;
+    if (!r || !r.ok) {
+      tbody.innerHTML = '<tr><td colspan="5" class="muted">Deployment logs unavailable.</td></tr>';
+      return;
+    }
+    var logs = (await r.json()).logs || [];
+    if (deployInfoDev !== id) return;
+    if (!logs.length) {
+      tbody.innerHTML = '<tr><td colspan="5" class="muted">No deployment logs for this device yet.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = logs.map(function (l) {
+      return '<tr data-file="' + esc(l.file) + '"><td>' + esc(fmtDate(l.finished_at)) +
+        '</td><td>' + esc(l.action || '') + '</td><td>' + deployLogResult(l) +
+        '</td><td>' + esc(fmtSize(l.size)) + '</td>' +
+        '<td><button class="linkish dlog-view">view</button></td></tr>';
+    }).join('');
+    document.querySelectorAll('#di-log-rows .dlog-view').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        showDeployLog(btn.closest('tr').getAttribute('data-file'),
+                      document.getElementById('di-log-text'));
+      });
+    });
+  }
+  document.getElementById('di-close').addEventListener('click', function () {
+    deployInfoDev = null;
+    document.getElementById('deploy-info-panel').hidden = true;
+  });
+  // ---- Per-job onboard log panels ----
+  // One panel PER JOB in #onboard-logs — its own <pre>, its own EventSource,
+  // its own close/abort — so two concurrent onboards never merge into (or
+  // blank) each other's window. Opening a job that already has a panel
+  // focuses it; at most MAX_ONBOARD_PANELS panels, oldest closed first.
+  var onboardPanels = {};        // job_id -> { root, es }
+  var onboardPanelOrder = [];    // job ids, oldest first
+  var MAX_ONBOARD_PANELS = 6;
+  var MAX_LOG_LINES = 500;
+  function closeJobLog(jobId) {
+    var p = onboardPanels[jobId];
+    if (!p) return;
+    if (p.es) { p.es.close(); p.es = null; }
+    p.root.remove();
+    delete onboardPanels[jobId];
+    var i = onboardPanelOrder.indexOf(jobId);
+    if (i > -1) onboardPanelOrder.splice(i, 1);
+  }
+  function openJobLog(jobId, deviceId, action, queued) {
+    if (onboardPanels[jobId]) {
+      onboardPanels[jobId].root.scrollIntoView({ block: 'nearest' });
+      return;
+    }
+    while (onboardPanelOrder.length >= MAX_ONBOARD_PANELS) closeJobLog(onboardPanelOrder[0]);
+    var root = document.createElement('div');
+    root.className = 'job-log-panel';
+    root.setAttribute('data-job', jobId);
+    var head = document.createElement('div'); head.className = 'job-log-head';
+    var title = document.createElement('h3');
+    title.textContent = deviceId + ' — ' + action;
+    var abortBtn = document.createElement('button');
+    abortBtn.type = 'button'; abortBtn.className = 'btn ghost';
+    abortBtn.textContent = 'Abort';
+    var closeBtn = document.createElement('button');
+    closeBtn.type = 'button'; closeBtn.className = 'btn ghost';
+    closeBtn.textContent = 'Close';
+    head.appendChild(title); head.appendChild(abortBtn); head.appendChild(closeBtn);
+    var log = document.createElement('pre'); log.className = 'log';
+    root.appendChild(head); root.appendChild(log);
+    document.getElementById('onboard-logs').appendChild(root);
+    var entry = { root: root, es: null };
+    onboardPanels[jobId] = entry;
+    onboardPanelOrder.push(jobId);
+    var lines = [], flushPending = false;
     function flush() { flushPending = false; log.textContent = lines.join('\n') + (lines.length ? '\n' : ''); log.scrollTop = log.scrollHeight; }
     function append(text) {
       lines = lines.concat(String(text).split('\n')).slice(-MAX_LOG_LINES);
       if (!flushPending) { flushPending = true; requestAnimationFrame(flush); }
     }
-    onboardEs.onmessage = function (e) { append(e.data); };
-    onboardEs.addEventListener('end', function (e) { append('— ' + e.data + ' —'); flush(); onboardEs.close(); onboardEs = null; onboardJobId = null; document.getElementById('onboard-abort').hidden = true; refreshDevices().catch(function () {}); });
-    onboardEs.onerror = function () { append('[stream closed]'); if (onboardEs) { onboardEs.close(); onboardEs = null; } };
+    if (queued) append('(queued — waiting for a free install slot; the log streams once it starts)');
+    var es = new EventSource('/api/onboard/jobs/' + encodeURIComponent(jobId) + '/stream');
+    entry.es = es;
+    es.onmessage = function (e) { append(e.data); };
+    es.addEventListener('end', function (e) {
+      append('— ' + e.data + ' —'); flush();
+      es.close(); entry.es = null; abortBtn.hidden = true;
+      refreshDevices().catch(function () {});
+    });
+    es.onerror = function () { append('[stream closed]'); if (entry.es) { entry.es.close(); entry.es = null; } };
+    abortBtn.addEventListener('click', async function () {
+      if (!confirm('Abort this ' + action + ' of ' + deviceId + '?\n\nThis stops ' +
+          'the running installer. The device may be left partially configured; ' +
+          're-onboard (idempotent) or undeploy to clean up.')) return;
+      var r = await jpost('/api/onboard/jobs/' + encodeURIComponent(jobId) + '/abort', {});
+      append(r.ok ? '[abort requested]' : '[abort failed (' + r.status + ')]');
+    });
+    closeBtn.addEventListener('click', function () { closeJobLog(jobId); });
+    root.scrollIntoView({ block: 'nearest' });
   }
   // Telemetry flags for onboard job bodies (reports default on, streaming
   // default off — the server treats an absent key the same way).
@@ -319,19 +540,6 @@
     return { telemetry: !t || t.checked,
              telemetry_stream: !!(s && s.checked) };
   }
-  document.getElementById('onboard-close').addEventListener('click', function () {
-    if (onboardEs) { onboardEs.close(); onboardEs = null; }
-    document.getElementById('onboard-panel').hidden = true;
-  });
-  document.getElementById('onboard-abort').addEventListener('click', async function () {
-    if (!onboardJobId) return;
-    if (!confirm('Abort this onboard?\n\nThis stops the running installer. The ' +
-        'device may be left partially configured; re-onboard (idempotent) or ' +
-        'undeploy to clean up.')) return;
-    var r = await jpost('/api/onboard/jobs/' + encodeURIComponent(onboardJobId) + '/abort', {});
-    var log = document.getElementById('onboard-log');
-    log.textContent += r.ok ? '\n[abort requested]\n' : '\n[abort failed (' + r.status + ')]\n';
-  });
   document.getElementById('mark-all').addEventListener('change', function (e) {
     document.querySelectorAll('#dev-rows .mark').forEach(function (cb) { cb.checked = e.target.checked; });
     updateSelBar();
@@ -365,6 +573,7 @@
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && openMenuPanel) closeMenus(); });
   wireMenu('csv-menu-btn', 'csv-menu');
   wireMenu('onboard-menu-btn', 'onboard-pop');
+  wireMenu('help-btn', 'help-pop');
   function updateSelBar() {
     var n = document.querySelectorAll('#dev-rows .mark:checked').length;
     document.getElementById('sel-bar').hidden = n === 0;
@@ -432,7 +641,7 @@
       var act = (j.action === 'undeploy')
         ? '<div style="color:#8a4baf;font-size:10px;font-weight:600">undeploy</div>' : '';
       return '<tr data-job="' + esc(j.id) + '" data-dev="' + esc(j.device_id) + '"' +
-        ' data-state="' + esc(j.state) + '">' +
+        ' data-state="' + esc(j.state) + '" data-action="' + esc(j.action || 'onboard') + '">' +
         '<td>' + esc(j.device_id) + act + '</td>' +
         '<td>' + jobBadge(j.state) + '</td>' +
         '<td class="muted">' + queuePos + '</td>' +
@@ -447,11 +656,9 @@
     document.querySelectorAll('#batch-rows .blog').forEach(function (btn) {
       btn.addEventListener('click', function () {
         var tr = btn.closest('tr');
-        var log = openOnboardPanel(tr.getAttribute('data-dev'));
-        if (tr.getAttribute('data-state') === 'queued') {
-          log.textContent = '(queued — waiting for a free install slot; the log streams once it starts)\n';
-        }
-        streamOnboardJob(tr.getAttribute('data-job'), log);
+        openJobLog(tr.getAttribute('data-job'), tr.getAttribute('data-dev'),
+                   tr.getAttribute('data-action') || 'onboard',
+                   tr.getAttribute('data-state') === 'queued');
       });
     });
     return jobs.some(function (j) { return j.state === 'queued' || j.state === 'running'; });
@@ -960,6 +1167,35 @@
     document.getElementById('td-endpoint').value = td.effective_endpoint || '';
     document.getElementById('td-enabled').checked = !!td.effective_enabled;
     document.getElementById('td-revert').hidden = td.source !== 'override';
+    // --- Audit export (the settings echo never carries the password) ---
+    var ae = s.audit_export || {};
+    document.getElementById('ae-host').value = ae.host || '';
+    document.getElementById('ae-port').value = ae.port == null ? '' : ae.port;
+    document.getElementById('ae-user').value = ae.user || '';
+    document.getElementById('ae-path').value = ae.path || '';
+    document.getElementById('ae-recipient').value = ae.age_recipient || '';
+    document.getElementById('ae-auto').checked = !!ae.auto;
+    var aePass = document.getElementById('ae-pass');
+    aePass.value = '';
+    aePass.placeholder = ae.password_set ? 'unchanged' : 'Password';
+    var aeStatus = document.getElementById('ae-status');
+    if (!ae.host) {
+      aeStatus.textContent = 'Not configured — the audit trail stays on this server.';
+    } else {
+      var last;
+      if (ae.last_run_ts) {
+        var lr = String(ae.last_result || '');
+        var lrOk = lr.slice(0, 3) === 'ok:';
+        last = ' · last export ' + esc(fmtDate(ae.last_run_ts)) +
+          ' <span class="badge ' + (lrOk ? 'badge-ok">ok' : 'badge-fail">fail') + '</span>' +
+          (lr ? ' <span class="muted">' + esc(lr.slice(lr.indexOf(':') + 1)) + '</span>' : '');
+      } else {
+        last = ' · never exported yet';
+      }
+      aeStatus.innerHTML = '<span class="badge badge-running">configured</span> ' +
+        esc((ae.user || '?') + '@' + ae.host + ':' + (ae.path || '')) +
+        (ae.auto ? ' · daily' : ' · manual only') + last;
+    }
   }
   document.getElementById('pw-form').addEventListener('submit', async function (e) {
     e.preventDefault();
@@ -1245,6 +1481,83 @@
     refreshSettings();
   });
 
+  // ---- Settings: audit export (SCP + age) ----
+  document.getElementById('ae-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var msg = document.getElementById('ae-msg'); msg.textContent = ''; msg.classList.remove('ok');
+    var host = document.getElementById('ae-host').value.trim();
+    var port = document.getElementById('ae-port').value.trim();
+    var user = document.getElementById('ae-user').value.trim();
+    var path = document.getElementById('ae-path').value.trim();
+    var recipient = document.getElementById('ae-recipient').value.trim();
+    var pass = document.getElementById('ae-pass').value;
+    if (!host || !user || !path) { msg.textContent = 'Host, username and remote path are required.'; return; }
+    if (!/^age1[0-9a-z]+$/.test(recipient)) {
+      msg.textContent = 'A valid age recipient (age1…) is required — the export is always encrypted.'; return;
+    }
+    var portNum = port ? Number(port) : 22;
+    if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
+      msg.textContent = 'Port must be a number between 1 and 65535.'; return;
+    }
+    var body = { host: host, port: portNum, user: user, path: path,
+                 age_recipient: recipient,
+                 auto: document.getElementById('ae-auto').checked };
+    if (pass) body.password = pass;    // absent password keeps the stored one
+    var r = await jpost('/api/settings/audit-export', body);
+    if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
+    document.getElementById('ae-pass').value = '';   // never leave the password in the DOM
+    msg.textContent = 'Audit export settings saved.'; msg.classList.add('ok');
+    refreshSettings();
+  });
+  // "Export now" starts the server-side job and polls it, like the CA refresh
+  var aePollTimer = null;
+  var aePollGen = 0;
+  function pollAuditExport(jobId) {
+    var gen = ++aePollGen;
+    var msg = document.getElementById('ae-msg');
+    if (aePollTimer) { clearTimeout(aePollTimer); aePollTimer = null; }
+    function next() { aePollTimer = setTimeout(poll, 1000); }
+    async function poll() {
+      try {
+      var r = await fetch('/api/settings/audit-export/run/' + encodeURIComponent(jobId));
+      if (gen !== aePollGen) return;
+      if (!r.ok) { msg.textContent = 'Export status unavailable (' + r.status + '); retrying…'; next(); return; }
+      var j = await r.json();
+      if (gen !== aePollGen) return;
+      if (j.state === 'done') {
+        aePollTimer = null;
+        msg.textContent = 'Exported: ' + (j.detail || 'ok'); msg.classList.add('ok');
+        refreshSettings().catch(function () {});
+      } else if (j.state === 'error') {
+        aePollTimer = null;
+        msg.textContent = 'Export failed: ' + (j.detail || 'unknown error');
+        refreshSettings().catch(function () {});
+      } else {
+        msg.textContent = 'Exporting…';
+        next();
+      }
+      } catch (e) { msg.textContent = 'Export status unavailable; retrying…'; next(); }
+    }
+    poll();
+  }
+  document.getElementById('ae-run').addEventListener('click', async function () {
+    var msg = document.getElementById('ae-msg'); msg.textContent = ''; msg.classList.remove('ok');
+    var r = await jpost('/api/settings/audit-export/run', {});
+    if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
+    msg.textContent = 'Exporting…';
+    pollAuditExport((await r.json()).job_id);
+  });
+  document.getElementById('ae-clear').addEventListener('click', async function () {
+    var msg = document.getElementById('ae-msg'); msg.textContent = ''; msg.classList.remove('ok');
+    if (!confirm('Clear the audit export configuration?\n\nThe stored settings and ' +
+        'password are deleted and the daily export stops. Audit events stay on ' +
+        'this server; files already exported to the remote host are untouched.')) return;
+    var r = await fetch('/api/settings/audit-export', { method: 'DELETE', headers: csrfHdr() });
+    if (!r.ok) { msg.textContent = 'Clear failed (' + r.status + ')'; return; }
+    msg.textContent = 'Audit export configuration cleared.'; msg.classList.add('ok');
+    refreshSettings();
+  });
+
   // ---- Settings: sidebar feature sub-menu (General / TLS & trust / Telemetry) ----
   // refreshSettings() above always populates all panes' ids regardless of
   // which is visible, so switching sub-pages is pure class/hidden toggling.
@@ -1253,11 +1566,26 @@
   // sub-pages are deep-linkable; the menu itself is revealed only while a
   // settings sub-page is showing.
   var SETTINGS_SUBS = ['general', 'tls', 'telemetry'];
+  // The audit-export pane rides the same pane/nav id pattern; appended
+  // separately so the original trio stays a literal for the source guard
+  // that pins it.
+  SETTINGS_SUBS.push('audit');
   function showSettingsSub(sub) {
     if (SETTINGS_SUBS.indexOf(sub) < 0) sub = 'general';
     SETTINGS_SUBS.forEach(function (t) {
       document.getElementById('settings-pane-' + t).hidden = t !== sub;
       document.getElementById('nav-settings-' + t).classList.toggle('active', t === sub);
+    });
+  }
+  // Monitoring uses the same sidebar sub-menu pattern (audit | deploylogs):
+  // when a view hosts multiple features, each gets its own sub-page instead
+  // of stacking cards.
+  var MONITORING_SUBS = ['audit', 'deploylogs'];
+  function showMonitoringSub(sub) {
+    if (MONITORING_SUBS.indexOf(sub) < 0) sub = 'audit';
+    MONITORING_SUBS.forEach(function (t) {
+      document.getElementById('monitoring-pane-' + t).hidden = t !== sub;
+      document.getElementById('nav-monitoring-' + t).classList.toggle('active', t === sub);
     });
   }
 
@@ -1353,6 +1681,8 @@
     'ca-trust-refresh': 'refreshed the public CA bundle',
     'telemetry-destination-set': 'changed the telemetry destination',
     'telemetry-destination-clear': 'reverted the telemetry destination to the deployment default',
+    audit_export: 'exported audit log',
+    audit_export_config: 'changed audit export settings',
     device_csv_import: 'imported devices from CSV',
     revoke: 'had all secrets revoked',
     auth_fail: 'failed token authentication'
@@ -1542,8 +1872,57 @@
 
   async function refreshMonitoring() {
     await Promise.all([refreshHistogram(), refreshAuditTable(),
-                       refreshTelemetryHealth()]);
+                       refreshTelemetryHealth(), refreshDeployLogs()]);
   }
+
+  // ---- Monitoring: persistent deployment logs pane ----
+  function deployLogResult(l) {
+    return jobBadge(l.state || 'done') +
+      (l.rc == null ? '' : ' <span class="muted">rc=' + esc(l.rc) + '</span>');
+  }
+  async function showDeployLog(file, pre) {
+    pre.hidden = false;
+    pre.textContent = 'Loading ' + file + '…';
+    var r = null;
+    try { r = await fetch('/api/deploy-logs/' + encodeURIComponent(file)); } catch (e) { }
+    if (!r || !r.ok) {
+      pre.textContent = 'Log unavailable' + (r ? ' (' + r.status + ')' : '') + '.';
+      return;
+    }
+    pre.textContent = await r.text();
+  }
+  async function refreshDeployLogs() {
+    var tbody = document.getElementById('dl-rows');
+    var dev = document.getElementById('dl-filter').value.trim();
+    var url = '/api/deploy-logs' + (dev ? '?device_id=' + encodeURIComponent(dev) : '');
+    var r = null;
+    try { r = await fetch(url); } catch (e) { }
+    if (!r || !r.ok) {
+      tbody.innerHTML = '<tr><td colspan="6" class="muted">Deployment logs unavailable' +
+        (r ? ' (' + r.status + ')' : '') + '.</td></tr>';
+      return;
+    }
+    var logs = (await r.json()).logs || [];
+    if (!logs.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="muted">No deployment logs' +
+        (dev ? ' for ' + esc(dev) : '') + ' yet.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = logs.map(function (l) {
+      return '<tr data-file="' + esc(l.file) + '"><td>' + esc(fmtDate(l.finished_at)) +
+        '</td><td>' + esc(l.device_id || '') + '</td><td>' + esc(l.action || '') +
+        '</td><td>' + deployLogResult(l) + '</td><td>' + esc(fmtSize(l.size)) + '</td>' +
+        '<td><button class="linkish dlog-view">view</button></td></tr>';
+    }).join('');
+    document.querySelectorAll('#dl-rows .dlog-view').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        showDeployLog(btn.closest('tr').getAttribute('data-file'),
+                      document.getElementById('dl-text'));
+      });
+    });
+  }
+  document.getElementById('dl-refresh').addEventListener('click', refreshDeployLogs);
+  document.getElementById('dl-filter').addEventListener('change', refreshDeployLogs);
 
   // OTLP export health badge (spec 8.3), via the console's session-gated
   // proxy — never the unauthenticated :9101 directly.
@@ -1686,11 +2065,39 @@
     });
   });
 
+  // ---- header help popover ----
+  // Version / deployment id / docs links come from GET /api/help, fetched
+  // lazily on the first open and cached for the session.
+  var helpLoaded = false;
+  document.getElementById('help-btn').addEventListener('click', async function () {
+    if (helpLoaded) return;
+    var r;
+    try { r = await fetch('/api/help'); } catch (e) { return; }
+    if (!r.ok) return;
+    var h = await r.json();
+    helpLoaded = true;
+    document.getElementById('help-version').textContent = 'Version ' + (h.version || 'unknown');
+    document.getElementById('help-deployment-id').textContent = h.deployment_id || '';
+    if (h.docs_url) document.getElementById('help-docs-link').href = h.docs_url;
+    var g = h.guides || {};
+    if (g.device) document.getElementById('help-device-guide').href = g.device;
+    if (g.server) document.getElementById('help-server-guide').href = g.server;
+  });
+  document.getElementById('help-copy-id').addEventListener('click', async function () {
+    var id = document.getElementById('help-deployment-id').textContent;
+    if (!id) return;
+    var btn = document.getElementById('help-copy-id');
+    try { await navigator.clipboard.writeText(id); btn.textContent = 'copied'; }
+    catch (e) { btn.textContent = 'copy failed'; }
+    setTimeout(function () { btn.textContent = 'copy'; }, 1500);
+  });
+
   // ---- hash router ----
   var VIEWS = ['overview', 'images', 'devices', 'swarm', 'settings', 'monitoring'];
   function show(view) {
     // "#settings/tls" style hashes: the part before the slash picks the view,
-    // the rest picks the settings sub-page (showSettingsSub validates it).
+    // the rest picks the view's sub-page (showSettingsSub / showMonitoringSub
+    // validate it).
     var sub = view.indexOf('/') > -1 ? view.slice(view.indexOf('/') + 1) : '';
     view = view.split('/')[0];
     if (VIEWS.indexOf(view) < 0) view = 'overview';
@@ -1701,6 +2108,8 @@
     });
     document.getElementById('settings-submenu').hidden = view !== 'settings';
     if (view === 'settings') showSettingsSub(sub || 'general');
+    document.getElementById('monitoring-submenu').hidden = view !== 'monitoring';
+    if (view === 'monitoring') showMonitoringSub(sub || 'audit');
     if (view === 'overview') refreshOverview();
     else if (view === 'images') { refreshImages(); refreshImportable(); }
     else if (view === 'devices') refreshDevices();

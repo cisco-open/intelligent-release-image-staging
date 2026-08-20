@@ -20,10 +20,12 @@ import tempfile
 import threading
 import time
 import urllib.request
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, parse_qs, urlsplit
 
 import audit
+import audit_export
 import gui_app
 import gui_auth
 import gui_onboard
@@ -166,6 +168,81 @@ def _default_swarm_fetch():
         return r.read()
 
 
+# ---- persisted deploy logs (written by OnboardService._persist_log) -------
+# Filename: <finished_at>-<sanitized device>-<action>-<jobid>.log; first line
+# is a "# job=... device=<raw id> ..." header. The header is authoritative
+# (it carries the RAW device id); the filename is only a fallback.
+_DEPLOY_LOG_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+\.log$")
+_DEPLOY_LOG_HEADER_RE = re.compile(
+    r"^# job=(?P<job>\S+) device=(?P<device>.*?) action=(?P<action>\S+) "
+    r"state=(?P<state>\S+) rc=(?P<rc>\S+) queued_at=\S+ started_at=\S+ "
+    r"finished_at=(?P<finished>\S+) platform=\S+$")
+
+
+def _int_or_none(raw):
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _list_deploy_logs(log_dir, device_id=None):
+    """Metadata for every parseable *.log under log_dir, newest first:
+    {"file","device_id","action","state","rc","finished_at","size"}. The
+    header line wins; a file with a missing/garbled header falls back to the
+    filename fields (state/rc unknown); anything unparseable either way is
+    skipped. The device_id filter compares the RAW id from the header."""
+    if not log_dir or not os.path.isdir(log_dir):
+        return []
+    out = []
+    for name in os.listdir(log_dir):
+        if not _DEPLOY_LOG_NAME_RE.match(name):
+            continue
+        full = os.path.join(log_dir, name)
+        try:
+            size = os.path.getsize(full)
+            with open(full, encoding="utf-8", errors="replace") as f:
+                first = f.readline().rstrip("\n")
+        except OSError:
+            continue
+        m = _DEPLOY_LOG_HEADER_RE.match(first)
+        if m:
+            entry = {"file": name, "device_id": m.group("device"),
+                     "action": m.group("action"), "state": m.group("state"),
+                     "rc": _int_or_none(m.group("rc")),
+                     "finished_at": _int_or_none(m.group("finished")),
+                     "size": size}
+        else:
+            parts = name[:-len(".log")].split("-")
+            if len(parts) < 4 or not parts[0].isdigit():
+                continue
+            entry = {"file": name, "device_id": "-".join(parts[1:-2]),
+                     "action": parts[-2], "state": None, "rc": None,
+                     "finished_at": int(parts[0]), "size": size}
+        if device_id is not None and entry["device_id"] != device_id:
+            continue
+        out.append(entry)
+    out.sort(key=lambda e: (e["finished_at"] or 0, e["file"]), reverse=True)
+    return out
+
+
+def _read_deploy_log(log_dir, name):
+    """Bytes of one persisted deploy log, or None. The name must look like a
+    log filename AND realpath-resolve to a direct child of log_dir — rejects
+    traversal and symlinks pointing out of the directory."""
+    if not log_dir or not _DEPLOY_LOG_NAME_RE.match(name or ""):
+        return None
+    root = os.path.realpath(log_dir)
+    full = os.path.realpath(os.path.join(root, name))
+    if os.path.dirname(full) != root:
+        return None
+    try:
+        with open(full, "rb") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
 def _read_version():
     """Best-effort IRIS version: IRIS_VERSION env, else a VERSION file near this
     module (present in a source checkout and the self-contained image), else
@@ -181,6 +258,46 @@ def _read_version():
         except OSError:
             continue
     return "unknown"
+
+
+# Official documentation site (GitHub Pages build of docs/ + docs/zensical/,
+# published by .github/workflows/docs.yml). Surfaced by GET /api/help so the
+# console's "?" popover can deep-link it.
+_DOCS_URL = "https://cisco-open.github.io/intelligent-release-image-staging/"
+_INSTANCE_ID_BASENAME = "instance-id"
+
+
+def read_instance_id(state_dir):
+    """Stable per-deployment id: $IRIS_STATE/instance-id holds a uuid4 hex,
+    minted exactly once (mode 0600) and immutable afterwards. Created at
+    main() startup and lazily by this reader, so tests can call it directly.
+    Never raises: an unreadable/unwritable state dir degrades to a fresh
+    per-call id rather than breaking /api/help."""
+    path = os.path.join(state_dir, _INSTANCE_ID_BASENAME)
+    try:
+        with open(path) as f:
+            existing = f.read().strip()
+        if existing:
+            return existing
+    except OSError:
+        pass
+    fresh = uuid.uuid4().hex
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+        # O_EXCL: first writer wins; a concurrent creator loses the race and
+        # re-reads the winner's id so every caller agrees on one value.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(fresh + "\n")
+    except FileExistsError:
+        try:
+            with open(path) as f:
+                return f.read().strip() or fresh
+        except OSError:
+            return fresh
+    except OSError:
+        return fresh
+    return fresh
 
 
 def _resolve_certfile():
@@ -862,6 +979,28 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     self._json(400, {"error": "bad device id"}); return
                 reports = catalog.get_telemetry(did) if catalog else []
                 self._json(200, {"reports": reports}); return
+            if path.startswith("/api/devices/") and path.endswith("/deployment"):
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                if receipts is None:
+                    self._json(404, {"error": "receipts unavailable"}); return
+                did = unquote(path[len("/api/devices/"):-len("/deployment")])
+                records = receipts.list(did)
+                # The record that best describes the device: the active one,
+                # else the recoverable teardown-authorizing one — both can
+                # raise on ambiguity (duplicate receipts), and this is a
+                # read-only visibility panel, so fall back to the newest
+                # record rather than erroring it.
+                try:
+                    record = receipts.recoverable_for_device(did)
+                except ValueError:
+                    record = None
+                if record is None and records:
+                    record = max(records,
+                                 key=lambda r: (r.get("timestamps") or {})
+                                 .get("planned_at") or 0)
+                self._json(200, {"receipt": record, "total": len(records)})
+                return
             if path == "/api/credentials":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
@@ -888,6 +1027,24 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 job = onboard.get_job(path[len("/api/onboard/jobs/"):]) if onboard else None
                 self._json(200, job) if job else self._json(404, {"error": "no such job"})
                 return
+            if path == "/api/deploy-logs":  # exact match before the /<file> prefix route
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                qs = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                device_id = (qs.get("device_id") or [None])[0]
+                log_dir = getattr(onboard, "log_dir", None) if onboard else None
+                self._json(200, {"logs": _list_deploy_logs(
+                    log_dir, device_id=device_id)})
+                return
+            if path.startswith("/api/deploy-logs/"):
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                log_dir = getattr(onboard, "log_dir", None) if onboard else None
+                data = _read_deploy_log(
+                    log_dir, unquote(path[len("/api/deploy-logs/"):]))
+                if data is None:
+                    self._json(404, {"error": "not found"}); return
+                self._send(200, "text/plain; charset=utf-8", data); return
             if path == "/api/overview":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
@@ -927,11 +1084,34 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 self._json(200, job) if job else self._json(
                     404, {"error": "no such job"})
                 return
+            if path.startswith("/api/settings/audit-export/run/"):
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                job = audit_export.get_job(
+                    path[len("/api/settings/audit-export/run/"):])
+                self._json(200, job) if job else self._json(
+                    404, {"error": "no such job"})
+                return
             if path == "/api/settings":
                 info = app.session_info(self._sid())
                 if info is None:
                     self._json(401, {"error": "unauthorized"}); return
                 self._json(200, self._settings_info(info["username"])); return
+            if path == "/api/help":
+                # "?" popover data: version + stable deployment id + doc links.
+                # state_dir is read per-request (the /api/settings idiom) so
+                # tests can point IRIS_STATE at a tmp dir.
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
+                self._json(200, {
+                    "version": _read_version(),
+                    "deployment_id": read_instance_id(state_dir),
+                    "docs_url": _DOCS_URL,
+                    "guides": {"device": "/help-device.html",
+                               "server": "/help-server.html"},
+                })
+                return
             if path in ("/", "/index.html") and app.needs_setup():
                 # First-run: land on the LOGIN page — the default iris
                 # credential there is what mints the setup grant. setup.html
@@ -1006,6 +1186,17 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                 "assigned": len(assigned), "staged": len(staged)})
             assigned_total = sum(r["assigned"] for r in rollout)
             staged_total = sum(r["staged"] for r in rollout)
+            # "Staging" must mean devices ACTUALLY staging: enrolled (their
+            # agent heartbeats) and reporting a non-terminal stage_state.
+            # The old assigned-minus-staged arithmetic counted inventory
+            # rows that never heartbeated, so an idle install with 6 fleet
+            # rows read "6 staging". ready (seeding) and unassigned agents
+            # are not staging either — ready feeds the staged count above.
+            staging_now = sum(
+                1 for row in rows
+                if row.get("last_seen") is not None
+                and row.get("stage_state") not in (None, "", "unassigned",
+                                                   "ready"))
             # devices freshly onboarded whose agent hasn't heartbeated yet —
             # surfaced so an operator doesn't read the gap as "undeployed"
             awaiting = sum(1 for row in rows
@@ -1013,7 +1204,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             return {
                 "images": len(imgs), "devices": len(rows),
                 "assigned": assigned_total, "staged": staged_total,
-                "staging_now": assigned_total - staged_total,
+                "staging_now": staging_now,
                 "awaiting_heartbeat": awaiting,
                 "rollout": rollout,
                 # console-relative: the map lives on this server now (session-
@@ -1056,6 +1247,13 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 # server-side in the age-encrypted store
                 "stage_host": (creds.get_stage_host() if creds is not None
                                else {"configured": False, "username": ""}),
+                # settings file verbatim (it holds no secret) + password_set —
+                # the SCP password itself never leaves the encrypted store
+                "audit_export": dict(
+                    audit_export.read_settings(
+                        audit_export.settings_path(state_dir)),
+                    password_set=(creds.audit_export_secrets() is not None
+                                  if creds is not None else False)),
                 # console cert metadata only — key material is never echoed
                 "gui_cert": gui_tls.active_info(),
                 # installed root CAs: name/subject/expiry/fingerprint/source
@@ -1372,6 +1570,86 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                            detail="user %s -> %s"
                                   % (prev["username"] or "(none)", user))
                 self._json(200, {"stage_host": saved}); return
+            if path == "/api/settings/audit-export/run":
+                # exact match before the bare config route below
+                if creds is None:
+                    self._json(404, {"error": "not found"}); return
+                state = os.environ.get("IRIS_STATE", "/var/lib/iris")
+                cfg = audit_export.read_settings(
+                    audit_export.settings_path(state))
+                secret = creds.audit_export_secrets()
+                if audit_export.validate_settings(cfg) is not None \
+                        or secret is None:
+                    self._json(409, {"error": "audit export not configured"})
+                    return
+
+                def _export_audit(result, detail):
+                    # safe from the worker thread: _audit only closes over
+                    # audit_path, never per-request state
+                    self._audit("audit_export", "settings", action="export",
+                               target="audit-export", actor=actor,
+                               result=result, detail=detail)
+
+                self._json(200, {"job_id": audit_export.start_export(
+                    audit_path, cfg, secret.get("password", ""), state,
+                    audit_fn=_export_audit)})
+                return
+            if path == "/api/settings/audit-export":
+                if creds is None:
+                    self._json(404, {"error": "not found"}); return
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                fields = {}
+                for key in ("host", "user", "path", "age_recipient"):
+                    val = data.get(key)
+                    if not isinstance(val, str) or not val.strip():
+                        self._json(400, {"error": "%s is required" % key})
+                        return
+                    fields[key] = val.strip()
+                port = data.get("port", 22)
+                if not isinstance(port, int) or isinstance(port, bool) \
+                        or not 0 < port < 65536:
+                    self._json(400, {"error": "port must be an integer 1-65535"})
+                    return
+                auto = data.get("auto", False)
+                if not isinstance(auto, bool):
+                    self._json(400, {"error": "auto must be a bool"}); return
+                password = data.get("password")
+                if password is not None and not isinstance(password, str):
+                    self._json(400, {"error": "password must be a string"})
+                    return
+                candidate = dict(fields, port=port, auto=auto)
+                err = audit_export.validate_settings(candidate)
+                if err:
+                    self._json(400, {"error": err}); return
+                spath = audit_export.settings_path(
+                    os.environ.get("IRIS_STATE", "/var/lib/iris"))
+                prev = audit_export.read_settings(spath)
+                # the destination changed, not the run history: keep it
+                candidate["last_run_ts"] = prev["last_run_ts"]
+                candidate["last_result"] = prev["last_result"]
+                try:
+                    audit_export.write_settings(spath, candidate)
+                    if password:    # absent/empty keeps the stored password
+                        creds.set_audit_export_secret(password)
+                except Exception as exc:
+                    self._audit("audit_export_config", "settings", action="set",
+                               target="audit-export", actor=actor, result="fail",
+                               detail="persist failed: %s" % exc.__class__.__name__)
+                    self._json(500, {"error": "settings save failed"}); return
+                # destination coordinates are non-secret (stage-host
+                # precedent); the password only ever audits as a flag
+                self._audit("audit_export_config", "settings", action="set",
+                           target="audit-export", actor=actor,
+                           detail="dest %s -> %s@%s:%s port %d, auto %s, "
+                                  "password %s"
+                                  % (("%s@%s" % (prev["user"], prev["host"]))
+                                     if prev["host"] else "(none)",
+                                     fields["user"], fields["host"],
+                                     fields["path"], port, auto,
+                                     "updated" if password else "unchanged"))
+                self._json(200, {"ok": True}); return
             if path == "/api/settings/ca-trust/refresh":
                 spath = ca_trust_settings_path(
                     os.environ.get("IRIS_STATE", "/var/lib/iris"))
@@ -2016,6 +2294,20 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                            detail=("cleared (was user %s)" % prev["username"])
                                   if deleted else "nothing was configured")
                 self._json(200, {"deleted": deleted}); return
+            if path == "/api/settings/audit-export" and creds is not None:
+                spath = audit_export.settings_path(
+                    os.environ.get("IRIS_STATE", "/var/lib/iris"))
+                prev = audit_export.read_settings(spath)
+                existed = os.path.exists(spath)
+                audit_export.clear_settings(spath)
+                deleted = creds.clear_audit_export_secret() or existed
+                self._audit("audit_export_config", "settings", action="clear",
+                           target="audit-export", actor=actor,
+                           detail=(("cleared (was %s@%s:%s)"
+                                    % (prev["user"], prev["host"], prev["path"]))
+                                   if prev["host"] else "cleared")
+                                  if deleted else "nothing was configured")
+                self._json(200, {"deleted": deleted}); return
             if path == "/api/settings/telemetry-destination":
                 dpath = telemetry_destination.settings_path(
                     os.environ.get("IRIS_STATE", "/var/lib/iris"))
@@ -2195,6 +2487,9 @@ def main():
     images_dir = os.environ.get("IRIS_IMAGES_DIR", "/var/lib/iris-images")
     certfile = _resolve_certfile()
     audit_path = os.environ.get("IRIS_AUDIT", "/etc/iris/audit.jsonl")
+    # Mint the per-deployment instance id up front so the very first
+    # /api/help call already sees the durable value.
+    read_instance_id(state_dir)
     app = gui_app.GuiApp(secrets_path, recipients_csv=recipients, secrets_enc=secrets_enc)
 
     def _bg_audit(**kw):
@@ -2211,7 +2506,8 @@ def main():
     receipts.recover_interrupted()
     onboard = gui_onboard.OnboardService(
         fleet, creds, audit_fn=_bg_audit,
-        clear_state_fn=catalog.forget_device, receipts=receipts)
+        clear_state_fn=catalog.forget_device, receipts=receipts,
+        log_dir=os.path.join(state_dir, "deploy-logs"))
     srv = make_server(host, port, app, images, fleet, creds, catalog, onboard,
                        None, certfile=certfile, audit_path=audit_path, receipts=receipts)
     # Daily public-CA bundle auto-refresh (spec A3): in-process daemon
@@ -2219,6 +2515,13 @@ def main():
     ca_stop = threading.Event()     # never set in production; loop dies with us
     threading.Thread(target=ca_trust_refresh_loop,
                      args=(ca_stop, state_dir, _bg_audit),
+                     daemon=True).start()
+    # Daily audit-trail export (F5): same daemon-thread idiom. The password
+    # accessor is passed as a callable so each run reads the current secret.
+    export_stop = threading.Event()  # never set in production either
+    threading.Thread(target=audit_export.export_loop,
+                     args=(export_stop, audit_path, state_dir,
+                           creds.audit_export_secrets, _bg_audit),
                      daemon=True).start()
     scheme = "https" if srv.tls_active else "http"
     print("iris-gui on %s://%s:%d/" % (scheme, host, port), flush=True)

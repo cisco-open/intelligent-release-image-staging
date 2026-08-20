@@ -70,7 +70,7 @@ individual effects are documented in
 
 ## Backups
 
-Back up the Docker volumes that hold `/var/lib/iris` and `/etc/iris`, plus the offline age recipient material required to decrypt secrets, plus the `iris-images` uploads volume — console-uploaded images live there, and a restore without it loses them. Image binaries under the read-only import root and generated artifacts stay in their normal external storage path.
+Back up the Docker volumes that hold `/var/lib/iris` and `/etc/iris`, plus the offline age identity (the host key file `IRIS_AGE_KEY_FILE_HOST` points at) required to decrypt secrets, plus the `iris-images` uploads volume — console-uploaded images live there, and a restore without it loses them. Image binaries under the read-only import root and generated artifacts stay in their normal external storage path.
 
 For Kubernetes, snapshot the `iris-data` PVC and back up the age identity stored
 outside that PVC. Both are required for recovery.
@@ -83,14 +83,16 @@ On Catalyst 9300 IOx devices the final agent-to-IOS transfer uses the bind-mount
 
 ## Cleanup
 
-Use `device/device-uninstall.sh` or the IOx uninstall path for device cleanup. Cleanup removes IRIS-owned EEM applets, Guest Shell or IOx agent wiring, trustpoint binding, and staged agent artifacts. It still does not reload the device.
+Use `device/device-uninstall.sh` (Guest Shell devices), `device/router-uninstall.sh` (Catalyst 8000 routers), or the IOx uninstall path for device cleanup. Cleanup removes IRIS-owned EEM applets, Guest Shell or IOx agent wiring, trustpoint binding, and staged agent artifacts. It still does not reload the device.
 
 Undeploy is driven by the device's applied **receipt**, not its editable
 inventory row, so a later inventory edit cannot retarget cleanup. An
 **inband** device's teardown removes only the app footprint and preserves the
 operator-owned VLAN/SVI/routes/VRF. A device deployed before receipts existed
 has no active receipt and must be **adopted** (an explicit, audited, no-change
-recording of ownership) before it can be undeployed. A missing, drifted, or
+recording of ownership) before it can be undeployed — except a Catalyst 8000
+router, which cannot be adopted and must be re-onboarded to record live
+ownership evidence. A missing, drifted, or
 uncertain receipt stops cleanup in `needs-reconcile` rather than guessing. See
 [Management Type and VLAN Ownership](network-attachment.md).
 

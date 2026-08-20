@@ -18,9 +18,11 @@ IRIS is allowed to create and remove on the device.
 ## Routed — IRIS-managed app network
 
 Routed attachment uses a **dedicated IRIS VLAN and SVI**. Onboarding is
-create-only: preflight requires the proposed VLAN/SVI to be absent, the applied
-receipt records the resources IRIS created, and teardown removes exactly those.
-IRIS never silently adopts a pre-existing VLAN or SVI.
+create-only: the applied receipt records the resources IRIS created, and
+teardown removes exactly those.
+Choose a VLAN and SVI that do not already exist on the device: the installer
+applies them as IRIS-created, the receipt records them as IRIS-owned, and
+routed teardown removes them.
 
 Global `ip routing` is a switch-wide setting IRIS never enables on the
 operator's behalf — it is an operator decision. Both installers

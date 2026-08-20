@@ -95,3 +95,43 @@ def test_stage_host_persists_encrypted_path(tmp_path, monkeypatch):
     # stored under the top-level stage_host key, alongside other store sections
     store = secrets_store.load(str(tmp_path / "secrets.json"))
     assert store["stage_host"]["username"] == "u"
+
+
+def test_audit_export_secret_set_get_clear(tmp_path):
+    cs = _cs(tmp_path)
+    # unset: server-side accessor returns None
+    assert cs.audit_export_secrets() is None
+    # the setter only ever reports the flag, never the password
+    assert cs.set_audit_export_secret("exportpw") == {"password_set": True}
+    full = cs.audit_export_secrets()
+    assert full["password"] == "exportpw" and full["updated_at"] > 0
+    assert cs.clear_audit_export_secret() is True
+    assert cs.clear_audit_export_secret() is False
+    assert cs.audit_export_secrets() is None
+
+
+def test_audit_export_secret_requires_password(tmp_path):
+    cs = _cs(tmp_path)
+    for bad in ("", None):
+        try:
+            cs.set_audit_export_secret(bad)
+            assert False
+        except ValueError:
+            pass
+
+
+def test_audit_export_secret_persists_encrypted_path(tmp_path, monkeypatch):
+    calls = {}
+
+    def fake_persist(store, plain_path, recipients_csv=None, enc_path=None):
+        calls["recipients"] = recipients_csv
+        secrets_store.save(store, plain_path)
+
+    monkeypatch.setattr(gui_creds.secretfs, "persist_store", fake_persist)
+    cs = gui_creds.CredentialStore(str(tmp_path / "secrets.json"),
+                                   recipients_csv="age1x", secrets_enc="/enc.age")
+    cs.set_audit_export_secret("p")
+    assert calls["recipients"] == "age1x"
+    # stored under the top-level audit_export key, alongside other sections
+    store = secrets_store.load(str(tmp_path / "secrets.json"))
+    assert store["audit_export"]["password"] == "p"

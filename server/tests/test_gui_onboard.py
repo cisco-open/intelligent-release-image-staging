@@ -2,6 +2,7 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 #
 # SPDX-License-Identifier: Apache-2.0
+import os
 import threading
 import time
 from types import SimpleNamespace
@@ -1658,3 +1659,88 @@ def test_start_threads_env_extra_to_the_runner():
                                           "IRIS_TELEMETRY_STREAM": "on"}))
     assert seen["env"]["TELEMETRY_STREAM"] == "on"
     assert seen["env"]["IRIS_TELEMETRY_STREAM"] == "on"
+
+
+# ---- persistent job logs (log_dir) ---------------------------------------
+# In-memory jobs evaporate after _JOB_TTL; with log_dir set, _finish writes
+# each finished job's log to disk (best-effort) so yesterday's failure is
+# still readable from the console.
+
+def test_finish_persists_log_file_with_header_and_lines(tmp_path):
+    log_dir = str(tmp_path / "deploy-logs")
+    svc = _svc(lambda p, e, on: (on("[1/6] hi"), on("[6/6] done"), 0)[2],
+               log_dir=log_dir)
+    job = _wait(svc, svc.start("d1"))
+    assert job["state"] == "done"
+    files = os.listdir(log_dir)
+    assert files == ["%s-d1-onboard-%s.log" % (job["finished_at"], job["id"])]
+    with open(os.path.join(log_dir, files[0])) as f:
+        lines = f.read().splitlines()
+    assert lines[0] == (
+        "# job=%s device=d1 action=onboard state=done rc=0 queued_at=%s "
+        "started_at=%s finished_at=%s platform=guestshell"
+        % (job["id"], job["queued_at"], job["started_at"],
+           job["finished_at"]))
+    assert lines[1:] == job["lines"]
+
+
+def test_failed_job_log_persisted_with_error_state(tmp_path):
+    log_dir = str(tmp_path / "deploy-logs")
+    svc = _svc(lambda p, e, on: (on("boom"), 2)[1], log_dir=log_dir)
+    job = _wait(svc, svc.start("d1"))
+    assert job["state"] == "error"
+    (name,) = os.listdir(log_dir)
+    with open(os.path.join(log_dir, name)) as f:
+        head = f.readline()
+    assert " state=error rc=2 " in head
+
+
+def test_persisted_log_filename_sanitizes_device_but_header_keeps_raw(tmp_path):
+    log_dir = str(tmp_path / "deploy-logs")
+    did = "sw 1/a"          # not filesystem-safe
+    fleet = _Fleet({did: {"device_id": did, "device_ip": "10.0.0.1",
+                          "model": "C9300", "credential_profile_id": "lab"}})
+    creds = _Creds({"lab": {"device_user": "u", "device_pass": "p"}})
+    svc = gui_onboard.OnboardService(
+        fleet, creds, device_install="/fake/device-install.sh",
+        crt_public="/fake/crt.pem", host_ip="10.9.9.9",
+        mint_fn=lambda d: "TOK", run_fn=lambda p, e, on: 0,
+        probe_fn=lambda dev, env: "C9300", log_dir=log_dir)
+    job = _wait(svc, svc.start(did))
+    assert job["state"] == "done"
+    (name,) = os.listdir(log_dir)
+    # filename carries the sanitized id, the header keeps the raw one
+    assert name == "%s-sw_1_a-onboard-%s.log" % (job["finished_at"],
+                                                 job["id"])
+    with open(os.path.join(log_dir, name)) as f:
+        assert " device=sw 1/a action=onboard " in f.readline()
+
+
+def test_persisted_logs_pruned_to_newest(tmp_path, monkeypatch):
+    monkeypatch.setattr(gui_onboard, "_MAX_PERSISTED_LOGS", 3)
+    log_dir = str(tmp_path / "deploy-logs")
+    os.makedirs(log_dir)
+    for i in range(4):
+        stale = os.path.join(log_dir, "%d-old-onboard-%04d.log" % (i, i))
+        with open(stale, "w") as f:
+            f.write("# old\n")
+        os.utime(stale, (i + 1, i + 1))    # strictly older than the new log
+    svc = _svc(lambda p, e, on: 0, log_dir=log_dir)
+    job = _wait(svc, svc.start("d1"))
+    assert job["state"] == "done"
+    names = sorted(os.listdir(log_dir))
+    assert len(names) == 3                 # pruned to the newest N
+    assert "%s-d1-onboard-%s.log" % (job["finished_at"], job["id"]) in names
+    assert "0-old-onboard-0000.log" not in names
+    assert "1-old-onboard-0001.log" not in names
+
+
+def test_log_persistence_failure_never_fails_the_job(tmp_path):
+    # log_dir resolves to an existing FILE: makedirs raises inside
+    # _persist_log — the write is best-effort, so the job still finishes
+    # and the outcome is unchanged.
+    blocked = tmp_path / "not-a-dir"
+    blocked.write_text("x")
+    svc = _svc(lambda p, e, on: 0, log_dir=str(blocked))
+    job = _wait(svc, svc.start("d1"))
+    assert job["state"] == "done" and job["returncode"] == 0
