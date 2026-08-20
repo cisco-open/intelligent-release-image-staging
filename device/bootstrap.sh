@@ -84,9 +84,18 @@ fi
 # relaunch, so the agent hit ECONNREFUSED on every 60s tick and crashed before
 # its first heartbeat — invisible until the stale process happened to die.
 # Health, not liveness, is the thing worth checking.
+# A FAILED launch must not abort bootstrap: the agent (step 5) is the device's
+# only path back to the catalog, so exiting here turns any aria2c launch
+# regression into a silent device (the 2026-08-20 empty-rpc-secret incident
+# was invisible for exactly this reason). Record the failure and continue —
+# the agent tolerates a down RPC and heartbeats stage_error instead.
 if [ -f "$STAGE/guestshell-start.sh" ]; then
-  bash "$STAGE/guestshell-start.sh" \
-    || { echo "IRIS-BOOTSTRAP: failed to launch aria2c" >&2; exit 1; }
+  if bash "$STAGE/guestshell-start.sh"; then
+    rm -f "$STAGE/aria2c-launch-failed"
+  else
+    echo "IRIS-BOOTSTRAP: failed to launch aria2c; continuing so the agent still heartbeats" >&2
+    date -u '+%Y-%m-%dT%H:%M:%SZ' > "$STAGE/aria2c-launch-failed" 2>/dev/null || :
+  fi
 fi
 
 # 4. trim the aria2c log so it never fills flash (Guest Shell mode)

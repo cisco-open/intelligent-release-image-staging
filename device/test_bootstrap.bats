@@ -47,6 +47,40 @@ teardown() { rm -rf "$TMP"; }
   [ ! -f "$TMP/pkill.log" ]
 }
 
+@test "a failed aria2c launch is recorded but does NOT block the agent" {
+  # Sibling of the 2026-08-20 incident class: bootstrap used to `exit 1` when
+  # guestshell-start.sh failed, so the agent (step 5) never ran and the device
+  # never heartbeated — an aria2c LAUNCH regression (e.g. the empty rpc-secret
+  # bug) was indistinguishable from a dead device. The agent is the device's
+  # only line back to the catalog: it must run even when the swarm daemon is
+  # down, and report the breakage instead of vanishing.
+  printf 'rpc_secret = SAME\n' > "$STAGE/iris-agent.conf"
+  printf 'SAME\n' > "$STAGE/rpc-secret"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$STAGE/guestshell-start.sh"
+  chmod +x "$STAGE/guestshell-start.sh"
+  mkdir -p "$STAGE/agent"
+  printf 'open(r"%s/agent-invoked", "w").write("ran")\n' "$TMP" \
+    > "$STAGE/agent/iris_agent.py"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  # the failure is surfaced and recorded for forensics...
+  [[ "$output" == *"failed to launch aria2c"* ]]
+  [ -f "$STAGE/aria2c-launch-failed" ]
+  # ...but the agent STILL ran, so the device still heartbeats
+  [ -f "$TMP/agent-invoked" ]
+}
+
+@test "a healthy aria2c launch clears a stale launch-failure marker" {
+  printf 'rpc_secret = SAME\n' > "$STAGE/iris-agent.conf"
+  printf 'SAME\n' > "$STAGE/rpc-secret"
+  printf 'stale\n' > "$STAGE/aria2c-launch-failed"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ ! -f "$STAGE/aria2c-launch-failed" ]
+}
+
 @test "a live-but-unresponsive aria2c is relaunched, not skipped" {
   # 2026-08-20 incident (iris8kv-2/-3/-4 + C9300 .129, ~42min silent): step 3
   # gated the launch on `pgrep aria2c` — process EXISTENCE, not RPC HEALTH. An

@@ -680,8 +680,26 @@ def run_once(cfg, deps, state):
         # clear any stale/phantom aria2 entry (e.g. a completed seed whose staged
         # file was deleted) so addTorrent actually re-downloads instead of being a
         # silent no-op on the duplicate info_hash.
-        deps.aria_remove(image["filename"])
-        deps.aria_add(torrent, stage_dir)
+        # A down RPC (aria2c launch failed / daemon died) must NOT crash the
+        # tick: these are the only RPC calls before the staging heartbeat, and
+        # letting the connection error escape is the 2026-08-20 failure class —
+        # the device never heartbeats and is invisible exactly while broken.
+        # OSError covers the whole family (URLError subclasses it). Degrade to
+        # an error heartbeat; the next tick retries after bootstrap relaunches.
+        try:
+            deps.aria_remove(image["filename"])
+            deps.aria_add(torrent, stage_dir)
+        except OSError as e:
+            deps.emit("ARIA2-DOWN",
+                      "aria2c RPC unreachable; cannot stage %s: %s"
+                      % (image["filename"], e))
+            _send_heartbeat(deps, sid,
+                            _heartbeat(image, deps, "error",
+                                       target_fs=state.get("stage_fs"),
+                                       tele_on=tele_on, stream_on=stream_on,
+                                       stage_error="aria2c RPC unreachable: %s"
+                                                   % e))
+            return "aria2-down"
         deps.emit("STAGING", "downloading %s via private swarm" % image["filename"])
     else:
         # one progress line per agent run (60s) — NOT a separate fast timer (the

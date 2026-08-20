@@ -430,6 +430,49 @@ def test_in_progress_download_is_not_re_added():
     assert any(m == "PROGRESS" for m, _ in emitted)   # one progress line, not a flood
 
 
+def test_aria_add_rpc_down_heartbeats_error_instead_of_crashing():
+    # 2026-08-20 incident class: aria2c is not serving RPC (launch failed,
+    # daemon died). The connection error out of addTorrent used to escape
+    # run_once BEFORE the tick's heartbeat — the device simply vanished from
+    # the console. A down swarm daemon must degrade to a visible error
+    # heartbeat, never to silence.
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin",
+                       "size": 1000, "sha256": "abc"})
+    deps, emitted, _, _, _, _, _, _ = make_deps(cat, {}, free=9_000_000_000)
+
+    def _refused(torrent, dest):
+        raise ConnectionRefusedError(111, "Connection refused")
+
+    deps = deps._replace(aria_add=_refused)
+    assert iris_agent.run_once(CFG, deps, {}) == "aria2-down"
+    assert len(cat.heartbeats) == 1
+    hb = cat.heartbeats[0]
+    assert hb["current_image_id"] == "img1"
+    assert hb["stage_state"] == "error"
+    assert "aria2c" in hb["stage_error"]
+
+
+def test_aria_remove_rpc_down_heartbeats_error_instead_of_crashing():
+    # Same failure class one call earlier: the stale-entry clear hits the RPC
+    # first, and urllib wraps the refusal in URLError. Must not crash either.
+    import urllib.error
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin",
+                       "size": 1000, "sha256": "abc"})
+    deps, emitted, _, aria, _, _, _, _ = make_deps(cat, {}, free=9_000_000_000)
+
+    def _refused(fname):
+        raise urllib.error.URLError(ConnectionRefusedError(111, "refused"))
+
+    deps = deps._replace(aria_remove=_refused)
+    assert iris_agent.run_once(CFG, deps, {}) == "aria2-down"
+    assert aria == []                       # never reached addTorrent
+    hb = cat.heartbeats[-1]
+    assert hb["stage_state"] == "error"
+    assert "aria2c" in hb["stage_error"]
+
+
 def test_reassignment_purges_old_image_everywhere():
     # device completed img1 (incl. root copy); operator reassigns img2 ->
     # the agent must purge the old torrent/files and delete the old root copy
