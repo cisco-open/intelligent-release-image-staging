@@ -1893,11 +1893,18 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 did = unquote(path[len("/api/devices/"):])
                 prev = fleet.get_device(did)
                 deleted = fleet.delete(did)
+                # Purge catalog-side state (assignment, heartbeat record,
+                # telemetry history, pending pull) even when the fleet row was
+                # already gone — a deleted-and-re-added device must come back
+                # unassigned, never resurrect a stale assignment.
+                purged = catalog.purge_device(did) if catalog is not None else False
                 self._audit("device_delete", "device", action="delete", target=did,
                            actor=actor, result="ok" if deleted else "fail",
-                           detail=("removed (ip %s, model %s)"
+                           detail=("removed (ip %s, model %s)%s"
                                    % ((prev or {}).get("device_ip"),
-                                      (prev or {}).get("model") or "-"))
+                                      (prev or {}).get("model") or "-",
+                                      ", assignment and state purged"
+                                      if purged else ""))
                                   if deleted else "no such device")
                 self._json(200, {"deleted": deleted})
                 return

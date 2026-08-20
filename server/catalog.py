@@ -220,6 +220,24 @@ class CatalogStore:
     def list_devices(self):
         return list(self._read(self.devices_path).values())
 
+    def purge_device(self, device_id):
+        """Remove ALL per-device catalog state: the heartbeat record, the
+        image assignment (policy), the telemetry history, and any pending
+        pull directive. Called when the console deletes a device from the
+        fleet — a device that is deleted and added back must come back
+        unassigned, or a stale assignment would silently restage the old
+        image. Contrast forget_device(), which drops only the heartbeat
+        record on undeploy and deliberately keeps the assignment. Returns
+        True iff any state existed."""
+        existed = self.forget_device(device_id)
+        for path in (self.policy_path, self.telemetry_path, self.pull_path):
+            with secrets_store.store_lock(path):
+                data = self._read(path)
+                if data.pop(device_id, None) is not None:
+                    existed = True
+                    _atomic_write_json(path, data)
+        return existed
+
     # --- policy (install-approval gate) ---
     def set_policy(self, device_id, approved_image_id=None, install_allowed=False):
         with secrets_store.store_lock(self.policy_path):

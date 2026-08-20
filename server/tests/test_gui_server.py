@@ -1048,6 +1048,35 @@ def test_devices_crud_and_list_requires_auth(tmp_path):
         stop()
 
 
+def test_device_delete_purges_catalog_state(tmp_path):
+    # Deleting a device must clear its catalog-side state too — a device
+    # that is deleted and added back comes back UNASSIGNED, never with a
+    # resurrected stale assignment that would silently restage an image.
+    host, port, (_, _, _, cat), stop = _serve_full(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        dev = {"device_id": "d1", "device_ip": "10.0.0.1", "vlan": "666",
+               "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
+               "guest_ip": "10.0.0.3"}
+        st, _, _ = _req(host, port, "POST", "/api/devices", dev, headers=hh)
+        assert st == 200
+        cat.set_policy("d1", approved_image_id="img1", install_allowed=True)
+        cat.record_heartbeat("d1", {"current_image_id": "img1"}, now=1)
+        cat.record_telemetry("d1", {"event": "staging-complete"})
+        st, _, b = _req(host, port, "DELETE", "/api/devices/d1", headers=hh)
+        assert st == 200 and json.loads(b)["deleted"] is True
+        assert cat.get_policy("d1") == {"approved_image_id": None,
+                                        "install_allowed": False}
+        assert cat.get_device("d1") is None
+        assert cat.get_telemetry("d1") == []
+        st, _, _ = _req(host, port, "POST", "/api/devices", dev, headers=hh)
+        assert st == 200
+        assert cat.get_policy("d1")["approved_image_id"] is None
+    finally:
+        stop()
+
+
 def test_device_post_requires_csrf(tmp_path):
     host, port, _, stop = _serve_full(tmp_path)
     try:

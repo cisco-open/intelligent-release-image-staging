@@ -154,6 +154,12 @@ top-level `VERSION` file.
   CA. The default path is unchanged.
 
 ### Fixed
+- **Deleted devices came back with their old assignment**: removing a device
+  from the console only dropped the fleet row; the catalog kept the image
+  assignment, heartbeat record, telemetry history, and any pending pull
+  directive, so re-adding the same device id silently restaged the old
+  image. Device deletion now purges all catalog-side state — a re-added
+  device always comes back unassigned.
 - **IOx packages built on containerd-store Docker engines never started**:
   `docker save` (and therefore `ioxclient docker package`) on such engines
   emits a nested OCI index with buildx attestation manifests, which IE3x00
