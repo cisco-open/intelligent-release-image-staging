@@ -6,10 +6,13 @@
 secrets store under the top-level 'credential_profiles' key, plus the singleton
 stage-host SSH login under the top-level 'stage_host' key (used by onboarding when
 the installer must ssh to STAGE_HOST — e.g. the Console running inside Docker,
-whose network namespace is never the stage host). The whole store file is
-encrypted at rest, so fields are stored plaintext inside (consistent with token
-storage). list_profiles()/get_stage_host() NEVER return passwords; get_secrets()/
-stage_host_secrets() are server-side accessors for onboarding. Persists via
+whose network namespace is never the stage host), plus the singleton audit-export
+SCP password under the top-level 'audit_export' key (used by audit_export.py's
+sshpass upload). The whole store file is encrypted at rest, so fields are stored
+plaintext inside (consistent with token storage). list_profiles()/
+get_stage_host() NEVER return passwords — the audit-export HTTP surface only
+ever sees password_set; get_secrets()/stage_host_secrets()/
+audit_export_secrets() are server-side accessors. Persists via
 secretfs.persist_store (durable-first), mirroring GuiApp.set_admin. Stdlib + repo
 modules only."""
 import time
@@ -109,6 +112,35 @@ class CredentialStore:
         with secrets_store.store_lock(self.secrets_path):
             store = secrets_store.load(self.secrets_path)
             existed = store.pop("stage_host", None) is not None
+            if existed:
+                secretfs.persist_store(store, self.secrets_path,
+                                       recipients_csv=self.recipients_csv,
+                                       enc_path=self.secrets_enc)
+        return existed
+
+    def set_audit_export_secret(self, password):
+        """Set the audit-export SCP password (singleton). Required."""
+        if not str(password or ""):
+            raise ValueError("password is required")
+        rec = {"password": password, "updated_at": int(self._now())}
+        with secrets_store.store_lock(self.secrets_path):
+            store = secrets_store.load(self.secrets_path)
+            store["audit_export"] = rec
+            secretfs.persist_store(store, self.secrets_path,
+                                   recipients_csv=self.recipients_csv,
+                                   enc_path=self.secrets_enc)
+        return {"password_set": True}
+
+    def audit_export_secrets(self):
+        """Full record incl. password — SERVER-SIDE ONLY (the export job).
+        None if unset. The HTTP surface only ever exposes password_set."""
+        rec = self._load().get("audit_export")
+        return rec if rec and rec.get("password") else None
+
+    def clear_audit_export_secret(self):
+        with secrets_store.store_lock(self.secrets_path):
+            store = secrets_store.load(self.secrets_path)
+            existed = store.pop("audit_export", None) is not None
             if existed:
                 secretfs.persist_store(store, self.secrets_path,
                                        recipients_csv=self.recipients_csv,

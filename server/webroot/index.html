@@ -13,6 +13,19 @@
   <div class="top">
     <span>◈ Intelligent Release &amp; Image Staging <span class="tag">IRIS</span></span>
     <span class="spacer"></span>
+    <div class="menu-wrap">
+      <button class="btn ghost" id="help-btn" aria-expanded="false" aria-label="Help" title="Help">?</button>
+      <div class="menu right" id="help-pop" hidden>
+        <div class="help-row muted" id="help-version"></div>
+        <div class="help-row muted">Deployment id
+          <span class="mono" id="help-deployment-id"></span>
+          <button class="linkish" type="button" id="help-copy-id">copy</button>
+        </div>
+        <a class="menu-item menu-close" id="help-docs-link" href="https://cisco-open.github.io/intelligent-release-image-staging/" target="_blank" rel="noopener">Official documentation ↗</a>
+        <a class="menu-item menu-close" id="help-device-guide" href="/help-device.html" target="_blank" rel="noopener">Device-side troubleshooting ↗</a>
+        <a class="menu-item menu-close" id="help-server-guide" href="/help-server.html" target="_blank" rel="noopener">Server-side setup &amp; troubleshooting ↗</a>
+      </div>
+    </div>
     <span class="who" id="who"></span>
     <button class="btn ghost" id="logout">Sign out</button>
   </div>
@@ -29,8 +42,13 @@
         <a href="#settings/general" class="nav subsub" id="nav-settings-general">General</a>
         <a href="#settings/tls" class="nav subsub" id="nav-settings-tls">TLS &amp; trust</a>
         <a href="#settings/telemetry" class="nav subsub" id="nav-settings-telemetry">Telemetry</a>
+        <a href="#settings/audit" class="nav subsub" id="nav-settings-audit">Audit export</a>
       </div>
       <a href="#monitoring" class="nav sub" id="nav-monitoring">Monitoring</a>
+      <div id="monitoring-submenu" hidden>
+        <a href="#monitoring/audit" class="nav subsub" id="nav-monitoring-audit">Audit trail</a>
+        <a href="#monitoring/deploylogs" class="nav subsub" id="nav-monitoring-deploylogs">Deployment logs</a>
+      </div>
     </nav>
     <main class="main">
       <section id="view-overview" hidden>
@@ -45,8 +63,9 @@
       <section id="view-images" hidden>
         <h2>Images</h2>
         <div class="upload" id="drop">
-          <input type="file" id="file" accept=".bin,.SPA.bin" hidden>
-          <p><button class="btn" id="pick">Choose a file</button> or drag an image here</p>
+          <input type="file" id="file" accept=".bin,.SPA.bin" multiple hidden>
+          <p><button class="btn" id="pick">Choose files</button> or drag images here</p>
+          <div id="uploads"></div>
           <div class="progress" id="prog" hidden><div class="bar" id="bar"></div></div>
           <p class="muted" id="status"></p>
         </div>
@@ -143,6 +162,18 @@
           <thead><tr><th><input type="checkbox" id="mark-all"></th><th>Device</th><th>IP</th><th>Model</th><th>Management type</th><th>Platform</th><th>Credential</th><th>Assigned image</th><th>Telemetry</th><th>Status</th></tr></thead>
           <tbody id="dev-rows"></tbody>
         </table>
+        <div id="deploy-info-panel" hidden>
+          <h3>Deployment details <span id="di-dev" class="muted"></span></h3>
+          <p class="muted" id="di-note"></p>
+          <table class="tbl" id="di-tbl"><tbody id="di-rows"></tbody></table>
+          <h3>Deployment logs</h3>
+          <table class="tbl" id="di-log-tbl">
+            <thead><tr><th>Finished</th><th>Action</th><th>Result</th><th>Size</th><th></th></tr></thead>
+            <tbody id="di-log-rows"></tbody>
+          </table>
+          <pre class="log" id="di-log-text" hidden></pre>
+          <p><button class="btn ghost" id="di-close">Close</button></p>
+        </div>
         <div id="batch-panel" hidden>
           <h3>Onboarding batch <span id="batch-summary" class="muted"></span></h3>
           <table class="tbl">
@@ -152,12 +183,7 @@
           <button class="btn ghost" id="batch-cancel">Cancel queued</button>
           <button class="btn ghost" id="batch-close">Close</button>
         </div>
-        <div id="onboard-panel" hidden>
-          <h3>Onboarding <span id="onboard-dev" class="muted"></span></h3>
-          <pre class="log" id="onboard-log"></pre>
-          <button class="btn ghost" id="onboard-abort">Abort onboard</button>
-          <button class="btn ghost" id="onboard-close">Close</button>
-        </div>
+        <div id="onboard-logs"></div>
       </section>
       <section id="view-swarm" hidden>
         <h2>Swarm</h2>
@@ -262,9 +288,30 @@
             <span class="err" id="td-msg"></span>
           </form>
         </div>
+        <div id="settings-pane-audit" hidden>
+          <h3>Audit export</h3>
+          <p class="muted">Uploads the audit trail to a remote host over SCP,
+            age-encrypted to the recipient below — encryption is mandatory.
+            The SCP password is stored age-encrypted and never shown again.</p>
+          <p class="muted" id="ae-status"></p>
+          <form class="inline-form" id="ae-form">
+            <input id="ae-host" placeholder="Host">
+            <input id="ae-port" placeholder="Port (22)">
+            <input id="ae-user" placeholder="Username" autocomplete="username">
+            <input id="ae-path" placeholder="Remote path (/var/backups or ~/audit)">
+            <input id="ae-recipient" placeholder="age recipient (age1…)" spellcheck="false">
+            <input id="ae-pass" type="password" placeholder="Password" autocomplete="new-password">
+            <label class="muted"><input type="checkbox" id="ae-auto"> Export daily</label>
+            <button class="btn" type="submit">Save</button>
+            <button class="btn ghost" type="button" id="ae-run">Export now</button>
+            <button class="linkish danger-link" type="button" id="ae-clear">Clear</button>
+            <span class="err" id="ae-msg"></span>
+          </form>
+        </div>
       </section>
       <section id="view-monitoring" hidden>
         <h2>Monitoring <span id="telemetry-health" class="badge badge-queued" hidden></span></h2>
+        <div id="monitoring-pane-audit">
         <h3>Audit trail (90-day circular)</h3>
         <div class="toolbar">
           <span class="joined">
@@ -303,6 +350,23 @@
           <tbody id="audit-rows"></tbody>
         </table>
         <p><button class="btn ghost" id="audit-load-older">Load older</button></p>
+        </div>
+        <div id="monitoring-pane-deploylogs" hidden>
+          <h3>Deployment logs</h3>
+          <p class="muted">Per-job onboard and undeploy logs kept on the server
+            (newest 200) — they survive console reloads and session changes.</p>
+          <div class="toolbar">
+            <span class="joined">
+              <input id="dl-filter" placeholder="Filter by device id" spellcheck="false">
+              <button class="btn ghost" id="dl-refresh">Refresh</button>
+            </span>
+          </div>
+          <table class="tbl" id="dl-tbl">
+            <thead><tr><th>Finished</th><th>Device</th><th>Action</th><th>Result</th><th>Size</th><th></th></tr></thead>
+            <tbody id="dl-rows"></tbody>
+          </table>
+          <pre class="log" id="dl-text" hidden></pre>
+        </div>
       </section>
     </main>
   </div>

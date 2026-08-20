@@ -1,0 +1,85 @@
+<!doctype html>
+<!-- Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+     SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IRIS — Server-side setup &amp; troubleshooting</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="top">
+    <span>◈ Intelligent Release &amp; Image Staging <span class="tag">IRIS</span></span>
+    <span class="spacer"></span>
+    <a class="toplink" href="/">← Console</a>
+    <a class="toplink" href="https://cisco-open.github.io/intelligent-release-image-staging/" target="_blank" rel="noopener">Official documentation ↗</a>
+  </div>
+  <div class="stripe"></div>
+  <main class="doc">
+    <h1>Server-side setup &amp; troubleshooting</h1>
+
+    <h2>First run</h2>
+    <p>Before an admin account exists, sign in with the default credential
+    <code>iris</code> / <code>irisisgreat!</code> — it works only pre-setup
+    and takes you straight to the wizard that creates the real admin account.
+    The moment an admin exists it becomes an ordinary failed login. The CLI
+    alternative from the server host:</p>
+    <pre class="log">docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin</pre>
+
+    <h2>Recovery checklist</h2>
+    <ol>
+      <li>Confirm <code>docker ps</code> shows the <code>iris</code>
+      container, then read <code>docker logs iris</code> for catalog,
+      tracker, seeder, or secretfs errors.</li>
+      <li>Confirm devices can reach ports <code>8443</code> (catalog),
+      <code>8000</code> (artifacts), <code>6969</code> (tracker), and
+      <code>6881</code> (seeder); operators need <code>8080</code>
+      (this console).</li>
+      <li>Check host-path ownership: every service runs at uid 10001. An
+      image listed as <code>not readable by the server</code>, a secrets
+      store that suddenly fails to decrypt, or an agent-bundle download
+      failure after a reset is an ownership problem, not corrupt state —
+      re-chown the age key, the artifacts directory, and every kept
+      volume to <code>10001:10001</code>.</li>
+      <li>Check the audit trail (Monitoring → Audit trail) for the last
+      admin or workflow action before the symptom started.</li>
+      <li>Check service health: <code>/healthz</code> on port 9101 answers
+      basic health JSON and, when telemetry export is configured, an
+      <code>otlp_export</code> block matching the console's <em>Telemetry
+      export</em> badge.</li>
+    </ol>
+
+    <h2>Staged IOx packages drift</h2>
+    <p>The IOx tars (<code>iris-arm64.tar</code> / <code>iris-amd64.tar</code>)
+    bake the catalog CA and agent code in at build time. After a TLS
+    certificate rotation <em>or</em> a release bump, already-staged tars are
+    stale: the app runs and TCP connects, but pinning fails and the device
+    never heartbeats. Rebuild and restage with
+    <code>tools/provision-iox-packages.sh</code>, then re-onboard the
+    affected IOx devices.</p>
+
+    <h2>Where state lives</h2>
+    <ul>
+      <li><code>/etc/iris</code> — encrypted secrets, generated TLS
+      material, and the audit trail (<code>audit.jsonl</code>).</li>
+      <li><code>/var/lib/iris</code> — catalog state, policies, torrent
+      metadata, deployment receipts, deploy logs.</li>
+      <li><code>/run/iris</code> — plaintext runtime secrets, tmpfs only:
+      gone on restart by design, rebuilt from the encrypted store.</li>
+      <li><code>/var/lib/iris-images</code> — console-uploaded images.
+      Back this volume up too; a restore without it loses the uploads.</li>
+    </ul>
+
+    <h2>More detail</h2>
+    <ul>
+      <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/server/" target="_blank" rel="noopener">Server</a> — services, state, bootstrap, certificates, chown rules</li>
+      <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/operations/" target="_blank" rel="noopener">Operations</a> — daily commands, backups, recovery checklist</li>
+      <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/network-ports/" target="_blank" rel="noopener">Network ports and flows</a> — every port and what rides it</li>
+      <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/observability/" target="_blank" rel="noopener">Observability</a> — metrics, telemetry export health, failure interpretation</li>
+      <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/console/" target="_blank" rel="noopener">Web console</a> — the admin browser workflow end to end</li>
+    </ul>
+  </main>
+</body>
+</html>

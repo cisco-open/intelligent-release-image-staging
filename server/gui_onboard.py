@@ -37,6 +37,10 @@ _MAX_QUEUED_JOBS = 1000
 _MAX_JOB_LOG_LINES = 2000
 _MAX_JOB_LOG_BYTES = 256 * 1024
 _LOG_TRUNCATED = "[additional job output truncated: retention limit reached]"
+# In-memory jobs evaporate after _JOB_TTL; when a log_dir is configured every
+# finished job's log is also written there so an operator can read yesterday's
+# failure. Bounded: the directory is pruned to the newest N files.
+_MAX_PERSISTED_LOGS = 200
 
 
 def _fmt_dur(secs):
@@ -405,7 +409,7 @@ class OnboardService:
                  mint_fn=None, run_fn=_default_runner, now_fn=time.time,
                  probe_fn=None, artifacts_dir=None, audit_fn=None,
                  max_concurrent=None, clear_state_fn=None, receipts=None,
-                 preflight_fn=None, iox_preflight_fn=None):
+                 preflight_fn=None, iox_preflight_fn=None, log_dir=None):
         self.fleet = fleet
         self.creds = creds
         self.server_dir = server_dir or os.path.dirname(os.path.abspath(__file__))
@@ -439,6 +443,9 @@ class OnboardService:
         # so orchestration stays unit-testable without a catalog.
         self._clear_state = clear_state_fn
         self.receipts = receipts
+        # Directory for persisted per-job logs (None disables persistence —
+        # unit tests and legacy callers keep the purely in-memory behavior).
+        self.log_dir = log_dir
         if max_concurrent is None:
             max_concurrent = int(os.environ.get(
                 "IRIS_ONBOARD_CONCURRENCY", str(_DEFAULT_CONCURRENCY)))
@@ -880,6 +887,7 @@ class OnboardService:
     def _finish(self, job_id, state, rc):
         device_id = detail = None
         action = "onboard"
+        log_job = None
         with self._lock:
             self._procs.pop(job_id, None)   # drop the (now-dead) installer handle
             j = self._jobs.get(job_id)
@@ -904,6 +912,17 @@ class OnboardService:
                                 if ln.startswith("ERROR:")), None)
                     if err:
                         detail += " -- " + err[:120]
+                if self.log_dir:
+                    # snapshot under the lock; the disk write happens outside it
+                    log_job = dict(j, lines=list(j["lines"]))
+        if log_job is not None:
+            # Best-effort: a full or read-only state volume must never fail
+            # the job (or block the audit emit below). Log lines are the
+            # installer's stdout, which never echoes passwords (see above).
+            try:
+                self._persist_log(log_job)
+            except Exception:
+                pass
         if self._audit is not None:
             try:
                 self._audit(event="%s_finished" % action, category="onboard",
@@ -912,6 +931,41 @@ class OnboardService:
                            detail=detail)
             except Exception:
                 pass
+
+    def _persist_log(self, job):
+        """Write one finished job's log into log_dir as
+        <finished_at>-<device>-<action>-<jobid>.log: a machine-parseable
+        header line, then the captured installer lines. The device id is
+        sanitized for the FILENAME only — the header keeps the raw id, and
+        readers (gui_server's /api/deploy-logs) parse the header. Afterwards
+        the directory is pruned to the newest _MAX_PERSISTED_LOGS files.
+        Callers treat the whole thing as best-effort."""
+        os.makedirs(self.log_dir, exist_ok=True)
+        device = str(job.get("device_id") or "")
+        fname = "%s-%s-%s-%s.log" % (
+            job.get("finished_at"),
+            re.sub(r"[^A-Za-z0-9._-]", "_", device),
+            job.get("action"), job.get("id"))
+        header = ("# job=%s device=%s action=%s state=%s rc=%s queued_at=%s "
+                  "started_at=%s finished_at=%s platform=%s"
+                  % (job.get("id"), device, job.get("action"),
+                     job.get("state"), job.get("returncode"),
+                     job.get("queued_at"), job.get("started_at"),
+                     job.get("finished_at"), job.get("platform")))
+        with open(os.path.join(self.log_dir, fname), "w",
+                  encoding="utf-8") as f:
+            f.write(header + "\n")
+            for line in job["lines"]:
+                f.write(line + "\n")
+        logs = sorted(
+            (n for n in os.listdir(self.log_dir) if n.endswith(".log")),
+            key=lambda n: os.path.getmtime(os.path.join(self.log_dir, n)),
+            reverse=True)
+        for stale in logs[_MAX_PERSISTED_LOGS:]:
+            try:
+                os.unlink(os.path.join(self.log_dir, stale))
+            except OSError:
+                pass    # a concurrent _finish may have pruned it already
 
     def get_job(self, job_id):
         with self._lock:
