@@ -40,7 +40,7 @@ top-level `VERSION` file.
   listener, default unchanged), and `IRIS_EVENTS_URL_TEMPLATE` (operator-
   configured swarm-drawer events link, replacing the previously hardcoded
   dashboard link; unset renders no link).
-- **Console certificate replacement**: Settings → Certificate uploads a
+- **Console certificate replacement**: Settings → TLS & trust uploads a
   cert/key PEM pair for the web console only, validated by a real
   `load_cert_chain` (garbage PEM and key/cert mismatch are rejected
   per-field) and hot-applied — no restart, and no change to the certificate
@@ -53,7 +53,7 @@ top-level `VERSION` file.
   upload can never lock the operator out. *Use built-in
   certificate* reverts. New `POST`/`DELETE /api/settings/gui-cert`, audited
   as `gui-cert-replace` / `gui-cert-revert` (never key material).
-- **Root-CA trust store**: Settings → Trusted CAs installs and removes CA
+- **Root-CA trust store**: Settings → TLS & trust installs and removes CA
   PEMs under `IRIS_TRUST_DIR` (default `/etc/iris/tls/trust`, one
   fingerprint-named file per install); every change — and every boot —
   rebuilds the runtime bundle `IRIS_CA_BUNDLE` (default
@@ -96,6 +96,14 @@ top-level `VERSION` file.
   operator-visible job log.
 
 ### Changed
+- **Settings is split into sub-pages** — General (server info, admin
+  password, stage host, sessions), TLS & trust (certificate, trusted CAs,
+  public CA bundle download), and Telemetry (destination) — replacing the
+  single long page.
+- **Unassign from the device table**: the assign dropdown's empty option now
+  clears a device's image assignment (audited as `device_assign`
+  action=`unassign`); previously the only way to unassign was deleting and
+  re-adding the device.
 - **Breaking:** `:9101/swarm` now answers only loopback peers by default (it
   was open to any peer that could reach the port). The authenticated console
   is unaffected — it already proxies swarm data over container loopback

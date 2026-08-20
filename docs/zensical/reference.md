@@ -90,7 +90,7 @@ see [Kubernetes](kubernetes.md).
 
 ### TLS trust and console certificate
 
-The console's *Settings → Certificate* and *Settings → Trusted CAs* sections
+The console's *Settings → TLS & trust* sub-page (Certificate and Trusted CAs sections)
 manage these; none needs to be set anywhere — the defaults below are the
 container and bare-metal paths, and with no override installed and an empty
 trust dir the behavior is identical to releases without the feature.
@@ -145,7 +145,7 @@ collector and backend.
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `IRIS_OBSERVABILITY` | unset (off) | Enables the external observability surface when set to `1`, `true`, `yes`, or `on`. Any other value, empty, or unset leaves it off. For OTLP export this is the deployment default only — a console override (below) takes precedence. The Prometheus `:9101` surface stays startup-gated by this variable alone. |
-| `IRIS_OTLP_ENDPOINT` | unset | OTLP/HTTP endpoint of your collector, e.g. `http://<collector-ip>:4318`. Deployment default only — the console's *Settings → Telemetry destination* can override it at runtime. |
+| `IRIS_OTLP_ENDPOINT` | unset | OTLP/HTTP endpoint of your collector, e.g. `http://<collector-ip>:4318`. Deployment default only — the console's *Settings → Telemetry* sub-page can override it at runtime. |
 | `IRIS_METRICS_PORT` | `9101` | Port for the telemetry listener. Empty or `0` disables the listener entirely. |
 | `IRIS_METRICS_HOST` | `0.0.0.0` | Bind host for the telemetry listener. Bind it to `127.0.0.1` when only the console's session-gated proxy consumes it. |
 | `IRIS_SWARM_URL` | `http://127.0.0.1:9101/swarm` | Where the console fetches swarm state from. A non-loopback value requires `IRIS_SWARM_PUBLIC=1` on the target listener — `/swarm` answers only loopback peers by default. |
@@ -165,7 +165,7 @@ collector and backend.
 `IRIS_OBSERVABILITY` still decides the Prometheus `/metrics` surface at
 startup — that gate is unchanged and takes effect on the next restart. The
 OTLP destination, by contrast, is re-read on every sample pass: the console's
-*Settings → Telemetry destination* stores a per-field override in
+*Settings → Telemetry* stores a per-field override in
 `$IRIS_STATE/telemetry-destination.json` (`endpoint`, `enabled`; a `null`
 field inherits the env), applied within seconds without a restart. *Revert to
 deployment default* deletes the file, restoring exact env behavior. The
