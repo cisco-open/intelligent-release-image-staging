@@ -70,7 +70,7 @@ find "$OUT" -name '*.pyc' -delete -o -name '.DS_Store' -delete 2>/dev/null || tr
 SCRUB_PASS="${SCRUB_PASS:-}"; SCRUB_USER="${SCRUB_USER:-}"
 if [ -n "$SCRUB_PASS$SCRUB_USER" ]; then
   # Scrub all shipped text file types — not just *.sh / *.conf* / *.example.
-  # A username or password in a .py, .md, .json, .cfg, .service, or .html file
+  # A username or password in a .py, .md, .json, .cfg, or .html file
   # would otherwise ship un-redacted.  `perl -I` (binary-safe) skips binary
   # files; `find … ! -name '*.pyc'` avoids double-processing compiled bytecode.
   find "$OUT" -type f ! -name '*.pyc' -print0 \
