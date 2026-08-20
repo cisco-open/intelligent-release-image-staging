@@ -154,6 +154,19 @@ top-level `VERSION` file.
   CA. The default path is unchanged.
 
 ### Fixed
+- **IOx packages built on containerd-store Docker engines never started**:
+  `docker save` (and therefore `ioxclient docker package`) on such engines
+  emits a nested OCI index with buildx attestation manifests, which IE3x00
+  CAF (dockerd 19.03) installs and activates but refuses to start — with
+  nothing in syslog. `device/iox/build.sh` now exports an attestation-free
+  docker-archive `rootfs.tar` itself, packages the staged directory, and
+  fails closed if an attestation manifest still appears.
+- **Unassigned devices never registered**: the agent returned before its
+  first heartbeat when no image was assigned, so a freshly onboarded device
+  stayed invisible to the console (and IOx onboarding without an assignment
+  timed out). The agent now heartbeats with `stage_state` `unassigned` (or
+  `error` when the assigned image is missing from the catalog) — assignment
+  gates staging, not presence.
 - **Stored cross-site scripting in the Swarm Map**: a device-supplied
   `link.rtt_ms_median` reached the report drawer unescaped. The field is now
   numerically gated in the browser and coerced server-side when a report is
