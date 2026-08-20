@@ -119,10 +119,10 @@ emulation; if it is not already enabled, `stage-iox-package.sh` requires
 `BINFMT_IMAGE_DIGEST` — an audited `tonistiigi/binfmt` sha256 digest — and
 fails closed without it.
 
-`aria2c` is handed in, never downloaded: the build takes it from a matching
-local agent bundle, an explicit `ARIA2C_BIN` override, or the deliverable
-`tools/get-aria2c.sh` installs, verifying it against `tools/aria2c.sha256` and
-failing closed on a mismatch. The catalog certificate must either be supplied
+`aria2c` is handed in, never downloaded: the build takes it from an explicit
+`ARIA2C_BIN` override, a matching local agent bundle, or the handed-in
+`deliverables/aria2c-<arch>` binary, verifying it against
+`tools/aria2c.sha256` and failing closed on a mismatch. The catalog certificate must either be supplied
 locally or fetched with an explicitly supplied SHA-256 certificate
 fingerprint.
 

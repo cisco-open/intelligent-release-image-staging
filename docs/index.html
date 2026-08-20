@@ -163,7 +163,7 @@ SPDX-License-Identifier: Apache-2.0
           </div>
           <div class="path-body" aria-live="polite">
             <h3 id="path-title">Catalyst 9300 Guest Shell</h3>
-            <p id="path-copy">Generate a per-device installer, bootstrap Guest Shell, and let EEM keep the staging agent alive.</p>
+            <p id="path-copy">Generate a per-device installer, bootstrap Guest Shell, and let EEM keep the staging agent alive — or run the amd64 IOx app on switches with app-hosting SSD storage.</p>
             <ul id="path-list">
               <li>Installs catalog trust material.</li>
               <li>Runs the agent every 60 seconds.</li>
@@ -175,7 +175,7 @@ SPDX-License-Identifier: Apache-2.0
           <p class="eyebrow">Platforms</p>
           <h2>Same delivery model, platform-specific staging.</h2>
           <p>
-            Catalyst 9300 devices use Guest Shell and stage to `flash:`. IE platforms use an IOx app and stage to `sdflash:`. Catalyst 8000 routers use Guest Shell through a VirtualPortGroup and stage to `bootflash:`. Router support is designed for the Catalyst 8000 family and lab-tested on C8000v: routed and NAT modes completed onboarding, verified staging, and receipt-backed undeploy, with Swarm Map and Grafana telemetry confirmed. Router preflight repeats before token mint, receipts bind management IP and processor-board identity, and router adoption requires re-onboarding. Every path downloads by swarm, verifies on the device, and stops before activation.
+            Catalyst 9000 switches run the agent in Guest Shell and stage to `flash:`, or as an IOx app on switches with app-hosting SSD storage, staging to `usbflash1:`. IE platforms run the IOx app and stage to `sdflash:`. Catalyst 8000 routers run Guest Shell through a VirtualPortGroup, in routed or NAT attachment, and stage to `bootflash:`. Router preflight repeats before token mint, receipts bind management IP and processor-board identity, and router adoption requires re-onboarding. Transfers appear on the Swarm Map, and telemetry exports to Cisco Splunk through the OpenTelemetry pipeline. Every path downloads by swarm, verifies on the device, and stops before activation.
           </p>
         </div>
       </section>

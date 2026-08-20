@@ -205,7 +205,7 @@ at 8 MiB and the streamed image upload at 4 GiB.
 | `POST /api/settings/trust` | `{pem}` — installs one or more CA certificates as one trust entry; returns `{entry}`, the new trust-store row. |
 | `DELETE /api/settings/trust/<name>` | Removes one trust entry and rebuilds the runtime bundle. |
 | `POST /api/settings/ca-trust` | `{url, auto}` — configures the public-CA bundle download; the URL must be `https://`. |
-| `POST /api/settings/ca-trust/refresh` | Starts a download-now job; returns `{job}`. Downloads refuse redirects, cap at 2 MiB, and must parse as PEM certificates. |
+| `POST /api/settings/ca-trust/refresh` | Starts a download-now job; returns `{job}`. Downloads refuse redirects, cap at 2 MiB, and must yield at least one certificate (plain PEM, a certs-only PKCS#7 bundle, or a verified CMS-signed wrapper). |
 | `GET /api/settings/ca-trust/refresh/<id>` | `{state, detail, certs}` — `running`, `done`, or `failed`. |
 | `POST /api/settings/telemetry-destination` | `{endpoint, enabled}` — telemetry destination override, hot-applied by the hub. The endpoint must be an `http`/`https` URL with a host, no query or fragment; a trailing slash is stripped. |
 | `DELETE /api/settings/telemetry-destination` | Removes the override — telemetry reverts to the deployment env defaults. |

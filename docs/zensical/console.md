@@ -34,7 +34,7 @@ docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin
 | Assignments | Maps each device to the image it should stage. |
 | Onboarding | Starts and tracks install or undeploy jobs when the device's assigned credential profile is configured. |
 | Swarm | Shows peer progress and seeder/device participation. With `IRIS_EVENTS_URL_TEMPLATE` configured, the peer drawer renders a "View this device's events" link into the operator's own backend; without it, no link renders. |
-| Monitoring | Links to health, swarm, metrics, and recent telemetry. Carries the *Telemetry export* badge (`ok` / `degraded` / `off`) fed by the hub's OTLP export health. |
+| Monitoring | Holds the audit trail and per-job deployment logs. Carries the *Telemetry export* badge (`ok` / `degraded` / `off`) fed by the hub's OTLP export health. |
 | Settings | Shows server configuration, version, and operational settings. |
 | Audit | Records administrative and workflow actions. |
 
@@ -115,8 +115,8 @@ OpenTelemetry (OTLP) export.
 Each onboard records a durable **receipt** of what it applied, and **Undeploy**
 runs only from that receipt, so editing inventory after onboarding cannot
 retarget cleanup. A device deployed before receipts existed shows no active
-receipt; use the row's **Adopt** action (an explicit, audited, no-change
-recording of current ownership) before undeploying it. Router deployments cannot
+receipt; check its row and use the toolbar's **Adopt** action (an explicit,
+audited, no-change recording of current ownership) before undeploying it. Router deployments cannot
 be adopted — re-onboard instead. For preflight and receipt ownership see
 [Deployment plans and applied receipts](network-attachment.md#deployment-plans-and-applied-receipts).
 
@@ -131,16 +131,14 @@ without touching each device:
 | *Telemetry reports* / *Telemetry streaming* checkboxes | Set the deployed agent's telemetry posture for every onboard started from this toolbar (single-row onboards included). Reports default on; streaming defaults off ([Transfer streaming](observability.md#transfer-streaming)). A bulk redeploy with the boxes toggled is the site-scale enable/disable path. | No |
 | Undeploy selected | Runs receipt-driven cleanup on each device. | Yes — one dialog for the whole selection, naming what teardown removes and preserves |
 | Adopt selected | Records the ownership receipt for each device. | Yes — a dialog listing the selected devices |
-| Delete selected | Removes the inventory rows only. | Yes — the same confirmation text the per-row delete uses, listing the devices |
+| Delete selected | Removes the inventory rows only. | Yes — a dialog listing the devices and warning that deletion is not an undeploy |
 | *credential for selected* + **Apply** | Assigns one credential profile to every checked device. Leaving the picker on either blank entry clears the credential instead. | No |
 
-The bulk **Adopt** dialog is not the per-row one: it is shorter and names the
-whole selection. Both warn that you should only adopt a device whose inventory
-row matches what is really on the box, both point at re-onboarding as the safer
-and idempotent alternative, and both send the acknowledgement the server requires
-— an adopt that omits it is refused. Only the per-row dialog explains that adopt
-makes no change to the device, and only the bulk dialog states up front that
-routers cannot be adopted.
+The **Adopt** dialog names the whole selection. It warns that you should only
+adopt a device whose inventory row matches what is really on the box, points at
+re-onboarding as the safer and idempotent alternative, states up front that
+routers cannot be adopted, and sends the acknowledgement the server requires —
+an adopt that omits it is refused.
 
 Bulk operations report per-device refusals rather than failing the whole batch:
 the status line shows how many devices succeeded and names the ones that did
@@ -173,8 +171,9 @@ refused at submit time or fails once the job is running.
 ## Settings
 
 Settings is a sidebar feature with its own sub-menu — **General**, **TLS &
-trust**, and **Telemetry** — rather than an in-page tab strip. Each sub-page
-is deep-linkable: `#settings/general`, `#settings/tls`, `#settings/telemetry`.
+trust**, **Telemetry**, and **Audit export** — rather than an in-page tab
+strip. Each sub-page is deep-linkable: `#settings/general`, `#settings/tls`,
+`#settings/telemetry`, `#settings/audit`.
 
 ### TLS & trust
 

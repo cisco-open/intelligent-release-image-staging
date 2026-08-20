@@ -52,7 +52,7 @@ the guest-share root, over a `copy https://` that the PKI trustpoint step
 | --- | --- | --- |
 | staged as `iris-agent-<DEVICE_ID>-<CAP>.conf` | `iris-agent.conf` | catalog URL, device id, and an empty `rpc_secret` — the agent fetches the real secret on its first token refresh |
 | staged as `rpc-secret-<CAP>` | `rpc-secret` | seeds aria2c's RPC secret; bootstrap.sh reconciles it against the conf on every tick |
-| `iris-agent.tgz` (`iris-agent-arm.tgz` on IE-3x00) | `bundle.tgz` | the agent Python, `bootstrap.sh`, `guestshell-start.sh`, `rotate-logs.sh`, and an architecture-matched `aria2c`, packed by `tools/make-agent-bundle.sh` |
+| `iris-agent.tgz` | `bundle.tgz` | the agent Python, `bootstrap.sh`, `guestshell-start.sh`, `rotate-logs.sh`, and an architecture-matched `aria2c`, packed by `tools/make-agent-bundle.sh` |
 | the bare server cert | `iris-catalog.pem` | pinned TLS trust anchor for the agent's catalog calls |
 | — | `bootstrap.sh` | the EEM entry point itself |
 
@@ -158,7 +158,7 @@ IRIS uses two checks because the server and device have different capabilities:
 | Check | Where | Why |
 | --- | --- | --- |
 | `sha256` | Agent Python code | Confirms the downloaded file matches catalog metadata before IOS copy. |
-| `sha512` | IOS `verify` path | Confirms the root storage copy matches catalog metadata using IOS-native verification. |
+| Cisco signature (`copy /verify`) | IOS copy path | IOS enforces the embedded Cisco image signature while copying to the storage root; a failed signature fails the copy and leaves no destination file. |
 
 If verification fails, the agent reports the failure and leaves installation decisions untouched. It does not change boot variables and does not reload the device.
 
