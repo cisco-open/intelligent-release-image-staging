@@ -9,6 +9,83 @@ This project uses **Calendar Versioning (CalVer)**: `YYYY.0M.0D` with an optiona
 `2026.06.11.1`). Releases are tagged `vYYYY.0M.0D`. The current version is in the
 top-level `VERSION` file.
 
+## [2026.08.21]
+
+### Added
+- **Deployment visibility in the console.** Each device row gains a details
+  panel backed by `GET /api/devices/<id>/deployment`: the latest deployment
+  receipt's resolved network configuration (management type, VLAN/VPG, SVI,
+  guest/app addressing, NAT interface), preflight evidence, owned resources,
+  and state — the console now answers "what did we actually configure on
+  this device".
+- **Persistent deployment logs.** Onboard and undeploy job output survives
+  the job: logs are written under the server state directory at job finish
+  (newest 200 kept) and browsable from a new *Monitoring → Deployment logs*
+  sub-page and from each device's details panel.
+- **Audit export.** On-demand and daily scheduled export of the audit trail
+  to an operator-configured SCP destination, encrypted with `age` to an
+  operator-supplied recipient (encryption is mandatory; the destination
+  password lives in the encrypted secrets store; a new *Settings → Audit
+  export* sub-page configures it).
+- **Console help.** A header **?** popover shows the server version, a
+  persistent unique deployment id, a link to the official documentation, and
+  two local troubleshooting guides (device-side and server-side).
+- The IOx entrypoint reconciles `agent_version` from the image's baked
+  VERSION file on every start, so telemetry reports the running build even
+  when a persistent conf predates a package upgrade.
+
+### Changed
+- Monitoring now uses sidebar sub-menus (*Audit trail* | *Deployment logs*),
+  matching the Settings pattern.
+- Concurrent image uploads each render their own progress row; the shared
+  progress bar no longer garbles simultaneous uploads.
+- Every onboard/undeploy job gets its own log window with its own live
+  stream, per-panel Abort (queue-aware: a still-queued job is cancelled
+  through the queue instead of failing) and Close; sequential onboards no
+  longer merge into one window.
+- The Overview *staging* counter counts devices that are actually staging —
+  heartbeating within the last 10 minutes and mid-pipeline — instead of
+  inventory rows, so an empty fleet no longer reports phantom staging
+  devices.
+
+### Fixed
+- **Guest Shell devices no longer stay silent after onboarding with the
+  Aria2 Next binary.** The installer bakes the device `rpc-secret` file
+  *empty* by design (the agent fetches the real value on its first
+  token-refresh), and `aria2c` 1.37 accepted `--rpc-secret=` with an empty
+  value. Aria2 Next 2.5.6 rejects it outright ("Empty string is not
+  allowed"), so on every freshly onboarded Guest Shell device `aria2c`
+  exited before daemonizing, `bootstrap.sh` aborted at the launch step
+  **before ever running the agent**, and the device never sent a heartbeat —
+  invisible in the console with no log anywhere (the `aria2c` log file is
+  only created by a successful launch). `device/guestshell-start.sh` now
+  launches with the same `iris` placeholder secret the IOx entrypoint has
+  always used when the baked secret is still empty; the existing bootstrap
+  secret-sync bounces `aria2c` onto the real secret right after the agent's
+  first token-refresh.
+- **A device stays visible when its download daemon cannot launch.**
+  Bootstrap records a failed `aria2c` launch and still runs the agent, and
+  the agent reports an error-state heartbeat when the local RPC is down —
+  a future launch regression shows up in the console instead of silence.
+- **An operator abort issued before the installer process exists is
+  honored** instead of being lost to a race between `abort()` and the
+  worker registering the process.
+- The audit-export worker turns an unexpected export failure into a
+  terminal error with an audit record instead of leaving the job running
+  forever; export settings writes serialize against the console's save and
+  clear routes; export filenames carry a random suffix so same-second runs
+  cannot collide.
+
+### Documentation
+- Accuracy sweep across the public site and every reference page: Catalyst
+  9000 is documented with both runtimes (Guest Shell to `flash:`, or the
+  amd64 IOx app on app-hosting SSD switches to `usbflash1:`), telemetry
+  examples lead with Cisco Splunk through the OpenTelemetry pipeline, and a
+  code-verified pass corrected backup guidance (age identity vs recipient),
+  the `copy /verify` signature gate, router adopt semantics, arm64 build
+  digest requirements, VLAN/SVI ownership claims, and stale console UI
+  descriptions.
+
 ## [2026.08.20]
 
 ### Added
@@ -195,20 +272,6 @@ top-level `VERSION` file.
   compressed rotation `logrotate.d/iris` provided.
 
 ### Fixed
-- **Guest Shell devices no longer stay silent after onboarding with the
-  Aria2 Next binary.** The installer bakes the device `rpc-secret` file
-  *empty* by design (the agent fetches the real value on its first
-  token-refresh), and `aria2c` 1.37 accepted `--rpc-secret=` with an empty
-  value. Aria2 Next 2.5.6 rejects it outright ("Empty string is not
-  allowed"), so on every freshly onboarded Guest Shell device `aria2c`
-  exited before daemonizing, `bootstrap.sh` aborted at the launch step
-  **before ever running the agent**, and the device never sent a heartbeat —
-  invisible in the console with no log anywhere (the `aria2c` log file is
-  only created by a successful launch). `device/guestshell-start.sh` now
-  launches with the same `iris` placeholder secret the IOx entrypoint has
-  always used when the baked secret is still empty; the existing bootstrap
-  secret-sync bounces `aria2c` onto the real secret right after the agent's
-  first token-refresh.
 - **A live-but-unresponsive `aria2c` no longer blocks its own relaunch.**
   `device/bootstrap.sh` decided whether to start the daemon with
   `pgrep aria2c` — process *liveness* — so an `aria2c` that was running but
