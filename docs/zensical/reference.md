@@ -195,7 +195,7 @@ at 8 MiB and the streamed image upload at 4 GiB.
 | `POST /api/setup` | Pre-auth, first run only. `{username, password, setup_grant}` creates the admin account, where `setup_grant` is the one-time, 10-minute grant from the default-credential login above; 403 on a missing/invalid/expired grant, 409 once an admin exists. |
 | `POST /api/logout` | Revokes the current session and expires the cookie. |
 | `GET /api/session` | The current session's info, or 401. |
-| `GET /api/settings` | Console settings, published port, and the running version — plus the active console certificate (`gui_cert`), the installed trust entries (`trust`), the CA download settings (`ca_trust`), and the effective telemetry destination with its source (`telemetry_destination`). |
+| `GET /api/settings` | Console settings, published port, and the running version — plus the active console certificate (`gui_cert`), the installed trust entries (`trust`), the CA download settings (`ca_trust`), the effective telemetry destination with its source (`telemetry_destination`), and the audit-export destination with its last-run status (`audit_export`; a `password_set` flag only, never the password). |
 | `POST /api/settings/password` | `{current, new, confirm}`; changes the admin password and revokes every other session. |
 | `POST /api/settings/sessions/revoke-others` | Revokes every session except the caller's. |
 | `POST /api/settings/stage-host` | Stores the stage-host SSH credential; returns the redacted record. |
@@ -209,6 +209,18 @@ at 8 MiB and the streamed image upload at 4 GiB.
 | `GET /api/settings/ca-trust/refresh/<id>` | `{state, detail, certs}` — `running`, `done`, or `failed`. |
 | `POST /api/settings/telemetry-destination` | `{endpoint, enabled}` — telemetry destination override, hot-applied by the hub. The endpoint must be an `http`/`https` URL with a host, no query or fragment; a trailing slash is stripped. |
 | `DELETE /api/settings/telemetry-destination` | Removes the override — telemetry reverts to the deployment env defaults. |
+| `POST /api/settings/audit-export` | `{host, port, user, path, age_recipient, auto, password}` — validates and stores the audit-export destination; 400 on any invalid field. An absent or empty `password` keeps the stored one. |
+| `DELETE /api/settings/audit-export` | `{deleted: <bool>}` — clears the destination and the stored password. |
+| `POST /api/settings/audit-export/run` | Starts one export job; returns `{job_id}`. 409 when the export is not fully configured (invalid or absent destination, or no stored password). |
+| `GET /api/settings/audit-export/run/<id>` | `{state, detail}` — `running`, `done`, or `error`; `detail` is the uploaded filename or the failure reason. Jobs are in-memory, so a restart forgets them (404). |
+
+The audit-export settings live in `$IRIS_STATE/audit-export-settings.json`
+(`host`, `port`, `user`, `path`, `age_recipient`, `auto`, plus the
+server-maintained `last_run_ts` / `last_result`; console-owned). The SCP
+password is not in this file — it lives in the age-encrypted secrets store —
+and the destination's SSH host key is pinned trust-on-first-use in
+`$IRIS_STATE/audit-export-known-hosts`. See
+[Audit export](operations.md#audit-export).
 
 ### Images
 
@@ -238,6 +250,7 @@ event, with `result=fail` and the reason on a rejection.
 | `POST /api/devices/import-csv` | Bulk inventory import (8 MiB cap, all-or-nothing); returns per-row stats. |
 | `GET /api/devices/<id>/plan` | `{plan}` — the resolved deployment plan; 409 when it cannot resolve. |
 | `GET /api/devices/<id>/reports` | `{reports: [...]}` — the device's stored telemetry ring. |
+| `GET /api/devices/<id>/deployment` | `{receipt, total}` — the receipt that best describes the device (the active one, else the teardown-authorizing one, else the newest) plus the stored-receipt count; `receipt` is `null` when none exists. Read-only — feeds the deployment-details panel. |
 | `POST /api/devices/<id>/assign`, `.../credential`, `.../platform` | Sets the approved image, the credential profile, or the platform and storage target; each returns `{ok: true}`. |
 | `POST /api/devices/<id>/request-report` | Requests a fresh telemetry report; `{ok: true, expires_at}`, or 429 while one is already pending. |
 | `POST /api/devices/<id>/adopt` | Requires `{"acknowledge_adopt": true}`; returns `{receipt_id}`. 409 when the device already has an active receipt; routers cannot be adopted. |
@@ -254,7 +267,7 @@ Router deployments carry extra preflight and ownership rules — see
 | `GET /api/onboard/jobs/<id>` | One job, or 404. |
 | `GET /api/onboard/jobs/<id>/stream` | Server-sent events for that job until it reaches a terminal state. |
 | `POST /api/onboard/jobs/<id>/abort` | `{aborted: true}`. |
-| `POST /api/onboard/cancel-queued` | `{cancelled: <count>}` — drops jobs still queued. |
+| `POST /api/onboard/cancel-queued` | `{cancelled: <count>}` — drops jobs still queued. An optional `{"job_ids": [...]}` body scopes the cancel to those jobs (the console always scopes); without it every queued job is cancelled, other sessions' included. |
 
 ### Credentials
 
@@ -272,9 +285,17 @@ Router deployments carry extra preflight and ownership rules — see
 | `GET /api/swarm` | The telemetry `/swarm` JSON, fetched over loopback. Answers 200 with `{"peers": [], "error": ...}` when the telemetry listener is unreachable. |
 | `GET /api/audit` | `{events: [...]}`; `category`, `limit` (max 500), `before_ts`, and `after_ts` query parameters. |
 | `GET /api/audit/histogram` | Per-bucket audit event counts for the activity strip. |
+| `GET /api/deploy-logs` | `{logs: [...]}` — metadata for the persisted per-job deployment logs (file, device, action, state, rc, finish time, size), newest first; a `device_id` query parameter filters to one device. |
+| `GET /api/deploy-logs/<file>` | One persisted log as `text/plain`; 404 for a name that does not resolve to a direct child of the log directory. |
+| `GET /api/help` | `{version, deployment_id, docs_url, guides}` — the "?" popover data: the running version, the stable per-deployment id, and the documentation links. |
 | `POST /api/telemetry/stream` | `{"every": <int 1..60>, "pause": <bool>}` — network-wide stream tuning, echoed to every device on its next heartbeat. Audited. |
 | `GET /api/telemetry/health` | The hub's `/healthz` JSON (OTLP export health), proxied behind the console session. `{"ok": false, "error": "unavailable"}` when the hub is unreachable. |
 | `GET /swarmmap` | The swarm map page itself. Session-gated like the `/api` routes, but not under `/api`. |
+
+Persisted deployment logs are plain files under `$IRIS_STATE/deploy-logs`,
+one per finished onboard or undeploy job with a machine-parseable header
+line; the newest 200 are kept. `/api/help`'s `deployment_id` comes from
+`$IRIS_STATE/instance-id`, minted once on first start and immutable after.
 
 ### Import skip reasons
 

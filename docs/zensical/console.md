@@ -44,6 +44,20 @@ container storage into IOS-visible storage. A final-placement failure is shown
 as `placement failed` with a bounded diagnostic; inspect the device's
 `IRIS ROOTCOPY-FAIL` syslog entry for the full device-side detail.
 
+On the Images screen, every picked or dropped file gets its own upload row —
+filename, progress bar, then publish state — with its own publish poller, so
+concurrent uploads report independently and a failed file names its error
+without stopping the others. Finished rows fade out on their own; failed rows
+stay until dismissed. A file over the 4 GB upload cap is refused in the
+browser before any bytes move.
+
+The header's **?** button opens a help popover with the running version, the
+stable per-deployment id (with a copy button — quote it when reporting a
+problem so reports from different installations stay distinguishable), a link
+to this documentation site, and two guides the console serves itself —
+*Device-side troubleshooting* and *Server-side setup & troubleshooting* — so
+both stay reachable from a network with no internet access.
+
 ## Importing images already on disk
 
 Besides the upload box, the Images screen has an **Import from disk** panel that
@@ -120,6 +134,16 @@ audited, no-change recording of current ownership) before undeploying it. Router
 be adopted — re-onboard instead. For preflight and receipt ownership see
 [Deployment plans and applied receipts](network-attachment.md#deployment-plans-and-applied-receipts).
 
+Each device row's **ⓘ Deployment details** control opens a read-only panel
+under the table showing what the deployment holds: the receipt state
+(`active`, `removed`, `superseded`, `needs-reconcile`) and receipt id, the
+preflight result, and the resolved configuration the onboard applied — the
+attachment type, the owned management VLAN or VPG, SVI and app addressing,
+NAT interface, swarm port, and the recorded model, platform, and device
+identity. A device with no receipt says so, naming adopt or re-onboard as the
+fix. The panel ends with that device's persisted deployment logs
+([Deployment logs](#deployment-logs)), each viewable in place.
+
 ## Bulk device actions
 
 The Devices toolbar acts on every checked row, so a CSV import can be finished
@@ -168,6 +192,30 @@ busy device, an unreachable device, a router already holding a deployment
 receipt — is rendered in the console and recorded in Audit, whether it is
 refused at submit time or fails once the job is running.
 
+### Job log windows
+
+The batch panel's per-row **log** button opens one log window per job, each
+with its own live stream, **Abort**, and **Close**, so concurrent onboards
+never write into (or blank) each other's window. At most six windows stay
+open; opening more closes the oldest. **Abort** is queue-aware: a job still
+waiting for an install slot is taken out of the queue instead — scoped to
+just that job, other queued work is untouched — while aborting a running job
+stops the installer, with the confirmation warning that the device may be
+left partially configured (re-onboard, which is idempotent, or undeploy to
+clean up). A window opened on a queued job says so and starts streaming the
+moment the job wins a slot.
+
+### Deployment logs
+
+Job windows are live views; the durable record is Monitoring →
+**Deployment logs** (`#monitoring/deploylogs`). Every finished onboard or
+undeploy job's installer output is persisted on the server under the state
+directory, so the logs survive console reloads, session changes, and server
+restarts; the newest 200 are kept. The table lists each log's finish time,
+device, action, result, and size, filters by device id, and shows the full
+log in place. The same list, already filtered to one device, sits at the
+bottom of that device's deployment-details panel on the Devices screen.
+
 ## Settings
 
 Settings is a sidebar feature with its own sub-menu — **General**, **TLS &
@@ -193,6 +241,14 @@ strip. Each sub-page is deep-linkable: `#settings/general`, `#settings/tls`,
   source; removing that row (**remove bundle**) is how you revert to
   system-store-only trust. A failed download never replaces the previous
   bundle.
+
+### Audit export
+
+The **Audit export** sub-page configures the age-encrypted off-box copy of
+the audit trail — destination, age recipient, SCP password, daily schedule —
+and carries the **Export now** button plus a status line showing the
+configured destination and the last run's outcome. The operational behaviour
+is described in [Audit export](operations.md#audit-export).
 
 ## When to use the CLI
 

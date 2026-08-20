@@ -75,6 +75,33 @@ Back up the Docker volumes that hold `/var/lib/iris` and `/etc/iris`, plus the o
 For Kubernetes, snapshot the `iris-data` PVC and back up the age identity stored
 outside that PVC. Both are required for recovery.
 
+## Audit export
+
+The console can ship the audit trail (`audit.jsonl`) off the box: *Settings →
+Audit export* takes an SCP destination (host, port, user, remote path), an
+age recipient, and the SCP password. Every export encrypts the trail to that
+recipient before it leaves the server — encryption is mandatory, there is no
+plaintext export path, and a missing recipient refuses the run rather than
+degrading. The password lives in the age-encrypted secrets store, never in
+the settings file, and reaches `scp` through the environment, never argv or a
+log line.
+
+Exports run on demand (**Export now**) or on the daily schedule (**Export
+daily**): the scheduler makes its first pass shortly after server start and
+then at most one attempt per day — failed attempts count, so a broken
+destination retries daily rather than hourly. Each upload is a fresh
+timestamped file (`audit-<utc>-<suffix>.jsonl.age`), so two exports never
+overwrite each other at the destination. The sub-page's status line shows the
+destination, the schedule mode, and the last run — timestamp plus `ok` with
+the uploaded filename or `fail` with the reason — and every run is also
+recorded in the audit trail itself as `audit_export`.
+
+The destination's SSH host key is pinned trust-on-first-use: the first export
+records it in a known-hosts file under the server state directory
+(`audit-export-known-hosts`), and later exports fail if the destination's key
+changes. Verify the fingerprint out of band where the destination warrants
+it, and remove that file after an intentional host rebuild.
+
 ## Scaling notes
 
 Private BitTorrent reduces server load by letting devices exchange pieces after the seeder introduces the content. The server remains important for tracker announces, catalog policy, initial seeding, and telemetry. Watch the seeder data port, tracker health, and device storage pressure during large network waves.
