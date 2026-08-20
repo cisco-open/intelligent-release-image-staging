@@ -195,6 +195,20 @@ top-level `VERSION` file.
   compressed rotation `logrotate.d/iris` provided.
 
 ### Fixed
+- **Guest Shell devices no longer stay silent after onboarding with the
+  Aria2 Next binary.** The installer bakes the device `rpc-secret` file
+  *empty* by design (the agent fetches the real value on its first
+  token-refresh), and `aria2c` 1.37 accepted `--rpc-secret=` with an empty
+  value. Aria2 Next 2.5.6 rejects it outright ("Empty string is not
+  allowed"), so on every freshly onboarded Guest Shell device `aria2c`
+  exited before daemonizing, `bootstrap.sh` aborted at the launch step
+  **before ever running the agent**, and the device never sent a heartbeat —
+  invisible in the console with no log anywhere (the `aria2c` log file is
+  only created by a successful launch). `device/guestshell-start.sh` now
+  launches with the same `iris` placeholder secret the IOx entrypoint has
+  always used when the baked secret is still empty; the existing bootstrap
+  secret-sync bounces `aria2c` onto the real secret right after the agent's
+  first token-refresh.
 - **A live-but-unresponsive `aria2c` no longer blocks its own relaunch.**
   `device/bootstrap.sh` decided whether to start the daemon with
   `pgrep aria2c` — process *liveness* — so an `aria2c` that was running but

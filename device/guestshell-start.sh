@@ -30,7 +30,15 @@ else
   set --
 fi
 
-RPC_SECRET="$(cat "$RPC_SECRET_FILE" 2>/dev/null || echo iris)"
+# The installer bakes rpc-secret EMPTY (the agent fetches the real value on
+# its first token-refresh), and Aria2 Next rejects --rpc-secret= outright
+# ("Empty string is not allowed"; aria2 1.37 accepted it — field incident
+# 2026-08-20: aria2c never launched, bootstrap aborted before the agent, and
+# every freshly onboarded Guest Shell device stayed silent). Launch with the
+# same placeholder the IOx entrypoint uses; bootstrap's secret sync bounces
+# aria2c onto the real secret right after that first refresh.
+RPC_SECRET="$(tr -d '[:space:]' < "$RPC_SECRET_FILE" 2>/dev/null || true)"
+RPC_SECRET="${RPC_SECRET:-iris}"
 
 # already up? (skip the probe in tests)
 if [ "${SKIP_RPC_PROBE:-0}" != "1" ]; then
