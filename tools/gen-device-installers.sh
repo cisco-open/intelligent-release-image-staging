@@ -30,17 +30,17 @@ if IFS= read -r first_line < "$CSV" && \
 fi
 
 # ---------- where do the server's secrets live? ----------
-in_docker() { docker ps --format '{{.Names}}' 2>/dev/null | grep -qx iris; }
+IRIS_CONTAINER="${IRIS_CONTAINER:-iris}"
+in_docker() { docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$IRIS_CONTAINER"; }
 cfg_read()  {  # cfg_read <file>
-  if in_docker; then docker exec iris cat "/etc/iris/$1" 2>/dev/null
-  elif [ -r "/etc/iris/$1" ]; then cat "/etc/iris/$1"
-  else return 1; fi
+  in_docker || return 1
+  docker exec "$IRIS_CONTAINER" cat "/etc/iris/$1" 2>/dev/null
 }
 # The BARE server cert (tls/crt.pem, NOT the combined tls/cert.pem+key — never ship
 # the key). Threaded into each installer for the on-device PKI trustpoint + curl
 # --cacert (#2). cfg_read reads /etc/iris/<arg>, so the arg is tls/crt.pem.
 IRIS_CRT="$(cfg_read tls/crt.pem || true)"
-[ -n "$IRIS_CRT" ] || { echo "ERROR: can't read the server's tls/crt.pem — is the iris container (or bare-metal install) running on this machine?" >&2; exit 1; }
+[ -n "$IRIS_CRT" ] || { echo "ERROR: can't read the server's tls/crt.pem — is the '$IRIS_CONTAINER' container running on this machine? (set IRIS_CONTAINER=<name> if it is named differently)" >&2; exit 1; }
 
 HOST_IP="${IRIS_HOST_IP:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
 [ -n "$HOST_IP" ] || { echo "ERROR: set IRIS_HOST_IP=<this server's IP>" >&2; exit 1; }
@@ -54,14 +54,11 @@ STAGE_HOST="${STAGE_HOST:-$HOST_IP}"
 # POST /v1/devices/<id>/token-refresh. If it leaks, it expires in an hour.
 mint_enrollment() {  # mint_enrollment <device_id> -> prints a fresh enrollment token
   local sid="$1" tok
-  if in_docker; then
-    tok="$(docker exec iris iris-mint-enrollment "$sid")"
-  elif command -v iris-mint-enrollment >/dev/null 2>&1; then
-    tok="$(iris-mint-enrollment "$sid")"
-  else
-    echo "ERROR: can't reach iris-mint-enrollment — is the iris container (or bare-metal install) running on this machine?" >&2
+  in_docker || {
+    echo "ERROR: can't reach iris-mint-enrollment — is the '$IRIS_CONTAINER' container running on this machine? (set IRIS_CONTAINER=<name> if it is named differently)" >&2
     exit 1
-  fi
+  }
+  tok="$(docker exec "$IRIS_CONTAINER" iris-mint-enrollment "$sid")"
   [ -n "$tok" ] || { echo "ERROR: iris-mint-enrollment returned an empty token for $sid" >&2; exit 1; }
   printf '%s' "$tok"
 }

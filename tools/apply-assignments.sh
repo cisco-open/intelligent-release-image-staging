@@ -13,13 +13,14 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 CSV="${1:-$REPO/fleet/assignments.csv}"
 [ -f "$CSV" ] || { echo "no assignments file: $CSV (copy fleet/assignments.csv.example)" >&2; exit 1; }
+IRIS_CONTAINER="${IRIS_CONTAINER:-iris}"
+docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$IRIS_CONTAINER" || {
+  echo "ERROR: the '$IRIS_CONTAINER' container is not running. Start it with tools/start-compose-server.sh, or set IRIS_CONTAINER=<name>." >&2
+  exit 1
+}
 
 assign() {
-  if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx iris; then
-    docker exec iris iris-assign "$1" "$2"
-  else
-    python3 "$REPO/server/iris-assign" "$1" "$2"          # bare-metal
-  fi
+  docker exec "$IRIS_CONTAINER" iris-assign "$1" "$2"
 }
 
 # ── Pass 1: validate every data row before touching any device ────────────────
