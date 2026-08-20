@@ -1481,7 +1481,21 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 body = self._json_body(raw)
                 if body is None:
                     return
-                image_id = str(body.get("image_id", ""))
+                image_id = str(body.get("image_id") or "")
+                if not image_id:
+                    # explicit unassign: clear the approval so the agent stops
+                    # staging without deleting the device
+                    if catalog is None:
+                        self._json(404, {"error": "not found"}); return
+                    old = catalog.get_policy(did).get("approved_image_id")
+                    catalog.set_policy(did, approved_image_id=None)
+                    old_entry = catalog.get_image(old) if old else None
+                    self._audit("device_assign", "device", action="unassign",
+                               target=did, actor=actor,
+                               detail="unassigned (was %s)"
+                                      % ((old_entry or {}).get("filename")
+                                         or old or "none"))
+                    self._json(200, {"ok": True}); return
                 entry = catalog.get_image(image_id) if catalog is not None else None
                 if entry is None:
                     self._json(400, {"error": "no such image"}); return

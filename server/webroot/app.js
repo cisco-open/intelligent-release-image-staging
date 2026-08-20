@@ -172,7 +172,7 @@
       marked[cb.getAttribute('data-id')] = true;
     });
     document.getElementById('dev-rows').innerHTML = devs.map(function (d) {
-      var opts = ['<option value="">— assign —</option>'].concat(imageIds.map(function (id) {
+      var opts = ['<option value="">' + (d.assigned_image_id ? '— unassign —' : '— assign —') + '</option>'].concat(imageIds.map(function (id) {
         return '<option value="' + esc(id) + '"' + (id === d.assigned_image_id ? ' selected' : '') + '>' + esc(id) + '</option>';
       })).join('');
       var credSel = ['<option value="">— no credential —</option>'].concat(credOpts.map(function (c) {
@@ -237,9 +237,10 @@
     document.querySelectorAll('#dev-rows .assign').forEach(function (sel) {
       sel.addEventListener('change', async function () {
         var id = sel.closest('tr').getAttribute('data-id');
-        if (!sel.value) return;
         var r = await jpost('/api/devices/' + encodeURIComponent(id) + '/assign', { image_id: sel.value });
-        devStatus.textContent = r.ok ? ('Assigned ' + sel.value + ' to ' + id) : 'Assign failed';
+        devStatus.textContent = r.ok
+          ? (sel.value ? ('Assigned ' + sel.value + ' to ' + id) : ('Unassigned ' + id))
+          : (sel.value ? 'Assign failed' : 'Unassign failed');
       });
     });
     document.querySelectorAll('#dev-rows .cred').forEach(function (sel) {

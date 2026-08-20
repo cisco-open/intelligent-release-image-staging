@@ -1109,6 +1109,35 @@ def test_device_delete_purges_catalog_state(tmp_path):
         stop()
 
 
+def test_device_assign_empty_unassigns(tmp_path):
+    # Selecting the empty option in the console dropdown must UNASSIGN —
+    # before this, delete+re-add was the only way to clear an assignment.
+    host, port, (_, _, _, cat), stop = _serve_full(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, _ = _req(host, port, "POST", "/api/devices",
+                        {"device_id": "d1", "device_ip": "10.0.0.1", "vlan": "666",
+                         "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
+                         "guest_ip": "10.0.0.3"}, headers=hh)
+        assert st == 200
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_id": "img1"}, headers=hh)
+        assert st == 200
+        assert cat.get_policy("d1")["approved_image_id"] == "img1"
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_id": ""}, headers=hh)
+        assert st == 200 and json.loads(b)["ok"] is True
+        assert cat.get_policy("d1")["approved_image_id"] is None
+        # idempotent: unassigning an unassigned device is still ok
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_id": None}, headers=hh)
+        assert st == 200
+        assert cat.get_policy("d1")["approved_image_id"] is None
+    finally:
+        stop()
+
+
 def test_device_post_requires_csrf(tmp_path):
     host, port, _, stop = _serve_full(tmp_path)
     try:
