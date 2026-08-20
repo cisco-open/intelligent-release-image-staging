@@ -167,8 +167,26 @@ if [ "$PACKAGE" -eq 0 ]; then
   exit 0
 fi
 
-echo ">> ioxclient docker package -> $PACKAGE_NAME"
-( cd "$CTX" && "$IOXCLIENT" docker package "$IMAGE_TAG" . )
+# IOx CAF ships a legacy docker runtime (dockerd 19.03 on IE3x00). Engines
+# using the containerd image store (the default on new installs) make
+# `docker save` — and therefore `ioxclient docker package` — emit a NESTED
+# OCI index carrying buildx attestation manifests; CAF then installs and
+# activates the app but refuses to start it ("Failed to place <app> in
+# running state", with nothing in syslog). Plain single-level OCI-with-compat
+# saves (classic-store engines) start fine. Export the rootfs ourselves with
+# attestations disabled and fail closed if one still sneaks in.
+echo ">> exporting docker-archive rootfs.tar (no buildx attestation manifests)"
+docker buildx build --platform "$DOCKER_PLATFORM" --provenance=false --sbom=false \
+  --output "type=docker,dest=$CTX/rootfs.tar" "$CTX"
+if tar xOf "$CTX/rootfs.tar" index.json 2>/dev/null | grep -q "attestation-manifest"; then
+  echo "!! rootfs.tar carries buildx attestation manifests — IE3x00 CAF cannot start such images" >&2
+  exit 1
+fi
+tar tf "$CTX/rootfs.tar" | grep -q "manifest.json" \
+  || { echo "!! rootfs.tar has no manifest.json — not a docker-archive" >&2; exit 1; }
+
+echo ">> ioxclient package -> $PACKAGE_NAME"
+( cd "$CTX" && "$IOXCLIENT" package . )
 cp "$CTX/package.tar" "$OUT/$PACKAGE_NAME"
 echo ">> done: $OUT/$PACKAGE_NAME"
 ls -la "$OUT/$PACKAGE_NAME"
