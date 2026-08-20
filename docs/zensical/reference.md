@@ -92,7 +92,7 @@ see [Kubernetes](kubernetes.md).
 
 The console's *Settings → TLS & trust* sub-page (Certificate and Trusted CAs sections)
 manage these; none needs to be set anywhere — the defaults below are the
-container and bare-metal paths, and with no override installed and an empty
+container paths, and with no override installed and an empty
 trust dir the behavior is identical to releases without the feature.
 
 | Variable | Default | Effect |

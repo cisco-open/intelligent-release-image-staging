@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Getting Started
 
-This path brings up the IRIS server, publishes an IOS-XE image, generates device installers, and assigns an image to a device. It assumes Docker Compose is the server runtime.
+This path brings up the IRIS server, publishes an IOS-XE image, generates device installers, and assigns an image to a device. Docker Compose is the server runtime.
 
 ## Prerequisites
 

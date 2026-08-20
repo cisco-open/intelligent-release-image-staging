@@ -129,6 +129,13 @@ loopback) or not publishing port 9101 at all.
 
 Server secret material is encrypted at rest with age recipients. Plaintext lives only in `/run/iris` while the container runs. Device enrollment tokens are short-lived and generated per device by the running server.
 
+The age private key is deliberately kept outside the directory holding the
+ciphertext it opens. Co-locating them would mean any backup, snapshot, or read
+of the config directory yields both halves at once, making the at-rest
+encryption theater. Compose enforces the separation structurally: the key is
+mounted as a Docker secret at `/run/secrets/iris_age_key` from a host path the
+operator controls, never from the encrypted volume.
+
 Do not commit:
 
 - Real `creds/` files.

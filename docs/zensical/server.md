@@ -8,6 +8,10 @@ SPDX-License-Identifier: Apache-2.0
 
 The server is a single Docker service that runs several small Python and shell components. It intentionally keeps runtime dependencies narrow: Python standard library services, `aria2c` for BitTorrent, `mktorrent` for torrent metadata, and OpenSSL/age tooling for certificates and encrypted secret material.
 
+Docker Compose and the Kubernetes manifests are the supported ways to run the
+server; both use the same image. There is no separate host install — the image
+is the unit of deployment.
+
 The image is self-contained: device installer sources and the SSH helper used by
 console onboarding are copied in at build time. Build it from the repository
 root for `linux/amd64`:
