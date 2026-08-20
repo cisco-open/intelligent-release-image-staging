@@ -51,6 +51,10 @@ CATALOG_CA="${STAGE}/iris-catalog.pem"
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
+CAP="$(od -An -N16 -tx1 /dev/urandom | tr -d '[:space:]')"
+[ "${#CAP}" -eq 32 ] || { echo "ERROR: failed to generate staging capability" >&2; exit 1; }
+CONF="iris-agent-$DEVICE_ID-$CAP.conf"
+RPC_SECRET_FILE="rpc-secret-$CAP"
 
 # --- Model-aware config: the ONE place the install path branches by device ---
 # Catalyst 9300 and IE-3x00 differ in (a) the app-hosting port, (b) the writable
@@ -219,8 +223,8 @@ if [ "$DRY" -eq 1 ]; then
   echo "===== AGENT CONFIG (staged on $STAGE_HOST:8000 (https), copied to $STAGE/iris-agent.conf) ====="; agent_conf
   echo "===== INSTALL COPIES (over verified https) ====="
   IOS_ROOT="${IOS_FS}/guest-share"
-  for pair in "bootstrap.sh:bootstrap.sh" "staging/iris-agent-$DEVICE_ID.conf:iris-agent.conf" \
-              "staging/rpc-secret:rpc-secret" "$BUNDLE:bundle.tgz" \
+  for pair in "bootstrap.sh:bootstrap.sh" "staging/$CONF:iris-agent.conf" \
+              "staging/$RPC_SECRET_FILE:rpc-secret" "$BUNDLE:bundle.tgz" \
               "iris-catalog.pem:iris-catalog.pem"; do
     src="${pair%%:*}"; dst="${pair##*:}"
     printf 'copy https://%s:8000/%s %s/%s\n' "$STAGE_HOST" "$src" "$IOS_ROOT" "$dst"
@@ -248,9 +252,21 @@ echo "[pre] prerequisite checks (ip routing, device clock)"
 # IRIS-managed SVI that depends on global routing; inband rides the operator's
 # own already-routed network.
 if [ "$NETWORK_ATTACHMENT" = "routed" ]; then
-  routing_out="$(printf 'show running-config | include ^ip routing\n' \
+  # `ip routing` can be the platform DEFAULT (seen on IE3x00): then neither
+  # `ip routing` nor `no ip routing` appears in the config, and grepping for
+  # the positive line false-fails a healthy switch. Decide from authoritative
+  # signals instead: an explicit `no ip routing` line, or the route table
+  # answering in host mode (`Default gateway ...`), means disabled — while a
+  # session that never echoes the command back is a TRANSPORT failure and
+  # must not masquerade as a routing problem.
+  routing_out="$(printf 'show running-config | include no ip routing\nshow ip route | include Gateway|Default gateway\n' \
     | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>/dev/null || true)"
-  if ! printf '%s\n' "$routing_out" | grep -qE '^ip routing[[:space:]]*$'; then
+  if ! printf '%s\n' "$routing_out" | grep -q 'show running-config'; then
+    echo "PREREQ: could not verify ip routing on $DEVICE_IP — the device session failed (check reachability and device credentials)" >&2
+    exit 1
+  fi
+  if printf '%s\n' "$routing_out" | grep -qE '^no ip routing[[:space:]]*$' \
+     || printf '%s\n' "$routing_out" | grep -qE '^Default gateway'; then
     echo "PREREQ: ip routing is disabled on this switch — the app network (VLAN $VLAN -> SVI $SVI_IP) cannot reach $STAGE_HOST. Enable it first:  configure terminal ; ip routing ; end ; write" >&2
     exit 1
   fi
@@ -262,7 +278,6 @@ if [ -n "$clock_year" ] && [ "$clock_year" -lt 2024 ]; then
 fi
 
 echo "[2/7] stage per-device agent config into artifacts/ (served on :8000 by the container)"
-CONF="iris-agent-$DEVICE_ID.conf"
 ART="${IRIS_ARTIFACTS_DIR:-$(cd "$HERE/.." && pwd)/artifacts}"
 # the agent's pinned CA = the SAME bare crt.pem; served as the fifth artifact and
 # pulled over the now-trusted HTTPS (a runtime convenience copy — trust itself
@@ -272,8 +287,9 @@ ART="${IRIS_ARTIFACTS_DIR:-$(cd "$HERE/.." && pwd)/artifacts}"
 if [ "${IRIS_STAGE_LOCAL:-0}" = "1" ] || ip -o addr 2>/dev/null | grep -qw "$STAGE_HOST" || [ "$STAGE_HOST" = "localhost" ]; then
   # we ARE the stage host — write directly, no ssh needed
   mkdir -p "$ART/staging"
-  agent_conf > "$ART/staging/$CONF"
-  printf '%s\n' "$RPC_SECRET" > "$ART/staging/rpc-secret"
+  (umask 077
+   agent_conf > "$ART/staging/$CONF"
+   printf '%s\n' "$RPC_SECRET" > "$ART/staging/$RPC_SECRET_FILE")
   # static served files are normally provisioned at container startup by
   # server/provision-served.sh (or by tools/make-agent-bundle.sh); the
   # copy-if-absent below also covers CLI runs from a stage host.
@@ -282,7 +298,7 @@ if [ "${IRIS_STAGE_LOCAL:-0}" = "1" ] || ip -o addr 2>/dev/null | grep -qw "$STA
 else
   : "${HOST_USER:?set HOST_USER (source creds/, or Console: Settings → Stage host) — needed to ssh to remote STAGE_HOST $STAGE_HOST}"
   : "${HOST_PASS:?set HOST_PASS (source creds/, or Console: Settings → Stage host) — needed to ssh to remote STAGE_HOST $STAGE_HOST}"
-  agent_conf | ssh_host "mkdir -p ~/iris/artifacts/staging && cat > ~/iris/artifacts/staging/$CONF && printf '%s\n' '$RPC_SECRET' > ~/iris/artifacts/staging/rpc-secret"
+  agent_conf | ssh_host "umask 077 && mkdir -p ~/iris/artifacts/staging && cat > ~/iris/artifacts/staging/$CONF && printf '%s\n' '$RPC_SECRET' > ~/iris/artifacts/staging/$RPC_SECRET_FILE"
   ssh_host "cat > ~/iris/artifacts/iris-catalog.pem" < "$IRIS_CRT_FILE"
 fi
 
@@ -340,7 +356,7 @@ fi
 printf 'delete /force /recursive %s\n' "$IOS_STAGE" | "$HERE/../lab/device-run.sh" "$DEVICE_IP" >/dev/null 2>&1 || true
 IOS_ROOT="${IOS_FS}/guest-share"
 for pair in "bootstrap.sh:bootstrap.sh" "staging/$CONF:iris-agent.conf" \
-            "staging/rpc-secret:rpc-secret" "$BUNDLE:bundle.tgz" \
+            "staging/$RPC_SECRET_FILE:rpc-secret" "$BUNDLE:bundle.tgz" \
             "iris-catalog.pem:iris-catalog.pem"; do
   src="${pair%%:*}"; dst="${pair##*:}"; ok=0
   for attempt in 1 2 3; do

@@ -1,0 +1,162 @@
+diff --git a/src/RpcMethodImpl.cc b/src/RpcMethodImpl.cc
+index eb821393..b2f72e67 100644
+--- a/src/RpcMethodImpl.cc
++++ b/src/RpcMethodImpl.cc
+@@ -1073,7 +1073,8 @@ std::string createPeerFlags(const Peer& peer)
+ 
+ void gatherPeer(List* peers, const std::shared_ptr<PeerStorage>& ps,
+                 const DownloadContext* dctx,
+-                const TorrentAttribute* torrentAttrs)
++                const TorrentAttribute* torrentAttrs,
++                const std::vector<std::string>& keys)
+ {
+   auto& usedPeers = ps->getUsedPeers();
+   for (auto& peer : usedPeers) {
+@@ -1081,50 +1082,90 @@ void gatherPeer(List* peers, const std::shared_ptr<PeerStorage>& ps,
+       continue;
+     }
+     auto peerEntry = Dict::g();
+-    if (peer->isHandshakeCompleted()) {
++    if (peer->isHandshakeCompleted() && requested_key(keys, KEY_PEER_ID)) {
+       peerEntry->put(KEY_PEER_ID, util::torrentPercentEncode(peer->getPeerId(),
+                                                              PEER_ID_LENGTH));
+     }
+-    if (!peer->getClientName().empty()) {
++    if (!peer->getClientName().empty() &&
++        requested_key(keys, KEY_PEER_CLIENT_NAME)) {
+       peerEntry->put(KEY_PEER_CLIENT_NAME, peer->getClientName());
+     }
+-    peerEntry->put(KEY_IP, peer->getIPAddress());
+-    peerEntry->put(KEY_PORT, util::uitos(peer->getRemotePort()));
+-    if (peer->hasListenPort()) {
++    if (requested_key(keys, KEY_IP)) {
++      peerEntry->put(KEY_IP, peer->getIPAddress());
++    }
++    if (requested_key(keys, KEY_PORT)) {
++      peerEntry->put(KEY_PORT, util::uitos(peer->getRemotePort()));
++    }
++    if (peer->hasListenPort() && requested_key(keys, KEY_LISTEN_PORT)) {
+       peerEntry->put(KEY_LISTEN_PORT, util::uitos(peer->getListenPort()));
+     }
+-    peerEntry->put(KEY_BITFIELD,
+-                   util::toHex(peer->getBitfield(), peer->getBitfieldLength()));
+-    peerEntry->put(KEY_AM_CHOKING, peer->amChoking() ? VLB_TRUE : VLB_FALSE);
+-    peerEntry->put(KEY_AM_INTERESTED,
+-                   peer->amInterested() ? VLB_TRUE : VLB_FALSE);
+-    peerEntry->put(KEY_PEER_CHOKING,
+-                   peer->peerChoking() ? VLB_TRUE : VLB_FALSE);
+-    peerEntry->put(KEY_PEER_INTERESTED,
+-                   peer->peerInterested() ? VLB_TRUE : VLB_FALSE);
+-    peerEntry->put(KEY_DOWNLOAD_SPEED,
+-                   util::itos(peer->calculateDownloadSpeed()));
+-    peerEntry->put(KEY_UPLOAD_SPEED, util::itos(peer->calculateUploadSpeed()));
+-    peerEntry->put(KEY_DOWNLOADED,
+-                   util::itos(peer->getSessionDownloadLength()));
+-    peerEntry->put(KEY_UPLOADED, util::itos(peer->getSessionUploadLength()));
++    if (requested_key(keys, KEY_BITFIELD)) {
++      peerEntry->put(KEY_BITFIELD, util::toHex(peer->getBitfield(),
++                                               peer->getBitfieldLength()));
++    }
++    if (requested_key(keys, KEY_AM_CHOKING)) {
++      peerEntry->put(KEY_AM_CHOKING, peer->amChoking() ? VLB_TRUE : VLB_FALSE);
++    }
++    if (requested_key(keys, KEY_AM_INTERESTED)) {
++      peerEntry->put(KEY_AM_INTERESTED,
++                     peer->amInterested() ? VLB_TRUE : VLB_FALSE);
++    }
++    if (requested_key(keys, KEY_PEER_CHOKING)) {
++      peerEntry->put(KEY_PEER_CHOKING,
++                     peer->peerChoking() ? VLB_TRUE : VLB_FALSE);
++    }
++    if (requested_key(keys, KEY_PEER_INTERESTED)) {
++      peerEntry->put(KEY_PEER_INTERESTED,
++                     peer->peerInterested() ? VLB_TRUE : VLB_FALSE);
++    }
++    if (requested_key(keys, KEY_DOWNLOAD_SPEED)) {
++      peerEntry->put(KEY_DOWNLOAD_SPEED,
++                     util::itos(peer->calculateDownloadSpeed()));
++    }
++    if (requested_key(keys, KEY_UPLOAD_SPEED)) {
++      peerEntry->put(KEY_UPLOAD_SPEED,
++                     util::itos(peer->calculateUploadSpeed()));
++    }
++    if (requested_key(keys, KEY_DOWNLOADED)) {
++      peerEntry->put(KEY_DOWNLOADED,
++                     util::itos(peer->getSessionDownloadLength()));
++    }
++    if (requested_key(keys, KEY_UPLOADED)) {
++      peerEntry->put(KEY_UPLOADED, util::itos(peer->getSessionUploadLength()));
++    }
+     if (!torrentAttrs->metadata.empty() && dctx->getTotalLength() > 0) {
+       const auto completedLength = peer->getCompletedLength();
+-      peerEntry->put(KEY_COMPLETED_LENGTH, util::itos(completedLength));
+-      peerEntry->put(
+-          KEY_PROGRESS,
+-          fmt("%.6f", static_cast<double>(completedLength) /
+-                         static_cast<double>(dctx->getTotalLength())));
+-    }
+-    peerEntry->put(KEY_FLAGS, createPeerFlags(*peer));
+-    peerEntry->put(KEY_INCOMING,
+-                   peer->isIncomingConnection() ? VLB_TRUE : VLB_FALSE);
+-    peerEntry->put(KEY_SNUBBED, peer->snubbing() ? VLB_TRUE : VLB_FALSE);
+-    peerEntry->put(KEY_OPTIMISTIC_UNCHOKE,
+-                   peer->optUnchoking() ? VLB_TRUE : VLB_FALSE);
+-    peerEntry->put(KEY_HANDSHAKING,
+-                   peer->isHandshakeCompleted() ? VLB_FALSE : VLB_TRUE);
+-    peerEntry->put(KEY_SEEDER, peer->isSeeder() ? VLB_TRUE : VLB_FALSE);
++      if (requested_key(keys, KEY_COMPLETED_LENGTH)) {
++        peerEntry->put(KEY_COMPLETED_LENGTH, util::itos(completedLength));
++      }
++      if (requested_key(keys, KEY_PROGRESS)) {
++        peerEntry->put(
++            KEY_PROGRESS,
++            fmt("%.6f", static_cast<double>(completedLength) /
++                           static_cast<double>(dctx->getTotalLength())));
++      }
++    }
++    if (requested_key(keys, KEY_FLAGS)) {
++      peerEntry->put(KEY_FLAGS, createPeerFlags(*peer));
++    }
++    if (requested_key(keys, KEY_INCOMING)) {
++      peerEntry->put(KEY_INCOMING,
++                     peer->isIncomingConnection() ? VLB_TRUE : VLB_FALSE);
++    }
++    if (requested_key(keys, KEY_SNUBBED)) {
++      peerEntry->put(KEY_SNUBBED, peer->snubbing() ? VLB_TRUE : VLB_FALSE);
++    }
++    if (requested_key(keys, KEY_OPTIMISTIC_UNCHOKE)) {
++      peerEntry->put(KEY_OPTIMISTIC_UNCHOKE,
++                     peer->optUnchoking() ? VLB_TRUE : VLB_FALSE);
++    }
++    if (requested_key(keys, KEY_HANDSHAKING)) {
++      peerEntry->put(KEY_HANDSHAKING,
++                     peer->isHandshakeCompleted() ? VLB_FALSE : VLB_TRUE);
++    }
++    if (requested_key(keys, KEY_SEEDER)) {
++      peerEntry->put(KEY_SEEDER, peer->isSeeder() ? VLB_TRUE : VLB_FALSE);
++    }
+     peers->append(std::move(peerEntry));
+   }
+ }
+@@ -1325,8 +1366,12 @@ std::unique_ptr<ValueBase> GetPeersRpcMethod::process(const RpcRequest& req,
+                                                       DownloadEngine* e)
+ {
+   const String* gidParam = checkRequiredParam<String>(req, 0);
++  const List* keysParam = checkParam<List>(req, 1);
+ 
+   a2_gid_t gid = str2Gid(gidParam);
++  std::vector<std::string> keys;
++  toStringList(std::back_inserter(keys), keysParam);
++
+   auto group = e->getRequestGroupMan()->findGroup(gid);
+   if (!group) {
+     throw DL_ABORT_EX(fmt("No peer data is available for GID#%s",
+@@ -1338,7 +1383,7 @@ std::unique_ptr<ValueBase> GetPeersRpcMethod::process(const RpcRequest& req,
+     assert(btObject->peerStorage);
+     auto dctx = group->getDownloadContext().get();
+     gatherPeer(peers.get(), btObject->peerStorage, dctx,
+-               bittorrent::getTorrentAttrs(dctx));
++               bittorrent::getTorrentAttrs(dctx), keys);
+   }
+   return std::move(peers);
+ }

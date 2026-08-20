@@ -660,6 +660,152 @@ def test_root_copy_failure_then_success_settles_to_complete():
     assert len(calls) == 2
 
 
+def test_root_copy_backoff_starts_after_second_failure(monkeypatch):
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 5,
+                       "sha256": "abc"})
+    deps, _, _, _, _, _, _, _ = make_deps(
+        cat, {"/stage/img1.bin": 5}, verify_ok=True)
+    calls = []
+    deps = deps._replace(
+        copy_to_root=lambda fname, target_prefix="flash:": calls.append(fname) or False)
+    now = [1_000.0]
+    monkeypatch.setattr(iris_agent.time, "time", lambda: now[0])
+    state = {}
+
+    iris_agent.run_once(CFG, deps, state)       # attempt 1 fails
+    assert "copy_next_ts" not in state["img1"]
+    iris_agent.run_once(CFG, deps, state)       # attempt 2: immediate next tick
+    assert len(calls) == 2
+    assert state["img1"]["copy_next_ts"] == now[0] + 5 * 60
+
+    now[0] += 5 * 60
+    iris_agent.run_once(CFG, deps, state)       # attempt 3 after five minutes
+    assert len(calls) == 3
+    assert state["img1"]["copy_next_ts"] == now[0] + 10 * 60
+
+    now[0] += 10 * 60
+    iris_agent.run_once(CFG, deps, state)       # attempt 4 is terminal
+    assert len(calls) == 4
+    assert state["img1"]["copy_terminal"] is True
+    assert "copy_next_ts" not in state["img1"]
+
+
+def test_first_retry_timestamp_from_regressed_state_is_ignored(monkeypatch):
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 5,
+                       "sha256": "abc"})
+    deps, _, _, _, _, _, _, _ = make_deps(
+        cat, {"/stage/img1.bin": 5}, verify_ok=True)
+    calls = []
+    deps = deps._replace(
+        copy_to_root=lambda fname, target_prefix="flash:": calls.append(fname) or True)
+    monkeypatch.setattr(iris_agent.time, "time", lambda: 1_000.0)
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "image_id": "img1",
+             "img1": {"done": True, "copied": False, "sha": "abc",
+                      "copy_attempts": 1, "copy_next_ts": 1_300.0}}
+
+    iris_agent.run_once(CFG, deps, state)
+    assert calls == ["img1.bin"]
+    assert state["img1"]["copied"] is True
+    assert state["root_file"] == "img1.bin"
+
+
+# --- D6 regression guards: a transient "running image unknown" refusal (the
+# IOx SSH-to-self `show version` scrape glitched) must NOT feed the same
+# copy_attempts counter as a genuine copy failure. deps.copy_to_root() signals
+# this case with the ROOT_COPY_RUNNING_IMAGE_UNKNOWN sentinel instead of plain
+# False. ---
+
+def test_root_copy_running_image_unknown_does_not_count_toward_terminal():
+    # Four (or more) consecutive unknown-running-image refusals — analogous to
+    # a run of flaky `show version` reads over ~15 minutes — must never trip
+    # the _ROOT_COPY_MAX_ATTEMPTS durable copy_failed terminal state, and must
+    # not advance copy_attempts or arm the backoff schedule. Before this fix,
+    # each refusal returned plain False and was indistinguishable from a real
+    # copy failure, so four of them alone would permanently dead-end the copy.
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 5,
+                       "sha256": "abc"})
+    deps, emitted, _, _, _, _, _, _ = make_deps(
+        cat, {"/stage/img1.bin": 5}, verify_ok=True)
+    calls = []
+
+    def unknown_running_copy(fname, target_prefix="flash:"):
+        calls.append(fname)
+        return iris_agent.ROOT_COPY_RUNNING_IMAGE_UNKNOWN
+
+    deps = deps._replace(copy_to_root=unknown_running_copy)
+    state = {}
+    for _ in range(iris_agent._ROOT_COPY_MAX_ATTEMPTS + 2):
+        iris_agent.run_once(CFG, deps, state)
+    assert len(calls) == iris_agent._ROOT_COPY_MAX_ATTEMPTS + 2   # retried every tick
+    assert state["img1"].get("copy_attempts") is None       # never counted
+    assert state["img1"].get("copy_terminal") is not True   # never terminal
+    assert state["img1"].get("copy_next_ts") is None        # no backoff armed
+    assert state["img1"].get("copied") is not True
+    assert not any(m == "ROOTCOPY-GIVEUP" for m, _ in emitted)
+
+
+def test_root_copy_running_image_unknown_then_resolves_copies_normally():
+    # Once the transient clears and running_image() resolves again, the copy
+    # proceeds exactly as if nothing had happened — no leftover attempt count,
+    # no stale backoff deferring the now-successful attempt.
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 5,
+                       "sha256": "abc"})
+    deps, _, _, _, _, _, _, _ = make_deps(
+        cat, {"/stage/img1.bin": 5}, verify_ok=True)
+    results = iter([iris_agent.ROOT_COPY_RUNNING_IMAGE_UNKNOWN,
+                    iris_agent.ROOT_COPY_RUNNING_IMAGE_UNKNOWN,
+                    True])
+    calls = []
+
+    def flaky_then_ok(fname, target_prefix="flash:"):
+        calls.append(fname)
+        return next(results)
+
+    deps = deps._replace(copy_to_root=flaky_then_ok)
+    state = {}
+    iris_agent.run_once(CFG, deps, state)      # unknown, retried next tick
+    iris_agent.run_once(CFG, deps, state)      # unknown again
+    iris_agent.run_once(CFG, deps, state)      # resolves -> real copy succeeds
+    assert len(calls) == 3
+    assert state["img1"]["copied"] is True
+    assert state["root_file"] == "img1.bin"
+    assert state["img1"].get("copy_attempts") is None
+
+
+def test_root_copy_unknown_interleaved_with_real_failures_only_real_ones_count():
+    # A transient unknown-running-image tick sandwiched between two genuine
+    # copy failures must not itself advance copy_attempts, and must not reset
+    # or otherwise disturb the count from the real failures around it.
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 5,
+                       "sha256": "abc"})
+    deps, _, _, _, _, _, _, _ = make_deps(
+        cat, {"/stage/img1.bin": 5}, verify_ok=True)
+    results = iter([False,
+                    iris_agent.ROOT_COPY_RUNNING_IMAGE_UNKNOWN,
+                    False])
+    calls = []
+
+    def mixed(fname, target_prefix="flash:"):
+        calls.append(fname)
+        return next(results)
+
+    deps = deps._replace(copy_to_root=mixed)
+    state = {}
+    iris_agent.run_once(CFG, deps, state)      # real failure #1
+    assert state["img1"]["copy_attempts"] == 1
+    iris_agent.run_once(CFG, deps, state)      # transient unknown, not counted
+    assert state["img1"]["copy_attempts"] == 1
+    iris_agent.run_once(CFG, deps, state)      # real failure #2
+    assert state["img1"]["copy_attempts"] == 2
+    assert len(calls) == 3
+
+
 # --- Direct tests of _agent_reverify_root (the real code path).
 # The IRIS-COPYROOT EEM applet deletes any stale leftover, then runs
 # `copy /verify` — copy + Cisco signature in one IOS-enforced step. A failed

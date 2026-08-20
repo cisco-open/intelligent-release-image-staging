@@ -140,10 +140,15 @@ setup() {
 # the stub-backed tests below prove the pass/fail/warn behavior itself. ---
 
 @test "install checks ip routing before applying any config (PREREQ, routed only)" {
+  # semantic detection: explicit `no ip routing` / host-mode route table —
+  # NOT a grep for the positive `ip routing` line, which is absent when
+  # routing is the platform default (IE3x00 false-positive, 2026-08-20)
   install="$BATS_TEST_DIRNAME/../install.sh"
-  run grep -F 'show running-config | include ^ip routing' "$install"
+  run grep -F 'show running-config | include no ip routing' "$install"
   [ "$status" -eq 0 ]
   run grep -F 'PREREQ: ip routing is disabled on this switch' "$install"
+  [ "$status" -eq 0 ]
+  run grep -F 'PREREQ: could not verify ip routing' "$install"
   [ "$status" -eq 0 ]
 }
 
@@ -180,9 +185,25 @@ _iox_stub_setup() {
   cat > "$STUBDIR/lab/device-run.sh" <<'STUB'
 #!/usr/bin/env bash
 cmds="$(cat)"
+[ -z "${FAKE_COMMAND_LOG:-}" ] || printf '%s\n' "$cmds" >> "$FAKE_COMMAND_LOG"
+case "$cmds" in
+  *"show version"*)
+    echo "cisco ${FAKE_MODEL:-IE-3400-8T2S} (ARMv8) processor"
+    echo "Processor board ID ${FAKE_DEVICE_IDENTITY:-FOC1234TEST}"
+    ;;
+esac
 case "$cmds" in
   *"show running-config"*)
-    [ "${FAKE_IP_ROUTING:-yes}" = "yes" ] && echo "ip routing"
+    # Real sessions echo the commands back; the installer's transport check
+    # keys on that echo. FAKE_DEVICE_DOWN=yes simulates a dead session.
+    [ "${FAKE_DEVICE_DOWN:-no}" = "yes" ] && exit 0
+    echo "show running-config | include no ip routing"
+    if [ "${FAKE_IP_ROUTING:-yes}" = "yes" ]; then
+      echo "Gateway of last resort is 100.90.168.1 to network 0.0.0.0"
+    else
+      echo "no ip routing"
+      echo "Default gateway is not set"
+    fi
     ;;
 esac
 case "$cmds" in
@@ -251,7 +272,8 @@ iox_run_with_timeout() {
 _iox_env() {
   env DEVICE_IP=192.0.2.10 CATALOG_TOKEN=t DEVICE_ID=e1 STAGE_HOST=192.0.2.2 \
     DEVICE_SSH_PASS=x VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 \
-    GUEST_IP=192.0.2.10 IRIS_CRT_FILE="$CRTFILE" "$@"
+    GUEST_IP=192.0.2.10 IRIS_CRT_FILE="$CRTFILE" MODEL=IE-3400-8T2S \
+    EXPECTED_DEVICE_IDENTITY=FOC1234TEST "$@"
 }
 
 @test "ip routing missing: real run exits non-zero with the PREREQ line" {
@@ -261,12 +283,23 @@ _iox_env() {
   [[ "$output" == *"PREREQ: ip routing is disabled on this switch"* ]]
 }
 
+@test "dead device session: PREREQ says transport, not routing" {
+  # a session that produces no output must not masquerade as a routing
+  # problem (the old check conflated the two)
+  _iox_stub_setup
+  run _iox_env FAKE_DEVICE_DOWN=yes bash "$STUBDIR/device/iox/install.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"PREREQ: could not verify ip routing"* ]]
+  [[ "$output" != *"PREREQ: ip routing is disabled"* ]]
+}
+
 @test "ip routing present: real run proceeds past the check to step [2/9]" {
   _iox_stub_setup
   iox_run_with_timeout 12 env DEVICE_IP=192.0.2.10 CATALOG_TOKEN=t DEVICE_ID=e1 \
     STAGE_HOST=192.0.2.2 DEVICE_SSH_PASS=x VLAN=666 SVI_IP=192.0.2.9 \
     SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 IRIS_CRT_FILE="$CRTFILE" \
-    FAKE_IP_ROUTING=yes bash "$STUBDIR/device/iox/install.sh"
+    MODEL=IE-3400-8T2S EXPECTED_DEVICE_IDENTITY=FOC1234TEST FAKE_IP_ROUTING=yes \
+    bash "$STUBDIR/device/iox/install.sh"
   [[ "$output" != *"PREREQ: ip routing is disabled"* ]]
   [[ "$output" == *"[2/9]"* ]]
 }
@@ -284,9 +317,19 @@ _iox_env() {
   iox_run_with_timeout 12 env DEVICE_IP=192.0.2.10 CATALOG_TOKEN=t DEVICE_ID=e1 \
     STAGE_HOST=192.0.2.2 DEVICE_SSH_PASS=x VLAN=666 SVI_IP=192.0.2.9 \
     SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 IRIS_CRT_FILE="$CRTFILE" \
-    FAKE_IP_ROUTING=yes FAKE_IOX_PARTITION=yes \
+    MODEL=IE-3400-8T2S EXPECTED_DEVICE_IDENTITY=FOC1234TEST FAKE_IP_ROUTING=yes FAKE_IOX_PARTITION=yes \
     FAKE_CLOCK_LINE="14:23:07.512 UTC Thu Aug 20 2018" \
     bash "$STUBDIR/device/iox/install.sh"
   [[ "$output" == *"PREREQ WARNING: device clock is 2018"* ]]
   [[ "$output" == *"[2/9]"* ]]
+}
+
+@test "mismatched device identity aborts before destructive app commands" {
+  _iox_stub_setup
+  COMMAND_LOG="$BATS_TEST_TMPDIR/device-commands.log"
+  run _iox_env FAKE_COMMAND_LOG="$COMMAND_LOG" EXPECTED_DEVICE_IDENTITY=WRONG-ID \
+    bash "$STUBDIR/device/iox/install.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"ERROR: device identity mismatch"* ]]
+  ! grep -qE 'app-hosting (stop|deactivate|uninstall) appid iris|no app-hosting appid iris' "$COMMAND_LOG"
 }

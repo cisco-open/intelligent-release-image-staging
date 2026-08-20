@@ -28,7 +28,9 @@ case "$1" in
           /etc/iris/tls/crt.pem) printf -- '-----BEGIN CERTIFICATE-----\nMIIBfake\n-----END CERTIFICATE-----\n' ;;
           *) exit 1 ;;
         esac ;;
-      iris-mint-enrollment) echo "enrolltok-$2-$RANDOM" ;;
+      # Enrollment tokens are 32 hexadecimal characters, as minted by the
+      # real secrets store.
+      iris-mint-enrollment) echo "0123456789abcdef0123456789abcdef" ;;
       *) exit 1 ;;
     esac ;;
   restart) : ;;
@@ -60,7 +62,7 @@ CSVEOF
 @test "generator mints a per-device enrollment token via iris-mint-enrollment" {
   run env IRIS_HOST_IP=10.0.0.9 bash "$GEN" "$CSV"
   [ "$status" -eq 0 ]
-  [[ "$(cat "$OUT/install-100.92.9.3.sh")" == *'CATALOG_TOKEN="enrolltok-100.92.9.3'* ]]
+  [[ "$(cat "$OUT/install-100.92.9.3.sh")" == *'CATALOG_TOKEN=0123456789abcdef0123456789abcdef'* ]]
 }
 
 @test "generator does NOT bake a permanent RPC secret" {
@@ -91,6 +93,19 @@ CSVEOF
   [ -f "$OUT/install-100.92.9.3.sh" ]
   # This assertion fails before the fix — the last row is silently dropped.
   [ -f "$OUT/install-100.92.9.4.sh" ]
+}
+
+@test "generator rejects a CSV field containing a shell quote" {
+  CSV_UNSAFE="$BATS_TEST_TMPDIR/unsafe.csv"
+  cat > "$CSV_UNSAFE" <<'CSVEOF'
+device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip
+unsafe"device,100.92.9.3,666,100.92.9.125,255.255.255.252,100.92.9.126
+CSVEOF
+
+  run env IRIS_HOST_IP=10.0.0.9 bash "$GEN" "$CSV_UNSAFE"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"ERROR: device_id has an invalid format"* ]]
+  [ ! -e "$OUT/install-unsafe\"device.sh" ]
 }
 
 # ── make-release scrub covers SCRUB_USER in all shipped text file types ────────

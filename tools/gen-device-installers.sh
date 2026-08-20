@@ -69,6 +69,22 @@ ALL="$OUT/install-all.sh"
 { echo "#!/usr/bin/env bash"; echo "set -e"; echo 'HERE="$(cd "$(dirname "$0")" && pwd)"'; } > "$ALL"
 
 trim() { echo "$1" | tr -d ' \r'; }
+validate_ipv4() {
+  local value="$1" field="$2"
+  python3 - "$value" "$field" <<'PY'
+import ipaddress
+import sys
+try:
+    ipaddress.IPv4Address(sys.argv[1])
+except ipaddress.AddressValueError:
+    raise SystemExit("ERROR: %s must be an IPv4 address" % sys.argv[2])
+PY
+}
+validate_field() {
+  local value="$1" field="$2" re="$3"
+  [[ "$value" =~ $re ]] || { echo "ERROR: $field has an invalid format" >&2; exit 1; }
+}
+shell_literal() { printf '%q' "$1"; }
 n=0
 while IFS=, read -r device_id device_ip vlan svi_ip svi_mask guest_ip csv_token _rest || [ -n "$device_id" ]; do
   device_id="$(trim "$device_id")"
@@ -78,7 +94,19 @@ while IFS=, read -r device_id device_ip vlan svi_ip svi_mask guest_ip csv_token 
   device_ip="$(trim "$device_ip")"; vlan="$(trim "$vlan")"
   svi_ip="$(trim "$svi_ip")"; svi_mask="$(trim "$svi_mask")"; guest_ip="$(trim "$guest_ip")"
   tok="$(trim "${csv_token:-}")"
+  validate_field "$device_id" device_id '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
+  validate_ipv4 "$device_ip" device_ip
+  validate_field "$vlan" vlan '^[0-9]{1,4}$'
+  [ "$vlan" -ge 1 ] && [ "$vlan" -le 4094 ] \
+    || { echo "ERROR: vlan must be between 1 and 4094" >&2; exit 1; }
+  validate_ipv4 "$svi_ip" svi_ip
+  validate_ipv4 "$svi_mask" svi_mask
+  validate_ipv4 "$guest_ip" guest_ip
+  if [ -n "$tok" ]; then
+    validate_field "$tok" csv_token '^[A-Fa-f0-9]{32}$'
+  fi
   [ -n "$tok" ] || tok="$(mint_enrollment "$device_id")"
+  validate_field "$tok" enrollment_token '^[A-Fa-f0-9]{32}$'
 
   f="$OUT/install-$device_id.sh"
   cat > "$f" <<EOF
@@ -86,9 +114,9 @@ while IFS=, read -r device_id device_ip vlan svi_ip svi_mask guest_ip csv_token 
 # IRIS installer for device $device_id  (GENERATED — re-run the generator to change)
 set -euo pipefail
 REPO="\$(cd "\$(dirname "\$0")/../.." && pwd)"
-export DEVICE_IP="$device_ip" VLAN="$vlan" SVI_IP="$svi_ip" SVI_MASK="$svi_mask" GUEST_IP="$guest_ip" DEVICE_ID="$device_id"
-export CATALOG_URL="$CATALOG_URL" CATALOG_TOKEN="$tok"
-export STAGE_HOST="$STAGE_HOST"
+export DEVICE_IP=$(shell_literal "$device_ip") VLAN=$(shell_literal "$vlan") SVI_IP=$(shell_literal "$svi_ip") SVI_MASK=$(shell_literal "$svi_mask") GUEST_IP=$(shell_literal "$guest_ip") DEVICE_ID=$(shell_literal "$device_id")
+export CATALOG_URL=$(shell_literal "$CATALOG_URL") CATALOG_TOKEN=$(shell_literal "$tok")
+export STAGE_HOST=$(shell_literal "$STAGE_HOST")
 # exported empty so device-install.sh reads a defined (empty) value; the agent fetches the real rpc_secret on its first token-refresh.
 export RPC_SECRET=""
 # Materialize the server's BARE cert (crt.pem) to a temp file and hand its path to

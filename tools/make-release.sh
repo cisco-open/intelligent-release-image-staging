@@ -29,7 +29,7 @@ cp -R "$REPO/device/." "$OUT/device/"
 
 # tools
 mkdir -p "$OUT/tools"
-for f in get-aria2c.sh make-torrent.sh make-agent-bundle.sh \
+for f in get-aria2c.sh aria2c.sha256 make-torrent.sh make-agent-bundle.sh \
          gen-device-installers.sh apply-assignments.sh \
          start-compose-server.sh; do
   cp "$REPO/tools/$f" "$OUT/tools/"

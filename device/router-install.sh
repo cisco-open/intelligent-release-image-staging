@@ -43,6 +43,10 @@ CATALOG_CA="$STAGE/iris-catalog.pem"
 IRIS_CRT_FILE="${IRIS_CRT_FILE:-}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
+CAP="$(od -An -N16 -tx1 /dev/urandom | tr -d '[:space:]')"
+[ "${#CAP}" -eq 32 ] || { echo "ERROR: failed to generate staging capability" >&2; exit 1; }
+CONF="iris-agent-$DEVICE_ID-$CAP.conf"
+RPC_SECRET_FILE="rpc-secret-$CAP"
 
 MODEL="${MODEL:-}"
 EXPECTED_DEVICE_IDENTITY="${EXPECTED_DEVICE_IDENTITY:-}"
@@ -178,8 +182,8 @@ if [ "$DRY" -eq 1 ]; then
   echo "===== PKI TRUSTPOINT ====="; trustpoint_block
   echo "===== AGENT CONFIG ====="; agent_conf
   echo "===== INSTALL COPIES ====="
-  for pair in "bootstrap.sh:bootstrap.sh" "staging/iris-agent-$DEVICE_ID.conf:iris-agent.conf" \
-              "staging/rpc-secret:rpc-secret" "$BUNDLE:bundle.tgz" \
+  for pair in "bootstrap.sh:bootstrap.sh" "staging/$CONF:iris-agent.conf" \
+              "staging/$RPC_SECRET_FILE:rpc-secret" "$BUNDLE:bundle.tgz" \
               "iris-catalog.pem:iris-catalog.pem"; do
     src="${pair%%:*}"; dst="${pair##*:}"
     printf 'copy https://%s:8000/%s %s/%s\n' "$STAGE_HOST" "$src" "$IOS_ROOT" "$dst"
@@ -199,7 +203,6 @@ printf 'dir bootflash: | include bytes free\n' | "$HERE/../lab/device-run.sh" "$
   | grep -i 'bytes free' || true
 
 echo "[2/7] stage per-device agent config into artifacts/"
-CONF="iris-agent-$DEVICE_ID.conf"
 ART="${IRIS_ARTIFACTS_DIR:-$(cd "$HERE/.." && pwd)/artifacts}"
 : "${IRIS_CRT_FILE:?set IRIS_CRT_FILE to the bare server cert crt.pem}"
 [ -r "$IRIS_CRT_FILE" ] \
@@ -208,15 +211,38 @@ if [ "${IRIS_STAGE_LOCAL:-0}" = "1" ] \
     || ip -o addr 2>/dev/null | grep -qw "$STAGE_HOST" \
     || [ "$STAGE_HOST" = "localhost" ]; then
   mkdir -p "$ART/staging"
-  agent_conf > "$ART/staging/$CONF"
-  printf '%s\n' "$RPC_SECRET" > "$ART/staging/rpc-secret"
+  (umask 077
+   agent_conf > "$ART/staging/$CONF"
+   printf '%s\n' "$RPC_SECRET" > "$ART/staging/$RPC_SECRET_FILE")
   [ -e "$ART/bootstrap.sh" ] || cp "$HERE/bootstrap.sh" "$ART/bootstrap.sh"
   [ -e "$ART/iris-catalog.pem" ] || cp "$IRIS_CRT_FILE" "$ART/iris-catalog.pem"
 else
   : "${HOST_USER:?set HOST_USER for remote STAGE_HOST $STAGE_HOST}"
   : "${HOST_PASS:?set HOST_PASS for remote STAGE_HOST $STAGE_HOST}"
-  agent_conf | ssh_host "mkdir -p ~/iris/artifacts/staging && cat > ~/iris/artifacts/staging/$CONF && printf '%s\\n' '$RPC_SECRET' > ~/iris/artifacts/staging/rpc-secret"
+  agent_conf | ssh_host "umask 077 && mkdir -p ~/iris/artifacts/staging && cat > ~/iris/artifacts/staging/$CONF && printf '%s\\n' '$RPC_SECRET' > ~/iris/artifacts/staging/$RPC_SECRET_FILE"
   ssh_host "cat > ~/iris/artifacts/iris-catalog.pem" < "$IRIS_CRT_FILE"
+fi
+
+# 2026-08-20 incident (iris8kv-1/-2): a re-onboard over a guestshell that was
+# already RUNNING leaves it on its OLD networking — the enable step below sees
+# RUNNING and never re-enables, so the freshly applied app-hosting gateway
+# never reaches the guest and the agent has no egress (silent: inbound ping
+# still answers). Destroy any pre-existing guestshell FIRST so enable always
+# builds the guest from the config this run applies. Agent state survives on
+# bootflash:guest-share, so this costs only the ~60s guest rebuild.
+existing="$(printf 'show app-hosting list\n' \
+  | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>/dev/null | grep -i guestshell || true)"
+if [ -n "$existing" ]; then
+  echo "[3/7] destroying pre-existing guestshell (stale networking guard)"
+  printf 'guestshell destroy\n' \
+    | "$HERE/../lab/device-run.sh" "$DEVICE_IP" >/dev/null 2>&1 || true
+  for i in $(seq 1 12); do
+    still="$(printf 'show app-hosting list\n' \
+      | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>/dev/null | grep -i guestshell || true)"
+    [ -z "$still" ] && { echo "  guestshell DESTROYED"; break; }
+    [ "$i" -ne 12 ] || { echo "ERROR: pre-existing guestshell still present after destroy" >&2; exit 1; }
+    sleep 10
+  done
 fi
 
 echo "[3/7] apply IOS config ($NETWORK_ATTACHMENT VirtualPortGroup)"
@@ -250,7 +276,7 @@ fi
 printf 'delete /force /recursive %s\n' "$IOS_STAGE" \
   | "$HERE/../lab/device-run.sh" "$DEVICE_IP" >/dev/null 2>&1 || true
 for pair in "bootstrap.sh:bootstrap.sh" "staging/$CONF:iris-agent.conf" \
-            "staging/rpc-secret:rpc-secret" "$BUNDLE:bundle.tgz" \
+            "staging/$RPC_SECRET_FILE:rpc-secret" "$BUNDLE:bundle.tgz" \
             "iris-catalog.pem:iris-catalog.pem"; do
   src="${pair%%:*}"; dst="${pair##*:}"; ok=0
   for attempt in 1 2 3; do

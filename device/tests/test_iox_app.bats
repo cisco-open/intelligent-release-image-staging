@@ -145,10 +145,15 @@ _appid_block_output() {
   [ "$CALLS" -ge 1 ]
 }
 
-@test "entrypoint.sh supervisor loop condition includes pgrep liveness check" {
-  # Static analysis: the loop body must contain a pgrep (or kill -0) check so
-  # that a dead daemon triggers start_aria2c independently of secret rotation.
+@test "entrypoint.sh supervisor checks aria2c HEALTH, not just liveness" {
+  # Static analysis: the loop body must restart the daemon when it is dead
+  # (pgrep/kill -0) AND when it is alive but not answering RPC. Liveness alone
+  # deadlocked Guest Shell devices in the field (2026-08-20): an aria2c that
+  # was running but not serving blocked its own relaunch, so the agent hit
+  # ECONNREFUSED on every tick and never reached its first heartbeat. The IOx
+  # supervisor had the identical condition and the identical latent fault.
   grep -q 'pgrep\|kill -0' "$ENTRYPOINT"
+  grep -q 'rpc_healthy\|jsonrpc' "$ENTRYPOINT"
 }
 
 @test "entrypoint.sh tracks agent and sleep children for prompt TERM handling" {

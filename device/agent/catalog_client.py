@@ -19,6 +19,13 @@ GZIP_MIN = 1024
 # keep only the newest N request RTT samples (drained once per agent tick)
 RTT_LOG_MAX = 16
 
+# Catalog JSON is deliberately small; torrent metainfo is larger but still tiny
+# compared with the image it describes.  Endpoint-specific caps keep a broken
+# proxy/captive portal from exhausting the 512 MB device before we parse/write.
+JSON_RESPONSE_MAX = 64 * 1024
+TORRENT_RESPONSE_MAX = 4 * 1024 * 1024
+ERROR_RESPONSE_MAX = 64 * 1024
+
 
 class CatalogError(Exception):
     pass
@@ -35,7 +42,28 @@ class CatalogClient:
         # only link probe. Drained once per tick via drain_rtts().
         self.rtt_ms_log = []
 
-    def _req(self, method, path, body=None, data=None, extra_headers=None):
+    @staticmethod
+    def _read_limited(response, limit):
+        length = response.headers.get("Content-Length")
+        if length is not None:
+            try:
+                if int(length) > limit:
+                    raise CatalogError("catalog response exceeds %d bytes" % limit)
+            except ValueError:
+                pass
+        chunks = []
+        total = 0
+        while True:
+            chunk = response.read(min(64 * 1024, limit - total + 1))
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > limit:
+                raise CatalogError("catalog response exceeds %d bytes" % limit)
+
+    def _req(self, method, path, body=None, data=None, extra_headers=None,
+             max_response_bytes=JSON_RESPONSE_MAX):
         # body: dict to JSON-encode. data: pre-encoded bytes sent as-is
         # (e.g. a gzipped telemetry report) -- callers pass one or the
         # other, never both. extra_headers: merged over the defaults.
@@ -51,7 +79,8 @@ class CatalogClient:
         started = time.monotonic()
         try:
             with urllib.request.urlopen(req, timeout=15, context=self.context) as r:
-                status, payload = r.status, r.read()
+                status = r.status
+                payload = self._read_limited(r, max_response_bytes)
             # Successful round trip: record the RTT for link classification.
             # HTTPError/URLError paths record nothing -- failures feed the
             # heartbeat fail_streak instead, never the RTT median.
@@ -59,7 +88,7 @@ class CatalogClient:
             del self.rtt_ms_log[:-RTT_LOG_MAX]        # keep the newest 16
             return status, payload
         except urllib.error.HTTPError as e:
-            return e.code, e.read()
+            return e.code, self._read_limited(e, ERROR_RESPONSE_MAX)
         except urllib.error.URLError as e:
             raise CatalogError("catalog unreachable: %s" % e)
 
@@ -86,7 +115,9 @@ class CatalogClient:
         raise CatalogError("image %s -> HTTP %d" % (image_id, status))
 
     def download_torrent(self, image_id, dest_path):
-        status, body = self._req("GET", "/v1/torrents/%s.torrent" % image_id)
+        status, body = self._req(
+            "GET", "/v1/torrents/%s.torrent" % image_id,
+            max_response_bytes=TORRENT_RESPONSE_MAX)
         if status != 200:
             raise CatalogError("torrent %s -> HTTP %d" % (image_id, status))
         # Write to a sibling tmp then os.replace() over dest_path, so a crash

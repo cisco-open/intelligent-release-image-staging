@@ -28,9 +28,11 @@ IOX_ARCH=amd64 PACKAGE_NAME=iris-amd64.tar \
 ```
 The default output is `device/iox/out/iris-arm64.tar`. Packaging also needs a
 configured `ioxclient`; `--image-only` does not. The build uses an
-architecture-matched `aria2c` from `ARIA2C_BIN` or a local agent bundle when
-available, otherwise it downloads a pinned static build and verifies its SHA-256
-digest. Supply the pinned catalog cert with `CATALOG_PEM`, or set both
+architecture-matched `aria2c` from `ARIA2C_BIN`, a local agent bundle, or
+`deliverables/aria2c-<arch>`, verifying each against `tools/aria2c.sha256` and
+failing closed on a mismatch. The build never downloads a client: an earlier
+network fallback could silently ship an unpatched third-party build into the
+image. Supply the pinned catalog cert with `CATALOG_PEM`, or set both
 `CATALOG_PEM_URL` and `CATALOG_PEM_FINGERPRINT`.
 
 ## Config delivery

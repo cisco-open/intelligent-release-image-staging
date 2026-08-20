@@ -3,11 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Flash space pre-check + reclaim planning for the device agent.
-Parses IOS `dir flash:` output and decides whether an image fits. SAFETY: the only
-automated reclaim is `install remove inactive` — the agent NEVER deletes image
-files. If space is still insufficient after that, the agent just syslogs and stops
-(the operator decides what to remove). Pure functions — the agent runs the
-resulting IOS commands on-box."""
+Parses IOS `dir flash:` output and decides whether an image fits. Automated
+reclaim is either `install remove inactive` or deletion of strictly allowlisted,
+unused bundle artifacts. Bundle deletion is skipped unless the running image is
+confirmed and protected; replaced root images are deleted only when state records
+that IRIS placed them. If space remains insufficient, staging stops. Pure
+functions — the agent runs the resulting IOS commands on-box."""
 import re
 
 HEADROOM = 200 * 1024 * 1024     # 200 MB slack on top of the image size

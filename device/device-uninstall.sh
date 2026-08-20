@@ -103,7 +103,7 @@ echo "[1/5] remove EEM applets on $DEVICE_IP (stops the 60s bootstrap timer)"
 echo "[2/5] guestshell disable"
 printf 'guestshell disable\n' | "$RUN" "$DEVICE_IP" >/dev/null 2>&1 || true
 st="?"
-for i in $(seq 1 30); do
+for _ in $(seq 1 30); do
   st="$(printf 'show app-hosting list\n' | "$RUN" "$DEVICE_IP" | grep -i guestshell || true)"
   case "$st" in *RUNNING*|*STOPPING*) sleep 10 ;; *) break ;; esac
 done
@@ -113,7 +113,7 @@ echo "[3/5] guestshell destroy"
 # The trailing 'y' answers the destroy confirmation on versions that prompt;
 # where none appears it is swallowed as a harmless '% Invalid input'.
 printf 'guestshell destroy\ny\n' | "$RUN" "$DEVICE_IP" >/dev/null 2>&1 || true
-for i in $(seq 1 30); do
+for _ in $(seq 1 30); do
   st="$(printf 'show app-hosting list\n' | "$RUN" "$DEVICE_IP" | grep -i guestshell || true)"
   [ -z "$st" ] && break
   sleep 10

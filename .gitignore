@@ -27,7 +27,12 @@ images/ios-xe/
 *.torrent
 *.aria2
 
-# --- vendored binaries (refetched by tools/get-aria2c.sh) ---
+# --- handed-in aria2c deliverables (produced by the aria2-next-static
+#     project, verified against tools/aria2c.sha256, never committed) ---
+deliverables/
+agentinfo/
+
+# --- vendored binaries (installed by tools/get-aria2c.sh) ---
 bin/*
 !bin/.gitkeep
 tools/bin/
@@ -42,7 +47,6 @@ iris-agent.tgz
 fleet/dist/
 fleet/iris-fleet.conf
 fleet/devices.csv
-fleet/switches.csv
 fleet/assignments.csv
 
 # --- runtime output ---

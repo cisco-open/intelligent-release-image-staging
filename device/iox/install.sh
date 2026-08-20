@@ -83,6 +83,25 @@ APPID=iris
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RUN() { "$HERE/../../lab/device-run.sh" "$DEVICE_IP"; }   # IOS cmds on stdin
 
+# A receipt binds this deployment to one physical device and platform.  Check
+# both before an idempotent reinstall tears down the app on the target address.
+MODEL="${MODEL:-}"
+EXPECTED_DEVICE_IDENTITY="${EXPECTED_DEVICE_IDENTITY:-}"
+if [ "$DRY" -eq 0 ]; then
+  : "${EXPECTED_DEVICE_IDENTITY:?set EXPECTED_DEVICE_IDENTITY from the deployment receipt}"
+  : "${MODEL:?set MODEL from the deployment receipt}"
+  VERSION_OUT="$(printf 'show version\n' | RUN 2>/dev/null)"
+  LIVE_MODEL="$(printf '%s\n' "$VERSION_OUT" \
+    | sed -nE 's/^cisco[[:space:]]+([^[:space:]]+)[[:space:]]+\(.*/\1/p' | head -1)"
+  LIVE_IDENTITY="$(printf '%s\n' "$VERSION_OUT" \
+    | sed -nE 's/^[Pp]rocessor board ID[[:space:]]+([^[:space:]]+).*/\1/p' | head -1)"
+  [ -n "$LIVE_IDENTITY" ] && [ "$LIVE_IDENTITY" = "$EXPECTED_DEVICE_IDENTITY" ] \
+    || { echo "ERROR: device identity mismatch; refusing to configure $DEVICE_IP" >&2; exit 1; }
+  [ -n "$LIVE_MODEL" ] && [ "$(printf '%s' "$LIVE_MODEL" | tr '[:lower:]' '[:upper:]')" = \
+    "$(printf '%s' "$MODEL" | tr '[:lower:]' '[:upper:]')" ] \
+    || { echo "ERROR: device model mismatch; expected $MODEL, detected ${LIVE_MODEL:-unknown}; refusing to configure $DEVICE_IP" >&2; exit 1; }
+fi
+
 # --- the PKI trustpoint that lets `copy https:` validate the self-signed cert ---
 # (identical idiom to device/device-install.sh: no-then-re-add, paste the BARE
 # crt.pem, answer the two yes/no prompts; non-circular — trust rides the SSH we
@@ -259,8 +278,20 @@ echo "[pre] prerequisite checks (ip routing, IOx storage, device clock)"
 # Catch that (and a missing IOx SD partition, and a clock so wrong TLS will
 # fail) here, in plain language, before any config is touched.
 if [ "$NETWORK_ATTACHMENT" = "routed" ]; then
-  routing_out="$(printf 'show running-config | include ^ip routing\n' | RUN 2>/dev/null || true)"
-  if ! printf '%s\n' "$routing_out" | grep -qE '^ip routing[[:space:]]*$'; then
+  # `ip routing` can be the platform DEFAULT (seen on IE3x00): then neither
+  # `ip routing` nor `no ip routing` appears in the config, and grepping for
+  # the positive line false-fails a healthy switch. Decide from authoritative
+  # signals instead: an explicit `no ip routing` line, or the route table
+  # answering in host mode (`Default gateway ...`), means disabled — while a
+  # session that never echoes the command back is a TRANSPORT failure and
+  # must not masquerade as a routing problem.
+  routing_out="$(printf 'show running-config | include no ip routing\nshow ip route | include Gateway|Default gateway\n' | RUN 2>/dev/null || true)"
+  if ! printf '%s\n' "$routing_out" | grep -q 'show running-config'; then
+    echo "PREREQ: could not verify ip routing on $DEVICE_IP — the device session failed (check reachability and device credentials)" >&2
+    exit 1
+  fi
+  if printf '%s\n' "$routing_out" | grep -qE '^no ip routing[[:space:]]*$' \
+     || printf '%s\n' "$routing_out" | grep -qE '^Default gateway'; then
     echo "PREREQ: ip routing is disabled on this switch — the app network (VLAN $VLAN -> SVI $SVI_IP) cannot reach $STAGE_HOST. Enable it first:  configure terminal ; ip routing ; end ; write" >&2
     exit 1
   fi

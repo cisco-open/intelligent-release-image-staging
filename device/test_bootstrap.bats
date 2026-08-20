@@ -46,3 +46,24 @@ teardown() { rm -rf "$TMP"; }
   [ "$status" -eq 0 ]
   [ ! -f "$TMP/pkill.log" ]
 }
+
+@test "a live-but-unresponsive aria2c is relaunched, not skipped" {
+  # 2026-08-20 incident (iris8kv-2/-3/-4 + C9300 .129, ~42min silent): step 3
+  # gated the launch on `pgrep aria2c` — process EXISTENCE, not RPC HEALTH. An
+  # aria2c that is alive but not serving RPC therefore blocked its own
+  # relaunch forever: the agent hit ECONNREFUSED on 127.0.0.1:6800 every tick,
+  # crashed before its first heartbeat, and the device never appeared. It only
+  # recovered when the stale process happened to die. guestshell-start.sh is
+  # ALREADY idempotent (it probes the RPC and exits 0 when healthy), so
+  # bootstrap must delegate to it unconditionally.
+  printf 'rpc_secret = SAME\nrpc_port = 6800\n' > "$STAGE/iris-agent.conf"
+  printf 'SAME\n' > "$STAGE/rpc-secret"      # in sync: no bounce path taken
+  # pgrep SUCCEEDS: a process is alive (the deadlock precondition)
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$BIN/pgrep"
+  chmod +x "$BIN/pgrep"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  # the launcher MUST still have been consulted despite the live process
+  [ -f "$TMP/gss.log" ]
+}

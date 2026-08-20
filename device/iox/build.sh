@@ -19,8 +19,11 @@
 #                  names when serving both packages, such as iris-amd64.tar.
 #   PACKAGE_DESCRIPTOR  package.yaml override for custom platform metadata.
 #   ARIA2C_BIN     architecture-matched aria2c. Default: use the matching local
-#                  agent bundle when present, otherwise download the pinned build.
-#   ARIA2_VERSION / ARIA2_SHA256 / ARIA2_URL  pinned download overrides.
+#                  agent bundle when present (its aria2c is still checksum-
+#                  verified), otherwise deliverables/aria2c-<arch>, verified
+#                  against tools/aria2c.sha256. This build does NOT download
+#                  aria2c -- see tools/get-aria2c.sh for how the deliverable
+#                  is produced and verified.
 #   CATALOG_PEM    pinned server cert. Default: fetched from $CATALOG_PEM_URL.
 #   CATALOG_PEM_URL  required when CATALOG_PEM is not supplied.
 #   CATALOG_PEM_FINGERPRINT  expected SHA-256 fingerprint of the catalog cert
@@ -60,8 +63,6 @@ case "$IOX_ARCH" in
     IOX_CPUARCH=aarch64
     ARIA2_FILE_PATTERN="ARM aarch64"
     DEFAULT_IMAGE_TAG=iris-iox:arm64
-    DEFAULT_ARIA2_SHA256=0c681a89a40e0f82d1f5137608e86257eb0af201459c002941ea098f2b8c26b6
-    DEFAULT_ARIA2_ASSET=aria2-aarch64-linux-musl_static.zip
     DEFAULT_PACKAGE_DESCRIPTOR="$HERE/package.yaml"
     LOCAL_BUNDLE="$REPO/artifacts/iris-agent-arm.tgz"
     DEFAULT_PACKAGE_NAME=iris-arm64.tar
@@ -72,8 +73,6 @@ case "$IOX_ARCH" in
     IOX_CPUARCH=x86_64
     ARIA2_FILE_PATTERN="x86-64"
     DEFAULT_IMAGE_TAG=iris-iox:amd64
-    DEFAULT_ARIA2_SHA256=e0a09b12ef67f35f8a8e4fdddbec851d235b7c31da549d0578bff459032b499a
-    DEFAULT_ARIA2_ASSET=aria2-x86_64-linux-musl_static.zip
     DEFAULT_PACKAGE_DESCRIPTOR="$HERE/package-amd64.yaml"
     LOCAL_BUNDLE="$REPO/artifacts/iris-agent.tgz"
     DEFAULT_PACKAGE_NAME=iris-amd64.tar
@@ -89,9 +88,6 @@ PACKAGE_NAME="${PACKAGE_NAME:-$DEFAULT_PACKAGE_NAME}"
 PACKAGE_DESCRIPTOR="${PACKAGE_DESCRIPTOR:-$DEFAULT_PACKAGE_DESCRIPTOR}"
 CATALOG_PEM_URL="${CATALOG_PEM_URL:-}"
 IOXCLIENT="${IOXCLIENT:-ioxclient}"
-ARIA2_VERSION="${ARIA2_VERSION:-1.37.0}"
-ARIA2_SHA256="${ARIA2_SHA256:-$DEFAULT_ARIA2_SHA256}"
-ARIA2_URL="${ARIA2_URL:-https://github.com/abcfy2/aria2-static-build/releases/download/${ARIA2_VERSION}/${DEFAULT_ARIA2_ASSET}}"
 [ -r "$PACKAGE_DESCRIPTOR" ] \
   || { echo "!! package descriptor not readable: $PACKAGE_DESCRIPTOR" >&2; exit 1; }
 
@@ -105,21 +101,55 @@ cp "$REPO"/device/verify_image.py "$CTX/agent/verify_image.py"   # lives in devi
 cp "$REPO/VERSION" "$CTX/agent/VERSION"   # telemetry reports the packaged release
 
 echo ">> staging $IOX_CPUARCH aria2c"
+# This build does NOT download aria2c. The only sources are an explicit
+# ARIA2C_BIN override, a local agent bundle (its aria2c is still checksum-
+# verified below, since a bundle's provenance is not otherwise pinned), or
+# the handed-in deliverables/aria2c-<arch> verified against
+# tools/aria2c.sha256 -- see tools/get-aria2c.sh for the same idiom.
+SUMS="$REPO/tools/aria2c.sha256"
+DELIVERABLE="$REPO/deliverables/aria2c-$IOX_CPUARCH"
+
+verify_aria2_checksum() {
+  # $1 = candidate binary path, $2 = description for error output
+  local candidate="$1" desc="$2" expected actual
+  [ -f "$SUMS" ] || { echo "!! missing $SUMS -- cannot verify $desc" >&2; exit 1; }
+  expected="$(awk -v a="$IOX_CPUARCH" '$2 == a { print $1 }' "$SUMS")"
+  [ -n "$expected" ] \
+    || { echo "!! no checksum recorded for $IOX_CPUARCH in $SUMS" >&2; exit 1; }
+  actual="$( (shasum -a 256 "$candidate" 2>/dev/null || sha256sum "$candidate") | awk '{print $1}')"
+  if [ "$actual" != "$expected" ]; then
+    cat >&2 <<EOF
+!! CHECKSUM MISMATCH for $desc ($IOX_CPUARCH) -- refusing to build.
+   expected: $expected   (tools/aria2c.sha256)
+   actual:   $actual     ($candidate)
+
+This usually means the deliverable is stale, or a newer client was produced
+and tools/aria2c.sha256 has not been updated to adopt it. Do not "fix" this
+by editing the checksum unless you intend to adopt that exact binary.
+EOF
+    exit 1
+  fi
+}
+
 if [ -n "${ARIA2C_BIN:-}" ]; then
   cp "$ARIA2C_BIN" "$CTX/agent_bin/aria2c"
 elif [ -f "$LOCAL_BUNDLE" ]; then
   tar xzf "$LOCAL_BUNDLE" -C "$CTX/agent_bin" aria2c
+  verify_aria2_checksum "$CTX/agent_bin/aria2c" "$LOCAL_BUNDLE (extracted aria2c)"
+elif [ -f "$DELIVERABLE" ]; then
+  verify_aria2_checksum "$DELIVERABLE" "$DELIVERABLE"
+  cp "$DELIVERABLE" "$CTX/agent_bin/aria2c"
 else
-  echo ">> no local $IOX_ARCH bundle; downloading pinned aria2c"
-  curl -fsSL "$ARIA2_URL" -o "$CTX/aria2.zip"
-  if command -v sha256sum >/dev/null 2>&1; then
-    echo "$ARIA2_SHA256  $CTX/aria2.zip" | sha256sum -c -
-  else
-    got="$(shasum -a 256 "$CTX/aria2.zip" | awk '{print $1}')"
-    [ "$got" = "$ARIA2_SHA256" ] \
-      || { echo "!! aria2 checksum mismatch: expected $ARIA2_SHA256, got $got" >&2; exit 1; }
-  fi
-  unzip -q "$CTX/aria2.zip" -d "$CTX/agent_bin"
+  cat >&2 <<EOF
+!! no aria2c available for $IOX_CPUARCH.
+
+This build does not download aria2c. Provide one of:
+  1. ARIA2C_BIN=/path/to/aria2c-$IOX_CPUARCH  (architecture-matched binary)
+  2. $DELIVERABLE
+     (handed in and verified against tools/aria2c.sha256 -- see
+     tools/get-aria2c.sh $([ "$IOX_CPUARCH" = "aarch64" ] && echo arm64 || echo amd64))
+EOF
+  exit 1
 fi
 file "$CTX/agent_bin/aria2c" | grep -q "$ARIA2_FILE_PATTERN" \
   || { echo "!! aria2c does not match $IOX_CPUARCH -- set ARIA2C_BIN"; exit 1; }
