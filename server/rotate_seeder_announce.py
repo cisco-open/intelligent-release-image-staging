@@ -34,9 +34,8 @@ Failure handling (spec §6):
 The helper never accepts or prints token values (argv/output are nonsecret) and
 does NOT revoke any previous credential (revoke is P1). It never accesses the
 tracker's in-process registry — the loopback ``/swarm`` verification is an
-INJECTABLE probe (``deps.swarm_probe``); its final typed predicate integration
-is deferred to a later task and the deployment path leaves it uncalled until
-then.
+injectable probe (``deps.swarm_probe(expected_info_hashes)``) that must prove
+the typed current service seeder and exact control-state torrent set.
 
 Compatibility note: ``rotate_announce`` and the additive
 ``announce_token_previous`` store shape live here for the torrent lane; the
@@ -213,6 +212,7 @@ def rotate_seeder_announce(secrets_path, manifest_path, torrents,
     # seeder, so that on a later hard no-go we can restore the EXACT old
     # canonical bytes for ALL of them (spec §6: an already-applied earlier
     # torrent must not be left rotated while a later torrent hard-fails).
+    expected_info_hashes = set()
     applied = []  # list of (idx, target, old_bytes)
 
     # 3+4. Serial per-torrent: prepare verified replacement, force-remove, add.
@@ -221,6 +221,7 @@ def rotate_seeder_announce(secrets_path, manifest_path, torrents,
             old_bytes = f.read()
         try:
             new_bytes = prepare_replacement(old_bytes, new_url)
+            expected_info_hashes.add(_info_hash(old_bytes))
         except Exception:
             # Preparation failure is treated like a byte-safe abort for this
             # torrent: nothing was removed/added yet, old bytes intact. Any
@@ -266,7 +267,8 @@ def rotate_seeder_announce(secrets_path, manifest_path, torrents,
     # Probe errors and timeouts fail closed exactly like a failed predicate; no
     # credential is revoked and the recovery manifest remains terminal.
     try:
-        serving = deps.swarm_probe()
+        serving = (callable(deps.swarm_probe)
+                   and deps.swarm_probe(expected_info_hashes))
     except Exception:
         serving = False
     if not serving:
@@ -339,6 +341,13 @@ def _sha256_file(path):
     return h.hexdigest()
 
 
+def _info_hash(torrent_bytes):
+    """Return the canonical SHA-1 info hash from raw torrent bytes."""
+    spans = torrent_personalize.scan_top_level(torrent_bytes)
+    start, end = spans["info"]
+    return hashlib.sha1(torrent_bytes[start:end]).hexdigest()
+
+
 def _atomic_write_bytes(path, data):
     d = os.path.dirname(path) or "."
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".torrent-", suffix=".tmp")
@@ -394,17 +403,24 @@ def durable_persist(recipients_csv, enc_path, age_bin=None):
 
 def production_deps(seeder_remove, seeder_add, recipients_csv, enc_path,
                     swarm_probe=None, manifest_write=None, now=None,
-                    age_bin=None):
+                    age_bin=None, swarm_sender=None):
     """Assemble ``RotationDeps`` for the operational path with a durable-first
-    persist. The seeder RPC and (deferred) loopback ``/swarm`` probe are still
-    injected so the core stays testable; only ``persist`` is fixed to the safe
-    durable adapter."""
+    persist. Unless an explicit ``swarm_probe(expected_info_hashes)`` is
+    injected, the deps build a real loopback ``/swarm`` probe. Its proof is
+    bound to the exact info hashes for the rotation operation. ``swarm_sender``
+    is an injectable transport seam for tests; it cannot bypass the typed
+    predicate enforced by :func:`make_swarm_probe`."""
     import time
+    if swarm_probe is None:
+        def swarm_probe(expected_info_hashes):
+            return make_swarm_probe(
+                expected_info_hashes, sender=swarm_sender)()
+
     return RotationDeps(
         persist=durable_persist(recipients_csv, enc_path, age_bin=age_bin),
         seeder_remove=seeder_remove,
         seeder_add=seeder_add,
-        swarm_probe=swarm_probe if swarm_probe is not None else (lambda: True),
+        swarm_probe=swarm_probe,
         manifest_write=manifest_write or _atomic_write_json,
         now=now or (lambda: int(time.time())))
 

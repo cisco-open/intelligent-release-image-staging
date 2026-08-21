@@ -118,7 +118,7 @@ def test_manifest_written_before_any_mutation(tmp_path):
 
     deps = rot.RotationDeps(
         persist=fake_persist, seeder_remove=seeder.remove,
-        seeder_add=seeder.add, swarm_probe=lambda: True,
+        seeder_add=seeder.add, swarm_probe=lambda expected: True,
         manifest_write=tracking_manifest_write, now=lambda: 100)
 
     rot.rotate_seeder_announce(
@@ -143,7 +143,7 @@ def test_manifest_contains_no_tokens_or_urls(tmp_path):
     deps = rot.RotationDeps(
         persist=lambda s, p: secrets_store.save(s, p),
         seeder_remove=seeder.remove, seeder_add=seeder.add,
-        swarm_probe=lambda: True,
+        swarm_probe=lambda expected: True,
         manifest_write=rot._atomic_write_json, now=lambda: 100)
     rot.rotate_seeder_announce(
         secrets_path=sp, manifest_path=manifest_path,
@@ -181,7 +181,7 @@ def test_durable_persist_before_canonical_replacement(tmp_path):
 
     deps = rot.RotationDeps(
         persist=fake_persist, seeder_remove=seeder.remove,
-        seeder_add=tracking_add, swarm_probe=lambda: True,
+        seeder_add=tracking_add, swarm_probe=lambda expected: True,
         manifest_write=rot._atomic_write_json, now=lambda: 100)
     rot.rotate_seeder_announce(
         secrets_path=sp, manifest_path=manifest_path,
@@ -208,7 +208,7 @@ def test_replacement_preserves_info_hash_and_uses_current_token(tmp_path):
     deps = rot.RotationDeps(
         persist=lambda s, p: secrets_store.save(s, p),
         seeder_remove=seeder.remove, seeder_add=seeder.add,
-        swarm_probe=lambda: True,
+        swarm_probe=lambda expected: True,
         manifest_write=rot._atomic_write_json, now=lambda: 100)
     rot.rotate_seeder_announce(
         secrets_path=sp, manifest_path=manifest_path,
@@ -243,7 +243,7 @@ def test_serial_remove_then_add_per_torrent(tmp_path):
     deps = rot.RotationDeps(
         persist=lambda s, p: secrets_store.save(s, p),
         seeder_remove=seeder.remove, seeder_add=seeder.add,
-        swarm_probe=lambda: True,
+        swarm_probe=lambda expected: True,
         manifest_write=rot._atomic_write_json, now=lambda: 100)
     rot.rotate_seeder_announce(
         secrets_path=sp, manifest_path=manifest_path,
@@ -263,15 +263,35 @@ def test_success_claims_served_only_after_probe(tmp_path):
     deps = rot.RotationDeps(
         persist=lambda s, p: secrets_store.save(s, p),
         seeder_remove=seeder.remove, seeder_add=seeder.add,
-        swarm_probe=lambda: (calls.append("probe") or True),
+        swarm_probe=lambda expected: (calls.append(expected) or True),
         manifest_write=rot._atomic_write_json, now=lambda: 100)
     result = rot.rotate_seeder_announce(
         sp, str(tmp_path / "recovery.json"),
         [rot.TorrentTarget("img", str(torrent), str(tmp_path), "gid")],
         "http://h:6969/announce", deps)
     assert result.served_claimed is True
-    assert calls == ["probe"]
+    assert calls == [{rot._info_hash(torrent.read_bytes())}]
     assert seeder.events[-1][0] == "add"
+
+
+@pytest.mark.parametrize("swarm_probe", [None, object(), lambda: True])
+def test_absent_or_misconfigured_probe_never_claims_served(tmp_path,
+                                                           swarm_probe):
+    sp = _seeder_store(tmp_path)
+    torrent = tmp_path / "img.torrent"
+    torrent.write_bytes(_canonical())
+    seeder = FakeSeeder()
+    deps = rot.RotationDeps(
+        persist=lambda s, p: secrets_store.save(s, p),
+        seeder_remove=seeder.remove, seeder_add=seeder.add,
+        swarm_probe=swarm_probe, manifest_write=rot._atomic_write_json,
+        now=lambda: 100)
+    result = rot.rotate_seeder_announce(
+        sp, str(tmp_path / "recovery.json"),
+        [rot.TorrentTarget("img", str(torrent), str(tmp_path), "gid")],
+        "http://h:6969/announce", deps)
+    assert result.served_claimed is False
+    assert result.hard_no_go is True
 
 
 def test_failed_probe_freezes_and_never_claims_served(tmp_path):
@@ -283,7 +303,7 @@ def test_failed_probe_freezes_and_never_claims_served(tmp_path):
     deps = rot.RotationDeps(
         persist=lambda s, p: secrets_store.save(s, p),
         seeder_remove=seeder.remove, seeder_add=seeder.add,
-        swarm_probe=lambda: (_ for _ in ()).throw(TimeoutError()),
+        swarm_probe=lambda expected: (_ for _ in ()).throw(TimeoutError()),
         manifest_write=rot._atomic_write_json, now=lambda: 100)
     result = rot.rotate_seeder_announce(
         sp, manifest_path,
@@ -324,7 +344,7 @@ def test_new_add_failure_restores_old_bytes_and_readds(tmp_path):
     deps = rot.RotationDeps(
         persist=lambda s, p: secrets_store.save(s, p),
         seeder_remove=seeder.remove, seeder_add=seeder.add,
-        swarm_probe=lambda: True,
+        swarm_probe=lambda expected: True,
         manifest_write=rot._atomic_write_json, now=lambda: 100)
 
     result = rot.rotate_seeder_announce(
@@ -367,7 +387,7 @@ def test_double_failure_is_hard_no_go(tmp_path):
     deps = rot.RotationDeps(
         persist=lambda s, p: secrets_store.save(s, p),
         seeder_remove=seeder.remove, seeder_add=seeder.add,
-        swarm_probe=lambda: True,
+        swarm_probe=lambda expected: True,
         manifest_write=rot._atomic_write_json, now=lambda: 100)
 
     result = rot.rotate_seeder_announce(
@@ -405,7 +425,7 @@ def test_result_never_claims_served_on_double_failure(tmp_path):
     deps = rot.RotationDeps(
         persist=lambda s, p: secrets_store.save(s, p),
         seeder_remove=seeder.remove, seeder_add=seeder.add,
-        swarm_probe=lambda: True,
+        swarm_probe=lambda expected: True,
         manifest_write=rot._atomic_write_json, now=lambda: 100)
     result = rot.rotate_seeder_announce(
         secrets_path=sp, manifest_path=manifest_path,
@@ -459,7 +479,7 @@ def test_multi_torrent_later_double_failure_restores_all_applied(tmp_path):
     deps = rot.RotationDeps(
         persist=lambda s, p: secrets_store.save(s, p),
         seeder_remove=seeder.remove, seeder_add=seeder.add,
-        swarm_probe=lambda: True,
+        swarm_probe=lambda expected: True,
         manifest_write=rot._atomic_write_json, now=lambda: 100)
 
     result = rot.rotate_seeder_announce(
@@ -567,6 +587,35 @@ def test_production_deps_persist_is_durable(tmp_path):
     assert getattr(deps.persist, "_durable", False) is True
 
 
+def test_production_deps_default_probe_requires_typed_swarm_proof(tmp_path):
+    calls = []
+    deps = rot.production_deps(
+        seeder_remove=lambda gid: None, seeder_add=lambda b, d: None,
+        recipients_csv="age1r", enc_path=str(tmp_path / "s.age"),
+        swarm_sender=lambda url, timeout: (calls.append((url, timeout)) or
+                                           _serving_swarm(["abc"])))
+    assert deps.swarm_probe({"abc"}) is True
+    assert calls == [(rot.DEFAULT_SWARM_URL, 2.0)]
+
+    # The default probe cannot be satisfied by a malformed/misidentified
+    # observation even when the transport itself succeeds.
+    bad_deps = rot.production_deps(
+        seeder_remove=lambda gid: None, seeder_add=lambda b, d: None,
+        recipients_csv="age1r", enc_path=str(tmp_path / "bad.age"),
+        swarm_sender=lambda url, timeout: {"server": {}})
+    assert bad_deps.swarm_probe({"abc"}) is False
+
+
+def test_production_deps_accepts_explicit_expected_hash_probe(tmp_path):
+    seen = []
+    deps = rot.production_deps(
+        seeder_remove=lambda gid: None, seeder_add=lambda b, d: None,
+        recipients_csv="age1r", enc_path=str(tmp_path / "s.age"),
+        swarm_probe=lambda expected: (seen.append(expected) or True))
+    assert deps.swarm_probe({"abc"}) is True
+    assert seen == [{"abc"}]
+
+
 def test_durable_failure_leaves_canonical_bytes_and_plaintext_untouched(
         tmp_path, monkeypatch):
     """If the encrypted durable persist fails, rotation aborts BEFORE any
@@ -594,7 +643,7 @@ def test_durable_failure_leaves_canonical_bytes_and_plaintext_untouched(
         recipients_csv="age1recipient", enc_path=str(tmp_path / "s.age"))
     deps = rot.RotationDeps(
         persist=persist, seeder_remove=seeder.remove,
-        seeder_add=seeder.add, swarm_probe=lambda: True,
+        seeder_add=seeder.add, swarm_probe=lambda expected: True,
         manifest_write=rot._atomic_write_json, now=lambda: 100)
 
     with pytest.raises(RuntimeError):
@@ -638,7 +687,7 @@ def test_durable_failure_rollback_ordering_precedes_seeder(tmp_path,
         recipients_csv="age1r", enc_path=str(tmp_path / "s.age"))
     deps = rot.RotationDeps(
         persist=persist, seeder_remove=tracking_remove,
-        seeder_add=seeder.add, swarm_probe=lambda: True,
+        seeder_add=seeder.add, swarm_probe=lambda expected: True,
         manifest_write=rot._atomic_write_json, now=lambda: 100)
     with pytest.raises(RuntimeError):
         rot.rotate_seeder_announce(
