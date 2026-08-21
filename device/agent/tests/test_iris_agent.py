@@ -79,6 +79,8 @@ def make_deps(catalog, sizes, verify_ok=True, free=9_000_000_000,
         removed.append(path)
         sizes.pop(path, None)             # reflect the delete in future file_size()
 
+    checkpoints = []
+
     deps = iris_agent.Deps(
         catalog=catalog,
         emit=lambda m, msg: emitted.append((m, msg)),
@@ -105,6 +107,8 @@ def make_deps(catalog, sizes, verify_ok=True, free=9_000_000_000,
         aria_stats=lambda stage_path: None,   # telemetry: no aria2 stats wired
         aria_peers=lambda stage_path: [],     # telemetry: no peer rows wired
         io_transfer=False,
+        checkpoint=lambda state: checkpoints.append(
+            __import__("copy").deepcopy(state)),
     )
     return (deps, emitted, ios_cmds, aria_calls, copied, purged, reclaimed,
             bundle_reclaimed)
@@ -2232,7 +2236,8 @@ def test_deps_gains_telemetry_and_io_transfer_fields_appended_at_end():
     # Contract: these fields are appended (so pre-existing positional
     # construction and index-based code stay valid). The defaults keep legacy
     # test scenarios on the Guest Shell path unchanged.
-    assert iris_agent.Deps._fields[-3:] == ("aria_stats", "aria_peers", "io_transfer")
+    assert iris_agent.Deps._fields[-4:] == (
+        "aria_stats", "aria_peers", "io_transfer", "checkpoint")
     cat = FakeCatalog({"approved_image_id": None}, None)
     deps, _, _, _, _, _, _, _ = make_deps(cat, {})
     assert deps.aria_stats("/stage/img1.bin") is None

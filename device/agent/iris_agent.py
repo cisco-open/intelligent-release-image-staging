@@ -60,7 +60,49 @@ Deps = collections.namedtuple(
     "Deps", "catalog emit ios aria_add file_size verify free_bytes version "
             "copy_to_root purge_others reclaim root_present remove_stage "
              "aria_remove detect_mode target_fs running_image reclaimable "
-             "reclaim_bundle model refresh aria_stats aria_peers io_transfer")
+             "reclaim_bundle model refresh aria_stats aria_peers io_transfer "
+             "checkpoint")
+
+
+def _atomic_write_state(state_path, state):
+    """Durably persist agent state with the crash-safe tmp+fsync+rename+
+    dir-fsync discipline.
+
+    The sibling rename is atomic on the state filesystem. Sync both the bytes
+    and the directory entry so sudden power loss cannot expose a truncated file
+    or lose the completed rename. A filesystem that does not implement directory
+    fsync raises EINVAL/ENOTSUP on the dir fd — that platform limitation is
+    ignored, but a real I/O failure still surfaces.
+
+    Factored out of main() (behavior unchanged) so Deps.checkpoint can persist
+    identity/sequence facts BEFORE any network side effect that must survive a
+    crash. Raises on a genuine write/fsync failure; callers that need
+    best-effort behavior (main's outer final save) wrap it."""
+    tmp = state_path + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(state, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, state_path)
+        dir_fd = os.open(os.path.dirname(state_path) or ".", os.O_RDONLY)
+        try:
+            try:
+                os.fsync(dir_fd)
+            except OSError as e:
+                unsupported = {errno.EINVAL}
+                if hasattr(errno, "ENOTSUP"):
+                    unsupported.add(errno.ENOTSUP)
+                if e.errno not in unsupported:
+                    raise
+        finally:
+            os.close(dir_fd)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _heartbeat(image, deps, stage_state="staging", target_fs=None,
@@ -107,6 +149,29 @@ def _send_heartbeat(deps, sid, payload):
 # telemetry (#13): completion-jitter sleep as a module seam so tests can stub
 # it (real jitter is up to JITTER_MAX seconds per send).
 _SLEEP = time.sleep
+
+
+def _checkpoint_or_skip(deps, state, emit_tag, emit_detail):
+    """Durably persist state BEFORE an identity/sequence-bearing POST.
+
+    Returns True on a durable checkpoint (the caller may POST), False if the
+    checkpoint failed OR deps has no checkpoint wired. A FAILED checkpoint MUST
+    prevent the POST: sending an identity/sequence the device could not persist
+    would let a crash-after-POST restart mint a fresh id or rewind sample_seq,
+    breaking server dedupe / reorder rejection. Losing the POST this tick is
+    harmless — the next tick re-checkpoints and re-sends. Never raises."""
+    checkpoint = getattr(deps, "checkpoint", None)
+    if not callable(checkpoint):
+        return False
+    try:
+        checkpoint(state)
+        return True
+    except Exception as e:
+        try:
+            deps.emit(emit_tag, "%s (POST skipped): %s" % (emit_detail, e))
+        except Exception:
+            pass
+        return False
 
 
 def _send_report(cfg, deps, state, img_id, report):
@@ -1205,7 +1270,7 @@ def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
 
 # ---- on-box wiring (not exercised by unit tests) ----
 
-def build_deps(cfg, conf_path):  # pragma: no cover
+def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
     import base64
     import urllib.request
     import catalog_client
@@ -1517,6 +1582,12 @@ def build_deps(cfg, conf_path):  # pragma: no cover
         # Hardware model (e.g. C9300-48UXM / IE-3400-8T2S) for the swarm map.
         return flash_target.device_model(_show("show version"))
 
+    def checkpoint(state):
+        # Durable pre-POST persistence of identity/sequence facts. Wired to the
+        # same state path main() uses for the ordinary final save, so a crash
+        # after a checkpointed POST restarts with the frozen id/sequence.
+        _atomic_write_state(state_path, state)
+
     return Deps(catalog=catalog, emit=emit, ios=ios, aria_add=aria_add,
                 file_size=lambda p: os.path.getsize(p) if os.path.exists(p) else None,
                 verify=lambda p, sha: verify_image.sha256_matches(p, sha),
@@ -1528,7 +1599,8 @@ def build_deps(cfg, conf_path):  # pragma: no cover
                 running_image=running_image, reclaimable=reclaimable,
                 reclaim_bundle=reclaim_bundle, model=model, refresh=refresh,
                 aria_stats=aria_stats, aria_peers=aria_peers,
-                io_transfer=(_mode == "container"))
+                io_transfer=(_mode == "container"),
+                checkpoint=checkpoint)
 
 
 def main():  # pragma: no cover
@@ -1558,42 +1630,18 @@ def main():  # pragma: no cover
     except Exception as e:
         state = {}
         load_error = e
-    deps = build_deps(cfg, conf_path)
+    deps = build_deps(cfg, conf_path, state_path)
     if load_error is not None:
         deps.emit("STATE-LOAD-FAIL",
                   "%s unreadable; starting with empty state: %s"
                   % (state_path, load_error))
     result = run_once(cfg, deps, state)
     try:
-        # The sibling rename is atomic on the state filesystem. Sync both the
-        # bytes and directory entry so sudden power loss cannot expose a
-        # truncated file or lose the completed rename.
-        tmp = state_path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(state, f)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, state_path)
-        dir_fd = os.open(os.path.dirname(state_path) or ".", os.O_RDONLY)
-        try:
-            try:
-                os.fsync(dir_fd)
-            except OSError as e:
-                # Some filesystems do not implement directory fsync. Ignore
-                # only that explicit platform limitation; real I/O failures
-                # still surface through STATE-WRITE-FAIL below.
-                unsupported = {errno.EINVAL}
-                if hasattr(errno, "ENOTSUP"):
-                    unsupported.add(errno.ENOTSUP)
-                if e.errno not in unsupported:
-                    raise
-        finally:
-            os.close(dir_fd)
+        # Ordinary final state save: durable, best-effort. A crash-critical
+        # identity/sequence fact was already checkpointed BEFORE its POST, so
+        # losing this outer save only costs progress, never idempotency.
+        _atomic_write_state(state_path, state)
     except Exception as e:
-        try:
-            os.remove(state_path + ".tmp")
-        except OSError:
-            pass
         deps.emit("STATE-WRITE-FAIL", "%s persistence failed: %s"
                   % (state_path, e))
     print(result)
