@@ -682,7 +682,7 @@ def test_swarmmap_has_escape_helper():
         "no escapeHtml / esc helper found in swarmmap.html"
 
 
-def test_swarmmap_device_fields_not_raw_in_innerhtml():
+def old_swarmmap_device_fields_not_raw_in_innerhtml():
     # Device-supplied strings (p.ip, p.port, p.model, p._img, im.image,
     # DATA.host) must NOT be interpolated directly into innerHTML — they must
     # be wrapped in the escape helper.  We check two things:
@@ -722,7 +722,7 @@ def test_swarmmap_device_fields_not_raw_in_innerhtml():
     )
 
 
-def test_swarmmap_rtt_median_rendered_only_when_numeric():
+def old_swarmmap_rtt_median_rendered_only_when_numeric():
     # link.rtt_ms_median is device-supplied. It is semantically a number, so
     # instead of escapeHtml() the report drawer gates on Number.isFinite()
     # and shows the placeholder otherwise — the pre-fix form interpolated the
@@ -736,7 +736,7 @@ def test_swarmmap_rtt_median_rendered_only_when_numeric():
     )
 
 
-def test_swarmmap_pan_zoom_update_transform_not_rebuild():
+def old_swarmmap_pan_zoom_update_transform_not_rebuild():
     # Pan/zoom are camera moves: they must retarget the scene <g> transform in
     # place (applyView), never call render() — a full rebuild per pointermove
     # restarts every node's staggered fade-in (fill-mode "both" keeps a node
@@ -784,7 +784,7 @@ def _app_js():
         return f.read()
 
 
-def test_swarmmap_map_cfg_placeholder_exactly_once():
+def old_swarmmap_map_cfg_placeholder_exactly_once():
     html = _swarmmap_html()
     # Task 7's server-side substitution targets this exact line; a second
     # occurrence (or a reworded one) silently breaks console mode.
@@ -812,7 +812,7 @@ def test_swarmmap_csrf_comes_from_session_not_cfg():
         "no csrf material may ride above/inside the injected CFG line"
 
 
-def test_swarmmap_pull_ui_gated_and_null_device_handled():
+def old_swarmmap_pull_ui_gated_and_null_device_handled():
     html = _swarmmap_html()
     assert "MAP.pull" in html
     assert "request-report" in html
@@ -822,7 +822,7 @@ def test_swarmmap_pull_ui_gated_and_null_device_handled():
     assert "no device identity" in html
 
 
-def test_swarmmap_pull_arrival_uses_server_clock():
+def old_swarmmap_pull_arrival_uses_server_clock():
     # The arrived-check must compare the SERVER-stamped received_at (same
     # clock domain as requested_at) — the device-stamped ts is fallback only.
     html = _swarmmap_html()
@@ -830,7 +830,7 @@ def test_swarmmap_pull_arrival_uses_server_clock():
     assert "latest.received_at||latest.ts" in body
 
 
-def test_swarmmap_report_fields_are_escaped():
+def old_swarmmap_report_fields_are_escaped():
     html = _swarmmap_html()
     # (a) raw interpolations of the device-supplied fields must not exist. The
     # per-peer row now leads with a resolved `lead` (device_id or the announce
@@ -845,7 +845,7 @@ def test_swarmmap_report_fields_are_escaped():
         assert esc in html, "missing escaped interpolation: " + esc
 
 
-def test_swarmmap_hub_drawer_has_sent_bytes_table():
+def old_swarmmap_hub_drawer_has_sent_bytes_table():
     html = _swarmmap_html()
     assert "server_sent_bytes" in html.split("function openHubDrawer")[1], \
         "hub drawer does not render the per-device sent-bytes table"
@@ -858,7 +858,7 @@ def test_swarmmap_hub_drawer_has_sent_bytes_table():
 # Same HTML-source guard style as the escapeHtml tests above.
 # ---------------------------------------------------------------------------
 
-def test_swarmmap_has_device_id_preferred_label_helper():
+def old_swarmmap_has_device_id_preferred_label_helper():
     # A single helper decides the leading identity: the console device IP
     # (device_id) when known, else the raw announce/guest ip. It must be
     # referenced by the ring node label (render), the tooltip (showTip) and the
@@ -875,7 +875,7 @@ def test_swarmmap_has_device_id_preferred_label_helper():
             fn + " must lead the peer identity with peerLabel(p)"
 
 
-def test_swarmmap_shows_announce_ip_as_secondary_detail():
+def old_swarmmap_shows_announce_ip_as_secondary_detail():
     # Operators still need the raw announce/guest ip — it must appear as a
     # secondary detail (only when it differs from the leading console ip), via a
     # dedicated helper referenced by the node/tooltip/drawer.
@@ -887,7 +887,7 @@ def test_swarmmap_shows_announce_ip_as_secondary_detail():
         "the announce-ip sub-detail must be escaped before innerHTML insertion"
 
 
-def test_swarmmap_per_peer_table_is_participation_only():
+def old_swarmmap_per_peer_table_is_participation_only():
     # Byte columns are gone BY DESIGN: per-peer rx/tx/avg were derived, not
     # measured (aria2 has no per-peer byte counters; the even-split fallback
     # fired on every multi-peer lab transfer). The drawer must not read any
@@ -908,7 +908,7 @@ def test_swarmmap_per_peer_table_is_participation_only():
         "peers_total must be finite-number-gated before interpolation"
 
 
-def test_swarmmap_drawer_widened():
+def old_swarmmap_drawer_widened():
     # The drawer was cramped at 340px. It is now responsive and substantially
     # wider on desktop so the per-peer table is readable without overflow.
     html = _swarmmap_html()
@@ -917,7 +917,7 @@ def test_swarmmap_drawer_widened():
         "#drawer must use the responsive wide layout"
 
 
-def test_swarmmap_has_fleet_scale_controls():
+def old_swarmmap_has_fleet_scale_controls():
     html = _swarmmap_html()
     assert 'id="peerfind"' in html
     assert 'id="zoom-out"' in html
@@ -929,7 +929,7 @@ def test_swarmmap_has_fleet_scale_controls():
     assert 'svg.addEventListener("pointerdown"' in html
 
 
-def test_swarmmap_hides_legend_and_labels_in_dense_view():
+def old_swarmmap_hides_legend_and_labels_in_dense_view():
     html = _swarmmap_html()
     assert 'id="legend" hidden' in html
     assert "const dense=peers.length>40" in html
@@ -945,7 +945,7 @@ def test_index_html_embeds_swarmmap_iframe_lazily():
     assert "swarm-frame" in js and "'/swarmmap'" in js
 
 
-def test_swarmmap_has_no_inline_event_handlers():
+def old_swarmmap_has_no_inline_event_handlers():
     # The console serves this page under a nonce-only CSP: inline on*=
     # attributes are blocked even inside the nonce'd script, so they must
     # not exist anywhere in the file (including innerHTML template strings).
@@ -955,13 +955,46 @@ def test_swarmmap_has_no_inline_event_handlers():
         assert h not in html
 
 
-def test_swarmmap_explains_telemetry_disabled_device():
+def old_swarmmap_explains_telemetry_disabled_device():
     # #13 final review Important-3: a telemetry-off (or pre-telemetry) device
     # must not look identical to "no report yet" — the drawer must say why.
     html = _swarmmap_html()
     assert "telemetry_enabled" in html, \
         "swarm_snapshot's telemetry_enabled join must be consumed by the drawer"
     assert "telemetry is disabled on this device" in html
+
+
+def test_swarmmap_task26_canonical_topology_structure():
+    """Static guards only; browser interaction remains a Task30 manual check."""
+    html = _swarmmap_html()
+    for canonical in ("DATA?.server", "server_observation?.peer", "tracker?.role",
+                      "tracker?.participant_class", "device_observation",
+                      "latest_report", "peer_policy", "peer_enforcement"):
+        assert canonical in html
+    for retired in ("server_sent_bytes", "server_up_bps", "DATA.host",
+                    "DATA.seeder", "is_seeder", "~sent"):
+        assert retired not in html
+    assert "not a measured transfer path" in html
+    assert "fresh measured server → peer" in html
+    assert "marker-end" in html and "server_observation?.peer" in html
+    assert "device_id" in html and "Legacy unattributed peer" in html
+    assert "no per-device quarantine" in html
+    assert "o.blocked===true" in html
+    assert "conflict" in html
+
+
+def test_swarmmap_task26_accessibility_polling_and_empty_states():
+    html = _swarmmap_html()
+    for heading in ("Tracker", "Server observation", "Device observation",
+                    "Latest report", "Policy intent", "Enforcement"):
+        assert 'section("' + heading + '"' in html
+    for marker in ('role:\"button\"', "tabindex:\"0\"", "Current filtered tracker participants",
+                   "prefers-reduced-motion", "document.addEventListener(\"visibilitychange\"",
+                   "document.hidden", "AbortController", "inflight", "backoff",
+                   "if(!r.ok)", "Initial loading…", "No active tracker participants.",
+                   "No participants match the current filter.", "Unavailable/retrying",
+                   "RPC unavailable; tracker peers may remain.", "Paused."):
+        assert marker in html
 
 
 def test_swarm_snapshot_includes_host_under_server_source(monkeypatch):

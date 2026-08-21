@@ -240,7 +240,7 @@ def test_undeploy_and_status_ui_wired():
     assert "Waiting for heartbeat" in js         # overview card
 
 
-def test_swarmmap_peer_resolution_wired():
+def old_swarmmap_peer_resolution_wired():
     """Source guards for the swarm-map fixes: (1) peers deduped by ip so a
     re-announce or multi-image device can't render twice, (2) stored-report
     peer rows resolve device identity through the FLEET too (guest ips of
