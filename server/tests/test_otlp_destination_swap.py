@@ -83,6 +83,84 @@ def test_failed_flush_preserves_concurrent_emits_without_loss_or_reorder():
     assert ids == ["orig0", "orig1", "orig2", "orig3", "orig4", "concurrent"]
 
 
+def test_failed_inflight_flush_stays_bounded_when_concurrent_emits_overflow():
+    q = otlp.LogQueue(max_queue=2)
+    q.emit({"peer_id": "p1"})
+    q.emit({"peer_id": "p2"})
+    sending = threading.Event()
+    release = threading.Event()
+
+    def fail(batch):
+        assert [event["peer_id"] for event in batch] == ["p1", "p2"]
+        sending.set()
+        assert release.wait(1.0)
+        raise OSError("down")
+
+    thread = threading.Thread(target=lambda: q.flush(fail))
+    thread.start()
+    assert sending.wait(1.0)
+    q.emit({"peer_id": "p3"})
+    q.emit({"peer_id": "p4"})
+    release.set()
+    thread.join(1.0)
+
+    # In-flight events are part of the bounded FIFO: overflow drops p1, then p2.
+    assert q.queued == 2
+    assert q.dropped_total == 2
+    assert [event["peer_id"] for event in q.snapshot()] == ["p3", "p4"]
+
+
+def test_concurrent_flushes_deliver_fifo_without_duplicates():
+    q = otlp.LogQueue(max_queue=10)
+    q.emit({"peer_id": "p1"})
+    q.emit({"peer_id": "p2"})
+    first_started = threading.Event()
+    release_first = threading.Event()
+    delivered = []
+
+    def first_send(batch):
+        first_started.set()
+        assert release_first.wait(1.0)
+        delivered.extend(event["peer_id"] for event in batch)
+
+    def second_send(batch):
+        delivered.extend(event["peer_id"] for event in batch)
+
+    first = threading.Thread(target=lambda: q.flush(first_send))
+    first.start()
+    assert first_started.wait(1.0)
+    second = threading.Thread(target=lambda: q.flush(second_send))
+    second.start()
+    q.emit({"peer_id": "p3"})
+    release_first.set()
+    first.join(1.0)
+    second.join(1.0)
+
+    assert delivered == ["p1", "p2", "p3"]
+    assert q.queued == 0
+
+
+def test_successful_inflight_flush_removes_only_sent_prefix():
+    q = otlp.LogQueue(max_queue=10)
+    q.emit({"peer_id": "p1"})
+    sending = threading.Event()
+    release = threading.Event()
+
+    def send(batch):
+        assert [event["peer_id"] for event in batch] == ["p1"]
+        sending.set()
+        assert release.wait(1.0)
+
+    thread = threading.Thread(target=lambda: q.flush(send))
+    thread.start()
+    assert sending.wait(1.0)
+    q.emit({"peer_id": "p2"})
+    release.set()
+    thread.join(1.0)
+
+    assert [event["peer_id"] for event in q.snapshot()] == ["p2"]
+
+
 # --- OTLPLogTransport: mutable destination, no queue ----------------------
 
 def test_transport_send_posts_batch_and_reports_delivered():

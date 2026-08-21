@@ -370,24 +370,31 @@ class LogQueue:
         events is preserved.
       * ``flush(send)`` hands a snapshot batch to ``send`` and removes those
         events from the queue ONLY after ``send`` returns without raising.
-        On failure the exact original batch (same order, same identities) is
-        left in place, and any events emitted concurrently during the in-flight
-        send are preserved after it — nothing is lost or reordered.
+        On failure the batch remains in place. Concurrent emits remain
+        non-blocking; if they fill the bounded queue, drop-oldest may discard
+        events from the in-flight prefix as well as any other oldest event.
+        Concurrent flushes are serialized, preserving delivery order.
       * ``flush`` returns None on an empty queue (no attempt), else the count
         of events confirmed delivered (0 on a failed send)."""
 
     def __init__(self, max_queue=1000):
         self._queue = collections.deque()
-        self._max = int(max_queue)
+        self._max = max(0, int(max_queue))
         self._dropped = 0
         self._lock = threading.Lock()
+        self._flush_lock = threading.Lock()
+        self._next_id = 0
 
     def emit(self, event):
         with self._lock:
+            if self._max == 0:
+                self._dropped += 1
+                return
             while len(self._queue) >= self._max:
                 self._queue.popleft()       # drop oldest, preserve FIFO
                 self._dropped += 1
-            self._queue.append(event)
+            self._queue.append((self._next_id, event))
+            self._next_id += 1
 
     @property
     def queued(self):
@@ -401,27 +408,31 @@ class LogQueue:
 
     def snapshot(self):
         with self._lock:
-            return list(self._queue)
+            return [event for _, event in self._queue]
 
     def flush(self, send):
-        """Deliver the current batch via ``send(batch)`` (which must raise on
-        failure); remove exactly those events on confirmed success, otherwise
-        restore them at the FRONT preserving order and any concurrent emits at
-        the back. Returns None (empty), the delivered count, or 0 (failure)."""
-        with self._lock:
-            n = len(self._queue)
-            if n == 0:
-                return None
-            batch = [self._queue.popleft() for _ in range(n)]
-        try:
-            send(batch)
-        except Exception:
+        """Deliver the current FIFO prefix via ``send(batch)`` (which must
+        raise on failure). The snapshot stays logically queued during the
+        network call, so emits never wait for transport and capacity remains
+        enforced. Returns None (empty), the delivered count, or 0 (failure)."""
+        with self._flush_lock:
             with self._lock:
-                # restore the exact original batch ahead of anything that
-                # landed while the send was in flight — no loss, no reorder.
-                self._queue.extendleft(reversed(batch))
-            return 0
-        return len(batch)
+                queued_batch = list(self._queue)
+            if not queued_batch:
+                return None
+            batch = [event for _, event in queued_batch]
+            try:
+                send(batch)
+            except Exception:
+                return 0
+            sent_ids = {event_id for event_id, _ in queued_batch}
+            with self._lock:
+                # Overflow may have dropped part of this in-flight prefix.
+                # Remove only its still-retained contiguous suffix; later
+                # concurrent emits have distinct IDs and stay queued.
+                while self._queue and self._queue[0][0] in sent_ids:
+                    self._queue.popleft()
+            return len(batch)
 
 
 class OTLPLogTransport:
