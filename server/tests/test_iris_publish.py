@@ -65,7 +65,7 @@ def test_default_tracker_url_from_secrets_store(tmp_path, monkeypatch):
     monkeypatch.setenv("IRIS_SECRETS", str(sec))
     monkeypatch.setenv("IRIS_TOKENS", str(tmp_path / "no-such-tokens.txt"))
     assert publish.default_tracker_url() == \
-        "http://10.0.0.5:6969/announce?key=%s" % tok
+        "http://10.0.0.5:6969/announce?announce_token=%s" % tok
 
 
 def test_default_tracker_url_legacy_tokens_fallback(tmp_path, monkeypatch):
@@ -152,3 +152,30 @@ def test_default_rpc_secret_missing_returns_empty(tmp_path, monkeypatch):
     monkeypatch.delenv("IRIS_RPC_SECRET", raising=False)
     monkeypatch.setenv("IRIS_RPC_SECRET_FILE", str(tmp_path / "absent"))
     assert publish.default_rpc_secret() == ""
+
+
+# ---------------------------------------------------------------------------
+# Task 8 — publisher uses the CURRENT announce token under announce_token=
+# ---------------------------------------------------------------------------
+
+def test_default_tracker_url_uses_current_never_previous(tmp_path, monkeypatch):
+    """The canonical URL carries the CURRENT seeder announce token under
+    `announce_token=` — never a rotated-out `announce_token_previous` (spec §6).
+    aria2's own `key=` must not be used for the IRIS credential."""
+    now = int(time.time())
+    store = {"devices": {}, "seeder": {}}
+    secrets_store.mint(store, "seeder", "announce_token", now)
+    current = store["seeder"]["announce_token"]["value"]
+    # Inject a rotated-out previous value that must NEVER appear in the URL.
+    store["seeder"]["announce_token_previous"] = [{
+        "value": "PREVIOUSVALUE", "created_at": now, "expires_at": 0,
+        "revoked": False, "rotated_at": now, "record_id": "deadbeef"}]
+    sec = tmp_path / "secrets.json"
+    secrets_store.save(store, str(sec))
+    monkeypatch.setenv("IRIS_HOST_IP", "10.0.0.9")
+    monkeypatch.setenv("IRIS_SECRETS", str(sec))
+    monkeypatch.setenv("IRIS_TOKENS", str(tmp_path / "no-such-tokens.txt"))
+    url = publish.default_tracker_url()
+    assert url == "http://10.0.0.9:6969/announce?announce_token=%s" % current
+    assert "PREVIOUSVALUE" not in url
+    assert "key=" not in url

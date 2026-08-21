@@ -333,7 +333,8 @@ class CatalogStore:
 
 class Catalog:
     def __init__(self, store, secrets_path,
-                 audit_path=None, live_table=None, stream_settings=None):
+                 audit_path=None, live_table=None, stream_settings=None,
+                 deployment_open=True):
         self.store = store
         self.secrets_path = secrets_path
         self.live_table = live_table
@@ -341,6 +342,21 @@ class Catalog:
         self.audit_path = (audit_path
                            or os.environ.get("IRIS_AUDIT",
                                              "/etc/iris/audit.jsonl"))
+        # Deployment gate (spec §6): during the first identity-compatible
+        # deployment the catalog refuses to serve any PERSONALIZED (device)
+        # torrent until an explicit checkpoint is reached — the canonical
+        # choice is binding the catalog to loopback so devices cannot reach
+        # :8443, but this in-process flag additionally guarantees no
+        # personalized GET is served before the checkpoint even if the bind is
+        # misconfigured. ``personalized_served_count`` proves zero personalized
+        # GETs before open.
+        self.deployment_open = deployment_open
+        self.personalized_served_count = 0
+
+    def open_deployment(self):
+        """Reach the deployment checkpoint: personalized torrents may now be
+        served (spec §6 — call only after rotate/reload/verify)."""
+        self.deployment_open = True
 
     def _load_store(self):
         """Load the secrets store fresh from disk; return (store_dict, index)."""
@@ -425,6 +441,11 @@ class Catalog:
         ptype = getattr(principal, "type", None)
 
         if ptype == "device":
+            # Deployment gate: refuse to serve any personalized torrent before
+            # the checkpoint (spec §6 — proves zero personalized GET pre-open).
+            if not self.deployment_open:
+                return self._json(
+                    503, {"error": "catalog not open for device personalization"})
             now = time.time()
             grace = int(os.environ.get("IRIS_TOKEN_SKEW_GRACE", "300"))
             announce_value = catalog_auth.device_announce_value(
@@ -440,6 +461,7 @@ class Catalog:
                 # in the message (spec §6 no-leak).
                 return self._json(
                     500, {"error": "torrent personalization failed"})
+            self.personalized_served_count += 1
             return (200, "application/x-bittorrent", body,
                     self._PERSONALIZED_HEADERS)
 
@@ -647,9 +669,11 @@ class Catalog:
 
 
 def make_server(host, port, store, secrets_path, certfile=None,
-                audit_path=None, live_table=None, stream_settings=None):
+                audit_path=None, live_table=None, stream_settings=None,
+                deployment_open=True):
     cat = Catalog(store, secrets_path, audit_path=audit_path,
-                  live_table=live_table, stream_settings=stream_settings)
+                  live_table=live_table, stream_settings=stream_settings,
+                  deployment_open=deployment_open)
 
     grace = int(os.environ.get("IRIS_TOKEN_SKEW_GRACE", "300"))
 

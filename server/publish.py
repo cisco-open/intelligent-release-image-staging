@@ -90,13 +90,18 @@ def default_tracker_url():
     if not host_ip:
         return None
     # Preferred: the secrets-broker store. The seeder is a pseudo-device whose
-    # announce_token is the private-tracker key (secrets_store schema).
+    # announce_token is the private-tracker key (secrets_store schema). New
+    # canonical torrents carry the IRIS credential in a dedicated
+    # `announce_token=` query parameter (spec §6), distinct from aria2's own
+    # BEP-style `key=` (which aria2 appends itself) so the two never collide.
+    # We read the CURRENT seeder announce token only — never a rotated-out
+    # `announce_token_previous` value.
     secrets_path = os.environ.get("IRIS_SECRETS", "/run/iris/secrets.json")
     try:
         store = secrets_store.load(secrets_path)
         tok = store.get("seeder", {}).get("announce_token", {}).get("value")
         if tok:
-            return "http://%s:6969/announce?key=%s" % (host_ip, tok)
+            return "http://%s:6969/announce?announce_token=%s" % (host_ip, tok)
     except Exception:
         pass
     # Production no longer creates tokens.txt; retain this dead fallback solely
