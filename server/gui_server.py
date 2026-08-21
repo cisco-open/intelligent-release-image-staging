@@ -32,6 +32,7 @@ import gui_onboard
 import gui_tls
 import live_samples
 import peer_policy
+import peer_enforcement
 import secretfs
 import secrets_store
 import telemetry
@@ -546,6 +547,61 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                  receipts=None, now_fn=time.time):
     login_limiter = gui_auth.LoginRateLimiter()
 
+    def policy_state_dir():
+        return (catalog.state_dir if catalog is not None
+                else os.environ.get("IRIS_STATE", "/var/lib/iris"))
+
+    def policy_paths():
+        state_dir = policy_state_dir()
+        return (os.path.join(state_dir, "peer-policy.json"),
+                os.path.join(state_dir, "peer-policy.lkg.json"),
+                os.path.join(state_dir, "peer-enforcement.json"))
+
+    def policy_view():
+        """Return the GUI-safe, count-only policy and tracker-status view."""
+        auth_path, lkg_path, enforcement_path = policy_paths()
+        result = peer_policy.load_policy(auth_path, lkg_path)
+        doc = result.document
+        status = peer_enforcement.read_status(enforcement_path) or {}
+        conflicts = status.get("conflicts")
+        if not isinstance(conflicts, list):
+            conflicts = []
+        types = sorted({str(c.get("reason")) for c in conflicts
+                        if isinstance(c, dict) and isinstance(c.get("reason"), str)})
+        effect = status.get("last_effect")
+        # Reconciler effects are aggregate counters. Do not pass through an
+        # arbitrary tracker document (which could accidentally grow an address).
+        safe_effect = ({k: v for k, v in effect.items()
+                        if k in ("disconnected_peers", "removed_peers")
+                        and isinstance(v, int) and not isinstance(v, bool)}
+                       if isinstance(effect, dict) else None)
+        enforcement = {
+            "state": status.get("state") if status.get("state") in peer_enforcement.STATES else None,
+            "desired_ip_count": status.get("desired_ip_count")
+                if isinstance(status.get("desired_ip_count"), int)
+                and not isinstance(status.get("desired_ip_count"), bool) else 0,
+            "applied_revision": status.get("applied_revision")
+                if isinstance(status.get("applied_revision"), int)
+                and not isinstance(status.get("applied_revision"), bool) else None,
+            "last_reconciled_at": status.get("last_reconciled_at")
+                if isinstance(status.get("last_reconciled_at"), (int, float)) else None,
+            "conflict_count": len(conflicts), "conflict_types": types,
+            "last_effect": safe_effect,
+            "last_error": status.get("last_error")
+                if isinstance(status.get("last_error"), str) else None,
+            "last_operation_exported_revision": status.get("last_operation_exported_revision")
+                if isinstance(status.get("last_operation_exported_revision"), int)
+                and not isinstance(status.get("last_operation_exported_revision"), bool) else 0,
+        }
+        return {"schema": doc.get("schema"), "revision": doc.get("revision"),
+                "degraded": result.degraded, "fail_closed": result.fail_closed,
+                "quarantine": {"reserved": True,
+                               "description": "reserved: fully isolate an assigned device"},
+                "quarantine_assignments": sorted(
+                    device_id for device_id, acl in doc.get("assignments", {}).items()
+                    if acl == peer_policy.RESERVED_QUARANTINE),
+                "enforcement": enforcement}
+
     class Handler(BaseHTTPRequestHandler):
         timeout = 60  # socket inactivity timeout (s): a stalled upload frees its thread
 
@@ -858,6 +914,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
 
         def do_GET(self):
             path = self.path.split("?", 1)[0]
+            if path == "/api/peer-policy":
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                self._json(200, policy_view()); return
             if path == "/api/audit":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
@@ -1355,6 +1415,65 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
 
         def do_PUT(self):
             path = self.path.split("?", 1)[0]
+            quarantine_prefix = "/api/peer-policy/quarantine/"
+            if path.startswith(quarantine_prefix):
+                info = self._require_session_csrf()
+                if info is None:
+                    return
+                encoded_id = path[len(quarantine_prefix):]
+                device_id = unquote(encoded_id)
+                # This is one URL segment, not a generic policy target. Reject
+                # encoded path separators and let FleetStore remain authoritative.
+                if not device_id or "/" in device_id or fleet is None or \
+                        fleet.get_device(device_id) is None:
+                    self._json(422, {"error": "unknown device"}); return
+                try:
+                    length = int(self.headers.get("Content-Length", "0") or 0)
+                except ValueError:
+                    self._json(400, {"error": "bad content-length"}); return
+                if length < 0 or length > _MAX_BODY:
+                    self._json(413, {"error": "payload too large"}); return
+                raw = self.rfile.read(length) if length else b""
+                body = self._json_body(raw)
+                if body is None:
+                    return
+                if set(body) != {"quarantined", "if_revision"} or \
+                        type(body.get("quarantined")) is not bool or \
+                        type(body.get("if_revision")) is not int or \
+                        body["if_revision"] < 1:
+                    self._json(400, {"error": "bad peer-policy request"}); return
+                view = policy_view()
+                if view["fail_closed"]:
+                    self._json(503, {"error": "policy_fail_closed"}); return
+                if view["degraded"]:
+                    self._json(422, {"error": "policy_error"}); return
+                auth_path, lkg_path, enforcement_path = policy_paths()
+                status = peer_enforcement.read_status(enforcement_path) or {}
+                acked = status.get("last_operation_exported_revision", 0)
+                if type(acked) is not int or acked < 0:
+                    acked = 0
+                quarantined = body["quarantined"]
+                def mutate(candidate):
+                    if quarantined:
+                        candidate["assignments"][device_id] = peer_policy.RESERVED_QUARANTINE
+                    else:
+                        candidate["assignments"].pop(device_id, None)
+                try:
+                    committed = peer_policy.commit_mutation(
+                        auth_path, lkg_path,
+                        action="assign" if quarantined else "unassign",
+                        target=device_id, actor="console:" + info["username"],
+                        now=now_fn(), mutate=mutate, acked_revision=acked,
+                        expected_revision=body["if_revision"])
+                except peer_policy.RevisionConflict as exc:
+                    self._json(409, {"error": "revision_conflict",
+                                     "revision": exc.revision}); return
+                except peer_policy.OperationBacklogFull:
+                    self._json(503, {"error": "operation_backlog_full"}); return
+                except peer_policy.PolicyError:
+                    self._json(422, {"error": "policy_error"}); return
+                self._json(200, {"ok": True, "revision": committed["revision"],
+                                 "quarantined": quarantined}); return
             prefix = "/api/images/upload/"
             if not path.startswith(prefix) or images is None:
                 self._json(404, {"error": "not found"})

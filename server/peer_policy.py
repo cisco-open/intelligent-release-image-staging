@@ -56,6 +56,14 @@ class OperationBacklogFull(Exception):
     """Raised when 256 unacknowledged outbox operations block a mutation."""
 
 
+class RevisionConflict(Exception):
+    """Raised when an optimistic mutation does not match the live revision."""
+
+    def __init__(self, revision):
+        self.revision = revision
+        super().__init__("policy revision conflict")
+
+
 PolicyResult = collections.namedtuple(
     "PolicyResult", ["document", "degraded", "fail_closed"])
 
@@ -322,7 +330,7 @@ def _prune_acked(outbox, acked_revision):
 
 
 def commit_mutation(auth_path, lkg_path, action, target, actor, now,
-                    mutate, acked_revision=0):
+                    mutate, acked_revision=0, expected_revision=None):
     """Commit one policy mutation under a single umbrella flock (spec 7).
 
     Loads and validates the current committed authoritative, prunes outbox
@@ -338,6 +346,8 @@ def commit_mutation(auth_path, lkg_path, action, target, actor, now,
         if prior is None:
             prior = base_document()
             _atomic_write_json(auth_path, prior)
+        if expected_revision is not None and prior["revision"] != expected_revision:
+            raise RevisionConflict(prior["revision"])
         outbox = _prune_acked(list(prior.get("operation_outbox", [])),
                               acked_revision)
         if len(outbox) >= OUTBOX_CAP:

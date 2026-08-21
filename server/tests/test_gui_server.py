@@ -1037,6 +1037,7 @@ def test_upload_rejects_truncated_body(tmp_path):
 import gui_fleet
 import gui_creds
 import catalog as catalog_mod
+import peer_enforcement
 
 
 def _serve_full(tmp_path):
@@ -1067,6 +1068,87 @@ def _auth(host, port):
     s, h, b = _req(host, port, "POST", "/api/login",
                    {"username": "admin", "password": "pw"})
     return h["Set-Cookie"].split(";")[0], json.loads(b)["csrf"]
+
+
+def _policy_device(fleet, device_id="d1"):
+    return fleet.upsert({"device_id": device_id, "device_ip": "10.0.0.1",
+                         "vlan": "666", "svi_ip": "10.0.0.2",
+                         "svi_mask": "255.255.255.0", "guest_ip": "10.0.0.3",
+                         "model": "C9300", "platform": "c9300"})
+
+
+def test_peer_policy_get_and_durable_quarantine_operation(tmp_path):
+    host, port, (_, fleet, _, cat), stop = _serve_full(tmp_path)
+    try:
+        _policy_device(fleet)
+        assert _req(host, port, "GET", "/api/peer-policy")[0] == 401
+        cookie, csrf = _auth(host, port)
+        headers = {"Cookie": cookie, "X-CSRF-Token": csrf}
+        status, _, raw = _req(host, port, "GET", "/api/peer-policy",
+                              headers={"Cookie": cookie})
+        assert status == 200
+        view = json.loads(raw)
+        assert view["revision"] == 1
+        assert view["quarantine_assignments"] == []
+        assert "rules" not in view["quarantine"]
+        assert "aria_session_id" not in view["enforcement"]
+        status, _, raw = _req(host, port, "PUT", "/api/peer-policy/quarantine/d1",
+                              {"quarantined": True, "if_revision": 1}, headers)
+        assert status == 200
+        assert json.loads(raw) == {"ok": True, "revision": 2, "quarantined": True}
+        with open(os.path.join(cat.state_dir, "peer-policy.json")) as f:
+            doc = json.load(f)
+        assert doc["assignments"] == {"d1": "quarantine"}
+        event = doc["operation_outbox"][-1]
+        assert set(event) == {"event_id", "revision", "action", "target", "actor", "created_at"}
+        assert event["action"] == "assign" and event["target"] == "d1"
+        assert event["actor"] == "console:admin"
+        tracker_status = peer_enforcement.build_status(
+            "pending", None, None, 1, 3, 10,
+            last_operation_exported_revision=2,
+            conflicts=[{"reason": "shared_permit_deny", "ipv4": "10.0.0.99"}],
+            last_effect={"disconnected_peers": 1})
+        # A GUI reader must not blindly expose future/untrusted status fields.
+        tracker_status["raw_ips"] = ["10.0.0.99"]
+        peer_enforcement.write_status(
+            os.path.join(cat.state_dir, "peer-enforcement.json"), tracker_status)
+        status, _, raw = _req(host, port, "GET", "/api/peer-policy",
+                              headers={"Cookie": cookie})
+        observed = json.loads(raw)["enforcement"]
+        assert status == 200 and observed["conflict_count"] == 1
+        assert observed["conflict_types"] == ["shared_permit_deny"]
+        assert "10.0.0.99" not in raw.decode()
+        # The tracker acknowledgement is consumed only by the next durable
+        # mutation, which prunes the acknowledged operation from the outbox.
+        status, _, _ = _req(host, port, "PUT", "/api/peer-policy/quarantine/d1",
+                            {"quarantined": False, "if_revision": 2}, headers)
+        assert status == 200
+        with open(os.path.join(cat.state_dir, "peer-policy.json")) as f:
+            assert [e["revision"] for e in json.load(f)["operation_outbox"]] == [3]
+        status, _, raw = _req(host, port, "PUT", "/api/peer-policy/quarantine/d1",
+                              {"quarantined": False, "if_revision": 2}, headers)
+        assert status == 409
+        assert json.loads(raw)["revision"] == 3
+    finally:
+        stop()
+
+
+def test_peer_policy_rejects_unknown_device_and_bad_csrf(tmp_path):
+    host, port, (_, fleet, _, _), stop = _serve_full(tmp_path)
+    try:
+        _policy_device(fleet)
+        cookie, csrf = _auth(host, port)
+        assert _req(host, port, "PUT", "/api/peer-policy/quarantine/d1",
+                    {"quarantined": True, "if_revision": 1},
+                    {"Cookie": cookie})[0] == 403
+        assert _req(host, port, "PUT", "/api/peer-policy/quarantine/missing",
+                    {"quarantined": True, "if_revision": 1},
+                    {"Cookie": cookie, "X-CSRF-Token": csrf})[0] == 422
+        # There is no DELETE policy API.
+        assert _req(host, port, "DELETE", "/api/peer-policy/quarantine/d1",
+                    headers={"Cookie": cookie, "X-CSRF-Token": csrf})[0] == 404
+    finally:
+        stop()
 
 
 def test_devices_crud_and_list_requires_auth(tmp_path):
