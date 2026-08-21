@@ -266,11 +266,13 @@
         peerPolicy.quarantine_assignments = (peerPolicy.quarantine_assignments || []).filter(function (x) { return x !== id; });
         if (body.quarantined) peerPolicy.quarantine_assignments.push(id);
         devStatus.textContent = action + ' intent saved for ' + id + '.';
-        await Promise.all([refreshDevices(), refreshPeerPolicy()]);
+        // The mutation is already committed. A follow-up read failure may leave
+        // the view stale, but must never turn a truthful success into "failed".
+        refreshDevices().catch(function () {});
       } else if (r.status === 409) {
-        await refreshPeerPolicy();
         devStatus.textContent = 'Peer policy changed elsewhere. Review the current policy and retry; no change was made.';
-        refreshDevices();
+        // Refresh best-effort without masking the accurate conflict outcome.
+        refreshDevices().catch(function () {});
       } else if (r.status === 503 && body.error === 'operation_backlog_full') {
         devStatus.textContent = 'Peer-policy operation backlog is full; retry later.';
       } else {
