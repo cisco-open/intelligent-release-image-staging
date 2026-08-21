@@ -18,7 +18,9 @@ from urllib.parse import unquote_to_bytes, urlparse
 
 import auth
 import bencode
+import blocklist_reconciler as _reconciler
 import peer_endpoints as _peer_endpoints
+import peer_enforcement as _peer_enforcement
 import peer_policy as _peer_policy
 import secrets_store
 import telemetry
@@ -153,7 +155,8 @@ def _legacy_id(peer_ip, peer_port):
 
 def make_server(host, port, secrets_path, registry=None, on_announce=None,
                 policy_paths=None, endpoints_path=None, pending_queue=None,
-                record_endpoint=None, on_endpoint_failure=None):
+                record_endpoint=None, on_endpoint_failure=None,
+                on_endpoint_change=None):
     """Build the tracker HTTP server.
 
     Typed identity/policy integration (spec §6/§7):
@@ -280,6 +283,11 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
                     pending_queue.enqueue(principal, peer_ip, peer_port, now)
                 if on_endpoint_failure is not None:
                     on_endpoint_failure()
+                return
+            # A tracker-authored durable change: wake the reconciler for
+            # immediate (sub-poll) application.
+            if on_endpoint_change is not None:
+                on_endpoint_change()
 
         def _select(self, a, principal, peer_ip):
             policy = _load_policy()
@@ -333,6 +341,348 @@ def _start_pruner(registry):
     tick()
 
 
+# ---------------------------------------------------------------------------
+# Sole tracker blocklist reconciler (spec §0 / §7 / §13)
+# ---------------------------------------------------------------------------
+
+RECONCILE_POLL = 2.0   # max seconds before durable cross-process changes apply
+
+
+class Aria2BlocklistAdapter:
+    """Thin adapter exposing the reconciler's ``aria`` contract over the local
+    aria2 JSON-RPC. It calls ``aria2.getSessionInfo`` for the counter epoch and
+    ``aria2.setBtPeerBlocklist`` for the sole full-replace apply (spec §0). The
+    RPC secret rides through the injected caller; no token is ever surfaced in
+    an error (the reconciler records only the exception TYPE name)."""
+
+    def __init__(self, rpc):
+        self._rpc = rpc
+
+    def get_session_id(self):
+        session = self._rpc("aria2.getSessionInfo", [])
+        return str((session or {}).get("sessionId") or "")
+
+    def set_blocklist(self, ips):
+        return self._rpc("aria2.setBtPeerBlocklist", [list(ips)]) or {}
+
+
+def _stat_key(path):
+    """Cheap change-detection key (mtime + size) for a durable file; missing
+    file -> a sentinel. Same discipline as the console's StreamSettings poll."""
+    try:
+        st = os.stat(path)
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+class TrackerReconciler:
+    """The single serialized reconcile loop. Constructed ONLY by the tracker
+    process (spec §0): the GUI/catalog/CLI never instantiate it, never call
+    ``setBtPeerBlocklist``, and never compute a denied set.
+
+    Each pass (spec §7/§13): retry pending endpoint writes even without a new
+    announce; recompute the desired denied set from durable endpoints + pending
+    + the active registry + the credential-revocation view + the ``PolicyResult``
+    + the protected current service-seeder address; full-replace apply; write the
+    exact count-only enforcement status; and export the policy operation outbox
+    in revision order above the ack, advancing
+    ``last_operation_exported_revision`` only after the audit contract succeeds.
+
+    Startup and every aria RPC transition to reachable / session change force a
+    full valid desired apply (including a valid-empty list). ``fail_closed``
+    never clears blocks from corruption and applies the emergency deny list; with
+    no known address it stays fail-closed with no false ``enforced`` claim.
+    """
+
+    def __init__(self, policy_paths, endpoints_path, enforcement_path, aria,
+                 pending_queue, active_participants, revoked_principals,
+                 protected_seeder_ip=None, audit_export=None, now=None):
+        self._policy_paths = policy_paths
+        self._endpoints_path = endpoints_path
+        self._enforcement_path = enforcement_path
+        self._aria = aria
+        self._pending = pending_queue
+        self._active_participants = active_participants
+        self._revoked_principals = revoked_principals
+        self._protected_seeder_ip = protected_seeder_ip
+        self._audit_export = audit_export
+        self._now = now or time.time
+        self._record_endpoint = _peer_endpoints.record_endpoint
+
+        # Force-apply memory (never a source of desired state; spec §0 recomputes
+        # from durable files each pass). None until the first successful apply.
+        self._last_session = None
+        self._last_hash = None
+        self._rpc_ok = None            # None=unknown, then True/False
+
+        # Serialization: exactly one reconcile at a time; a change during a run
+        # schedules exactly one rerun (dirty flag).
+        self._run_lock = threading.Lock()
+        self._running = False
+        self._dirty = False
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        self._thread = None
+        self._poll_keys = (None, None)
+
+    # -- public wake / lifecycle -------------------------------------------
+
+    def wake(self):
+        """Local wake for a tracker-authored durable change (immediate)."""
+        self._wake.set()
+
+    def request_run(self):
+        """Attempt to claim a run. If one is already running, mark dirty and
+        return False; otherwise return True (caller proceeds to run)."""
+        with self._run_lock:
+            if self._running:
+                self._dirty = True
+                return False
+            self._running = True
+            return True
+
+    def drain_pending(self):
+        """If a rerun was scheduled while running, run exactly once more.
+        Returns True iff a rerun happened."""
+        with self._run_lock:
+            if not self._dirty:
+                return False
+            self._dirty = False
+        self.run_once()
+        return True
+
+    def start(self):
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        self._wake.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+
+    def _loop(self):
+        # Startup always applies once (force full valid desired).
+        self._guarded_run()
+        while not self._stop.is_set():
+            # Local wake (tracker-authored) OR the ≤2s poll deadline, whichever
+            # comes first, then also poll durable stat keys for other-process
+            # changes (spec §0 ≤2s max latency).
+            self._wake.wait(timeout=RECONCILE_POLL)
+            self._wake.clear()
+            if self._stop.is_set():
+                break
+            keys = (_stat_key(self._policy_paths[0]),
+                    _stat_key(self._endpoints_path))
+            changed = keys != self._poll_keys
+            self._poll_keys = keys
+            # Always run on wake; on a bare poll only run when something changed.
+            self._guarded_run()
+
+    def _guarded_run(self):
+        if not self.request_run():
+            return
+        try:
+            self.run_once()
+        finally:
+            with self._run_lock:
+                self._running = False
+            # Coalesced rerun if a change landed mid-run.
+            self.drain_pending()
+
+    # -- one reconcile pass -------------------------------------------------
+
+    def run_once(self):
+        now = self._now()
+
+        # 1) Snapshot pending BEFORE retry so a pending tuple affects the
+        #    desired set immediately (spec §7), then retry the durable writes
+        #    even without a new announce. Outstanding-after-retry drives the
+        #    degrade signal (status degraded until the write is durable).
+        pending_snapshot = self._pending.snapshot()
+        self._retry_pending(now)
+        pending_outstanding = len(self._pending) > 0
+
+        # 2) Recompute desired from durable + pending + active + revocation +
+        #    policy + protected seeder (never in-memory residue).
+        policy = _peer_policy.load_policy(*self._policy_paths)
+        durable = _peer_endpoints.fresh_endpoints(self._endpoints_path, now)
+        active = list(self._active_participants() or [])
+        revoked = set(self._revoked_principals() or set())
+        derived = _reconciler.derive_denied_set(
+            policy, durable, pending_snapshot, active, revoked,
+            self._protected_seeder_ip)
+
+        # 3) Decide whether to force a full apply (startup / session change /
+        #    RPC recovery) — otherwise skip a redundant identical apply.
+        desired_hash = _reconciler.canonical_hash(derived.denied_ips)
+        session = self._probe_session()
+        force = (self._last_hash is None
+                 or session != self._last_session
+                 or self._rpc_ok is not True
+                 or desired_hash != self._last_hash)
+
+        outcome = None
+        if force:
+            outcome = _reconciler.apply_blocklist(
+                self._aria, derived.denied_ips, derived.apply_empty)
+
+        # 4) Persist the exact count-only enforcement status.
+        status = self._build_status(
+            now, policy, derived, desired_hash, outcome, pending_outstanding)
+
+        # 5) Export the policy operation outbox (revision order, ack-gated).
+        exported_rev = self._export_outbox(policy, status)
+        status["last_operation_exported_revision"] = exported_rev
+
+        _peer_enforcement.write_status(self._enforcement_path, status)
+        return status
+
+    def _retry_pending(self, now):
+        # Local retry using the (possibly injected) endpoint writer so failure
+        # injection is honored; mirrors peer_endpoints.retry_pending semantics.
+        for key, ptype, pid, endpoint in self._pending.items():
+            principal = auth.Principal(ptype, pid)
+            try:
+                self._record_endpoint(
+                    self._endpoints_path, principal, endpoint["ipv4"],
+                    endpoint["port"], now)
+            except OSError:
+                continue
+            self._pending._drop_key(key)
+
+    def _probe_session(self):
+        try:
+            return self._aria.get_session_id()
+        except Exception:
+            return None
+
+    def _build_status(self, now, policy, derived, desired_hash, outcome,
+                      pending_outstanding):
+        applied_revision = None
+        last_effect = None
+        last_error = None
+        session = None
+
+        if outcome is not None:
+            session = outcome.aria_session_id
+            applied_revision = outcome.applied_revision
+            last_effect = outcome.last_effect
+            last_error = outcome.last_error
+            rpc_ok = outcome.success or (
+                not outcome.applied and not derived.apply_empty
+                and not derived.fail_closed)
+        else:
+            # No apply this pass (nothing changed) => prior state stands.
+            session = self._last_session
+            rpc_ok = self._rpc_ok is True
+
+        # Decide the state (spec §13).
+        if derived.fail_closed:
+            state = "fail_closed"
+        elif pending_outstanding:
+            state = "degraded"
+        elif policy.degraded:
+            state = "degraded"
+        elif outcome is not None and outcome.applied and not outcome.success:
+            state = "degraded" if session else "rpc_unavailable"
+        elif rpc_ok and session:
+            state = "enforced"
+        elif outcome is not None and not outcome.applied \
+                and not derived.apply_empty:
+            # fail-closed handled above; valid empty with no session:
+            state = "degraded"
+        else:
+            state = "degraded"
+
+        # Update force-apply memory only on a real successful apply.
+        if outcome is not None and outcome.success:
+            self._last_session = session
+            self._last_hash = desired_hash
+            self._rpc_ok = True
+        elif outcome is not None and outcome.applied and not outcome.success:
+            self._rpc_ok = False
+
+        conflicts = derived.conflicts
+        # `enforced` requires a current session + desired hash (build_status
+        # enforces this invariant and rejects a false claim).
+        eff_hash = desired_hash if session else None
+        if state == "enforced" and (not session or not eff_hash):
+            state = "degraded"
+        return _peer_enforcement.build_status(
+            state=state, aria_session_id=session, desired_hash=eff_hash,
+            applied_revision=applied_revision,
+            desired_ip_count=len(derived.denied_ips), now=now,
+            conflicts=conflicts, last_effect=last_effect, last_error=last_error)
+
+    def _export_outbox(self, policy, status):
+        """Export outbox entries with revision > the acked revision, in revision
+        order, then advance the ack ONLY after the audit contract succeeds
+        (spec §7/§13). On any audit failure the ack is not advanced so the
+        entries replay on the next pass / after restart."""
+        prior = _peer_enforcement.read_status(self._enforcement_path)
+        acked = 0
+        if prior:
+            acked = prior.get("last_operation_exported_revision", 0) or 0
+        entries = _peer_policy.pending_exports(policy.document, acked)
+        if not entries:
+            return acked
+        if self._audit_export is None:
+            return acked
+        try:
+            self._audit_export(entries)
+        except Exception:
+            return acked   # audit best-effort failed -> replay next pass
+        return max(e["revision"] for e in entries)
+
+
+def _build_reconciler_from_env(env, registry):
+    """Construct the sole tracker reconciler from IRIS_* env (spec §0). The
+    cross-process channel files live under ``IRIS_STATE``; the RPC secret rides
+    through the injected JSON-RPC caller and is never surfaced in an error."""
+    state_dir = env.get("IRIS_STATE", "/var/lib/iris")
+    policy_path = os.path.join(state_dir, "peer-policy.json")
+    lkg_path = os.path.join(state_dir, "peer-policy.lkg.json")
+    endpoints_path = os.path.join(state_dir, "peer-endpoints.json")
+    enforcement_path = os.path.join(state_dir, "peer-enforcement.json")
+    audit_path = env.get("IRIS_AUDIT", "/etc/iris/audit.jsonl")
+
+    rpc = telemetry.make_jsonrpc_caller(
+        env.get("IRIS_RPC", telemetry.DEFAULT_RPC_URL),
+        telemetry._read_rpc_secret(env))
+    aria = Aria2BlocklistAdapter(rpc)
+
+    def audit_export(entries):
+        import audit
+        for e in entries:
+            audit.append_event(
+                audit_path, "peer-policy-operation", actor=e.get("actor"),
+                action=e.get("action"), target=e.get("target"),
+                new_id=e.get("event_id"), ts=e.get("created_at"))
+
+    return TrackerReconciler(
+        policy_paths=(policy_path, lkg_path),
+        endpoints_path=endpoints_path, enforcement_path=enforcement_path,
+        aria=aria, pending_queue=_peer_endpoints.PendingEndpointQueue(),
+        active_participants=lambda: _active_participants(registry),
+        revoked_principals=lambda: set(),   # revocation view wired at Task 15
+        protected_seeder_ip=env.get("IRIS_HOST_IP") or None,
+        audit_export=audit_export)
+
+
+def _active_participants(registry):
+    """Flatten the live registry into ``{principal_type, principal_id, ipv4}``
+    rows for the emergency (fail-closed) derivation."""
+    rows = []
+    for peers in registry.snapshot().values():
+        for p in peers:
+            rows.append({"principal_type": p["principal_type"],
+                         "principal_id": p["principal_id"],
+                         "ipv4": p["ip"]})
+    return rows
+
+
 def main():
     host = os.environ.get("IRIS_TRACKER_HOST", "0.0.0.0")
     port = int(os.environ.get("IRIS_TRACKER_PORT", "6969"))
@@ -383,8 +733,23 @@ def main():
             # is logged and skipped, the announce service still comes up.
             print("metrics server disabled: %s" % e, flush=True)
 
-    srv = make_server(host, port, secrets_path, registry=registry,
-                      on_announce=hub.note_announce)
+    # The tracker is the SOLE blocklist reconciler (spec §0). Construct and
+    # start it here; the announce path shares its pending queue and wakes it on
+    # a tracker-authored durable endpoint change.
+    reconciler = _build_reconciler_from_env(os.environ, registry)
+    state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
+    policy_paths = (os.path.join(state_dir, "peer-policy.json"),
+                    os.path.join(state_dir, "peer-policy.lkg.json"))
+    endpoints_path = os.path.join(state_dir, "peer-endpoints.json")
+
+    srv = make_server(
+        host, port, secrets_path, registry=registry,
+        on_announce=hub.note_announce,
+        policy_paths=policy_paths, endpoints_path=endpoints_path,
+        pending_queue=reconciler._pending,
+        on_endpoint_failure=reconciler.wake,
+        on_endpoint_change=reconciler.wake)
+    reconciler.start()
     print("tracker on http://%s:%d/announce" % (host, port), flush=True)
     srv.serve_forever()
 
