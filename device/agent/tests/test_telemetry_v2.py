@@ -46,7 +46,10 @@ def test_ensure_transfer_id_distinct_on_image_change():
 
 def test_a_b_a_mints_three_distinct_transfer_ids():
     # A->B->A is three acquisitions: the return to A is a NEW cycle, so the old
-    # A transfer state must be cleared when B took over.
+    # A transfer state must be cleared when B took over. This is the LEGACY pure
+    # unit check of clear_transfer() in isolation; the PRODUCTION reassignment
+    # path (run_once's state.pop) is proven by
+    # test_reassignment_a_b_a_mints_three_distinct_transfer_ids below.
     state = {}
     a1 = telemetry_report.ensure_transfer_id(state, "imgA")
     telemetry_report.clear_transfer(state, "imgA")   # image changed away from A
@@ -323,9 +326,18 @@ def test_reassignment_a_b_a_mints_three_distinct_transfer_ids():
         tids.append(cat.heartbeats[-1]["telemetry_observation"]["transfer_id"])
 
     run("imgA")
+    a1 = state["imgA"]["tele"]["transfer_id"]
     run("imgB")
+    # PRODUCTION reassignment: run_once's own state.pop(prev) drops the old
+    # image entry (tele + transfer_id) when the assigned image changes — it does
+    # NOT call telemetry_report.clear_transfer(). Prove the old A cycle is truly
+    # gone from state, so the return to A below re-mints rather than reusing.
+    assert "imgA" not in state
     run("imgA")
+    a2 = state["imgA"]["tele"]["transfer_id"]
     assert len(set(tids)) == 3
+    # ...and the two A acquisitions really are distinct cycles, not a reuse.
+    assert a1 != a2
 
 
 def test_aria_down_keeps_staging_heartbeat_with_rpc_unavailable_obs():

@@ -726,9 +726,13 @@ def run_once(cfg, deps, state):
             # state is PER-IMAGE: a reassignment to a new image id must go through
             # the full DONE + copy-to-root cycle again, untouched by the old one.
             st = state.setdefault(img_id, {})
-            # Persist the CONTENT-HASH verify outcome AT the decision point
-            # (spec §3D): the report reads this verbatim and never infers
+            # Record the CONTENT-HASH verify outcome INTO STATE at the decision
+            # point (spec §3D): the report reads this verbatim and never infers
             # 'verified' from done/copied or absence. verify() returned True here.
+            # Durability follows the report it feeds — the report-freeze
+            # checkpoint (spec §2) flushes this fact BEFORE its POST, and the
+            # outer final save persists it either way; a crash before that just
+            # re-derives the same fact next tick (verify is idempotent).
             st.setdefault("tele", {})["content_sha256_state"] = "verified"
             if st.get("sha") not in (None, image["sha256"]):
                 # A catalog republish under the same id is still genuinely new
@@ -828,9 +832,11 @@ def run_once(cfg, deps, state):
                         st["copied"] = True
                         state["root_file"] = image["filename"]
                         _reset_copy_failures(st)
-                        # Persist the IOS copy /verify outcome AT the decision
-                        # point (spec §3D): 'ok' means this attempt's
+                        # Record the IOS copy /verify outcome INTO STATE at the
+                        # decision point (spec §3D): 'ok' means this attempt's
                         # copy /verify passed. Independent of content_sha256.
+                        # Durability follows the report (freeze checkpoint /
+                        # final save); re-derived idempotently after a crash.
                         st.setdefault("tele", {})["ios_copy_verify_state"] = "ok"
                     else:
                         attempts = st.get("copy_attempts", 0) + 1
@@ -872,8 +878,9 @@ def run_once(cfg, deps, state):
                             hb, time.time())
             return "complete"
         deps.emit("ERROR", "%s sha256 MISMATCH - discarding" % image["filename"])
-        # Persist the mismatch fact AT the decision point (spec §3D): 'mismatch'
-        # is a distinct explicit state, never 'false'/'not_checked'.
+        # Record the mismatch fact INTO STATE at the decision point (spec §3D):
+        # 'mismatch' is a distinct explicit state, never 'false'/'not_checked'.
+        # Durability follows the report; re-derived idempotently after a crash.
         state.setdefault(img_id, {}).setdefault("tele", {})[
             "content_sha256_state"] = "mismatch"
         deps.remove_stage(stage)          # drop the bad file so the next tick re-downloads

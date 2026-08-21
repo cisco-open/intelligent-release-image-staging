@@ -83,11 +83,13 @@ def _tele(state, img_id):
 def ensure_transfer_id(state, img_id):
     """Return this acquisition cycle's transfer_id, minting+persisting a random
     one on the first observation of an image with no stored transfer (spec §2).
-    Stable across ticks for the same cycle. The image-change boundary is handled
-    by clear_transfer() (called by run_once when the assigned image changes), so
-    an A->B->A sequence mints three distinct ids. P1 boundaries (changed hash /
-    local loss) intentionally reuse the existing id — dedupe/freshness still
-    advance via report_id/sample_seq."""
+    Stable across ticks for the same cycle. The image-change boundary needs no
+    call here: run_once's own reassignment cleanup does state.pop(prev) on the
+    old image entry (dropping its tele + transfer_id), so the next acquisition of
+    that id mints fresh — an A->B->A sequence yields three distinct ids. P1
+    boundaries (changed hash / local loss) keep the same image id and its stored
+    transfer, so they intentionally reuse the existing id — dedupe/freshness
+    still advance via report_id/sample_seq."""
     tele = _tele(state, img_id)
     tid = tele.get("transfer_id")
     if not tid:
@@ -97,11 +99,17 @@ def ensure_transfer_id(state, img_id):
 
 
 def clear_transfer(state, img_id):
-    """Drop the transfer identity + sequence for an image whose acquisition
-    cycle has ended (the assigned image changed away from it), so the next
-    acquisition of the same id mints a fresh transfer_id and restarts
-    sample_seq. Leaves the rest of that image's state to run_once's own
-    cleanup."""
+    """Drop only the transfer identity + sequence for an image, leaving the rest
+    of its state intact.
+
+    NOT on the production reassignment path: run_once clears an old cycle by
+    popping the whole old image entry (state.pop(prev) in iris_agent.run_once),
+    which removes tele/transfer_id/sample_seq together. This narrower helper is
+    retained solely for the legacy pure v2 unit tests that simulate an
+    acquisition-cycle boundary in isolation (test_telemetry_v2:
+    test_a_b_a_mints_three_distinct_transfer_ids,
+    test_sample_seq_resets_for_a_new_transfer). Do not wire it into run_once —
+    the two paths would then both clear and disagree on cleanup ownership."""
     tele = (state.get(img_id) or {}).get("tele")
     if isinstance(tele, dict):
         tele.pop("transfer_id", None)
