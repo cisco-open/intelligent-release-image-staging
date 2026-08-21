@@ -6,7 +6,9 @@
 # The selected build platform must match the aria2c staged by build.sh. The agent
 # reaches IOS via an
 # SSH-to-self transport (cli_ssh) instead of the Guest Shell `cli` bridge.
-FROM python:3.12-slim-bookworm
+# Debian trixie (OpenSSL 3.5 LTS) — kept in lockstep with server/Dockerfile;
+# see the rationale there and issue #13.
+FROM python:3.12-slim-trixie
 
 LABEL org.opencontainers.image.title="IRIS IOx staging agent" \
       org.opencontainers.image.description="Cisco app-hosting image synchronization agent" \

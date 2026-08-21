@@ -9,6 +9,19 @@ This project uses **Calendar Versioning (CalVer)**: `YYYY.0M.0D` with an optiona
 `2026.06.11.1`). Releases are tagged `vYYYY.0M.0D`. The current version is in the
 top-level `VERSION` file.
 
+## [Unreleased]
+
+### Changed
+- **Server and IOx agent images move from Debian bookworm to trixie**
+  (`python:3.12-slim-trixie`), taking OpenSSL from the 3.0 branch — upstream
+  EOL **2026-09-07** — to **3.5 LTS**, supported to 2030-04. This is a
+  security boundary rather than housekeeping: `server/trust.py` shells out to
+  the base image's `openssl` for Cisco image-signature verification
+  (CMS/PKCS#7). Python stays 3.12.14 and both Dockerfiles are bumped in
+  lockstep. Addresses the first action item of the third-party EOL audit
+  (#13); the aria2c side of that audit already moved to OpenSSL 3.5.7 LTS
+  with the Aria2 Next hand-in in 2026.08.21.
+
 ## [2026.08.21]
 
 ### Added
