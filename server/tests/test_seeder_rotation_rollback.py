@@ -265,13 +265,13 @@ def test_success_claims_served_only_after_probe(tmp_path):
         seeder_remove=seeder.remove, seeder_add=seeder.add,
         swarm_probe=lambda expected, not_before: (
             calls.append((expected, not_before)) or True),
-        manifest_write=rot._atomic_write_json, now=lambda: 100)
+        manifest_write=rot._atomic_write_json, now=iter([100, 101]).__next__)
     result = rot.rotate_seeder_announce(
         sp, str(tmp_path / "recovery.json"),
         [rot.TorrentTarget("img", str(torrent), str(tmp_path), "gid")],
         "http://h:6969/announce", deps)
     assert result.served_claimed is True
-    assert calls == [({rot._info_hash(torrent.read_bytes())}, 100)]
+    assert calls == [({rot._info_hash(torrent.read_bytes())}, 101)]
     assert seeder.events[-1][0] == "add"
 
 
@@ -315,6 +315,28 @@ def test_failed_probe_freezes_and_never_claims_served(tmp_path):
             result.served_claimed) == (True, True, False)
     manifest = json.load(open(manifest_path))
     assert manifest["phase"] == manifest["error"] == "swarm_probe_failed"
+
+
+def test_post_add_probe_boundary_failure_is_hard_no_go(tmp_path):
+    """A false post-add proof freezes maintenance rather than claiming served."""
+    sp = _seeder_store(tmp_path)
+    torrent = tmp_path / "img.torrent"
+    torrent.write_bytes(_canonical())
+    calls = []
+    seeder = FakeSeeder()
+    deps = rot.RotationDeps(
+        persist=lambda s, p: secrets_store.save(s, p),
+        seeder_remove=seeder.remove, seeder_add=seeder.add,
+        swarm_probe=lambda expected, not_before: (
+            calls.append((expected, not_before)) or False),
+        manifest_write=rot._atomic_write_json, now=iter([100, 101]).__next__)
+    result = rot.rotate_seeder_announce(
+        sp, str(tmp_path / "recovery.json"),
+        [rot.TorrentTarget("img", str(torrent), str(tmp_path), "gid")],
+        "http://h:6969/announce", deps)
+    assert calls == [({rot._info_hash(torrent.read_bytes())}, 101)]
+    assert (result.hard_no_go, result.maintenance_frozen,
+            result.served_claimed) == (True, True, False)
 
 
 # ---------------------------------------------------------------------------
@@ -730,7 +752,10 @@ def test_announce_token_not_deployable_until_tracker_resolver(monkeypatch,
 # canonical `server` source) proving the relevant canonical torrents serve.
 # ---------------------------------------------------------------------------
 
-def _serving_swarm(info_hashes, rpc_up=True, extra_peers=None, last_seen=100.0):
+def _serving_swarm(info_hashes, rpc_up=True, extra_peers=None, last_seen=100.0,
+                   last_seen_by_info_hash=None):
+    if last_seen_by_info_hash is None:
+        last_seen_by_info_hash = {h: last_seen for h in info_hashes}
     return {
         "now": 100.0,
         "server": {"host": "100.90.168.20", "server_observation": {
@@ -738,7 +763,8 @@ def _serving_swarm(info_hashes, rpc_up=True, extra_peers=None, last_seen=100.0):
             "tracker_observation": {"principal_type": "service",
                                     "principal_id": "seeder",
                                     "observed_info_hashes": list(info_hashes),
-                                    "last_seen": last_seen},
+                                    "last_seen": last_seen,
+                                    "last_seen_by_info_hash": last_seen_by_info_hash},
             "aria_session_id": "s1", "global": {},
             "torrent": [{"info_hash": h, "image": "cat9k.bin",
                          "upload_length_bytes": 1, "lifetime": "control-state"}
@@ -757,6 +783,30 @@ def test_is_seeder_serving_requires_post_rotation_service_marker():
                                     ["abc"], 100) is False
     assert rot.is_seeder_serving(_serving_swarm(["abc"], last_seen=101),
                                 ["abc"], 100) is True
+
+
+def test_is_seeder_serving_requires_each_hash_post_rotation():
+    doc = _serving_swarm(["abc", "def"], last_seen=101,
+                         last_seen_by_info_hash={"abc": 101, "def": 100})
+    assert rot.is_seeder_serving(doc, ["abc", "def"], 100) is False
+
+
+def test_is_seeder_serving_accepts_each_hash_post_rotation():
+    doc = _serving_swarm(["abc", "def"],
+                         last_seen_by_info_hash={"abc": 101, "def": 102})
+    assert rot.is_seeder_serving(doc, ["abc", "def"], 100) is True
+
+
+def test_is_seeder_serving_aggregate_cannot_mask_stale_hash():
+    doc = _serving_swarm(["abc", "def"], last_seen=999,
+                         last_seen_by_info_hash={"abc": 101, "def": 99})
+    assert rot.is_seeder_serving(doc, ["abc", "def"], 100) is False
+
+
+def test_is_seeder_serving_requires_per_hash_freshness_map():
+    doc = _serving_swarm(["abc"])
+    del doc["server"]["server_observation"]["tracker_observation"]["last_seen_by_info_hash"]
+    assert rot.is_seeder_serving(doc, ["abc"], 99) is False
 
 
 def test_is_seeder_serving_true_when_server_source_proves_torrents():

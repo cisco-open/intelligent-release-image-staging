@@ -264,12 +264,16 @@ def rotate_seeder_announce(secrets_path, manifest_path, torrents,
         applied.append((idx, target, old_bytes))
         deps.manifest_write(manifest_path, manifest)
 
+    # Capture the boundary only after every canonical add succeeded: an announce
+    # must occur strictly later than this point for every expected info hash.
+    probe_not_before = deps.now()
+
     # Claim serving only after the canonical adds are independently observed.
     # Probe errors and timeouts fail closed exactly like a failed predicate; no
     # credential is revoked and the recovery manifest remains terminal.
     try:
         serving = (callable(deps.swarm_probe)
-                    and deps.swarm_probe(expected_info_hashes, now))
+                    and deps.swarm_probe(expected_info_hashes, probe_not_before))
     except Exception:
         serving = False
     if not serving:
@@ -453,7 +457,9 @@ def is_seeder_serving(swarm_doc, expected_info_hashes, not_before):
     Proof lives under the canonical ``server`` source (the deduped current
     non-legacy ``service:seeder``): ``server_observation.rpc_up`` must be true
     and each expected info_hash must appear in ``server_observation.torrent``
-    with ``lifetime == "control-state"``. A seeder announcing on a wrong/legacy
+    with ``lifetime == "control-state"`` and the factual
+    ``last_seen_by_info_hash`` must show every expected hash strictly after the
+    boundary. A seeder announcing on a wrong/legacy
     or unattributed credential is NOT deduped and instead shows up as a
     ``legacy`` / un-deduped ``service:seeder`` peer row — its presence as a
     seeder for an expected torrent fails the predicate (the current seeder
@@ -480,9 +486,15 @@ def is_seeder_serving(swarm_doc, expected_info_hashes, not_before):
     if not isinstance(marker, dict) \
             or marker.get("principal_type") != "service" \
             or marker.get("principal_id") != "seeder" \
-            or not isinstance(marker.get("last_seen"), (int, float)) \
-            or marker["last_seen"] <= not_before \
             or set(marker.get("observed_info_hashes") or []) != expected:
+        return False
+    last_seen_by_info_hash = marker.get("last_seen_by_info_hash")
+    if not isinstance(last_seen_by_info_hash, dict) \
+            or set(last_seen_by_info_hash) != expected \
+            or any(not isinstance(last_seen_by_info_hash.get(info_hash),
+                                  (int, float))
+                   or last_seen_by_info_hash[info_hash] <= not_before
+                   for info_hash in expected):
         return False
     if serving != expected:
         return False

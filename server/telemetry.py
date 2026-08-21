@@ -817,6 +817,10 @@ class Telemetry:
                 "lifetime": "control-state",
             })
         service = []
+        # Per-torrent facts from current typed service:seeder registry rows.
+        # Do not infer identity from IP/token or let one fresh announce stand in
+        # for a different torrent during a credential-rotation proof.
+        last_seen_by_info_hash = {}
         latest_seen = None
         for info_hash, peers in self._registry.snapshot(now=now).items():
             for peer in peers:
@@ -824,6 +828,8 @@ class Telemetry:
                         and peer.get("principal_id") == "seeder":
                     service.append(info_hash)
                     seen = peer.get("last_seen")
+                    if isinstance(seen, (int, float)):
+                        last_seen_by_info_hash[info_hash] = seen
                     if seen is not None and (latest_seen is None or seen > latest_seen):
                         latest_seen = seen
                     break
@@ -845,6 +851,7 @@ class Telemetry:
                 "principal_type": "service", "principal_id": "seeder",
                 "observed_info_hashes": sorted(service),
                 "last_seen": latest_seen,
+                "last_seen_by_info_hash": last_seen_by_info_hash,
             }
         return {
             "host": os.environ.get("IRIS_HOST_IP", ""),

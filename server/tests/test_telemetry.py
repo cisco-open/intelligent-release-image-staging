@@ -259,7 +259,8 @@ def test_server_source_proves_typed_seeder_and_current_torrent_snapshot():
     obs = hub.swarm_snapshot(now=11)["server"]["server_observation"]
     assert obs["tracker_observation"] == {
         "principal_type": "service", "principal_id": "seeder",
-        "observed_info_hashes": ["abc"], "last_seen": 10}
+        "observed_info_hashes": ["abc"], "last_seen": 10,
+        "last_seen_by_info_hash": {"abc": 10}}
     assert obs["torrent"] == [{"info_hash": "abc", "image": "a.bin",
                                 "upload_length_bytes": 3, "upload_bps": 7,
                                 "lifetime": "control-state"}]
