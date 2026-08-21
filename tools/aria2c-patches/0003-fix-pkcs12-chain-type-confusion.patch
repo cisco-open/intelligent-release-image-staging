@@ -1,0 +1,40 @@
+diff --git a/src/LibsslTLSContext.cc b/src/LibsslTLSContext.cc
+index 903261c7..c9a1aea8 100644
+--- a/src/LibsslTLSContext.cc
++++ b/src/LibsslTLSContext.cc
+@@ -298,10 +298,31 @@ bool OpenSSLTLSContext::addP12CredentialFile(const std::string& p12file)
+                      ERR_error_string(ERR_get_error(), nullptr)));
+     return false;
+   }
+-  if (ca && sk_X509_num(ca) && !SSL_CTX_add_extra_chain_cert(sslCtx_, ca)) {
+-    A2_LOG_ERROR(fmt("Failed to use PKCS12 file chain: %s",
+-                     ERR_error_string(ERR_get_error(), nullptr)));
+-    return false;
++  // SSL_CTX_add_extra_chain_cert() takes a single X509*, not a STACK_OF(X509)*.
++  // It is a macro that casts its argument to char* and forwards to
++  // SSL_CTX_ctrl(), so passing the whole stack compiled without complaint and
++  // left OpenSSL holding a STACK_OF(X509)* it would use as an X509*. Worse,
++  // ca_holder's deleter is sk_X509_pop_free(x, X509_free), so the stack and
++  // every certificate in it were also freed here - the same pointer had two
++  // owners.
++  //
++  // Shift each certificate off the stack instead. That removes it from
++  // ca_holder's ownership, and SSL_CTX_add_extra_chain_cert() takes ownership
++  // on success; anything left on the stack is still freed by ca_holder.
++  if (ca) {
++    while (sk_X509_num(ca) > 0) {
++      x509_t chainCert(sk_X509_shift(ca));
++      if (!chainCert) {
++        continue;
++      }
++      if (!SSL_CTX_add_extra_chain_cert(sslCtx_, chainCert.get())) {
++        A2_LOG_ERROR(fmt("Failed to use PKCS12 file chain: %s",
++                         ERR_error_string(ERR_get_error(), nullptr)));
++        return false;
++      }
++      // Ownership has passed to sslCtx_.
++      chainCert.release();
++    }
+   }
+ 
+   A2_LOG_DEBUG("Using certificate and key from PKCS12 file");

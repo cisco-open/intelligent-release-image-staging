@@ -21,6 +21,8 @@
 #
 # All the cert/fingerprint inputs build.sh needs (CATALOG_PEM or
 # CATALOG_PEM_URL + CATALOG_PEM_FINGERPRINT, IOXCLIENT) pass through the env.
+# BINFMT_IMAGE_DIGEST is required only when arm64 emulation must be installed;
+# set it to the audited sha256 digest for tonistiigi/binfmt (without an image tag).
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -52,7 +54,10 @@ esac
 if [ "$ARCH" = arm64 ] && ! docker run --rm --platform linux/arm64 \
     alpine:3.20 true >/dev/null 2>&1; then
   echo ">> enabling Docker arm64 emulation for the arm64 IOx package build"
-  docker run --privileged --rm tonistiigi/binfmt --install arm64
+  : "${BINFMT_IMAGE_DIGEST:?set BINFMT_IMAGE_DIGEST to an audited tonistiigi/binfmt sha256 digest}"
+  [[ "$BINFMT_IMAGE_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]] \
+    || { echo "!! BINFMT_IMAGE_DIGEST must be a sha256 digest" >&2; exit 1; }
+  docker run --privileged --rm "tonistiigi/binfmt@$BINFMT_IMAGE_DIGEST" --install arm64
 fi
 
 # Resolve the artifacts dir: explicit flag wins; else the Compose host bind

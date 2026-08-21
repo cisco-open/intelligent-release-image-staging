@@ -10,6 +10,7 @@ auth on every endpoint. The server publishes images and a per-device
 install-approval flag but NEVER triggers install (spec §6). Stdlib only."""
 import gzip
 import hashlib
+import io
 import json
 import os
 import ssl
@@ -220,13 +221,50 @@ class CatalogStore:
     def list_devices(self):
         return list(self._read(self.devices_path).values())
 
+    def purge_device(self, device_id):
+        """Remove ALL per-device catalog state: the heartbeat record, the
+        image assignment (policy), the telemetry history, and any pending
+        pull directive. Called when the console deletes a device from the
+        fleet — a device that is deleted and added back must come back
+        unassigned, or a stale assignment would silently restage the old
+        image. Contrast forget_device(), which drops only the heartbeat
+        record on undeploy and deliberately keeps the assignment. Returns
+        True iff any state existed."""
+        existed = self.forget_device(device_id)
+        for path in (self.policy_path, self.telemetry_path, self.pull_path):
+            with secrets_store.store_lock(path):
+                data = self._read(path)
+                if data.pop(device_id, None) is not None:
+                    existed = True
+                    _atomic_write_json(path, data)
+        return existed
+
     # --- policy (install-approval gate) ---
+    def image_policy_lock(self):
+        """Cross-process serializer for image-existence/assignment decisions.
+
+        Image assignment and deletion span two JSON stores, so their
+        check-then-act sequences need one shared lock — and `docker exec ...
+        iris-assign` runs as a SEPARATE process from the console, so a
+        threading lock cannot cover it. This is a store_lock (fcntl.flock)
+        on its own sidecar, distinct from the per-store file locks so the
+        holder can still take those underneath (flock does not nest on the
+        same path within one process). ImageService.delete_image shares it
+        with set_policy."""
+        return secrets_store.store_lock(self.catalog_path + ".assign")
+
     def set_policy(self, device_id, approved_image_id=None, install_allowed=False):
-        with secrets_store.store_lock(self.policy_path):
-            pol = self._read(self.policy_path)
-            pol[device_id] = {"approved_image_id": approved_image_id,
-                              "install_allowed": bool(install_allowed)}
-            _atomic_write_json(self.policy_path, pol)
+        with self.image_policy_lock():
+            # Re-check at persistence time. Missing catalog.json remains valid
+            # for legacy bootstrap callers; an existing catalog fails closed.
+            if approved_image_id and os.path.exists(self.catalog_path) \
+                    and self.get_image(approved_image_id) is None:
+                raise ValueError("no such image")
+            with secrets_store.store_lock(self.policy_path):
+                pol = self._read(self.policy_path)
+                pol[device_id] = {"approved_image_id": approved_image_id,
+                                  "install_allowed": bool(install_allowed)}
+                _atomic_write_json(self.policy_path, pol)
 
     def get_policy(self, device_id):
         return self._read(self.policy_path).get(
@@ -642,6 +680,10 @@ def make_server(host, port, store, secrets_path, certfile=None,
                 self._send((400, "application/json",
                             json.dumps({"error": "bad content-length"}).encode()))
                 return
+            if length < 0:
+                self._send((400, "application/json",
+                            json.dumps({"error": "bad content-length"}).encode()))
+                return
             if length > MAX_BODY_BYTES:
                 # Refuse before reading: the declared length is untrusted and
                 # could be arbitrarily large.
@@ -652,7 +694,10 @@ def make_server(host, port, store, secrets_path, certfile=None,
             enc = self.headers.get("Content-Encoding", "")
             if enc.strip().lower() == "gzip":
                 try:
-                    body = gzip.decompress(body)
+                    # A bounded streaming read avoids allocating an attacker's
+                    # complete decompressed payload before enforcing the cap.
+                    with gzip.GzipFile(fileobj=io.BytesIO(body)) as gz:
+                        body = gz.read(MAX_BODY_BYTES + 1)
                 except Exception:
                     self._send((400, "application/json",
                                 json.dumps(

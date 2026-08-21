@@ -154,7 +154,7 @@ def test_stats_excludes_stale_peers():
     reg = PeerRegistry()
     reg.announce("ABC", "p1", "10.0.0.1", 6881, left=10, now=0)
     st = reg.stats(now=2 * INTERVAL + 1)
-    assert st["ABC"]["peers"] == 0
+    assert "ABC" not in st
 
 
 def test_stats_separates_swarms():

@@ -4,30 +4,91 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# Downloads a fully-static (musl) aria2c for linux-amd64 and verifies its checksum.
-# Source: abcfy2/aria2-static-build (musl static releases). Pin a known version.
+# Installs the aria2c client that was HANDED IN to this repository.
+#
+#   tools/get-aria2c.sh              # host architecture
+#   tools/get-aria2c.sh amd64        # x86_64  (Catalyst / server)
+#   tools/get-aria2c.sh arm64        # aarch64 (IE-3400, Cortex-A53)
+#
+# IRIS does not download and does not build aria2c. The binary is produced
+# elsewhere, by the aria2-next-static project, and delivered here as an
+# artifact. That project owns the source pin, the patch set, the build flags
+# and the validation; this repository is purely the consumer.
+#
+# Why not download it: the previous implementation fetched a prebuilt binary
+# from a third party (abcfy2/aria2-static-build). That published x86_64 only,
+# while device/iox/package.yaml targets aarch64 for the IE-3x00 Guest Shell,
+# and an opaque zip can be checksummed but never audited or patched.
+#
+# Why not build it here: the build carries local patches. Keeping a second copy
+# of them in this repository guarantees they drift, and a stale copy silently
+# ships a client missing fixes. There is exactly one producer.
+#
+# The delivered binary is verified against tools/aria2c.sha256 and this script
+# FAILS CLOSED on a mismatch, so an out-of-date client cannot be installed by
+# accident.
 set -euo pipefail
 
-VERSION="${ARIA2_VERSION:-1.37.0}"
-ASSET="aria2-x86_64-linux-musl_static.zip"
-URL="https://github.com/abcfy2/aria2-static-build/releases/download/${VERSION}/${ASSET}"
-OUT_DIR="$(cd "$(dirname "$0")/.." && pwd)/bin"
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+OUT_DIR="$REPO_ROOT/bin"
+SUMS="$REPO_ROOT/tools/aria2c.sha256"
 
-echo "Downloading aria2 ${VERSION} static (musl) ..."
-curl -fsSL "$URL" -o "$TMP/${ASSET}"
+case "${1:-}" in
+  amd64|x86_64)  ARCH=x86_64 ;;
+  arm64|aarch64) ARCH=aarch64 ;;
+  "")
+    case "$(uname -m)" in
+      x86_64)        ARCH=x86_64 ;;
+      arm64|aarch64) ARCH=aarch64 ;;
+      *) echo "Unsupported host architecture: $(uname -m)" >&2; exit 1 ;;
+    esac
+    ;;
+  *) echo "usage: $0 [amd64|arm64]" >&2; exit 2 ;;
+esac
 
-# Record the checksum you observed on first download, then enforce it on every run.
-EXPECTED_SHA256="${ARIA2_SHA256:-e0a09b12ef67f35f8a8e4fdddbec851d235b7c31da549d0578bff459032b499a}"
-ACTUAL_SHA256="$(shasum -a 256 "$TMP/${ASSET}" | awk '{print $1}')"
-echo "Downloaded sha256: ${ACTUAL_SHA256}"
-if [[ -n "$EXPECTED_SHA256" && "$EXPECTED_SHA256" != "$ACTUAL_SHA256" ]]; then
-  echo "CHECKSUM MISMATCH: expected $EXPECTED_SHA256 got $ACTUAL_SHA256" >&2
+# Where the deliverable is collected from. Override when the producing project
+# lives elsewhere, or point it at a release artifact once one is published.
+DELIVERABLE="${ARIA2C_DELIVERABLE:-$REPO_ROOT/../aria2-next-static/out/$ARCH/aria2c}"
+
+[ -f "$SUMS" ] || { echo "missing $SUMS - cannot verify the deliverable" >&2; exit 1; }
+
+expected="$(awk -v a="$ARCH" '$2 == a { print $1 }' "$SUMS")"
+[ -n "$expected" ] || { echo "no checksum recorded for $ARCH in $SUMS" >&2; exit 1; }
+
+if [ ! -f "$DELIVERABLE" ]; then
+  cat >&2 <<EOF
+No aria2c deliverable for $ARCH at:
+  $DELIVERABLE
+
+This repository does not build aria2c. Either set ARIA2C_DELIVERABLE to a
+handed-in binary matching tools/aria2c.sha256, or build one from source:
+the upstream fork pinned in tools/aria2c.sha256 plus the patches in
+tools/aria2c-patches/ (see the README there for the recipe). Maintainers
+with the producer checkout can instead run:
+
+  cd ../aria2-next-static && ./build.sh $ARCH
+EOF
   exit 1
 fi
 
-unzip -o "$TMP/${ASSET}" -d "$TMP" >/dev/null
-BIN_PATH="$(find "$TMP" -name aria2c -type f | head -n1)"
-install -m 0755 "$BIN_PATH" "$OUT_DIR/aria2c"
+actual="$( (shasum -a 256 "$DELIVERABLE" 2>/dev/null || sha256sum "$DELIVERABLE") | awk '{print $1}')"
+if [ "$actual" != "$expected" ]; then
+  cat >&2 <<EOF
+CHECKSUM MISMATCH for $ARCH — refusing to install.
+  expected: $expected   (tools/aria2c.sha256)
+  actual:   $actual     ($DELIVERABLE)
+
+This usually means the deliverable is stale, or a newer client was produced and
+tools/aria2c.sha256 has not been updated to adopt it. Do not "fix" this by
+editing the checksum unless you intend to adopt that exact binary.
+EOF
+  exit 1
+fi
+
+mkdir -p "$OUT_DIR"
+install -m 0755 "$DELIVERABLE" "$OUT_DIR/aria2c"
+
 echo "Installed: $OUT_DIR/aria2c"
+echo "  arch:   $ARCH"
+echo "  sha256: $actual (verified against tools/aria2c.sha256)"
+echo "  size:   $(wc -c < "$OUT_DIR/aria2c") bytes"

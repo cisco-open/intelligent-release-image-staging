@@ -90,7 +90,8 @@ The public story is peer-assisted staging. The server implements that with a few
 | Telemetry service | Receives device reports and exposes health, swarm, and metrics surfaces. |
 | Device agent | Downloads pieces, verifies the image, stages it to platform storage, and reports status. |
 
-All of these services run inside one container as the unprivileged user `iris`,
+All of these services except the device agent run inside one container as the
+unprivileged user `iris`,
 a fixed uid/gid `10001` baked into the image. Every listener binds an
 unprivileged port, so the runtime drops all Linux capabilities and forbids
 privilege escalation. Nothing chowns anything at runtime, so the host paths that

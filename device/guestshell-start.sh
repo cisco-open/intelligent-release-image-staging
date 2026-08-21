@@ -30,7 +30,15 @@ else
   set --
 fi
 
-RPC_SECRET="$(cat "$RPC_SECRET_FILE" 2>/dev/null || echo iris)"
+# The installer bakes rpc-secret EMPTY (the agent fetches the real value on
+# its first token-refresh), and Aria2 Next rejects --rpc-secret= outright
+# ("Empty string is not allowed"; aria2 1.37 accepted it — field incident
+# 2026-08-20: aria2c never launched, bootstrap aborted before the agent, and
+# every freshly onboarded Guest Shell device stayed silent). Launch with the
+# same placeholder the IOx entrypoint uses; bootstrap's secret sync bounces
+# aria2c onto the real secret right after that first refresh.
+RPC_SECRET="$(tr -d '[:space:]' < "$RPC_SECRET_FILE" 2>/dev/null || true)"
+RPC_SECRET="${RPC_SECRET:-iris}"
 
 # already up? (skip the probe in tests)
 if [ "${SKIP_RPC_PROBE:-0}" != "1" ]; then
@@ -41,10 +49,27 @@ if [ "${SKIP_RPC_PROBE:-0}" != "1" ]; then
   fi
 fi
 
+# Reaching here means the RPC probe FAILED, so any surviving aria2c is alive
+# but not serving. It must go before we relaunch: it still owns the RPC port
+# (a new instance cannot bind) and `cp -f` over a running binary fails with
+# ETXTBSY, so the stale build would keep running. Field incident 2026-08-20:
+# leaving it alive deadlocked devices for ~42 minutes — the agent hit
+# ECONNREFUSED every tick and never reached its first heartbeat.
+if pgrep -f 'aria2c.*enable-rpc' >/dev/null 2>&1; then
+  echo "aria2c is running but not answering RPC on :$RPC_PORT — replacing it" >&2
+  pkill -f 'aria2c.*enable-rpc' 2>/dev/null || true
+  _w=0
+  while pgrep -f 'aria2c.*enable-rpc' >/dev/null 2>&1 && [ "$_w" -lt 10 ]; do
+    sleep 1; _w=$((_w + 1))
+  done
+fi
+
 # copy the binary to an exec-capable fs and run it
 ARIA2="$EXEC_DIR/aria2c"
-cp -f "$ARIA2_SRC" "$ARIA2" 2>/dev/null || true
-chmod +x "$ARIA2" 2>/dev/null || true
+cp -f "$ARIA2_SRC" "$ARIA2" \
+  || { echo "cannot install aria2c from $ARIA2_SRC to $ARIA2" >&2; exit 1; }
+chmod +x "$ARIA2" \
+  || { echo "cannot make $ARIA2 executable" >&2; exit 1; }
 
 exec "$ARIA2" \
   --daemon=true \

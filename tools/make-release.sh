@@ -29,10 +29,15 @@ cp -R "$REPO/device/." "$OUT/device/"
 
 # tools
 mkdir -p "$OUT/tools"
-for f in get-aria2c.sh make-torrent.sh make-agent-bundle.sh \
-         gen-device-installers.sh apply-assignments.sh; do
+for f in get-aria2c.sh aria2c.sha256 make-torrent.sh make-agent-bundle.sh \
+         gen-device-installers.sh apply-assignments.sh \
+         start-compose-server.sh; do
   cp "$REPO/tools/$f" "$OUT/tools/"
 done
+# corresponding source for the handed-in (GPL) aria2c binary — NOTICE and the
+# checksum manifest both point at this directory, so the release must carry it
+mkdir -p "$OUT/tools/aria2c-patches"
+cp -R "$REPO/tools/aria2c-patches/." "$OUT/tools/aria2c-patches/"
 
 # the one lab helper the installers drive devices through
 mkdir -p "$OUT/lab"
@@ -47,7 +52,8 @@ mkdir -p "$OUT/fleet"
 cp "$REPO/fleet/README.md" "$REPO/fleet/devices.csv.example" \
    "$REPO/fleet/assignments.csv.example" "$REPO/fleet/iris-fleet.conf.example" "$OUT/fleet/"
 
-# bin placeholder (the binary itself is fetched by tools/get-aria2c.sh)
+# bin placeholder — aria2c is fetched by tools/get-aria2c.sh for the DEVICE
+# agent bundle; the server gets its own copy baked into the image at build time.
 mkdir -p "$OUT/bin"; : > "$OUT/bin/.gitkeep"
 
 # artifacts dir: ship it (empty) so it exists + is owned by the unpacking user BEFORE
@@ -68,7 +74,7 @@ find "$OUT" -name '*.pyc' -delete -o -name '.DS_Store' -delete 2>/dev/null || tr
 SCRUB_PASS="${SCRUB_PASS:-}"; SCRUB_USER="${SCRUB_USER:-}"
 if [ -n "$SCRUB_PASS$SCRUB_USER" ]; then
   # Scrub all shipped text file types — not just *.sh / *.conf* / *.example.
-  # A username or password in a .py, .md, .json, .cfg, .service, or .html file
+  # A username or password in a .py, .md, .json, .cfg, or .html file
   # would otherwise ship un-redacted.  `perl -I` (binary-safe) skips binary
   # files; `find … ! -name '*.pyc'` avoids double-processing compiled bytecode.
   find "$OUT" -type f ! -name '*.pyc' -print0 \

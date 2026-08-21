@@ -29,7 +29,12 @@ IRIS_LOG="${IRIS_LOG:-/var/log/iris}"
 IRIS_RUN="${IRIS_RUN:-/run/iris}"
 IRIS_AGE_BIN="${IRIS_AGE_BIN:-age}"
 IRIS_AGE_KEY_FILE="${IRIS_AGE_KEY_FILE:-/run/secrets/iris_age_key}"
-mkdir -p "$IRIS_STATE/torrents" "$IRIS_CONFIG/tls" "$IRIS_LOG" "$IRIS_RUN/tls"
+# TLS trust + console-cert override (console-managed; absent = today's behavior)
+IRIS_TRUST_DIR="${IRIS_TRUST_DIR:-$IRIS_CONFIG/tls/trust}"
+IRIS_CA_BUNDLE="${IRIS_CA_BUNDLE:-$IRIS_RUN/tls/ca-bundle.pem}"
+IRIS_GUI_CERT="${IRIS_GUI_CERT:-$IRIS_RUN/tls/gui-cert.pem}"
+mkdir -p "$IRIS_STATE/torrents" "$IRIS_CONFIG/tls" "$IRIS_TRUST_DIR" "$IRIS_LOG" \
+  "$IRIS_RUN/tls"
 # Keep the plaintext dir private. Running non-root (uid 10001), we may not OWN
 # the mountpoint — compose mounts the tmpfs with uid=10001,mode=0700 (chmod
 # succeeds and is a no-op), but Kubernetes' Memory emptyDir stays root-owned
@@ -73,6 +78,83 @@ done
 cat "$IRIS_CONFIG/tls/crt.pem" "$IRIS_RUN/tls/key.pem" > "$IRIS_RUN/tls/cert.pem"
 chmod 600 "$IRIS_RUN/tls/cert.pem"
 
+# Optional console-only cert override: when the operator installed a custom
+# console certificate from Settings (durable gui-crt.pem + age-encrypted
+# gui-key.pem.age), build the combined $IRIS_GUI_CERT in tmpfs the same way.
+# UNLIKE the identity cert above this is best-effort: a corrupt or
+# undecryptable override must NOT stop the container — gui_server falls back
+# to the bootstrap cert (IRIS_CERT), so a bad uploaded cert can never lock
+# the operator out. On failure any stale runtime override is removed so the
+# fallback actually engages.
+if [ -f "$IRIS_CONFIG/tls/gui-crt.pem" ] && [ -f "$IRIS_CONFIG/tls/gui-key.pem.age" ]; then
+  if IRIS_AGE_BIN="$IRIS_AGE_BIN" PYTHONPATH="$script_dir" python3 - \
+      "$IRIS_CONFIG/tls/gui-key.pem.age" "$IRIS_RUN/tls/gui-key.pem" "$IRIS_AGE_KEY_FILE" <<'PY'
+import os, sys
+import secretfs
+secretfs.decrypt_to(sys.argv[1], sys.argv[2], sys.argv[3],
+                    age_bin=os.environ["IRIS_AGE_BIN"])
+PY
+  then
+    # gui_tls.persist_override writes the durable pair key-first, then cert
+    # (secretfs.encrypt_from, then the crt write) — a crash between the two
+    # can leave a NEW key paired with a STALE cert on the volume. Compare
+    # public keys (not modulus: future-proof beyond the RSA iris-bootstrap
+    # mints today) before ever combining them into a servable file, so a
+    # mismatched pair warns and falls back instead of crashing later inside
+    # ssl.load_cert_chain.
+    gui_cert_pub="$(openssl x509 -in "$IRIS_CONFIG/tls/gui-crt.pem" -noout -pubkey 2>/dev/null)" || gui_cert_pub=""
+    gui_key_pub="$(openssl pkey -in "$IRIS_RUN/tls/gui-key.pem" -pubout 2>/dev/null)" || gui_key_pub=""
+    if [ -n "$gui_cert_pub" ] && [ "$gui_cert_pub" = "$gui_key_pub" ]; then
+      cat "$IRIS_CONFIG/tls/gui-crt.pem" "$IRIS_RUN/tls/gui-key.pem" > "$IRIS_GUI_CERT"
+      chmod 600 "$IRIS_GUI_CERT"
+    else
+      echo "WARNING: gui-crt.pem and gui-key.pem.age do not form a matching certificate/key pair — console keeps the built-in certificate" >&2
+      rm -f "$IRIS_RUN/tls/gui-key.pem" "$IRIS_GUI_CERT"
+    fi
+  else
+    echo "WARNING: could not decrypt tls/gui-key.pem.age — console keeps the built-in certificate" >&2
+    rm -f "$IRIS_RUN/tls/gui-key.pem" "$IRIS_GUI_CERT"
+  fi
+else
+  # Durable override pair absent (never uploaded, or removed via Settings).
+  # Runtime files are derived state on the Compose tmpfs or Kubernetes memory
+  # emptyDir; when the durable pair is absent, sweep any stale override rather
+  # than serving it, just as an empty trust dir sweeps a stale CA bundle below.
+  rm -f "$IRIS_RUN/tls/gui-key.pem" "$IRIS_GUI_CERT"
+fi
+
+# Build the outbound-TLS trust bundle from the durable trust dir (installed
+# root CAs + the optional downloaded public bundle). Deterministic
+# lexicographic concat — must match server/trust.py rebuild_bundle(). An
+# empty trust dir means no bundle: outbound consumers then verify against
+# the default system store only.
+shopt -s nullglob
+trust_srcs=("$IRIS_TRUST_DIR"/*.pem)
+shopt -u nullglob
+if [ "${#trust_srcs[@]}" -gt 0 ]; then
+  # Per-file, not one `cat "${trust_srcs[@]}"`: a single unreadable entry
+  # (e.g. a directory named *.pem) would otherwise abort the WHOLE container
+  # start under set -e. Mirrors trust.py rebuild_bundle(), which skips a bad
+  # entry (except OSError: continue) rather than failing the whole rebuild.
+  : > "$IRIS_CA_BUNDLE"
+  bundle_wrote=0
+  for f in "${trust_srcs[@]}"; do
+    if cat "$f" >> "$IRIS_CA_BUNDLE" 2>/dev/null; then
+      bundle_wrote=1
+    else
+      echo "WARNING: skipping unreadable trust entry $f" >&2
+    fi
+  done
+  if [ "$bundle_wrote" -eq 1 ]; then
+    chmod 600 "$IRIS_CA_BUNDLE"
+  else
+    # every entry was bad — same as an empty trust dir
+    rm -f "$IRIS_CA_BUNDLE"
+  fi
+else
+  rm -f "$IRIS_CA_BUNDLE"
+fi
+
 export IRIS_STATE IRIS_CONFIG IRIS_RUN
 export IRIS_SECRETS="$IRIS_RUN/secrets.json"
 export IRIS_RPC_SECRET_FILE="$IRIS_RUN/rpc-secret"
@@ -80,6 +162,7 @@ export IRIS_CERT="$IRIS_RUN/tls/cert.pem"
 export IRIS_AUDIT="${IRIS_AUDIT:-$IRIS_CONFIG/audit.jsonl}"
 export IRIS_SECRETS_ENC="${IRIS_SECRETS_ENC:-$IRIS_CONFIG/secrets.json.age}"
 export IRIS_AGE_BIN IRIS_AGE_KEY_FILE
+export IRIS_GUI_CERT IRIS_TRUST_DIR IRIS_CA_BUNDLE
 
 # Writable volume for images uploaded via the GUI console; the seeder's
 # restart-reseed walk (seed-launch.sh) also covers this dir so uploads
@@ -135,11 +218,9 @@ RPC_PORT="${RPC_PORT:-6800}" IRIS_ROOT=/opt/iris IRIS_LOG="$IRIS_LOG" \
 # the per-device PKI trustpoint the installer pushes first. No auth here — the
 # trustpoint gives confidentiality + server-auth and the payload IS the
 # credential bundle (transport-security only; nothing installed/activated/reloaded).
-mkdir -p "$IRIS_ARTIFACTS_DIR" 2>/dev/null || true
 # staging/ holds the ephemeral per-device configs gui_onboard.py
 # (IRIS_STAGE_LOCAL=1) writes when the console is co-located with this artifact
 # server; artifact_server.py sweeps them after STAGING_MAX_AGE_SECONDS.
-mkdir -p "${IRIS_ARTIFACTS_DIR:-/srv/artifacts}/staging" 2>/dev/null || true
 # Log to the container log like the other services — discarding stdout/stderr
 # here hides artifact-server startup/serving failures (the device fetches its
 # agent bundle + per-device conf from this port, so silent failures matter).
@@ -153,11 +234,7 @@ python3 gui_server.py & G=$!
 PIDS=("$T" "$C" "$S" "$A" "$G")
 
 echo "iris container up: tracker :6969  catalog :8443 (https)  artifacts :8000 (https)  console :8080 (https)  seeder rpc :6800"
-if wait -n "$T" "$C" "$S" "$A" "$G"; then
-  :
-else
-  :
-fi
+wait -n "$T" "$C" "$S" "$A" "$G" || true
 echo "an iris service exited — stopping container" >&2
 stop_services
 exit 1

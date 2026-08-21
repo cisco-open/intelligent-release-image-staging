@@ -75,6 +75,14 @@ writable non-crash disk; otherwise it logs the fallback and retains automatic
 platform selection. `device/iox/install.sh` exposes this as `TARGET_FS` and
 defaults it to `sdflash:`.
 
+When `TARGET_FS` is `sdflash:` (the IE3x00 default), the installer checks
+`show sdflash: filesys` for an IOx partition before applying any config and
+fails closed with a `PREREQ:` line if the SD card was never formatted for
+IOx. The installer also checks `ip routing` on a routed attachment (see
+[Management type and VLAN ownership](network-attachment.md#routed-iris-managed-app-network))
+and warns — without blocking — on a device clock old enough to break TLS
+certificate validation.
+
 ## Build modes
 
 ```bash
@@ -89,9 +97,18 @@ IOX_ARCH=amd64 PACKAGE_NAME=iris-amd64.tar \
   CATALOG_PEM=/path/to/iris-catalog.pem device/iox/build.sh device/iox/out
 ```
 
-The clean-clone build path downloads a pinned architecture-matched static
-`aria2c` when no local bundle is available and fails if its SHA-256 digest
-differs. For package builds, `tools/stage-iox-package.sh` downloads Cisco's
+`device/iox/build.sh` never downloads `aria2c`. The binary is a handed-in
+deliverable, produced elsewhere by the aria2-next-static project and only
+verified here — never fetched from a third party, never built in this
+repository (`tools/get-aria2c.sh` and `tools/aria2c.sha256` document the same
+producer/consumer split and the same verify-or-fail idiom the build uses
+internally). It resolves an architecture-matched `aria2c` in order:
+`ARIA2C_BIN` if set, else the matching local agent bundle
+(`artifacts/iris-agent-arm.tgz` or `iris-agent.tgz`, whose `aria2c` is still
+checksum-verified — a bundle's provenance is not otherwise pinned), else
+`deliverables/aria2c-<arch>` checksum-verified against `tools/aria2c.sha256`.
+With none of those present the build hard-errors; there is no network
+fallback. For package builds, `tools/stage-iox-package.sh` downloads Cisco's
 pinned Linux amd64 `ioxclient` release to git-ignored `tools/bin/` on first use;
 set `IOXCLIENT` to use an existing installation instead.
 
@@ -121,8 +138,10 @@ and places the result in `/srv/artifacts`. When the served host directory is not
 writable by the invoking user — the normal case, since the server runs as uid
 10001 and its artifacts directory is owned by that uid — the helper places the
 package with `docker cp` rather than requiring a host ownership change. On an
-amd64 server, the arm64 build automatically registers Docker's ARM64 emulation
-handler when it is missing.
+amd64 server, the arm64 build registers Docker's ARM64 emulation handler when
+it is missing, using the audited `tonistiigi/binfmt` image digest supplied via
+the required `BINFMT_IMAGE_DIGEST` environment variable; with the digest unset
+the build fails closed rather than pull an unpinned image.
 
 Rebuild both packages after rotating the server certificate, because each
 package contains the pinned catalog certificate. The helper only builds and

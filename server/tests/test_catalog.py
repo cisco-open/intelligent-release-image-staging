@@ -66,6 +66,39 @@ def test_store_heartbeat_and_policy(tmp_path):
                                     "install_allowed": True}
 
 
+def test_set_policy_serializes_with_image_deletion_across_processes(tmp_path):
+    """set_policy's image-existence check must serialize with image deletion
+    through an OS-level lock, not a process-local RLock: `docker exec ...
+    iris-assign` is a SEPARATE Python process, so only a shared lock file
+    stops it from validating an image a concurrent console delete is
+    removing, then persisting a dangling assignment afterward.
+
+    The test plays the deleting process: it holds the image-policy flock,
+    fires set_policy on a thread (a stand-in for the other process — flock
+    on a fresh fd blocks either way), commits the delete, releases, and
+    expects the assignment to have been rejected, not persisted."""
+    s = _store(tmp_path)
+    result = {}
+
+    def assign():
+        try:
+            s.set_policy("sw-1", approved_image_id="img1")
+            result["outcome"] = "assigned"
+        except ValueError:
+            result["outcome"] = "rejected"
+
+    with s.image_policy_lock():
+        t = threading.Thread(target=assign)
+        t.start()
+        time.sleep(0.3)   # let set_policy reach (and block on) the lock
+        # the delete commits while the lock is held
+        s.delete_image("img1")
+    t.join(timeout=5)
+
+    assert result.get("outcome") == "rejected"
+    assert s.get_policy("sw-1")["approved_image_id"] is None
+
+
 def test_forget_device_drops_heartbeat_leaves_policy(tmp_path):
     s = _store(tmp_path)
     s.record_heartbeat("sw-1", {"current_image_id": "img1",
@@ -80,6 +113,26 @@ def test_forget_device_drops_heartbeat_leaves_policy(tmp_path):
     # idempotent: forgetting an unknown / already-forgotten device is False
     assert s.forget_device("sw-1") is False
     assert s.forget_device("never-seen") is False
+
+
+def test_purge_device_clears_all_state(tmp_path):
+    s = _store(tmp_path)
+    s.record_heartbeat("sw-1", {"current_image_id": "img1",
+                                "stage_state": "ready"}, now=222)
+    s.set_policy("sw-1", approved_image_id="img1", install_allowed=True)
+    s.record_telemetry("sw-1", {"event": "staging-complete"})
+    s.request_report("sw-1", now=1000)
+    assert s.purge_device("sw-1") is True
+    # deleted-and-re-added devices must come back unassigned: EVERY
+    # per-device store is emptied, unlike forget_device()
+    assert s.get_device("sw-1") is None
+    assert s.get_policy("sw-1") == {"approved_image_id": None,
+                                    "install_allowed": False}
+    assert s.get_telemetry("sw-1") == []
+    assert s.pending_report("sw-1", now=1001) is False
+    # idempotent on a purged / never-seen device
+    assert s.purge_device("sw-1") is False
+    assert s.purge_device("never-seen") is False
 
 
 def test_heartbeat_stores_stage_state(tmp_path):

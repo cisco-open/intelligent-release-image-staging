@@ -58,6 +58,15 @@ setup() {
   [[ "$output" != *"target_fs = flash:"* ]]
 }
 
+@test "router dry-run uses one capability for both credential filenames" {
+  run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  conf_cap="$(printf '%s\n' "$output" | sed -nE 's#.*staging/iris-agent-router-1-([0-9a-f]{32})\.conf.*#\1#p' | head -1)"
+  rpc_cap="$(printf '%s\n' "$output" | sed -nE 's#.*staging/rpc-secret-([0-9a-f]{32}).*#\1#p' | head -1)"
+  [ -n "$conf_cap" ]
+  [ "$conf_cap" = "$rpc_cap" ]
+}
+
 @test "router installer refuses a non-Catalyst-8000 model" {
   MODEL=ISR4451 run bash "$INSTALL" --dry-run
   [ "$status" -ne 0 ]
@@ -87,4 +96,33 @@ setup() {
   grep -qF 'show running-config' "$INSTALL"
   grep -qF 'config_block "VirtualPortGroup$VPG_NUMBER"' "$INSTALL"
   grep -qF 'router configuration is incomplete' "$INSTALL"
+}
+
+@test "re-onboard destroys a pre-existing guestshell before applying config" {
+  # 2026-08-20 incident (iris8kv-1/-2): a re-onboard over a guestshell that was
+  # already RUNNING left it on its OLD networking — step [4/7] saw RUNNING and
+  # never re-enabled, so the freshly applied app-hosting gateway never reached
+  # the guest and the agent had no egress. The installer must destroy any
+  # pre-existing guestshell BEFORE applying config so enable always builds the
+  # guest from the current networking.
+  run grep -n 'guestshell destroy' "$INSTALL"
+  [ "$status" -eq 0 ]
+  destroy_line="$(grep -n 'guestshell destroy' "$INSTALL" | head -1 | cut -d: -f1)"
+  config_line="$(grep -n '^echo "\[3/7\] apply IOS config' "$INSTALL" | head -1 | cut -d: -f1)"
+  enable_line="$(grep -n '^echo "\[4/7\] guestshell enable' "$INSTALL" | head -1 | cut -d: -f1)"
+  [ -n "$destroy_line" ] && [ -n "$config_line" ] && [ -n "$enable_line" ]
+  [ "$destroy_line" -lt "$config_line" ]
+  [ "$config_line" -lt "$enable_line" ]
+  # the destroy must wait for the guest to actually be gone, not fire-and-forget
+  run grep -A8 'guestshell destroy' "$INSTALL"
+  [[ "$output" == *"DESTROYED"* || "$output" == *"still present"* ]]
+}
+
+@test "guestshell destroy answers the confirmation prompt (cross-version)" {
+  # Some IOS-XE versions prompt "Undeploy Guest Shell? [y/n]"; without the y
+  # the destroy never runs, the poll loop burns its full two minutes, and the
+  # install fails with the stale guest intact. Both uninstallers already send
+  # the answer for exactly this reason — the installer's destroy must match.
+  run grep -F "printf 'guestshell destroy\ny\n'" "$INSTALL"
+  [ "$status" -eq 0 ]
 }

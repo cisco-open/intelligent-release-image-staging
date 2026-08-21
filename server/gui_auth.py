@@ -12,12 +12,69 @@ import hashlib
 import hmac
 import secrets
 import threading
+import time
 
 _SCRYPT_N = 65536      # 2**16 — this admin credential gates full fleet control; aligns with current OWASP guidance for interactive logins
 _SCRYPT_R = 8
 _SCRYPT_P = 1
 _SCRYPT_DKLEN = 32
 _SCRYPT_MAXMEM = 128 * 1024 * 1024  # headroom for n*r*128 (~64 MB)
+# Two simultaneous scrypts consume roughly 128 MiB.  Reject excess work rather
+# than queueing it on the unbounded ThreadingHTTPServer and exhausting RAM.
+_PASSWORD_VERIFY_SLOTS = threading.BoundedSemaphore(2)
+
+
+class LoginRateLimiter:
+    """Per-IP and fleet-wide exponential login backoff (in-memory)."""
+
+    def __init__(self, per_ip_free=3, global_free=20, max_delay=60,
+                 window=300, now_fn=time.monotonic):
+        # A short per-source allowance avoids penalising typos; the larger
+        # global allowance still stops distributed scrypt floods.
+        self.per_ip_free = per_ip_free
+        self.global_free = global_free
+        self.max_delay = max_delay
+        self.window = window
+        self._now = now_fn
+        self._lock = threading.Lock()
+        self._sources = {}
+        self._global = [0, 0.0, self._now()]
+
+    def retry_after(self, source):
+        now = self._now()
+        with self._lock:
+            self._expire(now)
+            source_until = self._sources.get(source, (0, 0.0, now))[1]
+            return max(0, int(max(source_until, self._global[1]) - now + 0.999))
+
+    def failure(self, source):
+        now = self._now()
+        with self._lock:
+            self._expire(now)
+            count, _until, _started = self._sources.get(source, (0, 0.0, now))
+            count += 1
+            delay = self._delay(count, self.per_ip_free)
+            self._sources[source] = (count, now + delay, now)
+            self._global[0] += 1
+            global_delay = self._delay(self._global[0], self.global_free)
+            self._global[1] = now + global_delay
+
+    def success(self, source):
+        with self._lock:
+            self._sources.pop(source, None)
+
+    def _delay(self, count, free):
+        if count <= free:
+            return 0
+        return min(self.max_delay, 2 ** (count - free - 1))
+
+    def _expire(self, now):
+        self._sources = {
+            source: state for source, state in self._sources.items()
+            if now - state[2] < self.window
+        }
+        if now - self._global[2] >= self.window:
+            self._global = [0, 0.0, now]
 
 
 def hash_password(password):
@@ -42,9 +99,14 @@ def verify_password(encoded, password):
         expected = bytes.fromhex(hash_hex)
     except (ValueError, AttributeError):
         return False
-    dk = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=n, r=r, p=p,
-                        dklen=len(expected), maxmem=_SCRYPT_MAXMEM)
-    return hmac.compare_digest(dk, expected)
+    if not _PASSWORD_VERIFY_SLOTS.acquire(blocking=False):
+        return False
+    try:
+        dk = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=n, r=r, p=p,
+                            dklen=len(expected), maxmem=_SCRYPT_MAXMEM)
+        return hmac.compare_digest(dk, expected)
+    finally:
+        _PASSWORD_VERIFY_SLOTS.release()
 
 
 # ---------------------------------------------------------------------------

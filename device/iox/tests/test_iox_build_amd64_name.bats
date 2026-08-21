@@ -35,3 +35,36 @@ setup() { BUILD="$BATS_TEST_DIRNAME/../build.sh"; }
   run bash "$BUILD" --nope
   [ "$status" -eq 2 ]
 }
+
+# CAF-compatible packaging: engines on the containerd image store make
+# `docker save` (and `ioxclient docker package`) emit OCI-layout archives with
+# buildx attestation manifests; IE3x00 CAF (dockerd 19.03) then installs and
+# activates the app but refuses to start it. build.sh must export a classic
+# docker-archive rootfs.tar itself and package the directory.
+
+@test "build.sh exports rootfs.tar via skopeo docker-archive" {
+  run grep -F -- 'skopeo copy "docker-daemon:$IMAGE_TAG" "docker-archive:$CTX/rootfs.tar:$IMAGE_TAG"' "$BUILD"
+  [ "$status" -eq 0 ]
+}
+
+@test "build.sh requires skopeo with an actionable message" {
+  run grep -F 'skopeo is required' "$BUILD"
+  [ "$status" -eq 0 ]
+}
+
+@test "build.sh rejects OCI-index rootfs archives" {
+  run grep -F 'grep -qx "index.json"' "$BUILD"
+  [ "$status" -eq 0 ]
+}
+
+@test "build.sh fails closed on attestation manifests in rootfs.tar" {
+  run grep -F 'attestation-manifest' "$BUILD"
+  [ "$status" -eq 0 ]
+}
+
+@test "build.sh packages the staged directory, not a daemon-side save" {
+  run grep -F '"$IOXCLIENT" package .' "$BUILD"
+  [ "$status" -eq 0 ]
+  run grep -F '"$IOXCLIENT" docker package' "$BUILD"
+  [ "$status" -ne 0 ]
+}

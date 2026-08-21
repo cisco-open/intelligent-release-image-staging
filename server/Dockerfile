@@ -10,7 +10,11 @@
 #
 # The alpha server image is intentionally amd64: the static aria2c copied into
 # the Guest Shell bundle must match the x86_64 Catalyst platforms it serves.
+# ---------------------------------------------------------------------------
+# The IRIS server image.
+# ---------------------------------------------------------------------------
 FROM python:3.12-slim-bookworm
+
 
 ARG TARGETARCH
 RUN case "${TARGETARCH:-amd64}" in \
@@ -27,17 +31,38 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends mktorrent openssl curl ca-certificates unzip age openssh-client sshpass iproute2 \
     && rm -rf /var/lib/apt/lists/*
 
-# Static (musl) aria2c — the BitTorrent seeder. Version + checksum pinned here;
-# the build FAILS CLOSED on any mismatch.
-ARG ARIA2_VERSION=1.37.0
-ARG ARIA2_SHA256=e0a09b12ef67f35f8a8e4fdddbec851d235b7c31da549d0578bff459032b499a
+# Static (musl) aria2c — the BitTorrent seeder.
+#
+# HANDED IN, not downloaded and not built here. The binary is produced by the
+# aria2-next-static project, which owns the source pin, patch set and build
+# flags, and is installed into bin/ by tools/get-aria2c.sh, which verifies it
+# against tools/aria2c.sha256 and fails closed on a mismatch.
+#
+# Run tools/get-aria2c.sh before building this image, or the COPY below fails.
+COPY bin/aria2c /opt/iris/bin/aria2c
+COPY tools/aria2c.sha256 /opt/iris/tools/aria2c.sha256
+
+# Fail the build rather than ship a client that is not the manifest-pinned
+# handed-in build, or that would not run in the device Guest Shell: it must
+# match the x86_64 entry in tools/aria2c.sha256 (running get-aria2c.sh
+# beforehand is only a convention — the pin is enforced HERE, so a stale or
+# substituted bin/aria2c cannot be baked in silently), be executable, and be
+# statically linked.
 RUN set -eux; \
-    curl -fsSL -o /tmp/aria2.zip \
-      "https://github.com/abcfy2/aria2-static-build/releases/download/${ARIA2_VERSION}/aria2-x86_64-linux-musl_static.zip"; \
-    echo "${ARIA2_SHA256}  /tmp/aria2.zip" | sha256sum -c -; \
-    unzip -o /tmp/aria2.zip -d /tmp/aria2; \
-    install -D -m 0755 "$(find /tmp/aria2 -name aria2c -type f | head -n1)" /opt/iris/bin/aria2c; \
-    rm -rf /tmp/aria2.zip /tmp/aria2
+    chmod 0755 /opt/iris/bin/aria2c; \
+    expected="$(awk '$2 == "x86_64" {print $1}' /opt/iris/tools/aria2c.sha256)"; \
+    test -n "$expected"; \
+    actual="$(sha256sum /opt/iris/bin/aria2c | awk '{print $1}')"; \
+    if [ "$actual" != "$expected" ]; then \
+      echo "FAIL: bin/aria2c sha256 $actual does not match the x86_64 entry in tools/aria2c.sha256 ($expected) — run tools/get-aria2c.sh" >&2; \
+      exit 1; \
+    fi; \
+    /opt/iris/bin/aria2c --version >/dev/null; \
+    if ldd /opt/iris/bin/aria2c 2>&1 | grep -qiv 'not a dynamic executable'; then \
+      echo "FAIL: /opt/iris/bin/aria2c is not statically linked" >&2; \
+      ldd /opt/iris/bin/aria2c 2>&1 || true; exit 1; \
+    fi
+
 
 WORKDIR /opt/iris
 COPY server/ /opt/iris/server/

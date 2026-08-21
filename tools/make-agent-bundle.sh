@@ -12,12 +12,35 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEVICE="$REPO_ROOT/device"
 ARIA2="$REPO_ROOT/bin/aria2c"
+EXPECTED_ARIA2_ARCH="x86-64"
 
 say() { printf '%s\n' "$*"; }
 ask() {                      # ask "Question" "default"  ->  prints the answer
   local q="$1" def="$2" ans=""
   if [ -t 0 ]; then read -rp "$q [$def]: " ans || true; fi
   printf '%s' "${ans:-$def}"
+}
+
+verify_aria2() {
+  local description="$1" file_out expected actual sums
+  command -v file >/dev/null 2>&1 \
+    || { say "  cannot verify $description: 'file' is required"; return 1; }
+  file_out="$(file -b "$ARIA2")"
+  [[ "$file_out" == *"ELF 64-bit"* && "$file_out" == *"$EXPECTED_ARIA2_ARCH"* \
+     && "$file_out" == *"statically linked"* ]] \
+    || { say "  $description is not an $EXPECTED_ARIA2_ARCH ELF binary: $file_out"; return 1; }
+  # The manifest is the pin, not the architecture: a stale or substituted
+  # x86-64 static binary passes the `file` check, so compare against the
+  # x86_64 entry in tools/aria2c.sha256 and fail closed on a mismatch —
+  # the same guarantee get-aria2c.sh and the IOx build path enforce.
+  sums="$REPO_ROOT/tools/aria2c.sha256"
+  expected="$(awk '$2 == "x86_64" {print $1}' "$sums" 2>/dev/null || true)"
+  [ -n "$expected" ] \
+    || { say "  cannot verify $description: no x86_64 entry in $sums"; return 1; }
+  actual="$( (shasum -a 256 "$ARIA2" 2>/dev/null || sha256sum "$ARIA2") | awk '{print $1}')"
+  [ "$actual" = "$expected" ] \
+    || { say "  $description sha256 $actual does not match the x86_64 entry in tools/aria2c.sha256 ($expected)"
+         say "  run  tools/get-aria2c.sh  to install the pinned handed-in binary"; return 1; }
 }
 
 say ""
@@ -41,21 +64,27 @@ for f in "$DEVICE/agent/iris_agent.py" "$DEVICE/agent/catalog_client.py" \
   [ -f "$f" ] || { say "  missing: $f"; missing=1; }
 done
 if [ ! -f "$ARIA2" ]; then
-  # try to borrow the binary from the built server image first (no extra download)
-  if command -v docker >/dev/null 2>&1 && docker image inspect iris:latest >/dev/null 2>&1; then
-    say "  bin/aria2c missing — extracting it from the iris:latest image..."
+  # Require an immutable image reference rather than silently using a stale
+  # local tag. The extracted binary is verified below before it is bundled.
+  IRIS_IMAGE="${IRIS_IMAGE:-}"
+  if command -v docker >/dev/null 2>&1 && [[ "$IRIS_IMAGE" == *@sha256:* ]] \
+      && docker image inspect "$IRIS_IMAGE" >/dev/null 2>&1; then
+    say "  bin/aria2c missing — extracting it from $IRIS_IMAGE..."
     mkdir -p "$(dirname "$ARIA2")"
-    cid="$(docker create iris:latest)"
+    cid="$(docker create --platform linux/amd64 "$IRIS_IMAGE")"
     docker cp "$cid:/opt/iris/bin/aria2c" "$ARIA2" >/dev/null
     docker rm "$cid" >/dev/null
     chmod +x "$ARIA2"
     say "  got it."
   else
-    say "  The aria2c program is not here yet (bin/aria2c), and no iris:latest"
-    say "  docker image to borrow it from. Either build the server image first, or"
+    say "  The aria2c program is not here yet (bin/aria2c), and no immutable IRIS_IMAGE"
+    say "  image reference is available. Set IRIS_IMAGE=name@sha256:<digest>, or"
     say "  run  tools/get-aria2c.sh  — then start me again."
     missing=1
   fi
+fi
+if [ -f "$ARIA2" ] && ! verify_aria2 "$ARIA2"; then
+  missing=1
 fi
 if [ "$missing" -eq 1 ]; then
   say ""; say "Please fix the item(s) above and run me again."; exit 1
@@ -78,7 +107,10 @@ say "Packing the bundle..."
 cp "$DEVICE/bootstrap.sh" "$(dirname "$OUT")/bootstrap.sh"
 
 SIZE="$(du -h "$OUT" | awk '{print $1}')"
-HOST_IP="$( (hostname -I 2>/dev/null | awk '{print $1}') || ipconfig getifaddr en0 2>/dev/null || true )"
+# hostname -I is Linux-only; on macOS the failing pipeline must not kill the
+# script under pipefail — the ipconfig fallback below handles the empty value
+HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+[ -n "$HOST_IP" ] || HOST_IP="$(ipconfig getifaddr en0 2>/dev/null || true)"
 [ -z "${HOST_IP:-}" ] && HOST_IP="<this-host-ip>"
 say "  Done:  $OUT  ($SIZE)"
 say ""

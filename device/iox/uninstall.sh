@@ -118,7 +118,7 @@ printf 'app-hosting deactivate appid %s\n' "$APPID" | RUN >/dev/null 2>&1 || tru
 sleep 4
 printf 'app-hosting uninstall appid %s\n' "$APPID" | RUN >/dev/null 2>&1 || true
 # Poll until the app-hosting entry is gone (uninstall is async).
-for i in $(seq 1 24); do
+for _ in $(seq 1 24); do
   [ -z "$(app_state)" ] && break
   sleep 5
 done

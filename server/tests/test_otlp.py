@@ -2,7 +2,16 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import http.server
+import os
+import ssl
+import subprocess
+import threading
+
+import pytest
+
 import otlp
+import trust
 
 
 def test_build_log_record_maps_core_fields():
@@ -295,3 +304,104 @@ class TestDefaultResource:
         assert res["service.name"] == "iris-tracker"
         assert res["service.namespace"] == "iris"
         assert res["service.version"] and res["service.version"] != ""
+
+
+# ---- trust-store wiring: _http_post verifies via trust.ssl_context() ------
+
+def _throwaway_cert(dirpath):
+    """Self-signed cert with SAN=IP:127.0.0.1 (the test_artifact_server
+    idiom). Returns (crt, combined)."""
+    crt = os.path.join(str(dirpath), "crt.pem")
+    key = os.path.join(str(dirpath), "key.pem")
+    combined = os.path.join(str(dirpath), "cert.pem")
+    subprocess.run(
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+         "-days", "2", "-keyout", key, "-out", crt, "-subj", "/CN=collector",
+         "-addext", "subjectAltName=IP:127.0.0.1"],
+        check=True, capture_output=True)
+    with open(combined, "w") as f:
+        with open(crt) as c:
+            f.write(c.read())
+        with open(key) as k:
+            f.write(k.read())
+    return crt, combined
+
+
+def _tls_collector(combined, redirect=False):
+    """Local https 'collector': 200 on POST (or a 302 when redirect=True)."""
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            if redirect:
+                self.send_response(302)
+                self.send_header("Location", "https://127.0.0.1:9/elsewhere")
+            else:
+                self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(combined)
+    srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+class TestTrustStoreWiring:
+    """_http_post must verify against trust.ssl_context() (system roots PLUS
+    the IRIS bundle): a private-CA collector works once its root is
+    installed, stays refused when it is not, and the redirect refusal
+    survives the change (spec feature A2)."""
+
+    @pytest.fixture(autouse=True)
+    def _trust_env(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("IRIS_TRUST_DIR", str(tmp_path / "trust"))
+        monkeypatch.setenv("IRIS_CA_BUNDLE",
+                           str(tmp_path / "run" / "ca-bundle.pem"))
+
+    def test_accepts_private_ca_once_root_installed(self, tmp_path):
+        crt, combined = _throwaway_cert(tmp_path)
+        srv = _tls_collector(combined)
+        try:
+            with open(crt) as f:
+                trust.add_pem(f.read())
+            url = "https://127.0.0.1:%d/v1/logs" % srv.server_address[1]
+            otlp._http_post(url, b"{}")          # must not raise
+        finally:
+            srv.shutdown()
+
+    def test_refused_while_root_not_installed(self, tmp_path):
+        _, combined = _throwaway_cert(tmp_path)
+        srv = _tls_collector(combined)
+        try:
+            url = "https://127.0.0.1:%d/v1/logs" % srv.server_address[1]
+            with pytest.raises(RuntimeError):
+                otlp._http_post(url, b"{}")
+        finally:
+            srv.shutdown()
+
+    def test_redirect_refusal_survives_trust_wiring(self, tmp_path):
+        crt, combined = _throwaway_cert(tmp_path)
+        srv = _tls_collector(combined, redirect=True)
+        try:
+            with open(crt) as f:
+                trust.add_pem(f.read())
+            url = "https://127.0.0.1:%d/v1/logs" % srv.server_address[1]
+            with pytest.raises(RuntimeError):
+                otlp._http_post(url, b"{}")      # 3xx is an export failure
+        finally:
+            srv.shutdown()
+
+    def test_trust_context_failure_is_caught_and_wrapped(self, monkeypatch):
+        """If trust.ssl_context() raises (unreadable bundle, ssl error),
+        the exception must be caught and wrapped in the generic RuntimeError,
+        not escape as a raw exception."""
+        monkeypatch.setattr(trust, "ssl_context",
+                           lambda: (_ for _ in ()).throw(
+                               ssl.SSLError("boom")))
+        with pytest.raises(RuntimeError, match="OTLP POST to"):
+            otlp._http_post("https://collector.local/v1/logs", b"{}")

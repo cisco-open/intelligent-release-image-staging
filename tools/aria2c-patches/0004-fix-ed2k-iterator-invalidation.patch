@@ -1,0 +1,38 @@
+diff --git a/src/Ed2kAttribute.cc b/src/Ed2kAttribute.cc
+index eb52cfee..9181cf2f 100644
+--- a/src/Ed2kAttribute.cc
++++ b/src/Ed2kAttribute.cc
+@@ -769,6 +769,13 @@ size_t removeEd2kPeerCompletedRequestedRange(Ed2kAttribute* attrs,
+   size_t updated = 0;
+   std::vector<ed2k::PartRange> removedRanges;
+   std::vector<ed2k::PartRange> addedRanges;
++  // Tails produced by splitting a range are collected here and appended after
++  // the loop. push_back() on state->requestedParts while the range-for below is
++  // iterating it would reallocate the vector, dangling both `range` and the
++  // loop's cached begin/end iterators. A peer reaches the splitting branch by
++  // sending OP_SENDINGPART for a byte range strictly inside an outstanding
++  // request, which is not otherwise rejected.
++  std::vector<ed2k::PartRange> pendingTails;
+   for (auto& range : state->requestedParts) {
+     if (end <= range.begin || begin >= range.end) {
+       continue;
+@@ -788,7 +795,7 @@ size_t removeEd2kPeerCompletedRequestedRange(Ed2kAttribute* attrs,
+       tail.end = range.end;
+       range.end = begin;
+       addedRanges.push_back(range);
+-      state->requestedParts.push_back(tail);
++      pendingTails.push_back(tail);
+       addedRanges.push_back(tail);
+     }
+     else {
+@@ -796,6 +803,10 @@ size_t removeEd2kPeerCompletedRequestedRange(Ed2kAttribute* attrs,
+     }
+     ++updated;
+   }
++  // Safe now that iteration has finished. Appended before the compaction below
++  // so tails are subject to the same zero-length filtering as everything else.
++  state->requestedParts.insert(state->requestedParts.end(),
++                               pendingTails.begin(), pendingTails.end());
+   state->requestedParts.erase(
+       std::remove_if(state->requestedParts.begin(), state->requestedParts.end(),
+                      [](const ed2k::PartRange& range) {

@@ -49,7 +49,11 @@ if [ ! -f "$CONF" ]; then
   : "${IRIS_DEVICE_SSH_USER:?set IRIS_DEVICE_SSH_USER to the IOS SSH user}"
   : "${IRIS_DEVICE_SSH_PASS:?set IRIS_DEVICE_SSH_PASS to the IOS SSH password}"
   echo "IRIS-ENTRYPOINT: no conf at $CONF; generating from environment"
-  tmp="${CONF}.tmp.$$"
+  # mktemp creates the file without following a pre-created symlink; keep it
+  # beside CONF so rename is atomic on the persistent filesystem.
+  tmp="$(mktemp "$(dirname "$CONF")/.iris-agent.conf.XXXXXX")"
+  chmod 600 "$tmp"
+  trap 'rm -f "$tmp"' EXIT HUP INT TERM
   {
     echo "catalog_url = ${IRIS_CATALOG_URL}"
     echo "catalog_token = ${IRIS_CATALOG_TOKEN}"
@@ -72,8 +76,8 @@ if [ ! -f "$CONF" ]; then
     echo "share_ios_path = ${IRIS_SHARE_IOS_PATH:-}"
     echo "agent_version = $(cat /opt/iris/agent/VERSION 2>/dev/null || echo unknown)"
   } > "$tmp"
-  chmod 600 "$tmp"
   mv -f "$tmp" "$CONF"
+  trap - EXIT HUP INT TERM
 fi
 chmod 600 "$CONF" 2>/dev/null || true
 
@@ -96,9 +100,16 @@ fi
 # Same operator-intent rule for the telemetry toggles: a console redeploy that
 # flips reports or streaming must take effect on a device with an existing
 # conf (spec section 5.5) — both keys reconcile, deploy-time env wins.
-. /opt/iris/agent/../reconcile.sh 2>/dev/null || . "$(dirname "$0")/reconcile.sh"
+. "$(dirname "$0")/reconcile.sh"
 reconcile_conf_key telemetry "${IRIS_TELEMETRY:-}"
 reconcile_conf_key telemetry_stream "${IRIS_TELEMETRY_STREAM:-}"
+# agent_version is a fact about the IMAGE, not operator state: after a package
+# upgrade a persistent conf still carries the previous build's number and every
+# telemetry report mis-states what is actually running (field observation
+# 2026-08-20: the 3400 kept reporting 2026.07.26 from a pre-release-cut
+# package). The baked VERSION file wins on every start.
+reconcile_conf_key agent_version \
+  "$(cat /opt/iris/agent/VERSION 2>/dev/null || echo unknown)"
 
 # --- 2/3. aria2c supervisor + agent tick loop ----------------------------------
 read_secret() {
@@ -118,6 +129,16 @@ start_aria2c() {
     --file-allocation=none --dir="$STAGE_DIR" \
     --log-level=warn --summary-interval=0 \
     && echo "IRIS-ENTRYPOINT: aria2c (re)started on :$RPC_PORT"
+}
+
+rpc_healthy() {
+  # Liveness is not health: an aria2c that is running but not answering RPC
+  # blocks its own relaunch, and the agent then fails every tick on
+  # ECONNREFUSED without ever heartbeating (field incident 2026-08-20, Guest
+  # Shell; this supervisor had the identical condition). Ask the RPC itself.
+  curl -s --max-time 3 "http://127.0.0.1:$RPC_PORT/jsonrpc" \
+    -d '{"jsonrpc":"2.0","id":"h","method":"aria2.getVersion","params":["token:'"$1"'"]}' \
+    >/dev/null 2>&1
 }
 
 AGENT_PID=""
@@ -142,7 +163,9 @@ cur=""
 while true; do
   want="$(read_secret)"
   [ -z "$want" ] && want="iris"          # placeholder until the agent fetches the real secret
-  if [ "$want" != "$cur" ] || ! pgrep -f 'aria2c.*enable-rpc' >/dev/null 2>&1; then
+  if [ "$want" != "$cur" ] \
+     || ! pgrep -f 'aria2c.*enable-rpc' >/dev/null 2>&1 \
+     || ! rpc_healthy "$want"; then
     start_aria2c "$want" && cur="$want"
   fi
   # Keep foreground work as tracked children. POSIX shells defer traps while a

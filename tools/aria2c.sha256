@@ -1,0 +1,20 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+# aria2c deliverable — produced by the aria2-next-static project.
+# NOT downloaded. NOT built here. Handed in as a binary artifact.
+#
+# aria2-next version : 2.5.6
+# source pin         : d4971f0e12322e2ffcdb1721911b7d5c6206d0e5
+# patches applied    : 4
+#   - 0001-getpeers-keys-filter.patch
+#   - 0002-fix-uaf-peer-blocklist-disconnect.patch
+#   - 0003-fix-pkcs12-chain-type-confusion.patch
+#   - 0004-fix-ed2k-iterator-invalidation.patch
+#
+# tools/get-aria2c.sh verifies the handed-in binary against these
+# checksums and FAILS CLOSED on a mismatch, so a stale client cannot
+# silently ship. Update this file only when adopting a new build.
+0e16b7ab3bfa69f8ad3fd893e8501b479531e6afe98ea7eaf34464df3aed8849  x86_64
+22d119b76199eaa084aa37318202d8005ef952ad9ccd10e3ccf74cbb5a7324be  aarch64

@@ -343,6 +343,146 @@ def test_device_form_has_model_field():
     assert "model:" in js
 
 
+def test_settings_tls_trust_and_destination_sections_wired():
+    """Source guards for the 2026-08-19 TLS/trust/telemetry-destination spec:
+    the Settings view gains three sections — Certificate (replace/revert the
+    console cert), Trusted CAs (install/remove CA PEMs + public-bundle
+    download with job polling), Telemetry destination (editable OTLP
+    override). Conventions pinned: jpost + csrfHdr on every mutation, one
+    solid .btn per form (the ca-form has none — Add CA is that section's
+    primary), danger links confirm with consequence-naming text, no inline
+    handlers/styles, key material never echoed or left in the DOM."""
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    # section headings, in the Settings view
+    settings = html.split('id="view-settings"')[1].split("</section>")[0]
+    assert "<h3>Certificate</h3>" in settings
+    assert "<h3>Trusted CAs</h3>" in settings
+    assert "<h3>Telemetry destination</h3>" in settings
+    # element inventory (the global orphan guard checks the JS side)
+    for el in ('id="cert-status"', 'id="cert-form"', 'id="cert-pem"',
+               'id="cert-key"', 'id="cert-msg"', 'id="cert-revert"',
+               'id="trust-tbl"', 'id="trust-rows"', 'id="trust-form"',
+               'id="trust-pem"', 'id="trust-msg"', 'id="ca-form"',
+               'id="ca-url"', 'id="ca-auto"', 'id="ca-msg"',
+               'id="ca-refresh"', 'id="td-status"', 'id="td-form"',
+               'id="td-endpoint"', 'id="td-enabled"', 'id="td-msg"',
+               'id="td-revert"'):
+        assert el in settings, el
+    # revert affordances start hidden — no flash before the first render
+    assert 'id="cert-revert" hidden' in settings
+    assert 'id="td-revert" hidden' in settings
+    # one solid button per form; auxiliaries are ghost or linkish.
+    # ('class="btn"' does NOT substring-match 'class="btn ghost"'.)
+    cert_form = settings.split('id="cert-form"')[1].split('</form>')[0]
+    assert cert_form.count('class="btn"') == 1            # Replace certificate
+    assert 'class="linkish danger-link"' in cert_form     # Use built-in cert
+    trust_form = settings.split('id="trust-form"')[1].split('</form>')[0]
+    assert trust_form.count('class="btn"') == 1           # Add CA
+    ca_form = settings.split('id="ca-form"')[1].split('</form>')[0]
+    assert ca_form.count('class="btn"') == 0              # no second primary
+    assert ca_form.count('class="btn ghost"') == 2        # Save + Download now
+    td_form = settings.split('id="td-form"')[1].split('</form>')[0]
+    assert td_form.count('class="btn"') == 1              # Save
+    assert 'class="linkish danger-link"' in td_form       # Revert to default
+    # trust table columns: subject/expiry/fingerprint/source/count
+    assert ("<th>Subject</th><th>Expires</th><th>SHA-256</th>"
+            "<th>Source</th><th>Certs</th>") in settings
+    # the operator is told the key is write-only and that the bundle URL
+    # gates both download paths
+    assert "never shown again" in settings
+    assert "https:// URL" in settings
+    # CSP: still no inline styles or handlers anywhere in the page
+    assert " style=" not in html and "onclick=" not in html
+
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    # endpoint literals — POST via jpost (csrfHdr inside), DELETE via fetch
+    assert js.count("'/api/settings/gui-cert'") == 2          # POST + DELETE
+    assert "'/api/settings/trust'" in js                      # POST add
+    assert "'/api/settings/trust/' + encodeURIComponent(" in js   # DELETE row
+    assert "'/api/settings/ca-trust'" in js                   # POST config
+    assert "'/api/settings/ca-trust/refresh'" in js           # POST job start
+    assert "'/api/settings/ca-trust/refresh/' + encodeURIComponent(" in js
+    assert js.count("'/api/settings/telemetry-destination'") == 2
+    # every DELETE carries the CSRF header (4 pre-existing + 3 new)
+    assert js.count("{ method: 'DELETE', headers: csrfHdr() }") >= 7
+    # per-row remove is a danger link rendered into the trust table
+    assert "#trust-rows .trust-del" in js
+    assert "danger-link trust-del" in js
+    # destructive paths confirm with consequence-naming messages
+    assert "serves the bootstrap certificate again" in js     # cert revert
+    assert "stops trusting certificates issued" in js         # trust remove
+    assert "goes back to the environment configuration" in js # dest revert
+    # download-now polls the job like the image publish poller
+    assert "function pollCaRefresh(" in js
+    assert "j.state === 'failed'" in js
+    # settings render consumes the new GET blocks; the old read-only
+    # Observability row is gone (superseded by the editable block)
+    assert "s.gui_cert" in js and "s.trust" in js and "s.ca_trust" in js
+    assert "s.telemetry_destination" in js
+    assert "effective_endpoint" in js and "fingerprint_sha256" in js
+    assert "['Observability'" not in js
+    # key hygiene: submit posts the PEMs, success wipes the textareas
+    assert "cert_pem" in js and "key_pem" in js
+    assert "getElementById('cert-form').reset()" in js
+    # all 8 new audit events have human verbs (keys quoted — hyphens)
+    verbs = js.split("var AUDIT_VERBS = {")[1].split("};")[0]
+    for ev in ("gui-cert-replace", "gui-cert-revert", "trust-add",
+               "trust-remove", "ca-trust-config", "ca-trust-refresh",
+               "telemetry-destination-set", "telemetry-destination-clear"):
+        assert "'%s'" % ev in verbs, ev
+    # no inline on*= crept into the new JS-built markup
+    assert not re.search(r'\bon[a-z]+\s*=\s*["\']', js)
+
+    with open(os.path.join(gui_server.WEBROOT, "styles.css")) as f:
+        css = f.read()
+    assert ".inline-form textarea" in css
+
+
+def test_settings_uses_sidebar_feature_submenus():
+    """Source guard for the Settings navigation: the three feature sub-pages
+    (General / TLS & trust / Telemetry) are reached from an indented sidebar
+    sub-menu under Settings — deep-linkable as #settings/<sub> — not from an
+    in-page tab strip. Panes stay siblings inside #view-settings, toggled
+    with the `hidden` attribute; the sub-menu lives in the sidebar and is
+    revealed only while a settings sub-page is active."""
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    side = html.split('<nav class="side">')[1].split("</nav>")[0]
+    # the sub-menu container starts hidden (revealed by the router) and holds
+    # one deep-linkable entry per feature sub-page
+    assert 'id="settings-submenu" hidden' in side
+    for sub in ("general", "tls", "telemetry"):
+        assert ('id="nav-settings-%s"' % sub) in side, sub
+        assert ('href="#settings/%s"' % sub) in side, sub
+    settings = html.split('id="view-settings"')[1].split("</section>")[0]
+    # the old in-page tab strip is gone everywhere
+    assert "settings-tab" not in html
+    for pane_id in ("settings-pane-general", "settings-pane-tls", "settings-pane-telemetry"):
+        assert ('id="%s"' % pane_id) in settings, pane_id
+    # exactly one pane is visible in the static markup: General (the default)
+    hidden_panes = [p for p in ("settings-pane-general", "settings-pane-tls",
+                                 "settings-pane-telemetry")
+                    if ('id="%s" hidden' % p) in settings]
+    assert hidden_panes == ["settings-pane-tls", "settings-pane-telemetry"]
+    assert 'id="settings-pane-general" hidden' not in settings
+
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    # app.js builds the six ids by concatenation ('settings-pane-' + t) rather
+    # than spelling each one out, so assert the prefixes plus the sub-name
+    # array that drives the concatenation (mirrors the orphan guard's own
+    # getElementById/querySelector extraction, which only catches literals).
+    assert "'settings-pane-' + t" in js
+    assert "'nav-settings-' + t" in js
+    assert re.search(
+        r"SETTINGS_SUBS\s*=\s*\[\s*'general'\s*,\s*'tls'\s*,\s*'telemetry'\s*\]", js)
+    # the router owns sub-page selection: #settings/<sub> deep-links resolve
+    assert "showSettingsSub(" in js
+    assert "settings-submenu" in js
+
+
 def test_read_version_env_handling(monkeypatch):
     monkeypatch.setenv("IRIS_VERSION", " 2026.07.02\n")
     assert gui_server._read_version() == "2026.07.02"
@@ -554,6 +694,7 @@ def test_module_run_as_script_actually_starts_the_server(tmp_path):
     env["IRIS_STATE"] = str(tmp_path / "state")
     env["IRIS_IMAGES_DIR"] = str(tmp_path / "images")
     env["IRIS_CERT"] = "/nonexistent-so-plain-http"
+    env["IRIS_GUI_CERT"] = "/nonexistent-so-plain-http-too"
 
     proc = subprocess.Popen(
         [sys.executable, "gui_server.py"],
@@ -950,6 +1091,64 @@ def test_devices_crud_and_list_requires_auth(tmp_path):
         stop()
 
 
+def test_device_delete_purges_catalog_state(tmp_path):
+    # Deleting a device must clear its catalog-side state too — a device
+    # that is deleted and added back comes back UNASSIGNED, never with a
+    # resurrected stale assignment that would silently restage an image.
+    host, port, (_, _, _, cat), stop = _serve_full(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        dev = {"device_id": "d1", "device_ip": "10.0.0.1", "vlan": "666",
+               "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
+               "guest_ip": "10.0.0.3"}
+        st, _, _ = _req(host, port, "POST", "/api/devices", dev, headers=hh)
+        assert st == 200
+        cat.set_policy("d1", approved_image_id="img1", install_allowed=True)
+        cat.record_heartbeat("d1", {"current_image_id": "img1"}, now=1)
+        cat.record_telemetry("d1", {"event": "staging-complete"})
+        st, _, b = _req(host, port, "DELETE", "/api/devices/d1", headers=hh)
+        assert st == 200 and json.loads(b)["deleted"] is True
+        assert cat.get_policy("d1") == {"approved_image_id": None,
+                                        "install_allowed": False}
+        assert cat.get_device("d1") is None
+        assert cat.get_telemetry("d1") == []
+        st, _, _ = _req(host, port, "POST", "/api/devices", dev, headers=hh)
+        assert st == 200
+        assert cat.get_policy("d1")["approved_image_id"] is None
+    finally:
+        stop()
+
+
+def test_device_assign_empty_unassigns(tmp_path):
+    # Selecting the empty option in the console dropdown must UNASSIGN —
+    # before this, delete+re-add was the only way to clear an assignment.
+    host, port, (_, _, _, cat), stop = _serve_full(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, _ = _req(host, port, "POST", "/api/devices",
+                        {"device_id": "d1", "device_ip": "10.0.0.1", "vlan": "666",
+                         "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
+                         "guest_ip": "10.0.0.3"}, headers=hh)
+        assert st == 200
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_id": "img1"}, headers=hh)
+        assert st == 200
+        assert cat.get_policy("d1")["approved_image_id"] == "img1"
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_id": ""}, headers=hh)
+        assert st == 200 and json.loads(b)["ok"] is True
+        assert cat.get_policy("d1")["approved_image_id"] is None
+        # idempotent: unassigning an unassigned device is still ok
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_id": None}, headers=hh)
+        assert st == 200
+        assert cat.get_policy("d1")["approved_image_id"] is None
+    finally:
+        stop()
+
+
 def test_device_post_requires_csrf(tmp_path):
     host, port, _, stop = _serve_full(tmp_path)
     try:
@@ -1161,6 +1360,12 @@ def _serve_onboard(tmp_path, run_fn, **svc_kw):
                   "credential_profile_id": "lab"})
     creds = gui_creds.CredentialStore(secrets_path)
     creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
+    # These devices resolve to guestshell, which now gets a live job-start
+    # reachability probe (gui_onboard.py's onboard job-start gate) before
+    # run_fn is invoked. Default it to "reachable" so tests of unrelated
+    # onboard behavior keep exercising run_fn as before; a test of the gate
+    # itself would override probe_fn via svc_kw.
+    svc_kw.setdefault("probe_fn", lambda dev, env: "C9300")
     onboard = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
                                          mint_fn=lambda d: "TOK", run_fn=run_fn,
                                          **svc_kw)
@@ -1449,7 +1654,15 @@ def _serve_inband(tmp_path, run_fn, device=None):
         open(os.path.join(art, pkg), "w").close()   # IOx package-presence gate
     onboard = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
                                          mint_fn=lambda d: "TOK", run_fn=run_fn,
-                                         receipts=receipts, artifacts_dir=art)
+                                         receipts=receipts, artifacts_dir=art,
+                                         # this device is platform=guestshell, so
+                                         # the job-start reachability gate (see
+                                         # gui_onboard.py) probes it before run_fn
+                                         probe_fn=lambda dev, env: "C9300",
+                                         iox_preflight_fn=lambda dev, env, resolved: {
+                                             "status": "passed",
+                                             "device_identity": "FCW0000TEST",
+                                             "detected_model": "IE-3400"})
     srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, creds, None,
                                  onboard, certfile=None, receipts=receipts)
     port = srv.server_address[1]
@@ -1851,6 +2064,7 @@ def _serve_onboard_audit(tmp_path, run_fn, **svc_kw):
     def audit_fn(**kw):
         audit_mod.append_event(audit_path, kw.pop("event"), **kw)
 
+    svc_kw.setdefault("probe_fn", lambda dev, env: "C9300")  # see _serve_onboard
     onboard = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
                                          mint_fn=lambda d: "TOK", run_fn=run_fn,
                                          audit_fn=audit_fn, **svc_kw)
@@ -1909,8 +2123,9 @@ def _serve_overview(tmp_path, swarm_fetch=None):
     # d1 finished staging (stage_state=ready); d3 is mid-download (staging); d2 never checked in
     cat.record_heartbeat("d1", {"current_image_id": "img1", "stage_state": "ready"}, now=10)
     cat.record_heartbeat("d3", {"current_image_id": "img1", "stage_state": "staging"}, now=11)
+    # clock injected just past the heartbeats, so both devices read as fresh
     srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, None, cat, None,
-                                 swarm_fetch, certfile=None)
+                                 swarm_fetch, certfile=None, now_fn=lambda: 100)
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return "127.0.0.1", port, srv.shutdown
@@ -1926,11 +2141,92 @@ def test_overview_aggregates(tmp_path):
         ov = json.loads(b)
         assert ov["images"] == 1 and ov["devices"] == 3
         assert ov["assigned"] == 3 and ov["staged"] == 1   # only d1 (ready) counts
-        assert ov["staging_now"] == 2                       # d2 + d3 not yet staged
+        # only d3 is ACTUALLY staging (heartbeating, stage_state=staging);
+        # d2 never checked in — an inventory row is not a staging device
+        assert ov["staging_now"] == 1
         r = [x for x in ov["rollout"] if x["image_id"] == "img1"][0]
         assert r["assigned"] == 3 and r["staged"] == 1
     finally:
         stop()
+
+
+def test_overview_staging_counts_only_heartbeating_stagers(tmp_path):
+    """Regression (operator report): an install with 6 inventory rows and NO
+    device ever heartbeating showed '6 staging'. staging_now was computed as
+    assigned - staged, i.e. it counted fleet/policy rows, not devices. It must
+    count devices that are ACTUALLY staging: enrolled (heartbeat present) with
+    a non-terminal stage_state — not inventory-only rows, not unassigned
+    agents, not ready/seeding devices (those feed the staged count)."""
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
+    state = str(tmp_path / "state")
+    fleet = gui_fleet.FleetStore(state)
+    cat = catalog_mod.CatalogStore(state)
+    cat.save_image({"id": "img1", "filename": "img1.bin", "sha256": "ab",
+                    "published_at": 1})
+    for i in range(6):
+        did = "sw%d" % i
+        fleet.upsert({"device_id": did, "device_ip": "10.0.0.%d" % (i + 1)})
+        cat.set_policy(did, approved_image_id="img1")
+    srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, None, cat,
+                                 None, None, certfile=None,
+                                 now_fn=lambda: 100)   # heartbeats stay fresh
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        ck, _csrf = _auth("127.0.0.1", port)
+        ov = json.loads(_req("127.0.0.1", port, "GET", "/api/overview",
+                             headers={"Cookie": ck})[2])
+        assert ov["devices"] == 6 and ov["assigned"] == 6
+        assert ov["staging_now"] == 0     # nothing has ever heartbeated
+        # devices actively staging ARE counted...
+        cat.record_heartbeat("sw0", {"stage_state": "staging"}, now=10)
+        cat.record_heartbeat("sw1", {"stage_state": "downloading"}, now=11)
+        # ...but a ready (seeding) device counts as staged, not staging,
+        # and an unassigned agent is not staging anything
+        cat.record_heartbeat("sw2", {"current_image_id": "img1",
+                                     "stage_state": "ready"}, now=12)
+        cat.record_heartbeat("sw3", {"stage_state": "unassigned"}, now=13)
+        ov = json.loads(_req("127.0.0.1", port, "GET", "/api/overview",
+                             headers={"Cookie": ck})[2])
+        assert ov["staging_now"] == 2     # sw0 + sw1 only
+        assert ov["staged"] == 1          # sw2: ready with its assigned image
+    finally:
+        srv.shutdown()
+
+
+def test_overview_staging_excludes_stale_and_error_devices(tmp_path):
+    """Regression: staging_now counted devices whose LAST heartbeat said
+    'staging' no matter how old it was — a device that died mid-stage read
+    as staging forever — and counted terminal stage_state=error rows too.
+    Only devices fresh within the UI's 600s offline horizon count, error is
+    out, but a retryable condition (flash_full) on a live agent still
+    counts."""
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
+    state = str(tmp_path / "state")
+    fleet = gui_fleet.FleetStore(state)
+    cat = catalog_mod.CatalogStore(state)
+    for did in ("fresh", "stale", "err", "flash"):
+        fleet.upsert({"device_id": did, "device_ip": "10.0.0.1"})
+    now = 10000
+    cat.record_heartbeat("fresh", {"stage_state": "staging"}, now=now - 30)
+    cat.record_heartbeat("stale", {"stage_state": "staging"}, now=now - 601)
+    cat.record_heartbeat("err", {"stage_state": "error"}, now=now - 30)
+    cat.record_heartbeat("flash", {"stage_state": "flash_full"}, now=now - 30)
+    srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, None, cat,
+                                 None, None, certfile=None,
+                                 now_fn=lambda: now)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        ck, _csrf = _auth("127.0.0.1", port)
+        ov = json.loads(_req("127.0.0.1", port, "GET", "/api/overview",
+                             headers={"Cookie": ck})[2])
+        # fresh + flash only: the stale stager is offline, error is terminal
+        assert ov["staging_now"] == 2
+    finally:
+        srv.shutdown()
 
 
 def test_swarm_proxy_and_error(tmp_path):
@@ -1963,23 +2259,51 @@ def _serve_fresh(tmp_path):
     return "127.0.0.1", port, app, srv.shutdown
 
 
+def _setup_headers(host, port):
+    return {"Origin": "http://%s:%d" % (host, port)}
+
+
+def _default_login_grant(host, port):
+    """Sign in with the documented default first-run credential
+    (iris/irisisgreat!) and return the one-time setup grant from the
+    response. No session cookie is issued for this login."""
+    st, hd, b = _req(host, port, "POST", "/api/login",
+                     {"username": gui_server.DEFAULT_SETUP_USER,
+                      "password": gui_server.DEFAULT_SETUP_PASS})
+    assert st == 200
+    body = json.loads(b)
+    assert body["setup"] is True and body["setup_grant"]
+    assert "Set-Cookie" not in hd            # no session for the default pair
+    return body["setup_grant"]
+
+
 def test_setup_serves_wizard_and_creates_admin(tmp_path):
     host, port, app, stop = _serve_fresh(tmp_path)
     try:
-        # while no admin exists, GET / serves the setup wizard
+        # while no admin exists, GET / serves the LOGIN page (the default
+        # iris credential there is what mints the setup grant); the setup
+        # page itself stays reachable as a static page for the redirect.
         st, hd, b = _req(host, port, "GET", "/")
-        assert st == 200 and b"setup" in b.lower()
-        # /api/setup (no auth) creates the admin
+        assert st == 200 and b'id="login-form"' in b
+        st, hd, b = _req(host, port, "GET", "/setup.html")
+        assert st == 200 and b'id="setup-form"' in b
+        # The operator signs in with the documented default credential; the
+        # server hands back a one-time grant instead of a session.
+        grant = _default_login_grant(host, port)
         st, _, _ = _req(host, port, "POST", "/api/setup",
-                        {"username": "admin", "password": "pw"})
+                        {"username": "admin", "password": "password",
+                         "setup_grant": grant},
+                        headers=_setup_headers(host, port))
         assert st == 200
         assert app.needs_setup() is False
         # it is now self-disabled (409) and the login flow works
         st, _, _ = _req(host, port, "POST", "/api/setup",
-                        {"username": "x", "password": "y"})
+                        {"username": "x", "password": "password",
+                         "setup_grant": grant},
+                        headers=_setup_headers(host, port))
         assert st == 409
         st, _, _ = _req(host, port, "POST", "/api/login",
-                        {"username": "admin", "password": "pw"})
+                        {"username": "admin", "password": "password"})
         assert st == 200
     finally:
         stop()
@@ -2006,12 +2330,218 @@ def test_normal_mode_serves_login_not_setup(tmp_path):
         # GET / serves the console shell (app.js), NOT the setup wizard, once set up
         st, _, b = _req("127.0.0.1", port, "GET", "/")
         assert st == 200 and b"/app.js" in b and b"First-run setup" not in b
-        # setup is refused now
+        # setup is refused now, even with a syntactically plausible grant
         st, _, _ = _req("127.0.0.1", port, "POST", "/api/setup",
-                        {"username": "x", "password": "y"})
+                        {"username": "x", "password": "password",
+                         "setup_grant": "unavailable-after-setup"},
+                        headers=_setup_headers("127.0.0.1", port))
         assert st == 409
+        # the default credential is not special once an admin exists: it is
+        # an ordinary failed login (no special-case leak), not a setup grant
+        st, _, b = _req("127.0.0.1", port, "POST", "/api/login",
+                        {"username": gui_server.DEFAULT_SETUP_USER,
+                         "password": gui_server.DEFAULT_SETUP_PASS})
+        assert st == 401
+        assert "setup" not in json.loads(b)
     finally:
         srv.shutdown()
+
+
+def test_setup_requires_and_consumes_grant(tmp_path):
+    host, port, app, stop = _serve_fresh(tmp_path)
+    try:
+        headers = _setup_headers(host, port)
+        payload = {"username": "admin", "password": "password"}
+
+        st, _, _ = _req(host, port, "POST", "/api/setup", payload, headers=headers)
+        assert st == 403                         # no grant
+
+        grant = _default_login_grant(host, port)
+        st, _, _ = _req(host, port, "POST", "/api/setup",
+                        payload | {"setup_grant": "wrong-grant"}, headers=headers)
+        assert st == 403                         # wrong grant
+
+        st, _, _ = _req(host, port, "POST", "/api/setup",
+                        payload | {"setup_grant": grant + "\n"}, headers=headers)
+        assert st == 200 and app.needs_setup() is False  # stray whitespace is stripped
+
+        st, _, _ = _req(host, port, "POST", "/api/setup",
+                        {"username": "other", "password": "password",
+                         "setup_grant": grant}, headers=headers)
+        assert st == 409                         # grant cannot be reused
+    finally:
+        stop()
+
+
+def test_setup_grant_expires(tmp_path, monkeypatch):
+    host, port, app, stop = _serve_fresh(tmp_path)
+    try:
+        monkeypatch.setattr(gui_server.time, "time", lambda: 10000.0)
+        grant = _default_login_grant(host, port)
+        monkeypatch.setattr(gui_server.time, "time",
+                            lambda: 10000.0 + gui_server._SETUP_GRANT_TTL)
+        st, _, _ = _req(host, port, "POST", "/api/setup",
+                        {"username": "admin", "password": "password",
+                         "setup_grant": grant},
+                        headers=_setup_headers(host, port))
+        assert st == 403
+        assert app.needs_setup() is True
+    finally:
+        stop()
+
+
+def test_setup_grant_regenerated_on_each_default_login_latest_wins(tmp_path):
+    host, port, app, stop = _serve_fresh(tmp_path)
+    try:
+        grant1 = _default_login_grant(host, port)
+        grant2 = _default_login_grant(host, port)
+        assert grant1 != grant2
+        headers = _setup_headers(host, port)
+        # the superseded grant no longer works
+        st, _, _ = _req(host, port, "POST", "/api/setup",
+                        {"username": "admin", "password": "password",
+                         "setup_grant": grant1}, headers=headers)
+        assert st == 403
+        # the latest grant does
+        st, _, _ = _req(host, port, "POST", "/api/setup",
+                        {"username": "admin", "password": "password",
+                         "setup_grant": grant2}, headers=headers)
+        assert st == 200
+    finally:
+        stop()
+
+
+def test_wrong_default_credentials_are_ordinary_failed_login(tmp_path):
+    """A near-miss on the default pair (right user/wrong password or vice
+    versa) while needs_setup does NOT mint a grant -- it is an ordinary
+    failed login, audited like any other (spec: default-cred-setup, Feature
+    1: "Failed default-credential attempts while needs_setup are audited as
+    category 'auth'")."""
+    host, port, app, stop = _serve_fresh(tmp_path)
+    try:
+        for creds in (
+            {"username": gui_server.DEFAULT_SETUP_USER, "password": "wrong"},
+            {"username": "not-iris", "password": gui_server.DEFAULT_SETUP_PASS},
+        ):
+            st, _, b = _req(host, port, "POST", "/api/login", creds)
+            assert st == 401
+            assert "setup" not in json.loads(b)
+        assert app.needs_setup() is True
+    finally:
+        stop()
+
+
+def test_default_credential_full_happy_path(tmp_path):
+    """End to end: default login -> grant -> /api/setup -> real session."""
+    host, port, app, stop = _serve_fresh(tmp_path)
+    try:
+        grant = _default_login_grant(host, port)
+        st, _, _ = _req(host, port, "POST", "/api/setup",
+                        {"username": "opuser", "password": "opuserpassword",
+                         "setup_grant": grant},
+                        headers=_setup_headers(host, port))
+        assert st == 200
+        assert app.needs_setup() is False
+        st, hd, b = _req(host, port, "POST", "/api/login",
+                         {"username": "opuser", "password": "opuserpassword"})
+        assert st == 200 and "iris_sid=" in hd.get("Set-Cookie", "")
+        assert json.loads(b)["username"] == "opuser"
+    finally:
+        stop()
+
+
+def test_admin_may_be_named_iris(tmp_path):
+    """The default-credential special case is gated purely on needs_setup(),
+    never on the chosen username: an operator may legitimately name the real
+    admin account "iris" (even reusing "irisisgreat!" as its password). Once
+    that admin exists, iris/irisisgreat! is checked against the stored admin
+    hash like any other login -- no reserved word, no special-casing."""
+    host, port, app, stop = _serve_fresh(tmp_path)
+    try:
+        grant = _default_login_grant(host, port)
+        st, _, _ = _req(host, port, "POST", "/api/setup",
+                        {"username": "iris", "password": "a-real-password",
+                         "setup_grant": grant},
+                        headers=_setup_headers(host, port))
+        assert st == 200
+        assert app.needs_setup() is False
+
+        # iris + the real chosen password -> ordinary successful login
+        st, hd, b = _req(host, port, "POST", "/api/login",
+                         {"username": "iris", "password": "a-real-password"})
+        assert st == 200 and "iris_sid=" in hd.get("Set-Cookie", "")
+        assert json.loads(b)["username"] == "iris"
+
+        # iris/irisisgreat! no longer means anything special post-setup, and
+        # does not match this admin's real (different) password
+        st, _, b = _req(host, port, "POST", "/api/login",
+                        {"username": gui_server.DEFAULT_SETUP_USER,
+                         "password": gui_server.DEFAULT_SETUP_PASS})
+        assert st == 401
+        assert "setup" not in json.loads(b)
+    finally:
+        stop()
+
+
+def test_admin_named_iris_with_default_password(tmp_path):
+    """Degenerate but legal case: the operator's chosen admin password IS
+    "irisisgreat!". Post-setup, iris/irisisgreat! must succeed as an
+    ordinary authenticated login (it matches the real stored credential),
+    not be diverted into the setup flow -- needs_setup() is false, so the
+    default-credential branch never triggers."""
+    host, port, app, stop = _serve_fresh(tmp_path)
+    try:
+        grant = _default_login_grant(host, port)
+        st, _, _ = _req(host, port, "POST", "/api/setup",
+                        {"username": "iris",
+                         "password": gui_server.DEFAULT_SETUP_PASS,
+                         "setup_grant": grant},
+                        headers=_setup_headers(host, port))
+        assert st == 200
+        assert app.needs_setup() is False
+
+        st, hd, b = _req(host, port, "POST", "/api/login",
+                         {"username": gui_server.DEFAULT_SETUP_USER,
+                          "password": gui_server.DEFAULT_SETUP_PASS})
+        assert st == 200 and "iris_sid=" in hd.get("Set-Cookie", "")
+        assert json.loads(b)["username"] == "iris"
+        assert "setup" not in json.loads(b)
+    finally:
+        stop()
+
+
+def test_bootstrap_token_strings_removed_repo_wide():
+    """Source guard (spec: default-cred-setup-and-tls-ux, Feature 1): the old
+    bootstrap-token mechanism -- the runtime file, its basename, the startup
+    banner -- is fully removed from every live file. CHANGELOG.md is exempt:
+    it documents the change, including the removed path, as project history.
+    This test's own file is exempt too: its name and this docstring
+    necessarily spell out the strings it is checking are gone everywhere
+    else. Scoped to git-tracked files so it never walks build output,
+    caches, or unrelated local directories."""
+    repo_root = os.path.normpath(os.path.join(gui_server.WEBROOT, "..", ".."))
+    tracked = subprocess.run(
+        ["git", "ls-files"], cwd=repo_root, capture_output=True,
+        text=True, check=True).stdout.splitlines()
+    needles = ("gui-bootstrap-token", "bootstrap_token")
+    self_path = "server/tests/" + os.path.basename(__file__)
+    hits = []
+    for rel in tracked:
+        if rel in (self_path, "CHANGELOG.md"):
+            continue
+        try:
+            with open(os.path.join(repo_root, rel), "rb") as f:
+                data = f.read()
+        except OSError:
+            continue
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            continue                      # binary file, not a text reference
+        for needle in needles:
+            if needle in text:
+                hits.append("%s: %s" % (rel, needle))
+    assert not hits, hits
 
 
 def test_delete_image_route(tmp_path):
@@ -2982,14 +3512,67 @@ def test_setup_emits_enriched_audit(tmp_path):
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
+        grant = _default_login_grant("127.0.0.1", port)
         st, _, _ = _req("127.0.0.1", port, "POST", "/api/setup",
-                        {"username": "root", "password": "pw12345678"})
+                        {"username": "root", "password": "pw12345678",
+                         "setup_grant": grant},
+                        headers=_setup_headers("127.0.0.1", port))
         assert st == 200
         ev = [e for e in _read_audit_lines(audit_path)
               if e.get("event") == "setup"][0]
         assert ev["target"] == "root"
         assert ev["detail"] == "initial admin account created"
         assert ev["src_ip"] == "127.0.0.1"
+        # the default-credential login that produced the grant is itself
+        # audited as an ordinary successful login (category "auth")
+        login_ev = [e for e in _read_audit_lines(audit_path)
+                    if e.get("event") == "login"][0]
+        assert login_ev["actor"] == "console:" + gui_server.DEFAULT_SETUP_USER
+        assert login_ev["category"] == "auth" and login_ev["result"] == "ok"
+    finally:
+        srv.shutdown()
+
+
+def test_setup_wrong_grant_is_audited(tmp_path):
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path)          # no admin yet -> needs_setup
+    audit_path = str(tmp_path / "audit.jsonl")
+    srv = gui_server.make_server("127.0.0.1", 0, app, audit_path=audit_path,
+                                 certfile=None)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        st, _, _ = _req("127.0.0.1", port, "POST", "/api/setup",
+                        {"username": "admin", "password": "password",
+                         "setup_grant": "bogus"},
+                        headers=_setup_headers("127.0.0.1", port))
+        assert st == 403
+        ev = [e for e in _read_audit_lines(audit_path)
+              if e.get("event") == "setup_fail"][0]
+        assert ev["category"] == "auth" and ev["result"] == "fail"
+    finally:
+        srv.shutdown()
+
+
+def test_default_login_failure_is_audited_category_auth(tmp_path):
+    """The Problem section's explicit requirement: a failed attempt at the
+    default credential while needs_setup is audited as category "auth" --
+    exercised here through the ordinary login_fail path (no grant issued)."""
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path)
+    audit_path = str(tmp_path / "audit.jsonl")
+    srv = gui_server.make_server("127.0.0.1", 0, app, audit_path=audit_path,
+                                 certfile=None)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        st, _, _ = _req("127.0.0.1", port, "POST", "/api/login",
+                        {"username": gui_server.DEFAULT_SETUP_USER,
+                         "password": "wrong"})
+        assert st == 401
+        ev = [e for e in _read_audit_lines(audit_path)
+              if e.get("event") == "login_fail"][0]
+        assert ev["category"] == "auth" and ev["result"] == "fail"
     finally:
         srv.shutdown()
 
@@ -3339,3 +3922,1540 @@ def test_device_view_exposes_telemetry_flags(tmp_path):
         assert rows["d-stream"]["telemetry_enabled"] is True
     finally:
         stop()
+
+
+# ---- gui-cert TLS resolution + hot reload (make_server) ----
+
+import ssl
+
+
+def _gen_cert_pair(tmp_path, cn, tag):
+    """Self-signed cert+key PEM pair via the openssl CLI (guaranteed in the
+    image; iris-bootstrap generates the builtin identity the same way)."""
+    key = str(tmp_path / ("pair-%s-key.pem" % tag))
+    crt = str(tmp_path / ("pair-%s-crt.pem" % tag))
+    subprocess.run(
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+         "-days", "2", "-keyout", key, "-out", crt, "-subj", "/CN=%s" % cn],
+        check=True, capture_output=True)
+    with open(crt) as f:
+        cert_pem = f.read()
+    with open(key) as f:
+        key_pem = f.read()
+    return cert_pem, key_pem
+
+
+def test_gui_cert_resolution_order(tmp_path, monkeypatch):
+    """Serve-time resolution: gui-cert override > IRIS_CERT combined file >
+    None (plain-HTTP fallback). File EXISTENCE decides, not the env being
+    set. Unit-level parallel of the subprocess fallback test
+    test_module_run_as_script_actually_starts_the_server above."""
+    gui = tmp_path / "gui-cert.pem"
+    combined = tmp_path / "cert.pem"
+    monkeypatch.setenv("IRIS_GUI_CERT", str(gui))
+    monkeypatch.setenv("IRIS_CERT", str(combined))
+    # neither file exists -> plain-HTTP fallback (unchanged behavior)
+    assert gui_server._resolve_certfile() is None
+    # only the shared combined file -> IRIS_CERT
+    combined.write_text("x")
+    assert gui_server._resolve_certfile() == str(combined)
+    # both present -> the console-specific override wins
+    gui.write_text("y")
+    assert gui_server._resolve_certfile() == str(gui)
+    # override removed -> back on IRIS_CERT (the revert path)
+    os.unlink(str(gui))
+    assert gui_server._resolve_certfile() == str(combined)
+
+
+def _serve_tls(tmp_path, certfile):
+    """Start gui_server over TLS on an ephemeral port. Returns
+    (host, port, srv, stop_fn) -- srv is exposed so tests can call
+    srv.reload_tls() directly (the endpoints call the same closure)."""
+    app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
+    srv = gui_server.make_server("127.0.0.1", 0, app, certfile=certfile)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return "127.0.0.1", port, srv, srv.shutdown
+
+
+def _peer_cert_der(host, port):
+    """Fresh TLS handshake; returns the server certificate in DER.
+    binary_form=True works without validation (the dict form would be
+    empty under CERT_NONE)."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    with socket.create_connection((host, port), timeout=5) as sock:
+        with ctx.wrap_socket(sock, server_hostname=host) as tls:
+            return tls.getpeercert(binary_form=True)
+
+
+def _first_cert_der(pem_text):
+    """DER of the first CERTIFICATE block (combined files carry cert+key)."""
+    m = re.search(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
+                  pem_text, re.S)
+    return ssl.PEM_cert_to_DER_cert(m.group(0))
+
+
+def test_reload_tls_false_on_plain_http_server(tmp_path, monkeypatch):
+    """Every pytest _serve* server runs certfile=None; reload_tls() must be
+    a safe no-op there, EVEN when a valid override file exists on disk
+    (upload-while-plain-HTTP: the persisted config takes effect at next
+    restart -- the message the gui-cert endpoint surfaces)."""
+    cert_pem, key_pem = _gen_cert_pair(tmp_path, "would-be-served", "plain")
+    gui = tmp_path / "gui-cert.pem"
+    gui.write_text(cert_pem + key_pem)
+    monkeypatch.setenv("IRIS_GUI_CERT", str(gui))
+    app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
+    srv = gui_server.make_server("127.0.0.1", 0, app, certfile=None)
+    try:
+        assert srv.reload_tls() is False
+    finally:
+        srv.server_close()
+
+
+def test_reload_tls_serves_new_cert_and_reverts(tmp_path, monkeypatch):
+    """Handshake before/after: replacing the gui-cert file + reload_tls()
+    serves the NEW certificate to fresh handshakes; removing the file +
+    reload_tls() lands back on IRIS_CERT (revert path)."""
+    bi_cert, bi_key = _gen_cert_pair(tmp_path, "iris-builtin", "builtin")
+    cu_cert, cu_key = _gen_cert_pair(tmp_path, "iris-custom", "custom")
+    builtin = tmp_path / "cert.pem"
+    builtin.write_text(bi_cert + bi_key)
+    gui = tmp_path / "gui-cert.pem"          # absent for now
+    monkeypatch.setenv("IRIS_CERT", str(builtin))
+    monkeypatch.setenv("IRIS_GUI_CERT", str(gui))
+    host, port, srv, stop = _serve_tls(tmp_path, str(builtin))
+    try:
+        assert srv.tls_active is True
+        assert _peer_cert_der(host, port) == _first_cert_der(bi_cert)
+        # the upload flow drops the combined override, then hot-reloads
+        gui.write_text(cu_cert + cu_key)
+        assert srv.reload_tls() is True
+        assert _peer_cert_der(host, port) == _first_cert_der(cu_cert)
+        # revert: override removed -> reload resolves back to IRIS_CERT
+        os.unlink(str(gui))
+        assert srv.reload_tls() is True
+        assert _peer_cert_der(host, port) == _first_cert_der(bi_cert)
+    finally:
+        stop()
+
+
+def test_reload_tls_corrupt_file_keeps_old_cert(tmp_path, monkeypatch):
+    """A corrupt combined file must not crash serving and must not leave the
+    live context half-swapped: reload_tls() returns False and fresh
+    handshakes still get the OLD certificate (throwaway-context probe runs
+    before the live load)."""
+    bi_cert, bi_key = _gen_cert_pair(tmp_path, "iris-builtin", "corrupt-bi")
+    builtin = tmp_path / "cert.pem"
+    builtin.write_text(bi_cert + bi_key)
+    gui = tmp_path / "gui-cert.pem"
+    monkeypatch.setenv("IRIS_CERT", str(builtin))
+    monkeypatch.setenv("IRIS_GUI_CERT", str(gui))
+    host, port, srv, stop = _serve_tls(tmp_path, str(builtin))
+    try:
+        gui.write_text("-----BEGIN CERTIFICATE-----\nnot a cert\n"
+                       "-----END CERTIFICATE-----\n")
+        assert srv.reload_tls() is False
+        assert _peer_cert_der(host, port) == _first_cert_der(bi_cert)
+    finally:
+        stop()
+
+
+def test_make_server_falls_back_to_iris_cert_when_gui_cert_is_corrupt(
+        tmp_path, monkeypatch):
+    """Startup crash-window guard (Task 6 review finding): a durable
+    mismatched cert/key pair can land in the gui-cert override file (e.g. a
+    crash between writing the cert and the key). _resolve_certfile() picks
+    it on existence alone, so make_server must not crash trying to load it
+    -- it probes with a throwaway context first, and on failure falls back
+    to the next candidate (IRIS_CERT) rather than taking the console down."""
+    bi_cert, bi_key = _gen_cert_pair(tmp_path, "iris-builtin", "startup-fb-bi")
+    builtin = tmp_path / "cert.pem"
+    builtin.write_text(bi_cert + bi_key)
+    gui = tmp_path / "gui-cert.pem"
+    gui.write_text("-----BEGIN CERTIFICATE-----\nnot a cert\n"
+                   "-----END CERTIFICATE-----\n")
+    monkeypatch.setenv("IRIS_CERT", str(builtin))
+    monkeypatch.setenv("IRIS_GUI_CERT", str(gui))
+    certfile = gui_server._resolve_certfile()  # picks the corrupt override
+    assert certfile == str(gui)
+    app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
+    srv = gui_server.make_server("127.0.0.1", 0, app, certfile=certfile)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        assert _peer_cert_der("127.0.0.1", port) == _first_cert_der(bi_cert)
+    finally:
+        srv.shutdown()
+
+
+def test_make_server_falls_back_to_plain_http_when_all_candidates_corrupt(
+        tmp_path, monkeypatch):
+    """Both the gui-cert override and IRIS_CERT are unusable at startup --
+    make_server must still not crash; it serves plain HTTP (no tls_ctx),
+    same as the certfile=None path, rather than taking the process down."""
+    builtin = tmp_path / "cert.pem"
+    builtin.write_text("-----BEGIN CERTIFICATE-----\nnot a cert\n"
+                       "-----END CERTIFICATE-----\n")
+    gui = tmp_path / "gui-cert.pem"
+    gui.write_text("-----BEGIN CERTIFICATE-----\nalso not a cert\n"
+                   "-----END CERTIFICATE-----\n")
+    monkeypatch.setenv("IRIS_CERT", str(builtin))
+    monkeypatch.setenv("IRIS_GUI_CERT", str(gui))
+    certfile = gui_server._resolve_certfile()  # picks the corrupt override
+    assert certfile == str(gui)
+    app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
+    srv = gui_server.make_server("127.0.0.1", 0, app, certfile=certfile)
+    try:
+        assert srv.reload_tls() is False  # no live TLS context to hot-swap
+        assert srv.tls_active is False
+        assert not isinstance(srv.socket, ssl.SSLSocket)
+    finally:
+        srv.server_close()
+
+
+def test_make_server_serves_gui_cert_when_both_candidates_valid(
+        tmp_path, monkeypatch):
+    """When both gui-cert and IRIS_CERT files exist and are valid, make_server
+    serves the gui-cert (first candidate in the probe loop), not the IRIS_CERT.
+    Handshake DER proves the correct cert was loaded."""
+    bi_cert, bi_key = _gen_cert_pair(tmp_path, "iris-builtin", "both-valid-bi")
+    gu_cert, gu_key = _gen_cert_pair(tmp_path, "iris-guicert", "both-valid-gu")
+    builtin = tmp_path / "cert.pem"
+    builtin.write_text(bi_cert + bi_key)
+    gui = tmp_path / "gui-cert.pem"
+    gui.write_text(gu_cert + gu_key)
+    monkeypatch.setenv("IRIS_CERT", str(builtin))
+    monkeypatch.setenv("IRIS_GUI_CERT", str(gui))
+    certfile = gui_server._resolve_certfile()  # picks gui-cert on existence
+    assert certfile == str(gui)
+    host, port, srv, stop = _serve_tls(tmp_path, certfile)
+    try:
+        assert srv.tls_active is True
+        # Handshake proves we got the GUI cert, not the builtin IRIS_CERT
+        assert _peer_cert_der(host, port) == _first_cert_der(gu_cert)
+    finally:
+        stop()
+
+
+# ---- console TLS cert replacement + root-CA trust store (Settings API) ----
+
+def _gui_cert_env(tmp_path, monkeypatch):
+    """Point every gui_tls path at tmp_path: durable override files under
+    $IRIS_CONFIG/tls, runtime combined file at $IRIS_GUI_CERT, and no age
+    recipients (plaintext degradation, the secretfs no-recipients test mode)."""
+    cfg = tmp_path / "config" / "tls"
+    run = tmp_path / "run" / "tls"
+    cfg.mkdir(parents=True)
+    run.mkdir(parents=True)
+    monkeypatch.setenv("IRIS_CONFIG", str(tmp_path / "config"))
+    monkeypatch.setenv("IRIS_GUI_CERT", str(run / "gui-cert.pem"))
+    monkeypatch.delenv("IRIS_AGE_RECIPIENTS", raising=False)
+    return run
+
+
+def test_settings_gui_cert_roundtrip(tmp_path, monkeypatch):
+    run = _gui_cert_env(tmp_path, monkeypatch)
+    # a distinct "built-in" combined cert so the revert path is observable
+    bi_cert, bi_key = _gen_cert_pair(tmp_path, "iris-builtin", "builtin")
+    builtin = run / "cert.pem"
+    builtin.write_text(bi_cert + bi_key)
+    monkeypatch.setenv("IRIS_CERT", str(builtin))
+    cert_pem, key_pem = _gen_cert_pair(tmp_path, "iris-custom", "custom")
+
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        # auth: no session -> 401; session without CSRF -> 403
+        assert _req(host, port, "POST", "/api/settings/gui-cert",
+                    {"cert_pem": cert_pem, "key_pem": key_pem})[0] == 401
+        ck, csrf = _auth(host, port)
+        assert _req(host, port, "POST", "/api/settings/gui-cert",
+                    {"cert_pem": cert_pem, "key_pem": key_pem},
+                    headers={"Cookie": ck})[0] == 403
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        # per-field validation -> 400
+        assert _req(host, port, "POST", "/api/settings/gui-cert",
+                    {"key_pem": key_pem}, headers=hh)[0] == 400
+        assert _req(host, port, "POST", "/api/settings/gui-cert",
+                    {"cert_pem": cert_pem}, headers=hh)[0] == 400
+        assert _req(host, port, "POST", "/api/settings/gui-cert",
+                    {"cert_pem": "", "key_pem": key_pem}, headers=hh)[0] == 400
+        assert _req(host, port, "POST", "/api/settings/gui-cert",
+                    {"cert_pem": 42, "key_pem": key_pem}, headers=hh)[0] == 400
+        # before any upload the settings view shows the built-in cert
+        st, _, b = _req(host, port, "GET", "/api/settings",
+                        headers={"Cookie": ck})
+        assert st == 200
+        assert json.loads(b)["gui_cert"]["source"] == "built-in"
+        # replace
+        st, _, b = _req(host, port, "POST", "/api/settings/gui-cert",
+                        {"cert_pem": cert_pem, "key_pem": key_pem}, headers=hh)
+        assert st == 200
+        gc = json.loads(b)["gui_cert"]
+        assert gc["source"] == "custom"
+        assert "iris-custom" in gc["subject"]
+        assert gc["fingerprint_sha256"] not in ("", "unknown")
+        # GET reflects it — and NEVER echoes key material
+        st, _, b = _req(host, port, "GET", "/api/settings",
+                        headers={"Cookie": ck})
+        got = json.loads(b)["gui_cert"]
+        assert got["source"] == "custom" and "iris-custom" in got["subject"]
+        assert b"PRIVATE KEY" not in b
+        # audit: the replace row carries subject+fingerprint, never the key
+        rows = [e for e in _read_audit_lines(audit_path)
+                if e.get("event") == "gui-cert-replace"]
+        assert rows and rows[-1]["result"] == "ok"
+        assert rows[-1]["category"] == "settings"
+        assert rows[-1]["target"] == "gui-cert"
+        assert gc["fingerprint_sha256"] in rows[-1]["detail"]
+        assert "PRIVATE KEY" not in open(audit_path).read()
+        # revert
+        st, _, b = _req(host, port, "DELETE", "/api/settings/gui-cert",
+                        headers=hh)
+        assert st == 200 and json.loads(b)["deleted"] is True
+        st, _, b = _req(host, port, "GET", "/api/settings",
+                        headers={"Cookie": ck})
+        got = json.loads(b)["gui_cert"]
+        assert got["source"] == "built-in" and "iris-builtin" in got["subject"]
+        rows = [e for e in _read_audit_lines(audit_path)
+                if e.get("event") == "gui-cert-revert"]
+        assert rows and rows[-1]["result"] == "ok"
+        # a second revert still answers 200 (idempotent), deleted False
+        st, _, b = _req(host, port, "DELETE", "/api/settings/gui-cert",
+                        headers=hh)
+        assert st == 200 and json.loads(b)["deleted"] is False
+    finally:
+        stop()
+
+
+def test_settings_gui_cert_rejects_bad_pairs(tmp_path, monkeypatch):
+    _gui_cert_env(tmp_path, monkeypatch)
+    cert_a, _key_a = _gen_cert_pair(tmp_path, "pair-a", "a")
+    _cert_b, key_b = _gen_cert_pair(tmp_path, "pair-b", "b")
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        # key does not match the cert
+        st, _, b = _req(host, port, "POST", "/api/settings/gui-cert",
+                        {"cert_pem": cert_a, "key_pem": key_b}, headers=hh)
+        assert st == 400 and json.loads(b)["error"]
+        # garbage PEM
+        st, _, _ = _req(host, port, "POST", "/api/settings/gui-cert",
+                        {"cert_pem": "hello", "key_pem": key_b}, headers=hh)
+        assert st == 400
+        # both rejections audited as failures; no key material in the file;
+        # no override was persisted
+        rows = [e for e in _read_audit_lines(audit_path)
+                if e.get("event") == "gui-cert-replace"]
+        assert len(rows) == 2 and all(e["result"] == "fail" for e in rows)
+        assert "PRIVATE KEY" not in open(audit_path).read()
+        st, _, b = _req(host, port, "GET", "/api/settings",
+                        headers={"Cookie": ck})
+        assert json.loads(b)["gui_cert"]["source"] != "custom"
+    finally:
+        stop()
+
+
+def test_settings_gui_cert_persist_failure_audited(tmp_path, monkeypatch):
+    """When gui_tls.persist_override raises (e.g. age subprocess fails or
+    disk-full OSError), the POST route must audit the failure, respond 500
+    with a static error message, and never expose key material."""
+    import subprocess
+    import gui_tls
+    _gui_cert_env(tmp_path, monkeypatch)
+    cert_pem, key_pem = _gen_cert_pair(tmp_path, "iris-custom", "custom")
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        # Monkeypatch persist_override to raise CalledProcessError (simulating
+        # age subprocess failure or similar).
+        orig_persist = gui_tls.persist_override
+        def failing_persist(c, k):
+            raise subprocess.CalledProcessError(1, ["age"])
+        monkeypatch.setattr(gui_tls, "persist_override", failing_persist)
+        # POST a valid cert/key pair: should return 500
+        st, _, b = _req(host, port, "POST", "/api/settings/gui-cert",
+                        {"cert_pem": cert_pem, "key_pem": key_pem}, headers=hh)
+        assert st == 500, "expected 500 on persist_override failure, got %d" % st
+        resp = json.loads(b)
+        assert resp["error"] == "certificate install failed"
+        assert b"PRIVATE KEY" not in b, "key material leaked in error response"
+        # Audit log must contain a fail row with CalledProcessError in detail,
+        # but NO key material.
+        rows = [e for e in _read_audit_lines(audit_path)
+                if e.get("event") == "gui-cert-replace"]
+        fail_rows = [e for e in rows if e.get("result") == "fail"]
+        assert fail_rows, "no fail audit row for persist_override exception"
+        assert "CalledProcessError" in fail_rows[-1]["detail"]
+        assert "PRIVATE KEY" not in open(audit_path).read()
+        assert key_pem not in open(audit_path).read(), \
+            "key material must never appear in audit log"
+    finally:
+        stop()
+
+
+def test_gui_cert_upload_encrypted_key_with_passphrase(tmp_path, monkeypatch):
+    """A passphrase-protected key uploads successfully when key_passphrase is
+    supplied (decrypted at import, stored age-encrypted like any key); a
+    wrong passphrase and a missing passphrase both fail with messages that
+    say 'passphrase' and never echo PEM or the passphrase itself."""
+    _gui_cert_env(tmp_path, monkeypatch)
+    cert_pem, key_pem = _gen_cert_pair(tmp_path, "iris-encpass", "encpass")
+    src = tmp_path / "clear.pem"; dst = tmp_path / "enc.pem"
+    src.write_text(key_pem)
+    subprocess.run(["openssl", "pkey", "-in", str(src), "-aes-256-cbc",
+                    "-passout", "pass:s3same!", "-out", str(dst)],
+                   check=True, capture_output=True)
+    enc_key = dst.read_text()
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        # no passphrase -> 400 naming the problem
+        st, _, b = _req(host, port, "POST", "/api/settings/gui-cert",
+                        {"cert_pem": cert_pem, "key_pem": enc_key}, headers=hh)
+        assert st == 400 and b"passphrase" in b
+        # wrong passphrase -> 400, safe message
+        st, _, b = _req(host, port, "POST", "/api/settings/gui-cert",
+                        {"cert_pem": cert_pem, "key_pem": enc_key,
+                         "key_passphrase": "nope"}, headers=hh)
+        assert st == 400 and b"passphrase" in b and b"BEGIN" not in b
+        # right passphrase -> accepted
+        st, _, _ = _req(host, port, "POST", "/api/settings/gui-cert",
+                        {"cert_pem": cert_pem, "key_pem": enc_key,
+                         "key_passphrase": "s3same!"}, headers=hh)
+        assert st == 200
+        # neither the passphrase nor key material may reach the audit log
+        audit = open(audit_path).read()
+        assert "s3same!" not in audit and "PRIVATE KEY" not in audit
+    finally:
+        stop()
+
+
+# ---- trust-store add/remove + settings listing ----
+
+def _trust_env(tmp_path, monkeypatch):
+    """Point the trust store at tmp_path: durable PEMs in $IRIS_TRUST_DIR,
+    runtime concat bundle at $IRIS_CA_BUNDLE."""
+    trust_dir = tmp_path / "trust"
+    run = tmp_path / "trun"
+    run.mkdir()
+    monkeypatch.setenv("IRIS_TRUST_DIR", str(trust_dir))
+    monkeypatch.setenv("IRIS_CA_BUNDLE", str(run / "ca-bundle.pem"))
+    return trust_dir, run / "ca-bundle.pem"
+
+
+def test_settings_trust_roundtrip(tmp_path, monkeypatch):
+    trust_dir, bundle = _trust_env(tmp_path, monkeypatch)
+    ca_pem, _key = _gen_cert_pair(tmp_path, "corp-root-ca", "ca")
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        # auth: no session -> 401; session without CSRF -> 403
+        assert _req(host, port, "POST", "/api/settings/trust",
+                    {"pem": ca_pem})[0] == 401
+        ck, csrf = _auth(host, port)
+        assert _req(host, port, "POST", "/api/settings/trust",
+                    {"pem": ca_pem}, headers={"Cookie": ck})[0] == 403
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        # validation -> 400: missing / empty / non-string / no PEM blocks
+        assert _req(host, port, "POST", "/api/settings/trust",
+                    {}, headers=hh)[0] == 400
+        assert _req(host, port, "POST", "/api/settings/trust",
+                    {"pem": ""}, headers=hh)[0] == 400
+        assert _req(host, port, "POST", "/api/settings/trust",
+                    {"pem": 42}, headers=hh)[0] == 400
+        st, _, _ = _req(host, port, "POST", "/api/settings/trust",
+                        {"pem": "this is not a certificate"}, headers=hh)
+        assert st == 400
+        fails = [e for e in _read_audit_lines(audit_path)
+                 if e.get("event") == "trust-add"]
+        assert fails and fails[-1]["result"] == "fail"
+        # install
+        st, _, b = _req(host, port, "POST", "/api/settings/trust",
+                        {"pem": ca_pem}, headers=hh)
+        assert st == 200
+        entry = json.loads(b)["entry"]
+        assert re.fullmatch(r"[0-9a-f]{64}\.pem", entry["name"])
+        assert entry["source"] == "manual" and entry["cert_count"] == 1
+        assert "corp-root-ca" in entry["subject"]
+        # GET reflects the store; the runtime bundle was rebuilt
+        st, _, b = _req(host, port, "GET", "/api/settings",
+                        headers={"Cookie": ck})
+        listed = json.loads(b)["trust"]
+        assert [e["name"] for e in listed] == [entry["name"]]
+        assert "BEGIN CERTIFICATE" in bundle.read_text()
+        ok_rows = [e for e in _read_audit_lines(audit_path)
+                   if e.get("event") == "trust-add" and e["result"] == "ok"]
+        assert ok_rows and ok_rows[-1]["target"] == entry["name"]
+        assert ok_rows[-1]["category"] == "settings"
+        # remove: unknown name answers 200/deleted:false with a fail audit row
+        st, _, b = _req(host, port, "DELETE",
+                        "/api/settings/trust/" + "0" * 64 + ".pem", headers=hh)
+        assert st == 200 and json.loads(b)["deleted"] is False
+        # remove the real entry: store empties, bundle disappears
+        st, _, b = _req(host, port, "DELETE",
+                        "/api/settings/trust/" + entry["name"], headers=hh)
+        assert st == 200 and json.loads(b)["deleted"] is True
+        st, _, b = _req(host, port, "GET", "/api/settings",
+                        headers={"Cookie": ck})
+        assert json.loads(b)["trust"] == []
+        assert not bundle.exists()
+        rm = [e for e in _read_audit_lines(audit_path)
+              if e.get("event") == "trust-remove"]
+        assert [e["result"] for e in rm] == ["fail", "ok"]
+    finally:
+        stop()
+
+
+def test_settings_trust_delete_rejects_traversal(tmp_path, monkeypatch):
+    trust_dir, _bundle = _trust_env(tmp_path, monkeypatch)
+    ca_pem, _key = _gen_cert_pair(tmp_path, "keep-me", "keep")
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, b = _req(host, port, "POST", "/api/settings/trust",
+                        {"pem": ca_pem}, headers=hh)
+        assert st == 200
+        name = json.loads(b)["entry"]["name"]
+        # every traversal shape -> 400, before any store access
+        for bad in ("..%2F..%2Fsecrets.json",   # ../../secrets.json
+                    "..", ".",
+                    "..%5C..%5Csecrets.json",   # ..\..\secrets.json
+                    "%2e%2e%2fx.pem"):          # ../x.pem
+            st, _, _ = _req(host, port, "DELETE",
+                            "/api/settings/trust/" + bad, headers=hh)
+            assert st == 400, bad
+        # nothing was deleted, nothing was audited as a remove
+        assert (trust_dir / name).is_file()
+        assert not [e for e in _read_audit_lines(audit_path)
+                    if e.get("event") == "trust-remove"]
+    finally:
+        stop()
+
+
+def test_settings_trust_add_includes_fingerprint_in_audit(tmp_path, monkeypatch):
+    """Verify that trust-add success audit detail includes fingerprint_sha256."""
+    trust_dir, bundle = _trust_env(tmp_path, monkeypatch)
+    ca_pem, _key = _gen_cert_pair(tmp_path, "corp-root-ca", "ca")
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, b = _req(host, port, "POST", "/api/settings/trust",
+                        {"pem": ca_pem}, headers=hh)
+        assert st == 200
+        entry = json.loads(b)["entry"]
+        # verify audit detail includes fingerprint alongside name/count/subject
+        ok_rows = [e for e in _read_audit_lines(audit_path)
+                   if e.get("event") == "trust-add" and e["result"] == "ok"]
+        assert ok_rows, "no success audit row found"
+        detail = ok_rows[-1]["detail"]
+        assert "fingerprint" in detail, "fingerprint not in detail: %s" % detail
+        assert entry["fingerprint_sha256"] in detail, \
+            "fingerprint_sha256 value not in detail: %s" % detail
+    finally:
+        stop()
+
+
+def test_settings_trust_add_audits_os_error(tmp_path, monkeypatch):
+    """Verify that OSError from trust.add_pem is caught and audited correctly."""
+    trust_dir, bundle = _trust_env(tmp_path, monkeypatch)
+    ca_pem, _key = _gen_cert_pair(tmp_path, "corp-root-ca", "ca")
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        # monkeypatch trust.add_pem to raise OSError
+        import trust as trust_mod
+        orig_add_pem = trust_mod.add_pem
+        def mock_add_pem(pem):
+            raise OSError("disk full")
+        monkeypatch.setattr(trust_mod, "add_pem", mock_add_pem)
+        # send valid PEM; should get 500 with static error body
+        st, _, b = _req(host, port, "POST", "/api/settings/trust",
+                        {"pem": ca_pem}, headers=hh)
+        assert st == 500
+        resp = json.loads(b)
+        assert resp["error"] == "trust install failed"
+        # verify audit contains class name only, not "disk full" or PEM text
+        fail_rows = [e for e in _read_audit_lines(audit_path)
+                     if e.get("event") == "trust-add" and e["result"] == "fail"]
+        assert fail_rows, "no fail audit row found"
+        detail = fail_rows[-1]["detail"]
+        assert "OSError" in detail, "OSError class name not in detail: %s" % detail
+        assert "disk full" not in detail, "error message leaked to detail: %s" % detail
+        assert "BEGIN CERTIFICATE" not in detail, "PEM text leaked to detail"
+    finally:
+        stop()
+
+
+def test_settings_trust_delete_rejects_null_and_no_suffix(tmp_path, monkeypatch):
+    """Verify DELETE /api/settings/trust/<name> rejects names with null bytes
+    and names without .pem suffix."""
+    trust_dir, _bundle = _trust_env(tmp_path, monkeypatch)
+    ca_pem, _key = _gen_cert_pair(tmp_path, "keep-me", "keep")
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, b = _req(host, port, "POST", "/api/settings/trust",
+                        {"pem": ca_pem}, headers=hh)
+        assert st == 200
+        name = json.loads(b)["entry"]["name"]
+        # test null-byte-encoded and no-suffix names -> 400, no audit
+        for bad in ("%00name.pem",  # null byte encoded
+                    "somename"):     # no .pem suffix
+            st, _, _ = _req(host, port, "DELETE",
+                            "/api/settings/trust/" + bad, headers=hh)
+            assert st == 400, bad
+        # nothing was deleted, nothing was audited as a remove
+        assert (trust_dir / name).is_file()
+        assert not [e for e in _read_audit_lines(audit_path)
+                    if e.get("event") == "trust-remove"]
+    finally:
+        stop()
+
+
+# ---- CA-trust settings + refresh job + daily thread (server TLS trust) ----
+
+import trust as trust_mod
+
+# Built-in default CA-bundle source (spec update after the brief was
+# drafted): a missing/null/blank configured url falls back to this so
+# "Download now" (and auto-refresh, once enabled) work with zero
+# configuration. Pinned as a literal here so a change to the constant in
+# gui_server.py is caught by test failures, not silently drifts.
+_CA_DEFAULT_URL = "https://www.cisco.com/security/pki/trs/ios.p7b"
+
+
+def test_ca_trust_default_url_is_prefilled(tmp_path, monkeypatch):
+    """Spec update: nothing configured -> the reader AND the console's
+    settings view both surface the built-in Cisco CA-bundle URL, not None,
+    so the UI shows it prefilled and 'Download now' works out of the box."""
+    assert gui_server._CA_TRUST_DEFAULT_URL == _CA_DEFAULT_URL
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    p = str(tmp_path / "state" / "ca-trust-settings.json")
+    assert gui_server.read_ca_trust_settings(p) == {
+        "url": _CA_DEFAULT_URL, "auto": False}
+    host, port, _deps, stop = _serve_full(tmp_path)
+    try:
+        ck, _csrf = _auth(host, port)
+        st, _, b = _req(host, port, "GET", "/api/settings",
+                        headers={"Cookie": ck})
+        assert st == 200
+        assert json.loads(b)["ca_trust"] == {
+            "url": _CA_DEFAULT_URL, "auto": False}
+    finally:
+        stop()
+
+
+def test_settings_ca_trust_roundtrip_and_validation(tmp_path, monkeypatch):
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, _deps, stop = _serve_full(tmp_path)
+    try:
+        # auth: no session -> 401; session without CSRF -> 403
+        assert _req(host, port, "POST", "/api/settings/ca-trust",
+                    {"url": "https://ca.example/bundle.pem",
+                     "auto": True})[0] == 401
+        ck, csrf = _auth(host, port)
+        assert _req(host, port, "POST", "/api/settings/ca-trust",
+                    {"url": "https://ca.example/bundle.pem", "auto": True},
+                    headers={"Cookie": ck})[0] == 403
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        # defaults before any write: the built-in URL, auto off
+        st, _, b = _req(host, port, "GET", "/api/settings",
+                        headers={"Cookie": ck})
+        assert st == 200
+        assert json.loads(b)["ca_trust"] == {
+            "url": _CA_DEFAULT_URL, "auto": False}
+        # validation: https only, host required, auto must be a real bool
+        for bad in ({"url": "http://ca.example/b.pem", "auto": True},
+                    {"url": "ftp://ca.example/b.pem", "auto": True},
+                    {"url": "https://", "auto": True},
+                    {"url": "ca.example/b.pem", "auto": True},
+                    {"url": 42, "auto": True},
+                    {"url": "https://ca.example/b.pem", "auto": "yes"},
+                    {"url": "https://ca.example/b.pem", "auto": 1}):
+            st, _, _ = _req(host, port, "POST", "/api/settings/ca-trust",
+                            bad, headers=hh)
+            assert st == 400, bad
+        hh_json = dict(hh); hh_json["Content-Type"] = "application/json"
+        assert _req(host, port, "POST", "/api/settings/ca-trust",
+                    raw=b"[]", headers=hh_json)[0] == 400
+        # save, then the settings view reflects it
+        st, _, b = _req(host, port, "POST", "/api/settings/ca-trust",
+                        {"url": "https://ca.example/bundle.pem", "auto": True},
+                        headers=hh)
+        assert st == 200
+        assert json.loads(b)["ca_trust"] == {
+            "url": "https://ca.example/bundle.pem", "auto": True}
+        st, _, b = _req(host, port, "GET", "/api/settings",
+                        headers={"Cookie": ck})
+        assert json.loads(b)["ca_trust"] == {
+            "url": "https://ca.example/bundle.pem", "auto": True}
+        # the settings file is atomic JSON under IRIS_STATE
+        with open(str(tmp_path / "state" / "ca-trust-settings.json")) as f:
+            assert json.load(f) == {"url": "https://ca.example/bundle.pem",
+                                    "auto": True}
+        # null url clears it (unset is first-class on disk: {"url": null});
+        # but a cleared url is not "no source" -- it falls back to the
+        # built-in default, both in the save response and on GET
+        st, _, b = _req(host, port, "POST", "/api/settings/ca-trust",
+                        {"url": None, "auto": False}, headers=hh)
+        assert st == 200
+        assert json.loads(b)["ca_trust"] == {
+            "url": _CA_DEFAULT_URL, "auto": False}
+        st, _, b = _req(host, port, "GET", "/api/settings",
+                        headers={"Cookie": ck})
+        assert json.loads(b)["ca_trust"] == {
+            "url": _CA_DEFAULT_URL, "auto": False}
+        with open(str(tmp_path / "state" / "ca-trust-settings.json")) as f:
+            assert json.load(f) == {"url": None, "auto": False}
+    finally:
+        stop()
+
+
+def test_ca_trust_settings_reader_tolerant(tmp_path):
+    p = str(tmp_path / "ca-trust-settings.json")
+    # missing file -> the built-in default url, auto off
+    assert gui_server.read_ca_trust_settings(p) == {
+        "url": _CA_DEFAULT_URL, "auto": False}
+    # garbage -> same defaults (a settings reader never raises)
+    with open(p, "w") as f:
+        f.write("{not json")
+    assert gui_server.read_ca_trust_settings(p) == {
+        "url": _CA_DEFAULT_URL, "auto": False}
+    # wrong types -> same defaults
+    with open(p, "w") as f:
+        json.dump({"url": 42, "auto": "yes"}, f)
+    assert gui_server.read_ca_trust_settings(p) == {
+        "url": _CA_DEFAULT_URL, "auto": False}
+    # roundtrip through the atomic writer: an explicit url is returned as-is
+    gui_server.write_ca_trust_settings(p, "https://ca.example/b.pem", True)
+    assert gui_server.read_ca_trust_settings(p) == {
+        "url": "https://ca.example/b.pem", "auto": True}
+    # writing an explicit null (first-class "unset") falls back to the
+    # default url again; auto is independent and is preserved as written
+    gui_server.write_ca_trust_settings(p, None, True)
+    assert gui_server.read_ca_trust_settings(p) == {
+        "url": _CA_DEFAULT_URL, "auto": True}
+
+
+def test_settings_ca_trust_config_audited(tmp_path, monkeypatch):
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        # Fresh state → POST url: audit shows "(none)" -> url, not default
+        assert _req(host, port, "POST", "/api/settings/ca-trust",
+                    {"url": "https://ca.example/bundle.pem", "auto": True},
+                    headers=hh)[0] == 200
+        evs = [e for e in _read_audit_lines(audit_path)
+               if e["event"] == "ca-trust-config"]
+        assert len(evs) == 1
+        ev = evs[0]
+        assert ev["category"] == "settings" and ev["result"] == "ok"
+        assert ev["actor"] == "console:admin" and ev["target"] == "ca-trust"
+        # Audit logs the raw stored value, not the resolved default:
+        # never-configured renders as "(none)"
+        assert "url (none) -> https://ca.example/bundle.pem" in ev["detail"]
+        assert "auto False -> True" in ev["detail"]
+        # POST different url: detail contains first url as before-value
+        assert _req(host, port, "POST", "/api/settings/ca-trust",
+                    {"url": "https://ca.other/bundle.pem", "auto": True},
+                    headers=hh)[0] == 200
+        evs = [e for e in _read_audit_lines(audit_path)
+               if e["event"] == "ca-trust-config"]
+        assert len(evs) == 2
+        ev = evs[1]
+        assert "url https://ca.example/bundle.pem -> https://ca.other/bundle.pem" in ev["detail"]
+        # Clearing (url null) → after-side "(none)"
+        assert _req(host, port, "POST", "/api/settings/ca-trust",
+                    {"url": None, "auto": False},
+                    headers=hh)[0] == 200
+        evs = [e for e in _read_audit_lines(audit_path)
+               if e["event"] == "ca-trust-config"]
+        assert len(evs) == 3
+        ev = evs[2]
+        assert "url https://ca.other/bundle.pem -> (none)" in ev["detail"]
+    finally:
+        stop()
+
+
+def test_settings_ca_trust_persist_failure_audited(tmp_path, monkeypatch):
+    """When write_ca_trust_settings raises (e.g. disk-full OSError), the
+    POST route must audit the failure and respond 500 with a static error
+    message rather than dropping the connection."""
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+
+        def failing_write(path, url, auto):
+            raise OSError("disk full")
+        monkeypatch.setattr(gui_server, "write_ca_trust_settings",
+                            failing_write)
+        st, _, b = _req(host, port, "POST", "/api/settings/ca-trust",
+                        {"url": "https://ca.example/bundle.pem",
+                         "auto": True}, headers=hh)
+        assert st == 500
+        resp = json.loads(b)
+        assert resp["error"] == "settings save failed"
+        fail_rows = [e for e in _read_audit_lines(audit_path)
+                     if e.get("event") == "ca-trust-config"
+                     and e.get("result") == "fail"]
+        assert fail_rows, "no fail audit row for write_ca_trust_settings exception"
+        detail = fail_rows[-1]["detail"]
+        assert "OSError" in detail
+        assert "disk full" not in detail
+    finally:
+        stop()
+
+
+def _poll_ca_job(host, port, ck, jid, timeout=3):
+    deadline = time.time() + timeout
+    job = None
+    while time.time() < deadline:
+        s, _, jb = _req(host, port, "GET",
+                        "/api/settings/ca-trust/refresh/" + jid,
+                        headers={"Cookie": ck})
+        assert s == 200
+        job = json.loads(jb)
+        if job["state"] != "running":
+            return job
+        time.sleep(0.02)
+    return job
+
+
+def test_ca_trust_refresh_job_flow(tmp_path, monkeypatch):
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        # poll route is session-gated; unknown id -> 404
+        assert _req(host, port, "GET",
+                    "/api/settings/ca-trust/refresh/deadbeef")[0] == 401
+        assert _req(host, port, "GET",
+                    "/api/settings/ca-trust/refresh/deadbeef",
+                    headers={"Cookie": ck})[0] == 404
+        # nothing configured yet -- refresh uses the built-in default url
+        # ("Download now" works out of the box); stub the downloader (no
+        # network in unit tests, and never the real Cisco URL)
+        seen = {}
+
+        def fake_download(url):
+            seen["url"] = url
+            return {"ok": True, "certs": 3, "error": None}
+
+        monkeypatch.setattr(trust_mod, "download_bundle", fake_download)
+        st, _, b = _req(host, port, "POST", "/api/settings/ca-trust/refresh",
+                        {}, headers=hh)
+        assert st == 200
+        jid = json.loads(b)["job"]
+        job = _poll_ca_job(host, port, ck, jid)
+        assert job == {"state": "done", "certs": 3,
+                       "detail": "downloaded 3 certificate(s) from "
+                                 + _CA_DEFAULT_URL}
+        assert seen["url"] == _CA_DEFAULT_URL
+
+        # configuring an explicit url overrides the default
+        assert _req(host, port, "POST", "/api/settings/ca-trust",
+                    {"url": "https://ca.example/bundle.pem", "auto": False},
+                    headers=hh)[0] == 200
+        st, _, b = _req(host, port, "POST", "/api/settings/ca-trust/refresh",
+                        {}, headers=hh)
+        assert st == 200
+        jid = json.loads(b)["job"]
+        job = _poll_ca_job(host, port, ck, jid)
+        assert job == {"state": "done", "certs": 3,
+                       "detail": "downloaded 3 certificate(s) from "
+                                 "https://ca.example/bundle.pem"}
+        assert seen["url"] == "https://ca.example/bundle.pem"
+
+        # the audit event is emitted BEFORE the job turns terminal, so a
+        # poller that saw done can rely on the line being there already
+        evs = [e for e in _read_audit_lines(audit_path)
+               if e["event"] == "ca-trust-refresh"]
+        assert len(evs) == 2
+        assert all(e["result"] == "ok" for e in evs)
+        assert all(e["category"] == "settings" for e in evs)
+        assert all(e["actor"] == "console:admin" for e in evs)
+        assert all(e["target"] == "ca-trust" for e in evs)
+        assert "3 certificate(s)" in evs[0]["detail"]
+        assert "3 certificate(s)" in evs[1]["detail"]
+    finally:
+        stop()
+
+
+def test_ca_trust_refresh_failure_reported_and_audited(tmp_path, monkeypatch):
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        assert _req(host, port, "POST", "/api/settings/ca-trust",
+                    {"url": "https://ca.example/bundle.pem", "auto": False},
+                    headers=hh)[0] == 200
+        monkeypatch.setattr(
+            trust_mod, "download_bundle",
+            lambda url: {"ok": False, "certs": 0, "error": "no PEM blocks"})
+        st, _, b = _req(host, port, "POST", "/api/settings/ca-trust/refresh",
+                        {}, headers=hh)
+        assert st == 200
+        jid = json.loads(b)["job"]
+        job = _poll_ca_job(host, port, ck, jid)
+        assert job == {"state": "failed", "certs": None,
+                       "detail": "no PEM blocks"}
+        evs = [e for e in _read_audit_lines(audit_path)
+               if e["event"] == "ca-trust-refresh"]
+        assert len(evs) == 1 and evs[0]["result"] == "fail"
+        assert "no PEM blocks" in evs[0]["detail"]
+    finally:
+        stop()
+
+
+def test_ca_refresh_due_pure_decision():
+    """The daily thread's 'should this cycle download' decision is a pure
+    function so it is testable without threads or sleeping."""
+    due = gui_server.ca_refresh_due
+    assert due({"url": "https://ca.example/b.pem", "auto": True}) == \
+        "https://ca.example/b.pem"
+    assert due({"url": " https://ca.example/b.pem ", "auto": True}) == \
+        "https://ca.example/b.pem"
+    assert due({"url": "https://ca.example/b.pem", "auto": False}) is None
+    assert due({"url": None, "auto": True}) is None
+    assert due({"url": "   ", "auto": True}) is None
+    assert due({"url": "https://ca.example/b.pem", "auto": 1}) is None
+    assert due({}) is None
+    assert due(None) is None
+
+
+# ---- editable telemetry destination (feature B, console side) ----
+
+def test_settings_telemetry_destination_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    monkeypatch.setenv("IRIS_OTLP_ENDPOINT", "http://env-collector:4318")
+    monkeypatch.setenv("IRIS_OBSERVABILITY", "1")
+    host, port, _deps, stop = _serve_full(tmp_path)
+    try:
+        # auth: no session -> 401; session without CSRF -> 403 (POST + DELETE)
+        assert _req(host, port, "POST", "/api/settings/telemetry-destination",
+                    {"endpoint": "https://c:4318", "enabled": True})[0] == 401
+        ck, csrf = _auth(host, port)
+        assert _req(host, port, "POST", "/api/settings/telemetry-destination",
+                    {"endpoint": "https://c:4318", "enabled": True},
+                    headers={"Cookie": ck})[0] == 403
+        assert _req(host, port, "DELETE",
+                    "/api/settings/telemetry-destination",
+                    headers={"Cookie": ck})[0] == 403
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        # no override yet: env is both the source and the effective config
+        st, _, b = _req(host, port, "GET", "/api/settings",
+                        headers={"Cookie": ck})
+        assert st == 200
+        assert json.loads(b)["telemetry_destination"] == {
+            "endpoint": None, "enabled": None, "source": "env",
+            "effective_endpoint": "http://env-collector:4318",
+            "effective_enabled": True}
+        # validation -> 400: bad types, bad scheme, missing netloc,
+        # query/fragment, bool pedantry, credentials, hostless netloc
+        for bad in ({"endpoint": 42, "enabled": True},
+                    {"endpoint": "ftp://c:4318", "enabled": True},
+                    {"endpoint": "https://", "enabled": True},
+                    {"endpoint": "collector:4318", "enabled": True},
+                    {"endpoint": "https://c:4318?x=1", "enabled": True},
+                    {"endpoint": "https://c:4318#frag", "enabled": True},
+                    {"endpoint": "", "enabled": True},
+                    {"endpoint": "https://c:4318", "enabled": 1},
+                    {"endpoint": "https://c:4318", "enabled": "on"},
+                    {"endpoint": "http://user:pass@collector:4318", "enabled": True},
+                    {"endpoint": "http://a@b", "enabled": True},
+                    {"endpoint": "https://:4318", "enabled": True}):
+            st, _, _ = _req(host, port, "POST",
+                            "/api/settings/telemetry-destination", bad,
+                            headers=hh)
+            assert st == 400, bad
+        hh_json = dict(hh); hh_json["Content-Type"] = "application/json"
+        assert _req(host, port, "POST",
+                    "/api/settings/telemetry-destination",
+                    raw=b"[]", headers=hh_json)[0] == 400
+        # set: the trailing slash is stripped before persisting
+        st, _, b = _req(host, port, "POST",
+                        "/api/settings/telemetry-destination",
+                        {"endpoint": "https://collector:4318/",
+                         "enabled": True}, headers=hh)
+        assert st == 200
+        assert json.loads(b) == {"ok": True,
+                                 "endpoint": "https://collector:4318",
+                                 "enabled": True}
+        with open(str(tmp_path / "state"
+                      / "telemetry-destination.json")) as f:
+            assert json.load(f) == {"endpoint": "https://collector:4318",
+                                    "enabled": True}
+        # IPv6 addresses still work (guard case)
+        st, _, b = _req(host, port, "POST",
+                        "/api/settings/telemetry-destination",
+                        {"endpoint": "https://[::1]:4318", "enabled": True},
+                        headers=hh)
+        assert st == 200
+        assert json.loads(b) == {"ok": True,
+                                 "endpoint": "https://[::1]:4318",
+                                 "enabled": True}
+        # Set back to collector:4318 for subsequent tests
+        assert _req(host, port, "POST",
+                    "/api/settings/telemetry-destination",
+                    {"endpoint": "https://collector:4318", "enabled": True},
+                    headers=hh)[0] == 200
+        st, _, b = _req(host, port, "GET", "/api/settings",
+                        headers={"Cookie": ck})
+        assert json.loads(b)["telemetry_destination"] == {
+            "endpoint": "https://collector:4318", "enabled": True,
+            "source": "override",
+            "effective_endpoint": "https://collector:4318",
+            "effective_enabled": True}
+        # per-field inherit: a null endpoint keeps the env endpoint effective
+        assert _req(host, port, "POST",
+                    "/api/settings/telemetry-destination",
+                    {"endpoint": None, "enabled": False},
+                    headers=hh)[0] == 200
+        st, _, b = _req(host, port, "GET", "/api/settings",
+                        headers={"Cookie": ck})
+        assert json.loads(b)["telemetry_destination"] == {
+            "endpoint": None, "enabled": False, "source": "override",
+            "effective_endpoint": "http://env-collector:4318",
+            "effective_enabled": False}
+        # DELETE reverts the GET reflection to the deployment default (env)
+        st, _, b = _req(host, port, "DELETE",
+                        "/api/settings/telemetry-destination", headers=hh)
+        assert st == 200 and json.loads(b)["deleted"] is True
+        assert not os.path.exists(str(tmp_path / "state"
+                                      / "telemetry-destination.json"))
+        st, _, b = _req(host, port, "GET", "/api/settings",
+                        headers={"Cookie": ck})
+        dest = json.loads(b)["telemetry_destination"]
+        assert dest["source"] == "env"
+        assert dest["effective_endpoint"] == "http://env-collector:4318"
+        assert dest["effective_enabled"] is True
+        # a second DELETE reports there was nothing to delete
+        st, _, b = _req(host, port, "DELETE",
+                        "/api/settings/telemetry-destination", headers=hh)
+        assert st == 200 and json.loads(b)["deleted"] is False
+    finally:
+        stop()
+
+
+def test_settings_telemetry_destination_audited(tmp_path, monkeypatch):
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        assert _req(host, port, "POST",
+                    "/api/settings/telemetry-destination",
+                    {"endpoint": "https://collector:4318", "enabled": True},
+                    headers=hh)[0] == 200
+        assert _req(host, port, "DELETE",
+                    "/api/settings/telemetry-destination",
+                    headers=hh)[0] == 200
+        events = _read_audit_lines(audit_path)
+        set_ev = [e for e in events
+                  if e["event"] == "telemetry-destination-set"]
+        clr_ev = [e for e in events
+                  if e["event"] == "telemetry-destination-clear"]
+        assert len(set_ev) == 1 and len(clr_ev) == 1
+        assert set_ev[0]["category"] == "telemetry"
+        assert set_ev[0]["actor"] == "console:admin"
+        assert set_ev[0]["target"] == "otlp-endpoint"
+        # non-secret before -> after (endpoint URLs are not secrets; headers
+        # stay env-only and never pass through this route)
+        assert ("endpoint (inherit) -> https://collector:4318"
+                in set_ev[0]["detail"])
+        assert "enabled (inherit) -> True" in set_ev[0]["detail"]
+        assert clr_ev[0]["category"] == "telemetry"
+        assert ("was endpoint https://collector:4318"
+                in clr_ev[0]["detail"])
+    finally:
+        stop()
+
+
+def test_settings_telemetry_destination_persist_failure_audited(tmp_path, monkeypatch):
+    """When telemetry_destination.write raises (e.g. disk-full OSError), the
+    POST route must audit the failure and respond 500 with a static error
+    message rather than dropping the connection."""
+    import telemetry_destination
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+
+        def failing_write(path, endpoint, enabled):
+            raise OSError("disk full")
+        monkeypatch.setattr(telemetry_destination, "write", failing_write)
+        st, _, b = _req(host, port, "POST",
+                        "/api/settings/telemetry-destination",
+                        {"endpoint": "https://collector:4318",
+                         "enabled": True}, headers=hh)
+        assert st == 500
+        resp = json.loads(b)
+        assert resp["error"] == "settings save failed"
+        fail_rows = [e for e in _read_audit_lines(audit_path)
+                     if e.get("event") == "telemetry-destination-set"
+                     and e.get("result") == "fail"]
+        assert fail_rows, "no fail audit row for telemetry_destination.write exception"
+        detail = fail_rows[-1]["detail"]
+        assert "OSError" in detail
+        assert "disk full" not in detail
+    finally:
+        stop()
+
+
+def test_settings_telemetry_destination_credentials_rejected(tmp_path, monkeypatch):
+    """Verify credentialed endpoints are rejected and credentials don't leak
+    into response or audit logs. Endpoints with embedded userinfo are rejected
+    at validation time before any audit event is generated."""
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        # Attempt 1: user:pass@ format
+        st, _, b = _req(host, port, "POST",
+                        "/api/settings/telemetry-destination",
+                        {"endpoint": "http://user:pass@collector:4318",
+                         "enabled": True},
+                        headers=hh)
+        assert st == 400
+        # Verify "pass" doesn't leak into response body
+        assert b"pass" not in b.lower()
+        # Attempt 2: user@ format
+        st, _, b = _req(host, port, "POST",
+                        "/api/settings/telemetry-destination",
+                        {"endpoint": "http://a@b", "enabled": True},
+                        headers=hh)
+        assert st == 400
+        assert b"a@b" not in b
+        # Check audit log: no telemetry-destination-set event should be created
+        # (validation happens before audit logging)
+        events = _read_audit_lines(audit_path)
+        set_ev = [e for e in events
+                  if e["event"] == "telemetry-destination-set"]
+        assert len(set_ev) == 0, "rejected endpoint should not create audit event"
+        # Verify "pass" and other credential markers don't appear anywhere in audit
+        audit_text = json.dumps(events)
+        assert "pass" not in audit_text
+        assert "user:pass" not in audit_text
+    finally:
+        stop()
+
+
+def test_settings_telemetry_destination_malformed_ipv6_rejected(tmp_path, monkeypatch):
+    """Verify malformed IPv6 URLs in endpoint validators are safely rejected
+    with a clean 400 error, not a ValueError crash that drops the connection."""
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, _deps, stop = _serve_full(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        # Malformed IPv6 bracket URLs must be rejected, not crash the request thread
+        for bad in ("http://[::1:4318", "http://[bad"):
+            st, _, b = _req(host, port, "POST",
+                            "/api/settings/telemetry-destination",
+                            {"endpoint": bad, "enabled": True},
+                            headers=hh)
+            assert st == 400, f"malformed IPv6 {bad!r} should return 400, not crash"
+            # Response must be valid JSON with an error message (proves connection stayed alive)
+            data = json.loads(b)
+            assert "error" in data, f"response should contain error key"
+        # Valid IPv6 must still work
+        st, _, b = _req(host, port, "POST",
+                        "/api/settings/telemetry-destination",
+                        {"endpoint": "https://[::1]:4318", "enabled": True},
+                        headers=hh)
+        assert st == 200, "valid IPv6 https://[::1]:4318 should return 200"
+        assert json.loads(b) == {"ok": True,
+                                 "endpoint": "https://[::1]:4318",
+                                 "enabled": True}
+    finally:
+        stop()
+
+
+def test_settings_ca_trust_malformed_ipv6_rejected(tmp_path, monkeypatch):
+    """Verify malformed IPv6 URLs in ca-trust validator are safely rejected
+    with a clean 400 error, not a ValueError crash that drops the connection."""
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, _deps, stop = _serve_full(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        # Malformed IPv6 bracket URLs must be rejected, not crash the request thread
+        st, _, b = _req(host, port, "POST", "/api/settings/ca-trust",
+                        {"url": "https://[bad", "auto": False},
+                        headers=hh)
+        assert st == 400, f"malformed IPv6 https://[bad should return 400, not crash"
+        # Response must be valid JSON with an error message (proves connection stayed alive)
+        data = json.loads(b)
+        assert "error" in data, f"response should contain error key"
+        # Valid IPv6 must still work
+        st, _, b = _req(host, port, "POST", "/api/settings/ca-trust",
+                        {"url": "https://[::1]:4318/ca.pem", "auto": False},
+                        headers=hh)
+        assert st == 200, "valid IPv6 https://[::1]:4318/ca.pem should return 200"
+        assert json.loads(b)["ca_trust"] == {
+            "url": "https://[::1]:4318/ca.pem", "auto": False}
+    finally:
+        stop()
+
+
+# ---- GET /api/devices/<id>/deployment (deployment config visibility) ------
+
+def _serve_receipts(tmp_path, now_fn=None):
+    """A server with ONLY a receipt store wired (the deployment route needs
+    nothing else). Returns the store so tests can seed records directly."""
+    import deployment_receipts
+    app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
+    app.set_admin("admin", "pw")
+    state = str(tmp_path / "state")
+    receipts = (deployment_receipts.ReceiptStore(state, now_fn=now_fn)
+                if now_fn else deployment_receipts.ReceiptStore(state))
+    srv = gui_server.make_server("127.0.0.1", 0, app, certfile=None,
+                                 receipts=receipts)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return "127.0.0.1", port, receipts, srv.shutdown
+
+
+def _receipt_stub(device_id):
+    return {"controller_id": "iris", "device_id": device_id,
+            "inventory_revision": 1, "plan_hash": "h",
+            "resolved": {"attachment": "routed", "platform": "guestshell"},
+            "preflight": {"status": "not-required"},
+            "resources": [{"kind": "guestshell", "ownership": "iris-created"}]}
+
+
+def test_deployment_route_auth_and_receipts_unavailable(tmp_path):
+    # no receipt store wired at all -> 404 "receipts unavailable"
+    host, port, _app, stop = _serve(tmp_path)
+    try:
+        assert _req(host, port, "GET", "/api/devices/d1/deployment")[0] == 401
+        ck, _csrf = _auth(host, port)
+        st, _, b = _req(host, port, "GET", "/api/devices/d1/deployment",
+                        headers={"Cookie": ck})
+        assert st == 404 and json.loads(b)["error"] == "receipts unavailable"
+    finally:
+        stop()
+
+
+def test_deployment_route_null_then_newest_then_active(tmp_path):
+    clock = {"t": 100}
+    host, port, receipts, stop = _serve_receipts(tmp_path,
+                                                 now_fn=lambda: clock["t"])
+    try:
+        ck, _csrf = _auth(host, port)
+        # no receipts for the device: record is null, total 0
+        st, _, b = _req(host, port, "GET", "/api/devices/d1/deployment",
+                        headers={"Cookie": ck})
+        assert st == 200
+        assert json.loads(b) == {"receipt": None, "total": 0}
+        # two non-active, non-recoverable receipts -> the newest by
+        # timestamps.planned_at wins
+        r1 = receipts.create(_receipt_stub("d1"))
+        receipts.transition(r1["receipt_id"], "removed")
+        clock["t"] = 200
+        r2 = receipts.create(_receipt_stub("d1"))
+        _, _, b = _req(host, port, "GET", "/api/devices/d1/deployment",
+                       headers={"Cookie": ck})
+        got = json.loads(b)
+        assert got["total"] == 2
+        assert got["receipt"]["receipt_id"] == r2["receipt_id"]
+        assert got["receipt"]["state"] == "planned"
+        # the record is the stored receipt as-is (resolved/preflight/
+        # resources ride along)
+        assert got["receipt"]["resolved"]["platform"] == "guestshell"
+        assert got["receipt"]["preflight"] == {"status": "not-required"}
+        assert got["receipt"]["resources"][0]["kind"] == "guestshell"
+        assert got["receipt"]["timestamps"]["planned_at"] == 200
+        # once a receipt goes active it wins regardless of age
+        receipts.transition(r2["receipt_id"], "applying")
+        receipts.transition(r2["receipt_id"], "active")
+        clock["t"] = 300
+        r3 = receipts.create(_receipt_stub("d1"))     # newer, but only planned
+        _, _, b = _req(host, port, "GET", "/api/devices/d1/deployment",
+                       headers={"Cookie": ck})
+        got = json.loads(b)
+        assert got["total"] == 3
+        assert got["receipt"]["receipt_id"] == r2["receipt_id"]
+        assert got["receipt"]["state"] == "active"
+        assert r3["receipt_id"] != r2["receipt_id"]
+        # receipts are per-device: another device still sees null
+        _, _, b = _req(host, port, "GET", "/api/devices/other/deployment",
+                       headers={"Cookie": ck})
+        assert json.loads(b) == {"receipt": None, "total": 0}
+    finally:
+        stop()
+
+
+def test_deployment_route_recoverable_beats_newer_planned(tmp_path):
+    clock = {"t": 100}
+    host, port, receipts, stop = _serve_receipts(tmp_path,
+                                                 now_fn=lambda: clock["t"])
+    try:
+        ck, _csrf = _auth(host, port)
+        r1 = receipts.create(_receipt_stub("d1"))
+        receipts.transition(r1["receipt_id"], "needs-reconcile")
+        clock["t"] = 200
+        receipts.create(_receipt_stub("d1"))          # newer, merely planned
+        _, _, b = _req(host, port, "GET", "/api/devices/d1/deployment",
+                       headers={"Cookie": ck})
+        got = json.loads(b)
+        # the recoverable receipt still describes what is ON the box
+        assert got["receipt"]["receipt_id"] == r1["receipt_id"]
+        assert got["receipt"]["state"] == "needs-reconcile"
+        assert got["total"] == 2
+    finally:
+        stop()
+
+
+# ---- GET /api/deploy-logs (persistent deployment logs) --------------------
+
+def test_deploy_logs_routes_list_filter_and_serve(tmp_path):
+    log_dir = str(tmp_path / "deploy-logs")
+
+    def run_fn(p, e, on):
+        on("[1/6] hello"); on("[6/6] done"); return 0
+
+    host, port, stop = _serve_onboard(tmp_path, run_fn, log_dir=log_dir)
+    try:
+        assert _req(host, port, "GET", "/api/deploy-logs")[0] == 401
+        ck, csrf = _auth(host, port)
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/onboard", {},
+                        headers={"Cookie": ck, "X-CSRF-Token": csrf})
+        assert st == 200
+        jid = json.loads(b)["job_id"]
+        import time as _t
+        deadline = _t.time() + 3
+        while _t.time() < deadline:
+            _, _, jb = _req(host, port, "GET", "/api/onboard/jobs/" + jid,
+                            headers={"Cookie": ck})
+            if json.loads(jb)["state"] in ("done", "error"):
+                break
+            _t.sleep(0.02)
+        st, _, b = _req(host, port, "GET", "/api/deploy-logs",
+                        headers={"Cookie": ck})
+        assert st == 200
+        logs = json.loads(b)["logs"]
+        assert len(logs) == 1
+        entry = logs[0]
+        assert entry["device_id"] == "d1" and entry["action"] == "onboard"
+        assert entry["state"] == "done" and entry["rc"] == 0
+        assert entry["file"].endswith("-d1-onboard-%s.log" % jid)
+        assert entry["finished_at"] and entry["size"] > 0
+        # the device filter compares the raw id from the header
+        _, _, b = _req(host, port, "GET", "/api/deploy-logs?device_id=d1",
+                       headers={"Cookie": ck})
+        assert len(json.loads(b)["logs"]) == 1
+        _, _, b = _req(host, port, "GET", "/api/deploy-logs?device_id=ghost",
+                       headers={"Cookie": ck})
+        assert json.loads(b)["logs"] == []
+        # the full text is served as text/plain: header line + job lines
+        assert _req(host, port, "GET",
+                    "/api/deploy-logs/" + entry["file"])[0] == 401
+        st, hd, body = _req(host, port, "GET",
+                            "/api/deploy-logs/" + entry["file"],
+                            headers={"Cookie": ck})
+        assert st == 200 and hd["Content-Type"].startswith("text/plain")
+        text = body.decode()
+        first = text.splitlines()[0]
+        assert first.startswith("# job=%s device=d1 action=onboard "
+                                "state=done rc=0" % jid)
+        assert "[1/6] hello" in text and "[6/6] done" in text
+    finally:
+        stop()
+
+
+def test_deploy_logs_survive_job_eviction(tmp_path):
+    """The whole point of persistence: after the in-memory job is TTL-evicted
+    (server restart, or an hour passing), the log is still listed and
+    readable."""
+    log_dir = str(tmp_path / "deploy-logs")
+    clock = {"t": 1000.0}
+    host, port, stop = _serve_onboard(tmp_path, lambda p, e, on: 0,
+                                      log_dir=log_dir,
+                                      now_fn=lambda: clock["t"])
+    try:
+        ck, csrf = _auth(host, port)
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/onboard", {},
+                        headers={"Cookie": ck, "X-CSRF-Token": csrf})
+        assert st == 200
+        jid = json.loads(b)["job_id"]
+        import time as _t
+        deadline = _t.time() + 3
+        while _t.time() < deadline:
+            st, _, jb = _req(host, port, "GET", "/api/onboard/jobs/" + jid,
+                             headers={"Cookie": ck})
+            if st == 200 and json.loads(jb)["state"] in ("done", "error"):
+                break
+            _t.sleep(0.02)
+        clock["t"] += 3600 * 2 + 1     # push the job past _JOB_TTL
+        st, _, _b = _req(host, port, "GET", "/api/onboard/jobs/" + jid,
+                         headers={"Cookie": ck})
+        assert st == 404               # in-memory job gone
+        _, _, b = _req(host, port, "GET", "/api/deploy-logs",
+                       headers={"Cookie": ck})
+        logs = json.loads(b)["logs"]
+        assert len(logs) == 1 and logs[0]["device_id"] == "d1"
+        st, _, body = _req(host, port, "GET",
+                           "/api/deploy-logs/" + logs[0]["file"],
+                           headers={"Cookie": ck})
+        assert st == 200 and b"# job=" in body
+    finally:
+        stop()
+
+
+def test_deploy_logs_list_falls_back_to_filename_and_skips_garbage(tmp_path):
+    log_dir = str(tmp_path / "deploy-logs")
+    os.makedirs(log_dir)
+    # headerless file: metadata comes from the filename fields
+    with open(os.path.join(log_dir, "50-legacy-undeploy-aaaa.log"), "w") as f:
+        f.write("some output\n")
+    # a proper header wins over the (sanitized) filename
+    with open(os.path.join(log_dir, "99-sw_1-onboard-bbbb.log"), "w") as f:
+        f.write("# job=bbbb device=sw 1 action=onboard state=error rc=7 "
+                "queued_at=90 started_at=91 finished_at=99 platform=iox\n")
+        f.write("ERROR: boom\n")
+    # unparseable either way -> skipped
+    with open(os.path.join(log_dir, "junk.log"), "w") as f:
+        f.write("not a header\n")
+    host, port, stop = _serve_onboard(tmp_path, lambda p, e, on: 0,
+                                      log_dir=log_dir)
+    try:
+        ck, _csrf = _auth(host, port)
+        _, _, b = _req(host, port, "GET", "/api/deploy-logs",
+                       headers={"Cookie": ck})
+        logs = json.loads(b)["logs"]
+        assert [e["file"] for e in logs] == [       # newest first
+            "99-sw_1-onboard-bbbb.log", "50-legacy-undeploy-aaaa.log"]
+        assert logs[0]["device_id"] == "sw 1"       # RAW id from the header
+        assert logs[0]["state"] == "error" and logs[0]["rc"] == 7
+        assert logs[1] == {"file": "50-legacy-undeploy-aaaa.log",
+                           "device_id": "legacy", "action": "undeploy",
+                           "state": None, "rc": None, "finished_at": 50,
+                           "size": logs[1]["size"]}
+        # filtering on the raw header id finds the header-borne row only
+        _, _, b = _req(host, port, "GET", "/api/deploy-logs?device_id=sw%201",
+                       headers={"Cookie": ck})
+        assert [e["file"] for e in json.loads(b)["logs"]] == [
+            "99-sw_1-onboard-bbbb.log"]
+    finally:
+        stop()
+
+
+def test_deploy_log_file_route_rejects_traversal_and_bad_names(tmp_path):
+    log_dir = str(tmp_path / "deploy-logs")
+    os.makedirs(log_dir)
+    with open(str(tmp_path / "outside.log"), "w") as f:
+        f.write("must never be served\n")
+    # a symlink INSIDE log_dir pointing outside must not escape either
+    os.symlink(str(tmp_path / "outside.log"),
+               os.path.join(log_dir, "1-esc-onboard-cafe.log"))
+    host, port, stop = _serve_onboard(tmp_path, lambda p, e, on: 0,
+                                      log_dir=log_dir)
+    try:
+        ck, _csrf = _auth(host, port)
+        for name in ("../outside.log", "..%2Foutside.log", "no.txt",
+                     "missing.log", "1-esc-onboard-cafe.log"):
+            st, _, _b = _req(host, port, "GET", "/api/deploy-logs/" + name,
+                             headers={"Cookie": ck})
+            assert st == 404, name
+    finally:
+        stop()
+
+
+def test_deploy_logs_empty_without_log_dir(tmp_path):
+    # no onboard service at all (plain _serve): listing is empty, files 404
+    host, port, _app, stop = _serve(tmp_path)
+    try:
+        ck, _csrf = _auth(host, port)
+        st, _, b = _req(host, port, "GET", "/api/deploy-logs",
+                        headers={"Cookie": ck})
+        assert st == 200 and json.loads(b) == {"logs": []}
+        st, _, _b = _req(host, port, "GET", "/api/deploy-logs/x.log",
+                         headers={"Cookie": ck})
+        assert st == 404
+    finally:
+        stop()
+
+
+# ---- GET /api/help + instance id + static guide pages (help "?" feature) ---
+
+def test_read_instance_id_minted_once_mode_0600(tmp_path):
+    state = str(tmp_path / "state")  # dir does not exist yet: reader creates it
+    first = gui_server.read_instance_id(state)
+    assert re.fullmatch(r"[0-9a-f]{32}", first)
+    p = os.path.join(state, "instance-id")
+    assert os.path.isfile(p)
+    assert os.stat(p).st_mode & 0o777 == 0o600
+    # stable across calls, and the file content matches (newline stripped)
+    assert gui_server.read_instance_id(state) == first
+    with open(p) as f:
+        assert f.read().strip() == first
+    # a pre-existing id is read back verbatim, never rewritten
+    with open(p, "w") as f:
+        f.write("deadbeef" * 4 + "\n")
+    assert gui_server.read_instance_id(state) == "deadbeef" * 4
+
+
+def test_help_route_auth_shape_and_stable_deployment_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, _app, stop = _serve(tmp_path)
+    try:
+        assert _req(host, port, "GET", "/api/help")[0] == 401
+        ck, _csrf = _auth(host, port)
+        st, _, b = _req(host, port, "GET", "/api/help",
+                        headers={"Cookie": ck})
+        assert st == 200
+        doc = json.loads(b)
+        assert doc["version"] == gui_server._read_version()
+        assert re.fullmatch(r"[0-9a-f]{32}", doc["deployment_id"])
+        assert doc["docs_url"] == gui_server._DOCS_URL
+        assert doc["docs_url"].startswith("https://")
+        assert doc["guides"] == {"device": "/help-device.html",
+                                 "server": "/help-server.html"}
+        # deployment id is durable: same value on every later call
+        st2, _, b2 = _req(host, port, "GET", "/api/help",
+                          headers={"Cookie": ck})
+        assert st2 == 200
+        assert json.loads(b2)["deployment_id"] == doc["deployment_id"]
+    finally:
+        stop()
+
+
+def test_help_guide_pages_exist_and_header_help_control_wired():
+    """Source guard for the "?" help feature: both static guide pages exist
+    in the webroot (the /api/help "guides" links must not 404), each is a
+    standalone CSP-clean page linking the shared stylesheet, and index.html
+    carries the header "?" control that opens the popover."""
+    for name in ("help-device.html", "help-server.html"):
+        p = os.path.join(gui_server.WEBROOT, name)
+        assert os.path.isfile(p), name
+        with open(p) as f:
+            page = f.read()
+        assert "SPDX-License-Identifier: Apache-2.0" in page, name
+        assert '<link rel="stylesheet" href="/styles.css">' in page, name
+        assert 'href="/"' in page, name           # link back to the console
+        assert gui_server._DOCS_URL in page, name  # link to the official docs
+        # CSP: no inline handlers/styles/scripts on the static guide pages
+        assert " style=" not in page and "onclick=" not in page, name
+        assert "<script" not in page, name
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    assert 'id="help-btn"' in html
+    assert 'href="/help-device.html"' in html
+    assert 'href="/help-server.html"' in html

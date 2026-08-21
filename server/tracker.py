@@ -8,6 +8,7 @@
 peer lifecycle via peer_registry, bencoded responses, optional compact peers.
 Stdlib only. Run as a service: python3 tracker.py (reads IRIS_* env)."""
 import binascii
+import ipaddress
 import os
 import socket
 import threading
@@ -38,6 +39,29 @@ def _valid_ipv4(addr):
         return False
 
 
+# Exactly the address space a fleet peer may claim: the three RFC1918
+# networks plus carrier-grade NAT. `is_private` would be broader — it also
+# admits loopback, link-local, unspecified and reserved ranges, which would
+# then be advertised to every other peer as a download endpoint.
+_OVERRIDE_NETS = tuple(ipaddress.ip_network(n) for n in (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"))
+
+
+def _private_override(addr):
+    """Allow NAT overrides only for non-routable fleet address space.
+
+    Containerized seeders need this because their socket source is loopback or
+    bridge-local. RFC1918 and carrier-grade NAT (used by deployed fleets) are
+    accepted; everything else — public endpoints, loopback, link-local — is
+    not.
+    """
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return False
+    return ip.version == 4 and any(ip in net for net in _OVERRIDE_NETS)
+
+
 def parse_announce(query):
     """Parse /announce query, preserving the BINARY info_hash (unquote_to_bytes —
     a raw 20-byte hash is not valid UTF-8). Returns a dict of typed fields."""
@@ -56,11 +80,12 @@ def parse_announce(query):
     raw_port = as_int("port", 6881)
     port = raw_port if 1 <= raw_port <= 65535 else None
 
-    # BEP3 optional ip= override — accept ONLY valid dotted-quad IPv4 so a
-    # client cannot inject an IPv6 address or hostname that would later cause
-    # compact_peers to raise when encoding the peer list for other clients.
+    # BEP3 optional ip= override — retain it for container/NAT deployments, but
+    # only for private/CGNAT dotted-quad IPv4. Public endpoints always come
+    # from the authenticated connection's socket source.
     raw_ip = raw.get("ip") or None
-    ip = raw_ip if raw_ip is not None and _valid_ipv4(raw_ip) else None
+    ip = raw_ip if raw_ip is not None and _valid_ipv4(raw_ip) \
+        and _private_override(raw_ip) else None
 
     return {
         "info_hash": binascii.hexlify(
@@ -150,6 +175,9 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None):
             if on_announce is not None:
                 on_announce()
             a = parse_announce(query)
+            if len(a["info_hash"]) != 40:
+                self._send(400, build_failure("info_hash must be 20 bytes"))
+                return
             # ip=None means the override was absent or invalid; fall back to
             # the socket source address.
             # port=None means the client sent an out-of-range value (>65535 or
@@ -189,6 +217,9 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None):
                 self._send(400, build_failure("scrape requires info_hash"))
                 return
             info_hex = binascii.hexlify(unquote_to_bytes(quoted)).decode()
+            if len(info_hex) != 40:
+                self._send(400, build_failure("info_hash must be 20 bytes"))
+                return
             stats = registry.scrape(info_hex)
             self._send(200, build_scrape_response(info_hex, stats))
 
@@ -212,8 +243,10 @@ def main():
     port = int(os.environ.get("IRIS_TRACKER_PORT", "6969"))
     secrets_path = os.environ.get("IRIS_SECRETS", "/run/iris/secrets.json")
 
-    # Telemetry owns a registry wired to its event hook; it is inert unless
-    # IRIS_OTLP_ENDPOINT / IRIS_METRICS_PORT are configured.
+    # Telemetry owns a registry wired to its event hook. The hub always
+    # runs; its OTLP destination is resolved per sample pass (deployment
+    # env, overridable from the console's telemetry-destination.json).
+    # Prometheus /metrics exposure stays startup-gated below.
     hub = telemetry.from_env()
     registry = hub.registry
     _start_pruner(registry)

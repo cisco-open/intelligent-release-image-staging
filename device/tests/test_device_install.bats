@@ -248,13 +248,37 @@ setup_stage_local() {
   # a real (non-dry-run) invocation only needs to get PAST step [2/7]; stub
   # lab/device-run.sh so step [1/7]'s flash pre-check is a harmless no-op and
   # step [3/7]+ (which needs a real device) never gets reached because we
-  # kill the script right after [2/7] finishes.
+  # kill the script right after [2/7] finishes. The [pre] PREREQ step now
+  # sits between [1/7] and [2/7] (routed by default), so the stub must also
+  # answer the ip-routing / clock checks — FAKE_IP_ROUTING defaults "yes" and
+  # FAKE_CLOCK_LINE defaults to a recent year so every pre-existing test below
+  # still sails past [pre] unmodified; only the dedicated PREREQ tests further
+  # down override those.
   STUBDIR="$BATS_TEST_TMPDIR/stub"
   mkdir -p "$STUBDIR/lab"
   cat > "$STUBDIR/lab/device-run.sh" <<'STUB'
 #!/usr/bin/env bash
-cat >/dev/null   # drain stdin (the CLI commands piped to the "device")
-echo "bytes free stub"
+cmds="$(cat)"   # drain stdin (the CLI commands piped to the "device")
+case "$cmds" in
+  *"show running-config"*)
+    # Real sessions echo the commands back; the installer's transport check
+    # keys on that echo. FAKE_DEVICE_DOWN=yes simulates a dead session.
+    [ "${FAKE_DEVICE_DOWN:-no}" = "yes" ] && exit 0
+    echo "show running-config | include no ip routing"
+    if [ "${FAKE_IP_ROUTING:-yes}" = "yes" ]; then
+      echo "Gateway of last resort is 100.90.168.1 to network 0.0.0.0"
+    else
+      echo "no ip routing"
+      echo "Default gateway is not set"
+    fi
+    ;;
+  *"show clock"*)
+    echo "${FAKE_CLOCK_LINE:-14:23:07.512 UTC Thu Aug 20 2026}"
+    ;;
+  *)
+    echo "bytes free stub"
+    ;;
+esac
 STUB
   chmod +x "$STUBDIR/lab/device-run.sh"
   # device-install.sh resolves lab/device-run.sh as "$HERE/../lab/device-run.sh";
@@ -319,8 +343,8 @@ run_with_timeout() {
     bash "$STUBDIR/device/device-install.sh"
 
   [[ "$output" != *"set HOST_USER"* ]]
-  [ -f "$ARTDIR/staging/iris-agent-100.92.9.3.conf" ]
-  [ -f "$ARTDIR/staging/rpc-secret" ]
+  [ "$(find "$ARTDIR/staging" -name 'iris-agent-100.92.9.3-*.conf' | wc -l)" -eq 1 ]
+  [ "$(find "$ARTDIR/staging" -name 'rpc-secret-*' | wc -l)" -eq 1 ]
 }
 
 @test "without IRIS_STAGE_LOCAL and a non-local STAGE_HOST, the remote ssh path still demands HOST_USER" {
@@ -335,7 +359,7 @@ run_with_timeout() {
     bash "$STUBDIR/device/device-install.sh"
 
   [[ "$output" == *"set HOST_USER"* ]]
-  [ ! -f "$ARTDIR/staging/iris-agent-100.92.9.3.conf" ]
+  [ "$(find "$ARTDIR" -name 'iris-agent-100.92.9.3-*.conf' | wc -l)" -eq 0 ]
 }
 
 # --- read-only served-tree regression (#13 follow-up): make-agent-bundle.sh
@@ -372,8 +396,8 @@ run_with_timeout() {
   chmod u+w "$ARTDIR"   # restore so bats can clean up BATS_TEST_TMPDIR
 
   [[ "$output" != *"Read-only file system"* ]]
-  [ -f "$ARTDIR/staging/iris-agent-100.92.9.3.conf" ]
-  [ -f "$ARTDIR/staging/rpc-secret" ]
+  [ "$(find "$ARTDIR/staging" -name 'iris-agent-100.92.9.3-*.conf' | wc -l)" -eq 1 ]
+  [ "$(find "$ARTDIR/staging" -name 'rpc-secret-*' | wc -l)" -eq 1 ]
   # untouched — the pre-existing content must survive (no re-copy happened)
   [ "$(cat "$ARTDIR/bootstrap.sh")" = "$BOOT_SUM_BEFORE" ]
   [ "$(cat "$ARTDIR/iris-catalog.pem")" = "$CRT_SUM_BEFORE" ]
@@ -432,4 +456,171 @@ _inband() {
 @test "inband Guest Shell does NOT disable app signature verification (IOx/SSD only)" {
   run _inband
   [[ "$output" != *"verification disable"* ]]
+}
+
+# --- operator-facing PREREQ checks (2026-08-20 incident: an IE-3400 lost `ip
+# routing` on re-image; onboarding "succeeded" while the app's VLAN traffic had
+# no L3 path out — silent, invisible, hours to diagnose). Static assertions
+# first, then stub-backed behavioral tests using setup_stage_local's fake
+# lab/device-run.sh (extended above with FAKE_IP_ROUTING / FAKE_CLOCK_LINE). ---
+
+@test "checks ip routing before applying any config (PREREQ, routed only)" {
+  # semantic detection: explicit `no ip routing` / host-mode route table —
+  # NOT a grep for the positive `ip routing` line, which is absent when
+  # routing is the platform default (IE3x00 false-positive, 2026-08-20)
+  run grep -F 'show running-config | include no ip routing' "$INSTALL"
+  [ "$status" -eq 0 ]
+  run grep -F 'PREREQ: ip routing is disabled on this switch' "$INSTALL"
+  [ "$status" -eq 0 ]
+  run grep -F 'PREREQ: could not verify ip routing' "$INSTALL"
+  [ "$status" -eq 0 ]
+}
+
+@test "warns (not fails) on a stale device clock (PREREQ)" {
+  run grep -F 'PREREQ WARNING: device clock is' "$INSTALL"
+  [ "$status" -eq 0 ]
+}
+
+@test "PREREQ checks land before step [2/7] stages the agent config" {
+  pre_line="$(grep -n '^echo "\[pre\] prerequisite checks' "$INSTALL" | head -1 | cut -d: -f1)"
+  step2_line="$(grep -n '^echo "\[2/7\]' "$INSTALL" | head -1 | cut -d: -f1)"
+  [ -n "$pre_line" ] && [ -n "$step2_line" ] && [ "$pre_line" -lt "$step2_line" ]
+}
+
+@test "does NOT check ip routing on the inband path (no IRIS-managed SVI)" {
+  # inband rides the operator's own already-routed network; only routed
+  # creates the IRIS-managed SVI this prerequisite protects.
+  run _inband
+  [[ "$output" != *"PREREQ: ip routing is disabled"* ]]
+}
+
+@test "ip routing missing: real run exits non-zero with the PREREQ line" {
+  setup_stage_local
+  unset HOST_USER HOST_PASS
+
+  run_with_timeout 5 env IRIS_STAGE_LOCAL=1 IRIS_ARTIFACTS_DIR="$ARTDIR" \
+    DEVICE_IP=100.92.9.3 VLAN=666 SVI_IP=100.92.9.125 SVI_MASK=255.255.255.252 \
+    GUEST_IP=100.92.9.126 CATALOG_URL=https://100.90.168.20:8443 \
+    CATALOG_TOKEN=deadbeef DEVICE_ID=100.92.9.3 STAGE_HOST=100.90.168.20 \
+    IRIS_CRT_FILE="$CRTFILE" FAKE_IP_ROUTING=no \
+    bash "$STUBDIR/device/device-install.sh"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"PREREQ: ip routing is disabled on this switch"* ]]
+  # must fail BEFORE staging — [pre] sits ahead of [2/7]
+  [ "$(find "$ARTDIR" -name 'iris-agent-100.92.9.3-*.conf' | wc -l)" -eq 0 ]
+}
+
+@test "dead device session: PREREQ says transport, not routing" {
+  # a session that produces no output must not masquerade as a routing
+  # problem (the old check conflated the two)
+  setup_stage_local
+  unset HOST_USER HOST_PASS
+
+  run_with_timeout 5 env IRIS_STAGE_LOCAL=1 IRIS_ARTIFACTS_DIR="$ARTDIR" \
+    DEVICE_IP=100.92.9.3 VLAN=666 SVI_IP=100.92.9.125 SVI_MASK=255.255.255.252 \
+    GUEST_IP=100.92.9.126 CATALOG_URL=https://100.90.168.20:8443 \
+    CATALOG_TOKEN=deadbeef DEVICE_ID=100.92.9.3 STAGE_HOST=100.90.168.20 \
+    IRIS_CRT_FILE="$CRTFILE" FAKE_DEVICE_DOWN=yes \
+    bash "$STUBDIR/device/device-install.sh"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"PREREQ: could not verify ip routing"* ]]
+  [[ "$output" != *"PREREQ: ip routing is disabled"* ]]
+}
+
+@test "ip routing present: real run proceeds past the check to step [2/7]" {
+  setup_stage_local
+  unset HOST_USER HOST_PASS
+
+  run_with_timeout 5 env IRIS_STAGE_LOCAL=1 IRIS_ARTIFACTS_DIR="$ARTDIR" \
+    DEVICE_IP=100.92.9.3 VLAN=666 SVI_IP=100.92.9.125 SVI_MASK=255.255.255.252 \
+    GUEST_IP=100.92.9.126 CATALOG_URL=https://100.90.168.20:8443 \
+    CATALOG_TOKEN=deadbeef DEVICE_ID=100.92.9.3 STAGE_HOST=100.90.168.20 \
+    IRIS_CRT_FILE="$CRTFILE" FAKE_IP_ROUTING=yes \
+    bash "$STUBDIR/device/device-install.sh"
+
+  [[ "$output" != *"PREREQ: ip routing is disabled"* ]]
+  [ "$(find "$ARTDIR/staging" -name 'iris-agent-100.92.9.3-*.conf' | wc -l)" -eq 1 ]
+}
+
+@test "old device clock: real run warns but continues past the check" {
+  setup_stage_local
+  unset HOST_USER HOST_PASS
+
+  run_with_timeout 5 env IRIS_STAGE_LOCAL=1 IRIS_ARTIFACTS_DIR="$ARTDIR" \
+    DEVICE_IP=100.92.9.3 VLAN=666 SVI_IP=100.92.9.125 SVI_MASK=255.255.255.252 \
+    GUEST_IP=100.92.9.126 CATALOG_URL=https://100.90.168.20:8443 \
+    CATALOG_TOKEN=deadbeef DEVICE_ID=100.92.9.3 STAGE_HOST=100.90.168.20 \
+    IRIS_CRT_FILE="$CRTFILE" FAKE_IP_ROUTING=yes \
+    FAKE_CLOCK_LINE="14:23:07.512 UTC Thu Aug 20 2018" \
+    bash "$STUBDIR/device/device-install.sh"
+
+  [[ "$output" == *"PREREQ WARNING: device clock is 2018"* ]]
+  [ "$(find "$ARTDIR/staging" -name 'iris-agent-100.92.9.3-*.conf' | wc -l)" -eq 1 ]
+}
+
+@test "unparseable device clock: the optional probe must not abort the install" {
+  # `show clock` output with no four-digit year (odd platform format, or a
+  # transport hiccup on just this probe) must leave clock_year empty and skip
+  # the warning — under `set -euo pipefail` a bare failing grep here used to
+  # kill the whole installer at a check that is documented as optional.
+  setup_stage_local
+  unset HOST_USER HOST_PASS
+
+  run_with_timeout 5 env IRIS_STAGE_LOCAL=1 IRIS_ARTIFACTS_DIR="$ARTDIR" \
+    DEVICE_IP=100.92.9.3 VLAN=666 SVI_IP=100.92.9.125 SVI_MASK=255.255.255.252 \
+    GUEST_IP=100.92.9.126 CATALOG_URL=https://100.90.168.20:8443 \
+    CATALOG_TOKEN=deadbeef DEVICE_ID=100.92.9.3 STAGE_HOST=100.90.168.20 \
+    IRIS_CRT_FILE="$CRTFILE" FAKE_IP_ROUTING=yes \
+    FAKE_CLOCK_LINE="% Clock is not set" \
+    bash "$STUBDIR/device/device-install.sh"
+
+  [[ "$output" != *"PREREQ WARNING"* ]]
+  [ "$(find "$ARTDIR/staging" -name 'iris-agent-100.92.9.3-*.conf' | wc -l)" -eq 1 ]
+}
+
+@test "dry-run and real run use the same capability-bearing staged filenames" {
+  setup_stage_local
+  cap=0123456789abcdef0123456789abcdef
+  mkdir -p "$STUBDIR/bin"
+  cat > "$STUBDIR/bin/od" <<EOF
+#!/usr/bin/env bash
+printf ' %s\n' '$cap'
+EOF
+  cat > "$STUBDIR/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$STUBDIR/bin/od" "$STUBDIR/bin/curl"
+  cat > "$STUBDIR/lab/device-run.sh" <<EOF
+#!/usr/bin/env bash
+cmds="\$(cat)"
+printf '%s\n' "\$cmds" >> '$BATS_TEST_TMPDIR/device-commands'
+case "\$cmds" in
+  *'show running-config | include ^ip routing'*) echo 'ip routing' ;;
+  *'show clock'*) echo '14:23:07.512 UTC Thu Aug 20 2026' ;;
+  *'show app-hosting list'*) echo 'guestshell RUNNING' ;;
+  *'copy https://'*) echo '123 bytes copied' ;;
+  *'copy running-config startup-config'*) echo '[OK]' ;;
+  *'show running-config'*)
+    echo 'show running-config | include no ip routing'
+    echo 'Gateway of last resort is 100.90.168.1 to network 0.0.0.0' ;;
+  *) echo 'bytes free stub' ;;
+esac
+EOF
+  chmod +x "$STUBDIR/lab/device-run.sh"
+
+  run env PATH="$STUBDIR/bin:$PATH" bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"staging/iris-agent-100.92.9.3-$cap.conf"* ]]
+  [[ "$output" == *"staging/rpc-secret-$cap"* ]]
+
+  run env PATH="$STUBDIR/bin:$PATH" IRIS_STAGE_LOCAL=1 IRIS_ARTIFACTS_DIR="$ARTDIR" \
+    IRIS_CRT_FILE="$CRTFILE" bash "$STUBDIR/device/device-install.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$ARTDIR/staging/iris-agent-100.92.9.3-$cap.conf" ]
+  [ -f "$ARTDIR/staging/rpc-secret-$cap" ]
+  grep -qF "staging/iris-agent-100.92.9.3-$cap.conf" "$BATS_TEST_TMPDIR/device-commands"
+  grep -qF "staging/rpc-secret-$cap" "$BATS_TEST_TMPDIR/device-commands"
 }

@@ -232,3 +232,12 @@ run_bootstrap() {
   [[ "$output" == *"valid device-reachable IPv4"* ]]
   [ ! -e "$BAD_CONFIG/secrets.json.age" ]
 }
+
+# ---------------------------------------------------------------------------
+# Test: durable CA trust dir is provisioned alongside the tls dir
+# ---------------------------------------------------------------------------
+@test "bootstrap creates the durable CA trust dir" {
+  run_bootstrap
+  [ "$status" -eq 0 ]
+  [ -d "$IRIS_CONFIG/tls/trust" ]
+}

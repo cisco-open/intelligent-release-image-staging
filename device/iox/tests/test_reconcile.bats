@@ -41,3 +41,19 @@ teardown() { rm -rf "$TMPDIR_T"; }
   grep -q 'telemetry_stream = \${IRIS_TELEMETRY_STREAM:-off}' \
     "$BATS_TEST_DIRNAME/../entrypoint.sh"
 }
+
+@test "a stale agent_version in a persistent conf is overwritten" {
+  # The version string is a fact about the image, not operator state: after a
+  # package upgrade a persistent conf still carried the old build's number and
+  # every telemetry report mis-stated what was running (field observation
+  # 2026-08-20: the 3400 kept reporting 2026.07.26 from a pre-release-cut
+  # package). The baked VERSION must win on every start.
+  echo "agent_version = 2026.07.26" >> "$CONF"
+  reconcile_conf_key agent_version 2026.08.20
+  grep -q '^agent_version = 2026.08.20$' "$CONF"
+  ! grep -q '2026\.07\.26' "$CONF"
+}
+
+@test "entrypoint reconciles agent_version from the baked VERSION file" {
+  grep -q 'reconcile_conf_key agent_version' "$BATS_TEST_DIRNAME/../entrypoint.sh"
+}

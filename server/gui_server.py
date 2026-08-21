@@ -16,20 +16,36 @@ import os
 import re
 import secrets
 import ssl
+import tempfile
+import threading
 import time
 import urllib.request
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import unquote, parse_qs
+from urllib.parse import unquote, parse_qs, urlsplit
 
 import audit
+import audit_export
 import gui_app
+import gui_auth
 import gui_onboard
+import gui_tls
 import live_samples
+import secretfs
+import secrets_store
+import telemetry
+import telemetry_destination
+import trust
 
 WEBROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webroot")
 COOKIE = "iris_sid"
 SWARMMAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "swarmmap.html")
+_IRIS_CERT_DEFAULT = "/run/iris/tls/cert.pem"
+# heartbeat freshness horizon (s): a device whose last_seen is older than
+# this is what the UI badges "offline" (app.js uses the same 600), so the
+# overview must not count it as actively staging
+_HEARTBEAT_FRESH = 600
 # GET /swarmmap swaps this exact placeholder line in the single-source
 # server/swarmmap.html for the console config line (the file on disk keeps
 # working standalone; only the served copy is rewritten):
@@ -67,6 +83,65 @@ _SECURITY_HEADERS = [
     ("Content-Security-Policy",
      "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'"),
 ]
+# Default first-run credential (spec: default-cred-setup-and-tls-ux, Feature 1).
+# Hardcoded and non-configurable by design -- this deliberately re-accepts the
+# first-comer-wins race the old bootstrap token closed, bounded by the
+# deployment's own network perimeter. It never creates a persistent account:
+# signing in with this pair only ever mints a one-time setup grant (below),
+# and becomes an ordinary failed login the moment a real admin exists.
+DEFAULT_SETUP_USER = "iris"
+DEFAULT_SETUP_PASS = "irisisgreat!"
+_SETUP_GRANT_TTL = 600  # seconds (10 minutes)
+
+
+def _is_default_credential(username, password):
+    """Constant-time compare of both fields against the hardcoded default
+    setup pair. Both must match -- there is no partial/near-miss case."""
+    return (hmac.compare_digest(username.encode("utf-8"),
+                                DEFAULT_SETUP_USER.encode("utf-8"))
+            and hmac.compare_digest(password.encode("utf-8"),
+                                    DEFAULT_SETUP_PASS.encode("utf-8")))
+
+
+def _mint_setup_grant(app):
+    """Issue a fresh one-time setup grant on *app* (36-byte urlsafe, 10-minute
+    expiry), replacing any previous one -- the latest grant always wins, and
+    the value lives only in process memory: never written to disk or logs."""
+    grant = secrets.token_urlsafe(36)
+    app._setup_grant = (grant, time.time() + _SETUP_GRANT_TTL)
+    return grant
+
+
+def _grant_valid(app, supplied):
+    """Constant-time check of *supplied* against the live setup grant on
+    *app*. False for no grant, an expired grant, or a mismatch. Does not
+    consume the grant -- callers that accept it must clear app._setup_grant
+    themselves so a claim is atomic with the admin-account write."""
+    current = getattr(app, "_setup_grant", None)
+    if current is None or not supplied:
+        return False
+    grant, expires_at = current
+    if time.time() >= expires_at:
+        return False
+    return hmac.compare_digest(supplied.encode("utf-8"), grant.encode("utf-8"))
+
+
+def _claim_admin(app, supplied_grant, username, password):
+    """Atomically consume the one-time setup grant and create the admin."""
+    with secrets_store.store_lock(app.secrets_path):
+        store = secrets_store.load(app.secrets_path)
+        if gui_auth.get_admin(store) is not None:
+            return "configured"
+        if not _grant_valid(app, supplied_grant):
+            return "grant"
+        gui_auth.set_admin(store, username, password, app._now())
+        secretfs.persist_store(store, app.secrets_path,
+                               recipients_csv=app.recipients_csv,
+                               enc_path=app.secrets_enc)
+        # Single-use: the account now permanently disables setup, so the
+        # grant has nothing left to authorize.
+        app._setup_grant = None
+        return "ok"
 
 
 def _fmt_bytes(n):
@@ -97,6 +172,81 @@ def _default_swarm_fetch():
         return r.read()
 
 
+# ---- persisted deploy logs (written by OnboardService._persist_log) -------
+# Filename: <finished_at>-<sanitized device>-<action>-<jobid>.log; first line
+# is a "# job=... device=<raw id> ..." header. The header is authoritative
+# (it carries the RAW device id); the filename is only a fallback.
+_DEPLOY_LOG_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+\.log$")
+_DEPLOY_LOG_HEADER_RE = re.compile(
+    r"^# job=(?P<job>\S+) device=(?P<device>.*?) action=(?P<action>\S+) "
+    r"state=(?P<state>\S+) rc=(?P<rc>\S+) queued_at=\S+ started_at=\S+ "
+    r"finished_at=(?P<finished>\S+) platform=\S+$")
+
+
+def _int_or_none(raw):
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _list_deploy_logs(log_dir, device_id=None):
+    """Metadata for every parseable *.log under log_dir, newest first:
+    {"file","device_id","action","state","rc","finished_at","size"}. The
+    header line wins; a file with a missing/garbled header falls back to the
+    filename fields (state/rc unknown); anything unparseable either way is
+    skipped. The device_id filter compares the RAW id from the header."""
+    if not log_dir or not os.path.isdir(log_dir):
+        return []
+    out = []
+    for name in os.listdir(log_dir):
+        if not _DEPLOY_LOG_NAME_RE.match(name):
+            continue
+        full = os.path.join(log_dir, name)
+        try:
+            size = os.path.getsize(full)
+            with open(full, encoding="utf-8", errors="replace") as f:
+                first = f.readline().rstrip("\n")
+        except OSError:
+            continue
+        m = _DEPLOY_LOG_HEADER_RE.match(first)
+        if m:
+            entry = {"file": name, "device_id": m.group("device"),
+                     "action": m.group("action"), "state": m.group("state"),
+                     "rc": _int_or_none(m.group("rc")),
+                     "finished_at": _int_or_none(m.group("finished")),
+                     "size": size}
+        else:
+            parts = name[:-len(".log")].split("-")
+            if len(parts) < 4 or not parts[0].isdigit():
+                continue
+            entry = {"file": name, "device_id": "-".join(parts[1:-2]),
+                     "action": parts[-2], "state": None, "rc": None,
+                     "finished_at": int(parts[0]), "size": size}
+        if device_id is not None and entry["device_id"] != device_id:
+            continue
+        out.append(entry)
+    out.sort(key=lambda e: (e["finished_at"] or 0, e["file"]), reverse=True)
+    return out
+
+
+def _read_deploy_log(log_dir, name):
+    """Bytes of one persisted deploy log, or None. The name must look like a
+    log filename AND realpath-resolve to a direct child of log_dir — rejects
+    traversal and symlinks pointing out of the directory."""
+    if not log_dir or not _DEPLOY_LOG_NAME_RE.match(name or ""):
+        return None
+    root = os.path.realpath(log_dir)
+    full = os.path.realpath(os.path.join(root, name))
+    if os.path.dirname(full) != root:
+        return None
+    try:
+        with open(full, "rb") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
 def _read_version():
     """Best-effort IRIS version: IRIS_VERSION env, else a VERSION file near this
     module (present in a source checkout and the self-contained image), else
@@ -114,9 +264,265 @@ def _read_version():
     return "unknown"
 
 
+# Official documentation site (GitHub Pages build of docs/ + docs/zensical/,
+# published by .github/workflows/docs.yml). Surfaced by GET /api/help so the
+# console's "?" popover can deep-link it.
+_DOCS_URL = "https://cisco-open.github.io/intelligent-release-image-staging/"
+_INSTANCE_ID_BASENAME = "instance-id"
+
+
+def read_instance_id(state_dir):
+    """Stable per-deployment id: $IRIS_STATE/instance-id holds a uuid4 hex,
+    minted exactly once (mode 0600) and immutable afterwards. Created at
+    main() startup and lazily by this reader, so tests can call it directly.
+    Never raises: an unreadable/unwritable state dir degrades to a fresh
+    per-call id rather than breaking /api/help."""
+    path = os.path.join(state_dir, _INSTANCE_ID_BASENAME)
+    try:
+        with open(path) as f:
+            existing = f.read().strip()
+        if existing:
+            return existing
+    except OSError:
+        pass
+    fresh = uuid.uuid4().hex
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+        # O_EXCL: first writer wins; a concurrent creator loses the race and
+        # re-reads the winner's id so every caller agrees on one value.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(fresh + "\n")
+    except FileExistsError:
+        try:
+            with open(path) as f:
+                return f.read().strip() or fresh
+        except OSError:
+            return fresh
+    except OSError:
+        return fresh
+    return fresh
+
+
+def _resolve_certfile():
+    """Serve-time TLS cert resolution for the console listener.
+
+    The console-specific override (IRIS_GUI_CERT, combined cert+key built by
+    the cert-upload flow and the entrypoint) wins WHEN ITS FILE EXISTS; else
+    the shared combined IRIS_CERT file all three TLS services load; else
+    None -> plain-HTTP fallback (unchanged, tested behavior). Catalog and
+    artifact server keep loading IRIS_CERT directly, so device pinning is
+    untouched."""
+    gui = os.environ.get("IRIS_GUI_CERT", "/run/iris/tls/gui-cert.pem")
+    if os.path.exists(gui):
+        return gui
+    cert = os.environ.get("IRIS_CERT", _IRIS_CERT_DEFAULT)
+    if os.path.exists(cert):
+        return cert
+    return None
+
+
+# ---- CA-trust settings + refresh jobs (spec A3) ---------------------------
+# $IRIS_STATE/ca-trust-settings.json {"url": str|null, "auto": bool}. The
+# console is both writer AND consumer (the daily thread below runs in this
+# process), so the helpers live here rather than in a shared module the way
+# telemetry-settings.json does.
+_CA_TRUST_BASENAME = "ca-trust-settings.json"
+# Built-in default CA-bundle source (Cisco's published trust store). A
+# missing/null/blank configured url falls back to this so a fresh install
+# can hit "Download now" (or enable auto) with zero configuration.
+_CA_TRUST_DEFAULT_URL = "https://www.cisco.com/security/pki/trs/ios.p7b"
+_CA_REFRESH_PERIOD = 24 * 60 * 60   # daily auto-download cadence (s)
+_CA_REFRESH_FIRST_DELAY = 60        # "shortly after start" first pass (s)
+
+
+def ca_trust_settings_path(state_dir):
+    return os.path.join(state_dir, _CA_TRUST_BASENAME)
+
+
+def _read_ca_trust_raw(path):
+    """Tolerant raw reader: missing/corrupt file or wrong types -> None.
+    Returns {"url": str|None, "auto": bool} WITHOUT applying the default-URL
+    fallback. Used by audit logging to distinguish never-configured from
+    explicitly-set. A settings reader never raises."""
+    url, auto = None, False
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        raw = data.get("url")
+        if isinstance(raw, str) and raw.strip():
+            url = raw.strip()
+        auto = data.get("auto") is True
+    except (OSError, ValueError, AttributeError):
+        pass
+    return {"url": url, "auto": auto}
+
+
+def read_ca_trust_settings(path):
+    """Tolerant reader: missing/corrupt file or wrong types -> defaults. A
+    missing/null/blank configured url falls back to the built-in default CA
+    bundle source (_CA_TRUST_DEFAULT_URL); auto stays off unless the file
+    explicitly says otherwise. A settings reader never raises."""
+    raw = _read_ca_trust_raw(path)
+    return {"url": raw["url"] or _CA_TRUST_DEFAULT_URL, "auto": raw["auto"]}
+
+
+def write_ca_trust_settings(path, url, auto):
+    """Atomic write: mkstemp in the same dir + os.replace (house idiom).
+    url may be None -- that is stored literally (first-class "unset"); the
+    default-URL fallback lives in the reader, not here, so an operator can
+    tell "never configured" apart from "explicitly cleared" if it ever
+    matters, and both read back through read_ca_trust_settings() as the
+    built-in default."""
+    d = os.path.dirname(path) or "."
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".ca-trust-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump({"url": url, "auto": bool(auto)}, f, sort_keys=True)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def _validate_otlp_endpoint(raw):
+    """Telemetry-destination endpoint validation (design doc, feature B):
+    http or https, host required, no query/fragment; the trailing slash is
+    stripped so the exporters derive <endpoint>/v1/logs cleanly (they
+    rstrip('/') too — otlp.py:252). Returns (endpoint, None) on success or
+    (None, error-message)."""
+    url = raw.strip()
+    try:
+        parts = urlsplit(url)
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            return None, "endpoint must be an http:// or https:// URL with a host"
+        if parts.username is not None or parts.password is not None:
+            return None, "endpoint must not contain credentials"
+        if parts.hostname is None:
+            return None, "endpoint must be an http:// or https:// URL with a host"
+        if parts.query or parts.fragment:
+            return None, "endpoint must not have a query or fragment"
+        return url.rstrip("/"), None
+    except ValueError:
+        return None, "endpoint must be an http:// or https:// URL with a host"
+
+
+_CA_JOB_TTL = 3600                  # evict terminal refresh jobs after (s)
+# In-memory refresh jobs (the gui_images.start_publish idiom): id -> dict,
+# a daemon thread runs the download, GET /api/settings/ca-trust/refresh/<id>
+# polls. Per-process: a restart abandons in-flight jobs.
+_CA_JOBS = {}
+_CA_JOBS_LOCK = threading.Lock()
+
+
+def ca_refresh_due(settings):
+    """Pure decision for the daily loop: the URL to download this cycle, or
+    None to skip (auto off / no URL). No clock, no I/O. settings is whatever
+    the caller passes -- typically read_ca_trust_settings()'s output, whose
+    url is never empty (default-URL fallback), so in practice this reduces
+    to the auto flag; the url checks stay so the function is correct against
+    a raw/partial dict too."""
+    if not isinstance(settings, dict) or settings.get("auto") is not True:
+        return None
+    url = settings.get("url")
+    if not isinstance(url, str) or not url.strip():
+        return None
+    return url.strip()
+
+
+def _run_ca_download(url, download_fn=None):
+    """One CA-bundle download attempt -> (ok, detail, certs). Never raises;
+    detail is audit/UI-safe (URL + error text only, never cert material --
+    and download_bundle never puts key/cert bytes in its error strings)."""
+    try:
+        result = (download_fn or trust.download_bundle)(url)
+    except Exception as exc:    # download_bundle reports; belt and suspenders
+        result = {"ok": False, "certs": 0, "error": str(exc)}
+    if result.get("ok") is True:
+        certs = int(result.get("certs") or 0)
+        return (True, "downloaded %d certificate(s) from %s" % (certs, url),
+                certs)
+    return False, str(result.get("error") or "download failed"), None
+
+
+def start_ca_refresh(url, audit_fn=None, download_fn=None):
+    """Run one CA-bundle download on a daemon thread; returns a job id for
+    the poll route immediately. audit_fn(result=..., detail=...) is called
+    BEFORE the job turns terminal so a poller that sees done/failed can rely
+    on the audit line already existing."""
+    job_id = secrets.token_hex(8)
+    job = {"state": "running", "detail": "", "certs": None,
+           "finished_at": None}
+    now = time.time()
+    with _CA_JOBS_LOCK:
+        stale = [jid for jid, j in _CA_JOBS.items()
+                 if j["finished_at"] is not None
+                 and j["finished_at"] <= now - _CA_JOB_TTL]
+        for jid in stale:
+            del _CA_JOBS[jid]
+        _CA_JOBS[job_id] = job
+
+    def run():
+        ok, detail, certs = _run_ca_download(url, download_fn=download_fn)
+        if audit_fn is not None:
+            try:
+                audit_fn(result="ok" if ok else "fail", detail=detail)
+            except Exception:
+                pass                # audit must never break the job
+        with _CA_JOBS_LOCK:
+            job["state"] = "done" if ok else "failed"
+            job["detail"] = detail
+            job["certs"] = certs
+            job["finished_at"] = time.time()
+
+    threading.Thread(target=run, daemon=True).start()
+    return job_id
+
+
+def get_ca_job(job_id):
+    """Poll view {"state","detail","certs"}, or None for an unknown id."""
+    with _CA_JOBS_LOCK:
+        job = _CA_JOBS.get(job_id)
+        if job is None:
+            return None
+        return {"state": job["state"], "detail": job["detail"],
+                "certs": job["certs"]}
+
+
+def ca_trust_refresh_loop(stop_event, state_dir, audit_fn=None,
+                          period=_CA_REFRESH_PERIOD,
+                          first_delay=_CA_REFRESH_FIRST_DELAY,
+                          download_fn=None):
+    """Daily public-CA auto-refresh (spec A3): stop-event wait loop like
+    telemetry.run_forever, with a short first delay so an enabled config is
+    honored shortly after start. Re-reads the settings file every cycle,
+    skips quietly unless auto && url (ca_refresh_due), audits completions as
+    ca-trust-refresh with actor system, and never lets a failure kill the
+    thread -- a failed download just retries next cycle."""
+    delay = first_delay
+    while not stop_event.wait(delay):
+        delay = period
+        try:
+            url = ca_refresh_due(
+                read_ca_trust_settings(ca_trust_settings_path(state_dir)))
+            if url is None:
+                continue
+            ok, detail, _certs = _run_ca_download(url,
+                                                  download_fn=download_fn)
+            if audit_fn is not None:
+                audit_fn(event="ca-trust-refresh", category="settings",
+                         action="refresh", target="ca-trust", actor="system",
+                         result="ok" if ok else "fail", detail=detail)
+        except Exception:
+            pass                    # the daily thread must never die
+
+
 def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=None,
                  onboard=None, swarm_fetch=None, certfile=None, audit_path=None,
-                 receipts=None):
+                 receipts=None, now_fn=time.time):
+    login_limiter = gui_auth.LoginRateLimiter()
+
     class Handler(BaseHTTPRequestHandler):
         timeout = 60  # socket inactivity timeout (s): a stalled upload frees its thread
 
@@ -577,6 +983,28 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     self._json(400, {"error": "bad device id"}); return
                 reports = catalog.get_telemetry(did) if catalog else []
                 self._json(200, {"reports": reports}); return
+            if path.startswith("/api/devices/") and path.endswith("/deployment"):
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                if receipts is None:
+                    self._json(404, {"error": "receipts unavailable"}); return
+                did = unquote(path[len("/api/devices/"):-len("/deployment")])
+                records = receipts.list(did)
+                # The record that best describes the device: the active one,
+                # else the recoverable teardown-authorizing one — both can
+                # raise on ambiguity (duplicate receipts), and this is a
+                # read-only visibility panel, so fall back to the newest
+                # record rather than erroring it.
+                try:
+                    record = receipts.recoverable_for_device(did)
+                except ValueError:
+                    record = None
+                if record is None and records:
+                    record = max(records,
+                                 key=lambda r: (r.get("timestamps") or {})
+                                 .get("planned_at") or 0)
+                self._json(200, {"receipt": record, "total": len(records)})
+                return
             if path == "/api/credentials":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
@@ -603,6 +1031,24 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 job = onboard.get_job(path[len("/api/onboard/jobs/"):]) if onboard else None
                 self._json(200, job) if job else self._json(404, {"error": "no such job"})
                 return
+            if path == "/api/deploy-logs":  # exact match before the /<file> prefix route
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                qs = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                device_id = (qs.get("device_id") or [None])[0]
+                log_dir = getattr(onboard, "log_dir", None) if onboard else None
+                self._json(200, {"logs": _list_deploy_logs(
+                    log_dir, device_id=device_id)})
+                return
+            if path.startswith("/api/deploy-logs/"):
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                log_dir = getattr(onboard, "log_dir", None) if onboard else None
+                data = _read_deploy_log(
+                    log_dir, unquote(path[len("/api/deploy-logs/"):]))
+                if data is None:
+                    self._json(404, {"error": "not found"}); return
+                self._send(200, "text/plain; charset=utf-8", data); return
             if path == "/api/overview":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
@@ -634,13 +1080,48 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
                 self._serve_swarmmap(); return
+            if path.startswith("/api/settings/ca-trust/refresh/"):
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                job = get_ca_job(
+                    path[len("/api/settings/ca-trust/refresh/"):])
+                self._json(200, job) if job else self._json(
+                    404, {"error": "no such job"})
+                return
+            if path.startswith("/api/settings/audit-export/run/"):
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                job = audit_export.get_job(
+                    path[len("/api/settings/audit-export/run/"):])
+                self._json(200, job) if job else self._json(
+                    404, {"error": "no such job"})
+                return
             if path == "/api/settings":
                 info = app.session_info(self._sid())
                 if info is None:
                     self._json(401, {"error": "unauthorized"}); return
                 self._json(200, self._settings_info(info["username"])); return
-            if path in ("/", "/index.html", "/login.html") and app.needs_setup():
-                self._serve_static("/setup.html"); return
+            if path == "/api/help":
+                # "?" popover data: version + stable deployment id + doc links.
+                # state_dir is read per-request (the /api/settings idiom) so
+                # tests can point IRIS_STATE at a tmp dir.
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
+                self._json(200, {
+                    "version": _read_version(),
+                    "deployment_id": read_instance_id(state_dir),
+                    "docs_url": _DOCS_URL,
+                    "guides": {"device": "/help-device.html",
+                               "server": "/help-server.html"},
+                })
+                return
+            if path in ("/", "/index.html") and app.needs_setup():
+                # First-run: land on the LOGIN page — the default iris
+                # credential there is what mints the setup grant. setup.html
+                # itself stays a plain static page; visiting it grantless just
+                # bounces back to login client-side.
+                self._serve_static("/login.html"); return
             self._serve_static(path)
 
         def _device_view(self):
@@ -709,6 +1190,23 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                 "assigned": len(assigned), "staged": len(staged)})
             assigned_total = sum(r["assigned"] for r in rollout)
             staged_total = sum(r["staged"] for r in rollout)
+            # "Staging" must mean devices ACTUALLY staging: enrolled (their
+            # agent heartbeats), FRESH (last_seen inside the same 600s the
+            # UI uses for its "offline" badge — a device that died mid-stage
+            # is offline, not staging), and reporting a non-terminal
+            # stage_state. The old assigned-minus-staged arithmetic counted
+            # inventory rows that never heartbeated, so an idle install with
+            # 6 fleet rows read "6 staging". ready (seeding) and unassigned
+            # agents are not staging either — ready feeds the staged count
+            # above — and error is terminal (flash_full etc. still count:
+            # the agent is alive and retrying).
+            now = now_fn()
+            staging_now = sum(
+                1 for row in rows
+                if row.get("last_seen") is not None
+                and (now - row["last_seen"]) < _HEARTBEAT_FRESH
+                and row.get("stage_state") not in (None, "", "unassigned",
+                                                   "ready", "error"))
             # devices freshly onboarded whose agent hasn't heartbeated yet —
             # surfaced so an operator doesn't read the gap as "undeployed"
             awaiting = sum(1 for row in rows
@@ -716,7 +1214,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             return {
                 "images": len(imgs), "devices": len(rows),
                 "assigned": assigned_total, "staged": staged_total,
-                "staging_now": assigned_total - staged_total,
+                "staging_now": staging_now,
                 "awaiting_heartbeat": awaiting,
                 "rollout": rollout,
                 # console-relative: the map lives on this server now (session-
@@ -735,6 +1233,13 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 tail = os.environ.get("IRIS_CONSOLE_URL", "").rstrip("/").rsplit(":", 1)[-1]
                 raw = tail if tail.isdigit() else ""
             console_port = int(raw) if raw.isdigit() else 8080
+            state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
+            dest = telemetry_destination.read(
+                telemetry_destination.settings_path(state_dir))
+            env_endpoint = os.environ.get("IRIS_OTLP_ENDPOINT", "").strip()
+            env_enabled = telemetry.observability_enabled()
+            override = (dest["endpoint"] is not None
+                        or dest["enabled"] is not None)
             return {
                 "admin_username": admin_username,
                 "version": _read_version(),
@@ -752,6 +1257,32 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 # server-side in the age-encrypted store
                 "stage_host": (creds.get_stage_host() if creds is not None
                                else {"configured": False, "username": ""}),
+                # settings file verbatim (it holds no secret) + password_set —
+                # the SCP password itself never leaves the encrypted store
+                "audit_export": dict(
+                    audit_export.read_settings(
+                        audit_export.settings_path(state_dir)),
+                    password_set=(creds.audit_export_secrets() is not None
+                                  if creds is not None else False)),
+                # console cert metadata only — key material is never echoed
+                "gui_cert": gui_tls.active_info(),
+                # installed root CAs: name/subject/expiry/fingerprint/source
+                "trust": trust.list_entries(),
+                "ca_trust": read_ca_trust_settings(ca_trust_settings_path(
+                    state_dir)),
+                "telemetry_destination": {
+                    "endpoint": dest["endpoint"],
+                    "enabled": dest["enabled"],
+                    "source": "override" if override else "env",
+                    # effective = file-if-not-null else env, PER FIELD —
+                    # exactly the hub's rule, so this view never lies
+                    "effective_endpoint": (dest["endpoint"]
+                                           if dest["endpoint"] is not None
+                                           else env_endpoint),
+                    "effective_enabled": (dest["enabled"]
+                                          if dest["enabled"] is not None
+                                          else env_enabled),
+                },
             }
 
         def _sse_onboard(self, onboard, job_id):
@@ -861,14 +1392,37 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if data is None:
                     return
                 username = str(data.get("username", ""))
+                password = str(data.get("password", ""))
                 src_ip = self.client_address[0]
-                res = app.login(username, str(data.get("password", "")))
+                retry = login_limiter.retry_after(src_ip)
+                if retry:
+                    self._json(429, {"error": "too many login attempts"},
+                               extra_headers=[("Retry-After", str(retry))])
+                    return
+                if app.needs_setup() and _is_default_credential(username, password):
+                    # No admin exists yet: the default pair does not create a
+                    # session, it hands back a one-time grant so the client can
+                    # complete /api/setup. A wrong/partial attempt at the
+                    # default pair falls through to the ordinary login below,
+                    # which fails closed (no admin -> no match) and is audited
+                    # the same as any other failed login.
+                    login_limiter.success(src_ip)
+                    grant = _mint_setup_grant(app)
+                    self._audit("login", "auth", action="login",
+                               actor="console:" + username, result="ok",
+                               detail="default credential -> setup grant issued",
+                               src_ip=src_ip)
+                    self._json(200, {"setup": True, "setup_grant": grant})
+                    return
+                res = app.login(username, password)
                 if res is None:
+                    login_limiter.failure(src_ip)
                     self._audit("login_fail", "auth", action="login",
                                actor="console:" + username, result="fail",
                                detail="invalid credentials", src_ip=src_ip)
                     self._json(401, {"error": "invalid credentials"})
                     return
+                login_limiter.success(src_ip)
                 sid, csrf = res
                 self._audit("login", "auth", action="login",
                            actor="console:" + username, result="ok", src_ip=src_ip)
@@ -878,17 +1432,52 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 return
 
             if path == "/api/setup":
-                if not app.needs_setup():
-                    self._json(409, {"error": "already set up"}); return
+                content_type = self.headers.get("Content-Type", "")
+                if content_type.split(";", 1)[0].strip().lower() != "application/json":
+                    self._json(415, {"error": "application/json required"}); return
+                fetch_site = self.headers.get("Sec-Fetch-Site", "")
+                if fetch_site and fetch_site != "same-origin":
+                    self._json(403, {"error": "cross-origin setup denied"}); return
+                origin = self.headers.get("Origin")
+                if origin:
+                    try:
+                        parsed_origin = urlsplit(origin)
+                        origin_ok = (parsed_origin.scheme in ("http", "https")
+                                     and parsed_origin.netloc.lower()
+                                     == self.headers.get("Host", "").lower()
+                                     and not parsed_origin.path
+                                     and not parsed_origin.query
+                                     and not parsed_origin.fragment)
+                    except ValueError:
+                        origin_ok = False
+                    if not origin_ok:
+                        self._json(403, {"error": "cross-origin setup denied"}); return
                 data = self._json_body(raw)
                 if data is None:
                     return
                 user = str(data.get("username", "")).strip()
                 pw = str(data.get("password", ""))
+                # strip: the grant rides in from sessionStorage via setup.js,
+                # but keep the same defensive strip the old token had in case
+                # of stray whitespace from any manual replay
+                grant = str(data.get("setup_grant", "")).strip()
                 if not user or not pw:
                     self._json(400, {"error": "username and password required"})
                     return
-                app.set_admin(user, pw)
+                if len(pw) < 8:
+                    self._json(400, {"error": "password must be at least 8 characters"})
+                    return
+                if not app.needs_setup():
+                    self._json(409, {"error": "already set up"}); return
+                result = _claim_admin(app, grant, user, pw)
+                if result == "configured":
+                    self._json(409, {"error": "already set up"}); return
+                if result == "grant":
+                    self._audit("setup_fail", "auth", action="setup",
+                               actor="console:" + user, target=user, result="fail",
+                               detail="invalid or expired setup grant",
+                               src_ip=self.client_address[0])
+                    self._json(403, {"error": "invalid setup grant"}); return
                 self._audit("setup", "auth", action="setup", actor="console:" + user,
                            target=user, detail="initial admin account created",
                            src_ip=self.client_address[0])
@@ -991,6 +1580,280 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                            detail="user %s -> %s"
                                   % (prev["username"] or "(none)", user))
                 self._json(200, {"stage_host": saved}); return
+            if path == "/api/settings/audit-export/run":
+                # exact match before the bare config route below
+                if creds is None:
+                    self._json(404, {"error": "not found"}); return
+                state = os.environ.get("IRIS_STATE", "/var/lib/iris")
+                cfg = audit_export.read_settings(
+                    audit_export.settings_path(state))
+                secret = creds.audit_export_secrets()
+                if audit_export.validate_settings(cfg) is not None \
+                        or secret is None:
+                    self._json(409, {"error": "audit export not configured"})
+                    return
+
+                def _export_audit(result, detail):
+                    # safe from the worker thread: _audit only closes over
+                    # audit_path, never per-request state
+                    self._audit("audit_export", "settings", action="export",
+                               target="audit-export", actor=actor,
+                               result=result, detail=detail)
+
+                self._json(200, {"job_id": audit_export.start_export(
+                    audit_path, cfg, secret.get("password", ""), state,
+                    audit_fn=_export_audit)})
+                return
+            if path == "/api/settings/audit-export":
+                if creds is None:
+                    self._json(404, {"error": "not found"}); return
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                fields = {}
+                for key in ("host", "user", "path", "age_recipient"):
+                    val = data.get(key)
+                    if not isinstance(val, str) or not val.strip():
+                        self._json(400, {"error": "%s is required" % key})
+                        return
+                    fields[key] = val.strip()
+                port = data.get("port", 22)
+                if not isinstance(port, int) or isinstance(port, bool) \
+                        or not 0 < port < 65536:
+                    self._json(400, {"error": "port must be an integer 1-65535"})
+                    return
+                auto = data.get("auto", False)
+                if not isinstance(auto, bool):
+                    self._json(400, {"error": "auto must be a bool"}); return
+                password = data.get("password")
+                if password is not None and not isinstance(password, str):
+                    self._json(400, {"error": "password must be a string"})
+                    return
+                candidate = dict(fields, port=port, auto=auto)
+                err = audit_export.validate_settings(candidate)
+                if err:
+                    self._json(400, {"error": err}); return
+                spath = audit_export.settings_path(
+                    os.environ.get("IRIS_STATE", "/var/lib/iris"))
+                try:
+                    # the settings lock covers the whole read-modify-write:
+                    # an export finishing mid-save (_record_result) must not
+                    # clobber this edit, nor this edit its result
+                    with audit_export.SETTINGS_LOCK:
+                        prev = audit_export.read_settings(spath)
+                        # the destination changed, not the run history: keep it
+                        candidate["last_run_ts"] = prev["last_run_ts"]
+                        candidate["last_result"] = prev["last_result"]
+                        audit_export.write_settings(spath, candidate)
+                    if password:    # absent/empty keeps the stored password
+                        creds.set_audit_export_secret(password)
+                except Exception as exc:
+                    self._audit("audit_export_config", "settings", action="set",
+                               target="audit-export", actor=actor, result="fail",
+                               detail="persist failed: %s" % exc.__class__.__name__)
+                    self._json(500, {"error": "settings save failed"}); return
+                # destination coordinates are non-secret (stage-host
+                # precedent); the password only ever audits as a flag
+                self._audit("audit_export_config", "settings", action="set",
+                           target="audit-export", actor=actor,
+                           detail="dest %s -> %s@%s:%s port %d, auto %s, "
+                                  "password %s"
+                                  % (("%s@%s" % (prev["user"], prev["host"]))
+                                     if prev["host"] else "(none)",
+                                     fields["user"], fields["host"],
+                                     fields["path"], port, auto,
+                                     "updated" if password else "unchanged"))
+                self._json(200, {"ok": True}); return
+            if path == "/api/settings/ca-trust/refresh":
+                spath = ca_trust_settings_path(
+                    os.environ.get("IRIS_STATE", "/var/lib/iris"))
+                cfg = read_ca_trust_settings(spath)
+                if not cfg["url"]:
+                    # read_ca_trust_settings() always falls back to the
+                    # built-in default url, so this is defense-in-depth only
+                    # (e.g. a future empty _CA_TRUST_DEFAULT_URL) -- normal
+                    # operation always has a url, so "Download now" works
+                    # with zero configuration.
+                    self._json(400, {"error": "no CA bundle URL configured"})
+                    return
+
+                def _refresh_audit(result, detail):
+                    # safe from the worker thread: _audit only closes over
+                    # audit_path, never per-request state
+                    self._audit("ca-trust-refresh", "settings",
+                               action="refresh", target="ca-trust",
+                               actor=actor, result=result, detail=detail)
+
+                self._json(200, {"job": start_ca_refresh(
+                    cfg["url"], audit_fn=_refresh_audit)})
+                return
+            if path == "/api/settings/ca-trust":
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                url = data.get("url")
+                auto = data.get("auto", False)
+                if not isinstance(auto, bool):
+                    self._json(400, {"error": "auto must be a bool"}); return
+                if url is not None and not isinstance(url, str):
+                    self._json(400, {"error": "url must be a string or null"})
+                    return
+                if url is not None:
+                    url = url.strip() or None   # blank == unset (falls back to the default)
+                if url is not None:
+                    try:
+                        parts = urlsplit(url)
+                        if parts.scheme != "https" or not parts.netloc:
+                            self._json(400, {"error": "url must be an https:// URL"})
+                            return
+                    except ValueError:
+                        self._json(400, {"error": "url must be an https:// URL"})
+                        return
+                spath = ca_trust_settings_path(
+                    os.environ.get("IRIS_STATE", "/var/lib/iris"))
+                # Read raw (stored) value for audit before-side, not the
+                # resolved value with fallback: allows distinguishing
+                # never-configured from explicitly-set.
+                prev_raw = _read_ca_trust_raw(spath)
+                prev_url_audit = prev_raw["url"] or "(none)"
+                url_after_audit = url if url is not None else "(none)"
+                try:
+                    write_ca_trust_settings(spath, url, auto)
+                except Exception as exc:
+                    self._audit("ca-trust-config", "settings", action="set",
+                               target="ca-trust", actor=actor, result="fail",
+                               detail="persist failed: %s" % exc.__class__.__name__)
+                    self._json(500, {"error": "settings save failed"}); return
+                saved = read_ca_trust_settings(spath)
+                self._audit("ca-trust-config", "settings", action="set",
+                           target="ca-trust", actor=actor,
+                           detail="url %s -> %s, auto %s -> %s"
+                                  % (prev_url_audit, url_after_audit,
+                                     prev_raw["auto"], auto))
+                self._json(200, {"ok": True, "ca_trust": saved})
+                return
+            if path == "/api/settings/telemetry-destination":
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                endpoint = data.get("endpoint")
+                enabled = data.get("enabled")
+                # null = inherit the deployment env, per field (feature B)
+                if enabled is not None and not isinstance(enabled, bool):
+                    self._json(400, {"error": "enabled must be a bool or null"})
+                    return
+                if endpoint is not None:
+                    if not isinstance(endpoint, str):
+                        self._json(400, {"error":
+                                         "endpoint must be a string or null"})
+                        return
+                    endpoint, err = _validate_otlp_endpoint(endpoint)
+                    if err:
+                        self._json(400, {"error": err}); return
+                dpath = telemetry_destination.settings_path(
+                    os.environ.get("IRIS_STATE", "/var/lib/iris"))
+                prev = telemetry_destination.read(dpath)
+                try:
+                    telemetry_destination.write(dpath, endpoint, enabled)
+                except Exception as exc:
+                    self._audit("telemetry-destination-set", "telemetry",
+                               action="set", target="otlp-endpoint",
+                               actor=actor, result="fail",
+                               detail="persist failed: %s" % exc.__class__.__name__)
+                    self._json(500, {"error": "settings save failed"}); return
+                # endpoint URLs are non-secret (headers stay env-only), so a
+                # before -> after detail is safe — stage-host precedent.
+                self._audit("telemetry-destination-set", "telemetry",
+                           action="set", target="otlp-endpoint", actor=actor,
+                           detail="endpoint %s -> %s, enabled %s -> %s"
+                                  % (prev["endpoint"] or "(inherit)",
+                                     endpoint or "(inherit)",
+                                     "(inherit)" if prev["enabled"] is None
+                                     else prev["enabled"],
+                                     "(inherit)" if enabled is None
+                                     else enabled))
+                self._json(200, {"ok": True, "endpoint": endpoint,
+                                 "enabled": enabled})
+                return
+            if path == "/api/settings/gui-cert":
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                cert_pem = data.get("cert_pem"); key_pem = data.get("key_pem")
+                if not isinstance(cert_pem, str) or not cert_pem.strip():
+                    self._json(400, {"error": "cert_pem must be a non-empty string"})
+                    return
+                if not isinstance(key_pem, str) or not key_pem.strip():
+                    self._json(400, {"error": "key_pem must be a non-empty string"})
+                    return
+                # Optional passphrase for an encrypted key: decrypted here at
+                # import, then stored age-encrypted like any other key. Fed to
+                # openssl over stdin; never audited, logged, or echoed.
+                passphrase = data.get("key_passphrase")
+                if passphrase is not None and (
+                        not isinstance(passphrase, str) or len(passphrase) > 4096):
+                    self._json(400, {"error": "key_passphrase must be a short string"})
+                    return
+                if passphrase and gui_tls.key_is_encrypted(key_pem):
+                    key_pem, dec_err = gui_tls.decrypt_key_pem(key_pem, passphrase)
+                    if dec_err:
+                        self._json(400, {"error": dec_err})
+                        return
+                err = gui_tls.validate_pair(cert_pem, key_pem)
+                if err:
+                    # validate_pair messages describe the failure only —
+                    # they never contain key material
+                    self._audit("gui-cert-replace", "settings", action="replace",
+                               target="gui-cert", actor=actor, result="fail",
+                               detail="rejected: %s" % err,
+                               src_ip=self.client_address[0])
+                    self._json(400, {"error": err}); return
+                try:
+                    gui_tls.persist_override(cert_pem, key_pem)
+                    reload_tls()  # new handshakes serve the new chain immediately
+                    cert_info = gui_tls.active_info()
+                    self._audit("gui-cert-replace", "settings", action="replace",
+                               target="gui-cert", actor=actor,
+                               detail="subject %s, fingerprint %s"
+                                      % (cert_info.get("subject"),
+                                         cert_info.get("fingerprint_sha256")),
+                               src_ip=self.client_address[0])
+                    self._json(200, {"gui_cert": cert_info}); return
+                except Exception as exc:
+                    self._audit("gui-cert-replace", "settings", action="replace",
+                               target="gui-cert", actor=actor, result="fail",
+                               detail="persist failed: %s" % exc.__class__.__name__,
+                               src_ip=self.client_address[0])
+                    self._json(500, {"error": "certificate install failed"}); return
+            if path == "/api/settings/trust":
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                pem = data.get("pem")
+                if not isinstance(pem, str) or not pem.strip():
+                    self._json(400, {"error": "pem must be a non-empty string"})
+                    return
+                try:
+                    entry = trust.add_pem(pem)
+                except ValueError as exc:
+                    self._audit("trust-add", "settings", action="add",
+                               target="trust-store", actor=actor, result="fail",
+                               detail="rejected: %s" % exc,
+                               src_ip=self.client_address[0])
+                    self._json(400, {"error": str(exc)}); return
+                except Exception as exc:
+                    self._audit("trust-add", "settings", action="add",
+                               target="trust-store", actor=actor, result="fail",
+                               detail="persist failed: %s" % exc.__class__.__name__,
+                               src_ip=self.client_address[0])
+                    self._json(500, {"error": "trust install failed"}); return
+                self._audit("trust-add", "settings", action="add",
+                           target=entry["name"], actor=actor,
+                           detail="installed %s (%s cert(s), subject %s, fingerprint %s)"
+                                  % (entry["name"], entry["cert_count"],
+                                     entry["subject"], entry["fingerprint_sha256"]),
+                           src_ip=self.client_address[0])
+                self._json(200, {"entry": entry}); return
             if path == "/api/devices":
                 if fleet is None:
                     self._json(404, {"error": "not found"}); return
@@ -1049,7 +1912,21 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 body = self._json_body(raw)
                 if body is None:
                     return
-                image_id = str(body.get("image_id", ""))
+                image_id = str(body.get("image_id") or "")
+                if not image_id:
+                    # explicit unassign: clear the approval so the agent stops
+                    # staging without deleting the device
+                    if catalog is None:
+                        self._json(404, {"error": "not found"}); return
+                    old = catalog.get_policy(did).get("approved_image_id")
+                    catalog.set_policy(did, approved_image_id=None)
+                    old_entry = catalog.get_image(old) if old else None
+                    self._audit("device_assign", "device", action="unassign",
+                               target=did, actor=actor,
+                               detail="unassigned (was %s)"
+                                      % ((old_entry or {}).get("filename")
+                                         or old or "none"))
+                    self._json(200, {"ok": True}); return
                 entry = catalog.get_image(image_id) if catalog is not None else None
                 if entry is None:
                     self._json(400, {"error": "no such image"}); return
@@ -1203,10 +2080,25 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 did = unquote(path[len("/api/devices/"):-len("/" + act)])
                 if not did.strip():
                     self._json(400, {"error": "bad device id"}); return
+
+                def _reject(status, error):
+                    # Every submission refusal from here on is audited under
+                    # the SAME event a successful start uses below (varying
+                    # only result), so the trail never goes quiet after an
+                    # operator hits onboard/undeploy: a rejected router
+                    # preflight, a busy-device conflict, an unreachable
+                    # device, etc. all leave a result=fail onboard_start /
+                    # undeploy_start record naming this device -- never a
+                    # "create" (or a click) followed by nothing.
+                    self._audit("%s_start" % act, "onboard", action="start",
+                               target=did, actor=actor, result="fail",
+                               detail=error)
+                    self._json(status, {"error": error})
+
                 # Reject unknown devices HERE, before start() creates a job +
                 # parked worker thread — junk ids must not accumulate either.
                 if fleet is not None and fleet.get_device(did) is None:
-                    self._json(404, {"error": "no such device"}); return
+                    _reject(404, "no such device"); return
                 resolved = None
                 receipt_ref = {}
                 prepare = None
@@ -1232,11 +2124,11 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                         try:
                             plan = self._plan(did, device)
                         except ValueError as exc:
-                            self._json(409, {"error": str(exc)}); return
+                            _reject(409, str(exc)); return
                         try:
                             preflight = onboard.preflight(did, plan["resolved"])
                         except (ValueError, OSError) as exc:
-                            self._json(409, {"error": "preflight failed: %s" % exc}); return
+                            _reject(409, "preflight failed: %s" % exc); return
                         if plan["resolved"].get("platform") == "router":
                             try:
                                 # Any receipt IRIS already applied blocks a
@@ -1246,16 +2138,16 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                 # enabled" instead of naming the real fix.
                                 existing = receipts.recoverable_for_device(did)
                             except ValueError as exc:
-                                self._json(409, {"error": str(exc)}); return
+                                _reject(409, str(exc)); return
                             if existing is not None:
-                                self._json(409, {"error": "router already has a %s "
-                                                 "deployment receipt; undeploy it before "
-                                                 "onboarding again"
-                                                 % existing.get("state", "recorded")}); return
+                                _reject(409, "router already has a %s "
+                                        "deployment receipt; undeploy it before "
+                                        "onboarding again"
+                                        % existing.get("state", "recorded")); return
                             try:
                                 plan = self._apply_router_preflight(plan, preflight)
                             except ValueError as exc:
-                                self._json(409, {"error": "preflight failed: %s" % exc}); return
+                                _reject(409, "preflight failed: %s" % exc); return
                         resolved = plan["resolved"]
 
                         def prepare():
@@ -1290,10 +2182,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                         try:
                             degraded_plan = self._plan(did, fleet.get_device(did))
                         except ValueError as exc:
-                            self._json(409, {"error": str(exc)}); return
+                            _reject(409, str(exc)); return
                         if degraded_plan["resolved"].get("platform") == "router":
-                            self._json(503, {"error": "router onboarding requires the "
-                                             "deployment receipt store"}); return
+                            _reject(503, "router onboarding requires the "
+                                    "deployment receipt store"); return
                 else:
                     # Undeploy renders exclusively from an active receipt so a
                     # post-deploy inventory edit cannot retarget cleanup. Without
@@ -1312,15 +2204,15 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             # duplicate actives should be impossible (activation
                             # supersedes siblings; startup collapses legacy dupes)
                             # — but surface the reason instead of a 500 if not.
-                            self._json(409, {"error": str(exc)}); return
+                            _reject(409, str(exc)); return
                         if receipt is None:
-                            self._json(409, {"error": "no deployment receipt for this "
-                                             "device; adopt it first, then undeploy"}); return
+                            _reject(409, "no deployment receipt for this "
+                                    "device; adopt it first, then undeploy"); return
                         try:
                             resolved = self._router_teardown_resolved(receipt)
                         except ValueError as exc:
                             receipts.transition(receipt["receipt_id"], "needs-reconcile")
-                            self._json(409, {"error": str(exc)}); return
+                            _reject(409, str(exc)); return
 
                         def prepare():
                             receipt_ref["id"] = receipt["receipt_id"]
@@ -1329,10 +2221,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                         try:
                             degraded_plan = self._plan(did, fleet.get_device(did))
                         except ValueError as exc:
-                            self._json(409, {"error": str(exc)}); return
+                            _reject(409, str(exc)); return
                         if degraded_plan["resolved"].get("platform") == "router":
-                            self._json(503, {"error": "router undeploy requires an "
-                                             "active deployment receipt"}); return
+                            _reject(503, "router undeploy requires an "
+                                    "active deployment receipt"); return
                 try:
                     jid = onboard.start(
                         did, action=act, resolved=resolved, prepare=prepare,
@@ -1342,7 +2234,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     if receipt_ref.get("id") and act == "onboard":
                         receipts.transition(receipt_ref["id"], "needs-reconcile")
                     # the device is busy with the OPPOSITE action
-                    self._json(409, {"error": str(exc)}); return
+                    _reject(409, str(exc)); return
                 # Emitted AFTER start() so the job id correlates this start with
                 # its *_finished event when jobs run concurrently.
                 self._audit("%s_start" % act, "onboard", action="start",
@@ -1416,15 +2308,80 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                            detail=("cleared (was user %s)" % prev["username"])
                                   if deleted else "nothing was configured")
                 self._json(200, {"deleted": deleted}); return
+            if path == "/api/settings/audit-export" and creds is not None:
+                spath = audit_export.settings_path(
+                    os.environ.get("IRIS_STATE", "/var/lib/iris"))
+                # under the settings lock so an export finishing mid-delete
+                # (_record_result) cannot resurrect the file we just removed
+                with audit_export.SETTINGS_LOCK:
+                    prev = audit_export.read_settings(spath)
+                    existed = os.path.exists(spath)
+                    audit_export.clear_settings(spath)
+                deleted = creds.clear_audit_export_secret() or existed
+                self._audit("audit_export_config", "settings", action="clear",
+                           target="audit-export", actor=actor,
+                           detail=(("cleared (was %s@%s:%s)"
+                                    % (prev["user"], prev["host"], prev["path"]))
+                                   if prev["host"] else "cleared")
+                                  if deleted else "nothing was configured")
+                self._json(200, {"deleted": deleted}); return
+            if path == "/api/settings/telemetry-destination":
+                dpath = telemetry_destination.settings_path(
+                    os.environ.get("IRIS_STATE", "/var/lib/iris"))
+                prev = telemetry_destination.read(dpath)
+                existed = os.path.exists(dpath)
+                telemetry_destination.clear(dpath)
+                self._audit("telemetry-destination-clear", "telemetry",
+                           action="clear", target="otlp-endpoint", actor=actor,
+                           detail=("cleared (was endpoint %s, enabled %s)"
+                                   % (prev["endpoint"] or "(inherit)",
+                                      "(inherit)" if prev["enabled"] is None
+                                      else prev["enabled"]))
+                                  if existed else "nothing was overridden")
+                self._json(200, {"deleted": existed}); return
+            if path == "/api/settings/gui-cert":
+                was_active = gui_tls.override_active()
+                gui_tls.remove_override()
+                reload_tls()  # fall back to the built-in IRIS_CERT chain
+                self._audit("gui-cert-revert", "settings", action="revert",
+                           target="gui-cert", actor=actor,
+                           detail="reverted to built-in certificate"
+                                  if was_active else "no override was active",
+                           src_ip=self.client_address[0])
+                self._json(200, {"deleted": was_active,
+                                 "gui_cert": gui_tls.active_info()}); return
+            if path.startswith("/api/settings/trust/"):
+                name = unquote(path[len("/api/settings/trust/"):])
+                # basename-only: no separators, no dot-dirs — a traversal
+                # attempt is a client bug (400), never a store lookup
+                if (not name or name in (".", "..") or "/" in name
+                        or "\\" in name or name != os.path.basename(name)
+                        or "\x00" in name or not name.endswith(".pem")):
+                    self._json(400, {"error": "bad name"}); return
+                removed = trust.remove(name)
+                self._audit("trust-remove", "settings", action="remove",
+                           target=name, actor=actor,
+                           result="ok" if removed else "fail",
+                           detail=("removed %s" % name) if removed
+                                  else "no such certificate",
+                           src_ip=self.client_address[0])
+                self._json(200, {"deleted": removed}); return
             if path.startswith("/api/devices/") and fleet is not None:
                 did = unquote(path[len("/api/devices/"):])
                 prev = fleet.get_device(did)
                 deleted = fleet.delete(did)
+                # Purge catalog-side state (assignment, heartbeat record,
+                # telemetry history, pending pull) even when the fleet row was
+                # already gone — a deleted-and-re-added device must come back
+                # unassigned, never resurrect a stale assignment.
+                purged = catalog.purge_device(did) if catalog is not None else False
                 self._audit("device_delete", "device", action="delete", target=did,
                            actor=actor, result="ok" if deleted else "fail",
-                           detail=("removed (ip %s, model %s)"
+                           detail=("removed (ip %s, model %s)%s"
                                    % ((prev or {}).get("device_ip"),
-                                      (prev or {}).get("model") or "-"))
+                                      (prev or {}).get("model") or "-",
+                                      ", assignment and state purged"
+                                      if purged else ""))
                                   if deleted else "no such device")
                 self._json(200, {"deleted": deleted})
                 return
@@ -1471,10 +2428,64 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             pass
 
     srv = ThreadingHTTPServer((host, port), Handler)
+    tls_ctx = None
     if certfile:
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ctx.load_cert_chain(certfile)
-        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+        # Startup crash-window guard: the preferred cert file (normally the
+        # gui-cert override, since _resolve_certfile() picks it on existence
+        # alone) can be a corrupt or mismatched cert/key pair -- e.g. a crash
+        # between writing the cert and the key. Probe with a throwaway
+        # context BEFORE wrapping the listening socket; on failure, fall
+        # back to the next candidate (IRIS_CERT) rather than crashing the
+        # process. If that also fails, serve plain HTTP -- never take the
+        # console down over a bad cert file.
+        candidates = [certfile]
+        iris_cert = os.environ.get("IRIS_CERT", _IRIS_CERT_DEFAULT)
+        if iris_cert != certfile:
+            candidates.append(iris_cert)
+        for cand in candidates:
+            if not os.path.exists(cand):
+                continue
+            try:
+                probe = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                probe.load_cert_chain(cand)      # validate before wrapping
+            except (ssl.SSLError, OSError):
+                continue                          # corrupt/mismatched pair
+            tls_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            tls_ctx.load_cert_chain(cand)
+            srv.socket = tls_ctx.wrap_socket(srv.socket, server_side=True)
+            break
+
+    srv.tls_active = tls_ctx is not None
+
+    def reload_tls():
+        """Hot-swap the serving certificate: re-resolve the active combined
+        file (gui-cert override if present, else IRIS_CERT) and re-run
+        load_cert_chain on the retained listening SSLContext. New handshakes
+        serve the new chain; established sessions continue; no rebind.
+
+        Returns True on success. Returns False as a safe no-op when the
+        server is not serving TLS (certfile was None -- persisted config
+        then takes effect at the next restart), when resolution finds no
+        file, or when the file fails to load. Atomicity: a throwaway
+        context validates the file FIRST, so a bad file can never leave the
+        live context half-swapped or kill serving.
+
+        Closure on purpose: Handler methods (defined above, also closures
+        of make_server) call this bare as reload_tls()."""
+        if tls_ctx is None:
+            return False
+        path = _resolve_certfile()
+        if path is None:
+            return False
+        try:
+            probe = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            probe.load_cert_chain(path)      # validate on a throwaway first
+            tls_ctx.load_cert_chain(path)    # only then touch the live one
+        except (ssl.SSLError, OSError):
+            return False
+        return True
+
+    srv.reload_tls = reload_tls
     return srv
 
 
@@ -1491,9 +2502,11 @@ def main():
     secrets_enc = os.environ.get("IRIS_SECRETS_ENC", "/etc/iris/secrets.json.age")
     state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
     images_dir = os.environ.get("IRIS_IMAGES_DIR", "/var/lib/iris-images")
-    cert = os.environ.get("IRIS_CERT", "/run/iris/tls/cert.pem")
-    certfile = cert if os.path.exists(cert) else None
+    certfile = _resolve_certfile()
     audit_path = os.environ.get("IRIS_AUDIT", "/etc/iris/audit.jsonl")
+    # Mint the per-deployment instance id up front so the very first
+    # /api/help call already sees the durable value.
+    read_instance_id(state_dir)
     app = gui_app.GuiApp(secrets_path, recipients_csv=recipients, secrets_enc=secrets_enc)
 
     def _bg_audit(**kw):
@@ -1510,10 +2523,24 @@ def main():
     receipts.recover_interrupted()
     onboard = gui_onboard.OnboardService(
         fleet, creds, audit_fn=_bg_audit,
-        clear_state_fn=catalog.forget_device, receipts=receipts)
+        clear_state_fn=catalog.forget_device, receipts=receipts,
+        log_dir=os.path.join(state_dir, "deploy-logs"))
     srv = make_server(host, port, app, images, fleet, creds, catalog, onboard,
                        None, certfile=certfile, audit_path=audit_path, receipts=receipts)
-    scheme = "https" if certfile else "http"
+    # Daily public-CA bundle auto-refresh (spec A3): in-process daemon
+    # thread, the repo's periodic-work idiom -- no cron/timer/extra process.
+    ca_stop = threading.Event()     # never set in production; loop dies with us
+    threading.Thread(target=ca_trust_refresh_loop,
+                     args=(ca_stop, state_dir, _bg_audit),
+                     daemon=True).start()
+    # Daily audit-trail export (F5): same daemon-thread idiom. The password
+    # accessor is passed as a callable so each run reads the current secret.
+    export_stop = threading.Event()  # never set in production either
+    threading.Thread(target=audit_export.export_loop,
+                     args=(export_stop, audit_path, state_dir,
+                           creds.audit_export_secrets, _bg_audit),
+                     daemon=True).start()
+    scheme = "https" if srv.tls_active else "http"
     print("iris-gui on %s://%s:%d/" % (scheme, host, port), flush=True)
     srv.serve_forever()
 

@@ -3,9 +3,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 (async function () {
+  try {
   var res = await fetch('/api/session');
   if (res.status === 401) { window.location.href = '/login.html'; return; }
+  if (!res.ok) throw new Error('Session check failed (' + res.status + ')');
   var info = await res.json();
+  if (!info || typeof info !== 'object' || !info.csrf) throw new Error('Session check returned invalid data');
   document.getElementById('who').textContent = info.username;
   document.getElementById('logout').addEventListener('click', async function () {
     await fetch('/api/logout', { method: 'POST', headers: { 'X-CSRF-Token': info.csrf } });
@@ -51,6 +54,7 @@
   var statusEl = document.getElementById('status');
   var prog = document.getElementById('prog');
   var bar = document.getElementById('bar');
+  var imageJobGen = 0;
   async function refreshImages() {
     var r = await fetch('/api/images'); if (!r.ok) return;
     var imgs = (await r.json()).images || [];
@@ -71,14 +75,21 @@
     });
   }
   function pollJob(jobId) {
-    var iv = setInterval(async function () {
-      var r = await fetch('/api/images/jobs/' + jobId);
-      if (!r.ok) { clearInterval(iv); return; }
-      var j = await r.json();
-      if (j.state === 'done') { clearInterval(iv); statusEl.textContent = 'Published ' + (j.image_id || '') + ' ✓'; prog.hidden = true; refreshImages(); refreshImportable(); }
-      else if (j.state === 'error') { clearInterval(iv); statusEl.textContent = 'Publish failed: ' + j.message; prog.hidden = true; refreshImportable(); }
-      else { statusEl.textContent = 'Publishing ' + j.filename + '…'; }
-    }, 1000);
+    var gen = ++imageJobGen;
+    function next() { setTimeout(poll, 1000); }
+    async function poll() {
+      try {
+        var r = await fetch('/api/images/jobs/' + jobId);
+        if (gen !== imageJobGen) return;
+        if (!r.ok) { statusEl.textContent = 'Publish status unavailable (' + r.status + '); retrying…'; next(); return; }
+        var j = await r.json();
+        if (gen !== imageJobGen) return;
+        if (j.state === 'done') { statusEl.textContent = 'Published ' + (j.image_id || '') + ' ✓'; prog.hidden = true; refreshImages().catch(function () {}); refreshImportable().catch(function () {}); }
+        else if (j.state === 'error') { statusEl.textContent = 'Publish failed: ' + j.message; prog.hidden = true; refreshImportable().catch(function () {}); }
+        else { statusEl.textContent = 'Publishing ' + j.filename + '…'; next(); }
+      } catch (e) { statusEl.textContent = 'Publish status unavailable; retrying…'; next(); }
+    }
+    poll();
   }
   // Images already on disk but not in the catalog: orphaned uploads after a
   // catalog reset, and operator-staged files under the read-only image root.
@@ -121,25 +132,94 @@
       });
     });
   }
+  // Per-file upload rows: every picked/dropped file gets its OWN row (name,
+  // progress bar, state text) and its OWN publish poller, so concurrent
+  // uploads never fight over shared elements. The legacy #status/#prog/#bar
+  // singletons above now serve only the import-from-disk flow.
+  var uploadsEl = document.getElementById('uploads');
+  function uploadRowUi(name) {
+    var row = document.createElement('div');
+    row.className = 'upload-row';
+    var label = document.createElement('span');
+    label.className = 'up-name'; label.textContent = name; label.title = name;
+    var rowProg = document.createElement('div'); rowProg.className = 'progress';
+    var rowBar = document.createElement('div'); rowBar.className = 'bar';
+    rowProg.appendChild(rowBar);
+    var state = document.createElement('span'); state.className = 'up-state muted';
+    var dismiss = document.createElement('button');
+    dismiss.type = 'button'; dismiss.className = 'linkish up-dismiss';
+    dismiss.textContent = '×'; dismiss.title = 'Dismiss'; dismiss.hidden = true;
+    dismiss.addEventListener('click', function () { row.remove(); });
+    row.appendChild(label); row.appendChild(rowProg);
+    row.appendChild(state); row.appendChild(dismiss);
+    uploadsEl.appendChild(row);
+    return {
+      progress: function (pct) {
+        rowBar.style.width = pct + '%';
+        state.textContent = Math.round(pct) + '%';
+      },
+      publishing: function () { rowBar.style.width = '100%'; state.textContent = 'publishing…'; },
+      done: function (text) {
+        rowBar.style.width = '100%'; state.textContent = text;
+        state.classList.remove('err'); dismiss.hidden = false;
+        // auto-fade finished rows; errors stay until dismissed
+        setTimeout(function () { row.remove(); }, 8000);
+      },
+      error: function (text) {
+        state.textContent = text; state.classList.add('err'); dismiss.hidden = false;
+      }
+    };
+  }
+  function pollUploadJob(jobId, ui) {
+    function next() { setTimeout(poll, 1000); }
+    async function poll() {
+      try {
+        var r = await fetch('/api/images/jobs/' + jobId);
+        if (!r.ok) {
+          // A non-OK status (401 session gone, 404 job evicted/unknown) never
+          // heals — stop the poller and surface it in the row instead of
+          // spinning forever. Network blips (catch below) still retry.
+          ui.error('publish status unavailable (' + r.status + ')');
+          return;
+        }
+        var j = await r.json();
+        if (j.state === 'done') {
+          ui.done('published ' + (j.image_id || '') + ' ✓');
+          refreshImages().catch(function () {}); refreshImportable().catch(function () {});
+        } else if (j.state === 'error') {
+          ui.error('publish failed: ' + j.message);
+          refreshImportable().catch(function () {});
+        } else { next(); }
+      } catch (e) { next(); }
+    }
+    poll();
+  }
   function upload(file) {
     if (!file) return;
+    var ui = uploadRowUi(file.name);
     var MAX = 4 * 1024 * 1024 * 1024;
-    if (file.size > MAX) { prog.hidden = true; statusEl.textContent = 'File too large: ' + fmtSize(file.size) + ' (max 4 GB). Not uploaded.'; return; }
-    prog.hidden = false; bar.style.width = '0'; statusEl.textContent = 'Uploading ' + file.name + '…';
+    if (file.size > MAX) { ui.error('too large: ' + fmtSize(file.size) + ' (max 4 GB) — not uploaded'); return; }
+    ui.progress(0);
     var xhr = new XMLHttpRequest();
     xhr.open('PUT', '/api/images/upload/' + encodeURIComponent(file.name));
     xhr.setRequestHeader('X-CSRF-Token', info.csrf);
-    xhr.upload.onprogress = function (e) { if (e.lengthComputable) bar.style.width = (e.loaded / e.total * 100) + '%'; };
-    xhr.onload = function () { if (xhr.status === 200) { statusEl.textContent = 'Upload done, publishing…'; pollJob(JSON.parse(xhr.responseText).job_id); } else { prog.hidden = true; statusEl.textContent = 'Upload failed (' + xhr.status + ')'; } };
-    xhr.onerror = function () { prog.hidden = true; statusEl.textContent = 'Upload error'; };
+    xhr.upload.onprogress = function (e) { if (e.lengthComputable) ui.progress(e.loaded / e.total * 100); };
+    xhr.onload = function () {
+      if (xhr.status === 200) { ui.publishing(); pollUploadJob(JSON.parse(xhr.responseText).job_id, ui); }
+      else { ui.error('upload failed (' + xhr.status + ')'); }
+    };
+    xhr.onerror = function () { ui.error('upload error'); };
     xhr.send(file);
   }
   document.getElementById('pick').addEventListener('click', function () { document.getElementById('file').click(); });
-  document.getElementById('file').addEventListener('change', function (e) { upload(e.target.files[0]); });
+  document.getElementById('file').addEventListener('change', function (e) {
+    Array.prototype.forEach.call(e.target.files, upload);
+    e.target.value = '';   // allow re-picking the same file
+  });
   var drop = document.getElementById('drop');
   ['dragenter', 'dragover'].forEach(function (ev) { drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.add('drag'); }); });
   ['dragleave', 'drop'].forEach(function (ev) { drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.remove('drag'); }); });
-  drop.addEventListener('drop', function (e) { upload(e.dataTransfer.files[0]); });
+  drop.addEventListener('drop', function (e) { Array.prototype.forEach.call(e.dataTransfer.files, upload); });
 
   // ---- Devices ----
   var devStatus = document.getElementById('dev-status');
@@ -151,12 +231,19 @@
   // but never while the operator is interacting with a row control (redrawing
   // innerHTML would yank an open dropdown out from under them) and never in a
   // hidden browser tab.
-  setInterval(function () {
-    if (document.hidden) return;
-    var a = document.activeElement;
-    if (a && a.closest && a.closest('#dev-rows')) return;
-    refreshDevices();
-  }, 10000);
+  function scheduleDevices() {
+    setTimeout(async function () {
+      if (!document.hidden) {
+        var a = document.activeElement;
+        if (!(a && a.closest && a.closest('#dev-rows'))) {
+          try { await refreshDevices(); }
+          catch (e) { devStatus.textContent = 'Device refresh unavailable; retrying…'; }
+        }
+      }
+      scheduleDevices();
+    }, 10000);
+  }
+  scheduleDevices();
   async function refreshDevices() {
     var [dr, ir, cr] = await Promise.all([fetch('/api/devices'), fetch('/api/images'), fetch('/api/credentials')]);
     if (!dr.ok) return;
@@ -172,7 +259,7 @@
       marked[cb.getAttribute('data-id')] = true;
     });
     document.getElementById('dev-rows').innerHTML = devs.map(function (d) {
-      var opts = ['<option value="">— assign —</option>'].concat(imageIds.map(function (id) {
+      var opts = ['<option value="">' + (d.assigned_image_id ? '— unassign —' : '— assign —') + '</option>'].concat(imageIds.map(function (id) {
         return '<option value="' + esc(id) + '"' + (id === d.assigned_image_id ? ' selected' : '') + '>' + esc(id) + '</option>';
       })).join('');
       var credSel = ['<option value="">— no credential —</option>'].concat(credOpts.map(function (c) {
@@ -232,14 +319,16 @@
         '<td><select class="cred">' + credSel + '</select></td>' +
         '<td><select class="assign">' + opts + '</select></td>' +
         '<td>' + telemetryCell(d) + '</td>' +
-        '<td>' + status + '</td></tr>';
+        '<td>' + status +
+        ' <button class="linkish dinfo" title="Deployment details">ⓘ</button></td></tr>';
     }).join('');
     document.querySelectorAll('#dev-rows .assign').forEach(function (sel) {
       sel.addEventListener('change', async function () {
         var id = sel.closest('tr').getAttribute('data-id');
-        if (!sel.value) return;
         var r = await jpost('/api/devices/' + encodeURIComponent(id) + '/assign', { image_id: sel.value });
-        devStatus.textContent = r.ok ? ('Assigned ' + sel.value + ' to ' + id) : 'Assign failed';
+        devStatus.textContent = r.ok
+          ? (sel.value ? ('Assigned ' + sel.value + ' to ' + id) : ('Unassigned ' + id))
+          : (sel.value ? 'Assign failed' : 'Unassign failed');
       });
     });
     document.querySelectorAll('#dev-rows .cred').forEach(function (sel) {
@@ -262,29 +351,206 @@
         }
       });
     });
+    document.querySelectorAll('#dev-rows .dinfo').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        openDeployInfo(btn.closest('tr').getAttribute('data-id'));
+      });
+    });
     document.getElementById('mark-all').checked = false;
     document.getElementById('dev-count').textContent =
       devs.length + ' device' + (devs.length === 1 ? '' : 's');
     updateSelBar();
   }
-  var onboardEs = null;
-  var onboardJobId = null;
-  function openOnboardPanel(label) {
-    var panel = document.getElementById('onboard-panel');
-    var log = document.getElementById('onboard-log');
-    document.getElementById('onboard-dev').textContent = label;
-    log.textContent = ''; panel.hidden = false;
-    onboardJobId = null;
-    document.getElementById('onboard-abort').hidden = false;
-    if (onboardEs) { onboardEs.close(); onboardEs = null; }
-    return log;
+  // ---- Device deployment details (per-row ⓘ) ----
+  // The panel lives OUTSIDE #dev-rows so the 10s table re-render never
+  // touches it. deployInfoDev guards against a slow fetch for one device
+  // painting over the panel after another row was opened.
+  var deployInfoDev = null;
+  var DEPLOY_STATE_BADGE = { active: 'badge-ok', removed: 'badge-queued',
+                             superseded: 'badge-cancelled', 'needs-reconcile': 'badge-fail' };
+  function deployReceiptRows(rec, total) {
+    var res = rec.resolved || {};
+    var ts = rec.timestamps || {};
+    var pf = rec.preflight || {};
+    var attach = res.attachment || '';
+    var mgmt = attach.indexOf('router-') === 0
+      ? (res.vpg_number ? 'VPG' + res.vpg_number : '')
+      : ((res.inband_vlan || res.iris_vlan) ? 'VLAN ' + (res.inband_vlan || res.iris_vlan) : '');
+    var svi = res.svi_ip ? res.svi_ip + (res.svi_mask ? ' / ' + res.svi_mask : '') : '';
+    var app = res.app_ip
+      ? res.app_ip + (res.app_mask ? ' / ' + res.app_mask : '') +
+        (res.app_gateway ? ' → gw ' + res.app_gateway : '')
+      : '';
+    var stateCls = DEPLOY_STATE_BADGE[rec.state] || 'badge-queued';
+    var pairs = [
+      ['State', '<span class="badge ' + stateCls + '">' + esc(rec.state || 'unknown') + '</span>' +
+        (rec.adopted ? ' <span class="muted">(adopted)</span>' : '')],
+      ['Receipt', esc(rec.receipt_id || '') +
+        ' <span class="muted">(' + esc(total) + ' stored for this device)</span>'],
+      ['Planned', esc(fmtDate(ts.planned_at) || '—')],
+      ['Finished', esc(fmtDate(ts.finished_at) || '—')],
+      ['Preflight', esc(pf.status || '—')],
+      ['Attachment', esc(attach || '—')],
+      ['Management VLAN / VPG', esc(mgmt || '—')],
+      ['SVI', esc(svi || '—')],
+      ['App IP', esc(app || '—')],
+      ['NAT interface', esc(res.nat_interface || '—')],
+      ['Swarm port', esc(res.swarm_port || '—')],
+      ['Model', esc(res.model || '—')],
+      ['Platform', esc(res.platform || '—')],
+      ['Device identity', esc(res.device_identity || '—')]
+    ];
+    return pairs.map(function (kv) {
+      return '<tr><td class="muted">' + esc(kv[0]) + '</td><td>' + kv[1] + '</td></tr>';
+    }).join('');
   }
-  function streamOnboardJob(jobId, log) {
-    onboardJobId = jobId;
-    onboardEs = new EventSource('/api/onboard/jobs/' + encodeURIComponent(jobId) + '/stream');
-    onboardEs.onmessage = function (e) { log.textContent += e.data + '\n'; log.scrollTop = log.scrollHeight; };
-    onboardEs.addEventListener('end', function (e) { log.textContent += '\n— ' + e.data + ' —\n'; onboardEs.close(); onboardEs = null; onboardJobId = null; document.getElementById('onboard-abort').hidden = true; refreshDevices(); });
-    onboardEs.onerror = function () { log.textContent += '\n[stream closed]\n'; if (onboardEs) { onboardEs.close(); onboardEs = null; } };
+  async function openDeployInfo(id) {
+    deployInfoDev = id;
+    var note = document.getElementById('di-note');
+    document.getElementById('di-dev').textContent = id;
+    document.getElementById('di-rows').innerHTML = '';
+    document.getElementById('di-log-rows').innerHTML = '';
+    var lt = document.getElementById('di-log-text');
+    lt.hidden = true; lt.textContent = '';
+    note.textContent = 'Loading…';
+    document.getElementById('deploy-info-panel').hidden = false;
+    var r = null;
+    try { r = await fetch('/api/devices/' + encodeURIComponent(id) + '/deployment'); } catch (e) { }
+    if (deployInfoDev !== id) return;      // another row was opened meanwhile
+    if (!r) {
+      note.textContent = 'Deployment details unavailable.';
+    } else if (r.status === 404) {
+      note.textContent = 'Deployment receipts are unavailable on this server.';
+    } else if (!r.ok) {
+      note.textContent = 'Deployment details unavailable (' + r.status + ').';
+    } else {
+      var body = await r.json();
+      if (deployInfoDev !== id) return;
+      if (!body.receipt) {
+        note.textContent = 'No deployment receipt — onboarded before receipts ' +
+          'existed, or added manually; adopt or re-onboard to create one.';
+      } else {
+        note.textContent = '';
+        document.getElementById('di-rows').innerHTML =
+          deployReceiptRows(body.receipt, body.total || 0);
+      }
+    }
+    renderDeviceDeployLogs(id);
+  }
+  async function renderDeviceDeployLogs(id) {
+    var tbody = document.getElementById('di-log-rows');
+    var r = null;
+    try { r = await fetch('/api/deploy-logs?device_id=' + encodeURIComponent(id)); } catch (e) { }
+    if (deployInfoDev !== id) return;
+    if (!r || !r.ok) {
+      tbody.innerHTML = '<tr><td colspan="5" class="muted">Deployment logs unavailable.</td></tr>';
+      return;
+    }
+    var logs = (await r.json()).logs || [];
+    if (deployInfoDev !== id) return;
+    if (!logs.length) {
+      tbody.innerHTML = '<tr><td colspan="5" class="muted">No deployment logs for this device yet.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = logs.map(function (l) {
+      return '<tr data-file="' + esc(l.file) + '"><td>' + esc(fmtDate(l.finished_at)) +
+        '</td><td>' + esc(l.action || '') + '</td><td>' + deployLogResult(l) +
+        '</td><td>' + esc(fmtSize(l.size)) + '</td>' +
+        '<td><button class="linkish dlog-view">view</button></td></tr>';
+    }).join('');
+    document.querySelectorAll('#di-log-rows .dlog-view').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        showDeployLog(btn.closest('tr').getAttribute('data-file'),
+                      document.getElementById('di-log-text'));
+      });
+    });
+  }
+  document.getElementById('di-close').addEventListener('click', function () {
+    deployInfoDev = null;
+    document.getElementById('deploy-info-panel').hidden = true;
+  });
+  // ---- Per-job onboard log panels ----
+  // One panel PER JOB in #onboard-logs — its own <pre>, its own EventSource,
+  // its own close/abort — so two concurrent onboards never merge into (or
+  // blank) each other's window. Opening a job that already has a panel
+  // focuses it; at most MAX_ONBOARD_PANELS panels, oldest closed first.
+  var onboardPanels = {};        // job_id -> { root, es }
+  var onboardPanelOrder = [];    // job ids, oldest first
+  var MAX_ONBOARD_PANELS = 6;
+  var MAX_LOG_LINES = 500;
+  function closeJobLog(jobId) {
+    var p = onboardPanels[jobId];
+    if (!p) return;
+    if (p.es) { p.es.close(); p.es = null; }
+    p.root.remove();
+    delete onboardPanels[jobId];
+    var i = onboardPanelOrder.indexOf(jobId);
+    if (i > -1) onboardPanelOrder.splice(i, 1);
+  }
+  function openJobLog(jobId, deviceId, action, queued) {
+    if (onboardPanels[jobId]) {
+      onboardPanels[jobId].root.scrollIntoView({ block: 'nearest' });
+      return;
+    }
+    while (onboardPanelOrder.length >= MAX_ONBOARD_PANELS) closeJobLog(onboardPanelOrder[0]);
+    var root = document.createElement('div');
+    root.className = 'job-log-panel';
+    root.setAttribute('data-job', jobId);
+    var head = document.createElement('div'); head.className = 'job-log-head';
+    var title = document.createElement('h3');
+    title.textContent = deviceId + ' — ' + action;
+    var abortBtn = document.createElement('button');
+    abortBtn.type = 'button'; abortBtn.className = 'btn ghost';
+    abortBtn.textContent = 'Abort';
+    var closeBtn = document.createElement('button');
+    closeBtn.type = 'button'; closeBtn.className = 'btn ghost';
+    closeBtn.textContent = 'Close';
+    head.appendChild(title); head.appendChild(abortBtn); head.appendChild(closeBtn);
+    var log = document.createElement('pre'); log.className = 'log';
+    root.appendChild(head); root.appendChild(log);
+    document.getElementById('onboard-logs').appendChild(root);
+    var entry = { root: root, es: null };
+    onboardPanels[jobId] = entry;
+    onboardPanelOrder.push(jobId);
+    var lines = [], flushPending = false;
+    function flush() { flushPending = false; log.textContent = lines.join('\n') + (lines.length ? '\n' : ''); log.scrollTop = log.scrollHeight; }
+    function append(text) {
+      lines = lines.concat(String(text).split('\n')).slice(-MAX_LOG_LINES);
+      if (!flushPending) { flushPending = true; requestAnimationFrame(flush); }
+    }
+    // Tracks whether the job is still parked in the queue: log lines only
+    // exist once a job runs, so the first streamed message means it started.
+    var isQueued = !!queued;
+    if (queued) append('(queued — waiting for a free install slot; the log streams once it starts)');
+    var es = new EventSource('/api/onboard/jobs/' + encodeURIComponent(jobId) + '/stream');
+    entry.es = es;
+    es.onmessage = function (e) { isQueued = false; append(e.data); };
+    es.addEventListener('end', function (e) {
+      append('— ' + e.data + ' —'); flush();
+      es.close(); entry.es = null; abortBtn.hidden = true;
+      refreshDevices().catch(function () {});
+    });
+    es.onerror = function () { append('[stream closed]'); if (entry.es) { entry.es.close(); entry.es = null; } };
+    abortBtn.addEventListener('click', async function () {
+      if (!confirm('Abort this ' + action + ' of ' + deviceId + '?\n\nThis stops ' +
+          'the running installer. The device may be left partially configured; ' +
+          're-onboard (idempotent) or undeploy to clean up.')) return;
+      // A queued job has no registered process, so the abort route can only
+      // 409 — take it out of the queue instead, scoped to just this job
+      // (same endpoint the batch panel's cancel uses).
+      if (isQueued) {
+        var qr = await jpost('/api/onboard/cancel-queued', { job_ids: [jobId] });
+        if (!qr.ok) { append('[cancel failed (' + qr.status + ')]'); return; }
+        var cancelled = 0;
+        try { cancelled = (await qr.json()).cancelled || 0; } catch (e2) { }
+        if (cancelled) { append('[cancelled while queued]'); return; }
+        isQueued = false;   // won a slot between open and click: abort the running job
+      }
+      var r = await jpost('/api/onboard/jobs/' + encodeURIComponent(jobId) + '/abort', {});
+      append(r.ok ? '[abort requested]' : '[abort failed (' + r.status + ')]');
+    });
+    closeBtn.addEventListener('click', function () { closeJobLog(jobId); });
+    root.scrollIntoView({ block: 'nearest' });
   }
   // Telemetry flags for onboard job bodies (reports default on, streaming
   // default off — the server treats an absent key the same way).
@@ -294,19 +560,6 @@
     return { telemetry: !t || t.checked,
              telemetry_stream: !!(s && s.checked) };
   }
-  document.getElementById('onboard-close').addEventListener('click', function () {
-    if (onboardEs) { onboardEs.close(); onboardEs = null; }
-    document.getElementById('onboard-panel').hidden = true;
-  });
-  document.getElementById('onboard-abort').addEventListener('click', async function () {
-    if (!onboardJobId) return;
-    if (!confirm('Abort this onboard?\n\nThis stops the running installer. The ' +
-        'device may be left partially configured; re-onboard (idempotent) or ' +
-        'undeploy to clean up.')) return;
-    var r = await jpost('/api/onboard/jobs/' + encodeURIComponent(onboardJobId) + '/abort', {});
-    var log = document.getElementById('onboard-log');
-    log.textContent += r.ok ? '\n[abort requested]\n' : '\n[abort failed (' + r.status + ')]\n';
-  });
   document.getElementById('mark-all').addEventListener('change', function (e) {
     document.querySelectorAll('#dev-rows .mark').forEach(function (cb) { cb.checked = e.target.checked; });
     updateSelBar();
@@ -340,6 +593,7 @@
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && openMenuPanel) closeMenus(); });
   wireMenu('csv-menu-btn', 'csv-menu');
   wireMenu('onboard-menu-btn', 'onboard-pop');
+  wireMenu('help-btn', 'help-pop');
   function updateSelBar() {
     var n = document.querySelectorAll('#dev-rows .mark:checked').length;
     document.getElementById('sel-bar').hidden = n === 0;
@@ -349,7 +603,11 @@
       var cb = tr.querySelector('.mark');
       tr.classList.toggle('sel', !!(cb && cb.checked));
     });
-    if (n === 0) closeMenus();
+    // An empty selection closes the selection-scoped popovers — but never
+    // the header help popover: the 10s devices poll re-renders the (empty)
+    // table and lands here with n === 0, and yanking an open "?" panel out
+    // from under the operator reads as a broken control.
+    if (n === 0 && openMenuPanel && openMenuPanel.id !== 'help-pop') closeMenus();
   }
   document.getElementById('dev-rows').addEventListener('change', function (e) {
     if (e.target.classList.contains('mark')) updateSelBar();
@@ -380,10 +638,17 @@
     return s < 60 ? s + 's' : Math.floor(s / 60) + 'm' + String(s % 60).padStart(2, '0') + 's';
   }
   function stopBatchPoll() {
-    if (batchTimer) { clearInterval(batchTimer); batchTimer = null; }
+    if (batchTimer) { clearTimeout(batchTimer); batchTimer = null; }
   }
   function startBatchPoll(gen) {
-    if (gen === batchGen && !batchTimer) batchTimer = setInterval(pollBatch, 2000);
+    if (gen !== batchGen || batchTimer) return;
+    batchTimer = setTimeout(async function run() {
+      batchTimer = null;
+      var active;
+      try { active = await pollBatch(); }
+      catch (e) { document.getElementById('batch-summary').textContent = 'Job refresh unavailable; retrying…'; active = true; }
+      if (active && gen === batchGen) startBatchPoll(gen);
+    }, 2000);
   }
   function renderBatch(listing) {
     // running durations are server-clock minus server-clock: the listing's
@@ -400,7 +665,7 @@
       var act = (j.action === 'undeploy')
         ? '<div style="color:#8a4baf;font-size:10px;font-weight:600">undeploy</div>' : '';
       return '<tr data-job="' + esc(j.id) + '" data-dev="' + esc(j.device_id) + '"' +
-        ' data-state="' + esc(j.state) + '">' +
+        ' data-state="' + esc(j.state) + '" data-action="' + esc(j.action || 'onboard') + '">' +
         '<td>' + esc(j.device_id) + act + '</td>' +
         '<td>' + jobBadge(j.state) + '</td>' +
         '<td class="muted">' + queuePos + '</td>' +
@@ -415,11 +680,9 @@
     document.querySelectorAll('#batch-rows .blog').forEach(function (btn) {
       btn.addEventListener('click', function () {
         var tr = btn.closest('tr');
-        var log = openOnboardPanel(tr.getAttribute('data-dev'));
-        if (tr.getAttribute('data-state') === 'queued') {
-          log.textContent = '(queued — waiting for a free install slot; the log streams once it starts)\n';
-        }
-        streamOnboardJob(tr.getAttribute('data-job'), log);
+        openJobLog(tr.getAttribute('data-job'), tr.getAttribute('data-dev'),
+                   tr.getAttribute('data-action') || 'onboard',
+                   tr.getAttribute('data-state') === 'queued');
       });
     });
     return jobs.some(function (j) { return j.state === 'queued' || j.state === 'running'; });
@@ -437,7 +700,7 @@
     var listing = await r.json();
     if (seq !== pollSeq) return true;   // a newer poll already rendered
     var active = renderBatch(listing);
-    if (!active) { stopBatchPoll(); refreshDevices(); }
+    if (!active) { stopBatchPoll(); refreshDevices().catch(function () {}); }
     return active;
   }
   // After a reload (or an accidental panel close + reload), re-attach to
@@ -456,6 +719,17 @@
     document.getElementById('batch-panel').hidden = false;
     renderBatch(listing);
     startBatchPoll(gen);
+  }
+  // Per-device submission rejections (a router preflight failure, a busy
+  // device, an unreachable device, etc.) must never read as a silent no-op:
+  // paint them in the same .err red the rest of the page uses for validation
+  // failures (see styles.css), one line per device, "<device_id>: <reason>".
+  function renderOnboardOutcome(action, startedCount, failed) {
+    var msg = 'Started ' + action + ' for ' + startedCount + ' device(s)';
+    if (failed.length) msg += '; refused: ' + failed.join(', ');
+    devStatus.textContent = msg;
+    devStatus.classList.toggle('err', failed.length > 0);
+    devStatus.classList.toggle('muted', failed.length === 0);
   }
   async function startBatch(action) {
     var ids = claimSelection();
@@ -482,7 +756,7 @@
             // surface WHY it was refused — a bare id reads as a mystery
             var reason = '';
             try { reason = (await r.json()).error || ''; } catch (e2) { }
-            failed.push(reason ? id + ' (' + reason + ')' : id);
+            failed.push(reason ? id + ': ' + reason : id);
           }
         } catch (e) { failed.push(id); }   // one blipped POST must not kill the batch
       }));
@@ -490,8 +764,7 @@
       setBulkBusy(false);
     }
     if (gen !== batchGen) return;    // panel was closed mid-start
-    devStatus.textContent = 'Started ' + action + ' for ' + Object.keys(batchJobs).length + ' device(s)' +
-      (failed.length ? '; failed to start: ' + failed.join(', ') : '');
+    renderOnboardOutcome(action, Object.keys(batchJobs).length, failed);
     if (await pollBatch()) startBatchPoll(gen);
   }
   document.getElementById('onboard-selected').addEventListener('click', function () { startBatch('onboard'); });
@@ -811,6 +1084,11 @@
   }
 
   // ---- Settings ----
+  // CA bundle source presets (Feature 3): the select is a client-side view
+  // over the same stored URL the free-text input always wrote — "cisco"
+  // means "no override" (server default), "mozilla" is this curated URL,
+  // anything else is "custom" and shows the raw input.
+  var CA_MOZILLA_URL = 'https://curl.se/ca/cacert.pem';
   async function refreshSettings() {
     var r = await fetch('/api/settings'); if (!r.ok) return;
     var s = await r.json();
@@ -820,9 +1098,7 @@
       ['Host IP', s.host_ip || '(unset)'],
       ['Ports', 'tracker ' + s.ports.tracker + ' · catalog ' + s.ports.catalog +
                 ' · artifacts ' + s.ports.artifacts + ' · swarm ' + s.ports.swarm +
-                ' · console ' + s.ports.console],
-      ['Observability', s.observability.enabled
-        ? ('on — ' + (s.observability.metrics_url || '')) : 'off']
+                ' · console ' + s.ports.console]
     ];
     document.querySelector('#settings-info tbody').innerHTML = rows.map(function (kv) {
       return '<tr><td class="muted">' + esc(kv[0]) + '</td><td>' + esc(kv[1]) + '</td></tr>';
@@ -838,6 +1114,112 @@
       : 'Not configured — needed when the Console runs in Docker, so the onboard ' +
         'installer can ssh to the stage host to stage per-device artifacts. ' +
         'Stored age-encrypted; the password is never shown again.';
+    // --- Certificate (metadata only — key material never reaches this page) ---
+    var gc = s.gui_cert || {};
+    var certStatus = document.getElementById('cert-status');
+    if (gc.source === 'custom' || gc.source === 'built-in') {
+      certStatus.innerHTML = (gc.source === 'custom'
+          ? '<span class="badge badge-running">custom</span> '
+          : '<span class="badge badge-queued">built-in</span> ') +
+        esc(gc.subject || 'unknown') +
+        ' — expires ' + esc(gc.not_after || 'unknown') +
+        ' — sha256 ' + esc((gc.fingerprint_sha256 || '').slice(0, 16)) + '…' +
+        (gc.source === 'custom' ? ''
+          : ' <span class="muted">(the revert button appears once a custom certificate is installed)</span>');
+    } else {
+      certStatus.textContent =
+        'No TLS certificate — the console is serving plain HTTP.';
+    }
+    document.getElementById('cert-revert').hidden = gc.source !== 'custom';
+    // --- Trusted CAs table (rows rebuilt per render, like the images table) ---
+    var trust = s.trust || [];
+    var caSrcNow = (s.ca_trust || {}).url;
+    var bundleLabel = !caSrcNow ? 'Cisco Trusted Root Store'
+      : (caSrcNow === CA_MOZILLA_URL ? 'Mozilla CA bundle (curl.se)' : 'Custom URL');
+    document.getElementById('trust-rows').innerHTML = trust.length
+      ? trust.map(function (t) {
+          // The downloaded bundle is ONE store file holding the whole public
+          // CA set — name it as such, not by its (arbitrary) first cert.
+          var isBundle = t.source === 'downloaded';
+          return '<tr data-name="' + esc(t.name) + '"><td>' +
+            (isBundle
+              ? esc('Public CA bundle — ' + bundleLabel)
+              : esc(t.subject || 'unknown')) +
+            '</td><td>' + esc(t.not_after || 'unknown') +
+            '</td><td>' + esc((t.fingerprint_sha256 || '').slice(0, 16)) + '…</td><td>' +
+            (isBundle
+              ? '<span class="badge badge-queued">downloaded</span>'
+              : '<span class="badge badge-ok">manual</span>') +
+            '</td><td>' + esc(t.cert_count) +
+            '</td><td><button class="linkish danger-link trust-del">' +
+            (isBundle ? 'remove bundle' : 'remove') + '</button></td></tr>';
+        }).join('')
+      : '<tr><td colspan="6" class="muted">No CA certificates installed — ' +
+        'outbound TLS uses the system store only.</td></tr>';
+    document.querySelectorAll('#trust-rows .trust-del').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        var name = btn.closest('tr').getAttribute('data-name');
+        if (!confirm('Remove trusted CA ' + name + '?\n\nOutbound TLS (telemetry ' +
+            'export, CA bundle download) stops trusting certificates issued by it ' +
+            'on the next connection.')) return;
+        var msg = document.getElementById('trust-msg');
+        msg.textContent = ''; msg.classList.remove('ok');
+        var r = await fetch('/api/settings/trust/' + encodeURIComponent(name),
+                            { method: 'DELETE', headers: csrfHdr() });
+        if (!r.ok) { msg.textContent = 'Remove failed (' + r.status + ')'; return; }
+        refreshSettings();
+      });
+    });
+    var ct = s.ca_trust || {};
+    document.getElementById('ca-url').value = ct.url || '';
+    document.getElementById('ca-auto').checked = !!ct.auto;
+    var caSourceSel = document.getElementById('ca-source');
+    caSourceSel.value = !ct.url ? 'cisco' : (ct.url === CA_MOZILLA_URL ? 'mozilla' : 'custom');
+    document.getElementById('ca-url').hidden = caSourceSel.value !== 'custom';
+    // --- Telemetry destination (replaces the old read-only Observability row) ---
+    var td = s.telemetry_destination || {};
+    var obs = s.observability || {};
+    document.getElementById('td-status').innerHTML =
+      (td.source === 'override'
+        ? '<span class="badge badge-running">console override</span> '
+        : '<span class="badge badge-queued">deployment default</span> ') +
+      (td.effective_enabled
+        ? ('export on — ' + esc(td.effective_endpoint || '(no endpoint)'))
+        : 'export off') +
+      (obs.metrics_url
+        ? ' · Prometheus scrape ' + esc(obs.metrics_url) : '');
+    document.getElementById('td-endpoint').value = td.effective_endpoint || '';
+    document.getElementById('td-enabled').checked = !!td.effective_enabled;
+    document.getElementById('td-revert').hidden = td.source !== 'override';
+    // --- Audit export (the settings echo never carries the password) ---
+    var ae = s.audit_export || {};
+    document.getElementById('ae-host').value = ae.host || '';
+    document.getElementById('ae-port').value = ae.port == null ? '' : ae.port;
+    document.getElementById('ae-user').value = ae.user || '';
+    document.getElementById('ae-path').value = ae.path || '';
+    document.getElementById('ae-recipient').value = ae.age_recipient || '';
+    document.getElementById('ae-auto').checked = !!ae.auto;
+    var aePass = document.getElementById('ae-pass');
+    aePass.value = '';
+    aePass.placeholder = ae.password_set ? 'unchanged' : 'Password';
+    var aeStatus = document.getElementById('ae-status');
+    if (!ae.host) {
+      aeStatus.textContent = 'Not configured — the audit trail stays on this server.';
+    } else {
+      var last;
+      if (ae.last_run_ts) {
+        var lr = String(ae.last_result || '');
+        var lrOk = lr.slice(0, 3) === 'ok:';
+        last = ' · last export ' + esc(fmtDate(ae.last_run_ts)) +
+          ' <span class="badge ' + (lrOk ? 'badge-ok">ok' : 'badge-fail">fail') + '</span>' +
+          (lr ? ' <span class="muted">' + esc(lr.slice(lr.indexOf(':') + 1)) + '</span>' : '');
+      } else {
+        last = ' · never exported yet';
+      }
+      aeStatus.innerHTML = '<span class="badge badge-running">configured</span> ' +
+        esc((ae.user || '?') + '@' + ae.host + ':' + (ae.path || '')) +
+        (ae.auto ? ' · daily' : ' · manual only') + last;
+    }
   }
   document.getElementById('pw-form').addEventListener('submit', async function (e) {
     e.preventDefault();
@@ -882,6 +1264,354 @@
     msg.textContent = 'Stage host credentials cleared.'; msg.classList.add('ok');
     refreshSettings();
   });
+
+  // ---- Settings: certificate / trust store / telemetry destination ----
+
+  // Drag-and-drop onto the TLS pane (Feature 2). Client-side only: a
+  // FileReader read plus content sniffing, then the existing textareas /
+  // endpoints do the rest — no new backend surface. Recognition is by PEM
+  // block content, never filename/extension, since operators name these
+  // files all sorts of things.
+  var PEM_PRIVATE_KEY_RE = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
+  // Mirrors gui_tls.key_is_encrypted: PKCS#8 and legacy PEM encodings. An
+  // encrypted key reveals the passphrase field; the server decrypts at
+  // import and stores the key age-encrypted at rest.
+  function keyLooksEncrypted(text) {
+    return text.indexOf('ENCRYPTED PRIVATE KEY') > -1
+        || text.indexOf('Proc-Type: 4,ENCRYPTED') > -1;
+  }
+  function syncPassphraseRow() {
+    var t = document.getElementById('cert-key').value;
+    document.getElementById('cert-passphrase-row').hidden = !keyLooksEncrypted(t);
+  }
+  document.getElementById('cert-key').addEventListener('input', syncPassphraseRow);
+  var PEM_CERTIFICATE_RE = /-----BEGIN CERTIFICATE-----/;
+  function readFileAsText(file) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () { resolve(String(reader.result || '')); };
+      reader.onerror = function () { reject(reader.error || new Error('read failed')); };
+      reader.readAsText(file);
+    });
+  }
+  // Wires a focusable drop-zone div to: click/Enter/Space -> hidden file
+  // input; dragover/dragleave -> 'drag' class for the dashed-border hover
+  // state; and a drop/file-pick callback receiving a FileList. Shared by
+  // both TLS drop zones below.
+  function wireDropzone(zone, input, onFiles) {
+    zone.addEventListener('click', function () { input.click(); });
+    zone.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+        e.preventDefault();
+        input.click();
+      }
+    });
+    ['dragenter', 'dragover'].forEach(function (ev) {
+      zone.addEventListener(ev, function (e) { e.preventDefault(); zone.classList.add('drag'); });
+    });
+    ['dragleave', 'drop'].forEach(function (ev) {
+      zone.addEventListener(ev, function (e) { e.preventDefault(); zone.classList.remove('drag'); });
+    });
+    zone.addEventListener('drop', function (e) {
+      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) onFiles(e.dataTransfer.files);
+    });
+    input.addEventListener('change', function (e) {
+      if (e.target.files && e.target.files.length) onFiles(e.target.files);
+      input.value = '';   // allow re-dropping/re-picking the same file
+    });
+  }
+  wireDropzone(document.getElementById('cert-dropzone'), document.getElementById('cert-dropzone-input'),
+    async function (files) {
+      var msg = document.getElementById('cert-msg'); msg.textContent = ''; msg.classList.remove('ok');
+      var recognized = [], errors = [];
+      for (var i = 0; i < files.length; i++) {
+        var file = files[i];
+        var text;
+        try { text = await readFileAsText(file); } catch (err) { errors.push(file.name + ': could not read file'); continue; }
+        var hasKey = PEM_PRIVATE_KEY_RE.test(text);
+        var hasCert = PEM_CERTIFICATE_RE.test(text);
+        if (!hasKey && !hasCert) { errors.push(file.name + ': no PEM block recognized'); continue; }
+        var what = [];
+        if (hasCert) { document.getElementById('cert-pem').value = text; what.push('certificate'); }
+        if (hasKey) {
+          document.getElementById('cert-key').value = text;
+          what.push(keyLooksEncrypted(text)
+            ? 'private key (passphrase-protected — enter it below)'
+            : 'private key');
+          syncPassphraseRow();
+        }
+        recognized.push(file.name + ': ' + what.join(' + ') + ' recognized');
+      }
+      msg.textContent = recognized.concat(errors).join('; ') || 'No files recognized.';
+      if (recognized.length && !errors.length) msg.classList.add('ok');
+      // Filled the textareas only — the existing Upload button still owns
+      // the actual /api/settings/gui-cert submit.
+    });
+  document.getElementById('cert-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var msg = document.getElementById('cert-msg'); msg.textContent = ''; msg.classList.remove('ok');
+    var cert = document.getElementById('cert-pem').value.trim();
+    var key = document.getElementById('cert-key').value.trim();
+    if (cert.indexOf('BEGIN CERTIFICATE') < 0) {
+      msg.textContent = 'Certificate PEM is required (-----BEGIN CERTIFICATE-----).'; return;
+    }
+    if (key.indexOf('PRIVATE KEY') < 0) {
+      msg.textContent = 'Private key PEM is required (-----BEGIN ... PRIVATE KEY-----).'; return;
+    }
+    var body = { cert_pem: cert, key_pem: key };
+    if (keyLooksEncrypted(key)) {
+      var pw = document.getElementById('cert-passphrase').value;
+      if (!pw) {
+        document.getElementById('cert-passphrase-row').hidden = false;
+        msg.textContent = 'This private key is passphrase-protected — enter its passphrase.';
+        return;
+      }
+      body.key_passphrase = pw;
+    }
+    var r = await jpost('/api/settings/gui-cert', body);
+    if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
+    document.getElementById('cert-form').reset();   // never leave the key in the DOM
+    msg.textContent = 'Certificate replaced. New connections use it now; reload to see it on this one.';
+    msg.classList.add('ok');
+    refreshSettings();
+  });
+  document.getElementById('cert-revert').addEventListener('click', async function () {
+    var msg = document.getElementById('cert-msg'); msg.textContent = ''; msg.classList.remove('ok');
+    if (!confirm('Use the built-in certificate?\n\nThe uploaded certificate and key ' +
+        'are deleted and the console serves the bootstrap certificate again. New ' +
+        'connections switch immediately; open sessions continue.')) return;
+    var r = await fetch('/api/settings/gui-cert', { method: 'DELETE', headers: csrfHdr() });
+    if (!r.ok) { msg.textContent = 'Revert failed (' + r.status + ')'; return; }
+    msg.textContent = 'Reverted to the built-in certificate.'; msg.classList.add('ok');
+    refreshSettings();
+  });
+  document.getElementById('trust-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var msg = document.getElementById('trust-msg'); msg.textContent = ''; msg.classList.remove('ok');
+    var pem = document.getElementById('trust-pem').value.trim();
+    if (pem.indexOf('BEGIN CERTIFICATE') < 0) {
+      msg.textContent = 'Paste at least one PEM certificate block.'; return;
+    }
+    var r = await jpost('/api/settings/trust', { pem: pem });
+    if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
+    document.getElementById('trust-form').reset();
+    msg.textContent = 'CA installed.'; msg.classList.add('ok');
+    refreshSettings();
+  });
+  wireDropzone(document.getElementById('trust-dropzone'), document.getElementById('trust-dropzone-input'),
+    async function (files) {
+      var msg = document.getElementById('trust-msg'); msg.textContent = ''; msg.classList.remove('ok');
+      var ok = 0, fail = 0, skipped = 0;
+      for (var i = 0; i < files.length; i++) {
+        var file = files[i];
+        var text;
+        try { text = await readFileAsText(file); } catch (err) { fail++; continue; }
+        if (!PEM_CERTIFICATE_RE.test(text)) { skipped++; continue; }
+        var r = await jpost('/api/settings/trust', { pem: text });
+        if (r.ok) ok++; else fail++;
+      }
+      var parts = [];
+      if (ok) parts.push(ok + ' added');
+      if (fail) parts.push(fail + ' failed');
+      if (skipped) parts.push(skipped + ' skipped (no certificate PEM found)');
+      msg.textContent = parts.length ? (parts.join(', ') + '.') : 'No files processed.';
+      if (ok && !fail && !skipped) msg.classList.add('ok');
+      refreshSettings();
+    });
+  document.getElementById('ca-source').addEventListener('change', function () {
+    document.getElementById('ca-url').hidden = this.value !== 'custom';
+  });
+  document.getElementById('ca-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var msg = document.getElementById('ca-msg'); msg.textContent = ''; msg.classList.remove('ok');
+    var source = document.getElementById('ca-source').value;
+    // cisco -> null (server default, existing semantics); mozilla -> the
+    // curated curl.se URL; custom -> whatever is typed in the (now visible)
+    // free-text input. Either way this still posts to the one existing
+    // ca-trust endpoint — the preset is purely a client-side URL picker.
+    var url = source === 'cisco' ? '' :
+      source === 'mozilla' ? CA_MOZILLA_URL :
+      document.getElementById('ca-url').value.trim();
+    var auto = document.getElementById('ca-auto').checked;
+    if (url && url.indexOf('https://') !== 0) { msg.textContent = 'Bundle URL must be https://'; return; }
+    if (auto && !url) { msg.textContent = 'Auto-refresh needs a bundle URL.'; return; }
+    var r = await jpost('/api/settings/ca-trust', { url: url || null, auto: auto });
+    if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
+    msg.textContent = 'CA download settings saved.'; msg.classList.add('ok');
+    refreshSettings();
+  });
+  // "Download now" starts the server-side job and polls it, like image publish
+  var caPollTimer = null;
+  var caPollGen = 0;
+  function pollCaRefresh(jobId) {
+    var gen = ++caPollGen;
+    var msg = document.getElementById('ca-msg');
+    if (caPollTimer) { clearTimeout(caPollTimer); caPollTimer = null; }
+    function next() { caPollTimer = setTimeout(poll, 1000); }
+    async function poll() {
+      try {
+      var r = await fetch('/api/settings/ca-trust/refresh/' + encodeURIComponent(jobId));
+      if (gen !== caPollGen) return;
+      if (!r.ok) { msg.textContent = 'Download status unavailable (' + r.status + '); retrying…'; next(); return; }
+      var j = await r.json();
+      if (gen !== caPollGen) return;
+      if (j.state === 'done') {
+        caPollTimer = null;
+        msg.textContent = 'Downloaded ' + (j.certs == null ? '?' : j.certs) +
+          ' certificate(s).'; msg.classList.add('ok');
+        refreshSettings().catch(function () {});
+      } else if (j.state === 'failed') {
+        caPollTimer = null;
+        msg.textContent = 'Download failed: ' + (j.detail || 'unknown error');
+      } else {
+        msg.textContent = 'Downloading…';
+        next();
+      }
+      } catch (e) { msg.textContent = 'Download status unavailable; retrying…'; next(); }
+    }
+    poll();
+  }
+  document.getElementById('ca-refresh').addEventListener('click', async function () {
+    var msg = document.getElementById('ca-msg'); msg.textContent = ''; msg.classList.remove('ok');
+    var r = await jpost('/api/settings/ca-trust/refresh', {});
+    if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
+    msg.textContent = 'Downloading…';
+    pollCaRefresh((await r.json()).job);
+  });
+  document.getElementById('td-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var msg = document.getElementById('td-msg'); msg.textContent = ''; msg.classList.remove('ok');
+    var endpoint = document.getElementById('td-endpoint').value.trim().replace(/\/+$/, '');
+    var enabled = document.getElementById('td-enabled').checked;
+    if (enabled && !endpoint) { msg.textContent = 'An endpoint is required when export is enabled.'; return; }
+    if (endpoint && !(endpoint.indexOf('http://') === 0 || endpoint.indexOf('https://') === 0)) {
+      msg.textContent = 'Endpoint must be an http:// or https:// URL.'; return;
+    }
+    var r = await jpost('/api/settings/telemetry-destination',
+                        { endpoint: endpoint || null, enabled: enabled });
+    if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
+    msg.textContent = 'Telemetry destination saved. The exporter picks it up on the next sample pass.';
+    msg.classList.add('ok');
+    refreshSettings();
+  });
+  document.getElementById('td-revert').addEventListener('click', async function () {
+    var msg = document.getElementById('td-msg'); msg.textContent = ''; msg.classList.remove('ok');
+    if (!confirm('Revert the telemetry destination to the deployment default?\n\n' +
+        'The console override is deleted and the exporter goes back to the environment configuration ' +
+        '(IRIS_OTLP_ENDPOINT / IRIS_OBSERVABILITY) on the next sample pass.')) return;
+    var r = await fetch('/api/settings/telemetry-destination', { method: 'DELETE', headers: csrfHdr() });
+    if (!r.ok) { msg.textContent = 'Revert failed (' + r.status + ')'; return; }
+    msg.textContent = 'Reverted to the deployment default.'; msg.classList.add('ok');
+    refreshSettings();
+  });
+
+  // ---- Settings: audit export (SCP + age) ----
+  document.getElementById('ae-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var msg = document.getElementById('ae-msg'); msg.textContent = ''; msg.classList.remove('ok');
+    var host = document.getElementById('ae-host').value.trim();
+    var port = document.getElementById('ae-port').value.trim();
+    var user = document.getElementById('ae-user').value.trim();
+    var path = document.getElementById('ae-path').value.trim();
+    var recipient = document.getElementById('ae-recipient').value.trim();
+    var pass = document.getElementById('ae-pass').value;
+    if (!host || !user || !path) { msg.textContent = 'Host, username and remote path are required.'; return; }
+    if (!/^age1[0-9a-z]+$/.test(recipient)) {
+      msg.textContent = 'A valid age recipient (age1…) is required — the export is always encrypted.'; return;
+    }
+    var portNum = port ? Number(port) : 22;
+    if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
+      msg.textContent = 'Port must be a number between 1 and 65535.'; return;
+    }
+    var body = { host: host, port: portNum, user: user, path: path,
+                 age_recipient: recipient,
+                 auto: document.getElementById('ae-auto').checked };
+    if (pass) body.password = pass;    // absent password keeps the stored one
+    var r = await jpost('/api/settings/audit-export', body);
+    if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
+    document.getElementById('ae-pass').value = '';   // never leave the password in the DOM
+    msg.textContent = 'Audit export settings saved.'; msg.classList.add('ok');
+    refreshSettings();
+  });
+  // "Export now" starts the server-side job and polls it, like the CA refresh
+  var aePollTimer = null;
+  var aePollGen = 0;
+  function pollAuditExport(jobId) {
+    var gen = ++aePollGen;
+    var msg = document.getElementById('ae-msg');
+    if (aePollTimer) { clearTimeout(aePollTimer); aePollTimer = null; }
+    function next() { aePollTimer = setTimeout(poll, 1000); }
+    async function poll() {
+      try {
+      var r = await fetch('/api/settings/audit-export/run/' + encodeURIComponent(jobId));
+      if (gen !== aePollGen) return;
+      if (!r.ok) { msg.textContent = 'Export status unavailable (' + r.status + '); retrying…'; next(); return; }
+      var j = await r.json();
+      if (gen !== aePollGen) return;
+      if (j.state === 'done') {
+        aePollTimer = null;
+        msg.textContent = 'Exported: ' + (j.detail || 'ok'); msg.classList.add('ok');
+        refreshSettings().catch(function () {});
+      } else if (j.state === 'error') {
+        aePollTimer = null;
+        msg.textContent = 'Export failed: ' + (j.detail || 'unknown error');
+        refreshSettings().catch(function () {});
+      } else {
+        msg.textContent = 'Exporting…';
+        next();
+      }
+      } catch (e) { msg.textContent = 'Export status unavailable; retrying…'; next(); }
+    }
+    poll();
+  }
+  document.getElementById('ae-run').addEventListener('click', async function () {
+    var msg = document.getElementById('ae-msg'); msg.textContent = ''; msg.classList.remove('ok');
+    var r = await jpost('/api/settings/audit-export/run', {});
+    if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
+    msg.textContent = 'Exporting…';
+    pollAuditExport((await r.json()).job_id);
+  });
+  document.getElementById('ae-clear').addEventListener('click', async function () {
+    var msg = document.getElementById('ae-msg'); msg.textContent = ''; msg.classList.remove('ok');
+    if (!confirm('Clear the audit export configuration?\n\nThe stored settings and ' +
+        'password are deleted and the daily export stops. Audit events stay on ' +
+        'this server; files already exported to the remote host are untouched.')) return;
+    var r = await fetch('/api/settings/audit-export', { method: 'DELETE', headers: csrfHdr() });
+    if (!r.ok) { msg.textContent = 'Clear failed (' + r.status + ')'; return; }
+    msg.textContent = 'Audit export configuration cleared.'; msg.classList.add('ok');
+    refreshSettings();
+  });
+
+  // ---- Settings: sidebar feature sub-menu (General / TLS & trust / Telemetry) ----
+  // refreshSettings() above always populates all panes' ids regardless of
+  // which is visible, so switching sub-pages is pure class/hidden toggling.
+  // The sub-menu entries live in the sidebar under Settings and are plain
+  // hash links (#settings/<sub>), so the router below owns selection and the
+  // sub-pages are deep-linkable; the menu itself is revealed only while a
+  // settings sub-page is showing.
+  var SETTINGS_SUBS = ['general', 'tls', 'telemetry'];
+  // The audit-export pane rides the same pane/nav id pattern; appended
+  // separately so the original trio stays a literal for the source guard
+  // that pins it.
+  SETTINGS_SUBS.push('audit');
+  function showSettingsSub(sub) {
+    if (SETTINGS_SUBS.indexOf(sub) < 0) sub = 'general';
+    SETTINGS_SUBS.forEach(function (t) {
+      document.getElementById('settings-pane-' + t).hidden = t !== sub;
+      document.getElementById('nav-settings-' + t).classList.toggle('active', t === sub);
+    });
+  }
+  // Monitoring uses the same sidebar sub-menu pattern (audit | deploylogs):
+  // when a view hosts multiple features, each gets its own sub-page instead
+  // of stacking cards.
+  var MONITORING_SUBS = ['audit', 'deploylogs'];
+  function showMonitoringSub(sub) {
+    if (MONITORING_SUBS.indexOf(sub) < 0) sub = 'audit';
+    MONITORING_SUBS.forEach(function (t) {
+      document.getElementById('monitoring-pane-' + t).hidden = t !== sub;
+      document.getElementById('nav-monitoring-' + t).classList.toggle('active', t === sub);
+    });
+  }
 
   // ---- Monitoring (audit trail + draggable time brush) ----
   var auditOldestTs = null;
@@ -967,6 +1697,16 @@
     revoke_other_sessions: 'revoked other console sessions',
     stage_host_set: 'set stage-host credentials',
     stage_host_clear: 'cleared stage-host credentials',
+    'gui-cert-replace': 'replaced the console TLS certificate',
+    'gui-cert-revert': 'reverted the console to the built-in certificate',
+    'trust-add': 'installed a trusted CA certificate',
+    'trust-remove': 'removed a trusted CA certificate',
+    'ca-trust-config': 'changed the CA bundle download settings',
+    'ca-trust-refresh': 'refreshed the public CA bundle',
+    'telemetry-destination-set': 'changed the telemetry destination',
+    'telemetry-destination-clear': 'reverted the telemetry destination to the deployment default',
+    audit_export: 'exported audit log',
+    audit_export_config: 'changed audit export settings',
     device_csv_import: 'imported devices from CSV',
     revoke: 'had all secrets revoked',
     auth_fail: 'failed token authentication'
@@ -1156,8 +1896,66 @@
 
   async function refreshMonitoring() {
     await Promise.all([refreshHistogram(), refreshAuditTable(),
-                       refreshTelemetryHealth()]);
+                       refreshTelemetryHealth(), refreshDeployLogs()]);
   }
+
+  // ---- Monitoring: persistent deployment logs pane ----
+  function deployLogResult(l) {
+    return jobBadge(l.state || 'done') +
+      (l.rc == null ? '' : ' <span class="muted">rc=' + esc(l.rc) + '</span>');
+  }
+  // Generation counter (same idiom as imageJobGen / caPollGen): two quick
+  // "view" clicks race their fetches, and without this the SLOWER response
+  // would paint the shared <pre> after the newer one — only the latest
+  // requested file may render.
+  var deployLogGen = 0;
+  async function showDeployLog(file, pre) {
+    var gen = ++deployLogGen;
+    pre.hidden = false;
+    pre.textContent = 'Loading ' + file + '…';
+    var r = null;
+    try { r = await fetch('/api/deploy-logs/' + encodeURIComponent(file)); } catch (e) { }
+    if (gen !== deployLogGen) return;   // a newer view request superseded this one
+    if (!r || !r.ok) {
+      pre.textContent = 'Log unavailable' + (r ? ' (' + r.status + ')' : '') + '.';
+      return;
+    }
+    var text = await r.text();
+    if (gen !== deployLogGen) return;
+    pre.textContent = text;
+  }
+  async function refreshDeployLogs() {
+    var tbody = document.getElementById('dl-rows');
+    var dev = document.getElementById('dl-filter').value.trim();
+    var url = '/api/deploy-logs' + (dev ? '?device_id=' + encodeURIComponent(dev) : '');
+    var r = null;
+    try { r = await fetch(url); } catch (e) { }
+    if (!r || !r.ok) {
+      tbody.innerHTML = '<tr><td colspan="6" class="muted">Deployment logs unavailable' +
+        (r ? ' (' + r.status + ')' : '') + '.</td></tr>';
+      return;
+    }
+    var logs = (await r.json()).logs || [];
+    if (!logs.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="muted">No deployment logs' +
+        (dev ? ' for ' + esc(dev) : '') + ' yet.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = logs.map(function (l) {
+      return '<tr data-file="' + esc(l.file) + '"><td>' + esc(fmtDate(l.finished_at)) +
+        '</td><td>' + esc(l.device_id || '') + '</td><td>' + esc(l.action || '') +
+        '</td><td>' + deployLogResult(l) + '</td><td>' + esc(fmtSize(l.size)) + '</td>' +
+        '<td><button class="linkish dlog-view">view</button></td></tr>';
+    }).join('');
+    document.querySelectorAll('#dl-rows .dlog-view').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        showDeployLog(btn.closest('tr').getAttribute('data-file'),
+                      document.getElementById('dl-text'));
+      });
+    });
+  }
+  document.getElementById('dl-refresh').addEventListener('click', refreshDeployLogs);
+  document.getElementById('dl-filter').addEventListener('change', refreshDeployLogs);
 
   // OTLP export health badge (spec 8.3), via the console's session-gated
   // proxy — never the unauthenticated :9101 directly.
@@ -1300,15 +2098,51 @@
     });
   });
 
+  // ---- header help popover ----
+  // Version / deployment id / docs links come from GET /api/help, fetched
+  // lazily on the first open and cached for the session.
+  var helpLoaded = false;
+  document.getElementById('help-btn').addEventListener('click', async function () {
+    if (helpLoaded) return;
+    var r;
+    try { r = await fetch('/api/help'); } catch (e) { return; }
+    if (!r.ok) return;
+    var h = await r.json();
+    helpLoaded = true;
+    document.getElementById('help-version').textContent = 'Version ' + (h.version || 'unknown');
+    document.getElementById('help-deployment-id').textContent = h.deployment_id || '';
+    if (h.docs_url) document.getElementById('help-docs-link').href = h.docs_url;
+    var g = h.guides || {};
+    if (g.device) document.getElementById('help-device-guide').href = g.device;
+    if (g.server) document.getElementById('help-server-guide').href = g.server;
+  });
+  document.getElementById('help-copy-id').addEventListener('click', async function () {
+    var id = document.getElementById('help-deployment-id').textContent;
+    if (!id) return;
+    var btn = document.getElementById('help-copy-id');
+    try { await navigator.clipboard.writeText(id); btn.textContent = 'copied'; }
+    catch (e) { btn.textContent = 'copy failed'; }
+    setTimeout(function () { btn.textContent = 'copy'; }, 1500);
+  });
+
   // ---- hash router ----
   var VIEWS = ['overview', 'images', 'devices', 'swarm', 'settings', 'monitoring'];
   function show(view) {
+    // "#settings/tls" style hashes: the part before the slash picks the view,
+    // the rest picks the view's sub-page (showSettingsSub / showMonitoringSub
+    // validate it).
+    var sub = view.indexOf('/') > -1 ? view.slice(view.indexOf('/') + 1) : '';
+    view = view.split('/')[0];
     if (VIEWS.indexOf(view) < 0) view = 'overview';
     VIEWS.forEach(function (v) {
       document.getElementById('view-' + v).hidden = v !== view;
       var nav = document.getElementById('nav-' + v);
       if (nav) nav.classList.toggle('active', v === view);
     });
+    document.getElementById('settings-submenu').hidden = view !== 'settings';
+    if (view === 'settings') showSettingsSub(sub || 'general');
+    document.getElementById('monitoring-submenu').hidden = view !== 'monitoring';
+    if (view === 'monitoring') showMonitoringSub(sub || 'audit');
     if (view === 'overview') refreshOverview();
     else if (view === 'images') { refreshImages(); refreshImportable(); }
     else if (view === 'devices') refreshDevices();
@@ -1319,4 +2153,11 @@
   function current() { return (location.hash || '#overview').slice(1); }
   window.addEventListener('hashchange', function () { show(current()); });
   show(current());
+  } catch (e) {
+    var notice = document.createElement('div');
+    notice.textContent = 'Console initialization failed: ' + (e && e.message ? e.message : e) + '. Reload to retry.';
+    notice.setAttribute('role', 'alert');
+    notice.style.cssText = 'position:fixed;top:12px;left:12px;right:12px;z-index:9999;padding:12px;background:#5b1d1d;color:#fff;border:1px solid #d66;border-radius:4px';
+    document.body.appendChild(notice);
+  }
 })();

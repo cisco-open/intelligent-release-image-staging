@@ -46,3 +46,78 @@ teardown() { rm -rf "$TMP"; }
   [ "$status" -eq 0 ]
   [ ! -f "$TMP/pkill.log" ]
 }
+
+@test "a failed aria2c launch is recorded but does NOT block the agent" {
+  # Sibling of the 2026-08-20 incident class: bootstrap used to `exit 1` when
+  # guestshell-start.sh failed, so the agent (step 5) never ran and the device
+  # never heartbeated — an aria2c LAUNCH regression (e.g. the empty rpc-secret
+  # bug) was indistinguishable from a dead device. The agent is the device's
+  # only line back to the catalog: it must run even when the swarm daemon is
+  # down, and report the breakage instead of vanishing.
+  printf 'rpc_secret = SAME\n' > "$STAGE/iris-agent.conf"
+  printf 'SAME\n' > "$STAGE/rpc-secret"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$STAGE/guestshell-start.sh"
+  chmod +x "$STAGE/guestshell-start.sh"
+  mkdir -p "$STAGE/agent"
+  printf 'open(r"%s/agent-invoked", "w").write("ran")\n' "$TMP" \
+    > "$STAGE/agent/iris_agent.py"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  # the failure is surfaced and recorded for forensics...
+  [[ "$output" == *"failed to launch aria2c"* ]]
+  [ -f "$STAGE/aria2c-launch-failed" ]
+  # ...but the agent STILL ran, so the device still heartbeats
+  [ -f "$TMP/agent-invoked" ]
+}
+
+@test "a failed log rotation warns but does NOT block the agent" {
+  # Rotation is ancillary maintenance. A permissions/mktemp/filesystem error
+  # in step 4 must not exit before step 5 — the agent is the device's only
+  # path back to the catalog, so a fatal rotation error would permanently
+  # silence the device on every EEM tick (same class as the aria2c-launch
+  # failure above).
+  printf 'rpc_secret = SAME\n' > "$STAGE/iris-agent.conf"
+  printf 'SAME\n' > "$STAGE/rpc-secret"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$STAGE/rotate-logs.sh"
+  chmod +x "$STAGE/rotate-logs.sh"
+  mkdir -p "$STAGE/agent"
+  printf 'open(r"%s/agent-invoked", "w").write("ran")\n' "$TMP" \
+    > "$STAGE/agent/iris_agent.py"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"log rotation failed"* ]]
+  [ -f "$TMP/agent-invoked" ]
+}
+
+@test "a healthy aria2c launch clears a stale launch-failure marker" {
+  printf 'rpc_secret = SAME\n' > "$STAGE/iris-agent.conf"
+  printf 'SAME\n' > "$STAGE/rpc-secret"
+  printf 'stale\n' > "$STAGE/aria2c-launch-failed"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ ! -f "$STAGE/aria2c-launch-failed" ]
+}
+
+@test "a live-but-unresponsive aria2c is relaunched, not skipped" {
+  # 2026-08-20 incident (iris8kv-2/-3/-4 + C9300 .129, ~42min silent): step 3
+  # gated the launch on `pgrep aria2c` — process EXISTENCE, not RPC HEALTH. An
+  # aria2c that is alive but not serving RPC therefore blocked its own
+  # relaunch forever: the agent hit ECONNREFUSED on 127.0.0.1:6800 every tick,
+  # crashed before its first heartbeat, and the device never appeared. It only
+  # recovered when the stale process happened to die. guestshell-start.sh is
+  # ALREADY idempotent (it probes the RPC and exits 0 when healthy), so
+  # bootstrap must delegate to it unconditionally.
+  printf 'rpc_secret = SAME\nrpc_port = 6800\n' > "$STAGE/iris-agent.conf"
+  printf 'SAME\n' > "$STAGE/rpc-secret"      # in sync: no bounce path taken
+  # pgrep SUCCEEDS: a process is alive (the deadlock precondition)
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$BIN/pgrep"
+  chmod +x "$BIN/pgrep"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  # the launcher MUST still have been consulted despite the live process
+  [ -f "$TMP/gss.log" ]
+}

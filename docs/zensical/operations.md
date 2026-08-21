@@ -19,6 +19,10 @@ This page collects the actions operators perform after the first deployment.
 | Apply assignments | `tools/apply-assignments.sh fleet/assignments.csv` |
 | Create or reset admin | `docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin` |
 
+`apply-assignments.sh` and `gen-device-installers.sh`
+([Prepare devices](getting-started.md#prepare-devices)) require the running
+`iris` container by that name; set `IRIS_CONTAINER=<name>` if yours differs.
+
 For Kubernetes, the equivalent process and logs are available through the
 single deployment:
 
@@ -45,6 +49,16 @@ volumes while keeping others needs it again for the kept ones — see
 [Upgrading from a root-runtime deployment](server.md#upgrading-from-a-root-runtime-deployment)
 for the command to run.
 
+## Unreachable devices at onboard
+
+A Guest Shell onboard job probes the device before running the installer. An
+unreachable device — wrong IP, wrong credentials, no network path — fails the
+job immediately with `cannot reach device <ip> — ping/SSH probe failed; check
+the device IP and credentials` instead of silently doing nothing. Router and
+IOx onboarding already ran a live preflight and failed the same way.
+Submit-time rejections render in the console and are audited like any other
+onboarding failure.
+
 ## Bulk device actions
 
 Network-wide changes come from the Devices toolbar, which acts on every checked
@@ -56,10 +70,37 @@ individual effects are documented in
 
 ## Backups
 
-Back up the Docker volumes that hold `/var/lib/iris` and `/etc/iris`, plus the offline age recipient material required to decrypt secrets, plus the `iris-images` uploads volume — console-uploaded images live there, and a restore without it loses them. Image binaries under the read-only import root and generated artifacts stay in their normal external storage path.
+Back up the Docker volumes that hold `/var/lib/iris` and `/etc/iris`, plus the offline age identity (the host key file `IRIS_AGE_KEY_FILE_HOST` points at) required to decrypt secrets, plus the `iris-images` uploads volume — console-uploaded images live there, and a restore without it loses them. Image binaries under the read-only import root and generated artifacts stay in their normal external storage path.
 
 For Kubernetes, snapshot the `iris-data` PVC and back up the age identity stored
 outside that PVC. Both are required for recovery.
+
+## Audit export
+
+The console can ship the audit trail (`audit.jsonl`) off the box: *Settings →
+Audit export* takes an SCP destination (host, port, user, remote path), an
+age recipient, and the SCP password. Every export encrypts the trail to that
+recipient before it leaves the server — encryption is mandatory, there is no
+plaintext export path, and a missing recipient refuses the run rather than
+degrading. The password lives in the age-encrypted secrets store, never in
+the settings file, and reaches `scp` through the environment, never argv or a
+log line.
+
+Exports run on demand (**Export now**) or on the daily schedule (**Export
+daily**): the scheduler makes its first pass shortly after server start and
+then at most one attempt per day — failed attempts count, so a broken
+destination retries daily rather than hourly. Each upload is a fresh
+timestamped file (`audit-<utc>-<suffix>.jsonl.age`), so two exports never
+overwrite each other at the destination. The sub-page's status line shows the
+destination, the schedule mode, and the last run — timestamp plus `ok` with
+the uploaded filename or `fail` with the reason — and every run is also
+recorded in the audit trail itself as `audit_export`.
+
+The destination's SSH host key is pinned trust-on-first-use: the first export
+records it in a known-hosts file under the server state directory
+(`audit-export-known-hosts`), and later exports fail if the destination's key
+changes. Verify the fingerprint out of band where the destination warrants
+it, and remove that file after an intentional host rebuild.
 
 ## Scaling notes
 
@@ -69,14 +110,16 @@ On Catalyst 9300 IOx devices the final agent-to-IOS transfer uses the bind-mount
 
 ## Cleanup
 
-Use `device/device-uninstall.sh` or the IOx uninstall path for device cleanup. Cleanup removes IRIS-owned EEM applets, Guest Shell or IOx agent wiring, trustpoint binding, and staged agent artifacts. It still does not reload the device.
+Use `device/device-uninstall.sh` (Guest Shell devices), `device/router-uninstall.sh` (Catalyst 8000 routers), or the IOx uninstall path for device cleanup. Cleanup removes IRIS-owned EEM applets, Guest Shell or IOx agent wiring, trustpoint binding, and staged agent artifacts. It still does not reload the device.
 
 Undeploy is driven by the device's applied **receipt**, not its editable
 inventory row, so a later inventory edit cannot retarget cleanup. An
 **inband** device's teardown removes only the app footprint and preserves the
 operator-owned VLAN/SVI/routes/VRF. A device deployed before receipts existed
 has no active receipt and must be **adopted** (an explicit, audited, no-change
-recording of ownership) before it can be undeployed. A missing, drifted, or
+recording of ownership) before it can be undeployed — except a Catalyst 8000
+router, which cannot be adopted and must be re-onboarded to record live
+ownership evidence. A missing, drifted, or
 uncertain receipt stops cleanup in `needs-reconcile` rather than guessing. See
 [Management Type and VLAN Ownership](network-attachment.md).
 
@@ -109,6 +152,20 @@ A later delete of an entry published in place leaves the file on disk: the unlin
 decision comes from the entry's recorded directory, not from its filename. See
 [Catalog entry fields](reference.md#catalog-entry-fields) for the exact rule,
 including the fallback for entries published before that field existed.
+
+## TLS rotation and IOx packages
+
+Rotating or regenerating the server's TLS certificate invalidates IOx packages
+that were already built: each `iris-arm64.tar` / `iris-amd64.tar` bakes the
+catalog CA in at build time, and the server only refreshes the *served*
+`iris-catalog.pem` on start — it does not rebuild the tars.
+
+Symptom: the IOx app runs and its TCP connection to the catalog succeeds, but
+the device never heartbeats, because the pinned certificate is rejected.
+
+Remedy: re-run `tools/provision-iox-packages.sh`, then re-onboard the affected
+IOx devices. Guest Shell devices need no such fix — the installer pushes the
+current certificate on every run, so they heal on re-onboard automatically.
 
 ## Recovery checklist
 

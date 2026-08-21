@@ -8,11 +8,18 @@ SPDX-License-Identifier: Apache-2.0
 
 The server is a single Docker service that runs several small Python and shell components. It intentionally keeps runtime dependencies narrow: Python standard library services, `aria2c` for BitTorrent, `mktorrent` for torrent metadata, and OpenSSL/age tooling for certificates and encrypted secret material.
 
+Docker Compose and the Kubernetes manifests are the supported ways to run the
+server; both use the same image. There is no separate host install — the image
+is the unit of deployment.
+
 The image is self-contained: device installer sources and the SSH helper used by
-console onboarding are copied in at build time. Build it from the repository
+console onboarding are copied in at build time. `aria2c` is handed in, not
+downloaded or built — run `tools/get-aria2c.sh amd64` first, or the
+Dockerfile's `COPY bin/aria2c` step fails. Then build it from the repository
 root for `linux/amd64`:
 
 ```bash
+tools/get-aria2c.sh amd64
 docker build --platform linux/amd64 -f server/Dockerfile -t iris:latest .
 ```
 
@@ -189,4 +196,4 @@ for the address and scaling constraints.
 
 ## Self-provisioned artifacts
 
-On startup, the container refreshes derivable served files such as the Guest Shell agent bundle, bootstrap script, and catalog certificate. Operator-supplied IOx packaging artifacts, such as `iris-arm64.tar`, remain operator-owned; the container serves them but does not modify them.
+On startup, the container refreshes derivable served files such as the Guest Shell agent bundle, bootstrap script, and catalog certificate. Operator-supplied IOx packaging artifacts, such as `iris-arm64.tar`, remain operator-owned; the container serves them but does not modify them. Because those tars bake the catalog CA in at build time and are never rebuilt automatically, a certificate rotation refreshes the served `iris-catalog.pem` but leaves already-built IOx packages pinned to the old certificate — see [TLS rotation and IOx packages](operations.md#tls-rotation-and-iox-packages).

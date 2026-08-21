@@ -145,9 +145,10 @@ const IMG_PALETTE=["#4ea1ff","#ffcf4d","#46d0a0","#c792ea","#ff8f6b","#7ee787","
 const svg=document.getElementById("svg"), tip=document.getElementById("tip"),
       drawer=document.getElementById("drawer"), errEl=document.getElementById("err"),
       legendEl=document.getElementById("legend");
-let DATA=null, curHash="all", paused=false, selPeer=null, peerFilter="";
+let DATA=null, curHash="all", paused=false, peerFilter="";
 let selDev=null, pullReq=null;   // open drawer's device_id + pull-request state
 let selTeleOff=false;   // open drawer's peer has telemetry_enabled===false (#13)
+let drawerGen=0, swarmGen=0;
 let zoom=1, panX=0, panY=0, panning=null, sceneEl=null;
 
 function el(tag,attrs={},parent){const e=document.createElementNS(SVGNS,tag);
@@ -237,15 +238,22 @@ function color(p,allView,cmap){
   if(p.progress!=null&&p.progress>=1)return "var(--leech)"; return "var(--accent)";}
 
 async function poll(){
+  const gen=++swarmGen;
   try{
     const r=await fetch(MAP.swarmUrl,{cache:"no-store"});
-    DATA=await r.json(); errEl.style.opacity=0;
+    const data=await r.json();
+    // A future caller may supersede this request; never let its old result win.
+    if(gen!==swarmGen)return;
+    DATA=data; errEl.style.opacity=0;
     document.getElementById("livedot").classList.toggle("down",!(DATA.seeder&&DATA.seeder.rpc_up));
     document.getElementById("livetxt").textContent=(DATA.seeder&&DATA.seeder.rpc_up)?"live":"seeder RPC down";
     render();
     refreshDrawerReport();
-  }catch(e){ errEl.textContent="cannot reach /swarm — "+e; errEl.style.opacity=1; }
+  }catch(e){
+    if(gen===swarmGen){errEl.textContent="cannot reach /swarm — "+e; errEl.style.opacity=1;}
+  }finally{schedulePoll();}
 }
+function schedulePoll(){setTimeout(()=>{if(!paused)poll();else schedulePoll();},3000);}
 
 function syncSelector(){
   const sel=document.getElementById("imgsel");
@@ -420,7 +428,7 @@ function showTip(ev,p){
 }
 
 function openDrawer(p){
-  selPeer=p.ip; selDev=p.device_id||null; pullReq=null;
+  drawerGen++; selDev=p.device_id||null; pullReq=null;
   selTeleOff=(p.telemetry_enabled===false);
   const total=p._total, pct=p.is_seeder?100:(p.progress!=null?Math.round(p.progress*100):0);
   const done=total!=null?(p.is_seeder?total:total-(p.left||0)):null;
@@ -432,8 +440,13 @@ function openDrawer(p){
   const eventsTpl=(window.IRIS_MAP_CFG||{}).eventsUrlTemplate||"";
   const eventsUrl=eventsTpl
     ? eventsTpl.replace("{ip}",encodeURIComponent(p.ip||""))
-               .replace("{device_id}",encodeURIComponent(p.device_id||""))
+                .replace("{device_id}",encodeURIComponent(p.device_id||""))
     : "";
+  let safeEventsUrl="";
+  try{
+    const parsed=new URL(eventsUrl,location.href);
+    if(parsed.protocol==="http:"||parsed.protocol==="https:")safeEventsUrl=parsed.href;
+  }catch(e){}
   // title leads with the CONSOLE device IP (peerLabel); the announce/guest IP
   // rides in the sub-line only when it differs.
   const asub=peerAnnounceSub(p);
@@ -461,15 +474,21 @@ function openDrawer(p){
     ${!selDev?`<div style="color:var(--muted);font-size:12px">no device identity for this peer (no heartbeat yet) — pull unavailable</div>`
       :selTeleOff?`<div style="color:var(--muted);font-size:12px">telemetry is disabled on this device (telemetry = off in iris-agent.conf) — pull unavailable</div>`
       :`<button id="pullbtn" style="width:100%">⇣ Pull fresh data from device</button>`}
-    <div id="repbox"><p style="color:var(--muted);font-size:12px">loading report…</p></div>`:""}
-    ${eventsUrl?`<a class="btn" href="${eventsUrl}" target="_blank" rel="noopener">&#8599; View this device's events</a>`:""}`;
+    <div id="repbox"><p style="color:var(--muted);font-size:12px">loading report…</p></div>`:""}`;
+  if(safeEventsUrl){
+    const eventsLink=document.createElement("a");
+    eventsLink.className="btn"; eventsLink.href=safeEventsUrl;
+    eventsLink.target="_blank"; eventsLink.rel="noopener";
+    eventsLink.textContent="↗ View this device's events";
+    drawer.appendChild(eventsLink);
+  }
   drawer.querySelector(".close").addEventListener("click", closeDrawer);
   const pb=document.getElementById("pullbtn");
   if(pb)pb.addEventListener("click",requestPull);
-  refreshDrawerReport();
   drawer.classList.add("open");
+  refreshDrawerReport();
 }
-function closeDrawer(){drawer.classList.remove("open");selPeer=null;selDev=null;pullReq=null;selTeleOff=false;}
+function closeDrawer(){drawerGen++;drawer.classList.remove("open");selDev=null;pullReq=null;selTeleOff=false;}
 
 // ---- device report drawer section (#13) -----------------------------------
 // Latest stored report for the device + a per-peer participation table
@@ -598,10 +617,13 @@ async function refreshDrawerReport(){
   // Live-refresh for the OPEN drawer: re-pulls the stored reports every poll
   // tick and walks the pull status pending -> arrived/expired.
   if(!MAP.pull||!drawer.classList.contains("open")||!selDev)return;
+  const devId=selDev, gen=drawerGen;
   const box=document.getElementById("repbox");
   if(!box)return;
   await loadFleet();   // once per page: lets report rows resolve departed peers
-  const reports=await loadReports(selDev);
+  const reports=await loadReports(devId);
+  // The operator can switch or close drawers while these requests are in flight.
+  if(gen!==drawerGen||selDev!==devId||!drawer.classList.contains("open"))return;
   const now=(DATA&&DATA.now)?DATA.now:Date.now()/1000;
   if(pullReq&&(pullReq.status==="pending")){
     const latest=reports.length?reports[reports.length-1]:null;
@@ -629,7 +651,7 @@ function showHubTip(ev){
   tip.style.top=(ev.clientY-wrap.top+14)+"px"; tip.style.opacity=1;
 }
 function openHubDrawer(){
-  selPeer=DATA.host||"seed";
+  drawerGen++;
   const s=DATA.seeder||{}, imgs=(DATA.images||[]);
   const rows=imgs.map(im=>`<dt style="font-size:12px">${escapeHtml(im.image)}</dt>`+
     `<dd>${im.seeders} seed · ${im.leechers} dl</dd>`).join("");
@@ -678,7 +700,6 @@ svg.addEventListener("pointerup",()=>{panning=null;});
 window.addEventListener("keydown",e=>{if(e.key==="Escape")closeDrawer();});
 
 poll();
-setInterval(()=>{if(!paused)poll();},3000);
 </script>
 </body>
 </html>

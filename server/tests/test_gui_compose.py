@@ -93,7 +93,14 @@ def test_entrypoint_self_provisions_served_artifacts():
 
 def test_entrypoint_creates_writable_staging_dir():
     txt = _read("docker-entrypoint.sh")
-    assert 'mkdir -p "${IRIS_ARTIFACTS_DIR:-/srv/artifacts}/staging"' in txt
+    # The guarantee is that staging/ is created under a DEFAULTED artifacts
+    # path, not that a particular line spells the default inline. The entrypoint
+    # exports the default first and then creates the directory, so both halves
+    # are asserted. Two later duplicate mkdirs were removed as redundant: the
+    # export below already applies the /srv/artifacts default, and nothing
+    # between them (only provision-served.sh, which creates) removes the dir.
+    assert 'export IRIS_ARTIFACTS_DIR="${IRIS_ARTIFACTS_DIR:-/srv/artifacts}"' in txt
+    assert 'mkdir -p "$IRIS_ARTIFACTS_DIR/staging"' in txt
 
 
 def test_dockerfile_exposes_artifacts_seed_data_and_healthcheck():

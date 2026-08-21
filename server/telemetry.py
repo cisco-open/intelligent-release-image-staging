@@ -24,6 +24,7 @@ import ipaddress
 import live_samples
 import metrics
 import otlp
+import telemetry_destination
 from peer_registry import PeerRegistry
 
 DEFAULT_INTERVAL = 15
@@ -272,7 +273,8 @@ class Telemetry:
                  interval=DEFAULT_INTERVAL, device_info=None,
                  reports_info=None, live_info=None, images_info=None,
                  metrics_exporter=None, export_health=None,
-                 device_metrics=False):
+                 device_metrics=False, dest_settings=None,
+                 env_endpoint="", env_enabled=False, headers=None):
         self.exporter = exporter
         self.rpc = rpc
         self.interval = interval
@@ -282,6 +284,18 @@ class Telemetry:
         self.metrics_exporter = metrics_exporter
         self.export_health = export_health or ExportHealth()
         self.device_metrics = bool(device_metrics)
+        # Console-editable OTLP destination (design 2026-08-19 feature B):
+        # dest_settings is a telemetry_destination.DestinationSettings the
+        # sampler consults at the top of every pass; a non-null file field
+        # overrides the deployment env captured here, per field. None
+        # (tests, direct construction) -> the explicitly passed exporters
+        # are kept as-is forever. Headers stay startup-env (secrets) and are
+        # re-applied to every rebuilt exporter.
+        self._dest = dest_settings
+        self._env_endpoint = (env_endpoint or "").strip()
+        self._env_enabled = bool(env_enabled)
+        self._headers = dict(headers or {})
+        self._effective = None      # (endpoint, enabled) the exporters match
         # Optional callable -> the catalog's live-samples.json doc (spec 6.3);
         # aggregated per image each sample() pass. None -> no live streaming
         # surface (tests/standalone keep working unchanged).
@@ -326,8 +340,9 @@ class Telemetry:
 
     # --- hooks called from the tracker (announce path) ---
     def on_swarm_event(self, event):
-        if self.exporter is not None:
-            self.exporter.emit(event)
+        exp = self.exporter
+        if exp is not None:
+            exp.emit(event)
         # Prune per-IP accumulators when a peer leaves (stopped or stale) so
         # _peer_sent/_peer_sent_since don't grow unbounded over a long run.
         if event.get("event") in ("stop", "stale"):
@@ -365,8 +380,45 @@ class Telemetry:
             return 0
 
     # --- sampler ---
+    def _refresh_exporters(self):
+        """Re-resolve the effective OTLP destination (console override file
+        overrides deployment env, per field — design 2026-08-19 feature B)
+        and build/swap/drop the exporters when it changed. With no exporters
+        the pass's export stages exit early (the existing None checks below).
+        CPython attribute assignment is atomic, so the announce-path reader
+        (on_swarm_event) is race-benign across object→object swaps — worst
+        case one event lands in the old exporter's queue (bounded, best-effort
+        by design). Readers must snapshot the attribute once (e.g. exp =
+        self.exporter) because a swap-to-None is not otherwise safe.
+        ExportHealth is hub-owned and survives every swap: a destination
+        change while degraded gives the new endpoint a fresh chance on the
+        next pass. No-op when no DestinationSettings is wired (direct
+        construction: tests and standalone keep their explicit exporters)."""
+        if self._dest is None:
+            return
+        file_endpoint, file_enabled = self._dest.current()
+        endpoint = self._env_endpoint if file_endpoint is None \
+            else file_endpoint
+        enabled = self._env_enabled if file_enabled is None else file_enabled
+        effective = (endpoint, bool(enabled))
+        if effective == self._effective:
+            return
+        self._effective = effective
+        if enabled and endpoint:
+            self.exporter = otlp.OTLPLogExporter(endpoint,
+                                                 headers=self._headers)
+            self.metrics_exporter = otlp.OTLPMetricsExporter(
+                endpoint, headers=self._headers)
+        else:
+            # Disabled, or no endpoint anywhere: drop the exporters. The
+            # rest of the pass still runs (seeder poll, live aggregation) —
+            # the swarm map and /metrics text don't depend on OTLP export.
+            self.exporter = None
+            self.metrics_exporter = None
+
     def sample(self, now=None):
         now = time.time() if now is None else now
+        self._refresh_exporters()
         if self.rpc is not None:
             seeder, names, totals = poll_seeder(self.rpc)
             self._seeder = seeder
@@ -628,17 +680,18 @@ def _read_rpc_secret(env):
 def from_env(env=None):
     """Build a Telemetry hub from IRIS_* env vars. The seeder RPC is always
     wired (it is local; failures just surface as iris_seeder_rpc_up 0) so the
-    swarm map keeps working. External event export over OTLP is enabled
-    ONLY when IRIS_OBSERVABILITY=1 AND IRIS_OTLP_ENDPOINT is set — IRIS makes
+    swarm map keeps working, and the hub is ALWAYS constructed — the sampler
+    always runs. External OTLP export is resolved per sample PASS from the
+    effective config: the console's telemetry-destination.json override when
+    a field is non-null, else the deployment env (IRIS_OBSERVABILITY AND
+    IRIS_OTLP_ENDPOINT both required — the default-off posture). IRIS makes
     no assumptions about any observability stack being around."""
     env = os.environ if env is None else env
     endpoint = env.get("IRIS_OTLP_ENDPOINT", "").strip()
-    gate = bool(endpoint) and observability_enabled(env)
-    headers = otlp.read_headers_env(env) if gate else {}
-    exporter = (otlp.OTLPLogExporter(endpoint, headers=headers)
-                if gate else None)
-    metrics_exporter = (otlp.OTLPMetricsExporter(endpoint, headers=headers)
-                        if gate else None)
+    # Headers stay startup-env only (they are secrets with an existing
+    # file-based path — never console-editable); read unconditionally so a
+    # console enable-from-off still authenticates to the collector.
+    headers = otlp.read_headers_env(env)
     device_metrics = env.get("IRIS_OTLP_DEVICE_METRICS",
                              "").strip().lower() in ("1", "true", "yes", "on")
     audit_path = env.get("IRIS_AUDIT", "/etc/iris/audit.jsonl")
@@ -660,12 +713,22 @@ def from_env(env=None):
     reports_info = lambda: _read_reports(state_dir)
     live_info = lambda: _read_live_samples(state_dir)
     images_info = lambda: _read_images(state_dir)
-    return Telemetry(exporter=exporter, rpc=rpc, interval=interval,
-                     device_info=device_info, reports_info=reports_info,
-                     live_info=live_info, images_info=images_info,
-                     metrics_exporter=metrics_exporter,
-                     export_health=export_health,
-                     device_metrics=device_metrics)
+    dest = telemetry_destination.DestinationSettings(
+        telemetry_destination.settings_path(state_dir))
+    hub = Telemetry(rpc=rpc, interval=interval,
+                    device_info=device_info, reports_info=reports_info,
+                    live_info=live_info, images_info=images_info,
+                    export_health=export_health,
+                    device_metrics=device_metrics,
+                    dest_settings=dest,
+                    env_endpoint=endpoint,
+                    env_enabled=observability_enabled(env),
+                    headers=headers)
+    # Build the initial exporters NOW (not on the first pass) so swarm events
+    # from the announce path are captured from process start, exactly as the
+    # construction-time exporters were before the destination became editable.
+    hub._refresh_exporters()
+    return hub
 
 
 def _read_devices(state_dir):

@@ -81,7 +81,9 @@ At the end of every step, state the next action required from me.
    and builds/stages both supported IOx packages before any Console onboarding.
    Do not proceed until `https://<server-ip>:8080/` is reachable.
 3. **Create the Console admin.** Accept the self-signed certificate warning only
-   for the expected server, create the initial admin, and sign in.
+   for the expected server, sign in with the default first-run credential
+   `iris` / `irisisgreat!`, and create the initial admin account. The default
+   credential works only before an admin account exists.
 4. **Publish an image.** Upload through the Console, import a file that is
    already on the server from the Console **Import from disk** panel, or use
    `iris-publish` from inside the server container. Publishing creates catalog

@@ -9,6 +9,7 @@ import threading
 
 import otlp
 import telemetry
+import telemetry_destination
 from peer_registry import PeerRegistry
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -333,8 +334,8 @@ def test_sample_aria2_restart_rebaselines_without_misattribution():
 
 
 def test_sample_first_sighting_baselines_historical_upload():
-    # Telemetry (re)starting while aria2 has been seeding for days (separate
-    # processes in bare-metal deploys): the counter's history is
+    # Telemetry (re)starting while aria2 has been seeding for days: the
+    # counter's history is
     # unattributable and must NOT be dumped onto whoever is connected at that
     # moment. Baseline only; nothing distributed.
     upload_len = {"abc": 5_000_000_000}
@@ -1485,3 +1486,235 @@ class TestSwarmRouteGate:
             assert c.getresponse().status == 200
         finally:
             srv.shutdown()
+
+
+# ---- editable telemetry destination (design 2026-08-19 feature B):
+# the hub resolves (endpoint, enabled) per sample pass — console override
+# file wins per field, else the deployment env captured at startup ----
+
+def _dest_hub(tmp_path, monkeypatch, posts, env_endpoint="",
+              env_enabled=False, headers=None):
+    """A hub wired the way from_env wires it (DestinationSettings + captured
+    env) whose REBUILT exporters record every POST into `posts` instead of
+    touching the network. Exporters resolve otlp._http_post from the module
+    at construction time (`sender or _http_post`), so patching the module
+    global first is inherited by every exporter _refresh_exporters builds."""
+    def fake_post(url, body, headers=None):
+        posts.append((url, dict(headers or {})))
+    monkeypatch.setattr(otlp, "_http_post", fake_post)
+    path = telemetry_destination.settings_path(str(tmp_path))
+    hub = telemetry.Telemetry(
+        PeerRegistry(),
+        dest_settings=telemetry_destination.DestinationSettings(path),
+        env_endpoint=env_endpoint, env_enabled=env_enabled, headers=headers)
+    return hub, path
+
+
+class TestEditableDestination:
+    def test_refresh_is_noop_without_destination_settings(self):
+        # Direct construction (tests/standalone) keeps explicitly-passed
+        # exporters untouched pass after pass — nothing regresses for the
+        # dozens of existing hubs built without dest_settings.
+        exp = otlp.OTLPLogExporter("http://c:4318", sender=lambda u, b: None)
+        hub = telemetry.Telemetry(PeerRegistry(), exporter=exp)
+        hub.sample()
+        assert hub.exporter is exp
+
+    def test_override_change_mid_run_swaps_exporter_url(
+            self, tmp_path, monkeypatch):
+        posts = []
+        hub, path = _dest_hub(tmp_path, monkeypatch, posts,
+                              env_endpoint="http://env-collector:4318",
+                              env_enabled=True)
+        hub.sample(now=100.0)
+        assert hub.exporter.url == "http://env-collector:4318/v1/logs"
+        assert posts[-1][0] == "http://env-collector:4318/v1/metrics"
+        first_log_exporter = hub.exporter
+        # console override lands mid-run: endpoint only (enabled inherits)
+        telemetry_destination.write(path, "http://other:4318", None)
+        os.utime(path, (200, 200))
+        hub.sample(now=115.0)
+        assert hub.exporter is not first_log_exporter   # rebuilt, not mutated
+        assert hub.exporter.url == "http://other:4318/v1/logs"
+        assert hub.metrics_exporter.url == "http://other:4318/v1/metrics"
+        assert posts[-1][0] == "http://other:4318/v1/metrics"
+
+    def test_override_disable_drops_exporters(self, tmp_path, monkeypatch):
+        posts = []
+        hub, path = _dest_hub(tmp_path, monkeypatch, posts,
+                              env_endpoint="http://env-collector:4318",
+                              env_enabled=True)
+        hub.sample(now=100.0)
+        assert hub.exporter is not None
+        n = len(posts)
+        telemetry_destination.write(path, None, False)
+        os.utime(path, (200, 200))
+        hub.sample(now=115.0)
+        assert hub.exporter is None
+        assert hub.metrics_exporter is None
+        assert len(posts) == n          # disabled pass attempts no export
+
+    def test_override_enables_export_when_env_off(
+            self, tmp_path, monkeypatch):
+        posts = []
+        hub, path = _dest_hub(tmp_path, monkeypatch, posts)  # env fully off
+        hub.sample(now=100.0)
+        assert hub.exporter is None and hub.metrics_exporter is None
+        assert posts == []
+        telemetry_destination.write(path, "http://console:4318", True)
+        os.utime(path, (200, 200))
+        hub.sample(now=115.0)
+        assert hub.exporter.url == "http://console:4318/v1/logs"
+        assert posts[-1][0] == "http://console:4318/v1/metrics"
+
+    def test_override_removed_reverts_to_env_config(
+            self, tmp_path, monkeypatch):
+        posts = []
+        hub, path = _dest_hub(tmp_path, monkeypatch, posts,
+                              env_endpoint="http://env-collector:4318",
+                              env_enabled=True)
+        telemetry_destination.write(path, "http://other:4318", None)
+        os.utime(path, (100, 100))
+        hub.sample(now=100.0)
+        assert hub.exporter.url == "http://other:4318/v1/logs"
+        telemetry_destination.clear(path)   # "Revert to deployment default"
+        hub.sample(now=115.0)
+        assert hub.exporter.url == "http://env-collector:4318/v1/logs"
+        assert posts[-1][0] == "http://env-collector:4318/v1/metrics"
+
+    def test_headers_reapplied_to_rebuilt_exporters(
+            self, tmp_path, monkeypatch):
+        posts = []
+        hub, path = _dest_hub(tmp_path, monkeypatch, posts,
+                              env_endpoint="http://env-collector:4318",
+                              env_enabled=True,
+                              headers={"Authorization": "Bearer s3cr3t"})
+        hub.sample(now=100.0)
+        telemetry_destination.write(path, "http://other:4318", None)
+        os.utime(path, (200, 200))
+        hub.sample(now=115.0)               # exporter swap
+        url, hdrs = posts[-1]
+        assert url == "http://other:4318/v1/metrics"
+        assert hdrs["Authorization"] == "Bearer s3cr3t"
+
+    def test_export_health_survives_destination_swap(
+            self, tmp_path, monkeypatch):
+        posts = []
+        hub, path = _dest_hub(tmp_path, monkeypatch, posts,
+                              env_endpoint="http://env-collector:4318",
+                              env_enabled=True)
+        # every POST fails -> health degrades on the first pass
+        def boom(url, body, headers=None):
+            raise RuntimeError("collector down")
+        monkeypatch.setattr(otlp, "_http_post", boom)
+        health = hub.export_health
+        hub.sample(now=100.0)
+        assert health.as_dict()["state"] == "degraded"
+        fails = health.as_dict()["failures_total"]
+        assert fails >= 1
+        # destination changes while degraded: the SAME health object rides
+        # along and the new endpoint gets a fresh chance on the next pass
+        def ok_post(url, body, headers=None):
+            posts.append((url, dict(headers or {})))
+        monkeypatch.setattr(otlp, "_http_post", ok_post)
+        telemetry_destination.write(path, "http://other:4318", None)
+        os.utime(path, (200, 200))
+        hub.sample(now=115.0)
+        assert hub.export_health is health          # hub-owned, not rebuilt
+        d = health.as_dict()
+        assert d["state"] == "ok"                   # recovered on new dest
+        assert d["failures_total"] == fails         # history preserved
+
+    def test_memoization_skips_rebuild_without_config_change(
+            self, tmp_path, monkeypatch):
+        # The memoization line (if effective == self._effective: return) is
+        # untested. If it were deleted, exporters would rebuild EVERY pass,
+        # silently discarding each interval's queued announce events. This
+        # test verifies that with a stable file override, exporters stay the
+        # same object across two sample() passes, and a queued event between
+        # passes still flushes.
+        posts = []
+        hub, path = _dest_hub(tmp_path, monkeypatch, posts,
+                              env_endpoint="http://env-collector:4318",
+                              env_enabled=True)
+        hub.sample(now=100.0)
+        first_log_exporter = hub.exporter
+        first_metrics_exporter = hub.metrics_exporter
+        # console override lands and stays stable
+        telemetry_destination.write(path, "http://console:4318", None)
+        os.utime(path, (150, 150))
+        hub.sample(now=115.0)          # config changes: rebuild
+        console_log_exporter = hub.exporter
+        console_metrics_exporter = hub.metrics_exporter
+        assert console_log_exporter is not first_log_exporter
+        assert console_metrics_exporter is not first_metrics_exporter
+        # queue an event
+        hub.on_swarm_event({"event": "join", "peer_id": "p1", "ts": 100.0})
+        # same config (file unchanged): no rebuild
+        hub.sample(now=130.0)
+        assert hub.exporter is console_log_exporter
+        assert hub.metrics_exporter is console_metrics_exporter
+        # queued event flushed to the same exporter
+        assert len(posts) >= 1 and posts[-1][0] == "http://console:4318/v1/metrics"
+
+    def test_enabled_true_no_endpoint_keeps_exporters_none(
+            self, tmp_path, monkeypatch):
+        # Mismatch cell of the truth table: file enabled=True but no endpoint
+        # anywhere (env empty) → exporters stay None after sample(). This is
+        # gated after the endpoint check, so the code path can be skipped if
+        # tests only exercise common cases.
+        posts = []
+        hub, path = _dest_hub(tmp_path, monkeypatch, posts,
+                              env_endpoint="", env_enabled=False)
+        hub.sample(now=100.0)
+        assert hub.exporter is None and hub.metrics_exporter is None
+        # console sets enabled=True but no endpoint
+        telemetry_destination.write(path, None, True)
+        os.utime(path, (150, 150))
+        hub.sample(now=115.0)
+        assert hub.exporter is None
+        assert hub.metrics_exporter is None
+        assert posts == []  # no export attempted
+
+
+class TestFromEnvDestination:
+    def test_from_env_always_builds_hub_and_wires_destination(self,
+                                                              tmp_path):
+        hub = telemetry.from_env({"IRIS_STATE": str(tmp_path)})
+        assert hub.exporter is None            # env off, no override: inert
+        assert hub._dest is not None
+        assert hub._dest.path == \
+            str(tmp_path / "telemetry-destination.json")
+        assert hub._env_endpoint == "" and hub._env_enabled is False
+
+    def test_from_env_captures_env_fields_and_builds_exporters(self,
+                                                               tmp_path):
+        hub = telemetry.from_env({
+            "IRIS_STATE": str(tmp_path),
+            "IRIS_OBSERVABILITY": "1",
+            "IRIS_OTLP_ENDPOINT": "http://collector:4318",
+            "IRIS_OTLP_HEADERS": "Authorization=Bearer x"})
+        assert hub._env_endpoint == "http://collector:4318"
+        assert hub._env_enabled is True
+        assert hub._headers == {"Authorization": "Bearer x"}
+        # initial exporters exist BEFORE start() so announce-path events are
+        # captured from process start, as construction-time exporters were
+        assert hub.exporter is not None
+        assert hub.exporter.url == "http://collector:4318/v1/logs"
+        assert hub.metrics_exporter.url == "http://collector:4318/v1/metrics"
+
+    def test_from_env_file_override_enables_export_with_env_off(self,
+                                                                tmp_path):
+        path = telemetry_destination.settings_path(str(tmp_path))
+        telemetry_destination.write(path, "http://console:4318", True)
+        hub = telemetry.from_env({"IRIS_STATE": str(tmp_path)})
+        assert hub.exporter is not None
+        assert hub.exporter.url == "http://console:4318/v1/logs"
+
+    def test_from_env_headers_read_even_when_env_gate_off(self, tmp_path):
+        # enable-from-off via the console must still authenticate to the
+        # collector: headers are captured regardless of the env gate.
+        hub = telemetry.from_env({
+            "IRIS_STATE": str(tmp_path),
+            "IRIS_OTLP_HEADERS": "Authorization=Bearer x"})
+        assert hub._headers == {"Authorization": "Bearer x"}

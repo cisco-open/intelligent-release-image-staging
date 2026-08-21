@@ -99,7 +99,8 @@ def default_tracker_url():
             return "http://%s:6969/announce?key=%s" % (host_ip, tok)
     except Exception:
         pass
-    # Legacy fallback: first token in tokens.txt (pre-secrets-broker installs).
+    # Production no longer creates tokens.txt; retain this dead fallback solely
+    # for test_default_tracker_url_legacy_tokens_fallback compatibility coverage.
     try:
         with open(os.environ.get("IRIS_TOKENS", "/etc/iris/tokens.txt")) as f:
             for line in f:

@@ -117,3 +117,183 @@ teardown() { rm -rf "$TMP"; }
   # combined cert built in tmpfs
   [ -f "$TMP/run/tls/cert.pem" ]
 }
+
+# ---------------------------------------------------------------------------
+# Console cert override + CA trust bundle (server TLS trust feature).
+# The gui-cert build is best-effort BY DESIGN: a corrupt override must never
+# stop the container — the console falls back to the bootstrap cert.
+#
+# The pair-validation tests below use REAL openssl-generated cert/key
+# material rather than the plain-text placeholders the other secret files
+# use in this suite: the boot script runs the real `openssl x509 -pubkey` /
+# `openssl pkey -pubout` public-key compare against these files, so the
+# fixtures have to be something openssl can actually parse. EC keys keep
+# generation fast (~20ms) — the compare is deliberately key-type-agnostic.
+# ---------------------------------------------------------------------------
+
+gen_ec_pair() {
+  # $1=key out path, $2=cert out path, $3=CN
+  openssl ecparam -genkey -name prime256v1 -noout -out "$1" 2>/dev/null
+  openssl req -x509 -key "$1" -days 1 -out "$2" -subj "/CN=$3" 2>/dev/null
+}
+
+@test "entrypoint builds the console cert override when the durable gui files exist" {
+  printf 'AGE-SECRET-KEY-FAKE\n' > "$TMP/agekey"
+  gen_ec_pair "$TMP/gui-key-plain.pem" "$TMP/config/tls/gui-crt.pem" "gui-a"
+  { printf 'AGEFAKE\n'; cat "$TMP/gui-key-plain.pem"; } > "$TMP/config/tls/gui-key.pem.age"
+  run env IRIS_CONFIG="$TMP/config" IRIS_STATE="$TMP/state" IRIS_LOG="$TMP/log" \
+      IRIS_RUN="$TMP/run" IRIS_AGE_BIN="$TMP/fake-age" \
+      IRIS_AGE_KEY_FILE="$TMP/agekey" SKIP_SUPERVISE=1 \
+      bash "$BATS_TEST_DIRNAME/../docker-entrypoint.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/run/tls/gui-cert.pem" ]
+  run cat "$TMP/run/tls/gui-cert.pem"
+  [[ "$output" == *"BEGIN CERTIFICATE"* ]]
+  [[ "$output" == *"BEGIN EC PRIVATE KEY"* ]]
+}
+
+@test "entrypoint keeps starting when the gui key does not decrypt (warn + skip, never fatal)" {
+  printf 'AGE-SECRET-KEY-FAKE\n' > "$TMP/agekey"
+  printf 'guicrtpem\n' > "$TMP/config/tls/gui-crt.pem"
+  printf 'NOT-AGEFAKE\ncorrupt\n' > "$TMP/config/tls/gui-key.pem.age"
+  run env IRIS_CONFIG="$TMP/config" IRIS_STATE="$TMP/state" IRIS_LOG="$TMP/log" \
+      IRIS_RUN="$TMP/run" IRIS_AGE_BIN="$TMP/fake-age" \
+      IRIS_AGE_KEY_FILE="$TMP/agekey" SKIP_SUPERVISE=1 \
+      bash "$BATS_TEST_DIRNAME/../docker-entrypoint.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARNING"* ]]
+  # the override is absent -> console falls back to the bootstrap cert, which
+  # must still have been built
+  [ ! -f "$TMP/run/tls/gui-cert.pem" ]
+  [ -f "$TMP/run/tls/cert.pem" ]
+}
+
+@test "entrypoint discards a mismatched gui cert/key pair (warn + skip, never fatal)" {
+  # Crash-window regression guard: gui_tls.persist_override writes the
+  # durable key first, then the cert. A crash between the two — or any other
+  # way the durable pair gets out of sync — must never leave a mismatched
+  # pair combined into a servable file; the console has to fall back to the
+  # built-in cert instead of crashing later inside ssl.load_cert_chain.
+  printf 'AGE-SECRET-KEY-FAKE\n' > "$TMP/agekey"
+  gen_ec_pair "$TMP/gui-key-a.pem" "$TMP/gui-crt-a.pem" "gui-a"
+  gen_ec_pair "$TMP/gui-key-b.pem" "$TMP/gui-crt-b.pem" "gui-b"
+  # durable crt is pair A's certificate; the (decryptable) durable key
+  # decrypts to pair B's key — the two do not form a matching pair.
+  cp "$TMP/gui-crt-a.pem" "$TMP/config/tls/gui-crt.pem"
+  { printf 'AGEFAKE\n'; cat "$TMP/gui-key-b.pem"; } > "$TMP/config/tls/gui-key.pem.age"
+  run env IRIS_CONFIG="$TMP/config" IRIS_STATE="$TMP/state" IRIS_LOG="$TMP/log" \
+      IRIS_RUN="$TMP/run" IRIS_AGE_BIN="$TMP/fake-age" \
+      IRIS_AGE_KEY_FILE="$TMP/agekey" SKIP_SUPERVISE=1 \
+      bash "$BATS_TEST_DIRNAME/../docker-entrypoint.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARNING"* ]]
+  [ ! -f "$TMP/run/tls/gui-cert.pem" ]
+  # the intermediate decrypted key must not survive a mismatched pair either
+  [ ! -f "$TMP/run/tls/gui-key.pem" ]
+  [ -f "$TMP/run/tls/cert.pem" ]
+}
+
+@test "entrypoint builds the runtime CA bundle from a non-empty trust dir (sorted concat)" {
+  printf 'AGE-SECRET-KEY-FAKE\n' > "$TMP/agekey"
+  mkdir -p "$TMP/config/tls/trust"
+  printf 'BBB-CA\n' > "$TMP/config/tls/trust/bbb.pem"
+  printf 'AAA-CA\n' > "$TMP/config/tls/trust/aaa.pem"
+  run env IRIS_CONFIG="$TMP/config" IRIS_STATE="$TMP/state" IRIS_LOG="$TMP/log" \
+      IRIS_RUN="$TMP/run" IRIS_AGE_BIN="$TMP/fake-age" \
+      IRIS_AGE_KEY_FILE="$TMP/agekey" SKIP_SUPERVISE=1 \
+      bash "$BATS_TEST_DIRNAME/../docker-entrypoint.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/run/tls/ca-bundle.pem" ]
+  run cat "$TMP/run/tls/ca-bundle.pem"
+  # deterministic lexicographic filename order — must match trust.rebuild_bundle()
+  [ "${lines[0]}" = "AAA-CA" ]
+  [ "${lines[1]}" = "BBB-CA" ]
+}
+
+@test "entrypoint creates the durable trust dir and leaves no CA bundle when it is empty" {
+  printf 'AGE-SECRET-KEY-FAKE\n' > "$TMP/agekey"
+  run env IRIS_CONFIG="$TMP/config" IRIS_STATE="$TMP/state" IRIS_LOG="$TMP/log" \
+      IRIS_RUN="$TMP/run" IRIS_AGE_BIN="$TMP/fake-age" \
+      IRIS_AGE_KEY_FILE="$TMP/agekey" SKIP_SUPERVISE=1 \
+      bash "$BATS_TEST_DIRNAME/../docker-entrypoint.sh"
+  [ "$status" -eq 0 ]
+  [ -d "$TMP/config/tls/trust" ]
+  [ ! -f "$TMP/run/tls/ca-bundle.pem" ]
+}
+
+# ---------------------------------------------------------------------------
+# Review findings (per-file trust-bundle guard + stale gui-cert sweep).
+# ---------------------------------------------------------------------------
+
+@test "entrypoint tolerates one bad trust entry and keeps the good cert (per-file guard)" {
+  # A single un-cat-able entry (here: a directory named *.pem) must not abort
+  # the whole container start under set -e — mirrors trust.py rebuild_bundle()
+  # skipping a bad entry rather than failing the whole rebuild.
+  printf 'AGE-SECRET-KEY-FAKE\n' > "$TMP/agekey"
+  mkdir -p "$TMP/config/tls/trust"
+  printf 'GOOD-CA\n' > "$TMP/config/tls/trust/good.pem"
+  mkdir -p "$TMP/config/tls/trust/bad.pem"
+  run env IRIS_CONFIG="$TMP/config" IRIS_STATE="$TMP/state" IRIS_LOG="$TMP/log" \
+      IRIS_RUN="$TMP/run" IRIS_AGE_BIN="$TMP/fake-age" \
+      IRIS_AGE_KEY_FILE="$TMP/agekey" SKIP_SUPERVISE=1 \
+      bash "$BATS_TEST_DIRNAME/../docker-entrypoint.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARNING"* ]]
+  [ -f "$TMP/run/tls/ca-bundle.pem" ]
+  run cat "$TMP/run/tls/ca-bundle.pem"
+  [ "$output" = "GOOD-CA" ]
+}
+
+@test "entrypoint's CA bundle only includes *.pem entries (stray non-pem files ignored)" {
+  printf 'AGE-SECRET-KEY-FAKE\n' > "$TMP/agekey"
+  mkdir -p "$TMP/config/tls/trust"
+  printf 'GOOD-CA\n' > "$TMP/config/tls/trust/good.pem"
+  printf 'not a cert\n' > "$TMP/config/tls/trust/stray.txt"
+  run env IRIS_CONFIG="$TMP/config" IRIS_STATE="$TMP/state" IRIS_LOG="$TMP/log" \
+      IRIS_RUN="$TMP/run" IRIS_AGE_BIN="$TMP/fake-age" \
+      IRIS_AGE_KEY_FILE="$TMP/agekey" SKIP_SUPERVISE=1 \
+      bash "$BATS_TEST_DIRNAME/../docker-entrypoint.sh"
+  [ "$status" -eq 0 ]
+  run cat "$TMP/run/tls/ca-bundle.pem"
+  [ "$output" = "GOOD-CA" ]
+}
+
+@test "entrypoint sweeps a stale runtime CA bundle when the trust dir is empty" {
+  # A stale runtime bundle can survive a restart if the trust dir was emptied
+  # in between; the entrypoint must sweep it rather than serve stale trust.
+  printf 'AGE-SECRET-KEY-FAKE\n' > "$TMP/agekey"
+  mkdir -p "$TMP/run/tls"
+  printf 'stale-ca\n' > "$TMP/run/tls/ca-bundle.pem"
+  run env IRIS_CONFIG="$TMP/config" IRIS_STATE="$TMP/state" IRIS_LOG="$TMP/log" \
+      IRIS_RUN="$TMP/run" IRIS_AGE_BIN="$TMP/fake-age" \
+      IRIS_AGE_KEY_FILE="$TMP/agekey" SKIP_SUPERVISE=1 \
+      bash "$BATS_TEST_DIRNAME/../docker-entrypoint.sh"
+  [ "$status" -eq 0 ]
+  [ ! -f "$TMP/run/tls/ca-bundle.pem" ]
+}
+
+@test "entrypoint sweeps a stale runtime gui-cert override when the durable pair is absent" {
+  # RuntimeDirectoryPreserve=yes keeps /run/iris across restarts — a PREVIOUS
+  # boot's override must not silently keep serving once the durable pair is
+  # gone (never uploaded, or removed via Settings).
+  printf 'AGE-SECRET-KEY-FAKE\n' > "$TMP/agekey"
+  mkdir -p "$TMP/run/tls"
+  printf 'stale-cert\n' > "$TMP/run/tls/gui-cert.pem"
+  printf 'stale-key\n' > "$TMP/run/tls/gui-key.pem"
+  run env IRIS_CONFIG="$TMP/config" IRIS_STATE="$TMP/state" IRIS_LOG="$TMP/log" \
+      IRIS_RUN="$TMP/run" IRIS_AGE_BIN="$TMP/fake-age" \
+      IRIS_AGE_KEY_FILE="$TMP/agekey" SKIP_SUPERVISE=1 \
+      bash "$BATS_TEST_DIRNAME/../docker-entrypoint.sh"
+  [ "$status" -eq 0 ]
+  [ ! -f "$TMP/run/tls/gui-cert.pem" ]
+  [ ! -f "$TMP/run/tls/gui-key.pem" ]
+}
+
+@test "entrypoint unseals via the shared secretfs.decrypt_to, not an inline reimplementation" {
+  # Anti-drift guard, ported from the deleted test_systemd_units.bats. The
+  # entrypoint must route decryption through server/secretfs.py so there is one
+  # implementation of the at-rest format, not two that can diverge.
+  local entrypoint="$BATS_TEST_DIRNAME/../docker-entrypoint.sh"
+  grep -q 'import secretfs' "$entrypoint"
+  grep -q 'secretfs\.decrypt_to(' "$entrypoint"
+}

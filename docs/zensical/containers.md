@@ -45,10 +45,13 @@ file to `guest-share` through SSH-to-self instead. See
 
 ## Seed-server image
 
-Build from the repository root because the runtime image includes the device
-installers and SSH helper used by console onboarding:
+`aria2c` is handed in, not downloaded or built — run `tools/get-aria2c.sh amd64`
+first, or the Dockerfile's `COPY bin/aria2c` step fails. Then build from the
+repository root because the runtime image includes the device installers and
+SSH helper used by console onboarding:
 
 ```bash
+tools/get-aria2c.sh amd64
 docker build --platform linux/amd64 \
   -f server/Dockerfile \
   -t iris:latest .
@@ -111,12 +114,17 @@ the server becomes healthy. It obtains the pinned Cisco `ioxclient` tool on the
 Linux server when needed, uses the running server certificate, and places both
 architecture-specific packages in served artifacts. Use
 `tools/stage-iox-package.sh --arch arm64` or `--arch amd64` only when rebuilding
-one package.
+one package. Building the arm64 package on an amd64 host needs Docker's arm64
+emulation; if it is not already enabled, `stage-iox-package.sh` requires
+`BINFMT_IMAGE_DIGEST` — an audited `tonistiigi/binfmt` sha256 digest — and
+fails closed without it.
 
-If no matching local agent bundle is present, the build downloads a pinned
-architecture-matched static `aria2c` and verifies its SHA-256 digest. The catalog certificate
-must either be supplied locally or fetched with an explicitly supplied SHA-256
-certificate fingerprint.
+`aria2c` is handed in, never downloaded: the build takes it from an explicit
+`ARIA2C_BIN` override, a matching local agent bundle, or the handed-in
+`deliverables/aria2c-<arch>` binary, verifying it against
+`tools/aria2c.sha256` and failing closed on a mismatch. The catalog certificate must either be supplied
+locally or fetched with an explicitly supplied SHA-256 certificate
+fingerprint.
 
 The installer passes all environment-specific values at deployment time. No
 lab address is baked in:

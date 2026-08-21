@@ -1,0 +1,25 @@
+diff --git a/src/PeerAbstractCommand.cc b/src/PeerAbstractCommand.cc
+index 6baa91cc..0259944c 100644
+--- a/src/PeerAbstractCommand.cc
++++ b/src/PeerAbstractCommand.cc
+@@ -142,6 +142,20 @@ bool PeerAbstractCommand::disconnectIfBlocked(bool retry)
+   A2_LOG_DEBUG(fmt("CUID#%" PRId64 " - Blocked BitTorrent peer %s:%u.",
+                    getCuid(), peerAddress.c_str(), peer_->getRemotePort()));
+   if (socket_ && socket_->isOpen()) {
++    // Unregister the event-poll entries BEFORE closing the socket.
++    //
++    // addSocketForReadCheck() registered this Command against the socket's
++    // descriptor. closeConnection() sets sockfd_ to -1, and
++    // disableRead/WriteCheckSocket() unregister by calling getSockfd() on that
++    // same SocketCore. Closing first therefore asks EventPoll to delete events
++    // for fd -1, which does nothing, and the entry registered under the real
++    // descriptor survives holding a raw Command* to this object. The command is
++    // erased and destroyed moments later in
++    // DownloadEngine::disconnectBlockedBtPeers(), leaving EventPoll with a
++    // dangling pointer that is dereferenced when the descriptor is next
++    // reported or reused - a delayed use-after-free.
++    disableReadCheckSocket();
++    disableWriteCheckSocket();
+     socket_->closeConnection();
+   }
+   return onBlocked(retry);

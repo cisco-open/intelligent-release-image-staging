@@ -13,6 +13,19 @@
   <div class="top">
     <span>◈ Intelligent Release &amp; Image Staging <span class="tag">IRIS</span></span>
     <span class="spacer"></span>
+    <div class="menu-wrap">
+      <button class="btn ghost" id="help-btn" aria-expanded="false" aria-label="Help" title="Help">?</button>
+      <div class="menu right" id="help-pop" hidden>
+        <div class="help-row muted" id="help-version"></div>
+        <div class="help-row muted">Deployment id
+          <span class="mono" id="help-deployment-id"></span>
+          <button class="linkish" type="button" id="help-copy-id">copy</button>
+        </div>
+        <a class="menu-item menu-close" id="help-docs-link" href="https://cisco-open.github.io/intelligent-release-image-staging/" target="_blank" rel="noopener">Official documentation ↗</a>
+        <a class="menu-item menu-close" id="help-device-guide" href="/help-device.html" target="_blank" rel="noopener">Device-side troubleshooting ↗</a>
+        <a class="menu-item menu-close" id="help-server-guide" href="/help-server.html" target="_blank" rel="noopener">Server-side setup &amp; troubleshooting ↗</a>
+      </div>
+    </div>
     <span class="who" id="who"></span>
     <button class="btn ghost" id="logout">Sign out</button>
   </div>
@@ -25,7 +38,17 @@
       <a href="#swarm" class="nav" id="nav-swarm">Swarm</a>
       <div class="nav-group">System</div>
       <a href="#settings" class="nav sub" id="nav-settings">Settings</a>
+      <div id="settings-submenu" hidden>
+        <a href="#settings/general" class="nav subsub" id="nav-settings-general">General</a>
+        <a href="#settings/tls" class="nav subsub" id="nav-settings-tls">TLS &amp; trust</a>
+        <a href="#settings/telemetry" class="nav subsub" id="nav-settings-telemetry">Telemetry</a>
+        <a href="#settings/audit" class="nav subsub" id="nav-settings-audit">Audit export</a>
+      </div>
       <a href="#monitoring" class="nav sub" id="nav-monitoring">Monitoring</a>
+      <div id="monitoring-submenu" hidden>
+        <a href="#monitoring/audit" class="nav subsub" id="nav-monitoring-audit">Audit trail</a>
+        <a href="#monitoring/deploylogs" class="nav subsub" id="nav-monitoring-deploylogs">Deployment logs</a>
+      </div>
     </nav>
     <main class="main">
       <section id="view-overview" hidden>
@@ -40,8 +63,9 @@
       <section id="view-images" hidden>
         <h2>Images</h2>
         <div class="upload" id="drop">
-          <input type="file" id="file" accept=".bin,.SPA.bin" hidden>
-          <p><button class="btn" id="pick">Choose a file</button> or drag an image here</p>
+          <input type="file" id="file" accept=".bin,.SPA.bin" multiple hidden>
+          <p><button class="btn" id="pick">Choose files</button> or drag images here</p>
+          <div id="uploads"></div>
           <div class="progress" id="prog" hidden><div class="bar" id="bar"></div></div>
           <p class="muted" id="status"></p>
         </div>
@@ -138,6 +162,18 @@
           <thead><tr><th><input type="checkbox" id="mark-all"></th><th>Device</th><th>IP</th><th>Model</th><th>Management type</th><th>Platform</th><th>Credential</th><th>Assigned image</th><th>Telemetry</th><th>Status</th></tr></thead>
           <tbody id="dev-rows"></tbody>
         </table>
+        <div id="deploy-info-panel" hidden>
+          <h3>Deployment details <span id="di-dev" class="muted"></span></h3>
+          <p class="muted" id="di-note"></p>
+          <table class="tbl" id="di-tbl"><tbody id="di-rows"></tbody></table>
+          <h3>Deployment logs</h3>
+          <table class="tbl" id="di-log-tbl">
+            <thead><tr><th>Finished</th><th>Action</th><th>Result</th><th>Size</th><th></th></tr></thead>
+            <tbody id="di-log-rows"></tbody>
+          </table>
+          <pre class="log" id="di-log-text" hidden></pre>
+          <p><button class="btn ghost" id="di-close">Close</button></p>
+        </div>
         <div id="batch-panel" hidden>
           <h3>Onboarding batch <span id="batch-summary" class="muted"></span></h3>
           <table class="tbl">
@@ -147,12 +183,7 @@
           <button class="btn ghost" id="batch-cancel">Cancel queued</button>
           <button class="btn ghost" id="batch-close">Close</button>
         </div>
-        <div id="onboard-panel" hidden>
-          <h3>Onboarding <span id="onboard-dev" class="muted"></span></h3>
-          <pre class="log" id="onboard-log"></pre>
-          <button class="btn ghost" id="onboard-abort">Abort onboard</button>
-          <button class="btn ghost" id="onboard-close">Close</button>
-        </div>
+        <div id="onboard-logs"></div>
       </section>
       <section id="view-swarm" hidden>
         <h2>Swarm</h2>
@@ -162,35 +193,125 @@
       </section>
       <section id="view-settings" hidden>
         <h2>Settings</h2>
-        <h3>Server &amp; build</h3>
-        <table class="tbl" id="settings-info"><tbody></tbody></table>
-        <h3>Change admin password</h3>
-        <form class="inline-form" id="pw-form">
-          <input id="pw-cur" type="password" placeholder="Current password" autocomplete="current-password">
-          <input id="pw-new" type="password" placeholder="New password (min 8)" autocomplete="new-password">
-          <input id="pw-confirm" type="password" placeholder="Confirm new password" autocomplete="new-password">
-          <button class="btn" type="submit">Change password</button>
-          <span class="err" id="pw-msg"></span>
-        </form>
-        <h3>Stage host (Docker onboarding)</h3>
-        <p class="muted" id="sh-status"></p>
-        <form class="inline-form" id="sh-form">
-          <input id="sh-user" placeholder="Stage host username" autocomplete="username">
-          <input id="sh-pass" type="password" placeholder="Stage host password" autocomplete="new-password">
-          <input id="sh-pass2" type="password" placeholder="Confirm password" autocomplete="new-password">
-          <button class="btn" type="submit">Save</button>
-          <button class="btn ghost" type="button" id="sh-clear">Clear</button>
-          <span class="err" id="sh-msg"></span>
-        </form>
-        <h3>Sessions</h3>
-        <p class="muted" id="sessions-info"></p>
-        <p>
-          <button class="btn ghost" id="revoke-others">Sign out other sessions</button>
-          <span class="muted" id="revoke-msg"></span>
-        </p>
+        <div id="settings-pane-general">
+          <h3>Server &amp; build</h3>
+          <table class="tbl" id="settings-info"><tbody></tbody></table>
+          <h3>Change admin password</h3>
+          <form class="inline-form" id="pw-form">
+            <input id="pw-cur" type="password" placeholder="Current password" autocomplete="current-password">
+            <input id="pw-new" type="password" placeholder="New password (min 8)" autocomplete="new-password">
+            <input id="pw-confirm" type="password" placeholder="Confirm new password" autocomplete="new-password">
+            <button class="btn" type="submit">Change password</button>
+            <span class="err" id="pw-msg"></span>
+          </form>
+          <h3>Stage host (Docker onboarding)</h3>
+          <p class="muted" id="sh-status"></p>
+          <form class="inline-form" id="sh-form">
+            <input id="sh-user" placeholder="Stage host username" autocomplete="username">
+            <input id="sh-pass" type="password" placeholder="Stage host password" autocomplete="new-password">
+            <input id="sh-pass2" type="password" placeholder="Confirm password" autocomplete="new-password">
+            <button class="btn" type="submit">Save</button>
+            <button class="btn ghost" type="button" id="sh-clear">Clear</button>
+            <span class="err" id="sh-msg"></span>
+          </form>
+          <h3>Sessions</h3>
+          <p class="muted" id="sessions-info"></p>
+          <p>
+            <button class="btn ghost" id="revoke-others">Sign out other sessions</button>
+            <span class="muted" id="revoke-msg"></span>
+          </p>
+        </div>
+        <div id="settings-pane-tls" hidden>
+          <h3>Certificate</h3>
+          <p class="muted">Serves the console only — the device-facing catalog and
+            artifact certificates are untouched, so enrolled devices keep working.
+            The private key is stored age-encrypted and never shown again.</p>
+          <p class="muted" id="cert-status"></p>
+          <div class="dropzone" id="cert-dropzone" tabindex="0" role="button"
+              aria-label="Drop a certificate and/or private key PEM file, or press Enter to browse for files">
+            <input type="file" id="cert-dropzone-input" multiple hidden>
+            <p>Drop the certificate and private key here<span class="hint">PEM files — or click / press Enter to browse</span></p>
+          </div>
+          <form class="inline-form" id="cert-form">
+            <textarea id="cert-pem" rows="4" spellcheck="false" placeholder="Certificate PEM — leaf or full chain (-----BEGIN CERTIFICATE-----)"></textarea>
+            <textarea id="cert-key" rows="4" spellcheck="false" placeholder="Private key PEM (-----BEGIN PRIVATE KEY-----)"></textarea>
+            <label id="cert-passphrase-row" hidden>Key passphrase
+              <input type="password" id="cert-passphrase" autocomplete="off"
+                     placeholder="passphrase for the encrypted key">
+            </label>
+            <button class="btn" type="submit">Replace certificate</button>
+            <button class="linkish danger-link" type="button" id="cert-revert" hidden>Use built-in certificate</button>
+            <span class="err" id="cert-msg"></span>
+          </form>
+          <h3>Trusted CAs</h3>
+          <p class="muted">Root CAs trusted by outbound TLS (telemetry export, CA
+            bundle download) in addition to the system store.</p>
+          <table class="tbl" id="trust-tbl">
+            <thead><tr><th>Subject</th><th>Expires</th><th>SHA-256</th><th>Source</th><th>Certs</th><th></th></tr></thead>
+            <tbody id="trust-rows"></tbody>
+          </table>
+          <div class="dropzone" id="trust-dropzone" tabindex="0" role="button"
+              aria-label="Drop CA certificate PEM files, or press Enter to browse for files">
+            <input type="file" id="trust-dropzone-input" multiple hidden>
+            <p>Drop CA certificates here<span class="hint">one or many PEM files — or click / press Enter to browse</span></p>
+          </div>
+          <form class="inline-form" id="trust-form">
+            <textarea id="trust-pem" rows="4" spellcheck="false" placeholder="CA certificate PEM — one or more -----BEGIN CERTIFICATE----- blocks"></textarea>
+            <button class="btn" type="submit">Add CA</button>
+            <span class="err" id="trust-msg"></span>
+          </form>
+          <p class="muted">Optional public CA bundle: Download now fetches the
+            https:// URL below (Cisco's Trusted Root Store by default); enable the
+            daily auto-refresh to keep it current. A failed download never replaces
+            the previous bundle.</p>
+          <form class="inline-form" id="ca-form">
+            <select id="ca-source">
+              <option value="cisco">Cisco Trusted Root Store</option>
+              <option value="mozilla">Mozilla CA bundle (curl.se)</option>
+              <option value="custom">Custom URL</option>
+            </select>
+            <input id="ca-url" placeholder="Public CA bundle URL (https://…)" hidden>
+            <label class="muted"><input type="checkbox" id="ca-auto"> Refresh daily</label>
+            <button class="btn ghost" type="submit">Save</button>
+            <button class="btn ghost" type="button" id="ca-refresh">Download now</button>
+            <span class="err" id="ca-msg"></span>
+          </form>
+        </div>
+        <div id="settings-pane-telemetry" hidden>
+          <h3>Telemetry destination</h3>
+          <p class="muted" id="td-status"></p>
+          <form class="inline-form" id="td-form">
+            <input id="td-endpoint" placeholder="OTLP endpoint (https://collector:4318)">
+            <label class="muted"><input type="checkbox" id="td-enabled"> Export enabled</label>
+            <button class="btn" type="submit">Save</button>
+            <button class="linkish danger-link" type="button" id="td-revert" hidden>Revert to deployment default</button>
+            <span class="err" id="td-msg"></span>
+          </form>
+        </div>
+        <div id="settings-pane-audit" hidden>
+          <h3>Audit export</h3>
+          <p class="muted">Uploads the audit trail to a remote host over SCP,
+            age-encrypted to the recipient below — encryption is mandatory.
+            The SCP password is stored age-encrypted and never shown again.</p>
+          <p class="muted" id="ae-status"></p>
+          <form class="inline-form" id="ae-form">
+            <input id="ae-host" placeholder="Host">
+            <input id="ae-port" placeholder="Port (22)">
+            <input id="ae-user" placeholder="Username" autocomplete="username">
+            <input id="ae-path" placeholder="Remote path (/var/backups or ~/audit)">
+            <input id="ae-recipient" placeholder="age recipient (age1…)" spellcheck="false">
+            <input id="ae-pass" type="password" placeholder="Password" autocomplete="new-password">
+            <label class="muted"><input type="checkbox" id="ae-auto"> Export daily</label>
+            <button class="btn" type="submit">Save</button>
+            <button class="btn ghost" type="button" id="ae-run">Export now</button>
+            <button class="linkish danger-link" type="button" id="ae-clear">Clear</button>
+            <span class="err" id="ae-msg"></span>
+          </form>
+        </div>
       </section>
       <section id="view-monitoring" hidden>
         <h2>Monitoring <span id="telemetry-health" class="badge badge-queued" hidden></span></h2>
+        <div id="monitoring-pane-audit">
         <h3>Audit trail (90-day circular)</h3>
         <div class="toolbar">
           <span class="joined">
@@ -229,6 +350,23 @@
           <tbody id="audit-rows"></tbody>
         </table>
         <p><button class="btn ghost" id="audit-load-older">Load older</button></p>
+        </div>
+        <div id="monitoring-pane-deploylogs" hidden>
+          <h3>Deployment logs</h3>
+          <p class="muted">Per-job onboard and undeploy logs kept on the server
+            (newest 200) — they survive console reloads and session changes.</p>
+          <div class="toolbar">
+            <span class="joined">
+              <input id="dl-filter" placeholder="Filter by device id" spellcheck="false">
+              <button class="btn ghost" id="dl-refresh">Refresh</button>
+            </span>
+          </div>
+          <table class="tbl" id="dl-tbl">
+            <thead><tr><th>Finished</th><th>Device</th><th>Action</th><th>Result</th><th>Size</th><th></th></tr></thead>
+            <tbody id="dl-rows"></tbody>
+          </table>
+          <pre class="log" id="dl-text" hidden></pre>
+        </div>
       </section>
     </main>
   </div>

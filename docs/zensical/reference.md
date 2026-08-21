@@ -88,6 +88,39 @@ services. What each directory holds is in
 The Kubernetes alpha maps the durable paths into one PVC under `/data` instead —
 see [Kubernetes](kubernetes.md).
 
+### TLS trust and console certificate
+
+The console's *Settings → TLS & trust* sub-page (Certificate and Trusted CAs sections)
+manage these; none needs to be set anywhere — the defaults below are the
+container paths, and with no override installed and an empty
+trust dir the behavior is identical to releases without the feature.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `IRIS_GUI_CERT` | `/run/iris/tls/gui-cert.pem` | Combined cert+key the web console serves **when the file exists**; otherwise the console serves the shared `IRIS_CERT`. Only the console reads it — the catalog and artifact server keep the device-pinned certificate either way. |
+| `IRIS_TRUST_DIR` | `/etc/iris/tls/trust` | Durable directory of installed root-CA PEMs: one `<sha256-fingerprint>.pem` per manual install, plus the downloaded public bundle as the distinguished file `downloaded-bundle.pem`. |
+| `IRIS_CA_BUNDLE` | `/run/iris/tls/ca-bundle.pem` | Runtime concatenation of the trust dir, rebuilt at every boot and on every trust change. Absent while the trust dir is empty. Outbound TLS (OTLP export, the CA-bundle download) verifies against the system store plus this bundle. |
+
+The console certificate override persists as
+`/etc/iris/tls/gui-crt.pem` (plaintext certificate, leaf or fullchain) plus
+`/etc/iris/tls/gui-key.pem.age` (private key, age-encrypted to the same
+recipients as the rest of the secret store); boot rebuilds `IRIS_GUI_CERT`
+from the pair. An override that fails to decrypt — or whose certificate and key
+do not form a matching pair — is skipped with a warning, so the console falls
+back to the built-in certificate and a bad upload can never lock you out of the
+console.
+
+The public-CA download settings live in `$IRIS_STATE/ca-trust-settings.json`
+(`{"url": ..., "auto": ...}`, console-owned): the URL must be `https://`, and
+while `auto` is on the console re-downloads the bundle every 24 hours. The
+default URL when none is configured is Cisco's Trusted Root Store,
+`https://www.cisco.com/security/pki/trs/ios.p7b` (Cisco refreshes this bundle
+over time; enable the daily auto-download to track it). The downloader accepts plain PEM, a certs-only
+PKCS#7 bundle (DER or PEM), or a CMS-signed wrapper in that shape — a signed
+wrapper's own transport-signer certificates are never imported, only the
+payload once its signature verifies, and a tampered wrapper is rejected
+outright. Failed downloads never overwrite the previous good bundle.
+
 ### Image path variables
 
 The server reads images from two places, and the distinction decides what a
@@ -111,8 +144,8 @@ collector and backend.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `IRIS_OBSERVABILITY` | unset (off) | Enables the external observability surface when set to `1`, `true`, `yes`, or `on`. Any other value, empty, or unset leaves it off. |
-| `IRIS_OTLP_ENDPOINT` | unset | OTLP/HTTP endpoint of your collector, e.g. `http://<collector-ip>:4318`. |
+| `IRIS_OBSERVABILITY` | unset (off) | Enables the external observability surface when set to `1`, `true`, `yes`, or `on`. Any other value, empty, or unset leaves it off. For OTLP export this is the deployment default only — a console override (below) takes precedence. The Prometheus `:9101` surface stays startup-gated by this variable alone. |
+| `IRIS_OTLP_ENDPOINT` | unset | OTLP/HTTP endpoint of your collector, e.g. `http://<collector-ip>:4318`. Deployment default only — the console's *Settings → Telemetry* sub-page can override it at runtime. |
 | `IRIS_METRICS_PORT` | `9101` | Port for the telemetry listener. Empty or `0` disables the listener entirely. |
 | `IRIS_METRICS_HOST` | `0.0.0.0` | Bind host for the telemetry listener. Bind it to `127.0.0.1` when only the console's session-gated proxy consumes it. |
 | `IRIS_SWARM_URL` | `http://127.0.0.1:9101/swarm` | Where the console fetches swarm state from. A non-loopback value requires `IRIS_SWARM_PUBLIC=1` on the target listener — `/swarm` answers only loopback peers by default. |
@@ -125,13 +158,18 @@ collector and backend.
 #### Telemetry gating rule
 
 * Prometheus `/metrics` is served only while `IRIS_OBSERVABILITY` is enabled; otherwise the path answers 404.
-* OTLP export requires **both** `IRIS_OBSERVABILITY` enabled **and** `IRIS_OTLP_ENDPOINT` set. `IRIS_OTLP_ENDPOINT` on its own is inert — nothing is exported.
+* OTLP export requires **both** an effective enabled flag **and** an effective endpoint. Each field is the console override from `$IRIS_STATE/telemetry-destination.json` when set, else the deployment env (`IRIS_OBSERVABILITY` / `IRIS_OTLP_ENDPOINT`). An endpoint on its own is inert — nothing is exported.
 * `/healthz` and the `/swarmmap` pointer page are served whenever the listener runs, regardless of either variable. `/swarm` answers only loopback peers by default (the console proxies it); `IRIS_SWARM_PUBLIC=1` opens it to remote peers.
 * The console reads `/swarm` over container loopback (`127.0.0.1:9101`), so port 9101 needs external reachability only for Prometheus scraping or operator tools — never for the console.
 
-`IRIS_OBSERVABILITY` and `IRIS_OTLP_ENDPOINT` are read at startup, so a change
-takes effect on the next container restart. The startup log states which posture
-is in effect.
+`IRIS_OBSERVABILITY` still decides the Prometheus `/metrics` surface at
+startup — that gate is unchanged and takes effect on the next restart. The
+OTLP destination, by contrast, is re-read on every sample pass: the console's
+*Settings → Telemetry* stores a per-field override in
+`$IRIS_STATE/telemetry-destination.json` (`endpoint`, `enabled`; a `null`
+field inherits the env), applied within seconds without a restart. *Revert to
+deployment default* deletes the file, restoring exact env behavior. The
+startup log states which posture is in effect at boot.
 
 !!! note "A down Prometheus target is not a fault"
     With observability off, a Prometheus job scraping IRIS reads down and an
@@ -153,15 +191,36 @@ at 8 MiB and the streamed image upload at 4 GiB.
 
 | Route | Body / result |
 | --- | --- |
-| `POST /api/login` | Pre-auth. `{username, password}` → `{username, csrf}` plus the session cookie; 401 on bad credentials. |
-| `POST /api/setup` | Pre-auth, first run only. `{username, password}` creates the admin account; 409 once one exists. |
+| `POST /api/login` | Pre-auth. `{username, password}` → `{username, csrf}` plus the session cookie; 401 on bad credentials. Before any admin exists, signing in with the default `iris` / `irisisgreat!` credential instead returns `{setup: true, setup_grant}` — no session — for use with `POST /api/setup` below. |
+| `POST /api/setup` | Pre-auth, first run only. `{username, password, setup_grant}` creates the admin account, where `setup_grant` is the one-time, 10-minute grant from the default-credential login above; 403 on a missing/invalid/expired grant, 409 once an admin exists. |
 | `POST /api/logout` | Revokes the current session and expires the cookie. |
 | `GET /api/session` | The current session's info, or 401. |
-| `GET /api/settings` | Console settings, published port, and the running version. |
+| `GET /api/settings` | Console settings, published port, and the running version — plus the active console certificate (`gui_cert`), the installed trust entries (`trust`), the CA download settings (`ca_trust`), the effective telemetry destination with its source (`telemetry_destination`), and the audit-export destination with its last-run status (`audit_export`; a `password_set` flag only, never the password). |
 | `POST /api/settings/password` | `{current, new, confirm}`; changes the admin password and revokes every other session. |
 | `POST /api/settings/sessions/revoke-others` | Revokes every session except the caller's. |
 | `POST /api/settings/stage-host` | Stores the stage-host SSH credential; returns the redacted record. |
 | `DELETE /api/settings/stage-host` | `{deleted: <bool>}` — clears that credential. |
+| `POST /api/settings/gui-cert` | `{cert_pem, key_pem}` — validates (real `load_cert_chain`; per-field errors on garbage PEM or key mismatch) and installs the console certificate, hot-applied. |
+| `DELETE /api/settings/gui-cert` | Reverts the console to the built-in certificate, hot-applied. |
+| `POST /api/settings/trust` | `{pem}` — installs one or more CA certificates as one trust entry; returns `{entry}`, the new trust-store row. |
+| `DELETE /api/settings/trust/<name>` | Removes one trust entry and rebuilds the runtime bundle. |
+| `POST /api/settings/ca-trust` | `{url, auto}` — configures the public-CA bundle download; the URL must be `https://`. |
+| `POST /api/settings/ca-trust/refresh` | Starts a download-now job; returns `{job}`. Downloads refuse redirects, cap at 2 MiB, and must yield at least one certificate (plain PEM, a certs-only PKCS#7 bundle, or a verified CMS-signed wrapper). |
+| `GET /api/settings/ca-trust/refresh/<id>` | `{state, detail, certs}` — `running`, `done`, or `failed`. |
+| `POST /api/settings/telemetry-destination` | `{endpoint, enabled}` — telemetry destination override, hot-applied by the hub. The endpoint must be an `http`/`https` URL with a host, no query or fragment; a trailing slash is stripped. |
+| `DELETE /api/settings/telemetry-destination` | Removes the override — telemetry reverts to the deployment env defaults. |
+| `POST /api/settings/audit-export` | `{host, port, user, path, age_recipient, auto, password}` — validates and stores the audit-export destination; 400 on any invalid field. An absent or empty `password` keeps the stored one. |
+| `DELETE /api/settings/audit-export` | `{deleted: <bool>}` — clears the destination and the stored password. |
+| `POST /api/settings/audit-export/run` | Starts one export job; returns `{job_id}`. 409 when the export is not fully configured (invalid or absent destination, or no stored password). |
+| `GET /api/settings/audit-export/run/<id>` | `{state, detail}` — `running`, `done`, or `error`; `detail` is the uploaded filename or the failure reason. Jobs are in-memory, so a restart forgets them (404). |
+
+The audit-export settings live in `$IRIS_STATE/audit-export-settings.json`
+(`host`, `port`, `user`, `path`, `age_recipient`, `auto`, plus the
+server-maintained `last_run_ts` / `last_result`; console-owned). The SCP
+password is not in this file — it lives in the age-encrypted secrets store —
+and the destination's SSH host key is pinned trust-on-first-use in
+`$IRIS_STATE/audit-export-known-hosts`. See
+[Audit export](operations.md#audit-export).
 
 ### Images
 
@@ -191,6 +250,7 @@ event, with `result=fail` and the reason on a rejection.
 | `POST /api/devices/import-csv` | Bulk inventory import (8 MiB cap, all-or-nothing); returns per-row stats. |
 | `GET /api/devices/<id>/plan` | `{plan}` — the resolved deployment plan; 409 when it cannot resolve. |
 | `GET /api/devices/<id>/reports` | `{reports: [...]}` — the device's stored telemetry ring. |
+| `GET /api/devices/<id>/deployment` | `{receipt, total}` — the receipt that best describes the device (the active one, else the teardown-authorizing one, else the newest) plus the stored-receipt count; `receipt` is `null` when none exists. Read-only — feeds the deployment-details panel. |
 | `POST /api/devices/<id>/assign`, `.../credential`, `.../platform` | Sets the approved image, the credential profile, or the platform and storage target; each returns `{ok: true}`. |
 | `POST /api/devices/<id>/request-report` | Requests a fresh telemetry report; `{ok: true, expires_at}`, or 429 while one is already pending. |
 | `POST /api/devices/<id>/adopt` | Requires `{"acknowledge_adopt": true}`; returns `{receipt_id}`. 409 when the device already has an active receipt; routers cannot be adopted. |
@@ -207,7 +267,7 @@ Router deployments carry extra preflight and ownership rules — see
 | `GET /api/onboard/jobs/<id>` | One job, or 404. |
 | `GET /api/onboard/jobs/<id>/stream` | Server-sent events for that job until it reaches a terminal state. |
 | `POST /api/onboard/jobs/<id>/abort` | `{aborted: true}`. |
-| `POST /api/onboard/cancel-queued` | `{cancelled: <count>}` — drops jobs still queued. |
+| `POST /api/onboard/cancel-queued` | `{cancelled: <count>}` — drops jobs still queued. An optional `{"job_ids": [...]}` body scopes the cancel to those jobs (the console always scopes); without it every queued job is cancelled, other sessions' included. |
 
 ### Credentials
 
@@ -225,9 +285,17 @@ Router deployments carry extra preflight and ownership rules — see
 | `GET /api/swarm` | The telemetry `/swarm` JSON, fetched over loopback. Answers 200 with `{"peers": [], "error": ...}` when the telemetry listener is unreachable. |
 | `GET /api/audit` | `{events: [...]}`; `category`, `limit` (max 500), `before_ts`, and `after_ts` query parameters. |
 | `GET /api/audit/histogram` | Per-bucket audit event counts for the activity strip. |
+| `GET /api/deploy-logs` | `{logs: [...]}` — metadata for the persisted per-job deployment logs (file, device, action, state, rc, finish time, size), newest first; a `device_id` query parameter filters to one device. |
+| `GET /api/deploy-logs/<file>` | One persisted log as `text/plain`; 404 for a name that does not resolve to a direct child of the log directory. |
+| `GET /api/help` | `{version, deployment_id, docs_url, guides}` — the "?" popover data: the running version, the stable per-deployment id, and the documentation links. |
 | `POST /api/telemetry/stream` | `{"every": <int 1..60>, "pause": <bool>}` — network-wide stream tuning, echoed to every device on its next heartbeat. Audited. |
 | `GET /api/telemetry/health` | The hub's `/healthz` JSON (OTLP export health), proxied behind the console session. `{"ok": false, "error": "unavailable"}` when the hub is unreachable. |
 | `GET /swarmmap` | The swarm map page itself. Session-gated like the `/api` routes, but not under `/api`. |
+
+Persisted deployment logs are plain files under `$IRIS_STATE/deploy-logs`,
+one per finished onboard or undeploy job with a machine-parseable header
+line; the newest 200 are kept. `/api/help`'s `deployment_id` comes from
+`$IRIS_STATE/instance-id`, minted once on first start and immutable after.
 
 ### Import skip reasons
 

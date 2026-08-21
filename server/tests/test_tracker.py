@@ -3,13 +3,20 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import http.client
+import hashlib
 import threading
 import time
+from urllib.parse import quote_from_bytes
 
 import bencode
 import secrets_store
 import telemetry
 import tracker
+
+
+INFO_HASH_BYTES = hashlib.sha1(b"iris-tracker-test-torrent").digest()
+INFO_HASH = quote_from_bytes(INFO_HASH_BYTES)
+INFO_HASH_HEX = INFO_HASH_BYTES.hex()
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +107,7 @@ def test_announce_without_key_403(tmp_path):
     """Announce with no ?key= → 403."""
     srv, port = _serve_empty(tmp_path)
     try:
-        status, body = _get(port, "/announce?info_hash=AABB&peer_id=p1&port=1")
+        status, body = _get(port, "/announce?info_hash=%s&peer_id=p1&port=1" % INFO_HASH)
         assert status == 403
         assert bencode.decode(body)[b"failure reason"]
     finally:
@@ -112,8 +119,8 @@ def test_announce_valid_store_token_200(tmp_path):
     srv, port, tok = _serve(tmp_path)
     try:
         status, _ = _get(
-            port, "/announce?info_hash=AABB&peer_id=p1&port=6881&left=0&key=%s"
-            % tok)
+            port, "/announce?info_hash=%s&peer_id=p1&port=6881&left=0&key=%s"
+            % (INFO_HASH, tok))
         assert status == 200
     finally:
         srv.shutdown()
@@ -128,8 +135,8 @@ def test_announce_revoked_token_403(tmp_path):
     port = srv.server_address[1]
     try:
         # Token currently valid
-        status, _ = _get(port, "/announce?info_hash=AABB&peer_id=p1&port=1&key=%s"
-                         % tok)
+        status, _ = _get(port, "/announce?info_hash=%s&peer_id=p1&port=1&key=%s"
+                          % (INFO_HASH, tok))
         assert status == 200
 
         # Revoke the device in the store (no server restart)
@@ -138,8 +145,8 @@ def test_announce_revoked_token_403(tmp_path):
         secrets_store.save(store, sp)
 
         # Same token → 403 on the next request (per-request load)
-        status, body = _get(port, "/announce?info_hash=AABB&peer_id=p1&port=1&key=%s"
-                            % tok)
+        status, body = _get(port, "/announce?info_hash=%s&peer_id=p1&port=1&key=%s"
+                             % (INFO_HASH, tok))
         assert status == 403
     finally:
         srv.shutdown()
@@ -152,7 +159,7 @@ def test_announce_revoked_token_403(tmp_path):
 def test_announce_requires_token(tmp_path):
     srv, port = _serve_empty(tmp_path)
     try:
-        status, body = _get(port, "/announce?info_hash=AABB&peer_id=p1&port=1")
+        status, body = _get(port, "/announce?info_hash=%s&peer_id=p1&port=1" % INFO_HASH)
         assert status == 403
         assert bencode.decode(body)[b"failure reason"]
     finally:
@@ -162,11 +169,11 @@ def test_announce_requires_token(tmp_path):
 def test_announce_lifecycle_over_http(tmp_path):
     srv, port, tok = _serve(tmp_path)
     try:
-        _get(port, "/announce?info_hash=AABB&peer_id=p1&port=6881&left=0&key=%s"
-             % tok)
+        _get(port, "/announce?info_hash=%s&peer_id=p1&port=6881&left=0&key=%s"
+             % (INFO_HASH, tok))
         status, body = _get(
-            port, "/announce?info_hash=AABB&peer_id=p2&port=6882&left=9&key=%s"
-            % tok)
+            port, "/announce?info_hash=%s&peer_id=p2&port=6882&left=9&key=%s"
+            % (INFO_HASH, tok))
         assert status == 200
         peers = bencode.decode(body)[b"peers"]
         # non-compact peers are dicts with an (empty) "peer id" key too
@@ -174,11 +181,11 @@ def test_announce_lifecycle_over_http(tmp_path):
                    for p in peers)
         # p1 leaves
         _get(port,
-             "/announce?info_hash=AABB&peer_id=p1&port=6881&event=stopped&key=%s"
-             % tok)
+             "/announce?info_hash=%s&peer_id=p1&port=6881&event=stopped&key=%s"
+             % (INFO_HASH, tok))
         status, body = _get(
-            port, "/announce?info_hash=AABB&peer_id=p2&port=6882&left=9&key=%s"
-            % tok)
+            port, "/announce?info_hash=%s&peer_id=p2&port=6882&left=9&key=%s"
+            % (INFO_HASH, tok))
         assert bencode.decode(body)[b"peers"] == []
     finally:
         srv.shutdown()
@@ -187,9 +194,9 @@ def test_announce_lifecycle_over_http(tmp_path):
 def test_scrape_reports_counts(tmp_path):
     srv, port, tok = _serve(tmp_path)
     try:
-        _get(port, "/announce?info_hash=AABB&peer_id=p1&port=6881&left=0&key=%s"
-             % tok)
-        status, body = _get(port, "/scrape?info_hash=AABB&key=%s" % tok)
+        _get(port, "/announce?info_hash=%s&peer_id=p1&port=6881&left=0&key=%s"
+             % (INFO_HASH, tok))
+        status, body = _get(port, "/scrape?info_hash=%s&key=%s" % (INFO_HASH, tok))
         assert status == 200
         files = bencode.decode(body)[b"files"]
         stats = list(files.values())[0]
@@ -205,7 +212,6 @@ def test_scrape_accepts_binary_info_hash(tmp_path):
     # valid-UTF-8 multibyte sequences silently corrupted to different bytes so
     # the registry could never match. Scrape must parse the raw query exactly
     # like announce does.
-    from urllib.parse import quote_from_bytes
     raw_hash = bytes(range(0xA0, 0xB4))              # 20 high bytes, not UTF-8
     quoted = quote_from_bytes(raw_hash)
     srv, port, tok = _serve(tmp_path)
@@ -233,12 +239,13 @@ def test_announce_feeds_telemetry_counter_and_swarm(tmp_path):
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     port = srv.server_address[1]
     try:
-        # info_hash bytes "AABB" -> hex 41414242; left=0 => a seeder
-        _get(port, "/announce?info_hash=AABB&peer_id=p1&port=6881&left=0&key=%s"
-             % tok)
+        # left=0 => a seeder
+        _get(port, "/announce?info_hash=%s&peer_id=p1&port=6881&left=0&key=%s"
+             % (INFO_HASH, tok))
         text = hub.metrics_text()
         assert "iris_tracker_announces_total 1" in text
-        assert ('iris_swarm_seeders{image="41414242",info_hash="41414242"} 1'
+        assert ('iris_swarm_seeders{image="%s",info_hash="%s"} 1'
+                % (INFO_HASH_HEX, INFO_HASH_HEX)
                 in text)
     finally:
         srv.shutdown()
@@ -248,23 +255,23 @@ def test_make_server_without_telemetry_still_works(tmp_path):
     # on_announce/registry are optional — the bare tracker must be unaffected
     srv, port, tok = _serve(tmp_path)
     try:
-        status, _ = _get(port, "/announce?info_hash=AABB&peer_id=p1&port=1&key=%s"
-                         % tok)
+        status, _ = _get(port, "/announce?info_hash=%s&peer_id=p1&port=1&key=%s"
+                         % (INFO_HASH, tok))
         assert status == 200
     finally:
         srv.shutdown()
 
 
 def test_announce_ip_override_is_handed_to_peers(tmp_path):
-    # a containerized seeder announces with ip=<external>; other peers must get
+    # a containerized seeder announces with a CGNAT ip=; other peers must get
     # THAT address, not the announce's source address (127.0.0.1 here)
     srv, port, tok = _serve(tmp_path)
     try:
-        _get(port, "/announce?info_hash=AABB&peer_id=seed&port=6881&left=0"
-             "&ip=100.90.168.20&key=%s" % tok)
+        _get(port, "/announce?info_hash=%s&peer_id=seed&port=6881&left=0"
+             "&ip=100.90.168.20&key=%s" % (INFO_HASH, tok))
         status, body = _get(
-            port, "/announce?info_hash=AABB&peer_id=p2&port=6882&left=9&key=%s"
-            % tok)
+            port, "/announce?info_hash=%s&peer_id=p2&port=6882&left=9&key=%s"
+            % (INFO_HASH, tok))
         peers = bencode.decode(body)[b"peers"]
         assert any(p[b"ip"] == b"100.90.168.20" and p[b"port"] == 6881
                    for p in peers)
@@ -283,13 +290,13 @@ def test_ipv6_ip_override_is_rejected_and_client_address_used(tmp_path):
     try:
         # seeder announces with an IPv6 ip= — this must NOT raise
         status, body = _get(
-            port, "/announce?info_hash=AABB&peer_id=seed&port=6881&left=0"
-            "&ip=fe80::1&key=%s" % tok)
+            port, "/announce?info_hash=%s&peer_id=seed&port=6881&left=0"
+            "&ip=fe80::1&key=%s" % (INFO_HASH, tok))
         assert status == 200
         # a second peer requests compact peers — must also return 200 without crash
         status2, body2 = _get(
-            port, "/announce?info_hash=AABB&peer_id=p2&port=6882&left=9"
-            "&compact=1&key=%s" % tok)
+            port, "/announce?info_hash=%s&peer_id=p2&port=6882&left=9"
+            "&compact=1&key=%s" % (INFO_HASH, tok))
         assert status2 == 200
         decoded = bencode.decode(body2)
         peers_bytes = decoded[b"peers"]
@@ -311,12 +318,12 @@ def test_ip_override_with_out_of_range_octet_is_rejected(tmp_path):
     srv, port, tok = _serve(tmp_path)
     try:
         status, _ = _get(
-            port, "/announce?info_hash=AABB&peer_id=seed&port=6881&left=0"
-            "&ip=10.0.0.999&key=%s" % tok)
+            port, "/announce?info_hash=%s&peer_id=seed&port=6881&left=0"
+            "&ip=10.0.0.999&key=%s" % (INFO_HASH, tok))
         assert status == 200
         status2, body2 = _get(
-            port, "/announce?info_hash=AABB&peer_id=p2&port=6882&left=9"
-            "&compact=1&key=%s" % tok)
+            port, "/announce?info_hash=%s&peer_id=p2&port=6882&left=9"
+            "&compact=1&key=%s" % (INFO_HASH, tok))
         assert status2 == 200
         decoded = bencode.decode(body2)
         assert isinstance(decoded[b"peers"], bytes)
@@ -331,13 +338,13 @@ def test_out_of_range_port_is_rejected_and_announce_returns_200(tmp_path):
     try:
         # announce with port=70000 (> 65535)
         status, _ = _get(
-            port, "/announce?info_hash=AABB&peer_id=seed&port=70000&left=0"
-            "&key=%s" % tok)
+            port, "/announce?info_hash=%s&peer_id=seed&port=70000&left=0"
+            "&key=%s" % (INFO_HASH, tok))
         assert status == 200
         # another peer does a compact request — must not crash
         status2, body2 = _get(
-            port, "/announce?info_hash=AABB&peer_id=p2&port=6882&left=9"
-            "&compact=1&key=%s" % tok)
+            port, "/announce?info_hash=%s&peer_id=p2&port=6882&left=9"
+            "&compact=1&key=%s" % (INFO_HASH, tok))
         assert status2 == 200
         decoded = bencode.decode(body2)
         assert isinstance(decoded[b"peers"], bytes)
@@ -367,12 +374,65 @@ def test_valid_ipv4_ip_override_is_accepted(tmp_path):
     """A valid dotted-quad ip= override must still be accepted and propagated."""
     srv, port, tok = _serve(tmp_path)
     try:
-        _get(port, "/announce?info_hash=AABB&peer_id=seed&port=6881&left=0"
-             "&ip=192.168.1.50&key=%s" % tok)
+        _get(port, "/announce?info_hash=%s&peer_id=seed&port=6881&left=0"
+             "&ip=192.168.1.50&key=%s" % (INFO_HASH, tok))
         status, body = _get(
-            port, "/announce?info_hash=AABB&peer_id=p2&port=6882&left=9"
-            "&key=%s" % tok)
+            port, "/announce?info_hash=%s&peer_id=p2&port=6882&left=9"
+            "&key=%s" % (INFO_HASH, tok))
         peers = bencode.decode(body)[b"peers"]
         assert any(p[b"ip"] == b"192.168.1.50" for p in peers)
+    finally:
+        srv.shutdown()
+
+
+def test_rfc1918_172_16_ip_override_is_accepted(tmp_path):
+    """All three RFC1918 blocks are fleet address space; 172.16/12 included."""
+    srv, port, tok = _serve(tmp_path)
+    try:
+        _get(port, "/announce?info_hash=%s&peer_id=seed&port=6881&left=0"
+             "&ip=172.16.5.5&key=%s" % (INFO_HASH, tok))
+        status, body = _get(
+            port, "/announce?info_hash=%s&peer_id=p2&port=6882&left=9"
+            "&key=%s" % (INFO_HASH, tok))
+        peers = bencode.decode(body)[b"peers"]
+        assert any(p[b"ip"] == b"172.16.5.5" for p in peers)
+    finally:
+        srv.shutdown()
+
+
+def test_link_local_ip_override_is_rejected_and_client_address_used(tmp_path):
+    """The override contract is RFC1918 + CGNAT only. `is_private` alone also
+    admits link-local (169.254/16), which would then be advertised to every
+    other peer as a download endpoint — it must fall back to the socket
+    source instead."""
+    srv, port, tok = _serve(tmp_path)
+    try:
+        _get(port, "/announce?info_hash=%s&peer_id=seed&port=6881&left=0"
+             "&ip=169.254.10.10&key=%s" % (INFO_HASH, tok))
+        status, body = _get(
+            port, "/announce?info_hash=%s&peer_id=p2&port=6882&left=9"
+            "&key=%s" % (INFO_HASH, tok))
+        peers = bencode.decode(body)[b"peers"]
+        assert not any(p[b"ip"] == b"169.254.10.10" for p in peers)
+        assert any(p[b"ip"] == b"127.0.0.1" and p[b"port"] == 6881
+                   for p in peers)
+    finally:
+        srv.shutdown()
+
+
+def test_loopback_ip_override_is_rejected_and_client_address_used(tmp_path):
+    """Loopback is `is_private` but is never a usable fleet endpoint; an
+    announce claiming ip=127.0.0.2 must fall back to the socket source."""
+    srv, port, tok = _serve(tmp_path)
+    try:
+        _get(port, "/announce?info_hash=%s&peer_id=seed&port=6881&left=0"
+             "&ip=127.0.0.2&key=%s" % (INFO_HASH, tok))
+        status, body = _get(
+            port, "/announce?info_hash=%s&peer_id=p2&port=6882&left=9"
+            "&key=%s" % (INFO_HASH, tok))
+        peers = bencode.decode(body)[b"peers"]
+        assert not any(p[b"ip"] == b"127.0.0.2" for p in peers)
+        assert any(p[b"ip"] == b"127.0.0.1" and p[b"port"] == 6881
+                   for p in peers)
     finally:
         srv.shutdown()
