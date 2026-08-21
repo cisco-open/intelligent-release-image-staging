@@ -391,6 +391,77 @@ def test_new_add_failure_restores_old_bytes_and_readds(tmp_path):
 # Double failure: old re-add ALSO fails -> hard no-go
 # ---------------------------------------------------------------------------
 
+def test_first_remove_failure_restores_bytes_without_unsafe_readd(tmp_path):
+    sp = _seeder_store(tmp_path)
+    manifest_path = str(tmp_path / "recovery.json")
+    canon = _canonical()
+    torrent = tmp_path / "img.torrent"
+    torrent.write_bytes(canon)
+    seeder = FakeSeeder()
+
+    def remove_fails(gid):
+        seeder.events.append(("remove", gid))
+        raise RuntimeError("aria RPC response is uncertain")
+
+    deps = rot.RotationDeps(
+        persist=lambda s, p: secrets_store.save(s, p),
+        seeder_remove=remove_fails, seeder_add=seeder.add,
+        swarm_probe=lambda expected, not_before: True,
+        manifest_write=rot._atomic_write_json, now=lambda: 100)
+
+    result = rot.rotate_seeder_announce(
+        sp, manifest_path,
+        [rot.TorrentTarget("img", str(torrent), str(tmp_path), "gid-old")],
+        "http://h:6969/announce", deps)
+
+    assert torrent.read_bytes() == canon
+    assert [event for event in seeder.events if event[0] == "add"] == []
+    assert result.hard_no_go is True
+    assert result.maintenance_frozen is True
+    assert result.served_claimed is False
+    assert result.affected == [{"image_id": "img", "gid": "gid-old",
+                                "restore_readd_ok": False}]
+    manifest = json.load(open(manifest_path))
+    assert manifest["phase"] == "hard_no_go"
+    assert manifest["error"] == "remove_failed"
+    assert manifest["torrents"][0]["status"] == "remove_failed"
+    assert "aria RPC" not in json.dumps(manifest)
+
+
+def test_later_remove_failure_restores_and_repairs_prior_applied(tmp_path):
+    sp = _seeder_store(tmp_path)
+    manifest_path = str(tmp_path / "recovery.json")
+    canon0, canon1 = _canonical(), _canonical()
+    t0, t1 = tmp_path / "a.torrent", tmp_path / "b.torrent"
+    t0.write_bytes(canon0)
+    t1.write_bytes(canon1)
+    seeder = FakeSeeder()
+
+    def remove_fails_on_second(gid):
+        seeder.events.append(("remove", gid))
+        if gid == "gid1":
+            raise RuntimeError("uncertain")
+
+    deps = rot.RotationDeps(
+        persist=lambda s, p: secrets_store.save(s, p),
+        seeder_remove=remove_fails_on_second, seeder_add=seeder.add,
+        swarm_probe=lambda expected, not_before: True,
+        manifest_write=rot._atomic_write_json, now=lambda: 100)
+
+    result = rot.rotate_seeder_announce(
+        sp, manifest_path,
+        [rot.TorrentTarget("img0", str(t0), str(tmp_path), "gid0"),
+         rot.TorrentTarget("img1", str(t1), str(tmp_path), "gid1")],
+        "http://h:6969/announce", deps)
+
+    assert t0.read_bytes() == canon0 and t1.read_bytes() == canon1
+    old_adds = [event for event in seeder.events if event[0] == "add"
+                and b"announce_token=OLD" in event[2]]
+    assert old_adds, "the prior applied torrent must be repaired"
+    assert {item["image_id"] for item in result.affected} == {"img0", "img1"}
+    assert {item["image_id"]: item["restore_readd_ok"] for item in result.affected} == {
+        "img0": True, "img1": False}
+
 def test_double_failure_is_hard_no_go(tmp_path):
     sp = _seeder_store(tmp_path)
     manifest_path = str(tmp_path / "recovery.json")

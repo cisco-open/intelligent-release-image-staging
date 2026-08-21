@@ -5,6 +5,8 @@
 """Operational preflight and nonsecret CLI coverage for seeder rotation."""
 import json
 
+import pytest
+
 import bencode
 import rotate_seeder_announce as rot
 
@@ -44,6 +46,38 @@ def test_discover_targets_uses_authoritative_source_dirs_in_order(tmp_path):
             for name, h in hashes.items()])
     assert [target.image_id for target in targets] == ["a", "z"]
     assert all(target.image_dir == str(tmp_path / "images") for target in targets)
+
+
+def test_discover_targets_refuses_catalog_with_missing_canonical_before_rpc(tmp_path):
+    state, _ = _state(tmp_path, ("a", "b"))
+    (state / "torrents" / "b.torrent").unlink()
+
+    with pytest.raises(ValueError, match="canonical torrent unavailable"):
+        rot.discover_targets(str(state), {}, lambda *args: pytest.fail("RPC called"))
+
+
+def test_discover_targets_refuses_empty_catalog_before_rpc(tmp_path):
+    state, _ = _state(tmp_path, ())
+
+    with pytest.raises(ValueError, match="no published torrent targets"):
+        rot.discover_targets(str(state), {}, lambda *args: pytest.fail("RPC called"))
+
+
+def test_cli_missing_catalog_target_does_not_mutate(tmp_path, monkeypatch):
+    state, _ = _state(tmp_path, ("a", "b"))
+    (state / "torrents" / "b.torrent").unlink()
+    called = []
+    monkeypatch.setenv("IRIS_AGE_RECIPIENTS", "age1recipient")
+    monkeypatch.setenv("IRIS_SECRETS_ENC", str(tmp_path / "s.age"))
+    monkeypatch.setenv("IRIS_RPC_SECRET", "x")
+    monkeypatch.setattr(rot.telemetry, "make_jsonrpc_caller",
+                        lambda *args: lambda *rpc_args: called.append(rpc_args))
+    monkeypatch.setattr(rot, "rotate_seeder_announce",
+                        lambda *args: pytest.fail("core called"))
+
+    assert rot.main(["--maintenance-frozen", "--state", str(state)]) == 2
+    assert called == []
+    assert not (state / "seeder-rotation-recovery.json").exists()
 
 
 def test_cli_preflight_failures_do_not_call_core(tmp_path, monkeypatch, capsys):

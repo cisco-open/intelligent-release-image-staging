@@ -21,6 +21,9 @@ This is the ONLY supported way to rotate the seeder announce credential
    the manifest phase per torrent.
 
 Failure handling (spec §6):
+- Remove failure/uncertain result -> restore the EXACT old canonical bytes,
+  enter hard no-go, and do not re-add because aria2 may still hold the old
+  torrent; explicit repair is required.
 - New-add failure -> restore the EXACT old canonical bytes and attempt the old
   add (rollback).
 - If the old re-add ALSO fails -> a hard no-go: restore the EXACT old canonical
@@ -238,7 +241,20 @@ def rotate_seeder_announce(secrets_path, manifest_path, torrents,
 
         # Write the new canonical to disk atomically (durable) before add.
         _atomic_write_bytes(target.path, new_bytes)
-        deps.seeder_remove(target.gid)
+        try:
+            deps.seeder_remove(target.gid)
+        except Exception:
+            # forceRemove may have reached aria2 before its caller observed an
+            # error.  The live state is therefore unknown: restore the exact
+            # old file, but never add it again and risk a duplicate torrent.
+            _atomic_write_bytes(target.path, old_bytes)
+            _mark(manifest, idx, "remove_failed")
+            manifest["phase"] = "rolling_back"
+            deps.manifest_write(manifest_path, manifest)
+            return _hard_no_go(
+                manifest, manifest_path, applied, new_current, deps,
+                also=[(idx, target, old_bytes)], this_readd_failed=True,
+                failure_class="remove_failed")
         try:
             deps.seeder_add(new_bytes, target.image_dir)
         except Exception:
@@ -295,7 +311,7 @@ def rotate_seeder_announce(secrets_path, manifest_path, torrents,
 
 
 def _hard_no_go(manifest, manifest_path, applied, new_current, deps,
-                also=None, this_readd_failed=False):
+                also=None, this_readd_failed=False, failure_class="double_failure"):
     """Enter the hard no-go state: restore EXACT old canonical bytes for every
     previously applied torrent, attempt to re-add each restored torrent, abort
     remaining torrents, freeze maintenance, preserve the manifest, and never
@@ -328,7 +344,9 @@ def _hard_no_go(manifest, manifest_path, applied, new_current, deps,
         affected.append({"image_id": target.image_id, "gid": target.gid,
                          "restore_readd_ok": not this_readd_failed})
 
-    manifest["phase"] = "double_failure"
+    manifest["phase"] = ("hard_no_go" if failure_class == "remove_failed"
+                         else "double_failure")
+    manifest["error"] = failure_class
     manifest["maintenance_frozen"] = True
     manifest["served_claimed"] = False
     manifest["affected"] = affected
@@ -643,12 +661,14 @@ def discover_targets(state, env, rpc):
     images = catalog.get("images") if isinstance(catalog, dict) else None
     if not isinstance(images, dict):
         raise ValueError("catalog unavailable")
+    if not images:
+        raise ValueError("no published torrent targets")
     candidates = []
     for image_id in sorted(images):
         entry = images[image_id]
         torrent = os.path.join(state, "torrents", "%s.torrent" % image_id)
         if not isinstance(entry, dict) or not os.path.isfile(torrent):
-            continue
+            raise ValueError("canonical torrent unavailable")
         image_dir = _image_dir(entry, env)
         if image_dir is None:
             raise ValueError("image directory unavailable")

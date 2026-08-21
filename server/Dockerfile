@@ -93,6 +93,7 @@ RUN chmod +x /opt/iris/server/seed-launch.sh \
     /opt/iris/server/iris-publish \
     /opt/iris/server/iris-assign \
     /opt/iris/server/iris-bootstrap \
+    /opt/iris/server/rotate_seeder_announce.py \
     /opt/iris/server/pack-agent-bundle.sh \
     /opt/iris/server/provision-served.sh \
     /opt/iris/server/docker-entrypoint.sh \

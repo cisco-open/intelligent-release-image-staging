@@ -27,3 +27,12 @@ def test_dockerfile_verifies_aria2c_against_the_manifest():
         "the build does not hash bin/aria2c"
     assert 'awk \'$2 == "x86_64" {print $1}\'' in text, \
         "the build does not read the x86_64 entry from the manifest"
+
+
+def test_rotation_cli_is_executable_in_source_and_container():
+    script = os.path.join(HERE, "..", "rotate_seeder_announce.py")
+    assert open(script).readline() == "#!/usr/bin/env python3\n"
+    assert os.stat(script).st_mode & 0o111
+    text = open(DOCKERFILE).read()
+    chmod_block = text[text.index("RUN chmod +x"):text.index("# Run unprivileged")]
+    assert "/opt/iris/server/rotate_seeder_announce.py" in chmod_block
