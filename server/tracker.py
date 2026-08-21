@@ -347,6 +347,16 @@ def _start_pruner(registry):
 
 RECONCILE_POLL = 2.0   # max seconds before durable cross-process changes apply
 
+# Upper bound on how long the loop may go without a full recompute even when
+# nothing on disk changed and no wake arrived. A bare ≤2s poll with unchanged
+# stat keys, an empty pending queue, a healthy known RPC/session and no dirty
+# flag is a no-op (the dead-poll gate suppresses the redundant per-2s RPC), but
+# endpoint TTL expiry and periodic RPC/session recovery are time-driven and have
+# no file-change signal — so we still force a maintenance pass at least this
+# often. Bounded to one endpoint-TTL horizon (capped) so pruning is timely
+# without blindly never running.
+MAINTENANCE_INTERVAL_CAP = 60.0   # seconds
+
 
 class Aria2BlocklistAdapter:
     """Thin adapter exposing the reconciler's ``aria`` contract over the local
@@ -425,6 +435,11 @@ class TrackerReconciler:
         self._stop = threading.Event()
         self._thread = None
         self._poll_keys = (None, None)
+        # Bounded next-maintenance deadline (never None-forever / never disabled):
+        # forces a periodic full recompute so endpoint TTL prune and RPC/session
+        # recovery happen even with no file change and no wake. Scheduled after
+        # every run_once (see _schedule_maintenance). None => "run at once".
+        self._next_maintenance = None
 
     # -- public wake / lifecycle -------------------------------------------
 
@@ -469,16 +484,53 @@ class TrackerReconciler:
             # Local wake (tracker-authored) OR the ≤2s poll deadline, whichever
             # comes first, then also poll durable stat keys for other-process
             # changes (spec §0 ≤2s max latency).
-            self._wake.wait(timeout=RECONCILE_POLL)
+            waked = self._wake.wait(timeout=RECONCILE_POLL)
             self._wake.clear()
             if self._stop.is_set():
                 break
-            keys = (_stat_key(self._policy_paths[0]),
-                    _stat_key(self._endpoints_path))
-            changed = keys != self._poll_keys
-            self._poll_keys = keys
-            # Always run on wake; on a bare poll only run when something changed.
-            self._guarded_run()
+            # Dead-poll gate: a wake always runs; a bare poll runs only when
+            # something actually needs reconciling (durable stat change, pending
+            # work, unhealthy RPC/session, or the bounded maintenance deadline).
+            if self._poll_should_run(waked):
+                self._guarded_run()
+
+    def _current_poll_keys(self):
+        return (_stat_key(self._policy_paths[0]),
+                _stat_key(self._endpoints_path))
+
+    def _poll_should_run(self, waked):
+        """Decide whether this loop iteration should reconcile.
+
+        Wakes always run. On a bare (unwaked) poll we run only when there is a
+        genuine reason: an external durable stat change, outstanding pending
+        work, an unhealthy RPC/session (recovery must be detected without a file
+        change), or the bounded maintenance deadline has passed (endpoint TTL
+        prune / periodic reconciliation). Otherwise the poll is a no-op — no
+        run_once, no getSessionInfo, no apply — so a steady idle loop performs
+        no per-2s RPC."""
+        keys = self._current_poll_keys()
+        changed = keys != self._poll_keys
+        self._poll_keys = keys
+        if waked:
+            return True
+        if changed:
+            return True
+        if len(self._pending) > 0:
+            return True
+        if self._rpc_ok is not True:
+            return True
+        if self._next_maintenance is None:
+            return True
+        return self._now() >= self._next_maintenance
+
+    def _schedule_maintenance(self):
+        """Arm the bounded next-maintenance deadline after a reconcile pass. The
+        horizon is the effective endpoint TTL, capped at
+        :data:`MAINTENANCE_INTERVAL_CAP`, so TTL-driven prune and periodic
+        recovery are timely but the idle loop is not woken every 2s."""
+        interval = min(float(_peer_endpoints.endpoint_ttl()),
+                       MAINTENANCE_INTERVAL_CAP)
+        self._next_maintenance = self._now() + interval
 
     def _guarded_run(self):
         if not self.request_run():
@@ -533,24 +585,27 @@ class TrackerReconciler:
             now, policy, derived, desired_hash, outcome, pending_outstanding)
 
         # 5) Export the policy operation outbox (revision order, ack-gated).
-        exported_rev = self._export_outbox(policy, status)
+        #    Read the prior ack watermark once (centralized) and carry it
+        #    forward so a status-only / non-operation pass can never reset it.
+        acked = self._read_acked_revision()
+        exported_rev = self._export_outbox(policy, acked)
         status["last_operation_exported_revision"] = exported_rev
 
         _peer_enforcement.write_status(self._enforcement_path, status)
+        # Arm the bounded next-maintenance deadline so a subsequent idle bare
+        # poll stays a no-op until either something changes or the deadline
+        # passes (TTL prune / periodic recovery).
+        self._schedule_maintenance()
         return status
 
     def _retry_pending(self, now):
-        # Local retry using the (possibly injected) endpoint writer so failure
-        # injection is honored; mirrors peer_endpoints.retry_pending semantics.
-        for key, ptype, pid, endpoint in self._pending.items():
-            principal = auth.Principal(ptype, pid)
-            try:
-                self._record_endpoint(
-                    self._endpoints_path, principal, endpoint["ipv4"],
-                    endpoint["port"], now)
-            except OSError:
-                continue
-            self._pending._drop_key(key)
+        # Reuse peer_endpoints.retry_pending with the (possibly injected) writer
+        # so failure injection is honored AND the endpoint's ORIGINAL
+        # observed_at is preserved — a stuck retry must never extend endpoint
+        # TTL past first observation (spec §7). ``now`` is intentionally unused
+        # for the persisted timestamp.
+        _peer_endpoints.retry_pending(
+            self._endpoints_path, self._pending, writer=self._record_endpoint)
 
     def _probe_session(self):
         try:
@@ -616,15 +671,23 @@ class TrackerReconciler:
             desired_ip_count=len(derived.denied_ips), now=now,
             conflicts=conflicts, last_effect=last_effect, last_error=last_error)
 
-    def _export_outbox(self, policy, status):
+    def _read_acked_revision(self):
+        """The single, centralized source of the persisted outbox ack watermark
+        (``last_operation_exported_revision``). Every status write must carry a
+        value ``>=`` this so a later non-operation pass can never reset the
+        watermark downward (spec §7/§13). Missing/corrupt status => 0."""
+        prior = _peer_enforcement.read_status(self._enforcement_path)
+        if not prior:
+            return 0
+        return prior.get("last_operation_exported_revision", 0) or 0
+
+    def _export_outbox(self, policy, acked):
         """Export outbox entries with revision > the acked revision, in revision
         order, then advance the ack ONLY after the audit contract succeeds
-        (spec §7/§13). On any audit failure the ack is not advanced so the
-        entries replay on the next pass / after restart."""
-        prior = _peer_enforcement.read_status(self._enforcement_path)
-        acked = 0
-        if prior:
-            acked = prior.get("last_operation_exported_revision", 0) or 0
+        (spec §7/§13). On any audit failure — or a status-only pass with no new
+        entries — the prior ``acked`` watermark is returned unchanged so it is
+        preserved (never reset) and un-acked entries replay next pass / after
+        restart."""
         entries = _peer_policy.pending_exports(policy.document, acked)
         if not entries:
             return acked
@@ -634,7 +697,8 @@ class TrackerReconciler:
             self._audit_export(entries)
         except Exception:
             return acked   # audit best-effort failed -> replay next pass
-        return max(e["revision"] for e in entries)
+        # Never regress below the prior watermark.
+        return max(acked, max(e["revision"] for e in entries))
 
 
 def _build_reconciler_from_env(env, registry):
@@ -666,20 +730,37 @@ def _build_reconciler_from_env(env, registry):
         endpoints_path=endpoints_path, enforcement_path=enforcement_path,
         aria=aria, pending_queue=_peer_endpoints.PendingEndpointQueue(),
         active_participants=lambda: _active_participants(registry),
-        revoked_principals=lambda: set(),   # revocation view wired at Task 15
+        # Revocation view is intentionally an empty set until Task 15 wires the
+        # credential-revocation catalog. Keeping it empty (never None) means the
+        # reconciler treats no principal as credential-revoked yet — policy still
+        # governs deny decisions — and the derivation stays valid. Do NOT invent
+        # catalog wiring here; Task 15 replaces this with the real view.
+        revoked_principals=lambda: set(),
         protected_seeder_ip=env.get("IRIS_HOST_IP") or None,
         audit_export=audit_export)
 
 
 def _active_participants(registry):
     """Flatten the live registry into ``{principal_type, principal_id, ipv4}``
-    rows for the emergency (fail-closed) derivation."""
+    rows for the emergency (fail-closed) derivation.
+
+    Defensive by contract: a malformed or legacy row with missing typed fields
+    must never crash the emergency fail-closed pass. Rows are read with
+    ``.get()``; a row without a usable ``ip`` contributes no denied address and
+    is skipped (the emergency derivation keys on ``ipv4``), while missing
+    type/id default to ``None`` so the downstream ``.get()`` handling stays
+    valid."""
     rows = []
-    for peers in registry.snapshot().values():
-        for p in peers:
-            rows.append({"principal_type": p["principal_type"],
-                         "principal_id": p["principal_id"],
-                         "ipv4": p["ip"]})
+    for peers in (registry.snapshot() or {}).values():
+        for p in peers or []:
+            if not isinstance(p, dict):
+                continue
+            ip = p.get("ip")
+            if not ip:
+                continue
+            rows.append({"principal_type": p.get("principal_type"),
+                         "principal_id": p.get("principal_id"),
+                         "ipv4": ip})
     return rows
 
 

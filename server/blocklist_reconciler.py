@@ -157,6 +157,17 @@ def _validate_ips(denied_ips):
         ipaddress.IPv4Address(ip)  # raises ValueError on a bad rule
 
 
+def _safe_session_id(aria):
+    """Probe the aria session id without ever letting a transport exception —
+    whose message may embed the RPC secret — escape or be recorded. Only the
+    successful session string is returned; any failure yields ``None`` (the
+    exception, and therefore any secret in it, is dropped)."""
+    try:
+        return aria.get_session_id()
+    except Exception:
+        return None
+
+
 def apply_blocklist(aria, denied_ips, apply_empty):
     """Full-replace apply of the desired list via ``aria.set_blocklist`` (spec
     5/13). Validates every IP first (one bad rule rejects the whole call). When
@@ -177,7 +188,7 @@ def apply_blocklist(aria, denied_ips, apply_empty):
             desired_hash=desired_hash, applied_revision=None,
             last_effect=None, last_error=None)
 
-    session = aria.get_session_id()
+    session = _safe_session_id(aria)
     try:
         ret = aria.set_blocklist(ordered)
     except Exception as exc:  # RPC failure is never success / never permit-all

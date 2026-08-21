@@ -378,3 +378,304 @@ def test_local_wake_runs_immediately(tmp_path):
         assert seen
     finally:
         rec.stop()
+
+
+# ---------------------------------------------------------------------------
+# Dead-poll gate: an idle bare poll with nothing to do does no RPC work, but
+# maintenance/recovery semantics still eventually run (spec §0 / §7 / §13).
+# ---------------------------------------------------------------------------
+
+class CountingAria(FakeAria):
+    """FakeAria that also counts get_session_id probes (RPC touches)."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.session_probes = 0
+
+    def get_session_id(self):
+        self.session_probes += 1
+        return super().get_session_id()
+
+
+def test_idle_bare_poll_does_not_run_reconcile(tmp_path):
+    """A steady-state bare poll (<=2s, unchanged stat keys, empty pending, no
+    dirty/wake, healthy known RPC/session) must NOT invoke run_once /
+    getSessionInfo / reconcile: the gate suppresses the redundant per-2s RPC."""
+    aria = CountingAria()
+    rec, p, _ = _make_reconciler(tmp_path, aria, clock=Clock(1000.0))
+    # First converged pass: healthy, known session, empty pending.
+    rec.run_once()
+    calls_before = len(aria.calls)
+    probes_before = aria.session_probes
+
+    # Simulate a converged loop: seed poll keys and a far-future maintenance
+    # deadline so only a genuine change would justify running.
+    rec._poll_keys = (tracker._stat_key(p["policy"]),
+                      tracker._stat_key(p["endpoints"]))
+    rec._next_maintenance = 1_000_000.0
+
+    # Ten consecutive idle bare polls (waked=False) with nothing changed.
+    for _ in range(10):
+        assert rec._poll_should_run(waked=False) is False
+    # No apply and no session probe happened from the gate deciding "skip".
+    assert len(aria.calls) == calls_before
+    assert aria.session_probes == probes_before
+
+
+def test_external_file_change_still_runs_on_bare_poll(tmp_path):
+    """An external (other-process) durable stat change must still execute on a
+    bare poll even without a local wake."""
+    aria = CountingAria()
+    rec, p, _ = _make_reconciler(tmp_path, aria, clock=Clock(1000.0))
+    rec.run_once()
+    rec._poll_keys = (tracker._stat_key(p["policy"]),
+                      tracker._stat_key(p["endpoints"]))
+    rec._next_maintenance = 1_000_000.0
+    # Another process writes a quarantine + endpoint.
+    _quarantine(p["policy"], p["lkg"], "bad", 1000.0)
+    peer_endpoints.record_endpoint(p["endpoints"], _dev("bad"),
+                                   "10.0.0.9", 6881, 1000.0)
+    assert rec._poll_should_run(waked=False) is True
+
+
+def test_pending_work_still_runs_on_bare_poll(tmp_path):
+    """Outstanding pending work must run on a bare poll (retry-without-announce
+    semantics), even with unchanged stat keys."""
+    aria = CountingAria()
+    pending = peer_endpoints.PendingEndpointQueue()
+    rec, p, _ = _make_reconciler(tmp_path, aria, clock=Clock(1000.0),
+                                 pending=pending)
+    rec.run_once()
+    rec._poll_keys = (tracker._stat_key(p["policy"]),
+                      tracker._stat_key(p["endpoints"]))
+    rec._next_maintenance = 1_000_000.0
+    pending.enqueue(_dev("bad"), "10.0.0.9", 6881, 1000.0)
+    assert rec._poll_should_run(waked=False) is True
+
+
+def test_rpc_recovery_still_runs_on_bare_poll(tmp_path):
+    """A prior RPC failure (unhealthy) must let a bare poll run so recovery is
+    detected without waiting for a file change or a wake."""
+    aria = CountingAria(raise_on_call=True)
+    rec, p, _ = _make_reconciler(tmp_path, aria, clock=Clock(1000.0))
+    _quarantine(p["policy"], p["lkg"], "bad", 1000.0)
+    peer_endpoints.record_endpoint(p["endpoints"], _dev("bad"),
+                                   "10.0.0.9", 6881, 1000.0)
+    rec.run_once()   # RPC down -> unhealthy
+    rec._poll_keys = (tracker._stat_key(p["policy"]),
+                      tracker._stat_key(p["endpoints"]))
+    rec._next_maintenance = 1_000_000.0
+    # Nothing changed on disk, no wake, but unhealthy RPC -> must still run.
+    assert rec._poll_should_run(waked=False) is True
+
+
+def test_wake_always_runs_even_when_idle(tmp_path):
+    """A local wake always runs regardless of the gate."""
+    aria = CountingAria()
+    rec, p, _ = _make_reconciler(tmp_path, aria, clock=Clock(1000.0))
+    rec.run_once()
+    rec._poll_keys = (tracker._stat_key(p["policy"]),
+                      tracker._stat_key(p["endpoints"]))
+    rec._next_maintenance = 1_000_000.0
+    assert rec._poll_should_run(waked=True) is True
+
+
+def test_maintenance_deadline_is_bounded_not_never(tmp_path):
+    """The maintenance deadline must be a bounded finite value (endpoint TTL /
+    periodic health), never disabled, so TTL prune / recovery eventually runs
+    even with no file change and no wake."""
+    aria = CountingAria()
+    rec, p, _ = _make_reconciler(tmp_path, aria, clock=Clock(1000.0))
+    rec.run_once()
+    # A finite, bounded next deadline was scheduled.
+    assert rec._next_maintenance is not None
+    assert rec._next_maintenance < float("inf")
+    # It is within one endpoint-TTL horizon of now (bounded upper bound).
+    assert rec._next_maintenance <= 1000.0 + peer_endpoints.endpoint_ttl()
+
+
+def test_reached_maintenance_deadline_runs_on_bare_poll(tmp_path):
+    """When the bounded maintenance deadline has passed, a bare poll runs so
+    endpoint TTL prune / periodic reconciliation happens without a change."""
+    aria = CountingAria()
+    clock = Clock(1000.0)
+    rec, p, _ = _make_reconciler(tmp_path, aria, clock=clock)
+    rec.run_once()
+    rec._poll_keys = (tracker._stat_key(p["policy"]),
+                      tracker._stat_key(p["endpoints"]))
+    # Advance time past the maintenance deadline.
+    clock.t = rec._next_maintenance + 1.0
+    assert rec._poll_should_run(waked=False) is True
+
+
+# ---------------------------------------------------------------------------
+# Retry pending must preserve the ORIGINAL observed_at (retry cannot extend
+# endpoint TTL beyond the moment of first observation).
+# ---------------------------------------------------------------------------
+
+def test_retry_pending_preserves_original_observed_at(tmp_path):
+    """A pending endpoint enqueued at t0 that only becomes durable on a later
+    pass at t1 must be persisted with observed_at == t0, NOT t1 — otherwise a
+    stuck retry would silently extend the endpoint's TTL indefinitely."""
+    aria = FakeAria()
+    pending = peer_endpoints.PendingEndpointQueue()
+    calls = {"n": 0}
+
+    def flaky_record(path, principal, ipv4, port, now):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("disk full")
+        return peer_endpoints.record_endpoint(path, principal, ipv4, port, now)
+
+    clock = Clock(1000.0)
+    rec, p, _ = _make_reconciler(tmp_path, aria, clock=clock, pending=pending)
+    rec._record_endpoint = flaky_record
+    # Enqueue at t0 = 1000.0 (the true observation time).
+    pending.enqueue(_dev("bad"), "10.0.0.9", 6881, 1000.0)
+    rec.run_once()                 # first retry fails, stays pending
+    assert len(pending) == 1
+    # A much later pass finally writes it durably.
+    clock.t = 1500.0
+    rec.run_once()
+    assert len(pending) == 0
+    doc = json.loads(open(p["endpoints"]).read())
+    ep = doc["principals"]["device:bad"]["endpoints"][0]
+    # observed_at must be the original t0, not the retry pass time (1500.0).
+    assert ep["observed_at"] == 1000.0
+
+
+# ---------------------------------------------------------------------------
+# _active_participants must be defensive: a malformed/legacy registry row with
+# missing typed fields cannot crash the emergency (fail-closed) pass.
+# ---------------------------------------------------------------------------
+
+class _FakeRegistry:
+    def __init__(self, snapshot):
+        self._snap = snapshot
+
+    def snapshot(self):
+        return self._snap
+
+
+def test_active_participants_tolerates_malformed_rows():
+    """Missing/None typed fields (legacy residue, partial rows) must be skipped
+    or defaulted — never raise KeyError."""
+    reg = _FakeRegistry({
+        "hashA": [
+            {"principal_type": "device", "principal_id": "d1", "ip": "10.0.0.1"},
+            {"principal_id": "d2", "ip": "10.0.0.2"},          # no type
+            {"principal_type": "device", "ip": "10.0.0.3"},    # no id
+            {"principal_type": "device", "principal_id": "d4"},  # no ip
+            {},                                                  # empty
+        ],
+    })
+    rows = tracker._active_participants(reg)
+    # No crash; valid rows survive, and every emitted row exposes the three keys.
+    for r in rows:
+        assert "principal_type" in r
+        assert "principal_id" in r
+        assert "ipv4" in r
+    ips = {r["ipv4"] for r in rows}
+    assert "10.0.0.1" in ips
+
+
+def test_emergency_pass_survives_malformed_active_row(tmp_path):
+    """A malformed active participant row must not crash the fail-closed
+    emergency reconcile pass."""
+    aria = FakeAria()
+
+    def bad_active():
+        return [{"ip": "10.0.0.5"}]  # missing principal_type/id (legacy-ish)
+
+    rec, p, _ = _make_reconciler(tmp_path, aria, clock=Clock(1000.0),
+                                 active_provider=bad_active)
+    with open(p["policy"], "w") as f:
+        f.write("{ broken")
+    with open(p["lkg"], "w") as f:
+        f.write("{ broken")
+    # Must not raise.
+    rec.run_once()
+    st = peer_enforcement.read_status(p["enforcement"])
+    assert st["state"] == "fail_closed"
+
+
+# ---------------------------------------------------------------------------
+# No-leak: an aria RPC exception whose message embeds the RPC secret must never
+# surface in the enforcement status / error / output (only the exception TYPE).
+# ---------------------------------------------------------------------------
+
+SECRET_SENTINEL = "SUPER-SECRET-RPC-TOKEN-abc123"
+
+
+class LeakyAria:
+    """Every RPC entry point raises an exception whose message embeds the RPC
+    secret, exactly as a naive transport error would."""
+
+    class _Boom(RuntimeError):
+        pass
+
+    def get_session_id(self):
+        raise self._Boom("connect failed url=http://x/?secret=%s"
+                          % SECRET_SENTINEL)
+
+    def set_blocklist(self, ips):
+        raise self._Boom("apply failed url=http://x/?secret=%s"
+                          % SECRET_SENTINEL)
+
+
+def test_session_probe_exception_never_leaks_secret(tmp_path):
+    aria = LeakyAria()
+    rec, p, _ = _make_reconciler(tmp_path, aria, clock=Clock(1000.0))
+    _quarantine(p["policy"], p["lkg"], "bad", 1000.0)
+    peer_endpoints.record_endpoint(p["endpoints"], _dev("bad"),
+                                   "10.0.0.9", 6881, 1000.0)
+    # Probe + apply both raise with the secret in the message — must not raise
+    # and must not persist the secret anywhere.
+    rec.run_once()
+    raw = open(p["enforcement"]).read()
+    assert SECRET_SENTINEL not in raw
+    st = peer_enforcement.read_status(p["enforcement"])
+    for field in ("last_error", "last_effect", "aria_session_id",
+                  "desired_hash"):
+        assert SECRET_SENTINEL not in json.dumps(st.get(field))
+    # The recorded error, if any, is the exception TYPE name only.
+    assert st.get("last_error") in (None, "_Boom")
+
+
+# ---------------------------------------------------------------------------
+# Outbox ack watermark: a later status write with NO new operations must never
+# reset the previously-acked revision back down (regression).
+# ---------------------------------------------------------------------------
+
+def test_ack_watermark_preserved_across_non_operation_passes(tmp_path):
+    aria = FakeAria()
+    rec, p, audit_calls = _make_reconciler(tmp_path, aria, clock=Clock(1000.0))
+    _quarantine(p["policy"], p["lkg"], "a", 1000.0)
+    _quarantine(p["policy"], p["lkg"], "b", 1000.0)
+    rec.run_once()
+    acked = peer_enforcement.read_status(
+        p["enforcement"])["last_operation_exported_revision"]
+    assert acked >= 3
+    # Several subsequent passes with NO new policy operations must preserve the
+    # watermark — a status write must not reset it to 0.
+    for _ in range(3):
+        rec.run_once()
+        st = peer_enforcement.read_status(p["enforcement"])
+        assert st["last_operation_exported_revision"] == acked
+
+
+def test_ack_watermark_survives_status_only_write_after_audit_disabled(tmp_path):
+    """Even if the audit exporter is unavailable on a later pass (best-effort
+    off), a status-only write must not reset the prior ack watermark."""
+    aria = FakeAria()
+    rec, p, _ = _make_reconciler(tmp_path, aria, clock=Clock(1000.0))
+    _quarantine(p["policy"], p["lkg"], "a", 1000.0)
+    rec.run_once()
+    acked = peer_enforcement.read_status(
+        p["enforcement"])["last_operation_exported_revision"]
+    assert acked >= 2
+    # Drop the audit exporter; a further pass writes status only.
+    rec._audit_export = None
+    rec.run_once()
+    st = peer_enforcement.read_status(p["enforcement"])
+    assert st["last_operation_exported_revision"] == acked

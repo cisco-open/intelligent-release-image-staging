@@ -259,17 +259,28 @@ class _StructPrincipal:
         self.id = id_
 
 
-def retry_pending(path, queue, now):
+def retry_pending(path, queue, now=None, writer=None):
     """Attempt the durable write for every pending principal without requiring a
     new announce (spec 7 ``<=2s`` retry). Removes from the queue only those whose
     durable write succeeds; a failing write leaves the tuple queued. Returns the
-    list of resolved principal keys."""
+    list of resolved principal keys.
+
+    The write always uses the endpoint's ORIGINAL ``observed_at`` — never the
+    current pass time — so a stuck retry cannot silently extend the endpoint's
+    TTL past its first observation. ``now`` is therefore ignored for the persisted
+    timestamp and is accepted only for signature compatibility.
+
+    ``writer`` is an injectable ``record_endpoint``-shaped callable (defaults to
+    :func:`record_endpoint`) so the tracker can honor failure-injection while
+    reusing this exact retry/timestamp logic.
+    """
+    write = writer or record_endpoint
     resolved = []
     for key, ptype, pid, endpoint in queue.items():
         principal = _StructPrincipal(ptype, pid)
         try:
-            record_endpoint(path, principal, endpoint["ipv4"],
-                            endpoint["port"], endpoint["observed_at"])
+            write(path, principal, endpoint["ipv4"],
+                  endpoint["port"], endpoint["observed_at"])
         except OSError:
             continue
         queue._drop_key(key)
