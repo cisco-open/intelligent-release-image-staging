@@ -74,29 +74,40 @@ def poll_seeder(rpc):
 
 
 def poll_seeder_peers(rpc):
-    """The server seeder's per-peer upload view, plus the exact per-torrent
-    upload counter to calibrate it against. Returns (peer_up, upload_lengths):
-      * peer_up: {info_hash: {ip: upload_bps}} — from aria2 tellActive
-        (gid+infoHash) -> getPeers(gid).uploadSpeed, i.e. how fast THIS server
-        is INSTANTANEOUSLY sending to each connected device.
-      * upload_lengths: {info_hash: bytes} — aria2's own EXACT cumulative
-        uploadLength for that torrent since aria2 start. aria2 has no
-        per-peer cumulative byte counter, so callers distribute this exact
-        per-torrent total across peers proportional to their instantaneous
-        uploadSpeed (see Telemetry.sample) instead of integrating the noisy
-        instantaneous rate directly, which overcounts on bursty transfers."""
+    """The server seeder's per-peer CURRENT send rate plus the per-torrent
+    control-state uploadLength gauge, tagged with aria2's session id so the
+    caller can detect a counter epoch (session change / decrease).
+
+    Returns (peer_up, upload_lengths, session_id):
+      * peer_up: {info_hash: {ip: upload_bps}} — how fast THIS server is
+        INSTANTANEOUSLY sending to each connected device, from
+        getPeers(gid, ["ip","uploadSpeed"]) (rate-only; never bitfield, never
+        cumulative per-peer counters — aria2 has no cross-connection per-peer
+        total, and inferring one from the torrent-wide counter was division,
+        not measurement).
+      * upload_lengths: {info_hash: bytes} — aria2's BitTorrent piece-payload
+        uploadLength for that torrent over its control-state lifetime. It is a
+        GAUGE: it can exceed the image size (re-sends/multiple leechers) and
+        can decrease on control-state loss. It is never split across peers.
+      * session_id: aria2.getSessionInfo's session id ("" when unavailable),
+        identifying the counter epoch."""
     peer_up, upload_lengths = {}, {}
+    try:
+        session = rpc("aria2.getSessionInfo", [])
+        session_id = str((session or {}).get("sessionId") or "")
+    except Exception:
+        session_id = ""
     try:
         active = rpc("aria2.tellActive", [["gid", "infoHash", "uploadLength"]])
     except Exception:
-        return peer_up, upload_lengths
+        return peer_up, upload_lengths, session_id
     for d in active:
         ih, gid = d.get("infoHash"), d.get("gid")
         if not ih or not gid:
             continue
         upload_lengths[ih] = _int(d.get("uploadLength"))
         try:
-            peers = rpc("aria2.getPeers", [gid])
+            peers = rpc("aria2.getPeers", [gid, ["ip", "uploadSpeed"]])
         except Exception:
             continue
         m = peer_up.setdefault(ih, {})
@@ -104,41 +115,7 @@ def poll_seeder_peers(rpc):
             ip = p.get("ip")
             if ip:
                 m[ip] = m.get(ip, 0) + _int(p.get("uploadSpeed"))
-    return peer_up, upload_lengths
-
-
-def _distribute_upload_delta(delta, weights):
-    """Split `delta` exact bytes across connected peers proportional to their
-    instantaneous uploadSpeed `weights` ({ip: bps}). This is how we calibrate
-    the per-peer sent-bytes display against aria2's exact per-torrent
-    uploadLength counter instead of integrating the (noisy, bursty)
-    instantaneous rate directly.
-
-    Returns {ip: bytes} summing to exactly `delta` (integer division leaves a
-    remainder of at most len(weights)-1 bytes, which is handed to the
-    largest-share peer), or None if there are no connected peers at all — the
-    caller carries the delta into the next window rather than dropping it.
-    Ties in "largest share" break on dict iteration order (Python 3.7+
-    insertion order), which is stable enough for byte-accounting purposes."""
-    if not weights:
-        return None
-    total_bps = sum(weights.values())
-    ips = list(weights.keys())
-    if total_bps <= 0:
-        # No peer is reporting a nonzero rate this sample (e.g. every peer is
-        # momentarily idle) but bytes were still sent -> split evenly rather
-        # than attributing them all to one arbitrary peer.
-        n = len(ips)
-        base = delta // n
-        shares = {ip: base for ip in ips}
-        remainder = delta - base * n
-    else:
-        shares = {ip: delta * bps // total_bps for ip, bps in weights.items()}
-        remainder = delta - sum(shares.values())
-    if remainder:
-        largest_ip = max(ips, key=lambda ip: weights.get(ip, 0))
-        shares[largest_ip] += remainder
-    return shares
+    return peer_up, upload_lengths, session_id
 
 
 def build_swarm(reg_stats, names):
@@ -324,10 +301,8 @@ class Telemetry:
         self._names = {}                    # last good info_hash -> name
         self._totals = {}                   # last good info_hash -> total bytes
         self._peer_up = {}                  # info_hash -> {ip: server upload bps}
-        self._peer_sent = {}                # info_hash -> {ip: bytes sent this cycle}
-        self._peer_sent_since = {}          # info_hash -> {ip: joined_at the sent counter is anchored to}
-        self._last_upload_len = {}          # info_hash -> aria2's uploadLength as of the last sample
-        self._unattributed = {}             # info_hash -> bytes from a delta with nowhere to go yet (no connected peers), carried to the next window
+        self._upload_len = {}               # info_hash -> control-state uploadLength gauge (epoch-baselined)
+        self._session_id = None             # aria2 session id bound to _upload_len; a change is a new epoch
         self._counters = {"announces_total": 0}
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -343,14 +318,6 @@ class Telemetry:
         exp = self.exporter
         if exp is not None:
             exp.emit(event)
-        # Prune per-IP accumulators when a peer leaves (stopped or stale) so
-        # _peer_sent/_peer_sent_since don't grow unbounded over a long run.
-        if event.get("event") in ("stop", "stale"):
-            ih = event.get("info_hash")
-            ip = event.get("ip")
-            if ih and ip:
-                self._peer_sent.get(ih, {}).pop(ip, None)
-                self._peer_sent_since.get(ih, {}).pop(ip, None)
 
     def note_announce(self):
         with self._lock:
@@ -426,55 +393,28 @@ class Telemetry:
                 self._names = names
             if totals:
                 self._totals = totals
-            # Reset each peer's integrated bytes-sent when it starts a NEW
-            # download cycle, so the swarm map shows what this server sent for
-            # the CURRENT download — not a lifetime sum across re-downloads. The
-            # registry's joined_at is the authoritative cycle marker (it advances
-            # when a finished peer re-announces with bytes left to fetch); when it
-            # changes for a peer, zero that peer's accumulator. First sighting of
-            # a peer (anchor unset) just records the anchor — no spurious reset.
-            joined = self._joined_at_by_ip(now)
-            for info_hash, jmap in joined.items():
-                acc = self._peer_sent.setdefault(info_hash, {})
-                anchor = self._peer_sent_since.setdefault(info_hash, {})
-                for ip, j in jmap.items():
-                    if j is None:
-                        continue
-                    if anchor.get(ip) is not None and anchor[ip] != j:
-                        acc[ip] = 0
-                    anchor[ip] = j
-            # per-device server upload: current rate (display) + calibrated
-            # bytes-sent (distributed from aria2's exact per-torrent counter —
-            # see _distribute_upload_delta for why we don't integrate the rate).
-            self._peer_up, upload_lengths = poll_seeder_peers(self.rpc)
+            # Per-peer CURRENT send rate (measured) + the per-torrent
+            # control-state uploadLength gauge, tagged with aria2's session id.
+            # No per-peer cumulative bytes are inferred: the gauge is surfaced
+            # as-is on an unchanged session (increases and image-size overshoot
+            # are legitimate), and RE-BASELINED — never bridged — on a changed
+            # session id OR an observed decrease without a session change (both
+            # mean a new counter epoch / control-state loss). Because nothing is
+            # integrated into a per-peer allocation, an epoch reset loses no
+            # attributed bytes: there is simply nothing to carry.
+            self._peer_up, upload_lengths, session_id = \
+                poll_seeder_peers(self.rpc)
+            new_epoch = (self._session_id is not None
+                         and session_id != self._session_id)
+            self._session_id = session_id
             for info_hash, now_len in upload_lengths.items():
-                # Unexplained jumps are BASELINED, never distributed: on the
-                # first sighting of a hash (telemetry start) the counter's
-                # history is unattributable — whoever happens to be connected
-                # right now didn't necessarily receive it, so distributing it
-                # would spike one peer's row. Same on a counter DECREASE
-                # (aria2 restarted): re-baseline and lose at most one window
-                # rather than misattribute. Deltas only flow between two
-                # consecutive samples of the same counter epoch.
-                last = self._last_upload_len.get(info_hash)
-                self._last_upload_len[info_hash] = now_len
-                if last is None or now_len < last:
-                    continue
-                delta = now_len - last
-                delta += self._unattributed.pop(info_hash, 0)
-                if delta <= 0:
-                    continue
-                weights = self._peer_up.get(info_hash, {})
-                shares = _distribute_upload_delta(delta, weights)
-                if shares is None:
-                    # no connected peers to attribute this delta to -> carry it
-                    # into the next window so bytes are never dropped.
-                    self._unattributed[info_hash] = \
-                        self._unattributed.get(info_hash, 0) + delta
-                    continue
-                acc = self._peer_sent.setdefault(info_hash, {})
-                for ip, share in shares.items():
-                    acc[ip] = acc.get(ip, 0) + share
+                last = self._upload_len.get(info_hash)
+                # On a new session epoch, or a decrease within the same epoch,
+                # report the current counter verbatim (re-baseline). Otherwise
+                # the gauge simply tracks the counter.
+                self._upload_len[info_hash] = now_len
+                if not new_epoch and last is not None and now_len < last:
+                    continue                # decrease: rebaseline, do not bridge
         if self._live_info is not None:
             try:
                 self._transfers, self._extras = aggregate_transfers(
@@ -555,14 +495,6 @@ class Telemetry:
                         high = rcv
         self._report_seen = high
 
-    def _joined_at_by_ip(self, now):
-        """info_hash -> {ip: current-cycle joined_at}, from the registry, so the
-        sampler can spot when a peer begins a fresh download cycle."""
-        out = {}
-        for info_hash, peers in self._registry.snapshot(now=now).items():
-            out[info_hash] = {p["ip"]: p.get("joined_at") for p in peers}
-        return out
-
     # --- live per-peer swarm view (for the swarm map) ---
     def swarm_snapshot(self, now=None):
         now = time.time() if now is None else now
@@ -605,7 +537,6 @@ class Telemetry:
         for info_hash, peers in self._registry.snapshot(now=now).items():
             total = self._totals.get(info_hash)
             up_now = self._peer_up.get(info_hash, {})
-            sent = self._peer_sent.get(info_hash, {})
             out = []
             for p in peers:
                 left = p.get("left")
@@ -617,9 +548,9 @@ class Telemetry:
                     progress = None
                 did = device_by_ip.get(p["ip"])
                 out.append({**p, "progress": progress,
-                            # how fast / how much THIS server is sending to it
+                            # MEASURED current send rate to this peer (no
+                            # inferred cumulative per-peer bytes — retired)
                             "server_up_bps": up_now.get(p["ip"], 0),
-                            "server_sent_bytes": sent.get(p["ip"], 0),
                             "model": model_by_ip.get(p["ip"]),
                             # joined by swarm IP; summary of the device's
                             # LATEST stored report (full rows stay in the
@@ -633,6 +564,10 @@ class Telemetry:
                 "image": self._names.get(info_hash, info_hash),
                 "info_hash": info_hash,
                 "total_bytes": total,
+                # control-state uploadLength gauge (server_observation.torrent):
+                # BitTorrent piece payload over the torrent's control-state
+                # lifetime — may exceed the image size, never a per-device total
+                "upload_length_bytes": self._upload_len.get(info_hash, 0),
                 "seeders": sum(1 for p in peers if p["is_seeder"]),
                 "leechers": sum(1 for p in peers if not p["is_seeder"]),
                 "peers": out,

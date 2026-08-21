@@ -100,303 +100,223 @@ def test_swarm_snapshot_builds_per_peer_progress():
     assert snap["seeder"]["connections"] == 2
 
 
-def test_poll_seeder_peers_maps_server_upload_per_ip():
+def _peers_rpc(active_gid, peers_by_gid, session_id="s0"):
+    """A _fake_rpc-style double for the truth-model peer path. `active_gid` is
+    a callable returning the tellActive(gid+infoHash+uploadLength) list, so a
+    test can mutate uploadLength between samples; `peers_by_gid[gid]` is the
+    rate-only getPeers() list. Asserts the exact filtered key sets the truth
+    model must send (never bitfield)."""
     def rpc(method, params=None):
+        if method == "aria2.getSessionInfo":
+            return {"sessionId": session_id}
         if method == "aria2.tellActive":
-            return [{"gid": "g1", "infoHash": "abc", "uploadLength": "12345"}]
+            assert params and params[0] == ["gid", "infoHash", "uploadLength"]
+            return active_gid()
         if method == "aria2.getPeers":
-            assert params[0] == "g1"
-            return [{"ip": "10.0.0.2", "uploadSpeed": "500000"},
-                    {"ip": "10.0.0.3", "uploadSpeed": "0"}]
-        raise AssertionError(method)
-    pu, upload_lengths = telemetry.poll_seeder_peers(rpc)
-    assert pu == {"abc": {"10.0.0.2": 500000, "10.0.0.3": 0}}
-    assert upload_lengths == {"abc": 12345}
-
-
-def test_swarm_snapshot_includes_server_upload_and_accumulates_sent():
-    # server_sent_bytes is calibrated against aria2's exact per-torrent
-    # uploadLength counter, not integrated from the instantaneous rate. The
-    # first sighting of a hash only BASELINES the counter; each later sample
-    # distributes exactly the counter's delta since the previous one.
-    ga = {"uploadSpeed": "500000", "downloadSpeed": "0", "numActive": "1"}
-    active_full = [{"connections": "1", "infoHash": "abc", "totalLength": "1000",
-                    "files": [{"path": "/img/cat9k.bin"}]}]
-    peers = {"g1": [{"ip": "10.0.0.2", "uploadSpeed": "100"}]}
-    upload_len = {"abc": 0}
-
-    def rpc(method, params=None):
-        if method == "aria2.getGlobalStat":
-            return ga
-        if method == "aria2.tellActive":     # poll_seeder asks for files; peers for gid
-            keys = params[0] if params else []
-            if "files" in keys:
-                return active_full
-            return [{"gid": "g1", "infoHash": "abc",
-                     "uploadLength": str(upload_len["abc"])}]
-        if method == "aria2.getPeers":
-            return peers.get(params[0], [])
-        raise AssertionError(method)
-
-    hub = telemetry.Telemetry(PeerRegistry(), rpc=rpc, interval=10)
-    hub.sample()                                   # baseline (attributes nothing)
-    upload_len["abc"] = 1000
-    hub.sample()                                   # delta = 1000
-    hub._registry.announce("abc", "l1", "10.0.0.2", 6882, left=500)
-    p = [x for x in hub.swarm_snapshot()["images"][0]["peers"]
-         if x["ip"] == "10.0.0.2"][0]
-    assert p["server_up_bps"] == 100
-    assert p["server_sent_bytes"] == 1000          # calibrated to the exact counter
-    upload_len["abc"] = 1800                       # aria2's exact counter advances
-    hub.sample()                                   # delta 800, one connected peer
-    p2 = [x for x in hub.swarm_snapshot()["images"][0]["peers"]
-          if x["ip"] == "10.0.0.2"][0]
-    assert p2["server_sent_bytes"] == 1800
-
-
-def test_swarm_snapshot_server_sent_resets_on_new_download_cycle():
-    # "sent by server" must reflect the CURRENT download, not the peer's
-    # lifetime. When a finished peer re-downloads (its joined_at advances), the
-    # calibrated bytes-sent accumulator resets — otherwise the map would show
-    # the sum of every download the peer ever did. The reset logic runs before
-    # the calibrated distribution each sample, so it still applies cleanly.
-    ga = {"uploadSpeed": "0", "downloadSpeed": "0", "numActive": "1"}
-    active_full = [{"connections": "1", "infoHash": "abc", "totalLength": "1000",
-                    "files": [{"path": "/img/cat9k.bin"}]}]
-    peers = {"g1": [{"ip": "10.0.0.2", "uploadSpeed": "100"}]}
-    upload_len = {"abc": 0}
-
-    def rpc(method, params=None):
-        if method == "aria2.getGlobalStat":
-            return ga
-        if method == "aria2.tellActive":
-            keys = params[0] if params else []
-            if "files" in keys:
-                return active_full
-            return [{"gid": "g1", "infoHash": "abc",
-                     "uploadLength": str(upload_len["abc"])}]
-        if method == "aria2.getPeers":
-            return peers.get(params[0], [])
-        raise AssertionError(method)
-
-    def sent(hub, now):
-        ps = hub.swarm_snapshot(now=now)["images"][0]["peers"]
-        return [x for x in ps if x["ip"] == "10.0.0.2"][0]["server_sent_bytes"]
-
-    hub = telemetry.Telemetry(PeerRegistry(), rpc=rpc, interval=10)
-    # cycle 1: downloading; two samples calibrated against aria2's exact
-    # counter advancing to 2000 B total (1000 B delta per sample)
-    hub._registry.announce("abc", "l1", "10.0.0.2", 6882, left=500, now=1000)
-    hub.sample(now=1000)   # baseline (first sighting attributes nothing)
-    upload_len["abc"] = 1000
-    hub.sample(now=1000)
-    upload_len["abc"] = 2000
-    hub.sample(now=1000)
-    assert sent(hub, 1000) == 2000
-    # peer finishes (left=0), then re-downloads later (left>0) -> new cycle
-    hub._registry.announce("abc", "l1", "10.0.0.2", 6882, left=0, now=1005)
-    hub._registry.announce("abc", "l1", "10.0.0.2", 6882, left=500, now=1010)
-    upload_len["abc"] = 3000             # aria2's counter keeps climbing (+1000)
-    hub.sample(now=1010)                 # first sample of the new cycle -> reset
-    assert sent(hub, 1010) == 1000       # ONLY this cycle's 1000, not 3000
-
-
-# --- sent-bytes calibration against aria2's exact uploadLength counter ---
-# (regression coverage for the rate*interval overcount bug: a per-peer row
-# could exceed the torrent's own exact cumulative uploadLength on bursty
-# transfers because the old code integrated the noisy instantaneous rate
-# instead of calibrating against the exact counter.)
-
-def _calibration_rpc(upload_len, peers_by_gid, connections="1"):
-    """A _fake_rpc-style RPC double for calibration tests: single torrent
-    'abc'/gid 'g1'. `upload_len` is a mutable {"abc": int} the test can bump
-    between samples; `peers_by_gid["g1"]` is the getPeers() list."""
-    active_full = [{"connections": connections, "infoHash": "abc",
-                    "totalLength": "1000000000",
-                    "files": [{"path": "/img/cat9k.bin"}]}]
-
-    def rpc(method, params=None):
-        if method == "aria2.getGlobalStat":
-            return {"uploadSpeed": "0", "downloadSpeed": "0", "numActive": "1"}
-        if method == "aria2.tellActive":
-            keys = params[0] if params else []
-            if "files" in keys:
-                return active_full
-            return [{"gid": "g1", "infoHash": "abc",
-                     "uploadLength": str(upload_len["abc"])}]
-        if method == "aria2.getPeers":
+            assert params[1] == ["ip", "uploadSpeed"]      # rate-only, no bitfield
             return peers_by_gid.get(params[0], [])
         raise AssertionError(method)
     return rpc
 
 
-def test_sample_distributes_delta_proportionally_to_peer_speed():
-    # Two peers, speeds 3:1 -> a 100MB delta splits 75MB/25MB, summing exactly.
-    upload_len = {"abc": 0}
-    peers = {"g1": [{"ip": "10.0.0.2", "uploadSpeed": "300"},
-                    {"ip": "10.0.0.3", "uploadSpeed": "100"}]}
-    hub = telemetry.Telemetry(PeerRegistry(), rpc=_calibration_rpc(upload_len, peers),
-                              interval=15)
-    hub.sample()   # baseline: first sighting of a hash attributes nothing
-    upload_len["abc"] = 100 * 1024 * 1024
-    hub.sample()
-    sent = hub._peer_sent["abc"]
-    assert sent["10.0.0.2"] == 75 * 1024 * 1024
-    assert sent["10.0.0.3"] == 25 * 1024 * 1024
-    assert sent["10.0.0.2"] + sent["10.0.0.3"] == 100 * 1024 * 1024
-
-
-def test_sample_calibration_prevents_burst_overcount_regression():
-    # Regression for the confirmed bug: instantaneous uploadSpeed integrated
-    # over the sample interval would have summed to 2x the exact delta on a
-    # bursty LAN transfer. The calibrated sampler must store exactly the
-    # exact-counter delta, never the (higher) naive rate*interval figure.
-    interval = 15
-    upload_len = {"abc": 0}
-    # A speed high enough that rate*interval alone would double the real delta.
-    exact_delta = 50_000_000
-    naive_bps = exact_delta // interval           # what old code integrated...
-    burst_bps = naive_bps * 2                      # ...at 2x the real rate (burst)
-    peers = {"g1": [{"ip": "10.0.0.2", "uploadSpeed": str(burst_bps)}]}
-    hub = telemetry.Telemetry(PeerRegistry(), rpc=_calibration_rpc(upload_len, peers),
-                              interval=interval)
-    hub.sample()   # baseline: first sighting of a hash attributes nothing
-    upload_len["abc"] = exact_delta
-    hub.sample()
-    stored = hub._peer_sent["abc"]["10.0.0.2"]
-    assert stored == exact_delta
-    assert stored != burst_bps * interval          # would be 2x if uncalibrated
-
-
-def test_sample_zero_weight_window_splits_evenly():
-    # All reported speeds are 0 this sample (e.g. momentarily idle) but the
-    # exact counter still advanced -> split the delta evenly, not all-or-nothing.
-    upload_len = {"abc": 0}
-    peers = {"g1": [{"ip": "10.0.0.2", "uploadSpeed": "0"},
+def test_poll_seeder_peers_uses_filtered_keys_and_reports_session():
+    # The rate path fetches ONLY ip+uploadSpeed (never bitfield / cumulative),
+    # tellActive fetches only gid+infoHash+uploadLength, and the session id
+    # comes from aria2.getSessionInfo so the caller can detect a counter epoch.
+    def active_gid():
+        return [{"gid": "g1", "infoHash": "abc", "uploadLength": "12345"}]
+    peers = {"g1": [{"ip": "10.0.0.2", "uploadSpeed": "500000"},
                     {"ip": "10.0.0.3", "uploadSpeed": "0"}]}
-    hub = telemetry.Telemetry(PeerRegistry(), rpc=_calibration_rpc(upload_len, peers),
-                              interval=15)
-    hub.sample()   # baseline: first sighting of a hash attributes nothing
-    upload_len["abc"] = 100
-    hub.sample()
-    sent = hub._peer_sent["abc"]
-    assert sent["10.0.0.2"] == 50
-    assert sent["10.0.0.3"] == 50
+    pu, upload_lengths, session_id = telemetry.poll_seeder_peers(
+        _peers_rpc(active_gid, peers, session_id="sess-1"))
+    assert pu == {"abc": {"10.0.0.2": 500000, "10.0.0.3": 0}}
+    assert upload_lengths == {"abc": 12345}
+    assert session_id == "sess-1"
 
 
-def test_sample_no_peer_window_carries_delta_to_next_window():
-    # No peers connected this sample (getPeers returns []) but the exact
-    # counter advanced -> nothing is dropped; the delta carries forward and is
-    # attributed once a peer shows up in a later sample.
-    upload_len = {"abc": 0}
-    peers = {"g1": []}
-    hub = telemetry.Telemetry(PeerRegistry(), rpc=_calibration_rpc(upload_len, peers),
-                              interval=15)
-    hub.sample()   # baseline: first sighting of a hash attributes nothing
-    upload_len["abc"] = 1000
-    hub.sample()
-    assert hub._peer_sent.get("abc", {}) == {}     # nothing to attribute to
-    assert hub._unattributed["abc"] == 1000         # but nothing lost either
+def test_poll_seeder_peers_session_absent_is_empty_string():
+    # getSessionInfo may be unavailable (old aria2 / RPC blip) -> best-effort
+    # empty session id, and the rest of the peer view still works.
+    def active_gid():
+        return [{"gid": "g1", "infoHash": "abc", "uploadLength": "10"}]
 
-    # a peer connects and the counter advances again -> both the carried and
-    # the new delta are attributed together
-    peers["g1"] = [{"ip": "10.0.0.2", "uploadSpeed": "100"}]
-    upload_len["abc"] = 1500
-    hub.sample()
-    assert hub._peer_sent["abc"]["10.0.0.2"] == 1500  # 1000 carried + 500 new
-    assert "abc" not in hub._unattributed or hub._unattributed["abc"] == 0
+    def rpc(method, params=None):
+        if method == "aria2.getSessionInfo":
+            raise OSError("no session info")
+        if method == "aria2.tellActive":
+            return active_gid()
+        if method == "aria2.getPeers":
+            return [{"ip": "10.0.0.2", "uploadSpeed": "7"}]
+        raise AssertionError(method)
+    pu, upload_lengths, session_id = telemetry.poll_seeder_peers(rpc)
+    assert pu == {"abc": {"10.0.0.2": 7}}
+    assert upload_lengths == {"abc": 10}
+    assert session_id == ""
 
 
-def test_sample_aria2_restart_rebaselines_without_misattribution():
-    # If aria2 restarts, its cumulative uploadLength drops. Unexplained jumps
-    # are BASELINED, never distributed: we lose at most one window instead of
-    # misattributing post-restart bytes (or, worse, a huge stale counter).
-    upload_len = {"abc": 0}
+def test_swarm_snapshot_surfaces_measured_peer_rate_no_inferred_bytes():
+    # server_up_bps is the MEASURED current send rate to a connected peer. No
+    # inferred cumulative per-peer bytes exist anywhere: server_sent_bytes is
+    # gone from the row entirely (it was division, not measurement).
+    def active_gid():
+        return [{"gid": "g1", "infoHash": "abc", "uploadLength": "1000"}]
     peers = {"g1": [{"ip": "10.0.0.2", "uploadSpeed": "100"}]}
-    hub = telemetry.Telemetry(PeerRegistry(), rpc=_calibration_rpc(upload_len, peers),
-                              interval=15)
-    hub.sample()   # baseline: first sighting of a hash attributes nothing
-    upload_len["abc"] = 900_000_000
-    hub.sample()
-    assert hub._peer_sent["abc"]["10.0.0.2"] == 900_000_000
-    assert hub._last_upload_len["abc"] == 900_000_000
-
-    # aria2 restarts: uploadLength drops way down -> rebaseline, attribute none
-    upload_len["abc"] = 200
-    hub.sample()
-    assert hub._peer_sent["abc"]["10.0.0.2"] == 900_000_000
-    assert hub._last_upload_len["abc"] == 200
-
-    # deltas flow normally again from the new baseline
-    upload_len["abc"] = 700
-    hub.sample()
-    assert hub._peer_sent["abc"]["10.0.0.2"] == 900_000_000 + 500
-
-
-def test_sample_first_sighting_baselines_historical_upload():
-    # Telemetry (re)starting while aria2 has been seeding for days: the
-    # counter's history is
-    # unattributable and must NOT be dumped onto whoever is connected at that
-    # moment. Baseline only; nothing distributed.
-    upload_len = {"abc": 5_000_000_000}
-    peers = {"g1": [{"ip": "10.0.0.2", "uploadSpeed": "100"}]}
-    hub = telemetry.Telemetry(PeerRegistry(), rpc=_calibration_rpc(upload_len, peers),
-                              interval=15)
-    hub.sample()
-    assert hub._peer_sent.get("abc", {}).get("10.0.0.2", 0) == 0
-    assert hub._last_upload_len["abc"] == 5_000_000_000
-
-
-def test_sample_multi_hash_deltas_do_not_bleed_across_torrents():
-    # Two torrents sampled together must keep independent counters/deltas —
-    # a delta computed for one info_hash must never leak into the other's
-    # accumulator.
-    active_full = [
-        {"connections": "1", "infoHash": "abc", "totalLength": "1000",
-         "files": [{"path": "/img/a.bin"}]},
-        {"connections": "1", "infoHash": "def", "totalLength": "2000",
-         "files": [{"path": "/img/b.bin"}]},
-    ]
-    upload_len = {"abc": 0, "def": 0}
-    peers = {
-        "ga": [{"ip": "10.0.0.2", "uploadSpeed": "100"}],
-        "gb": [{"ip": "10.0.0.9", "uploadSpeed": "50"}],
-    }
+    ga = {"uploadSpeed": "500000", "downloadSpeed": "0", "numActive": "1"}
+    active_full = [{"connections": "1", "infoHash": "abc", "totalLength": "1000",
+                    "files": [{"path": "/img/cat9k.bin"}]}]
 
     def rpc(method, params=None):
         if method == "aria2.getGlobalStat":
-            return {"uploadSpeed": "0", "downloadSpeed": "0", "numActive": "2"}
+            return ga
         if method == "aria2.tellActive":
             keys = params[0] if params else []
             if "files" in keys:
                 return active_full
-            return [{"gid": "ga", "infoHash": "abc",
-                     "uploadLength": str(upload_len["abc"])},
-                    {"gid": "gb", "infoHash": "def",
-                     "uploadLength": str(upload_len["def"])}]
+            assert keys == ["gid", "infoHash", "uploadLength"]
+            return active_gid()
+        if method == "aria2.getSessionInfo":
+            return {"sessionId": "s0"}
         if method == "aria2.getPeers":
+            assert params[1] == ["ip", "uploadSpeed"]
             return peers.get(params[0], [])
         raise AssertionError(method)
 
+    hub = telemetry.Telemetry(PeerRegistry(), rpc=rpc, interval=10)
+    hub.sample()
+    hub._registry.announce("abc", "l1", "10.0.0.2", 6882, left=500)
+    p = [x for x in hub.swarm_snapshot()["images"][0]["peers"]
+         if x["ip"] == "10.0.0.2"][0]
+    assert p["server_up_bps"] == 100
+    assert "server_sent_bytes" not in p          # no inferred cumulative bytes
+
+
+def test_swarm_snapshot_torrent_upload_length_is_a_gauge():
+    # uploadLength is surfaced only as a control-state gauge on the image
+    # (server_observation.torrent), never split across peers. It may legitimately
+    # exceed the image size on the same session (re-sends / multiple leechers).
+    upload_len = {"abc": 0}
+
+    def active_gid():
+        return [{"gid": "g1", "infoHash": "abc",
+                 "uploadLength": str(upload_len["abc"])}]
+    ga = {"uploadSpeed": "0", "downloadSpeed": "0", "numActive": "1"}
+    active_full = [{"connections": "1", "infoHash": "abc", "totalLength": "1000",
+                    "files": [{"path": "/img/cat9k.bin"}]}]
+
+    def rpc(method, params=None):
+        if method == "aria2.getGlobalStat":
+            return ga
+        if method == "aria2.tellActive":
+            keys = params[0] if params else []
+            return active_full if "files" in keys else active_gid()
+        if method == "aria2.getSessionInfo":
+            return {"sessionId": "s0"}
+        if method == "aria2.getPeers":
+            return [{"ip": "10.0.0.2", "uploadSpeed": "1"}]
+        raise AssertionError(method)
+
+    hub = telemetry.Telemetry(PeerRegistry(), rpc=rpc, interval=10)
+    hub.sample()
+    upload_len["abc"] = 1500          # overshoot past the 1000 B image size
+    hub.sample()
+    hub._registry.announce("abc", "l1", "10.0.0.2", 6882, left=500)
+    img = hub.swarm_snapshot()["images"][0]
+    assert img["upload_length_bytes"] == 1500   # reported as-is on one session
+
+
+def test_sample_unchanged_session_reports_upload_length_verbatim():
+    # On an unchanged session id, increases (including image-size overshoot)
+    # are legitimate and the reported gauge tracks the counter exactly.
+    upload_len = {"abc": 0}
+
+    def active_gid():
+        return [{"gid": "g1", "infoHash": "abc",
+                 "uploadLength": str(upload_len["abc"])}]
+    peers = {"g1": [{"ip": "10.0.0.2", "uploadSpeed": "0"}]}
+    hub = telemetry.Telemetry(PeerRegistry(),
+                              rpc=_peers_rpc(active_gid, peers, session_id="s1"),
+                              interval=15)
+    hub.sample()
+    upload_len["abc"] = 5_000_000_000
+    hub.sample()
+    assert hub._upload_len["abc"] == 5_000_000_000
+    upload_len["abc"] = 6_000_000_000
+    hub.sample()
+    assert hub._upload_len["abc"] == 6_000_000_000
+
+
+def test_sample_session_change_rebaselines_gauge_without_bridging():
+    # A changed aria_session_id is a new counter epoch: the reported gauge
+    # re-baselines to the new session's counter and never bridges the old
+    # epoch's value into the new one.
+    upload_len = {"abc": 900_000_000}
+    session = {"id": "s1"}
+
+    def active_gid():
+        return [{"gid": "g1", "infoHash": "abc",
+                 "uploadLength": str(upload_len["abc"])}]
+
+    def rpc(method, params=None):
+        if method == "aria2.getSessionInfo":
+            return {"sessionId": session["id"]}
+        if method == "aria2.tellActive":
+            return active_gid()
+        if method == "aria2.getPeers":
+            return [{"ip": "10.0.0.2", "uploadSpeed": "0"}]
+        raise AssertionError(method)
+
     hub = telemetry.Telemetry(PeerRegistry(), rpc=rpc, interval=15)
-    hub.sample()   # baseline: first sighting of each hash attributes nothing
-    upload_len["abc"] = 300
-    upload_len["def"] = 5000
     hub.sample()
-    assert hub._peer_sent["abc"]["10.0.0.2"] == 300
-    assert hub._peer_sent["def"]["10.0.0.9"] == 5000
-    assert "10.0.0.9" not in hub._peer_sent["abc"]
-    assert "10.0.0.2" not in hub._peer_sent["def"]
-
-    # only 'abc' advances this round -> 'def' must not accumulate anything new
-    upload_len["abc"] = 900
+    assert hub._upload_len["abc"] == 900_000_000
+    # aria2 reloaded (new session), counter now small -> report the NEW epoch's
+    # value as-is, do not bridge/keep the old 900_000_000.
+    session["id"] = "s2"
+    upload_len["abc"] = 200
     hub.sample()
-    assert hub._peer_sent["abc"]["10.0.0.2"] == 900
-    assert hub._peer_sent["def"]["10.0.0.9"] == 5000    # unchanged
+    assert hub._upload_len["abc"] == 200
+    assert hub._session_id == "s2"
 
 
-def test_distribute_upload_delta_no_peers_returns_none():
-    assert telemetry._distribute_upload_delta(500, {}) is None
+def test_sample_counter_decrease_without_session_change_rebaselines():
+    # A decrease without a session id change (control-state loss) is treated as
+    # a new epoch too: re-baseline to the current counter, never carry the old.
+    upload_len = {"abc": 0}
+
+    def active_gid():
+        return [{"gid": "g1", "infoHash": "abc",
+                 "uploadLength": str(upload_len["abc"])}]
+    peers = {"g1": [{"ip": "10.0.0.2", "uploadSpeed": "0"}]}
+    hub = telemetry.Telemetry(PeerRegistry(),
+                              rpc=_peers_rpc(active_gid, peers, session_id="s1"),
+                              interval=15)
+    hub.sample()
+    upload_len["abc"] = 700
+    hub.sample()
+    assert hub._upload_len["abc"] == 700
+    upload_len["abc"] = 200          # decrease, same session -> rebaseline
+    hub.sample()
+    assert hub._upload_len["abc"] == 200
+
+
+def test_sample_has_no_inferred_allocation_state():
+    # The inferred-allocation machinery is gone: none of the removed
+    # accumulators or the split function survive on the hub or the module.
+    upload_len = {"abc": 0}
+
+    def active_gid():
+        return [{"gid": "g1", "infoHash": "abc",
+                 "uploadLength": str(upload_len["abc"])}]
+    peers = {"g1": [{"ip": "10.0.0.2", "uploadSpeed": "100"}]}
+    hub = telemetry.Telemetry(PeerRegistry(),
+                              rpc=_peers_rpc(active_gid, peers), interval=15)
+    hub.sample()
+    upload_len["abc"] = 1000
+    hub.sample()
+    for attr in ("_peer_sent", "_peer_sent_since", "_last_upload_len",
+                 "_unattributed"):
+        assert not hasattr(hub, attr), attr
+    assert not hasattr(telemetry, "_distribute_upload_delta")
+    assert not hasattr(hub, "_joined_at_by_ip")
 
 
 def test_metrics_server_serves_swarm_json():
@@ -979,90 +899,19 @@ def test_swarm_snapshot_includes_host_from_env(monkeypatch):
     assert hub.swarm_snapshot()["host"] == "100.90.168.20"
 
 
-def test_peer_accumulators_pruned_on_stopped_event():
-    # When a peer sends event=stopped, its IP must be removed from
-    # _peer_sent and _peer_sent_since so those dicts don't grow unbounded.
-    ga = {"uploadSpeed": "0", "downloadSpeed": "0", "numActive": "1"}
-    active_full = [{"connections": "0", "infoHash": "abc",
-                    "totalLength": "1000",
-                    "files": [{"path": "/img/cat9k.bin"}]}]
-    # the counter must ADVANCE between two samples for bytes to land (the
-    # first sighting only baselines), so serve uploadLength from a mutable.
-    upload_len = {"abc": 0}
-    def active_gid():
-        return [{"gid": "g1", "infoHash": "abc",
-                 "uploadLength": str(upload_len["abc"])}]
-    peers_map = {"g1": [{"ip": "10.0.0.2", "uploadSpeed": "100"}]}
-
-    def rpc(method, params=None):
-        if method == "aria2.getGlobalStat":
-            return ga
-        if method == "aria2.tellActive":
-            keys = params[0] if params else []
-            return active_full if "files" in keys else active_gid()
-        if method == "aria2.getPeers":
-            return peers_map.get(params[0], [])
-        raise AssertionError(method)
-
-    reg = PeerRegistry(on_event=lambda e: None)
-    hub = telemetry.Telemetry(reg, rpc=rpc, interval=10)
-    hub.registry = reg      # ensure on_swarm_event is wired
-    reg._on_event = hub.on_swarm_event
-
-    reg.announce("abc", "p1", "10.0.0.2", 6882, left=500, now=0)
-    hub.sample(now=0)       # baseline (first sighting attributes nothing)
-    upload_len["abc"] = 1000
-    hub.sample(now=0)       # delta 1000 lands on 10.0.0.2
-    assert "10.0.0.2" in hub._peer_sent.get("abc", {})
-    assert "10.0.0.2" in hub._peer_sent_since.get("abc", {})
-
-    # peer departs with event=stopped
-    reg.announce("abc", "p1", "10.0.0.2", 6882, event="stopped", now=60)
-
-    # accumulators for this IP must be gone
-    assert "10.0.0.2" not in hub._peer_sent.get("abc", {})
-    assert "10.0.0.2" not in hub._peer_sent_since.get("abc", {})
-
-
-def test_peer_accumulators_pruned_on_stale_expiry():
-    # When the registry prunes a silent peer (stale event), its accumulators
-    # must also be removed — otherwise they grow for the lifetime of the process.
-    ga = {"uploadSpeed": "0", "downloadSpeed": "0", "numActive": "1"}
-    active_full = [{"connections": "0", "infoHash": "abc",
-                    "totalLength": "1000",
-                    "files": [{"path": "/img/cat9k.bin"}]}]
-    # counter must ADVANCE between two samples for bytes to land (first
-    # sighting only baselines), so serve uploadLength from a mutable.
-    upload_len = {"abc": 0}
-    def active_gid():
-        return [{"gid": "g1", "infoHash": "abc",
-                 "uploadLength": str(upload_len["abc"])}]
-    peers_map = {"g1": [{"ip": "10.0.0.3", "uploadSpeed": "50"}]}
-
-    def rpc(method, params=None):
-        if method == "aria2.getGlobalStat":
-            return ga
-        if method == "aria2.tellActive":
-            keys = params[0] if params else []
-            return active_full if "files" in keys else active_gid()
-        if method == "aria2.getPeers":
-            return peers_map.get(params[0], [])
-        raise AssertionError(method)
-
-    reg = PeerRegistry(interval=30)
-    hub = telemetry.Telemetry(reg, rpc=rpc, interval=10)
-    reg._on_event = hub.on_swarm_event
-
-    reg.announce("abc", "p1", "10.0.0.3", 6882, left=500, now=0)
-    hub.sample(now=0)       # baseline (first sighting attributes nothing)
-    upload_len["abc"] = 1000
-    hub.sample(now=0)       # delta 1000 lands on 10.0.0.3
-    assert "10.0.0.3" in hub._peer_sent.get("abc", {})
-
-    # advance time past 2*interval (60 s) so the registry prunes the peer
-    reg.prune_all(now=61)
-
-    assert "10.0.0.3" not in hub._peer_sent.get("abc", {})
+def test_on_swarm_event_does_not_track_per_peer_accumulators():
+    # With inferred allocation removed, a stop/stale event only forwards to the
+    # exporter — there are no per-peer byte accumulators to prune anymore.
+    sent = []
+    exp = otlp.OTLPLogExporter("http://c:4318",
+                               sender=lambda u, b: sent.append(b))
+    hub = telemetry.Telemetry(PeerRegistry(), exporter=exp)
+    hub.on_swarm_event({"event": "stop", "info_hash": "abc", "ip": "10.0.0.2",
+                        "peer_id": "p1", "ts": 0})
+    exp.flush()
+    assert b"p1" in sent[0]
+    for attr in ("_peer_sent", "_peer_sent_since"):
+        assert not hasattr(hub, attr), attr
 
 
 # --- device telemetry reports: _read_reports / join / export / gauge ---
@@ -1158,14 +1007,18 @@ def test_swarm_snapshot_survives_reports_info_raising():
 
 
 def test_swarm_peer_rows_keep_existing_fields_plus_device_id_and_report():
-    # /swarm response shape: everything that was there stays, two fields added.
+    # /swarm response shape: existing fields stay, EXCEPT the retired inferred
+    # server_sent_bytes; two device-join fields are present. The measured
+    # server_up_bps rate stays; the torrent gauge lives on the image row.
     hub = telemetry.Telemetry(PeerRegistry())
     hub._registry.announce("abc", "p1", "10.0.0.2", 6882, left=0, now=0)
-    p = hub.swarm_snapshot(now=0)["images"][0]["peers"][0]
+    img = hub.swarm_snapshot(now=0)["images"][0]
+    assert "upload_length_bytes" in img
+    p = img["peers"][0]
     for key in ("ip", "port", "left", "last_seen", "is_seeder", "progress",
-                "server_up_bps", "server_sent_bytes", "model",
-                "device_id", "report"):
+                "server_up_bps", "model", "device_id", "report"):
         assert key in p, key
+    assert "server_sent_bytes" not in p        # inferred cumulative bytes retired
     assert p["device_id"] is None
     assert p["report"] is None
 
