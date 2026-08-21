@@ -746,20 +746,13 @@ def test_durable_failure_rollback_ordering_precedes_seeder(tmp_path,
 # documents that the tracker-side consumer is a separate integration.
 # ---------------------------------------------------------------------------
 
-def test_announce_token_not_deployable_until_tracker_resolver(monkeypatch,
-                                                              capsys):
-    # The CLI is a non-operational core helper until the deployment/tracker
-    # wiring lands; it must not perform a live rotation and must say so.
-    rc = rot.main(["--state", "/tmp/x", "--secrets", "/tmp/y"])
-    assert rc == 0
-    err = capsys.readouterr().err
-    assert "live wiring pending" in err
-    # Source/contract: the module states the tracker-side consumer is deferred
-    # and the deployment path leaves the probe uncalled until then.
-    import inspect
-    src = inspect.getsource(rot)
-    assert "announce_token" in src
-    assert "deferred" in src or "later task" in src
+def test_cli_requires_maintenance_freeze_acknowledgment(tmp_path, capsys):
+    """Argument validation exits before catalog/RPC/manifest mutation."""
+    with pytest.raises(SystemExit) as raised:
+        rot.main(["--state", str(tmp_path), "--secrets", str(tmp_path / "s")])
+    assert raised.value.code == 2
+    assert not list(tmp_path.iterdir())
+    assert "maintenance-frozen" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
@@ -801,6 +794,20 @@ def test_is_seeder_serving_requires_post_rotation_service_marker():
                                     ["abc"], 100) is False
     assert rot.is_seeder_serving(_serving_swarm(["abc"], last_seen=101),
                                 ["abc"], 100) is True
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"),
+                                  float("-inf"), True])
+def test_is_seeder_serving_rejects_nonfinite_or_bool_boundaries(value):
+    assert rot.is_seeder_serving(_serving_swarm(["abc"], last_seen=101),
+                                 ["abc"], value) is False
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"),
+                                  float("-inf"), True])
+def test_is_seeder_serving_rejects_nonfinite_or_bool_last_seen(value):
+    assert rot.is_seeder_serving(_serving_swarm(
+        ["abc"], last_seen_by_info_hash={"abc": value}), ["abc"], 99) is False
 
 
 def test_is_seeder_serving_requires_each_hash_post_rotation():

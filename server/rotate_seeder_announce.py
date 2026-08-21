@@ -47,16 +47,21 @@ token validation.
 Stdlib only; the orchestration takes injectable deps so it is fully unit
 testable off any live aria2 / tracker."""
 import argparse
+import base64
 import collections
 import hashlib
+import ipaddress
 import json
+import math
 import os
 import secrets
 import sys
 import tempfile
+from urllib.parse import urlsplit, urlunsplit
 
 import secretfs
 import secrets_store
+import telemetry
 import torrent_personalize
 
 SEEDER_PREV_CAP = 2
@@ -468,8 +473,7 @@ def is_seeder_serving(swarm_doc, expected_info_hashes, not_before):
     seeder for an expected torrent fails the predicate (the current seeder
     identity is not proven). A completed typed DEVICE seeder row (left == 0) is
     a legitimate downloader, not a rival origin claim, and is ignored."""
-    if not isinstance(swarm_doc, dict) \
-            or not isinstance(not_before, (int, float)):
+    if not isinstance(swarm_doc, dict) or not _finite_number(not_before):
         return False
     expected = {h for h in (expected_info_hashes or []) if h}
     if not expected:
@@ -494,9 +498,8 @@ def is_seeder_serving(swarm_doc, expected_info_hashes, not_before):
     last_seen_by_info_hash = marker.get("last_seen_by_info_hash")
     if not isinstance(last_seen_by_info_hash, dict) \
             or set(last_seen_by_info_hash) != expected \
-            or any(not isinstance(last_seen_by_info_hash.get(info_hash),
-                                  (int, float))
-                   or last_seen_by_info_hash[info_hash] <= not_before
+            or any(not _finite_number(last_seen_by_info_hash.get(info_hash))
+                    or last_seen_by_info_hash[info_hash] <= not_before
                    for info_hash in expected):
         return False
     if serving != expected:
@@ -521,6 +524,13 @@ def is_seeder_serving(swarm_doc, expected_info_hashes, not_before):
                     and tracker.get("principal_type") != "device":
                 return False
     return True
+
+
+def _finite_number(value):
+    """Accept JSON numbers used as observation timestamps, never bool/NaN/inf."""
+    return (not isinstance(value, bool)
+            and isinstance(value, (int, float))
+            and math.isfinite(value))
 
 
 def make_swarm_probe(expected_info_hashes, not_before, url=None,
@@ -575,13 +585,127 @@ def _http_swarm_sender(url, timeout):
 # CLI (nonsecret only — no token/value argv or output, no revoke option)
 # ---------------------------------------------------------------------------
 
+def _tracker_announce_base(env):
+    """Return the token-free HTTP announce base without ever echoing it."""
+    value = env.get("IRIS_TRACKER_ANNOUNCE")
+    if not value:
+        host = env.get("IRIS_HOST_IP")
+        if not host:
+            raise ValueError("tracker announce base unavailable")
+        value = "http://%s:%s/announce" % (
+            host, env.get("IRIS_TRACKER_PORT") or "6969")
+    parsed = urlsplit(value)
+    if (parsed.scheme != "http" or not parsed.netloc or parsed.query
+            or parsed.fragment):
+        raise ValueError("invalid tracker announce base")
+    try:
+        if not ipaddress.ip_address(parsed.hostname).is_private:
+            raise ValueError("tracker announce base is not private")
+    except ValueError:
+        raise ValueError("tracker announce base is not private")
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path or "/announce",
+                       "", ""))
+
+
+def _image_dir(entry, env):
+    """Resolve an image directory without guessing a basename collision."""
+    filename = entry.get("filename")
+    if not isinstance(filename, str) or not filename:
+        return None
+    source_dir = entry.get("source_dir")
+    if isinstance(source_dir, str) and os.path.isdir(source_dir):
+        # source_dir is authoritative: do not fall back to a same-named image.
+        return source_dir if os.path.isfile(os.path.join(source_dir, filename)) else None
+    roots = []
+    for value in (env.get("IRIS_IMAGES_DIR"), env.get("IMAGES_ROOT"),
+                  "/opt/images"):
+        roots.extend(p for p in (value or "").split(":") if p)
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for parent, _dirs, files in os.walk(root):
+            if filename in files:
+                return parent
+    return None
+
+
+def discover_targets(state, env, rpc):
+    """Discover published canonical torrents and bind each to one active aria GID.
+
+    All reads and RPC preflight occur before the core writes its recovery
+    manifest or changes credentials/canonical torrent bytes.
+    """
+    try:
+        with open(os.path.join(state, "catalog.json")) as f:
+            catalog = json.load(f)
+    except Exception:
+        raise ValueError("catalog unavailable")
+    images = catalog.get("images") if isinstance(catalog, dict) else None
+    if not isinstance(images, dict):
+        raise ValueError("catalog unavailable")
+    candidates = []
+    for image_id in sorted(images):
+        entry = images[image_id]
+        torrent = os.path.join(state, "torrents", "%s.torrent" % image_id)
+        if not isinstance(entry, dict) or not os.path.isfile(torrent):
+            continue
+        image_dir = _image_dir(entry, env)
+        if image_dir is None:
+            raise ValueError("image directory unavailable")
+        try:
+            with open(torrent, "rb") as f:
+                info_hash = _info_hash(f.read()).lower()
+        except Exception:
+            raise ValueError("canonical torrent unavailable")
+        candidates.append((str(image_id), torrent, image_dir, info_hash))
+    if not candidates:
+        raise ValueError("no published torrent targets")
+
+    try:
+        active = rpc("aria2.tellActive", [["gid", "infoHash"]]) or []
+    except Exception:
+        raise ValueError("aria RPC preflight failed")
+    gids = {}
+    for item in active:
+        if isinstance(item, dict) and item.get("gid") and item.get("infoHash"):
+            gids.setdefault(str(item["infoHash"]).lower(), []).append(item["gid"])
+    missing = [h for _, _, _, h in candidates if len(gids.get(h, [])) != 1]
+    if missing:
+        # Inspect non-active states only to make an operator-visible distinction
+        # in RPC audit trails; these states are never acceptable for rotation.
+        try:
+            rpc("aria2.tellWaiting", [0, 1000, ["gid", "infoHash"]])
+            rpc("aria2.tellStopped", [0, 1000, ["gid", "infoHash"]])
+        except Exception:
+            pass
+        raise ValueError("canonical torrent is not uniquely active")
+    return [TorrentTarget(image_id, path, image_dir, gids[info_hash][0])
+            for image_id, path, image_dir, info_hash in candidates]
+
+
+def _seeder_rpc_ops(rpc):
+    def remove(gid):
+        rpc("aria2.forceRemove", [gid])
+        try:
+            rpc("aria2.removeDownloadResult", [gid])
+        except Exception:
+            pass
+
+    def add(torrent_bytes, image_dir):
+        return rpc("aria2.addTorrent", [base64.b64encode(torrent_bytes).decode(),
+                                         [], {"dir": image_dir,
+                                              "seed-ratio": "0",
+                                              "bt-seed-unverified": "true"}])
+    return remove, add
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="rotate-seeder-announce",
         description="Rotate the seeder announce credential (durable-first, "
-                    "recovery-manifested). Operates on the secrets store and "
-                    "nonsecret record ids only; never prints or accepts a "
-                    "token value, and never revokes a previous credential.")
+                    "recovery-manifested). The external maintenance freeze and "
+                    "loopback tracker /swarm service must already be active. "
+                    "Never prints or accepts credential values.")
     ap.add_argument("--state", default=os.environ.get(
         "IRIS_STATE", "/var/lib/iris"),
         help="IRIS state dir (torrents live under <state>/torrents)")
@@ -589,20 +713,44 @@ def main(argv=None):
         "IRIS_SECRETS", "/run/iris/secrets.json"))
     ap.add_argument("--manifest", default=None,
                     help="recovery manifest path (default <state>/"
-                         "seeder-rotation-recovery.json)")
-    ap.parse_args(argv)
-    # Live wiring (real aria2 RPC, real loopback /swarm probe, live tracker
-    # resolver) is assembled by the deployment path in a later task; the pure
-    # core above is the unit under test. When that wiring lands it MUST build
-    # its persist via ``production_deps`` / ``durable_persist`` (secretfs
-    # durable-first) — the plaintext-only ``secrets_store.save`` path is not a
-    # valid operational persist. This CLI intentionally does not perform a live
-    # rotation without that wiring, and new ``announce_token=`` canonical
-    # torrents are not deployable until the tracker-side resolver integration
-    # (deferred) consumes the credential.
-    print("rotate-seeder-announce: core helper; live wiring pending deployment "
-          "integration", file=sys.stderr)
-    return 0
+                          "seeder-rotation-recovery.json)")
+    ap.add_argument("--maintenance-frozen", action="store_true", required=True,
+                    help="acknowledge maintenance is externally frozen; required")
+    args = ap.parse_args(argv)
+    manifest = args.manifest or os.path.join(args.state,
+                                              "seeder-rotation-recovery.json")
+    # Every condition below is preflight-only. In particular, no manifest is
+    # created until the live seeder has been proved to host every target.
+    try:
+        if os.path.exists(manifest):
+            raise ValueError("recovery manifest already exists; archive or remove it safely")
+        recipients = os.environ.get("IRIS_AGE_RECIPIENTS", "")
+        enc_path = os.environ.get("IRIS_SECRETS_ENC", "")
+        if not recipients.strip() or not enc_path.strip():
+            raise ValueError("durable encrypted secrets configuration unavailable")
+        rpc_secret = telemetry._read_rpc_secret(os.environ)
+        if not rpc_secret:
+            raise ValueError("aria RPC secret unavailable")
+        rpc = telemetry.make_jsonrpc_caller(
+            os.environ.get("IRIS_RPC", telemetry.DEFAULT_RPC_URL), rpc_secret)
+        targets = discover_targets(args.state, os.environ, rpc)
+        tracker_base = _tracker_announce_base(os.environ)
+        remove, add = _seeder_rpc_ops(rpc)
+        deps = production_deps(remove, add, recipients, enc_path)
+        result = rotate_seeder_announce(args.secrets, manifest, targets,
+                                        tracker_base, deps)
+    except Exception as exc:
+        # RPC and URL exceptions can include request/token material: never echo.
+        print("rotate-seeder-announce: refused (%s); maintenance remains frozen"
+              % exc.__class__.__name__, file=sys.stderr)
+        return 2
+    if result.served_claimed and not result.hard_no_go:
+        print("rotate-seeder-announce: complete; maintenance may remain frozen",
+              file=sys.stderr)
+        return 0
+    print("rotate-seeder-announce: not proven; maintenance remains frozen; "
+          "recovery manifest preserved at %s" % manifest, file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":
