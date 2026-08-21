@@ -428,7 +428,10 @@ def production_deps(seeder_remove, seeder_add, recipients_csv, enc_path,
         seeder_add=seeder_add,
         swarm_probe=swarm_probe,
         manifest_write=manifest_write or _atomic_write_json,
-        now=now or (lambda: int(time.time())))
+        # Keep sub-second precision: rotation verification requires each
+        # service-seeder announce to occur strictly after the post-add boundary.
+        # Truncating to int would let an earlier announce in the same second pass.
+        now=now or time.time)
 
 
 # ---------------------------------------------------------------------------

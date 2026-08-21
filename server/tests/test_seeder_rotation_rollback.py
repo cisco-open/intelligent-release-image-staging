@@ -631,6 +631,24 @@ def test_production_deps_default_probe_requires_typed_swarm_proof(tmp_path):
     assert bad_deps.swarm_probe({"abc"}, 100) is False
 
 
+def test_production_deps_preserves_fractional_rotation_boundary(tmp_path,
+                                                                monkeypatch):
+    """An announce earlier in the same second must not satisfy the strict
+    post-rotation identity proof."""
+    import time
+
+    monkeypatch.setattr(time, "time", lambda: 100.75)
+    deps = rot.production_deps(
+        seeder_remove=lambda gid: None, seeder_add=lambda b, d: None,
+        recipients_csv="age1r", enc_path=str(tmp_path / "s.age"),
+        swarm_sender=lambda url, timeout: _serving_swarm(
+            ["abc"], last_seen_by_info_hash={"abc": 100.5}))
+
+    boundary = deps.now()
+    assert boundary == 100.75
+    assert deps.swarm_probe({"abc"}, boundary) is False
+
+
 def test_production_deps_rejects_arbitrary_swarm_probe(tmp_path):
     with pytest.raises(TypeError):
         rot.production_deps(
