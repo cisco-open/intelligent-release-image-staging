@@ -6,9 +6,26 @@
 Tokens are resolved via the secrets store's reverse index — a dict keyed by the
 random token value (secrets_store.record_for) — then validated for scope and
 expiry/revoke state."""
+from typing import NamedTuple
 from urllib.parse import parse_qs
 
 import secrets_store as _ss
+
+
+class Principal(NamedTuple):
+    """A typed authenticated identity (spec §0a).
+
+    Never a bare string, so a device literally named ``seeder``
+    (``Principal("device", "seeder")``) can never collide with the service
+    seeder (``Principal("service", "seeder")``). Types:
+
+      * ``device``  — an announce/catalog credential owned by a fleet device.
+      * ``service`` — the current, non-legacy seeder credential (id ``seeder``).
+      * ``legacy``  — a previous/legacy announce token; ``id`` is a nonsecret
+        endpoint-derived key set at tracker integration, never a token value.
+    """
+    type: str
+    id: str
 
 
 def authorize(index, store, token, device_id, scope, now, grace):
