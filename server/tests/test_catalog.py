@@ -283,13 +283,18 @@ def test_list_and_get_image(tmp_path):
         srv.shutdown()
 
 
-def test_torrent_download_bytes(tmp_path):
+def test_torrent_download_device_without_announce_fails_closed(tmp_path):
+    # A device catalog principal with NO announce credential must fail CLOSED
+    # (spec §6) — never a canonical/seeder-token fallback. The _store fixture's
+    # device (from _serve) has no announce_token minted.
     srv, port = _serve(tmp_path, "tok")
     try:
         status, ctype, body = _req(
             port, "GET", "/v1/torrents/img1.torrent", token="tok")
-        assert status == 200 and ctype == "application/x-bittorrent"
-        assert body == b"d4:infod}fakeee"
+        assert status == 500
+        # No token, announce URL, or query string leaks into the error body.
+        assert b"tok" not in body
+        assert b"announce_token" not in body
     finally:
         srv.shutdown()
 
@@ -1622,3 +1627,147 @@ def test_heartbeat_response_report_requested_roundtrip(tmp_path):
         assert "report_requested" not in json.loads(body)
     finally:
         srv.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Task 7 — typed personalized torrent serving (spec §6)
+# ---------------------------------------------------------------------------
+
+import bencode  # noqa: E402
+import torrent_personalize  # noqa: E402
+
+
+def _valid_torrent_bytes(announce=b"http://old:6969/announce"):
+    info = bencode.encode({"name": "img.bin", "piece length": 16384,
+                           "pieces": b"\x00" * 20, "length": 100})
+    return (b"d8:announce" + bencode.encode(announce)
+            + b"4:info" + info + b"e")
+
+
+def _serve_torrent(tmp_path, device_id="dev-t", catalog_tok="ctok",
+                   announce_val="annVAL", host_ip="10.0.0.1"):
+    """Start a catalog server whose device has a catalog_token AND an
+    announce_token, with a VALID canonical torrent for img1 on disk."""
+    sp = _secrets_path(tmp_path)
+    now = time.time()
+    store = secrets_store.load(sp)
+    dev = store["devices"].setdefault(device_id, {})
+    dev["catalog_token"] = {"value": catalog_tok, "created_at": now,
+                            "expires_at": now + 3600, "revoked": False}
+    if announce_val is not None:
+        dev["announce_token"] = {"value": announce_val, "created_at": now,
+                                 "expires_at": 0, "revoked": False}
+    secrets_store.save(store, sp)
+    s = catalog.CatalogStore(str(tmp_path))
+    (tmp_path / "torrents").mkdir(exist_ok=True)
+    (tmp_path / "torrents" / "img1.torrent").write_bytes(_valid_torrent_bytes())
+    s.save_image({"id": "img1", "filename": "img1.bin", "size": 5,
+                  "sha256": "ab" * 32, "cisco_signature_verified": False,
+                  "info_hash_hex": "cc" * 20, "published_at": 111})
+    os.environ["IRIS_HOST_IP"] = host_ip
+    srv = catalog.make_server("127.0.0.1", 0, s, sp)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, srv.server_address[1]
+
+
+def _req_headers(port, path, token):
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    c.request("GET", path, headers={"Authorization": "Bearer " + token})
+    r = c.getresponse()
+    body = r.read()
+    return r.status, dict(r.getheaders()), body
+
+
+def test_device_gets_personalized_torrent_with_its_announce(tmp_path):
+    srv, port = _serve_torrent(tmp_path, announce_val="ANNTOKEN")
+    try:
+        status, headers, body = _req_headers(
+            port, "/v1/torrents/img1.torrent", "ctok")
+        assert status == 200
+        meta = bencode.decode(body)
+        assert b"announce_token=ANNTOKEN" in meta[b"announce"]
+        assert b"announce-list" not in meta
+        # info hash unchanged vs canonical
+        canon = _valid_torrent_bytes()
+        canon_info = bencode.decode(canon)[b"info"]
+        assert bencode.encode(meta[b"info"]) == bencode.encode(canon_info)
+    finally:
+        srv.shutdown()
+
+
+def test_personalized_response_cache_headers(tmp_path):
+    srv, port = _serve_torrent(tmp_path)
+    try:
+        status, headers, body = _req_headers(
+            port, "/v1/torrents/img1.torrent", "ctok")
+        assert status == 200
+        assert headers.get("Cache-Control") == "private, no-store"
+        assert headers.get("Vary") == "Authorization"
+    finally:
+        srv.shutdown()
+
+
+def test_device_missing_announce_fails_closed_no_leak(tmp_path):
+    srv, port = _serve_torrent(tmp_path, announce_val=None)
+    try:
+        status, headers, body = _req_headers(
+            port, "/v1/torrents/img1.torrent", "ctok")
+        assert status == 500
+        # No token, announce URL, or query string leaks (the generic word
+        # "announce" in a message is fine; a secret/URL is not).
+        assert b"ctok" not in body
+        assert b"announce_token=" not in body
+        assert b"http://" not in body
+        assert b"?" not in body
+    finally:
+        srv.shutdown()
+
+
+def test_canonical_disk_bytes_unchanged_after_personalized_get(tmp_path):
+    srv, port = _serve_torrent(tmp_path, announce_val="ANNX")
+    disk = tmp_path / "torrents" / "img1.torrent"
+    before = disk.read_bytes()
+    try:
+        status, _, body = _req_headers(
+            port, "/v1/torrents/img1.torrent", "ctok")
+        assert status == 200
+        assert body != before  # personalized in memory
+        assert disk.read_bytes() == before  # canonical on disk untouched
+    finally:
+        srv.shutdown()
+
+
+def test_torrent_personalization_failure_is_500_no_leak(tmp_path):
+    # Corrupt canonical torrent -> personalize raises -> 500, no token leak.
+    srv, port = _serve_torrent(tmp_path, announce_val="ANNZ")
+    (tmp_path / "torrents" / "img1.torrent").write_bytes(b"d4:infod}fakeee")
+    try:
+        status, _, body = _req_headers(
+            port, "/v1/torrents/img1.torrent", "ctok")
+        assert status == 500
+        assert b"ANNZ" not in body
+    finally:
+        srv.shutdown()
+
+
+def test_service_principal_receives_canonical_bytes(tmp_path):
+    # A non-device (service/internal) principal receives canonical bytes with
+    # no personalization. Exercised at the route level with a synthetic typed
+    # AuthContext (Day-1 mints no service catalog credential).
+    import catalog_auth
+    s = catalog.CatalogStore(str(tmp_path))
+    (tmp_path / "torrents").mkdir(exist_ok=True)
+    canon = _valid_torrent_bytes()
+    (tmp_path / "torrents" / "img1.torrent").write_bytes(canon)
+    s.save_image({"id": "img1", "filename": "img1.bin", "size": 5,
+                  "sha256": "ab" * 32, "cisco_signature_verified": False,
+                  "info_hash_hex": "cc" * 20, "published_at": 111})
+    cat = catalog.Catalog(s, str(tmp_path / "secrets.json"))
+    ctx = catalog_auth.AuthContext(
+        principal=catalog_auth.Principal("service", "seeder"),
+        secret_name="catalog_token", scope="catalog")
+    result = cat.route_get("/v1/torrents/img1.torrent",
+                           auth_ctx=ctx, store_dict={})
+    status, ctype, body = result[0], result[1], result[2]
+    assert status == 200 and ctype == "application/x-bittorrent"
+    assert body == canon  # canonical, unmodified

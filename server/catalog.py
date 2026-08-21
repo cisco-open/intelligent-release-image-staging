@@ -20,10 +20,11 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import audit
-import auth
+import catalog_auth
 import live_samples
 import secretfs
 import secrets_store
+import torrent_personalize
 
 
 def _audit_id(value):
@@ -347,7 +348,40 @@ class Catalog:
         index = secrets_store.build_index(store_dict)
         return store_dict, index
 
-    def route_get(self, path):
+    def _announce_base_url(self):
+        """Return the tracker announce base URL (no query), or None.
+
+        Personalized/canonical announce URLs carry the IRIS credential in a
+        dedicated ``announce_token=`` query parameter (spec §6), distinct from
+        aria2's own ``key=``. The base is taken from IRIS_TRACKER_ANNOUNCE if
+        set, else derived from IRIS_HOST_IP + the tracker announce port."""
+        base = os.environ.get("IRIS_TRACKER_ANNOUNCE")
+        if base:
+            return base
+        host_ip = os.environ.get("IRIS_HOST_IP")
+        if not host_ip:
+            return None
+        port = os.environ.get("IRIS_TRACKER_PORT", "6969")
+        return "http://%s:%s/announce" % (host_ip, port)
+
+    def _personalized_torrent(self, image_id, announce_value):
+        """Return personalized torrent bytes for *announce_value*, or raise.
+
+        Reads the canonical torrent from disk (never mutating it) and rewrites
+        only the outer announce to carry ``announce_token=<announce_value>``.
+        The raw ``info`` byte span is preserved verbatim (info hash provably
+        identical). The announce token, the announce URL, and the query string
+        are NEVER logged, echoed, or embedded in any error (spec §6)."""
+        base = self._announce_base_url()
+        if not base:
+            raise ValueError("tracker announce base unavailable")
+        sep = "&" if "?" in base else "?"
+        announce_url = "%s%sannounce_token=%s" % (base, sep, announce_value)
+        with open(self.store.torrent_path(image_id), "rb") as f:
+            canonical = f.read()
+        return torrent_personalize.personalize(canonical, announce_url)
+
+    def route_get(self, path, auth_ctx=None, store_dict=None):
         parts = path.strip("/").split("/")
         if parts == ["v1", "images"]:
             return self._json(200, {"images": self.store.list_images()})
@@ -358,17 +392,63 @@ class Catalog:
         if len(parts) == 3 and parts[:2] == ["v1", "torrents"]:
             image_id = parts[2][:-len(".torrent")] \
                 if parts[2].endswith(".torrent") else parts[2]
-            try:
-                with open(self.store.torrent_path(image_id), "rb") as f:
-                    return (200, "application/x-bittorrent", f.read())
-            except OSError:
-                return self._json(404, {"error": "no such torrent"})
+            return self._route_torrent(image_id, auth_ctx, store_dict)
         if parts == ["v1", "devices"]:
             return self._json(200, {"devices": self.store.list_devices()})
         if len(parts) == 4 and parts[:2] == ["v1", "devices"] \
                 and parts[3] == "policy":
             return self._json(200, self.store.get_policy(parts[2]))
         return self._json(404, {"error": "not found"})
+
+    # Extra response headers the handler must emit for a personalized torrent
+    # so proxies/browsers never cache a device-specific body (spec §6).
+    _PERSONALIZED_HEADERS = (
+        ("Cache-Control", "private, no-store"),
+        ("Vary", "Authorization"),
+    )
+
+    def _route_torrent(self, image_id, auth_ctx, store_dict):
+        """Serve a torrent per the resolved principal (spec §6).
+
+        - device principal: in-memory personalized torrent carrying ONLY that
+          device's valid announce token; missing announce credential fails
+          CLOSED (never a seeder fallback).
+        - service / other internal principal: canonical bytes, unmodified.
+
+        No announce token, announce URL, or query string is ever placed in an
+        error body, log, or audit entry — only the image id, principal, and a
+        boolean outcome are non-secret."""
+        if not os.path.exists(self.store.torrent_path(image_id)):
+            return self._json(404, {"error": "no such torrent"})
+
+        principal = getattr(auth_ctx, "principal", None)
+        ptype = getattr(principal, "type", None)
+
+        if ptype == "device":
+            now = time.time()
+            grace = int(os.environ.get("IRIS_TOKEN_SKEW_GRACE", "300"))
+            announce_value = catalog_auth.device_announce_value(
+                store_dict or {}, principal.id, now, grace)
+            if not announce_value:
+                # Fail closed: never fall a device back to the seeder token.
+                return self._json(
+                    500, {"error": "no announce credential for device"})
+            try:
+                body = self._personalized_torrent(image_id, announce_value)
+            except Exception:
+                # Any personalization/invariant failure -> 500, no token/URL
+                # in the message (spec §6 no-leak).
+                return self._json(
+                    500, {"error": "torrent personalization failed"})
+            return (200, "application/x-bittorrent", body,
+                    self._PERSONALIZED_HEADERS)
+
+        # Service / internal (or, defensively, unresolved) principal: canonical.
+        try:
+            with open(self.store.torrent_path(image_id), "rb") as f:
+                return (200, "application/x-bittorrent", f.read())
+        except OSError:
+            return self._json(404, {"error": "no such torrent"})
 
     def route_post(self, path, body, src_ip=None, store=None, index=None,
                    token=None):
@@ -578,13 +658,25 @@ def make_server(host, port, store, secrets_path, certfile=None,
             """Route-aware guard.
 
             Device-bound routes (heartbeat, token-refresh, telemetry): require
-            auth.authorize(..., parts[2], "catalog", ...).
+            a device catalog_token resolving to that device's principal.
 
             Shared routes (images, torrents, devices-list, policy): require
             any valid catalog-scoped record.
+
+            Returns ``(store_dict, index, auth_ctx)`` on success (auth_ctx is a
+            typed ``catalog_auth.AuthContext`` for the resolved principal) or
+            ``(None, None, None)`` on auth failure. Every authorization decision
+            is made through the STRICT catalog auth index (spec §6): the broad
+            ``secrets_store.build_index`` never authorizes.
             """
             store_dict, index = cat._load_store()
             now = time.time()
+            try:
+                strict = catalog_auth.build_catalog_auth_index(store_dict)
+            except catalog_auth.DuplicateCredentialError:
+                # Hard config error: duplicate catalog credential ownership.
+                # Fail closed for every request; never a silent overwrite.
+                return None, None, None
 
             # Determine if this is a device-bound route
             is_device_bound = (
@@ -595,8 +687,12 @@ def make_server(host, port, store, secrets_path, certfile=None,
 
             if is_device_bound:
                 device_id = parts[2]
-                ok = auth.authorize(
-                    index, store_dict, token, device_id, "catalog", now, grace)
+                ctx = catalog_auth.resolve_catalog_auth(
+                    store_dict, strict, token, now, grace)
+                ok = (ctx is not None
+                      and ctx.principal.type == "device"
+                      and ctx.principal.id == device_id
+                      and ctx.secret_name == "catalog_token")
                 if not ok:
                     # Audit auth failure for token-refresh routes
                     if parts[3] == "token-refresh":
@@ -608,30 +704,19 @@ def make_server(host, port, store, secrets_path, certfile=None,
                             )
                         except Exception:
                             pass
-                    return None, None
+                    return None, None, None
+                return store_dict, index, ctx
 
-                return store_dict, index
-
-            # Shared route: accept any valid catalog token.
-            # NOTE: a rolled-old token (catalog_token_prev) works here because
-            # record_for finds it in the index and its _scope=="catalog".  It is
-            # rejected on device-bound routes above because auth.authorize only
-            # matches SECRET_TYPES entries, and catalog_token_prev has no entry
-            # there — that asymmetry is intentional (overlap window applies to
-            # non-device-bound reads only).
-            result = secrets_store.record_for(index, store_dict, token)
-            if result is None:
-                return None, None
-            _, secret_name, record = result
-            # Accept catalog_token (via SECRET_TYPES) or catalog_token_prev
-            # (stashed by _handle_token_refresh for the overlap window).
-            stype = secrets_store.SECRET_TYPES.get(secret_name, {})
-            scope = stype.get("scope") or record.get("_scope", "")
-            if scope != "catalog":
-                return None, None
-            if not secrets_store.valid(record, now, grace):
-                return None, None
-            return store_dict, index
+            # Shared route: accept any valid catalog credential resolved through
+            # the strict index (device catalog_token OR catalog_token_prev). A
+            # rolled-old token (catalog_token_prev) works here because the strict
+            # index covers it; it is rejected on device-bound routes above
+            # because those require secret_name == "catalog_token".
+            ctx = catalog_auth.resolve_catalog_auth(
+                store_dict, strict, token, now, grace)
+            if ctx is None:
+                return None, None, None
+            return store_dict, index, ctx
 
         def _extract_token(self):
             value = self.headers.get("Authorization", "")
@@ -641,10 +726,20 @@ def make_server(host, port, store, secrets_path, certfile=None,
             return value[len(prefix):]
 
         def _send(self, triple):
-            status, ctype, body = triple
+            # triple is (status, ctype, body) or
+            # (status, ctype, body, extra_headers) where extra_headers is an
+            # iterable of (name, value) pairs (e.g. personalized-torrent
+            # Cache-Control/Vary, spec §6).
+            extra_headers = ()
+            if len(triple) == 4:
+                status, ctype, body, extra_headers = triple
+            else:
+                status, ctype, body = triple
             self.send_response(status)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
+            for name, value in extra_headers:
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(body)
 
@@ -655,12 +750,13 @@ def make_server(host, port, store, secrets_path, certfile=None,
                             json.dumps({"error": "unauthorized"}).encode()))
                 return
             parts = self.path.strip("/").split("/")
-            store_dict, index = self._guard(parts, token)
+            store_dict, index, auth_ctx = self._guard(parts, token)
             if store_dict is None:
                 self._send((401, "application/json",
                             json.dumps({"error": "unauthorized"}).encode()))
                 return
-            self._send(cat.route_get(self.path))
+            self._send(cat.route_get(
+                self.path, auth_ctx=auth_ctx, store_dict=store_dict))
 
         def do_POST(self):
             token = self._extract_token()
@@ -669,7 +765,7 @@ def make_server(host, port, store, secrets_path, certfile=None,
                             json.dumps({"error": "unauthorized"}).encode()))
                 return
             parts = self.path.strip("/").split("/")
-            store_dict, index = self._guard(parts, token)
+            store_dict, index, auth_ctx = self._guard(parts, token)
             if store_dict is None:
                 self._send((401, "application/json",
                             json.dumps({"error": "unauthorized"}).encode()))
