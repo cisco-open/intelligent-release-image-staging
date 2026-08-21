@@ -129,7 +129,7 @@ def test_purge_device_clears_all_state(tmp_path):
     assert s.get_policy("sw-1") == {"approved_image_id": None,
                                     "install_allowed": False}
     assert s.get_telemetry("sw-1") == []
-    assert s.pending_report("sw-1", now=1001) is False
+    assert s.pending_report("sw-1", now=1001) is None
     # idempotent on a purged / never-seen device
     assert s.purge_device("sw-1") is False
     assert s.purge_device("never-seen") is False
@@ -1254,8 +1254,9 @@ def test_sanitize_report_whitelists_and_trims():
     data.pop("peers_total", None)                # absent -> floored at rows
     out = catalog._sanitize_report(data)
     assert set(out) <= {"ts", "image_id", "event", "transfer", "link",
-                        "peers", "peers_total", "agent"}
+                        "peers", "peers_total", "agent", "schema"}
     assert "evil_key" not in out and "install" not in out
+    assert out["schema"] == "v1"
     assert out["image_id"] == "A" * 128
     assert out["link"]["tier"] == "B" * 128
     # peers: exactly 64 rows of exactly {ip}, ip capped at 64 chars
@@ -1389,14 +1390,14 @@ def test_pull_directive_lifecycle_with_ttl(tmp_path):
     s = catalog.CatalogStore(str(tmp_path))
     now = 1000.0
     assert catalog.CatalogStore.PULL_TTL == 600
-    assert s.pending_report("dev-1", now) is False
+    assert s.pending_report("dev-1", now) is None
     # request -> pending
     assert s.request_report("dev-1", now) is True
-    assert s.pending_report("dev-1", now + 1) is True
+    assert s.pending_report("dev-1", now + 1)["report_requested"] is True
     # one pending per device: duplicate refused while unexpired
     assert s.request_report("dev-1", now + 10) is False
     # TTL expiry: at now + PULL_TTL the directive is expired...
-    assert s.pending_report("dev-1", now + 600) is False
+    assert s.pending_report("dev-1", now + 600) is None
     # ...and was lazily deleted from pull_requests.json
     with open(str(tmp_path / "pull_requests.json")) as f:
         assert "dev-1" not in json.load(f)
@@ -1404,7 +1405,7 @@ def test_pull_directive_lifecycle_with_ttl(tmp_path):
     assert s.request_report("dev-1", now + 600) is True
     # explicit clear
     s.clear_report_request("dev-1")
-    assert s.pending_report("dev-1", now + 601) is False
+    assert s.pending_report("dev-1", now + 601) is None
 
 
 def test_record_telemetry_clears_pull_request(tmp_path):
@@ -1413,11 +1414,11 @@ def test_record_telemetry_clears_pull_request(tmp_path):
     s = catalog.CatalogStore(str(tmp_path))
     assert s.request_report("dev-1", 1000.0) is True
     assert s.request_report("dev-2", 1000.0) is True
-    assert s.pending_report("dev-1", 1001.0) is True
+    assert s.pending_report("dev-1", 1001.0)["report_requested"] is True
     s.record_telemetry("dev-1", _report(event="pull"))
-    assert s.pending_report("dev-1", 1002.0) is False
+    assert s.pending_report("dev-1", 1002.0) is None
     # dev-2's directive is untouched
-    assert s.pending_report("dev-2", 1002.0) is True
+    assert s.pending_report("dev-2", 1002.0)["report_requested"] is True
 
 
 # --- HTTP path: route, auth binding, body caps, gzip ------------------------

@@ -17,7 +17,7 @@ OK = {"v": 1, "image_id": "img-1", "phase": "downloading",
 class TestSanitize:
     def test_valid_passes_and_whitelists(self):
         s = live_samples.sanitize_sample(dict(OK, extra="dropme"), "img-1")
-        assert s == OK
+        assert s == dict(OK, schema="v1")
 
     def test_rejects(self):
         bad = [
@@ -46,23 +46,30 @@ class TestSanitize:
 class TestLiveTable:
     def test_update_reject_snapshot(self):
         t = live_samples.LiveTable()
-        t.update("d1", dict(OK), 1000.0, 1)
+        clean = live_samples.sanitize_sample(dict(OK), "img-1")
+        t.observe("d1", clean, 1000.0, 1)
         t.reject()
         snap = t.snapshot(1000.0)
         assert snap["counters"]["samples_rejected_total"] == 1
         ent = snap["samples"]["d1"]
         assert ent["received_at"] == 1000.0
-        assert ent["effective_interval"] == 60      # good tier, every=1
+        assert ent["valid"] is True
 
-    def test_ttl_scales_with_tier_and_stream_every(self):
+    def test_v1_retention_scales_with_tier_and_stream_every(self):
+        # retention_seconds = min(900, max(TIER_TICKS[class], every)*60*3)
+        # good every=1 -> 180 ; constrained every=1 -> min(900,4*180)=720 ;
+        # good every=10 -> min(900,10*180)=900 (capped).
         t = live_samples.LiveTable()
-        t.update("good1", dict(OK), 1000.0, 1)                       # ttl 180
-        t.update("con4", dict(OK, tier="constrained"), 1000.0, 1)    # ttl 720
-        t.update("far", dict(OK), 1000.0, 10)                        # ttl 1800
+        t.observe("good1", live_samples.sanitize_sample(dict(OK), "img-1"),
+                  1000.0, 1)
+        t.observe("con4", live_samples.sanitize_sample(
+            dict(OK, tier="constrained"), "img-1"), 1000.0, 1)
+        t.observe("far", live_samples.sanitize_sample(dict(OK), "img-1"),
+                  1000.0, 10)
         assert set(t.snapshot(1170.0)["samples"]) == {"good1", "con4", "far"}
         assert set(t.snapshot(1190.0)["samples"]) == {"con4", "far"}
         assert set(t.snapshot(1730.0)["samples"]) == {"far"}
-        assert t.snapshot(2810.0)["samples"] == {}
+        assert t.snapshot(1910.0)["samples"] == {}
 
 
 class TestSettings:
@@ -104,7 +111,8 @@ class TestWriterLoop:
         import time as _time
         path = str(tmp_path / "live-samples.json")
         t = live_samples.LiveTable()
-        t.update("d1", dict(OK), _time.time(), 1)    # fresh: writes non-empty
+        t.observe("d1", live_samples.sanitize_sample(dict(OK), "img-1"),
+                  _time.time(), 1)    # fresh: writes non-empty
         stop = threading.Event()
         th = threading.Thread(target=live_samples.writer_loop,
                               args=(t, path, 0.05, stop), daemon=True)
@@ -117,7 +125,8 @@ class TestWriterLoop:
             assert "d1" in json.load(f)["samples"]
         # age the entry out (stale received_at, far past ttl on the real
         # clock) -> the next pass evicts it and makes ONE final empty write
-        t.update("d1", dict(OK), 0.0, 1)
+        t.observe("d1", live_samples.sanitize_sample(dict(OK), "img-1"),
+                  0.0, 1)
         for _ in range(100):
             with open(path) as f:
                 if json.load(f)["samples"] == {}:

@@ -2892,7 +2892,8 @@ def test_request_report_session_csrf_and_429(tmp_path):
         assert st == 200
         res = json.loads(b)
         assert res["ok"] is True and res["expires_at"] > time.time()
-        assert cat.pending_report("d1", time.time()) is True
+        assert cat.pending_report(
+            "d1", time.time())["report_requested"] is True
         # duplicate while pending -> 429
         st, _, b = _req(host, port, "POST", "/api/devices/d1/request-report",
                         {}, headers=hh)

@@ -9,18 +9,21 @@ import live_samples
 
 class _Store:
     """Minimal CatalogStore stand-in for route_post heartbeat tests."""
-    def __init__(self, approved="img-1"):
+    def __init__(self, approved="img-1", stage_error=None,
+                 stage_state="ready"):
         self.approved = approved
+        self.stage_error = stage_error
+        self.stage_state = stage_state
         self.heartbeats = []
 
-    def record_heartbeat(self, device_id, data):
+    def record_heartbeat(self, device_id, data, now=None):
         self.heartbeats.append((device_id, data))
 
     def get_policy(self, device_id):
         return {"approved_image_id": self.approved, "install_allowed": False}
 
     def pending_report(self, device_id, now):
-        return False
+        return None
 
 
 SAMPLE = {"v": 1, "image_id": "img-1", "phase": "downloading",
@@ -85,3 +88,96 @@ class TestSettingsEcho:
     def test_no_settings_no_keys(self):
         _, resp = _post(_cat(), {})
         assert "stream_every" not in resp and "stream_pause" not in resp
+
+
+# --- v2 telemetry_observation envelope in the heartbeat (Task 20) ----------
+
+TID = "3f0a9c1d8e2b4a6f9017c3d5e7b1a2c4"
+
+
+def _obs(**over):
+    env = {"v": 2, "obs_state": "observed", "observed_at": 1.0,
+           "transfer_id": TID, "image_id": "img-1", "sample_seq": 1,
+           "sampling_class": "good",
+           "aria": {"status": "active", "completed_content_bytes": 1,
+                    "total_content_bytes": 2, "receive_bps": 3,
+                    "send_bps": 4, "connections": 5},
+           "peer_connections": []}
+    env.update(over)
+    return env
+
+
+class TestV2ObservationIngest:
+    def test_valid_observation_lands(self):
+        table = live_samples.LiveTable()
+        cat = _cat(table=table)
+        status, resp = _post(cat, {"current_image_id": "img-1",
+                                   "telemetry_enabled": True,
+                                   "telemetry_stream_enabled": True,
+                                   "telemetry_observation": _obs()})
+        assert status == 200 and resp["ok"] is True
+        assert table.size() == 1
+        ent = table.snapshot(1.0)["samples"]["d1"]
+        assert ent["obs_state"] == "observed" and ent["schema"] == "v2"
+
+    def test_bad_observation_rejected_heartbeat_still_200(self):
+        table = live_samples.LiveTable()
+        cat = _cat(table=table)
+        status, resp = _post(cat, {"current_image_id": "img-1",
+                                   "telemetry_observation": _obs(v=9)})
+        assert status == 200 and resp["ok"] is True
+        assert table.snapshot(0.0)["counters"]["samples_rejected_total"] == 1
+        assert table.size() == 0
+
+    def test_bad_observation_leaves_prior_good_data(self):
+        table = live_samples.LiveTable()
+        cat = _cat(table=table)
+        _post(cat, {"current_image_id": "img-1",
+                    "telemetry_observation": _obs(sample_seq=5)})
+        assert table.size() == 1
+        _post(cat, {"current_image_id": "img-1",
+                    "telemetry_observation": _obs(obs_state="running")})
+        # bad envelope rejected + counted, prior good data untouched
+        assert table.size() == 1
+        assert table.snapshot(1.0)["samples"]["d1"]["sample_seq"] == 5
+
+    def test_flags_off_withdraw_even_with_observed(self):
+        table = live_samples.LiveTable()
+        cat = _cat(table=table)
+        _post(cat, {"current_image_id": "img-1",
+                    "telemetry_observation": _obs()})
+        assert table.snapshot(1.0)["samples"]["d1"]["valid"] is True
+        # telemetry disabled flag -> server withdraws even with observed
+        _post(cat, {"current_image_id": "img-1", "telemetry_enabled": False,
+                    "telemetry_observation": _obs(sample_seq=2)})
+        ent = table.snapshot(1.0)["samples"]["d1"]
+        assert ent["valid"] is False
+
+    def test_unassigned_device_withdraws(self):
+        table = live_samples.LiveTable()
+        cat = _cat(store=_Store(approved="img-1"), table=table)
+        _post(cat, {"current_image_id": "img-1",
+                    "telemetry_observation": _obs()})
+        assert table.snapshot(1.0)["samples"]["d1"]["valid"] is True
+        # now the policy has no assignment -> withdraw
+        cat2 = _cat(store=_Store(approved=None), table=table)
+        cat2.route_post("/v1/devices/d1/heartbeat",
+                        json.dumps({"telemetry_observation":
+                                    {"v": 2, "obs_state": "not_active",
+                                     "observed_at": 1.0}}).encode(),
+                        "10.0.0.9")
+        assert table.snapshot(1.0)["samples"]["d1"]["valid"] is False
+
+    def test_v1_sample_and_v2_envelope_coexist_v2_wins(self):
+        # a v2 agent sends telemetry_observation; a legacy sample is ignored
+        # when the v2 envelope is present (v2 supersedes v1 on v2 agents).
+        table = live_samples.LiveTable()
+        cat = _cat(table=table)
+        _post(cat, {"current_image_id": "img-1",
+                    "telemetry_observation": _obs(),
+                    "sample": {"v": 1, "image_id": "img-1",
+                               "phase": "downloading", "done_bytes": 1,
+                               "down_bps": 1, "up_bps": 1, "peers": 1,
+                               "tier": "good"}})
+        ent = table.snapshot(1.0)["samples"]["d1"]
+        assert ent["schema"] == "v2"

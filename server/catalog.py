@@ -13,6 +13,8 @@ import hashlib
 import io
 import json
 import os
+import re
+import secrets
 import ssl
 import tempfile
 import threading
@@ -71,6 +73,143 @@ _REPORT_EVENTS = ("staging-complete", "seeding-only", "pull")
 _REPORT_PEER_ROWS = 64
 _REPORT_STR_MAX = 128
 
+# v2 terminal report (spec §10.2). Exact strict schema, distinct from the
+# legacy v1 shape above. Ingest re-validates every type/enum/id/bound.
+_HEX32 = re.compile(r"^[a-f0-9]{32}$")
+_IMAGE_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+_CONTENT_SHA256_STATES = ("verified", "mismatch", "not_checked")
+_IOS_COPY_VERIFY_STATES = ("ok", "failed", "not_run", "unsupported")
+_SAMPLING_CLASSES = ("good", "constrained")
+_V2_STAGE_STATES = ("ready", "staging", "flash_full_seeding_only")
+_REPORT_STORE_MAX = 16384       # bytes STORED per report (transport stays 64K)
+_V2_PEER_CAP = 64
+_STATE_PEER_SET_CAP = 512
+_CONTENT_CAP = 2 ** 53
+
+
+def _bounded_report_int(value, cap):
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("report field not an int")
+    if not 0 <= value <= cap:
+        raise ValueError("report field out of bounds")
+    return value
+
+
+def _sanitize_report_v2(data):
+    """Strict server-side re-validation of a v2 terminal report (spec §10.2).
+
+    Exact types/enums/ids/timestamps; content/verification/sampling/stage/peer
+    caps; stored body bounded at _REPORT_STORE_MAX. Tags ``schema:"v2"``.
+    ``report_id`` is the ring dedupe key. No token/secret ever appears in a
+    raised message (a report carries none, but the discipline is explicit)."""
+    report_id = data.get("report_id")
+    if not isinstance(report_id, str) or not _HEX32.match(report_id):
+        raise ValueError("bad report_id")
+    transfer_id = data.get("transfer_id")
+    if not isinstance(transfer_id, str) or not _HEX32.match(transfer_id):
+        raise ValueError("bad transfer_id")
+    event = data.get("event")
+    if event not in _REPORT_EVENTS:
+        raise ValueError("bad event")
+    rrid = data.get("report_request_id")
+    if event == "pull":
+        if rrid is not None and (not isinstance(rrid, str)
+                                 or not _HEX32.match(rrid)):
+            raise ValueError("bad report_request_id")
+    else:
+        if rrid is not None:
+            raise ValueError("report_request_id only for pull")
+    created = data.get("report_created_at")
+    if isinstance(created, bool) or not isinstance(created, (int, float)):
+        raise ValueError("bad report_created_at")
+    image_id = data.get("image_id")
+    if not isinstance(image_id, str) or not _IMAGE_RE.match(image_id):
+        raise ValueError("bad image_id")
+
+    win = data.get("window")
+    if not isinstance(win, dict):
+        raise ValueError("bad window")
+    for key in ("start", "end"):
+        v = win.get(key)
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError("bad window.%s" % key)
+    if not isinstance(win.get("complete"), bool):
+        raise ValueError("bad window.complete")
+
+    content = data.get("content")
+    if not isinstance(content, dict):
+        raise ValueError("bad content")
+    content_out = {
+        "completed_content_bytes": _bounded_report_int(
+            content.get("completed_content_bytes"), _CONTENT_CAP),
+        "total_content_bytes": _bounded_report_int(
+            content.get("total_content_bytes"), _CONTENT_CAP)}
+
+    csha = data.get("content_sha256")
+    if not isinstance(csha, dict) or csha.get("state") not in \
+            _CONTENT_SHA256_STATES:
+        raise ValueError("bad content_sha256")
+    content_sha256 = {"state": csha["state"]}
+    if csha.get("algo") is not None:
+        content_sha256["algo"] = _cap_strings(str(csha["algo"]))
+
+    iocv = data.get("ios_copy_verify")
+    if not isinstance(iocv, dict) or iocv.get("state") not in \
+            _IOS_COPY_VERIFY_STATES:
+        raise ValueError("bad ios_copy_verify")
+
+    sampling = data.get("sampling")
+    if not isinstance(sampling, dict) or sampling.get("sampling_class") not in \
+            _SAMPLING_CLASSES:
+        raise ValueError("bad sampling")
+    sampling_out = {"sampling_class": sampling["sampling_class"]}
+    for key in ("catalog_rtt_ms_median", "catalog_rtt_samples",
+                "heartbeat_fail_streak", "report_fail_streak"):
+        if key in sampling:
+            sampling_out[key] = _peer_int(sampling.get(key))
+
+    stage_state = data.get("stage_state")
+    if stage_state not in _V2_STAGE_STATES:
+        raise ValueError("bad stage_state")
+
+    peers_in = data.get("peers")
+    if not isinstance(peers_in, list):
+        raise ValueError("bad peers")
+    rows = []
+    for row in peers_in[:_V2_PEER_CAP]:
+        if not isinstance(row, dict):
+            raise ValueError("bad peer row")
+        ip = row.get("ip")
+        clean = {"ip": str(ip or "")[:64]}
+        for key in ("first_observed", "last_observed"):
+            v = row.get(key)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                clean[key] = float(v)
+        clean["observations"] = _peer_int(row.get("observations"))
+        rows.append(clean)
+    peers_total = min(max(_peer_int(data.get("peers_total")), len(rows)),
+                      _STATE_PEER_SET_CAP)
+
+    report = {"v": 2, "schema": "v2", "report_id": report_id,
+              "transfer_id": transfer_id, "report_request_id": rrid,
+              "report_created_at": float(created), "image_id": image_id,
+              "event": event,
+              "window": {"start": float(win["start"]),
+                         "end": float(win["end"]),
+                         "complete": bool(win["complete"])},
+              "content": content_out, "content_sha256": content_sha256,
+              "ios_copy_verify": {"state": iocv["state"]},
+              "sampling": sampling_out, "stage_state": stage_state,
+              "peers": rows, "peers_total": peers_total,
+              "peers_truncated": bool(data.get("peers_truncated")),
+              "peers_saturated": bool(data.get("peers_saturated"))}
+    agent = data.get("agent")
+    if isinstance(agent, dict):
+        report["agent"] = _cap_strings(agent)
+    if len(json.dumps(report)) > _REPORT_STORE_MAX:
+        raise ValueError("report too large")
+    return report
+
 
 def _cap_strings(value):
     """Recursively cap every string in *value* (keys included) at
@@ -94,17 +233,17 @@ def _peer_int(value):
 
 
 def _sanitize_report(data):
-    """Server-side re-validation of a device telemetry report (spec issue #13).
+    """Server-side re-validation of a device telemetry report.
 
-    Whitelists top-level keys, requires a known event, re-trims peers to
-    _REPORT_PEER_ROWS rows of exactly {ip[:64]} — participation only, byte
-    fields are not part of the contract — and floors peers_total at the
-    named-row count, coerces the numeric link fields to int, and caps every
-    other string at _REPORT_STR_MAX chars. The device already trims
-    client-side, but ingest never trusts that. Raises ValueError on a
+    Dispatches by version: a ``v == 2`` body is the strict v2 terminal report
+    (spec §10.2, _sanitize_report_v2); anything else is the legacy v1 report
+    (issue #13), tagged ``schema:"v1"`` with its existing ambiguous fields
+    preserved verbatim and NEVER mapped into v2 fields. Raises ValueError on a
     non-dict body or an unknown event (routes map that to a 400)."""
     if not isinstance(data, dict):
         raise ValueError("report must be a JSON object")
+    if data.get("v") == 2:
+        return _sanitize_report_v2(data)
     if data.get("event") not in _REPORT_EVENTS:
         raise ValueError("bad event")
     report = {}
@@ -143,6 +282,7 @@ def _sanitize_report(data):
     # key-count in nested sections is otherwise uncapped.
     if len(json.dumps(report)) > 16384:
         raise ValueError("report too large")
+    report["schema"] = "v1"
     return report
 
 
@@ -278,19 +418,49 @@ class CatalogStore:
     def record_telemetry(self, device_id, report):
         """Append *report* to the device's ring in telemetry.json
         ({device_id: [oldest..newest, <=TELEMETRY_RING]}), stamping
-        received_at.  Evicts the oldest beyond the ring bound, then clears
-        any pending pull directive — the report IS the directive's answer
-        (or supersedes it)."""
+        received_at (the authoritative ingest clock, spec §2/§4).
+
+        Version-aware durability (spec §4/§8):
+        - **v2** reports are DEDUPED by ``report_id``: appending a report whose
+          id already exists in the ring is a no-op (idempotent crash retry).
+        - **v1** reports get a random stable ``_event_id`` stamped HERE, before
+          the ring write, so OTLP can key a durable event id (there is no
+          telemetry-process writeback API). It persists across restart.
+
+        After the write, clears the pending pull directive — MATCH-GATED for v2
+        pulls (only a report whose ``report_request_id`` equals the currently
+        stored request id clears it; a stale/mismatched id cannot clear a newer
+        request). A v1 report (no id to echo) preserves the legacy bridge: it
+        clears the device's pending request unconditionally."""
         report = dict(report)
         report["received_at"] = time.time()
+        is_v2 = report.get("schema") == "v2" or report.get("v") == 2
+        if is_v2:
+            rid = report.get("report_id")
+        else:
+            report.setdefault("_event_id", secrets.token_hex(16))
+            rid = None
         with secrets_store.store_lock(self.telemetry_path):
             tel = self._read(self.telemetry_path)
             ring = tel.get(device_id)
             ring = ring if isinstance(ring, list) else []
+            if rid is not None and any(
+                    isinstance(r, dict) and r.get("report_id") == rid
+                    for r in ring):
+                return          # v2 dedupe: idempotent retry, no-op
             ring.append(report)
             tel[device_id] = ring[-self.TELEMETRY_RING:]
             _atomic_write_json(self.telemetry_path, tel)
-        self.clear_report_request(device_id)
+        if is_v2:
+            # Match-gated (spec §10.2b): only a pull report whose
+            # report_request_id equals the stored request clears it. A v2
+            # completion/seeding report (report_request_id=None) or a mismatched
+            # pull id leaves the pending request intact.
+            rrid = report.get("report_request_id")
+            if rrid is not None:
+                self.clear_report_request(device_id, request_id=rrid)
+        else:
+            self.clear_report_request(device_id)
 
     def get_telemetry(self, device_id):
         reports = self._read(self.telemetry_path).get(device_id, [])
@@ -298,21 +468,23 @@ class CatalogStore:
 
     # --- pull directives (console-requested fresh reports) ---
     def request_report(self, device_id, now):
-        """Flag *device_id* for a fresh report.  Returns False when a
-        non-expired directive is already pending (one per device)."""
+        """Flag *device_id* for a fresh report with a random 32-hex
+        ``request_id`` (spec §10.2b). Returns False when a non-expired directive
+        is already pending (one per device)."""
         with secrets_store.store_lock(self.pull_path):
             pr = self._read(self.pull_path)
             ent = pr.get(device_id)
             if isinstance(ent, dict) and now < ent.get("expires_at", 0):
                 return False
-            pr[device_id] = {"requested_at": now,
+            pr[device_id] = {"request_id": secrets.token_hex(16),
+                             "requested_at": now,
                              "expires_at": now + self.PULL_TTL}
             _atomic_write_json(self.pull_path, pr)
             return True
 
-    def pending_report(self, device_id, now):
-        """True when a non-expired pull directive exists for *device_id*.
-        Expired entries (any device) are reaped lazily here — no threads."""
+    def pending_request(self, device_id, now):
+        """The full non-expired pull directive dict for *device_id* (carrying
+        ``request_id``), or None. Reaps expired entries lazily."""
         with secrets_store.store_lock(self.pull_path):
             pr = self._read(self.pull_path)
             expired = [d for d, ent in pr.items()
@@ -322,13 +494,38 @@ class CatalogStore:
                 del pr[d]
             if expired:
                 _atomic_write_json(self.pull_path, pr)
-            return device_id in pr
+            ent = pr.get(device_id)
+            return dict(ent) if isinstance(ent, dict) else None
 
-    def clear_report_request(self, device_id):
+    def pending_report(self, device_id, now):
+        """Heartbeat directive for *device_id*: a dict
+        ``{report_requested: True, report_request_id: <id>}`` when a non-expired
+        pull is pending, else None (spec §10.2b)."""
+        ent = self.pending_request(device_id, now)
+        if ent is None:
+            return None
+        return {"report_requested": True,
+                "report_request_id": ent.get("request_id")}
+
+    def clear_report_request(self, device_id, request_id="__unset__"):
+        """Clear the pending pull directive for *device_id*.
+
+        MATCH-GATED (spec §10.2b): when *request_id* is supplied (v2 pull path)
+        the clear happens ONLY if it equals the currently stored request id — a
+        stale/mismatched id (e.g. echoing a superseded request) cannot clear a
+        newer request. A ``None`` request id (v2 completion/seeding) or the
+        default sentinel (v1 legacy bridge / explicit clear) clears
+        unconditionally."""
         with secrets_store.store_lock(self.pull_path):
             pr = self._read(self.pull_path)
-            if pr.pop(device_id, None) is not None:
-                _atomic_write_json(self.pull_path, pr)
+            ent = pr.get(device_id)
+            if not isinstance(ent, dict):
+                return
+            if request_id not in ("__unset__", None) \
+                    and ent.get("request_id") != request_id:
+                return          # mismatched id: do not clear a newer request
+            del pr[device_id]
+            _atomic_write_json(self.pull_path, pr)
 
 
 class Catalog:
@@ -496,27 +693,56 @@ class Catalog:
                 # join this device's model onto its swarm peer by IP.
                 "swarm_ip": src_ip,
             })
-            # Live streaming sample (spec 6.1): validated against the POLICY
-            # assignment (server truth), size/enum/bounds checked; a bad
-            # sample NEVER fails the heartbeat — drop and count.
-            sample = data.get("sample")
-            if sample is not None and self.live_table is not None:
+            # Live telemetry (spec §3/§10.1): a v2 `telemetry_observation`
+            # envelope supersedes the legacy v1 `sample` on v2 agents; a bad
+            # envelope/sample NEVER fails the heartbeat — reject-and-count.
+            # The server cross-checks the device's telemetry flags and the
+            # global stream pause and the policy assignment: telemetry off /
+            # paused / unassigned / errored -> WITHDRAW the live value even if
+            # an `observed` envelope arrived, without inventing transfer fields.
+            if self.live_table is not None:
                 approved = self.store.get_policy(parts[2]).get(
                     "approved_image_id")
-                every = (self.stream_settings.read()[0]
-                         if self.stream_settings is not None else 1)
-                try:
-                    clean = live_samples.sanitize_sample(sample, approved)
-                    self.live_table.update(parts[2], clean, time.time(), every)
-                except ValueError:
-                    self.live_table.reject()
+                every, paused = 1, False
+                if self.stream_settings is not None:
+                    every, paused = self.stream_settings.read()
+                tele_off = (data.get("telemetry_enabled") is False
+                            or data.get("telemetry_stream_enabled") is False
+                            or paused or not approved)
+                obs = data.get("telemetry_observation")
+                sample = data.get("sample")
+                if obs is not None:
+                    try:
+                        clean, _trunc = live_samples.sanitize_observation(
+                            obs, approved, every)
+                        if tele_off:
+                            self.live_table.withdraw(parts[2])
+                        else:
+                            self.live_table.observe(
+                                parts[2], clean, time.time(), every)
+                    except ValueError:
+                        self.live_table.reject()
+                elif sample is not None:
+                    try:
+                        clean = live_samples.sanitize_sample(sample, approved)
+                        if tele_off:
+                            self.live_table.withdraw(parts[2])
+                        else:
+                            self.live_table.observe(
+                                parts[2], clean, time.time(), every)
+                    except ValueError:
+                        self.live_table.reject()
             resp = {"ok": True}
             if self.stream_settings is not None:
                 every, pause = self.stream_settings.read()
                 resp["stream_every"] = every
                 resp["stream_pause"] = pause
-            if self.store.pending_report(parts[2], time.time()):
+            directive = self.store.pending_report(parts[2], time.time())
+            if directive is not None:
                 resp["report_requested"] = True
+                rrid = directive.get("report_request_id")
+                if rrid is not None:
+                    resp["report_request_id"] = rrid
             return self._json(200, resp)
         if len(parts) == 4 and parts[:2] == ["v1", "devices"] \
                 and parts[3] == "telemetry":
