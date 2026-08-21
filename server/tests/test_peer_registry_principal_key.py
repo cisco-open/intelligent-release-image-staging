@@ -124,6 +124,22 @@ def test_select_predicate_receives_both_complete_principals_and_ips():
     assert out == [{"ip": "10.0.0.2", "port": 6882}]
 
 
+def test_select_excludes_full_identity_not_bare_peer_id():
+    # A different typed principal reusing the SAME peer_id must remain
+    # discoverable: only the requester's own (principal, peer_id) identity is
+    # excluded, never every record that happens to share the peer_id.
+    reg = PeerRegistry()
+    # requester's OWN self record (device:dev-1 / peer_id "p1")
+    reg.announce("IH", "p1", "10.0.0.1", 6881, principal=DEV, now=0)
+    # a DIFFERENT principal (the service seeder) reusing peer_id "p1"
+    reg.announce("IH", "p1", "10.0.0.2", 6882, principal=SVC_SEEDER, now=0)
+    out = reg.select_peers("IH", "p1", requester_principal=DEV,
+                           requester_ip="10.0.0.1", predicate=None, now=0)
+    ips = {p["ip"] for p in out}
+    # the self record is excluded; the same-peer_id foreign principal survives
+    assert ips == {"10.0.0.2"}
+
+
 def test_select_without_predicate_returns_all_others():
     reg = PeerRegistry()
     reg.announce("IH", "p1", "10.0.0.1", 6881, principal=DEV, now=0)

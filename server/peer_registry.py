@@ -215,14 +215,21 @@ class PeerRegistry:
         returned (implicit permit-all discovery).
         """
         now = time.time() if now is None else now
+        # Exclude the requester's OWN record by its FULL identity key
+        # (principal.type, principal.id, peer_id), not by bare peer_id: a
+        # different typed principal that happens to reuse this peer_id is a
+        # distinct peer and must stay discoverable (spec §0a/§6).
+        req = _DEFAULT_PRINCIPAL if requester_principal is None \
+            else requester_principal
+        self_key = (req.type, req.id, peer_id)
         with self._lock:
             swarm = self._swarms.get(info_hash, {})
             pending = self._prune(info_hash, swarm, now)
             self._cleanup_empty(info_hash, swarm, now)
             limit = min(max(0, numwant), NUMWANT_CAP)
             out = []
-            for r in swarm.values():
-                if r["peer_id"] == peer_id:
+            for key, r in swarm.items():
+                if key == self_key:
                     continue
                 if predicate is not None and not predicate(
                         requester_principal, requester_ip,

@@ -64,7 +64,11 @@ def _raw_pairs(query):
 
 def _resolve_valid_credential(index, store, value, now, grace):
     """Return (Principal, secret_name, legacy_bool) for a valid, non-revoked
-    announce credential, or None. Raises nothing (index built by caller)."""
+    announce credential, or None. Raises nothing (index built by caller).
+
+    *store* is unused here (the *index* already carries the resolved record);
+    it is retained only to keep the positional signature stable for existing
+    callers/tests. Do not rely on it for resolution."""
     entry = index.get(value)
     if entry is None:
         return None
@@ -86,6 +90,9 @@ def resolve_announce_principal(query, index, store, now=None, grace=None,
     id is *legacy_id* (an endpoint-derived nonsecret key supplied at tracker
     integration); when unknown the id is left empty. Raises AnnounceAuthError
     (token-free) on any ambiguous/invalid/absent outcome.
+
+    *store* is unused (resolution is driven entirely by *index*); it is kept only
+    to preserve the positional signature for existing callers.
     """
     now = 0 if now is None else now
     grace = 0 if grace is None else grace
