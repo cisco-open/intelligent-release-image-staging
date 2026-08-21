@@ -7,7 +7,7 @@ Tokens are resolved via the secrets store's reverse index — a dict keyed by th
 random token value (secrets_store.record_for) — then validated for scope and
 expiry/revoke state."""
 from typing import NamedTuple
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, parse_qsl
 
 import secrets_store as _ss
 
@@ -26,6 +26,109 @@ class Principal(NamedTuple):
     """
     type: str
     id: str
+
+
+class AuthContext(NamedTuple):
+    """Resolved typed authentication result (spec §6).
+
+    Carries the typed principal, the owning secret name, and the auth scope. It
+    never carries the token value or the record, so it is safe to log/audit.
+    """
+    principal: Principal
+    secret_name: str
+    scope: str
+
+
+class AnnounceAuthError(Exception):
+    """Announce credential resolution failed (ambiguous / invalid / none).
+
+    Maps to a tracker 403. The message is deliberately token-free — no announce
+    token value, record, or query URL is ever included.
+    """
+
+
+# Query parameter names (spec §6): IRIS carries its credential in a DEDICATED
+# `announce_token=` param, distinct from aria2's BEP-style `key=`.
+_DEDICATED_PARAM = "announce_token"
+_LEGACY_PARAM = "key"
+
+
+def _raw_pairs(query):
+    """All (name, value) query pairs, blanks preserved, order kept.
+
+    Uses keep_blank_values so a blank `announce_token=` is a real occurrence —
+    never collapsed away as parse_qs(...)[0] would.
+    """
+    return parse_qsl(query, keep_blank_values=True)
+
+
+def _resolve_valid_credential(index, store, value, now, grace):
+    """Return (Principal, secret_name, legacy_bool) for a valid, non-revoked
+    announce credential, or None. Raises nothing (index built by caller)."""
+    entry = index.get(value)
+    if entry is None:
+        return None
+    principal, secret_name, record, legacy = entry
+    if not _ss.valid(record, now, grace):
+        return None
+    return (principal, secret_name, legacy)
+
+
+def resolve_announce_principal(query, index, store, now=None, grace=None,
+                               legacy_id=None):
+    """Resolve the announce credential in *query* to a typed AuthContext.
+
+    *index* must be the strict announce index (secrets_store.build_announce_index);
+    it already raises token-free on duplicate value ownership. Resolution order
+    follows spec §6 exactly (see module docstring of the resolver tests).
+
+    A legacy (previous-token) credential resolves to a ``legacy`` principal whose
+    id is *legacy_id* (an endpoint-derived nonsecret key supplied at tracker
+    integration); when unknown the id is left empty. Raises AnnounceAuthError
+    (token-free) on any ambiguous/invalid/absent outcome.
+    """
+    now = 0 if now is None else now
+    grace = 0 if grace is None else grace
+
+    pairs = _raw_pairs(query)
+    dedicated = [v for (k, v) in pairs if k == _DEDICATED_PARAM]
+
+    # Step 1: two or more dedicated occurrences (blank or not) -> ambiguous.
+    if len(dedicated) >= 2:
+        raise AnnounceAuthError("ambiguous announce credential: "
+                                "multiple announce_token parameters")
+
+    # Step 2: exactly one non-blank dedicated -> resolve ONLY that value.
+    if len(dedicated) == 1 and dedicated[0] != "":
+        resolved = _resolve_valid_credential(
+            index, store, dedicated[0], now, grace)
+        if resolved is None:
+            raise AnnounceAuthError("invalid announce credential")
+        return _context(resolved, legacy_id)
+
+    # Step 3: exactly one blank dedicated OR no dedicated -> legacy scan.
+    # Step 4: legacy `key=` scan — accept iff exactly one unique valid value.
+    legacy_values = {v for (k, v) in pairs if k == _LEGACY_PARAM and v != ""}
+    valid_hits = {}
+    for value in legacy_values:
+        resolved = _resolve_valid_credential(index, store, value, now, grace)
+        if resolved is not None:
+            valid_hits[value] = resolved
+    if len(valid_hits) == 1:
+        (resolved,) = valid_hits.values()
+        return _context(resolved, legacy_id)
+    if len(valid_hits) == 0:
+        raise AnnounceAuthError("no valid announce credential")
+    raise AnnounceAuthError("ambiguous announce credential: "
+                            "multiple valid legacy keys")
+
+
+def _context(resolved, legacy_id):
+    principal, secret_name, legacy = resolved
+    if legacy:
+        return AuthContext(Principal("legacy", legacy_id or ""),
+                           secret_name, "announce")
+    return AuthContext(principal, secret_name, "announce")
 
 
 def authorize(index, store, token, device_id, scope, now, grace):
