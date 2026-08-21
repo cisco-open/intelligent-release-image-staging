@@ -288,6 +288,7 @@ def _sanitize_report(data):
 
 class CatalogStore:
     TELEMETRY_RING = 5      # newest reports kept per device (hard disk bound)
+    SEEN_REPORT_IDS = 256   # durable per-device seen v2 report_id ledger bound
     PULL_TTL = 600          # seconds a console pull directive stays pending
 
     def __init__(self, state_dir):
@@ -299,6 +300,14 @@ class CatalogStore:
         self.policy_path = os.path.join(state_dir, "policy.json")
         self.telemetry_path = os.path.join(state_dir, "telemetry.json")
         self.pull_path = os.path.join(state_dir, "pull_requests.json")
+        # Durable bounded per-device seen v2 report_id ledger. The ring
+        # (TELEMETRY_RING) only remembers the newest few reports, so a v2 retry
+        # of an id already evicted from the ring would otherwise re-append and
+        # break the final spec's stable report event ids / idempotence. This
+        # ledger persists SEEN_REPORT_IDS ids/device (deterministic bound,
+        # oldest purged FIFO) and is purged with the device.
+        self.report_ledger_path = os.path.join(state_dir,
+                                                "report_ledger.json")
 
     def _read(self, path):
         try:
@@ -364,15 +373,16 @@ class CatalogStore:
 
     def purge_device(self, device_id):
         """Remove ALL per-device catalog state: the heartbeat record, the
-        image assignment (policy), the telemetry history, and any pending
-        pull directive. Called when the console deletes a device from the
-        fleet — a device that is deleted and added back must come back
-        unassigned, or a stale assignment would silently restage the old
-        image. Contrast forget_device(), which drops only the heartbeat
+        image assignment (policy), the telemetry history, the seen-report-id
+        ledger, and any pending pull directive. Called when the console deletes
+        a device from the fleet — a device that is deleted and added back must
+        come back unassigned, or a stale assignment would silently restage the
+        old image. Contrast forget_device(), which drops only the heartbeat
         record on undeploy and deliberately keeps the assignment. Returns
         True iff any state existed."""
         existed = self.forget_device(device_id)
-        for path in (self.policy_path, self.telemetry_path, self.pull_path):
+        for path in (self.policy_path, self.telemetry_path, self.pull_path,
+                     self.report_ledger_path):
             with secrets_store.store_lock(path):
                 data = self._read(path)
                 if data.pop(device_id, None) is not None:
@@ -422,7 +432,11 @@ class CatalogStore:
 
         Version-aware durability (spec §4/§8):
         - **v2** reports are DEDUPED by ``report_id``: appending a report whose
-          id already exists in the ring is a no-op (idempotent crash retry).
+          id already exists in the ring OR in the durable bounded per-device
+          seen-report-id ledger (SEEN_REPORT_IDS) is a no-op. The ledger keeps
+          dedupe idempotent even after the report has aged out of the small
+          ring, so a crash-retry after ring eviction stays a no-op (stable
+          report event ids, spec §4/§8) without unbounded state.
         - **v1** reports get a random stable ``_event_id`` stamped HERE, before
           the ring write, so OTLP can key a durable event id (there is no
           telemetry-process writeback API). It persists across restart.
@@ -447,13 +461,22 @@ class CatalogStore:
             tel = self._read(self.telemetry_path)
             ring = tel.get(device_id)
             ring = ring if isinstance(ring, list) else []
-            duplicate = rid is not None and any(
-                isinstance(r, dict) and r.get("report_id") == rid
-                for r in ring)
+            duplicate = rid is not None and (
+                any(isinstance(r, dict) and r.get("report_id") == rid
+                    for r in ring)
+                or self._report_id_seen(device_id, rid))
             if not duplicate:
                 ring.append(report)
                 tel[device_id] = ring[-self.TELEMETRY_RING:]
                 _atomic_write_json(self.telemetry_path, tel)
+                if rid is not None:
+                    # Record the id in the durable bounded ledger AFTER the ring
+                    # write. A crash between the two only means the ring still
+                    # remembers this id (it is the newest), so a retry before
+                    # the ledger catches up still dedupes on the ring — no
+                    # double count, and the ledger makes it durable past
+                    # eviction.
+                    self._remember_report_id(device_id, rid)
         if is_v2:
             # Match-gated (spec §10.2b): only a pull report whose
             # report_request_id equals the stored request clears it. A v2
@@ -473,6 +496,26 @@ class CatalogStore:
     def get_telemetry(self, device_id):
         reports = self._read(self.telemetry_path).get(device_id, [])
         return reports if isinstance(reports, list) else []
+
+    def _report_id_seen(self, device_id, rid):
+        """True iff *rid* is in the device's durable seen-report-id ledger.
+        Read fresh (small bounded file); tolerant of a missing/garbage file."""
+        led = self._read(self.report_ledger_path).get(device_id)
+        return isinstance(led, list) and rid in led
+
+    def _remember_report_id(self, device_id, rid):
+        """Append *rid* to the device's durable seen-report-id ledger, bounded
+        FIFO at SEEN_REPORT_IDS (oldest purged). Idempotent: an id already
+        present is not re-appended, so the ledger never grows on retries."""
+        with secrets_store.store_lock(self.report_ledger_path):
+            led = self._read(self.report_ledger_path)
+            seen = led.get(device_id)
+            seen = seen if isinstance(seen, list) else []
+            if rid in seen:
+                return
+            seen.append(rid)
+            led[device_id] = seen[-self.SEEN_REPORT_IDS:]
+            _atomic_write_json(self.report_ledger_path, led)
 
     # --- pull directives (console-requested fresh reports) ---
     def request_report(self, device_id, now):

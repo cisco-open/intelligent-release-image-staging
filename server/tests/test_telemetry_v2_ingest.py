@@ -464,3 +464,62 @@ class TestV2DuplicateClearsInterruptedPull:
         s.record_telemetry("dev-1", rep)
         assert len(s.get_telemetry("dev-1")) == 1
         assert s.pending_request("dev-1", now) is None
+
+
+class TestV2SeenReportLedger:
+    """Durable bounded per-device seen-report-id ledger (spec §4/§8 stable
+    report event ids / idempotence): a v2 retry after the report has been
+    evicted from the TELEMETRY_RING must still be a no-op, without unbounded
+    state. Bounds are deterministic (SEEN_REPORT_IDS per device) and the
+    ledger is purged with the device."""
+
+    def _store_n(self, s, device_id, n, start=0):
+        for i in range(start, start + n):
+            s.record_telemetry(device_id, catalog._sanitize_report(
+                _v2_report(report_id="%032x" % i,
+                           transfer_id="%032x" % (0xabc0000 + i))))
+
+    def test_retry_after_ring_eviction_is_noop(self, tmp_path):
+        s = catalog.CatalogStore(str(tmp_path))
+        # store more than the ring bound (5) so the first ids are evicted
+        self._store_n(s, "dev-1", 8)
+        assert len(s.get_telemetry("dev-1")) == catalog.CatalogStore.TELEMETRY_RING
+        # report_id 0 is long gone from the ring; a retry must still be a no-op
+        before = list(s.get_telemetry("dev-1"))
+        s.record_telemetry("dev-1", catalog._sanitize_report(
+            _v2_report(report_id="%032x" % 0,
+                       transfer_id="%032x" % 0xabc0000)))
+        after = s.get_telemetry("dev-1")
+        assert after == before          # no re-append after ring eviction
+
+    def test_ledger_persists_across_restart(self, tmp_path):
+        s = catalog.CatalogStore(str(tmp_path))
+        self._store_n(s, "dev-1", 8)
+        # fresh store object over the same state dir (process restart)
+        s2 = catalog.CatalogStore(str(tmp_path))
+        before = list(s2.get_telemetry("dev-1"))
+        s2.record_telemetry("dev-1", catalog._sanitize_report(
+            _v2_report(report_id="%032x" % 1,
+                       transfer_id="%032x" % (0xabc0000 + 1))))
+        assert s2.get_telemetry("dev-1") == before   # still deduped post-restart
+
+    def test_ledger_bounded_per_device(self, tmp_path):
+        import json as _json
+        s = catalog.CatalogStore(str(tmp_path))
+        cap = catalog.CatalogStore.SEEN_REPORT_IDS
+        self._store_n(s, "dev-1", cap + 20)
+        with open(s.report_ledger_path) as f:
+            led = _json.load(f)
+        assert len(led["dev-1"]) == cap          # deterministic bound
+        # the newest ids are retained; the oldest were purged
+        assert ("%032x" % (cap + 20 - 1)) in led["dev-1"]
+        assert ("%032x" % 0) not in led["dev-1"]
+
+    def test_purge_device_clears_ledger(self, tmp_path):
+        import json as _json
+        s = catalog.CatalogStore(str(tmp_path))
+        self._store_n(s, "dev-1", 3)
+        s.purge_device("dev-1")
+        with open(s.report_ledger_path) as f:
+            led = _json.load(f)
+        assert "dev-1" not in led
