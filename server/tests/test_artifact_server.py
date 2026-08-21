@@ -279,6 +279,74 @@ def test_staging_file_403_when_foreign_owned_and_mode_loose(
     )
 
 
+def test_startup_sweep_keeps_foreign_owned_tight_staging_file(
+        tmp_path, monkeypatch):
+    # The startup sweep must apply the same contract as request-time serving:
+    # a staged file owned by a foreign uid (remote SSH staging, stage-host
+    # CLI run) raises EPERM on chmod, but when its mode is ALREADY tight the
+    # least-privilege property holds without our chmod — deleting it here
+    # would destroy a valid credential before the server even starts.
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    conf = staging / ("iris-agent-BOOT-" + "h" * 32 + ".conf")
+    conf.write_text("catalog_token=BOOTTOKEN\n")
+    os.chmod(str(conf), 0o600)
+
+    real_chmod = os.chmod
+    conf_path = os.path.abspath(str(conf))
+
+    def fake_chmod(path, mode, *args, **kwargs):
+        if os.path.abspath(path) == conf_path:
+            raise PermissionError(1, "Operation not permitted")
+        return real_chmod(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(artifact_server.os, "chmod", fake_chmod)
+    artifact_server.secure_staging_permissions(str(tmp_path))
+    assert conf.exists(), (
+        "the startup sweep must not delete a foreign-owned staging file "
+        "whose mode is already tight (0600)"
+    )
+
+
+def test_startup_sweep_deletes_foreign_owned_loose_staging_file(
+        tmp_path, monkeypatch):
+    # ...but a foreign-owned file that is group/other-accessible and cannot
+    # be tightened must still fail closed: delete it.
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    conf = staging / ("iris-agent-LOOSEBOOT-" + "i" * 32 + ".conf")
+    conf.write_text("catalog_token=LOOSEBOOT\n")
+    os.chmod(str(conf), 0o644)
+
+    real_chmod = os.chmod
+    conf_path = os.path.abspath(str(conf))
+
+    def fake_chmod(path, mode, *args, **kwargs):
+        if os.path.abspath(path) == conf_path:
+            raise PermissionError(1, "Operation not permitted")
+        return real_chmod(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(artifact_server.os, "chmod", fake_chmod)
+    artifact_server.secure_staging_permissions(str(tmp_path))
+    assert not conf.exists(), (
+        "a loose (0644) staging file that cannot be chmod'd must be removed "
+        "by the startup sweep"
+    )
+
+
+def test_startup_sweep_tightens_owned_loose_staging_file(tmp_path):
+    # Unchanged behavior: a file this process owns is tightened in place.
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    conf = staging / ("iris-agent-OWNED-" + "j" * 32 + ".conf")
+    conf.write_text("catalog_token=OWNED\n")
+    os.chmod(str(conf), 0o644)
+
+    artifact_server.secure_staging_permissions(str(tmp_path))
+    assert conf.exists()
+    assert (os.stat(str(conf)).st_mode & 0o777) == 0o600
+
+
 def test_staging_file_swept_after_window(tmp_path):
     # Exposure is time-bounded: staging files older than STAGING_MAX_AGE_SECONDS
     # are swept.  We call the sweep function directly with a fake clock to avoid

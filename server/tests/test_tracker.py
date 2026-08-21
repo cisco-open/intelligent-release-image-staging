@@ -383,3 +383,56 @@ def test_valid_ipv4_ip_override_is_accepted(tmp_path):
         assert any(p[b"ip"] == b"192.168.1.50" for p in peers)
     finally:
         srv.shutdown()
+
+
+def test_rfc1918_172_16_ip_override_is_accepted(tmp_path):
+    """All three RFC1918 blocks are fleet address space; 172.16/12 included."""
+    srv, port, tok = _serve(tmp_path)
+    try:
+        _get(port, "/announce?info_hash=%s&peer_id=seed&port=6881&left=0"
+             "&ip=172.16.5.5&key=%s" % (INFO_HASH, tok))
+        status, body = _get(
+            port, "/announce?info_hash=%s&peer_id=p2&port=6882&left=9"
+            "&key=%s" % (INFO_HASH, tok))
+        peers = bencode.decode(body)[b"peers"]
+        assert any(p[b"ip"] == b"172.16.5.5" for p in peers)
+    finally:
+        srv.shutdown()
+
+
+def test_link_local_ip_override_is_rejected_and_client_address_used(tmp_path):
+    """The override contract is RFC1918 + CGNAT only. `is_private` alone also
+    admits link-local (169.254/16), which would then be advertised to every
+    other peer as a download endpoint — it must fall back to the socket
+    source instead."""
+    srv, port, tok = _serve(tmp_path)
+    try:
+        _get(port, "/announce?info_hash=%s&peer_id=seed&port=6881&left=0"
+             "&ip=169.254.10.10&key=%s" % (INFO_HASH, tok))
+        status, body = _get(
+            port, "/announce?info_hash=%s&peer_id=p2&port=6882&left=9"
+            "&key=%s" % (INFO_HASH, tok))
+        peers = bencode.decode(body)[b"peers"]
+        assert not any(p[b"ip"] == b"169.254.10.10" for p in peers)
+        assert any(p[b"ip"] == b"127.0.0.1" and p[b"port"] == 6881
+                   for p in peers)
+    finally:
+        srv.shutdown()
+
+
+def test_loopback_ip_override_is_rejected_and_client_address_used(tmp_path):
+    """Loopback is `is_private` but is never a usable fleet endpoint; an
+    announce claiming ip=127.0.0.2 must fall back to the socket source."""
+    srv, port, tok = _serve(tmp_path)
+    try:
+        _get(port, "/announce?info_hash=%s&peer_id=seed&port=6881&left=0"
+             "&ip=127.0.0.2&key=%s" % (INFO_HASH, tok))
+        status, body = _get(
+            port, "/announce?info_hash=%s&peer_id=p2&port=6882&left=9"
+            "&key=%s" % (INFO_HASH, tok))
+        peers = bencode.decode(body)[b"peers"]
+        assert not any(p[b"ip"] == b"127.0.0.2" for p in peers)
+        assert any(p[b"ip"] == b"127.0.0.1" and p[b"port"] == 6881
+                   for p in peers)
+    finally:
+        srv.shutdown()

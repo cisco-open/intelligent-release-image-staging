@@ -88,10 +88,11 @@ class ImageService:
         inferring location from the name would delete the wrong file. Entries
         published before source_dir was recorded keep the legacy behaviour of
         removing images_dir/<filename>. Assignment and deletion share the
-        catalog image-policy lock, so no new assignment can persist after this
-        method's final policy check and before catalog removal."""
-        with catalog_mod._IMAGE_POLICY_LOCK:
-            store = self._store()
+        catalog image-policy lock (an fcntl flock, so the docker-exec CLI
+        serializes too), so no new assignment can persist after this method's
+        final policy check and before catalog removal."""
+        store = self._store()
+        with store.image_policy_lock():
             entry = store.get_image(image_id)
             if entry is None:
                 raise KeyError(image_id)
@@ -286,11 +287,16 @@ class ImageService:
                     or image_id in self._upload_reservations:
                 raise ValueError("image already published or publishing")
             self._upload_reservations[image_id] = final
-        os.makedirs(self.images_dir, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=self.images_dir, prefix=".upload-",
-                                   suffix=".tmp")
+        # Everything after the reservation sits inside the cleanup scope: a
+        # transient makedirs/mkstemp failure (disk full, permissions, mount)
+        # must release the reservation too, or every retry is rejected as
+        # "already publishing" until the server restarts.
+        tmp = None
         total = 0
         try:
+            os.makedirs(self.images_dir, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=self.images_dir, prefix=".upload-",
+                                       suffix=".tmp")
             with os.fdopen(fd, "wb") as f:
                 while True:
                     chunk = reader()
@@ -310,7 +316,7 @@ class ImageService:
                 self._upload_reservations.pop(image_id, None)
             raise
         finally:
-            if os.path.exists(tmp):
+            if tmp is not None and os.path.exists(tmp):
                 os.remove(tmp)
 
     def start_publish(self, image_path):

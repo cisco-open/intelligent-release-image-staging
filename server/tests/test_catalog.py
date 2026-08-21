@@ -66,6 +66,39 @@ def test_store_heartbeat_and_policy(tmp_path):
                                     "install_allowed": True}
 
 
+def test_set_policy_serializes_with_image_deletion_across_processes(tmp_path):
+    """set_policy's image-existence check must serialize with image deletion
+    through an OS-level lock, not a process-local RLock: `docker exec ...
+    iris-assign` is a SEPARATE Python process, so only a shared lock file
+    stops it from validating an image a concurrent console delete is
+    removing, then persisting a dangling assignment afterward.
+
+    The test plays the deleting process: it holds the image-policy flock,
+    fires set_policy on a thread (a stand-in for the other process — flock
+    on a fresh fd blocks either way), commits the delete, releases, and
+    expects the assignment to have been rejected, not persisted."""
+    s = _store(tmp_path)
+    result = {}
+
+    def assign():
+        try:
+            s.set_policy("sw-1", approved_image_id="img1")
+            result["outcome"] = "assigned"
+        except ValueError:
+            result["outcome"] = "rejected"
+
+    with s.image_policy_lock():
+        t = threading.Thread(target=assign)
+        t.start()
+        time.sleep(0.3)   # let set_policy reach (and block on) the lock
+        # the delete commits while the lock is held
+        s.delete_image("img1")
+    t.join(timeout=5)
+
+    assert result.get("outcome") == "rejected"
+    assert s.get_policy("sw-1")["approved_image_id"] is None
+
+
 def test_forget_device_drops_heartbeat_leaves_policy(tmp_path):
     s = _store(tmp_path)
     s.record_heartbeat("sw-1", {"current_image_id": "img1",

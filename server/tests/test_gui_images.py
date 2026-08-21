@@ -52,6 +52,30 @@ def test_save_stream_enforces_size_cap(tmp_path):
     assert not os.path.exists(str(tmp_path / "imgs" / "img.bin"))
 
 
+def test_failed_temp_creation_releases_upload_reservation(tmp_path, monkeypatch):
+    # A transient makedirs/mkstemp failure (disk full, permissions, mount
+    # hiccup) happens AFTER the upload reservation is installed; it must not
+    # leave the image id reserved forever, or every retry is rejected as
+    # "already publishing" until the server restarts.
+    svc = gui_images.ImageService(str(tmp_path / "state"), str(tmp_path / "imgs"))
+
+    def boom(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(gui_images.tempfile, "mkstemp", boom)
+    try:
+        svc.save_stream("img.bin", _chunks(b"hello-image-bytes"))
+        assert False, "expected OSError"
+    except OSError:
+        pass
+    monkeypatch.undo()
+
+    assert svc.publish_in_flight(svc.derived_id("img.bin")) is False
+    path = svc.save_stream("img.bin", _chunks(b"hello-image-bytes"))
+    with open(path, "rb") as f:
+        assert f.read() == b"hello-image-bytes"
+
+
 def test_save_stream_rejects_incomplete_upload(tmp_path):
     svc = gui_images.ImageService(str(tmp_path / "state"), str(tmp_path / "imgs"))
     try:

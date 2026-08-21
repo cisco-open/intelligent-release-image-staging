@@ -39,19 +39,27 @@ def _valid_ipv4(addr):
         return False
 
 
+# Exactly the address space a fleet peer may claim: the three RFC1918
+# networks plus carrier-grade NAT. `is_private` would be broader — it also
+# admits loopback, link-local, unspecified and reserved ranges, which would
+# then be advertised to every other peer as a download endpoint.
+_OVERRIDE_NETS = tuple(ipaddress.ip_network(n) for n in (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"))
+
+
 def _private_override(addr):
     """Allow NAT overrides only for non-routable fleet address space.
 
     Containerized seeders need this because their socket source is loopback or
     bridge-local. RFC1918 and carrier-grade NAT (used by deployed fleets) are
-    accepted; public arbitrary endpoint injection is not.
+    accepted; everything else — public endpoints, loopback, link-local — is
+    not.
     """
     try:
         ip = ipaddress.ip_address(addr)
     except ValueError:
         return False
-    return ip.version == 4 and (ip.is_private or ip in ipaddress.ip_network(
-        "100.64.0.0/10"))
+    return ip.version == 4 and any(ip in net for net in _OVERRIDE_NETS)
 
 
 def parse_announce(query):

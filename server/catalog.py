@@ -64,10 +64,6 @@ def _atomic_write_json(path, obj):
 # Global POST body cap (also applied to gzip-DECOMPRESSED bodies — bomb guard).
 MAX_BODY_BYTES = 65536
 
-# Image assignment and deletion span two JSON stores but need one process-local
-# decision. ImageService shares this lock with set_policy to close that race.
-_IMAGE_POLICY_LOCK = threading.RLock()
-
 _REPORT_KEYS = ("ts", "image_id", "event", "transfer", "link", "peers",
                 "peers_total", "agent")
 _REPORT_EVENTS = ("staging-complete", "seeding-only", "pull")
@@ -244,8 +240,21 @@ class CatalogStore:
         return existed
 
     # --- policy (install-approval gate) ---
+    def image_policy_lock(self):
+        """Cross-process serializer for image-existence/assignment decisions.
+
+        Image assignment and deletion span two JSON stores, so their
+        check-then-act sequences need one shared lock — and `docker exec ...
+        iris-assign` runs as a SEPARATE process from the console, so a
+        threading lock cannot cover it. This is a store_lock (fcntl.flock)
+        on its own sidecar, distinct from the per-store file locks so the
+        holder can still take those underneath (flock does not nest on the
+        same path within one process). ImageService.delete_image shares it
+        with set_policy."""
+        return secrets_store.store_lock(self.catalog_path + ".assign")
+
     def set_policy(self, device_id, approved_image_id=None, install_allowed=False):
-        with _IMAGE_POLICY_LOCK:
+        with self.image_policy_lock():
             # Re-check at persistence time. Missing catalog.json remains valid
             # for legacy bootstrap callers; an existing catalog fails closed.
             if approved_image_id and os.path.exists(self.catalog_path) \

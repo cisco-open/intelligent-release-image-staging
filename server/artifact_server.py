@@ -58,7 +58,16 @@ def sweep_staging(directory, now=None):
 
 
 def secure_staging_permissions(directory):
-    """Restrict existing credential files before they can be served."""
+    """Restrict existing credential files before they can be served.
+
+    Same contract as the request-time check in do_GET: files staged from
+    OUTSIDE this container (remote SSH staging, or a stage-host-local CLI
+    run) are owned by a foreign uid, so chmod by this process always raises
+    EPERM even though the installer wrote them with umask 077. What matters
+    is the file's actual permission bits — a foreign-owned file whose mode is
+    already tight stays; only a LOOSE file that cannot be tightened is
+    removed. Deleting on every chmod failure would destroy valid staged
+    credentials at server start."""
     staging_dir = os.path.join(directory, "staging")
     try:
         entries = os.listdir(staging_dir)
@@ -67,11 +76,26 @@ def secure_staging_permissions(directory):
     for name in entries:
         path = os.path.join(staging_dir, name)
         try:
-            if os.path.isfile(path):
-                os.chmod(path, 0o600)
+            if not os.path.isfile(path):
+                continue
+            st = os.stat(path)
         except OSError:
-            # A credential file whose permissions cannot be restricted must
-            # not remain available to either local users or HTTP clients.
+            # Cannot even stat it — fail closed rather than serve unknown
+            # permissions later.
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            continue
+        mode_already_tight = (st.st_mode & 0o077) == 0
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            if mode_already_tight:
+                continue
+            # A loose credential file whose permissions cannot be restricted
+            # must not remain available to either local users or HTTP
+            # clients.
             try:
                 os.unlink(path)
             except OSError:
