@@ -168,6 +168,72 @@ class TestV2ObservationIngest:
                         "10.0.0.9")
         assert table.snapshot(1.0)["samples"]["d1"]["valid"] is False
 
+    def test_unassigned_observed_old_image_withdraws_not_stale(self):
+        # A prior good live observation exists; the server policy then loses
+        # the assignment (approved=None) and the device still ships a v2
+        # `observed` envelope carrying its OLD image_id. The image mismatch
+        # must NOT bypass the policy-driven withdrawal: the heartbeat stays
+        # 200, the live value is withdrawn as not_active (not left stale), and
+        # the malformed-but-policy-driven case is NOT counted as a reject.
+        table = live_samples.LiveTable()
+        cat = _cat(store=_Store(approved="img-1"), table=table)
+        _post(cat, {"current_image_id": "img-1",
+                    "telemetry_observation": _obs()})
+        assert table.snapshot(1.0)["samples"]["d1"]["valid"] is True
+
+        cat2 = _cat(store=_Store(approved=None), table=table)
+        status, _ctype, _raw = cat2.route_post(
+            "/v1/devices/d1/heartbeat",
+            json.dumps({"current_image_id": "img-1",
+                        "telemetry_observation": _obs(sample_seq=2)}).encode(),
+            "10.0.0.9")
+        assert status == 200
+        assert table.snapshot(1.0)["samples"]["d1"]["valid"] is False
+        assert table.snapshot(1.0)["samples"]["d1"]["obs_state"] == "not_active"
+        # policy-driven withdrawal is not a malformed-sample reject
+        assert table.snapshot(1.0)["counters"]["samples_rejected_total"] == 0
+
+    def test_global_pause_observed_old_image_withdraws_not_reject(self):
+        # Same withdrawal precedence for the global stream pause: a paused
+        # stream withdraws even when the observed envelope would otherwise be
+        # rejected on image mismatch, and it does not increment rejects.
+        table = live_samples.LiveTable()
+        cat = _cat(store=_Store(approved="img-1"), table=table)
+        _post(cat, {"current_image_id": "img-1",
+                    "telemetry_observation": _obs()})
+        settings_path = "/nonexistent"
+        # simulate pause via a paused StreamSettings
+        import tempfile
+        import os as _os
+        fd, p = tempfile.mkstemp()
+        _os.close(fd)
+        live_samples.write_settings(p, 1, True)   # paused
+        cat2 = _cat(store=_Store(approved="img-1"), table=table,
+                    settings=live_samples.StreamSettings(p))
+        status, _ctype, _raw = cat2.route_post(
+            "/v1/devices/d1/heartbeat",
+            json.dumps({"current_image_id": "img-1",
+                        "telemetry_observation": _obs(sample_seq=2)}).encode(),
+            "10.0.0.9")
+        _os.unlink(p)
+        assert status == 200
+        assert table.snapshot(1.0)["samples"]["d1"]["valid"] is False
+        assert table.snapshot(1.0)["counters"]["samples_rejected_total"] == 0
+
+    def test_malformed_observed_while_assigned_still_rejects(self):
+        # When the device IS still assigned (no policy-driven withdrawal), a
+        # genuinely malformed observed envelope still rejects-and-counts and
+        # leaves the prior good value in place.
+        table = live_samples.LiveTable()
+        cat = _cat(store=_Store(approved="img-1"), table=table)
+        _post(cat, {"current_image_id": "img-1",
+                    "telemetry_observation": _obs(sample_seq=5)})
+        _post(cat, {"current_image_id": "img-1",
+                    "telemetry_observation": _obs(obs_state="running")})
+        assert table.size() == 1
+        assert table.snapshot(1.0)["samples"]["d1"]["sample_seq"] == 5
+        assert table.snapshot(1.0)["counters"]["samples_rejected_total"] == 1
+
     def test_v1_sample_and_v2_envelope_coexist_v2_wins(self):
         # a v2 agent sends telemetry_observation; a legacy sample is ignored
         # when the v2 envelope is present (v2 supersedes v1 on v2 agents).

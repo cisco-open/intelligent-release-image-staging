@@ -711,25 +711,31 @@ class Catalog:
                             or paused or not approved)
                 obs = data.get("telemetry_observation")
                 sample = data.get("sample")
-                if obs is not None:
+                if tele_off:
+                    # Policy-driven withdrawal (telemetry flags off / global
+                    # stream pause / device unassigned) takes precedence over
+                    # and is INDEPENDENT of the approved-image sanitizer: the
+                    # live rate/state is withdrawn as not_active NOW, and an
+                    # image mismatch on the (now-superseded) envelope must not
+                    # bypass that withdrawal by short-circuiting to reject.
+                    # This is not a malformed-sample reject, so the reject
+                    # counter is left untouched — only a genuinely malformed
+                    # envelope WHILE still assigned rejects/leaves prior good.
+                    if obs is not None or sample is not None:
+                        self.live_table.withdraw(parts[2])
+                elif obs is not None:
                     try:
                         clean, _trunc = live_samples.sanitize_observation(
                             obs, approved, every)
-                        if tele_off:
-                            self.live_table.withdraw(parts[2])
-                        else:
-                            self.live_table.observe(
-                                parts[2], clean, time.time(), every)
+                        self.live_table.observe(
+                            parts[2], clean, time.time(), every)
                     except ValueError:
                         self.live_table.reject()
                 elif sample is not None:
                     try:
                         clean = live_samples.sanitize_sample(sample, approved)
-                        if tele_off:
-                            self.live_table.withdraw(parts[2])
-                        else:
-                            self.live_table.observe(
-                                parts[2], clean, time.time(), every)
+                        self.live_table.observe(
+                            parts[2], clean, time.time(), every)
                     except ValueError:
                         self.live_table.reject()
             resp = {"ok": True}
