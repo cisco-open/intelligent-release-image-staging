@@ -22,13 +22,25 @@ ask() {                      # ask "Question" "default"  ->  prints the answer
 }
 
 verify_aria2() {
-  local description="$1" file_out
+  local description="$1" file_out expected actual sums
   command -v file >/dev/null 2>&1 \
     || { say "  cannot verify $description: 'file' is required"; return 1; }
   file_out="$(file -b "$ARIA2")"
   [[ "$file_out" == *"ELF 64-bit"* && "$file_out" == *"$EXPECTED_ARIA2_ARCH"* \
      && "$file_out" == *"statically linked"* ]] \
     || { say "  $description is not an $EXPECTED_ARIA2_ARCH ELF binary: $file_out"; return 1; }
+  # The manifest is the pin, not the architecture: a stale or substituted
+  # x86-64 static binary passes the `file` check, so compare against the
+  # x86_64 entry in tools/aria2c.sha256 and fail closed on a mismatch —
+  # the same guarantee get-aria2c.sh and the IOx build path enforce.
+  sums="$REPO_ROOT/tools/aria2c.sha256"
+  expected="$(awk '$2 == "x86_64" {print $1}' "$sums" 2>/dev/null || true)"
+  [ -n "$expected" ] \
+    || { say "  cannot verify $description: no x86_64 entry in $sums"; return 1; }
+  actual="$( (shasum -a 256 "$ARIA2" 2>/dev/null || sha256sum "$ARIA2") | awk '{print $1}')"
+  [ "$actual" = "$expected" ] \
+    || { say "  $description sha256 $actual does not match the x86_64 entry in tools/aria2c.sha256 ($expected)"
+         say "  run  tools/get-aria2c.sh  to install the pinned handed-in binary"; return 1; }
 }
 
 say ""
@@ -95,7 +107,9 @@ say "Packing the bundle..."
 cp "$DEVICE/bootstrap.sh" "$(dirname "$OUT")/bootstrap.sh"
 
 SIZE="$(du -h "$OUT" | awk '{print $1}')"
-HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+# hostname -I is Linux-only; on macOS the failing pipeline must not kill the
+# script under pipefail — the ipconfig fallback below handles the empty value
+HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
 [ -n "$HOST_IP" ] || HOST_IP="$(ipconfig getifaddr en0 2>/dev/null || true)"
 [ -z "${HOST_IP:-}" ] && HOST_IP="<this-host-ip>"
 say "  Done:  $OUT  ($SIZE)"

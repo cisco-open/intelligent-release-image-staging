@@ -34,6 +34,10 @@ for f in get-aria2c.sh aria2c.sha256 make-torrent.sh make-agent-bundle.sh \
          start-compose-server.sh; do
   cp "$REPO/tools/$f" "$OUT/tools/"
 done
+# corresponding source for the handed-in (GPL) aria2c binary — NOTICE and the
+# checksum manifest both point at this directory, so the release must carry it
+mkdir -p "$OUT/tools/aria2c-patches"
+cp -R "$REPO/tools/aria2c-patches/." "$OUT/tools/aria2c-patches/"
 
 # the one lab helper the installers drive devices through
 mkdir -p "$OUT/lab"

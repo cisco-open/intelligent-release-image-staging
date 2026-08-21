@@ -40,11 +40,23 @@ RUN apt-get update \
 #
 # Run tools/get-aria2c.sh before building this image, or the COPY below fails.
 COPY bin/aria2c /opt/iris/bin/aria2c
+COPY tools/aria2c.sha256 /opt/iris/tools/aria2c.sha256
 
-# Fail the build rather than ship a client that would not run in the device
-# Guest Shell: it must be executable and statically linked.
+# Fail the build rather than ship a client that is not the manifest-pinned
+# handed-in build, or that would not run in the device Guest Shell: it must
+# match the x86_64 entry in tools/aria2c.sha256 (running get-aria2c.sh
+# beforehand is only a convention — the pin is enforced HERE, so a stale or
+# substituted bin/aria2c cannot be baked in silently), be executable, and be
+# statically linked.
 RUN set -eux; \
     chmod 0755 /opt/iris/bin/aria2c; \
+    expected="$(awk '$2 == "x86_64" {print $1}' /opt/iris/tools/aria2c.sha256)"; \
+    test -n "$expected"; \
+    actual="$(sha256sum /opt/iris/bin/aria2c | awk '{print $1}')"; \
+    if [ "$actual" != "$expected" ]; then \
+      echo "FAIL: bin/aria2c sha256 $actual does not match the x86_64 entry in tools/aria2c.sha256 ($expected) — run tools/get-aria2c.sh" >&2; \
+      exit 1; \
+    fi; \
     /opt/iris/bin/aria2c --version >/dev/null; \
     if ldd /opt/iris/bin/aria2c 2>&1 | grep -qiv 'not a dynamic executable'; then \
       echo "FAIL: /opt/iris/bin/aria2c is not statically linked" >&2; \
