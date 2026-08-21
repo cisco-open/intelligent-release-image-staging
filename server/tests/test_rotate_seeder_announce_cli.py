@@ -63,6 +63,27 @@ def test_discover_targets_refuses_empty_catalog_before_rpc(tmp_path):
         rot.discover_targets(str(state), {}, lambda *args: pytest.fail("RPC called"))
 
 
+def test_discover_targets_refuses_stale_recorded_source_without_fallback(
+        tmp_path):
+    state, hashes = _state(tmp_path, ("a",))
+    catalog_path = state / "catalog.json"
+    catalog = json.loads(catalog_path.read_text())
+    catalog["images"]["a"]["source_dir"] = str(tmp_path / "gone")
+    catalog_path.write_text(json.dumps(catalog))
+    fallback = tmp_path / "fallback"
+    fallback.mkdir()
+    (fallback / "a.bin").write_bytes(b"wrong same-name bytes")
+    called = []
+
+    with pytest.raises(ValueError, match="image directory unavailable"):
+        rot.discover_targets(
+            str(state), {"IMAGES_ROOT": str(fallback)},
+            lambda method, params: called.append((method, params)) or [
+                {"gid": "g-a", "infoHash": hashes["a"]}])
+
+    assert called == [], "stale authoritative source must fail before RPC"
+
+
 def test_cli_missing_catalog_target_does_not_mutate(tmp_path, monkeypatch):
     state, _ = _state(tmp_path, ("a", "b"))
     (state / "torrents" / "b.torrent").unlink()

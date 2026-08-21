@@ -630,9 +630,13 @@ def _image_dir(entry, env):
     filename = entry.get("filename")
     if not isinstance(filename, str) or not filename:
         return None
-    source_dir = entry.get("source_dir")
-    if isinstance(source_dir, str) and os.path.isdir(source_dir):
-        # source_dir is authoritative: do not fall back to a same-named image.
+    if "source_dir" in entry:
+        source_dir = entry.get("source_dir")
+        # A recorded source_dir is authoritative even when it has gone stale.
+        # Falling back by basename could seed unrelated same-named bytes under
+        # the canonical torrent's piece hashes (bt-seed-unverified is enabled).
+        if not isinstance(source_dir, str) or not os.path.isdir(source_dir):
+            return None
         return source_dir if os.path.isfile(os.path.join(source_dir, filename)) else None
     roots = []
     for value in (env.get("IRIS_IMAGES_DIR"), env.get("IMAGES_ROOT"),
