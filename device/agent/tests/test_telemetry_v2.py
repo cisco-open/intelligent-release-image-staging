@@ -180,6 +180,20 @@ def test_build_observation_peer_rows_capped():
     assert len(env["peer_connections"]) == 32
 
 
+def test_build_observation_preserves_only_measured_peer_fields():
+    env = telemetry_report.build_observation(
+        obs_state="observed", observed_at=1.0, transfer_id="a" * 32,
+        image_id="img", sample_seq=1, sampling_class="good",
+        stats=_observed_stats(), peers=[
+            {"ip": "10.0.0.1", "receive_bps": 12,
+             "peer_client_name": "aria2", "progress": 50.5},
+            {"ip": "10.0.0.2"}])
+    assert env["peer_connections"] == [
+        {"ip": "10.0.0.1", "receive_bps": 12,
+         "peer_client_name": "aria2", "progress": 50.5},
+        {"ip": "10.0.0.2"}]
+
+
 # ---- run_once integration: v2 envelope on assigned heartbeats ----
 
 import time as _time

@@ -161,6 +161,11 @@ class TestSanitizeObservation:
         assert len(clean["peer_connections"]) == 8
         assert clean["peer_connections"][0]["ip"] == "10.0.0.0"
 
+    def test_peer_rates_are_optional_and_not_invented_as_zero(self):
+        env = _obs(peer_connections=[{"ip": "10.0.0.1", "progress": 50.0}])
+        clean, _ = live_samples.sanitize_observation(env, "img-1", 32)
+        assert clean["peer_connections"] == [{"ip": "10.0.0.1", "progress": 50.0}]
+
     def test_peer_cap_hard_ceiling_32(self):
         # configured max 999 -> capped at 32.
         env = _obs()

@@ -12,6 +12,7 @@ build_deps() wires the real cli module / aria2 RPC / filesystem."""
 import collections
 import errno
 import json
+import math
 import os
 import random
 import re
@@ -1173,17 +1174,67 @@ def _aria_stats_impl(rpc, stage_path):
 
 
 def _aria_peers_impl(rpc, stage_path):
-    """Observed peer rows for the staged file's download: [{'ip': str}].
-    Participation only — aria2 has no per-peer byte counters, so nothing
-    else from getPeers is consumed. Returns [] on no matching download / ANY
-    error (getPeers on a stopped download is an aria2 error). NEVER raises."""
+    """Measured peer rows for the staged download, or [] on any RPC error.
+
+    Rates are instantaneous aria2 measurements, so absent/malformed values are
+    omitted rather than represented as a measured zero. Terminal participation
+    remains independently IP/timestamp/count-only in observe_peers()."""
     try:
         gid = _find_aria_gid(rpc, stage_path)
         if gid is None:
             return []
-        return [{"ip": p.get("ip", "")} for p in rpc("aria2.getPeers", [gid])]
+        raw_rows = rpc("aria2.getPeers", [
+            gid, ["ip", "downloadSpeed", "uploadSpeed", "peerClientName",
+                  "progress"]])
+        if not isinstance(raw_rows, list):
+            return []
+        rows = []
+        for peer in raw_rows:
+            if not isinstance(peer, dict):
+                continue
+            ip = peer.get("ip")
+            if not isinstance(ip, str) or not ip or len(ip) > 64:
+                continue
+            row = {"ip": ip}
+            receive = _optional_bounded_int(peer.get("downloadSpeed"), 10 ** 12)
+            send = _optional_bounded_int(peer.get("uploadSpeed"), 10 ** 12)
+            if receive is not None:
+                row["receive_bps"] = receive
+            if send is not None:
+                row["send_bps"] = send
+            name = peer.get("peerClientName")
+            if isinstance(name, str) and name:
+                row["peer_client_name"] = name[:64]
+            progress = _optional_progress(peer.get("progress"))
+            if progress is not None:
+                row["progress"] = progress
+            rows.append(row)
+        return rows
     except Exception:
         return []
+
+
+def _optional_bounded_int(value, cap):
+    """Coerce aria2's decimal-string counters, rejecting unknown values."""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        out = int(value)
+    except (TypeError, ValueError):
+        return None
+    if not 0 <= out <= cap:
+        return None
+    return out
+
+
+def _optional_progress(value):
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) and 0 <= out <= 100 else None
 
 
 # ---- agent-side root-copy re-verification (module-level so it's unit-testable

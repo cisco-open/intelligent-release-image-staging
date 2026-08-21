@@ -2201,22 +2201,34 @@ def test_aria_stats_none_on_non_dict_tellstatus():
     assert iris_agent._aria_stats_impl(rpc, _TELE_STAGE) is None
 
 
-def test_aria_peers_returns_simplified_rows():
+def test_aria_peers_requests_measured_fields_and_returns_canonical_rows():
     peers = [{"ip": "10.0.0.7", "downloadSpeed": "1024", "uploadSpeed": "0",
-              "peerId": "aria2%2F1.37", "seeder": "true", "bitfield": "ff"},
-             {"ip": "10.0.0.8", "downloadSpeed": "0", "uploadSpeed": "2048",
-              "amChoking": "false"}]
+              "peerClientName": "aria2/1.37", "progress": "87.5",
+              "bitfield": "ff"},
+              {"ip": "10.0.0.8", "downloadSpeed": "0", "uploadSpeed": "2048",
+               "amChoking": "false"}]
     rpc, calls = _tele_rpc(active=[_ACTIVE_ROW], peers=peers)
     out = iris_agent._aria_peers_impl(rpc, _TELE_STAGE)
-    # participation only: everything but ip is dropped (aria2 has no
-    # per-peer byte counters, so nothing else from getPeers is consumed)
-    assert out == [{"ip": "10.0.0.7"}, {"ip": "10.0.0.8"}]
-    assert calls[-1] == ("aria2.getPeers", ["gidA"])
+    assert out == [
+        {"ip": "10.0.0.7", "receive_bps": 1024, "send_bps": 0,
+         "peer_client_name": "aria2/1.37", "progress": 87.5},
+        {"ip": "10.0.0.8", "receive_bps": 0, "send_bps": 2048}]
+    assert calls[-1] == ("aria2.getPeers", [
+        "gidA", ["ip", "downloadSpeed", "uploadSpeed", "peerClientName",
+                 "progress"]])
+    assert "bitfield" not in calls[-1][1][1]
 
 
-def test_aria_peers_tolerates_missing_row_keys():
-    rpc, _ = _tele_rpc(active=[_ACTIVE_ROW], peers=[{}])
-    assert iris_agent._aria_peers_impl(rpc, _TELE_STAGE) == [{"ip": ""}]
+def test_aria_peers_omits_unknown_fields_and_ignores_malformed_rows():
+    rpc, _ = _tele_rpc(active=[_ACTIVE_ROW], peers=[
+        {"ip": "10.0.0.7", "downloadSpeed": None, "uploadSpeed": "bad",
+         "peerClientName": "x" * 100, "progress": "101"},
+        {"ip": "10.0.0.8", "downloadSpeed": "1000000000001",
+         "uploadSpeed": True, "progress": "nan"},
+        {}, {"ip": 42}, "not-a-row"])
+    assert iris_agent._aria_peers_impl(rpc, _TELE_STAGE) == [
+        {"ip": "10.0.0.7", "peer_client_name": "x" * 64},
+        {"ip": "10.0.0.8"}]
 
 
 def test_aria_peers_empty_when_no_match():

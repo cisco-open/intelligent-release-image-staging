@@ -9,6 +9,7 @@ encryption in this repo covers the secrets store only), carries no secrets
 and no IPs, and is safe on tmpfs. Stdlib only; imports nothing from
 catalog.py (catalog imports this module)."""
 import json
+import math
 import os
 import re
 import tempfile
@@ -190,16 +191,18 @@ def sanitize_observation(data, approved_image_id, configured_max_peers):
         ip = row.get("ip")
         if not isinstance(ip, str) or not ip or len(ip) > 64:
             raise ValueError("bad peer_connection ip")
-        clean = {"ip": ip,
-                 "send_bps": _bounded_int(row.get("send_bps", 0),
-                                          _PEER_ROW_BPS_CAP),
-                 "receive_bps": _bounded_int(row.get("receive_bps", 0),
-                                             _PEER_ROW_BPS_CAP)}
+        clean = {"ip": ip}
+        for key in ("send_bps", "receive_bps"):
+            if key in row:
+                clean[key] = _bounded_int(row[key], _PEER_ROW_BPS_CAP)
         name = row.get("peer_client_name")
         if isinstance(name, str):
             clean["peer_client_name"] = name[:64]
         prog = row.get("progress")
-        if isinstance(prog, (int, float)) and not isinstance(prog, bool):
+        if prog is not None:
+            if isinstance(prog, bool) or not isinstance(prog, (int, float)) \
+                    or not math.isfinite(prog) or not 0 <= prog <= 100:
+                raise ValueError("bad peer_connection progress")
             clean["progress"] = float(prog)
         rows.append(clean)
     out["peer_connections"] = rows

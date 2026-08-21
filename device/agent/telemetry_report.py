@@ -168,11 +168,15 @@ def build_observation(obs_state, observed_at, transfer_id, image_id,
     env["aria"] = aria
     rows = []
     for p in (peers or [])[:peer_rows_max]:
+        if not isinstance(p, dict):
+            continue
         ip = p.get("ip")
         if not ip:
             continue
-        row = {"ip": ip, "send_bps": int(p.get("send_bps", 0) or 0),
-               "receive_bps": int(p.get("receive_bps", 0) or 0)}
+        row = {"ip": ip}
+        for key in ("send_bps", "receive_bps", "peer_client_name", "progress"):
+            if key in p:
+                row[key] = p[key]
         rows.append(row)
     env["peer_connections"] = rows
     return env
