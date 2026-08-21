@@ -430,8 +430,11 @@ class CatalogStore:
         After the write, clears the pending pull directive — MATCH-GATED for v2
         pulls (only a report whose ``report_request_id`` equals the currently
         stored request id clears it; a stale/mismatched id cannot clear a newer
-        request). A v1 report (no id to echo) preserves the legacy bridge: it
-        clears the device's pending request unconditionally."""
+        request). The match-gated clear runs even when the v2 write was a dedupe
+        no-op, so a crash-retry whose original clear was interrupted still
+        clears the same still-pending pull. A v1 report (no id to echo)
+        preserves the legacy bridge: it clears the device's pending request
+        unconditionally, but only on a genuine (non-duplicate) append."""
         report = dict(report)
         report["received_at"] = time.time()
         is_v2 = report.get("schema") == "v2" or report.get("v") == 2
@@ -444,22 +447,27 @@ class CatalogStore:
             tel = self._read(self.telemetry_path)
             ring = tel.get(device_id)
             ring = ring if isinstance(ring, list) else []
-            if rid is not None and any(
-                    isinstance(r, dict) and r.get("report_id") == rid
-                    for r in ring):
-                return          # v2 dedupe: idempotent retry, no-op
-            ring.append(report)
-            tel[device_id] = ring[-self.TELEMETRY_RING:]
-            _atomic_write_json(self.telemetry_path, tel)
+            duplicate = rid is not None and any(
+                isinstance(r, dict) and r.get("report_id") == rid
+                for r in ring)
+            if not duplicate:
+                ring.append(report)
+                tel[device_id] = ring[-self.TELEMETRY_RING:]
+                _atomic_write_json(self.telemetry_path, tel)
         if is_v2:
             # Match-gated (spec §10.2b): only a pull report whose
             # report_request_id equals the stored request clears it. A v2
             # completion/seeding report (report_request_id=None) or a mismatched
-            # pull id leaves the pending request intact.
+            # pull id leaves the pending request intact. The clear runs even on
+            # a DEDUPE no-op (duplicate report_id): if the original delivery
+            # stored the report but its match-gated clear was interrupted (a
+            # crash between the ring write and the clear), the crash-retry must
+            # still clear the same still-pending pull — the clear is idempotent
+            # and match-gated, so a superseded request is never wrongly cleared.
             rrid = report.get("report_request_id")
             if rrid is not None:
                 self.clear_report_request(device_id, request_id=rrid)
-        else:
+        elif not duplicate:
             self.clear_report_request(device_id)
 
     def get_telemetry(self, device_id):

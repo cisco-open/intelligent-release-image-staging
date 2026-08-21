@@ -417,3 +417,50 @@ class TestV2ReportDedupe:
         s = catalog.CatalogStore(str(tmp_path))
         s.record_telemetry("dev-1", catalog._sanitize_report(_v2_report()))
         assert "received_at" in s.get_telemetry("dev-1")[0]
+
+
+class TestV2DuplicateClearsInterruptedPull:
+    def test_dedupe_retry_still_clears_matching_pull(self, tmp_path):
+        # First store succeeded but the match-gated clear was interrupted
+        # (crash between the ring write and clear_report_request). A duplicate
+        # v2 report with the same report_id must be a storage no-op AND still
+        # match-clear the still-pending pull directive.
+        s = catalog.CatalogStore(str(tmp_path))
+        now = 1000.0
+        s.request_report("dev-1", now)
+        rrid = s.pending_request("dev-1", now)["request_id"]
+        rep = catalog._sanitize_report(
+            _v2_report(event="pull", report_request_id=rrid))
+        # first delivery stores the report...
+        s.record_telemetry("dev-1", rep)
+        assert len(s.get_telemetry("dev-1")) == 1
+        # ...simulate the clear having been interrupted: re-arm the SAME pull
+        s.request_report("dev-1", now)
+        # but the retry must carry the ORIGINAL request id it echoed
+        # (identical report), and the currently pending request differs, so a
+        # mismatched id must not clear a newer request.
+        s.record_telemetry("dev-1", rep)
+        assert len(s.get_telemetry("dev-1")) == 1     # dedupe: still one
+        assert s.pending_request("dev-1", now) is not None  # newer request kept
+
+    def test_dedupe_retry_clears_same_still_pending_pull(self, tmp_path):
+        # The realistic interrupted-clear case: the pull is STILL the same
+        # request the report echoes. A dedupe retry must clear it.
+        s = catalog.CatalogStore(str(tmp_path))
+        now = 1000.0
+        s.request_report("dev-1", now)
+        rrid = s.pending_request("dev-1", now)["request_id"]
+        rep = catalog._sanitize_report(
+            _v2_report(event="pull", report_request_id=rrid))
+        s.record_telemetry("dev-1", rep)
+        # pretend the clear was interrupted: forcibly re-add the same directive
+        import json as _json
+        with open(s.pull_path, "w") as f:
+            _json.dump({"dev-1": {"request_id": rrid, "requested_at": now,
+                                  "expires_at": now + s.PULL_TTL}}, f)
+        assert s.pending_request("dev-1", now) is not None
+        # duplicate delivery: storage no-op, but the pending pull it matches
+        # must now be cleared.
+        s.record_telemetry("dev-1", rep)
+        assert len(s.get_telemetry("dev-1")) == 1
+        assert s.pending_request("dev-1", now) is None
