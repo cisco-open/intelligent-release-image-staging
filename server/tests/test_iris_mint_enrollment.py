@@ -34,6 +34,7 @@ def test_mint_enrollment_prints_token(tmp_path, monkeypatch, capsys):
     sp = str(tmp_path / "secrets.json")
     monkeypatch.setenv("IRIS_SECRETS", sp)
     monkeypatch.setenv("IRIS_AGE_RECIPIENTS", "")
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path))
     monkeypatch.setenv("IRIS_ENROLL_TTL", "3600")
 
     mod = _load_cli()
@@ -55,6 +56,7 @@ def test_mint_enrollment_expires_at_uses_enroll_ttl(tmp_path, monkeypatch):
     enroll_ttl = 7200
     monkeypatch.setenv("IRIS_SECRETS", sp)
     monkeypatch.setenv("IRIS_AGE_RECIPIENTS", "")
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path))
     monkeypatch.setenv("IRIS_ENROLL_TTL", str(enroll_ttl))
 
     mod = _load_cli()
@@ -75,6 +77,7 @@ def test_mint_enrollment_not_revoked(tmp_path, monkeypatch):
     sp = str(tmp_path / "secrets.json")
     monkeypatch.setenv("IRIS_SECRETS", sp)
     monkeypatch.setenv("IRIS_AGE_RECIPIENTS", "")
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path))
 
     mod = _load_cli()
     mod.main(["dev-enroll2"])
@@ -96,6 +99,7 @@ def test_mint_enrollment_provisions_announce_and_rpc(tmp_path, monkeypatch):
     sp = str(tmp_path / "secrets.json")
     monkeypatch.setenv("IRIS_SECRETS", sp)
     monkeypatch.setenv("IRIS_AGE_RECIPIENTS", "")
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path))
 
     mod = _load_cli()
     assert mod.main(["dev-prov"]) == 0
@@ -111,6 +115,7 @@ def test_mint_enrollment_no_args_returns_rc2(tmp_path, monkeypatch):
     """No arguments → usage error rc 2."""
     monkeypatch.setenv("IRIS_SECRETS", str(tmp_path / "secrets.json"))
     monkeypatch.setenv("IRIS_AGE_RECIPIENTS", "")
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path))
 
     mod = _load_cli()
     rc = mod.main([])
@@ -121,6 +126,7 @@ def test_mint_enrollment_too_many_args_returns_rc2(tmp_path, monkeypatch):
     """Too many arguments → usage error rc 2."""
     monkeypatch.setenv("IRIS_SECRETS", str(tmp_path / "secrets.json"))
     monkeypatch.setenv("IRIS_AGE_RECIPIENTS", "")
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path))
 
     mod = _load_cli()
     rc = mod.main(["dev-1", "extra"])

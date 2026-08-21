@@ -11,8 +11,10 @@ Usage:
 """
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import peer_policy     # noqa: E402
 import secretfs       # noqa: E402
 import secrets_store  # noqa: E402
 
@@ -26,6 +28,9 @@ def main(argv=None):
 
     device_id = argv[0]
     secrets_path = os.environ.get("IRIS_SECRETS", "/run/iris/secrets.json")
+    state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
+    policy_path = os.path.join(state_dir, "peer-policy.json")
+    lkg_path = os.path.join(state_dir, "peer-policy.lkg.json")
 
     # Hold the same advisory lock the catalog server's token-refresh takes, so
     # a concurrent rotation can't load a pre-revoke snapshot and write it back
@@ -58,6 +63,22 @@ def main(argv=None):
             print("error: durable persist failed, revoke NOT applied: %s" % exc,
                   file=sys.stderr)
             return 1
+
+    # Policy-assignment cleanup happens ONLY after the durable revoke succeeded
+    # (spec §7 retirement). It is best-effort tidy-up: endpoints are retained and
+    # the now-revoked-credential principal is derived-denied regardless of
+    # assignment, so a cleanup failure can never re-permit the device and must
+    # never unrevoke it. A failure here is reported as a degraded (nonzero)
+    # outcome while the revoke stays applied.
+    try:
+        peer_policy.unassign_device(
+            policy_path, lkg_path, device_id,
+            actor="iris-revoke", now=time.time())
+    except Exception as exc:
+        print("warning: revoke applied but policy cleanup failed "
+              "(device stays derived-denied): %s" % exc, file=sys.stderr)
+        print("revoked all secrets for device '%s'" % device_id)
+        return 1
 
     print("revoked all secrets for device '%s'" % device_id)
     return 0

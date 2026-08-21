@@ -31,6 +31,7 @@ import gui_auth
 import gui_onboard
 import gui_tls
 import live_samples
+import peer_policy
 import secretfs
 import secrets_store
 import telemetry
@@ -142,6 +143,28 @@ def _claim_admin(app, supplied_grant, username, password):
         # grant has nothing left to authorize.
         app._setup_grant = None
         return "ok"
+
+
+def _revoke_device_secrets(app, device_id):
+    """Durably revoke every secret for *device_id*, durable-copy-FIRST, under the
+    secrets-store flock (spec §7 retirement step 1).
+
+    Returns ``"ok"`` on a persisted revoke, ``"absent"`` if the device owns no
+    secret records (nothing to revoke — the caller may still clean fleet/catalog
+    state), or raises on a persist failure so the caller ABORTS the delete with
+    no fleet/catalog/policy change. Uses the same lock + durable-first discipline
+    as iris-revoke, so a concurrent rotation cannot re-arm the device and a
+    durable-write failure never leaves a phantom (unpersisted) revoke.
+    """
+    with secrets_store.store_lock(app.secrets_path):
+        store = secrets_store.load(app.secrets_path)
+        if device_id not in store.get("devices", {}):
+            return "absent"
+        secrets_store.revoke(store, device_id)
+        secretfs.persist_store(store, app.secrets_path,
+                               recipients_csv=app.recipients_csv,
+                               enc_path=app.secrets_enc)
+    return "ok"
 
 
 def _fmt_bytes(n):
@@ -2369,21 +2392,75 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             if path.startswith("/api/devices/") and fleet is not None:
                 did = unquote(path[len("/api/devices/"):])
                 prev = fleet.get_device(did)
+                # Spec §7 retirement: durably REVOKE the device's secrets FIRST.
+                # If that persist fails, ABORT — no fleet/catalog/policy change,
+                # HTTP reports failure, audit stays non-secret. Endpoint rows are
+                # deliberately RETAINED (never removed here); the now-revoked
+                # principal is derived-denied via its still-fresh endpoint
+                # regardless of policy, so cleanup order can never re-permit it.
+                try:
+                    revoke_state = _revoke_device_secrets(app, did)
+                except Exception:
+                    # Token-free: the exception (which could embed a path or
+                    # secret) is dropped, only a generic failure is audited.
+                    self._audit("device_delete", "device", action="delete",
+                               target=did, actor=actor, result="fail",
+                               detail="secret revoke failed; delete aborted, "
+                                      "no state changed")
+                    self._json(500, {"deleted": False,
+                                     "error": "secret revoke failed"})
+                    return
+                # Revoke succeeded (or the device had no secrets). Now tidy
+                # policy + fleet + catalog state. Any failure here is
+                # partial/degraded but CANNOT permit the device.
+                degraded = []
+                # Peer-policy lives in the shared IRIS state dir. Prefer the
+                # catalog's own state_dir (single source of truth, and what the
+                # tracker reconciler reads) so console + tracker agree; fall back
+                # to IRIS_STATE only when no catalog is wired.
+                state_dir = (catalog.state_dir if catalog is not None
+                             else os.environ.get("IRIS_STATE", "/var/lib/iris"))
+                try:
+                    peer_policy.unassign_device(
+                        os.path.join(state_dir, "peer-policy.json"),
+                        os.path.join(state_dir, "peer-policy.lkg.json"),
+                        did, actor=actor, now=time.time())
+                except Exception:
+                    degraded.append("policy")
                 deleted = fleet.delete(did)
                 # Purge catalog-side state (assignment, heartbeat record,
-                # telemetry history, pending pull) even when the fleet row was
-                # already gone — a deleted-and-re-added device must come back
-                # unassigned, never resurrect a stale assignment.
-                purged = catalog.purge_device(did) if catalog is not None else False
-                self._audit("device_delete", "device", action="delete", target=did,
-                           actor=actor, result="ok" if deleted else "fail",
-                           detail=("removed (ip %s, model %s)%s"
-                                   % ((prev or {}).get("device_ip"),
-                                      (prev or {}).get("model") or "-",
-                                      ", assignment and state purged"
-                                      if purged else ""))
-                                  if deleted else "no such device")
-                self._json(200, {"deleted": deleted})
+                # telemetry history, seen-report ledger, pending pull) even when
+                # the fleet row was already gone — a deleted-and-re-added device
+                # must come back unassigned. Endpoints are NOT purged (retained
+                # to TTL); re-onboard clears them before new credentials mint.
+                try:
+                    purged = (catalog.purge_device(did)
+                              if catalog is not None else False)
+                except Exception:
+                    purged = False
+                    degraded.append("catalog")
+                result = "ok" if deleted and not degraded else (
+                    "fail" if not deleted else "degraded")
+                if deleted:
+                    suffix = (", secrets revoked" if revoke_state == "ok"
+                              else "")
+                    suffix += ", endpoints retained"
+                    if degraded:
+                        suffix += ", partial cleanup: %s" % ",".join(degraded)
+                    detail = ("removed (ip %s, model %s)%s"
+                              % ((prev or {}).get("device_ip"),
+                                 (prev or {}).get("model") or "-", suffix))
+                elif revoke_state == "ok" or purged:
+                    # No fleet row, but the device had durable secrets/state we
+                    # revoked/purged — a real retirement, not a no-op.
+                    detail = "no fleet row; secrets revoked, state purged"
+                else:
+                    detail = "no such device"
+                self._audit("device_delete", "device", action="delete",
+                           target=did, actor=actor, result=result,
+                           detail=detail)
+                self._json(200 if not degraded else 207,
+                           {"deleted": deleted, "degraded": degraded})
                 return
             if path.startswith("/api/credentials/") and creds is not None:
                 cid = unquote(path[len("/api/credentials/"):])

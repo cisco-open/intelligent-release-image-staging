@@ -9,6 +9,7 @@ peer lifecycle via peer_registry, bencoded responses, optional compact peers.
 Stdlib only. Run as a service: python3 tracker.py (reads IRIS_* env)."""
 import binascii
 import ipaddress
+import json
 import os
 import socket
 import threading
@@ -711,6 +712,7 @@ def _build_reconciler_from_env(env, registry):
     endpoints_path = os.path.join(state_dir, "peer-endpoints.json")
     enforcement_path = os.path.join(state_dir, "peer-enforcement.json")
     audit_path = env.get("IRIS_AUDIT", "/etc/iris/audit.jsonl")
+    secrets_path = env.get("IRIS_SECRETS", "/run/iris/secrets.json")
 
     rpc = telemetry.make_jsonrpc_caller(
         env.get("IRIS_RPC", telemetry.DEFAULT_RPC_URL),
@@ -730,14 +732,49 @@ def _build_reconciler_from_env(env, registry):
         endpoints_path=endpoints_path, enforcement_path=enforcement_path,
         aria=aria, pending_queue=_peer_endpoints.PendingEndpointQueue(),
         active_participants=lambda: _active_participants(registry),
-        # Revocation view is intentionally an empty set until Task 15 wires the
-        # credential-revocation catalog. Keeping it empty (never None) means the
-        # reconciler treats no principal as credential-revoked yet — policy still
-        # governs deny decisions — and the derivation stays valid. Do NOT invent
-        # catalog wiring here; Task 15 replaces this with the real view.
-        revoked_principals=lambda: set(),
+        # Revocation view (spec §7 retirement): a device principal whose every
+        # secret record is durably revoked is derived-denied regardless of
+        # policy. The provider reads the durable secrets store fresh each pass;
+        # a corrupt/unreadable store must never silently permit a known-revoked
+        # device, so it fails safe by retaining the last-known revoked set.
+        revoked_principals=_make_revoked_view(secrets_path),
         protected_seeder_ip=env.get("IRIS_HOST_IP") or None,
         audit_export=audit_export)
+
+
+def _make_revoked_view(secrets_path):
+    """Build the reconciler's ``revoked_principals`` provider over the durable
+    secrets store (spec §7 retirement).
+
+    Each call reads the store fresh (revocation must be picked up without a
+    tracker restart). To stay fail-closed, a read/parse failure NEVER shrinks
+    the revoked set: the last successfully-derived set is retained so a
+    transient corrupt read cannot silently re-permit a known-revoked device.
+    The RPC secret and other secret values never leave this closure — only the
+    ``"<type>:<id>"`` keys do — and no exception message is surfaced.
+    """
+    last_known = {"keys": set()}
+
+    def view():
+        try:
+            with open(secrets_path) as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError("not a dict")
+            data.setdefault("devices", {})
+            keys = secrets_store.revoked_device_principals(data)
+        except (OSError, ValueError):
+            # Fail-safe: a corrupt/unreadable store must never SHRINK the deny
+            # set (that would silently re-permit a known-revoked device), so we
+            # keep denying every principal the last GOOD read knew was revoked.
+            return set(last_known["keys"])
+        # A successful read is authoritative: it reflects the true current
+        # revoke state, so a legitimately re-onboarded device (fresh, non-revoked
+        # credentials) correctly drops out of the deny set.
+        last_known["keys"] = keys
+        return set(keys)
+
+    return view
 
 
 def _active_participants(registry):

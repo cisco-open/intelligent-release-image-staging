@@ -3707,7 +3707,8 @@ def test_device_delete_details_ok_and_fail(tmp_path):
         dels = [e for e in _read_audit_lines(audit_path)
                 if e.get("event") == "device_delete"]
         assert dels[0]["result"] == "ok"
-        assert dels[0]["detail"] == "removed (ip 10.0.0.1, model -)"
+        assert dels[0]["detail"] == (
+            "removed (ip 10.0.0.1, model -), endpoints retained")
         # deleting a device that never existed is a FAIL, not a phantom ok
         assert dels[1]["result"] == "fail"
         assert dels[1]["detail"] == "no such device"

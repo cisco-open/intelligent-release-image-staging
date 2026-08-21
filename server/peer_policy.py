@@ -367,3 +367,25 @@ def pending_exports(doc, exported_revision):
     return sorted((e for e in doc.get("operation_outbox", [])
                    if e["revision"] > exported_revision),
                   key=lambda e: e["revision"])
+
+
+def unassign_device(auth_path, lkg_path, device_id, actor, now,
+                    acked_revision=0):
+    """Remove ``device_id``'s ACL assignment as a system cleanup action (spec §7
+    retirement). Safe/optimistic: a no-op mutation (device not assigned) still
+    commits a revision so the outbox records the cleanup; the reserved
+    quarantine ACL is never touched. Runs under the same umbrella lock and
+    preserves the operation outbox via :func:`commit_mutation`.
+
+    This is the device-retirement counterpart to an operator assignment: after a
+    device's secrets are durably revoked, its endpoint rows are retained and the
+    revoked-credential principal is derived-denied regardless of assignment, so
+    dropping the assignment here can never re-permit the device — it only tidies
+    policy. Returns the committed document.
+    """
+    def _mutate(candidate):
+        candidate.get("assignments", {}).pop(device_id, None)
+
+    return commit_mutation(
+        auth_path, lkg_path, action="unassign", target=device_id,
+        actor=actor, now=now, mutate=_mutate, acked_revision=acked_revision)

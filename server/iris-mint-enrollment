@@ -18,6 +18,8 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import auth            # noqa: E402
+import peer_endpoints  # noqa: E402
 import secretfs       # noqa: E402
 import secrets_store  # noqa: E402
 
@@ -32,8 +34,26 @@ def main(argv=None):
     device_id = argv[0]
     secrets_path = os.environ.get("IRIS_SECRETS", "/run/iris/secrets.json")
     enroll_ttl = int(os.environ.get("IRIS_ENROLL_TTL", "3600"))
+    state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
+    endpoints_path = os.path.join(state_dir, "peer-endpoints.json")
 
     now = time.time()
+
+    # Re-onboard MUST clear the device's old retained endpoint rows BEFORE the
+    # new credentials become usable (spec §7 retirement item 4): a stale
+    # endpoint left over from a prior revoke/delete would otherwise keep the
+    # reconciler denying the IP even after re-enrollment. The device principal
+    # is ``device:<device_id>`` — deliberately distinct from the ``service:seeder``
+    # namespace, so a device literally named "seeder" clears its own rows, never
+    # the service seeder's. If this clear fails, abort before any new credential
+    # is minted or persisted (nothing has been written yet).
+    try:
+        peer_endpoints.clear_principal(
+            endpoints_path, auth.Principal("device", device_id))
+    except OSError as exc:
+        print("error: endpoint clear failed, enrollment NOT minted: %s" % exc,
+              file=sys.stderr)
+        return 1
 
     # Hold the same advisory lock the catalog server's token-refresh takes, so
     # a concurrent rotation/revoke can't load a snapshot that predates this

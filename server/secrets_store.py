@@ -368,6 +368,34 @@ def revoke(store, device_id):
 
 
 # ---------------------------------------------------------------------------
+# Retirement / revocation view (spec §7 retirement)
+# ---------------------------------------------------------------------------
+
+def revoked_device_principals(store):
+    """Return the set of ``"device:<id>"`` keys whose credentials are all
+    revoked (spec §7 retirement).
+
+    A device is treated as **retired/revoked** only when it owns at least one
+    secret record AND **every** owned record is durably ``revoked`` (the state
+    ``revoke`` sets). This is deliberately based on the durable revoke flag, not
+    on transient catalog-token expiry: a device with an expired-but-not-revoked
+    ``catalog_token`` whose ``announce_token`` is still valid is **not** retired
+    (not all records are revoked), so ordinary token expiry never derives a
+    deny. Only the seeder pseudo-device is skipped — it is a service principal,
+    never a retirable device. The returned keys feed the tracker reconciler's
+    ``revoked_principals`` view, where a matching principal is derived-denied
+    regardless of policy assignment.
+    """
+    keys = set()
+    for device_id, records in store.get("devices", {}).items():
+        if not records:
+            continue
+        if all(rec.get("revoked") for rec in records.values()):
+            keys.add("device:%s" % device_id)
+    return keys
+
+
+# ---------------------------------------------------------------------------
 # Seeder announce-token overlap (spec §6)
 # ---------------------------------------------------------------------------
 
