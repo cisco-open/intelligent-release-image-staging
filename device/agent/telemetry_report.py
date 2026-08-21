@@ -44,6 +44,27 @@ OBS_STATES = ("observed", "not_due", "paused", "disabled",
               "not_active", "rpc_unavailable")
 SAMPLING_CLASSES = ("good", "constrained")
 LIVE_PEER_ROWS_MAX = 32     # peer_connections[] cap in a v2 observation envelope
+CONTENT_SHA256_STATES = ("verified", "mismatch", "not_checked")
+IOS_COPY_VERIFY_STATES = ("ok", "failed", "not_run", "unsupported")
+
+
+def content_sha256_state(state, img_id):
+    """The persisted content-hash verify fact for a report (spec §3D), read
+    VERBATIM from the decision point run_once recorded. Defaults to
+    'not_checked' when no verify decision has been made — never inferred from
+    done/copied or absence, and 'false' is never used to mean unchecked."""
+    tele = (state.get(img_id) or {}).get("tele") or {}
+    v = tele.get("content_sha256_state")
+    return v if v in CONTENT_SHA256_STATES else "not_checked"
+
+
+def ios_copy_verify_state(state, img_id):
+    """The persisted IOS copy /verify fact for a report (spec §3D), read
+    VERBATIM from the decision point. Defaults to 'not_run' when no copy /verify
+    decision has been made. Independent of content_sha256_state."""
+    tele = (state.get(img_id) or {}).get("tele") or {}
+    v = tele.get("ios_copy_verify_state")
+    return v if v in IOS_COPY_VERIFY_STATES else "not_run"
 
 
 def mint_id():

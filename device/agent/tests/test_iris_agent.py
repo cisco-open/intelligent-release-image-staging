@@ -2371,7 +2371,14 @@ def test_telemetry_off_means_no_rpc_and_no_post():
         == "complete"
     assert stats_calls == [] and peer_calls == []
     assert cat.telemetry == []
-    assert "tele" not in state.get("img1", {})
+    # No telemetry SAMPLING/REPORT state was created (no peers/report_pending/
+    # stream_last_ts). Verification FACTS (content_sha256_state /
+    # ios_copy_verify_state) are recorded regardless of the telemetry toggle —
+    # they are honest per-decision facts, not stream state.
+    tele = state.get("img1", {}).get("tele", {})
+    for k in ("peers", "report_pending", "stream_last_ts", "sample_seq",
+              "transfer_id"):
+        assert k not in tele
 
 
 def test_bad_tier_defers_send_and_keeps_data():
