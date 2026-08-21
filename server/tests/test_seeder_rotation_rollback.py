@@ -254,6 +254,47 @@ def test_serial_remove_then_add_per_torrent(tmp_path):
     assert kinds == ["remove", "add", "remove", "add"]
 
 
+def test_success_claims_served_only_after_probe(tmp_path):
+    sp = _seeder_store(tmp_path)
+    torrent = tmp_path / "img.torrent"
+    torrent.write_bytes(_canonical())
+    calls = []
+    seeder = FakeSeeder()
+    deps = rot.RotationDeps(
+        persist=lambda s, p: secrets_store.save(s, p),
+        seeder_remove=seeder.remove, seeder_add=seeder.add,
+        swarm_probe=lambda: (calls.append("probe") or True),
+        manifest_write=rot._atomic_write_json, now=lambda: 100)
+    result = rot.rotate_seeder_announce(
+        sp, str(tmp_path / "recovery.json"),
+        [rot.TorrentTarget("img", str(torrent), str(tmp_path), "gid")],
+        "http://h:6969/announce", deps)
+    assert result.served_claimed is True
+    assert calls == ["probe"]
+    assert seeder.events[-1][0] == "add"
+
+
+def test_failed_probe_freezes_and_never_claims_served(tmp_path):
+    sp = _seeder_store(tmp_path)
+    manifest_path = str(tmp_path / "recovery.json")
+    torrent = tmp_path / "img.torrent"
+    torrent.write_bytes(_canonical())
+    seeder = FakeSeeder()
+    deps = rot.RotationDeps(
+        persist=lambda s, p: secrets_store.save(s, p),
+        seeder_remove=seeder.remove, seeder_add=seeder.add,
+        swarm_probe=lambda: (_ for _ in ()).throw(TimeoutError()),
+        manifest_write=rot._atomic_write_json, now=lambda: 100)
+    result = rot.rotate_seeder_announce(
+        sp, manifest_path,
+        [rot.TorrentTarget("img", str(torrent), str(tmp_path), "gid")],
+        "http://h:6969/announce", deps)
+    assert (result.maintenance_frozen, result.hard_no_go,
+            result.served_claimed) == (True, True, False)
+    manifest = json.load(open(manifest_path))
+    assert manifest["phase"] == manifest["error"] == "swarm_probe_failed"
+
+
 # ---------------------------------------------------------------------------
 # Rollback: new-add failure restores EXACT old bytes and attempts old add
 # ---------------------------------------------------------------------------
@@ -644,6 +685,10 @@ def _serving_swarm(info_hashes, rpc_up=True, extra_peers=None):
         "now": 100.0,
         "server": {"host": "100.90.168.20", "server_observation": {
             "observed_at": 100.0, "rpc_up": rpc_up,
+            "tracker_observation": {"principal_type": "service",
+                                    "principal_id": "seeder",
+                                    "observed_info_hashes": list(info_hashes),
+                                    "last_seen": 100.0},
             "aria_session_id": "s1", "global": {},
             "torrent": [{"info_hash": h, "image": "cat9k.bin",
                          "upload_length_bytes": 1, "lifetime": "control-state"}
@@ -668,6 +713,17 @@ def test_is_seeder_serving_false_when_rpc_down():
 def test_is_seeder_serving_false_when_expected_torrent_missing():
     doc = _serving_swarm(["abc"])
     assert rot.is_seeder_serving(doc, ["abc", "def"]) is False
+
+
+def test_is_seeder_serving_requires_current_typed_service_marker():
+    doc = _serving_swarm(["abc"])
+    del doc["server"]["server_observation"]["tracker_observation"]
+    assert rot.is_seeder_serving(doc, ["abc"]) is False
+
+
+def test_is_seeder_serving_requires_exact_active_hashes():
+    doc = _serving_swarm(["abc", "stale"])
+    assert rot.is_seeder_serving(doc, ["abc"]) is False
 
 
 def test_is_seeder_serving_false_on_empty_expected():

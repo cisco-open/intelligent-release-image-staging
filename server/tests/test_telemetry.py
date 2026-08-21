@@ -236,6 +236,53 @@ def test_swarm_snapshot_torrent_upload_length_is_a_gauge():
     assert torrents["abc"]["lifetime"] == "control-state"
 
 
+def test_server_source_proves_typed_seeder_and_current_torrent_snapshot():
+    import auth
+    active = [{"gid": "g1", "connections": "1", "infoHash": "abc",
+               "totalLength": "1000", "uploadLength": "3",
+               "uploadSpeed": "7", "files": [{"path": "/img/a.bin"}]}]
+    def rpc(method, params=None):
+        if method == "aria2.getGlobalStat":
+            return {"uploadSpeed": "7", "downloadSpeed": "0", "numActive": "1"}
+        if method == "aria2.tellActive":
+            return active
+        if method == "aria2.getSessionInfo":
+            return {"sessionId": "s1"}
+        if method == "aria2.getPeers":
+            return []
+        raise AssertionError(method)
+    hub = telemetry.Telemetry(PeerRegistry(), rpc=rpc)
+    hub._registry.announce("abc", "seed", "10.0.0.1", 6881, left=0,
+                           now=10, principal=auth.Principal("service", "seeder"))
+    hub.sample(now=11)
+    obs = hub.swarm_snapshot(now=11)["server"]["server_observation"]
+    assert obs["tracker_observation"] == {
+        "principal_type": "service", "principal_id": "seeder",
+        "observed_info_hashes": ["abc"], "last_seen": 10}
+    assert obs["torrent"] == [{"info_hash": "abc", "image": "a.bin",
+                                "upload_length_bytes": 3, "upload_bps": 7,
+                                "lifetime": "control-state"}]
+
+
+def test_failed_or_vanished_peer_poll_clears_current_torrent_gauges():
+    active = {"rows": [{"gid": "g1", "connections": "0", "infoHash": "abc",
+                        "totalLength": "1", "uploadLength": "2",
+                        "uploadSpeed": "3", "files": []}], "fail": False}
+    def rpc(method, params=None):
+        if method == "aria2.getGlobalStat": return {"numActive": "1"}
+        if method == "aria2.tellActive":
+            if active["fail"]: raise OSError("down")
+            return active["rows"]
+        if method == "aria2.getSessionInfo": return {"sessionId": "s"}
+        if method == "aria2.getPeers": return []
+        raise AssertionError(method)
+    hub = telemetry.Telemetry(PeerRegistry(), rpc=rpc)
+    hub.sample(now=10)
+    active["rows"] = []
+    hub.sample(now=11)
+    assert hub._server_source(11)["server_observation"]["torrent"] == []
+
+
 def test_sample_unchanged_session_reports_upload_length_verbatim():
     # On an unchanged session id, increases (including image-size overshoot)
     # are legitimate and the reported gauge tracks the counter exactly.
@@ -1415,16 +1462,16 @@ class TestPeerPolicyEnforcementFacts:
         assert enf["blocked"] is True
         assert enf["conflict"]["global_block_applied"] is True
 
-    def test_enforcement_not_blocked_when_absent(self):
+    def test_enforcement_omits_blocked_when_absent(self):
         enforcement = {"state": "enforced", "conflicts": []}
         row = self._row(self._hub(enforcement=enforcement))
-        assert row["peer_enforcement"]["blocked"] is False
+        assert "blocked" not in row["peer_enforcement"]
         assert "conflict" not in row["peer_enforcement"]
 
-    def test_fail_closed_enforcement_state_blocks(self):
+    def test_fail_closed_enforcement_state_does_not_prove_peer_block(self):
         enforcement = {"state": "fail_closed", "conflicts": []}
         row = self._row(self._hub(enforcement=enforcement))
-        assert row["peer_enforcement"]["blocked"] is True
+        assert "blocked" not in row["peer_enforcement"]
         assert row["peer_enforcement"]["state"] == "fail_closed"
 
     def test_legacy_peer_gets_no_policy_or_enforcement(self):

@@ -262,7 +262,22 @@ def rotate_seeder_announce(secrets_path, manifest_path, torrents,
         applied.append((idx, target, old_bytes))
         deps.manifest_write(manifest_path, manifest)
 
+    # Claim serving only after the canonical adds are independently observed.
+    # Probe errors and timeouts fail closed exactly like a failed predicate; no
+    # credential is revoked and the recovery manifest remains terminal.
+    try:
+        serving = deps.swarm_probe()
+    except Exception:
+        serving = False
+    if not serving:
+        manifest["phase"] = "swarm_probe_failed"
+        manifest["error"] = "swarm_probe_failed"
+        manifest["maintenance_frozen"] = True
+        manifest["served_claimed"] = False
+        deps.manifest_write(manifest_path, manifest)
+        return RotationResult(False, True, True, False, new_current)
     manifest["phase"] = "complete"
+    manifest["served_claimed"] = True
     deps.manifest_write(manifest_path, manifest)
     return RotationResult(False, False, False, True, new_current)
 
@@ -441,7 +456,14 @@ def is_seeder_serving(swarm_doc, expected_info_hashes):
         if isinstance(t, dict) and t.get("lifetime") == "control-state" \
                 and t.get("info_hash"):
             serving.add(t["info_hash"])
-    if not expected.issubset(serving):
+    marker = obs.get("tracker_observation")
+    if not isinstance(marker, dict) \
+            or marker.get("principal_type") != "service" \
+            or marker.get("principal_id") != "seeder" \
+            or marker.get("last_seen") is None \
+            or set(marker.get("observed_info_hashes") or []) != expected:
+        return False
+    if serving != expected:
         return False
     # Reject only a ring seeder row that genuinely conflicts with the canonical
     # dedup of the current non-legacy service seeder: a legacy/unattributed or

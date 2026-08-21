@@ -51,12 +51,12 @@ def poll_seeder(rpc):
     try:
         g = rpc("aria2.getGlobalStat", [])
         active = rpc("aria2.tellActive",
-                     [["gid", "connections", "infoHash", "totalLength",
-                       "files"]])
+                      [["gid", "connections", "infoHash", "totalLength",
+                        "uploadSpeed", "files"]])
     except Exception:
         return {"rpc_up": False}, {}, {}
     connections = sum(_int(d.get("connections")) for d in active)
-    names, totals = {}, {}
+    names, totals, upload_bps = {}, {}, {}
     for d in active:
         ih = d.get("infoHash")
         if not ih:
@@ -67,12 +67,14 @@ def poll_seeder(rpc):
             names[ih] = os.path.basename(path)
         if d.get("totalLength"):
             totals[ih] = _int(d.get("totalLength"))
+        upload_bps[ih] = _int(d.get("uploadSpeed"))
     return {
         "rpc_up": True,
         "upload_speed": _int(g.get("uploadSpeed")),
         "download_speed": _int(g.get("downloadSpeed")),
         "active_torrents": _int(g.get("numActive")),
         "connections": connections,
+        "torrent_upload_bps": upload_bps,
     }, names, totals
 
 
@@ -103,7 +105,7 @@ def poll_seeder_peers(rpc):
     try:
         active = rpc("aria2.tellActive", [["gid", "infoHash", "uploadLength"]])
     except Exception:
-        return peer_up, upload_lengths, session_id
+        return None, None, session_id
     for d in active:
         ih, gid = d.get("infoHash"), d.get("gid")
         if not ih or not gid:
@@ -420,6 +422,8 @@ class Telemetry:
         self._totals = {}                   # last good info_hash -> total bytes
         self._peer_up = {}                  # info_hash -> {ip: server upload bps}
         self._upload_len = {}               # info_hash -> control-state uploadLength gauge (epoch-baselined)
+        self._torrent_upload_bps = {}       # info_hash -> aria2 current uploadSpeed
+        self._torrent_observed_at = 0.0     # last successful control-state poll
         self._session_id = None             # aria2 session id bound to _upload_len; a change is a new epoch
         self._counters = {"announces_total": 0}
         self._lock = threading.Lock()
@@ -558,10 +562,12 @@ class Telemetry:
         if self.rpc is not None:
             seeder, names, totals = poll_seeder(self.rpc)
             self._seeder = seeder
-            if names:                       # keep last good values on RPC blips
+            if seeder.get("rpc_up"):
+                # A successful tellActive is a complete replacement snapshot:
+                # vanished torrents are no longer current control state.
                 self._names = names
-            if totals:
                 self._totals = totals
+                self._torrent_upload_bps = seeder.get("torrent_upload_bps", {})
             # Per-peer CURRENT send rate (measured) + the per-torrent
             # control-state uploadLength gauge, tagged with aria2's session id.
             # No per-peer cumulative bytes are inferred: the gauge is surfaced
@@ -571,12 +577,21 @@ class Telemetry:
             # mean a new counter epoch / control-state loss). Because nothing is
             # integrated into a per-peer allocation, an epoch reset loses no
             # attributed bytes: there is simply nothing to carry.
-            self._peer_up, upload_lengths, session_id = \
+            peer_up, upload_lengths, session_id = \
                 poll_seeder_peers(self.rpc)
+            if upload_lengths is not None:
+                self._peer_up = peer_up
+                self._upload_len = {}
+                self._torrent_observed_at = now
+            else:
+                # Do not present retained gauges/rates as a current observation
+                # after a failed control-state poll.
+                self._peer_up = {}
+                self._upload_len = {}
             new_epoch = (self._session_id is not None
                          and session_id != self._session_id)
             self._session_id = session_id
-            for info_hash, now_len in upload_lengths.items():
+            for info_hash, now_len in (upload_lengths or {}).items():
                 last = self._upload_len.get(info_hash)
                 # On a new session epoch, or a decrease within the same epoch,
                 # report the current counter verbatim (re-baseline). Otherwise
@@ -729,22 +744,42 @@ class Telemetry:
                 # the torrent's control-state lifetime — may exceed image size,
                 # never a per-device total).
                 "upload_length_bytes": self._upload_len.get(info_hash, 0),
+                "upload_bps": self._torrent_upload_bps.get(info_hash, 0),
                 "lifetime": "control-state",
             })
+        service = []
+        latest_seen = None
+        for info_hash, peers in self._registry.snapshot(now=now).items():
+            for peer in peers:
+                if peer.get("principal_type") == "service" \
+                        and peer.get("principal_id") == "seeder":
+                    service.append(info_hash)
+                    seen = peer.get("last_seen")
+                    if seen is not None and (latest_seen is None or seen > latest_seen):
+                        latest_seen = seen
+                    break
+        observation = {
+            "observed_at": self._torrent_observed_at,
+            "rpc_up": bool(self._seeder.get("rpc_up")),
+            "unavailable": not bool(self._seeder.get("rpc_up")),
+            "aria_session_id": self._session_id,
+            "global": {
+                "send_bps": self._seeder.get("upload_speed", 0),
+                "receive_bps": self._seeder.get("download_speed", 0),
+                "connections": self._seeder.get("connections", 0),
+                "active_torrents": self._seeder.get("active_torrents", 0),
+            },
+            "torrent": torrents,
+        }
+        if service:
+            observation["tracker_observation"] = {
+                "principal_type": "service", "principal_id": "seeder",
+                "observed_info_hashes": sorted(service),
+                "last_seen": latest_seen,
+            }
         return {
             "host": os.environ.get("IRIS_HOST_IP", ""),
-            "server_observation": {
-                "observed_at": now,
-                "rpc_up": bool(self._seeder.get("rpc_up")),
-                "aria_session_id": self._session_id,
-                "global": {
-                    "send_bps": self._seeder.get("upload_speed", 0),
-                    "receive_bps": self._seeder.get("download_speed", 0),
-                    "connections": self._seeder.get("connections", 0),
-                    "active_torrents": self._seeder.get("active_torrents", 0),
-                },
-                "torrent": torrents,
-            },
+            "server_observation": observation,
         }
 
     def _devices_by_id(self):
@@ -1139,20 +1174,18 @@ def _derived_denied_ids(enforcement):
 def _peer_enforcement_fact(enforcement, derived_denied, principal_type,
                            device_id, ipv4):
     """Per-participant ``peer_enforcement`` fact (spec §7/§10.3). Factual, not a
-    causal claim: ``blocked`` is asserted True ONLY when directly known — either
-    the tracker's aggregate ``state`` is ``fail_closed`` (an explicit global
-    deny) or a typed conflict for this device carries ``global_block_applied``
-    true. It is NEVER inferred from mere conflict presence nor from the aggregate
-    desired count (the count-only enforcement path does not expose the actual
-    denied principal list). A recorded shared_permit_deny conflict with
-    ``global_block_applied`` false is surfaced but leaves ``blocked`` False. The
-    raw denied-IP list is never read (it is not exposed). ``state`` mirrors the
-    tracker's aggregate enforcement state. None when unwired."""
+    causal claim: ``blocked`` is asserted only when this device's typed conflict
+    carries ``global_block_applied`` true. Aggregate state (including
+    ``fail_closed``), policy intent, and counts cannot prove an ordinary device
+    was blocked, so ``blocked`` is omitted without that direct fact. A recorded
+    shared_permit_deny conflict with ``global_block_applied`` false is surfaced
+    with ``blocked`` false. The raw denied-IP list is never read (it is not
+    exposed). ``state`` mirrors the tracker's aggregate enforcement state. None
+    when unwired."""
     if not isinstance(enforcement, dict):
         return None
     state = enforcement.get("state")
-    blocked = device_id in derived_denied or state == "fail_closed"
-    fact = {"blocked": bool(blocked), "state": state}
+    fact = {"state": state}
     # Surface a shared-IP conflict for this participant when the tracker
     # published one (typed, count-safe — no raw list).
     for c in enforcement.get("conflicts") or []:
@@ -1163,6 +1196,9 @@ def _peer_enforcement_fact(enforcement, derived_denied, principal_type,
                 "reason": c.get("reason"),
                 "global_block_applied": c.get("global_block_applied"),
             }
+            # This typed conflict is the only per-device block evidence. The
+            # aggregate state and policy intent cannot prove this peer's block.
+            fact["blocked"] = bool(c.get("global_block_applied"))
             break
     return fact
 
