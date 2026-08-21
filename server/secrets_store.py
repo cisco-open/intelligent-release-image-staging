@@ -250,6 +250,23 @@ def build_catalog_auth_index(store):
     return index
 
 
+def device_announce_value(store, device_id, now, grace):
+    """Return *device_id*'s current, valid ``announce_token`` value, or None.
+
+    Used by the catalog to personalize a device's torrent with its OWN announce
+    credential (spec §6). A device with no minted announce credential, or one
+    that is expired/revoked, returns None so the caller can fail CLOSED — a
+    device is never silently fallen back to the shared seeder token. Validity
+    is checked against the live record via ``valid``.
+    """
+    rec = store.get("devices", {}).get(device_id, {}).get("announce_token")
+    if not isinstance(rec, dict):
+        return None
+    if not valid(rec, now, grace):
+        return None
+    return rec.get("value")
+
+
 # ---------------------------------------------------------------------------
 # Mint
 # ---------------------------------------------------------------------------

@@ -20,7 +20,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import audit
-import catalog_auth
+import auth
 import live_samples
 import secretfs
 import secrets_store
@@ -448,7 +448,7 @@ class Catalog:
                     503, {"error": "catalog not open for device personalization"})
             now = time.time()
             grace = int(os.environ.get("IRIS_TOKEN_SKEW_GRACE", "300"))
-            announce_value = catalog_auth.device_announce_value(
+            announce_value = secrets_store.device_announce_value(
                 store_dict or {}, principal.id, now, grace)
             if not announce_value:
                 # Fail closed: never fall a device back to the seeder token.
@@ -688,16 +688,17 @@ def make_server(host, port, store, secrets_path, certfile=None,
             any valid catalog-scoped record.
 
             Returns ``(store_dict, index, auth_ctx)`` on success (auth_ctx is a
-            typed ``catalog_auth.AuthContext`` for the resolved principal) or
+            typed ``auth.AuthContext`` for the resolved principal) or
             ``(None, None, None)`` on auth failure. Every authorization decision
             is made through the STRICT catalog auth index (spec §6): the broad
-            ``secrets_store.build_index`` never authorizes.
+            ``secrets_store.build_index`` never authorizes (it is loaded here
+            only as route_post compatibility data).
             """
             store_dict, index = cat._load_store()
             now = time.time()
             try:
-                strict = catalog_auth.build_catalog_auth_index(store_dict)
-            except catalog_auth.DuplicateCredentialError:
+                strict = secrets_store.build_catalog_auth_index(store_dict)
+            except secrets_store.DuplicateCredentialError:
                 # Hard config error: duplicate catalog credential ownership.
                 # Fail closed for every request; never a silent overwrite.
                 return None, None, None
@@ -711,7 +712,7 @@ def make_server(host, port, store, secrets_path, certfile=None,
 
             if is_device_bound:
                 device_id = parts[2]
-                ctx = catalog_auth.resolve_catalog_auth(
+                ctx = auth.resolve_catalog_auth(
                     store_dict, strict, token, now, grace)
                 ok = (ctx is not None
                       and ctx.principal.type == "device"
@@ -736,7 +737,7 @@ def make_server(host, port, store, secrets_path, certfile=None,
             # rolled-old token (catalog_token_prev) works here because the strict
             # index covers it; it is rejected on device-bound routes above
             # because those require secret_name == "catalog_token".
-            ctx = catalog_auth.resolve_catalog_auth(
+            ctx = auth.resolve_catalog_auth(
                 store_dict, strict, token, now, grace)
             if ctx is None:
                 return None, None, None

@@ -1754,7 +1754,7 @@ def test_service_principal_receives_canonical_bytes(tmp_path):
     # A non-device (service/internal) principal receives canonical bytes with
     # no personalization. Exercised at the route level with a synthetic typed
     # AuthContext (Day-1 mints no service catalog credential).
-    import catalog_auth
+    import auth
     s = catalog.CatalogStore(str(tmp_path))
     (tmp_path / "torrents").mkdir(exist_ok=True)
     canon = _valid_torrent_bytes()
@@ -1763,8 +1763,8 @@ def test_service_principal_receives_canonical_bytes(tmp_path):
                   "sha256": "ab" * 32, "cisco_signature_verified": False,
                   "info_hash_hex": "cc" * 20, "published_at": 111})
     cat = catalog.Catalog(s, str(tmp_path / "secrets.json"))
-    ctx = catalog_auth.AuthContext(
-        principal=catalog_auth.Principal("service", "seeder"),
+    ctx = auth.AuthContext(
+        principal=auth.Principal("service", "seeder"),
         secret_name="catalog_token", scope="catalog")
     result = cat.route_get("/v1/torrents/img1.torrent",
                            auth_ctx=ctx, store_dict={})

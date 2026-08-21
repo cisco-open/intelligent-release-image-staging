@@ -9,7 +9,7 @@ import os
 
 import bencode
 import catalog
-import catalog_auth
+import auth
 
 
 def _valid_torrent_bytes(announce=b"http://old:6969/announce"):
@@ -31,8 +31,8 @@ def _catalog_with_torrent(tmp_path, deployment_open):
 
 
 def _device_ctx():
-    return catalog_auth.AuthContext(
-        principal=catalog_auth.Principal("device", "dev-g"),
+    return auth.AuthContext(
+        principal=auth.Principal("device", "dev-g"),
         secret_name="catalog_token", scope="catalog")
 
 
@@ -72,8 +72,8 @@ def test_personalized_get_served_after_checkpoint(tmp_path):
 def test_canonical_get_unaffected_by_gate(tmp_path):
     # A service principal receives canonical bytes even before the checkpoint.
     cat = _catalog_with_torrent(tmp_path, deployment_open=False)
-    ctx = catalog_auth.AuthContext(
-        principal=catalog_auth.Principal("service", "seeder"),
+    ctx = auth.AuthContext(
+        principal=auth.Principal("service", "seeder"),
         secret_name="catalog_token", scope="catalog")
     result = cat.route_get("/v1/torrents/img1.torrent",
                            auth_ctx=ctx, store_dict={})

@@ -138,6 +138,36 @@ def _context(resolved, legacy_id):
     return AuthContext(principal, secret_name, "announce")
 
 
+def resolve_catalog_auth(store, index, token, now, grace):
+    """Resolve *token* to a validated catalog ``AuthContext`` or ``None``.
+
+    *index* is the STRICT catalog auth index
+    (``secrets_store.build_catalog_auth_index``): a mapping
+    ``{value: (Principal, secret_name, record)}`` that already fails token-free
+    on duplicate value ownership. This is the sole catalog authorization
+    surface (spec §6) — never the broad ``secrets_store.build_index``.
+
+    Resolution validates the actual live record from the strict index for
+    expiry/revoke via ``secrets_store.valid`` and returns a typed
+    ``AuthContext`` (scope ``"catalog"``) that never carries the token value or
+    the record. Default-deny: a token-free/absent/invalid lookup returns None.
+
+    *store* is retained for signature/parity with the announce resolvers; the
+    strict index already carries the live record, so resolution is driven
+    entirely by *index*.
+    """
+    if token is None:
+        return None
+    entry = index.get(token)
+    if entry is None:
+        return None
+    principal, secret_name, record = entry
+    if not _ss.valid(record, now, grace):
+        return None
+    return AuthContext(principal=principal, secret_name=secret_name,
+                       scope="catalog")
+
+
 def authorize(index, store, token, device_id, scope, now, grace):
     """Return True iff *token* is valid for *device_id* with *scope*.
 

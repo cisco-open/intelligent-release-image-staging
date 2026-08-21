@@ -14,7 +14,7 @@ import time
 
 import bencode
 import catalog
-import catalog_auth
+import auth
 import secrets_store
 
 
@@ -37,8 +37,8 @@ def test_personalized_headers_present_via_route(tmp_path):
         "value": "ANNH", "created_at": now, "expires_at": 0,
         "revoked": False}}}, "seeder": {}}
     cat = catalog.Catalog(s, str(tmp_path / "secrets.json"))
-    ctx = catalog_auth.AuthContext(
-        principal=catalog_auth.Principal("device", "dev-h"),
+    ctx = auth.AuthContext(
+        principal=auth.Principal("device", "dev-h"),
         secret_name="catalog_token", scope="catalog")
     result = cat.route_get("/v1/torrents/img1.torrent",
                            auth_ctx=ctx, store_dict=store_dict)
@@ -59,8 +59,8 @@ def test_canonical_response_has_no_personalization_headers(tmp_path):
                   "sha256": "ab" * 32, "cisco_signature_verified": False,
                   "info_hash_hex": "cc" * 20, "published_at": 111})
     cat = catalog.Catalog(s, str(tmp_path / "secrets.json"))
-    ctx = catalog_auth.AuthContext(
-        principal=catalog_auth.Principal("service", "seeder"),
+    ctx = auth.AuthContext(
+        principal=auth.Principal("service", "seeder"),
         secret_name="catalog_token", scope="catalog")
     result = cat.route_get("/v1/torrents/img1.torrent",
                            auth_ctx=ctx, store_dict={})
