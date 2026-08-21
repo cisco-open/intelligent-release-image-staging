@@ -189,12 +189,16 @@ def _send_report(cfg, deps, state, img_id, report):
             return False
         _SLEEP(random.uniform(0, telemetry_report.JITTER_MAX))
         post(cfg["device_id"], report)
+        # A delivered report proves the catalog link is healthy: reset the
+        # heartbeat streak (classifier) AND the separate report streak (spec
+        # §10.2 splits heartbeat_fail_streak from report_fail_streak).
         telemetry_report.record_success(state)
+        telemetry_report.record_report_success(state)
         deps.emit("TELEMETRY", "%s report sent (%s)"
                   % (img_id, report.get("event")))
         return True
     except Exception as e:
-        telemetry_report.record_failure(state)
+        telemetry_report.record_report_failure(state)
         deps.emit("TELEMETRY-FAIL", "%s report failed (ignored): %s"
                   % (img_id, e))
         return False
@@ -311,6 +315,51 @@ def _maybe_sample(cfg, deps, state, img_id, stage, phase, now):
         return None, None
 
 
+def _send_frozen_report(cfg, deps, state, img_id, now):
+    """Send the completion/seeding v2 report, freezing it on the first attempt.
+
+    The full payload (body + report_id + report_created_at) is frozen in state
+    and CHECKPOINTED durably BEFORE the first POST (spec §2), so a crash after
+    the POST but before the outer final save restarts with the SAME frozen
+    report/id and re-sends it byte-for-byte (the server dedupes by report_id).
+    Every retry re-sends the identical frozen object. Returns True on delivery.
+    A checkpoint failure skips the POST (no unpersisted identity shipped)."""
+    frozen = telemetry_report.frozen_report(state, img_id)
+    if frozen is None:
+        tele = (state.get(img_id) or {}).get("tele") or {}
+        transfer_id = telemetry_report.ensure_transfer_id(state, img_id)
+        report = telemetry_report.build_report_v2(
+            cfg, state, img_id, tele.get("event") or "staging-complete", now,
+            transfer_id, telemetry_report.mint_id())
+        frozen = telemetry_report.freeze_report(state, img_id, report)
+        if not _checkpoint_or_skip(
+                deps, state, "TELEMETRY-CKPT",
+                "%s report freeze checkpoint failed" % img_id):
+            return False
+    return _send_report(cfg, deps, state, img_id, frozen)
+
+
+def _send_pull_report(cfg, deps, state, img_id, request_id, now):
+    """Send a pull v2 report for the server's report_request_id (spec §10.2b).
+
+    A NEW request_id mints a fresh random report_id, freezes an immutable pull
+    payload keyed by that request, and CHECKPOINTS it BEFORE the POST; a repeat
+    of the same request reuses the identical frozen body. Returns True on
+    delivery."""
+    frozen = telemetry_report.frozen_pull_report(state, request_id)
+    if frozen is None:
+        transfer_id = telemetry_report.ensure_transfer_id(state, img_id)
+        report = telemetry_report.build_report_v2(
+            cfg, state, img_id, "pull", now, transfer_id,
+            telemetry_report.mint_id(), report_request_id=request_id)
+        frozen = telemetry_report.freeze_pull_report(state, request_id, report)
+        if not _checkpoint_or_skip(
+                deps, state, "TELEMETRY-CKPT",
+                "%s pull report freeze checkpoint failed" % img_id):
+            return False
+    return _send_report(cfg, deps, state, img_id, frozen)
+
+
 def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now,
                     peers=None):
     """Per-tick telemetry glue (issue #13). phase is which run_once path is
@@ -346,7 +395,8 @@ def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now,
             tele["started_ts"] = now
         if phase in ("downloading", "seeding-only"):
             telemetry_report.observe_peers(
-                tele, peers if peers is not None else deps.aria_peers(stage))
+                tele, peers if peers is not None else deps.aria_peers(stage),
+                now)
         if phase in ("copied", "seeding-only") and not tele.get("done_ts"):
             # Take ONE final participation sample first so peers connected at
             # the end of a fast download still land in the observed set (the
@@ -354,18 +404,26 @@ def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now,
             # a peer-RPC hiccup here must never block marking done.
             if phase == "copied":
                 try:
-                    telemetry_report.observe_peers(tele, deps.aria_peers(stage))
+                    telemetry_report.observe_peers(
+                        tele, deps.aria_peers(stage), now)
                 except Exception:
                     pass
             tele["done_ts"] = now
             stats = deps.aria_stats(stage)
             if stats:
-                tele["total_bytes"] = int(stats.get("completedLength", 0) or 0)
+                completed = int(stats.get("completedLength", 0) or 0)
+                tele["total_bytes"] = completed
+                # v2 content-at-end fields (spec §3D): not a "bytes transferred"
+                # claim. total is the torrent's declared totalLength when known.
+                tele["completed_content_bytes"] = completed
+                tele["total_content_bytes"] = int(
+                    stats.get("totalLength", completed) or completed)
             elapsed = max(now - tele.get("started_ts", now), 0.0)
             tele["elapsed_s"] = elapsed
             if elapsed > 0 and tele.get("total_bytes"):
+                # avg_bps kept ONLY as an internal classifier input; retired as
+                # an authoritative v2 report field.
                 tele["avg_bps"] = int(tele["total_bytes"] / elapsed)
-            tele["sha_ok"] = bool(st.get("done"))
         # Arm exactly one completion report per image. staging-complete
         # upgrades an armed-but-unsent seeding-only report (the copy gate
         # cleared on a later tick).
@@ -375,6 +433,9 @@ def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now,
             tele["report_pending"] = True
             tele["report_attempts"] = 0
             tele["report_next_ts"] = 0.0
+            # Discard any armed-but-unsent seeding-only frozen payload so the
+            # report re-freezes with the upgraded staging-complete event/id.
+            tele.pop("frozen_report", None)
         elif phase == "seeding-only" and not tele.get("event"):
             tele["event"] = "seeding-only"
             tele["report_pending"] = True
@@ -393,11 +454,25 @@ def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now,
         # tracks bytes at all. No local retry bookkeeping: the server keeps
         # the directive until a report ARRIVES, so a failed send is
         # re-flagged on the next heartbeat anyway.
-        if telemetry_report.pull_requested(hb_resp):
-            _send_report(cfg, deps, state, img_id,
-                         telemetry_report.build_report(cfg, state, img_id,
-                                                       "pull", now))
-        # Pending completion report: tier-gated with exponential backoff.
+        # GUI pull (v2): the server mints a per-request report_request_id
+        # (§10.2b). On a NEW request id the agent mints a FRESH random report_id,
+        # freezes an immutable pull payload for that request, CHECKPOINTS it
+        # BEFORE the POST, and retries it byte-for-byte; a repeat of the SAME
+        # request id reuses the identical frozen body (so repeated console pulls
+        # never collide). A steady tick re-sends the completed transfer's frozen
+        # observed peer set — never a fresh sample.
+        request_id = telemetry_report.pull_request_id(hb_resp)
+        if request_id is not None:
+            _send_pull_report(cfg, deps, state, img_id, request_id, now)
+        elif telemetry_report.pull_requested(hb_resp):
+            # Legacy pull directive without a request_id: fall back to a fresh
+            # per-tick v2 report (no freeze key available).
+            transfer_id = telemetry_report.ensure_transfer_id(state, img_id)
+            report = telemetry_report.build_report_v2(
+                cfg, state, img_id, "pull", now, transfer_id,
+                telemetry_report.mint_id())
+            _send_report(cfg, deps, state, img_id, report)
+        # Pending completion/seeding report (v2): tier-gated backoff, frozen once.
         if tele.get("report_pending") and now >= tele.get("report_next_ts", 0):
             if tele.get("report_attempts", 0) >= telemetry_report.MAX_ATTEMPTS:
                 tele["report_pending"] = False
@@ -409,20 +484,14 @@ def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now,
                     tele["report_attempts"] = tele.get("report_attempts", 0) + 1
                     tele["report_next_ts"] = telemetry_report.next_backoff_ts(
                         tele["report_attempts"], now)
+                elif _send_frozen_report(cfg, deps, state, img_id, now):
+                    tele["report_pending"] = False
+                    tele["report_sent_ts"] = now
                 else:
-                    report = telemetry_report.build_report(
-                        cfg, state, img_id, tele.get("event")
-                        or "staging-complete", now)
-                    if tier == "constrained":
-                        report = telemetry_report.trim_report(report)
-                    if _send_report(cfg, deps, state, img_id, report):
-                        tele["report_pending"] = False
-                        tele["report_sent_ts"] = now
-                    else:
-                        tele["report_attempts"] = \
-                            tele.get("report_attempts", 0) + 1
-                        tele["report_next_ts"] = telemetry_report.next_backoff_ts(
-                            tele["report_attempts"], now)
+                    tele["report_attempts"] = \
+                        tele.get("report_attempts", 0) + 1
+                    tele["report_next_ts"] = telemetry_report.next_backoff_ts(
+                        tele["report_attempts"], now)
     except Exception as e:
         try:
             deps.emit("TELEMETRY-FAIL", "telemetry tick failed (ignored): %s" % e)

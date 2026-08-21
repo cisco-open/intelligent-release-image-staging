@@ -2325,8 +2325,11 @@ def test_fast_download_reports_totals_only():
     assert report["event"] == "staging-complete"
     assert report["peers"] == []
     assert report["peers_total"] == 0
-    assert report["transfer"]["total_bytes"] == 5
-    assert report["transfer"]["sha_ok"] is True
+    assert report["content"]["completed_content_bytes"] == 5
+    assert report["content_sha256"]["state"] == "verified"
+    assert report["ios_copy_verify"]["state"] == "ok"
+    assert "avg_bps" not in report and "transfer" not in report
+    assert len(report["report_id"]) == 32 and len(report["transfer_id"]) == 32
     tele = state["img1"]["tele"]
     assert tele["report_pending"] is False and tele["report_sent_ts"] > 0
 
@@ -2353,9 +2356,11 @@ def test_completion_hook_takes_one_final_peer_sample():
     assert peer_calls == ["/stage/img1.bin"]
     assert len(cat.telemetry) == 1
     _, report = cat.telemetry[0]
-    assert report["peers"] == [{"ip": "10.0.0.7"}]
+    assert [p["ip"] for p in report["peers"]] == ["10.0.0.7"]
+    assert report["peers"][0]["observations"] >= 1
+    assert "first_observed" in report["peers"][0]
     assert report["peers_total"] == 1
-    assert report["transfer"]["total_bytes"] == 200000000
+    assert report["content"]["completed_content_bytes"] == 200000000
 
 
 def test_telemetry_off_means_no_rpc_and_no_post():
@@ -2439,18 +2444,23 @@ def test_steady_pull_never_inflates_tx_or_adds_peers():
     tele = {"report_pending": False, "report_sent_ts": 1.0,
             "event": "staging-complete", "total_bytes": 100,
             "elapsed_s": 10.0, "done_ts": 50.0,
-            "peers": {"10.0.0.1": [100, 0]}}        # legacy byte-shaped state
+            "peers": {"10.0.0.1": [100, 0]},        # legacy byte-shaped state
+            "peers_v2": {"10.0.0.1": {"first_observed": 10.0,
+                                      "last_observed": 40.0,
+                                      "observations": 4}}}
     state = {"schema_version": iris_agent._STATE_SCHEMA,
              "image_id": "img1", "stage_fs": "flash:",
              "img1": {"done": True, "copied": True, "sha": "abc",
                       "tele": tele}}
     assert iris_agent.run_once(CFG, deps, state) == "complete"
     _, report = cat.telemetry[0]
-    assert report["peers"] == [{"ip": "10.0.0.1"}]   # frozen, keys only,
-    assert report["peers_total"] == 1                # no byte fields emitted
-    assert tele["peers"] == {"10.0.0.1": [100, 0]}   # state untouched (a
-    # steady tick never calls observe_peers, so even legacy-shaped state
-    # persists verbatim until the next live-transfer tick discards it)
+    # frozen, keys + participation only, NO byte fields
+    assert [p["ip"] for p in report["peers"]] == ["10.0.0.1"]
+    assert report["peers"][0]["observations"] == 4
+    assert report["peers_total"] == 1
+    # a steady tick never calls observe_peers, so the finished transfer's peer
+    # state persists verbatim (no fresh sample, no inflation)
+    assert tele["peers_v2"]["10.0.0.1"]["observations"] == 4
 
 
 def test_steady_state_without_pull_stays_rpc_free_and_sends_nothing():
@@ -2502,7 +2512,13 @@ def test_post_telemetry_raise_never_escapes_run_once():
     tele = state["img1"]["tele"]
     assert tele["report_pending"] is True            # will retry with backoff
     assert tele["report_attempts"] == 1
-    assert state["link"]["fail_streak"] == 1
+    # a failed REPORT send advances the report streak, not the heartbeat streak
+    # (spec §10.2 splits them); the heartbeat itself succeeded this tick.
+    assert state["link"]["report_fail_streak"] == 1
+    assert state["link"].get("fail_streak", 0) == 0
+    # the payload was FROZEN before the (failed) POST so the retry is identical
+    assert tele["frozen_report"]["report_id"] == tele["frozen_report"]["report_id"]
+    assert len(tele["frozen_report"]["report_id"]) == 32
 
 
 def test_seeding_only_arms_and_sends_seeding_report():
@@ -2515,7 +2531,7 @@ def test_seeding_only_arms_and_sends_seeding_report():
     assert len(cat.telemetry) == 1
     _, report = cat.telemetry[0]
     assert report["event"] == "seeding-only"
-    assert report["transfer"]["stage_state"] == "flash_full_seeding_only"
+    assert report["stage_state"] == "flash_full_seeding_only"
 
 
 def test_completion_report_sent_exactly_once():
@@ -2527,23 +2543,26 @@ def test_completion_report_sent_exactly_once():
     assert len(cat.telemetry) == 1                   # armed + sent once, total
 
 
-def test_constrained_tier_sends_trimmed_report():
+def test_constrained_tier_report_is_full_v2_no_trim():
+    # v2 retired the constrained-tier trim + the generic 'link'/'tier'/'trimmed'
+    # fields: the report always carries full participation with a sampling_class.
     cat = FakeCatalog({"approved_image_id": "img1"}, _IMG)
     deps, *_ = make_deps(cat, {"/stage/img1.bin": 5})
     # High RTT median (> RTT_CONSTRAINED_MS), no failures -> 'constrained'.
     state = {"link": {"rtt_ms": [400.0, 500.0, 450.0], "fail_streak": 0},
              "image_id": "img1",
-             "img1": {"tele": {"peers": {"10.0.0.7": 1}}}}
+             "img1": {"tele": {"peers_v2": {"10.0.0.7": {
+                 "first_observed": 1.0, "last_observed": 2.0,
+                 "observations": 1}}}}}
     assert iris_agent.run_once(CFG, deps, state) == "complete"
     assert len(cat.telemetry) == 1
     _, report = cat.telemetry[0]
-    assert report["peers"] == []                     # rows dropped
-    assert report["peers_total"] == 1        # participation count survives trim
-    assert report["link"]["trimmed"] is True
-    # the accumulated participation state is NOT lost — still in state for a
-    # later pull (deps.aria_peers is stubbed empty this tick, so the count
-    # is unchanged, not re-observed)
-    assert state["img1"]["tele"]["peers"] == {"10.0.0.7": 1}
+    assert report["sampling"]["sampling_class"] == "constrained"
+    assert report["sampling"]["catalog_rtt_samples"] == 3
+    assert "link" not in report and "trimmed" not in report
+    # peer participation is preserved in full (no trim in v2)
+    assert [p["ip"] for p in report["peers"]] == ["10.0.0.7"]
+    assert report["peers_total"] == 1
 
 
 def test_rtts_drained_from_catalog_client_into_state():

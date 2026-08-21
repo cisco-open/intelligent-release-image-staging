@@ -23,6 +23,7 @@ keys: a bump clears 'copied' flags and forces a fleet-wide ~1.2 GB re-copy):
 removes them on sight; see observe_peers.)
 """
 import os
+import re
 import secrets
 
 PEER_CAP = 64               # named peer rows per report (rest -> peers_total)
@@ -44,6 +45,7 @@ OBS_STATES = ("observed", "not_due", "paused", "disabled",
               "not_active", "rpc_unavailable")
 SAMPLING_CLASSES = ("good", "constrained")
 LIVE_PEER_ROWS_MAX = 32     # peer_connections[] cap in a v2 observation envelope
+_HEX32 = re.compile(r"^[a-f0-9]{32}$")
 CONTENT_SHA256_STATES = ("verified", "mismatch", "not_checked")
 IOS_COPY_VERIFY_STATES = ("ok", "failed", "not_run", "unsupported")
 
@@ -190,9 +192,24 @@ def record_rtt(state, rtt_ms):
 
 
 def record_failure(state):
-    """One more consecutive catalog-POST failure (heartbeat or report)."""
+    """One more consecutive HEARTBEAT-POST failure (drives the classifier's
+    'bad' tier). Split from the report streak: a new agent talking to an old
+    server heartbeats fine but its report POST 404s — those are distinct
+    signals in the v2 report (heartbeat_fail_streak vs report_fail_streak)."""
     link = _link(state)
     link["fail_streak"] = int(link.get("fail_streak", 0)) + 1
+
+
+def record_report_failure(state):
+    """One more consecutive TELEMETRY-REPORT send failure (spec §10.2
+    report_fail_streak), tracked independently of the heartbeat streak."""
+    link = _link(state)
+    link["report_fail_streak"] = int(link.get("report_fail_streak", 0)) + 1
+
+
+def record_report_success(state):
+    """A telemetry report was delivered — reset the report failure streak."""
+    _link(state)["report_fail_streak"] = 0
 
 
 def record_success(state):
@@ -235,7 +252,7 @@ def sampling_class_of(state, avg_bps):
     return "good" if classify(state, avg_bps) == "good" else "constrained"
 
 
-def observe_peers(tele, peers):
+def observe_peers(tele, peers, now=None):
     """Record one aria2 getPeers sample as participation observation, in
     place. Per-peer BYTE counts are deliberately not tracked: aria2 1.37
     exposes only instantaneous per-peer speeds, and integrating those over
@@ -243,7 +260,13 @@ def observe_peers(tele, peers):
     fallback fired on every multi-peer lab transfer — see CHANGELOG). What
     IS measured: which peer IPs were connected at the sample instants, in
     observation order, with a per-ip sample count for dedup. New IPs beyond
-    STATE_PEER_SET_CAP are dropped (size valve; peers_total saturates)."""
+    STATE_PEER_SET_CAP are dropped (size valve; peers_total saturates).
+
+    When `now` is provided, ALSO maintains the v2 rich form `tele['peers_v2']`
+    = {ip: {first_observed, last_observed, observations}} in parallel with the
+    legacy v1 `tele['peers']` = {ip: count}, so the v2 terminal report can
+    surface first/last/count while the cap/set/truncate/saturate semantics stay
+    identical (STATE_PEER_SET_CAP-bounded distinct IPs)."""
     tele.pop("other", None)             # legacy keys from the
     tele.pop("last_sample_ts", None)    # byte-integration era
     rows = tele.setdefault("peers", {})
@@ -251,6 +274,7 @@ def observe_peers(tele, peers):
         # legacy {ip: [rx, tx]} state persisted across the upgrade: the
         # accumulators are fabricated-by-integration — discard, never migrate
         rows = tele["peers"] = {}
+    v2 = tele.setdefault("peers_v2", {}) if now is not None else None
     for p in peers:
         ip = p.get("ip")
         if not ip:
@@ -259,6 +283,13 @@ def observe_peers(tele, peers):
             rows[ip] += 1
         elif len(rows) < STATE_PEER_SET_CAP:
             rows[ip] = 1
+        if v2 is not None:
+            if ip in v2:
+                v2[ip]["last_observed"] = float(now)
+                v2[ip]["observations"] += 1
+            elif len(v2) < STATE_PEER_SET_CAP:
+                v2[ip] = {"first_observed": float(now),
+                          "last_observed": float(now), "observations": 1}
 
 
 def build_report(cfg, state, img_id, event, now):
@@ -307,6 +338,130 @@ def build_report(cfg, state, img_id, event, now):
         "agent": {"version": cfg.get("agent_version", "unknown"),
                   "runtime_mode": runtime_mode},
     }
+
+
+def _report_peer_rows_v2(tele):
+    """(peer_rows, peers_total, truncated, saturated) for the v2 report from the
+    rich `peers_v2` state. Rows carry participation only — ip + first/last
+    observed times + observation count, NEVER bytes. Rows beyond PEER_CAP (64)
+    are counted in peers_total but not named (truncated); peers_total saturates
+    at STATE_PEER_SET_CAP (512)."""
+    observed = tele.get("peers_v2") or {}
+    total = len(observed)
+    rows = []
+    for ip in list(observed)[:PEER_CAP]:
+        rec = observed[ip]
+        rows.append({"ip": ip,
+                     "first_observed": rec.get("first_observed"),
+                     "last_observed": rec.get("last_observed"),
+                     "observations": int(rec.get("observations", 0) or 0)})
+    return rows, total, total > PEER_CAP, total >= STATE_PEER_SET_CAP
+
+
+def build_report_v2(cfg, state, img_id, event, now, transfer_id, report_id,
+                    report_request_id=None, window_start=None,
+                    window_complete=True):
+    """Assemble the EXACT v2 terminal report body (spec §10.2). Pure read of
+    cfg/state. IDs are supplied by the caller (frozen once, retried verbatim).
+    Verification is TWO independent persisted facts read verbatim
+    (content_sha256_state / ios_copy_verify_state); avg_bps / sha_ok / the
+    generic 'tier' are retired. Peers carry first/last/count participation only.
+    `report_request_id` is set only for pull reports (null otherwise)."""
+    st = state.get(img_id) or {}
+    tele = st.get("tele") or {}
+    link = state.get("link") or {}
+    rtts = link.get("rtt_ms") or []
+    if st.get("copied"):
+        stage_state = "ready"
+    elif st.get("blocked_no_space"):
+        stage_state = "flash_full_seeding_only"
+    else:
+        stage_state = "staging"
+    peer_rows, peers_total, truncated, saturated = _report_peer_rows_v2(tele)
+    runtime_mode = (os.environ.get("IRIS_RUNTIME_MODE")
+                    or cfg.get("runtime_mode") or "guestshell")
+    completed = int(tele.get("completed_content_bytes",
+                             tele.get("total_bytes", 0)) or 0)
+    total = int(tele.get("total_content_bytes",
+                         tele.get("total_bytes", 0)) or 0)
+    sha_state = content_sha256_state(state, img_id)
+    content_sha256 = {"state": sha_state}
+    if sha_state in ("verified", "mismatch"):
+        content_sha256["algo"] = "sha256"
+    end = float(tele.get("done_ts", now) or now)
+    start = window_start
+    if start is None:
+        start = float(tele.get("started_ts", end) or end)
+    return {
+        "v": 2,
+        "report_id": report_id,
+        "transfer_id": transfer_id,
+        "report_request_id": report_request_id,
+        "report_created_at": float(now),
+        "image_id": img_id,
+        "event": event,
+        "window": {"start": start, "end": end,
+                   "complete": bool(window_complete)},
+        "content": {"completed_content_bytes": completed,
+                    "total_content_bytes": total},
+        "content_sha256": content_sha256,
+        "ios_copy_verify": {"state": ios_copy_verify_state(state, img_id)},
+        "sampling": {
+            "sampling_class": sampling_class_of(state, tele.get("avg_bps")),
+            "catalog_rtt_ms_median": int(round(_median(rtts))),
+            "catalog_rtt_samples": len(rtts),
+            "heartbeat_fail_streak": int(link.get("fail_streak", 0) or 0),
+            "report_fail_streak": int(link.get("report_fail_streak", 0) or 0)},
+        "stage_state": stage_state,
+        "peers": peer_rows,
+        "peers_total": peers_total,
+        "peers_truncated": truncated,
+        "peers_saturated": saturated,
+        "agent": {"version": cfg.get("agent_version", "unknown"),
+                  "runtime_mode": runtime_mode},
+    }
+
+
+def freeze_report(state, img_id, report):
+    """Freeze a completion/seeding v2 report payload in state (per transfer) so
+    every retry re-sends it byte-identical (spec §2). The CALLER checkpoints
+    state BEFORE the first POST. Returns the frozen dict (the stored object)."""
+    tele = _tele(state, img_id)
+    tele["frozen_report"] = report
+    return report
+
+
+def frozen_report(state, img_id):
+    """The frozen completion/seeding report, or None."""
+    return ((state.get(img_id) or {}).get("tele") or {}).get("frozen_report")
+
+
+def freeze_pull_report(state, request_id, report):
+    """Freeze a pull report keyed by the server's request_id (spec §10.2b), so
+    a repeated pull with the SAME request_id reuses the identical frozen body,
+    while a NEW request_id gets a fresh report. Bounded to the most recent
+    pull (the server clears a request on ingest)."""
+    state["frozen_pull"] = {"request_id": request_id, "report": report}
+    return report
+
+
+def frozen_pull_report(state, request_id):
+    """The frozen pull report for request_id, or None if the stored pull is for
+    a different (or absent) request."""
+    fp = state.get("frozen_pull")
+    if isinstance(fp, dict) and fp.get("request_id") == request_id:
+        return fp.get("report")
+    return None
+
+
+def pull_request_id(resp):
+    """The server's pull report_request_id from a heartbeat response (spec
+    §10.2b), or None. 32-hex only; tolerates captive-portal garbage."""
+    if isinstance(resp, dict):
+        rid = resp.get("report_request_id")
+        if isinstance(rid, str) and _HEX32.match(rid):
+            return rid
+    return None
 
 
 def trim_report(report):
