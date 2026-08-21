@@ -99,9 +99,13 @@ if [ -f "$STAGE/guestshell-start.sh" ]; then
 fi
 
 # 4. trim the aria2c log so it never fills flash (Guest Shell mode)
+# Rotation is ancillary maintenance: a permissions/mktemp/filesystem error
+# here must not stop step 5 — the agent is the device's only path back to the
+# catalog (same rationale as the daemon-launch handling above), so warn and
+# keep going rather than silencing the device on every EEM tick.
 if [ -f "$STAGE/rotate-logs.sh" ]; then
   bash "$STAGE/rotate-logs.sh" "$STAGE/aria2c.log" \
-    || { echo "IRIS-BOOTSTRAP: log rotation failed" >&2; exit 1; }
+    || echo "IRIS-BOOTSTRAP: log rotation failed; continuing so the agent still heartbeats" >&2
 fi
 
 # 5. run the agent control plane once

@@ -324,6 +324,34 @@ _iox_env() {
   [[ "$output" == *"[2/9]"* ]]
 }
 
+@test "unparseable device clock: the optional probe must not abort the install" {
+  # No four-digit year in the probe output must leave clock_year empty and
+  # skip the warning — under `set -euo pipefail` a bare failing grep here
+  # used to kill the installer at a check documented as optional.
+  _iox_stub_setup
+  iox_run_with_timeout 12 env DEVICE_IP=192.0.2.10 CATALOG_TOKEN=t DEVICE_ID=e1 \
+    STAGE_HOST=192.0.2.2 DEVICE_SSH_PASS=x VLAN=666 SVI_IP=192.0.2.9 \
+    SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 IRIS_CRT_FILE="$CRTFILE" \
+    MODEL=IE-3400-8T2S EXPECTED_DEVICE_IDENTITY=FOC1234TEST FAKE_IP_ROUTING=yes FAKE_IOX_PARTITION=yes \
+    FAKE_CLOCK_LINE="% Clock is not set" \
+    bash "$STUBDIR/device/iox/install.sh"
+  [[ "$output" != *"PREREQ WARNING"* ]]
+  [[ "$output" == *"[2/9]"* ]]
+}
+
+@test "failing PREREQ aborts before the existing app is torn down" {
+  # The prerequisite checks are read-only; when one fails on a re-onboard the
+  # working app must still be running. Tearing down first turns a routing or
+  # storage complaint into a destroyed deployment with no replacement.
+  _iox_stub_setup
+  COMMAND_LOG="$BATS_TEST_TMPDIR/device-commands.log"
+  run _iox_env FAKE_COMMAND_LOG="$COMMAND_LOG" FAKE_IP_ROUTING=no \
+    bash "$STUBDIR/device/iox/install.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"PREREQ: ip routing is disabled"* ]]
+  ! grep -qE 'app-hosting (stop|deactivate|uninstall) appid iris|no app-hosting appid iris' "$COMMAND_LOG"
+}
+
 @test "mismatched device identity aborts before destructive app commands" {
   _iox_stub_setup
   COMMAND_LOG="$BATS_TEST_TMPDIR/device-commands.log"

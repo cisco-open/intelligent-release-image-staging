@@ -560,6 +560,26 @@ _inband() {
   [ "$(find "$ARTDIR/staging" -name 'iris-agent-100.92.9.3-*.conf' | wc -l)" -eq 1 ]
 }
 
+@test "unparseable device clock: the optional probe must not abort the install" {
+  # `show clock` output with no four-digit year (odd platform format, or a
+  # transport hiccup on just this probe) must leave clock_year empty and skip
+  # the warning — under `set -euo pipefail` a bare failing grep here used to
+  # kill the whole installer at a check that is documented as optional.
+  setup_stage_local
+  unset HOST_USER HOST_PASS
+
+  run_with_timeout 5 env IRIS_STAGE_LOCAL=1 IRIS_ARTIFACTS_DIR="$ARTDIR" \
+    DEVICE_IP=100.92.9.3 VLAN=666 SVI_IP=100.92.9.125 SVI_MASK=255.255.255.252 \
+    GUEST_IP=100.92.9.126 CATALOG_URL=https://100.90.168.20:8443 \
+    CATALOG_TOKEN=deadbeef DEVICE_ID=100.92.9.3 STAGE_HOST=100.90.168.20 \
+    IRIS_CRT_FILE="$CRTFILE" FAKE_IP_ROUTING=yes \
+    FAKE_CLOCK_LINE="% Clock is not set" \
+    bash "$STUBDIR/device/device-install.sh"
+
+  [[ "$output" != *"PREREQ WARNING"* ]]
+  [ "$(find "$ARTDIR/staging" -name 'iris-agent-100.92.9.3-*.conf' | wc -l)" -eq 1 ]
+}
+
 @test "dry-run and real run use the same capability-bearing staged filenames" {
   setup_stage_local
   cap=0123456789abcdef0123456789abcdef

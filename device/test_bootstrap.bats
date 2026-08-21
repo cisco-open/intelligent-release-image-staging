@@ -71,6 +71,26 @@ teardown() { rm -rf "$TMP"; }
   [ -f "$TMP/agent-invoked" ]
 }
 
+@test "a failed log rotation warns but does NOT block the agent" {
+  # Rotation is ancillary maintenance. A permissions/mktemp/filesystem error
+  # in step 4 must not exit before step 5 — the agent is the device's only
+  # path back to the catalog, so a fatal rotation error would permanently
+  # silence the device on every EEM tick (same class as the aria2c-launch
+  # failure above).
+  printf 'rpc_secret = SAME\n' > "$STAGE/iris-agent.conf"
+  printf 'SAME\n' > "$STAGE/rpc-secret"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$STAGE/rotate-logs.sh"
+  chmod +x "$STAGE/rotate-logs.sh"
+  mkdir -p "$STAGE/agent"
+  printf 'open(r"%s/agent-invoked", "w").write("ran")\n' "$TMP" \
+    > "$STAGE/agent/iris_agent.py"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"log rotation failed"* ]]
+  [ -f "$TMP/agent-invoked" ]
+}
+
 @test "a healthy aria2c launch clears a stale launch-failure marker" {
   printf 'rpc_secret = SAME\n' > "$STAGE/iris-agent.conf"
   printf 'SAME\n' > "$STAGE/rpc-secret"

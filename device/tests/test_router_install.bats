@@ -117,3 +117,12 @@ setup() {
   run grep -A8 'guestshell destroy' "$INSTALL"
   [[ "$output" == *"DESTROYED"* || "$output" == *"still present"* ]]
 }
+
+@test "guestshell destroy answers the confirmation prompt (cross-version)" {
+  # Some IOS-XE versions prompt "Undeploy Guest Shell? [y/n]"; without the y
+  # the destroy never runs, the poll loop burns its full two minutes, and the
+  # install fails with the stale guest intact. Both uninstallers already send
+  # the answer for exactly this reason — the installer's destroy must match.
+  run grep -F "printf 'guestshell destroy\ny\n'" "$INSTALL"
+  [ "$status" -eq 0 ]
+}

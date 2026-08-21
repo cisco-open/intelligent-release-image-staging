@@ -234,7 +234,10 @@ existing="$(printf 'show app-hosting list\n' \
   | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>/dev/null | grep -i guestshell || true)"
 if [ -n "$existing" ]; then
   echo "[3/7] destroying pre-existing guestshell (stale networking guard)"
-  printf 'guestshell destroy\n' \
+  # some IOS-XE versions prompt "Undeploy Guest Shell? [y/n]" — answer it,
+  # matching both uninstallers; without the y the destroy never runs and the
+  # wait loop below times out with the stale guest intact
+  printf 'guestshell destroy\ny\n' \
     | "$HERE/../lab/device-run.sh" "$DEVICE_IP" >/dev/null 2>&1 || true
   for i in $(seq 1 12); do
     still="$(printf 'show app-hosting list\n' \

@@ -272,7 +272,9 @@ if [ "$NETWORK_ATTACHMENT" = "routed" ]; then
   fi
 fi
 clock_out="$(printf 'show clock\n' | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>/dev/null || true)"
-clock_year="$(printf '%s' "$clock_out" | grep -oE '[0-9]{4}' | tail -1)"
+# no four-digit year (odd format, probe hiccup) leaves clock_year empty and
+# skips the warning — the grep must not be fatal under pipefail
+clock_year="$(printf '%s' "$clock_out" | grep -oE '[0-9]{4}' | tail -1 || true)"
 if [ -n "$clock_year" ] && [ "$clock_year" -lt 2024 ]; then
   echo "PREREQ WARNING: device clock is $clock_year — TLS certificate validation may fail; set the clock or NTP"
 fi
