@@ -13,12 +13,16 @@
 # ---------------------------------------------------------------------------
 # The IRIS server image.
 # ---------------------------------------------------------------------------
-# Debian trixie, NOT bookworm: trixie carries OpenSSL 3.5 LTS (supported to
-# 2030-04) while bookworm's OpenSSL 3.0 branch reached upstream EOL on
-# 2026-09-07. server/trust.py shells out to this image's `openssl` binary to
-# verify Cisco image signatures (CMS/PKCS#7), so the TLS/crypto stack here is
-# a security boundary, not just a build detail. Keep in lockstep with
-# device/iox/Dockerfile, which shares this base (issue #13).
+# Debian trixie, NOT bookworm: trixie carries OpenSSL 3.5 LTS while bookworm's
+# OpenSSL 3.0 branch reached upstream EOL on 2026-09-07 (Debian security
+# support for bookworm continues on its own track, but we do not want to run on
+# an upstream-EOL crypto branch). server/trust.py shells out to this image's
+# `openssl` binary to parse the TLS trust store and verify CMS integrity for
+# downloaded CA bundles (PKCS#7/CMS), so the TLS/crypto stack here is a security
+# boundary, not just a build detail. Note this is trust-store/CA-bundle
+# processing only: IOS image authenticity is enforced device-side by IOS
+# `copy /verify`, not by the server. Keep in lockstep with device/iox/Dockerfile,
+# which shares this base (issue #13).
 FROM python:3.12-slim-trixie
 
 

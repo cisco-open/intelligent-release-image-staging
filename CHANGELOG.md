@@ -14,10 +14,14 @@ top-level `VERSION` file.
 ### Changed
 - **Server and IOx agent images move from Debian bookworm to trixie**
   (`python:3.12-slim-trixie`), taking OpenSSL from the 3.0 branch — upstream
-  EOL **2026-09-07** — to **3.5 LTS**, supported to 2030-04. This is a
-  security boundary rather than housekeeping: `server/trust.py` shells out to
-  the base image's `openssl` for Cisco image-signature verification
-  (CMS/PKCS#7). Python stays 3.12.14 and both Dockerfiles are bumped in
+  EOL **2026-09-07** — to **3.5 LTS**, supported upstream to 2030-04 (Debian
+  tracks security support for each suite on its own schedule; the point is to
+  stop running on an upstream-EOL crypto branch). This is a security boundary
+  rather than housekeeping: `server/trust.py` shells out to the base image's
+  `openssl` to parse the TLS trust store and verify CMS integrity for
+  downloaded CA bundles (PKCS#7/CMS). This is CA-bundle/trust-store processing
+  only — IOS image authenticity is enforced device-side by IOS `copy /verify`,
+  not by the server. Python stays 3.12.14 and both Dockerfiles are bumped in
   lockstep. Addresses the first action item of the third-party EOL audit
   (#13); the aria2c side of that audit already moved to OpenSSL 3.5.7 LTS
   with the Aria2 Next hand-in in 2026.08.21.

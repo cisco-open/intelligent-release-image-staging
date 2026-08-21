@@ -2,12 +2,14 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Both images must sit on a Debian trixie base (OpenSSL 3.5 LTS, supported to
-2030-04), not bookworm (OpenSSL 3.0, upstream EOL 2026-09-07).
+"""Both images must sit on a Debian trixie base (OpenSSL 3.5 LTS), not bookworm
+(OpenSSL 3.0, upstream EOL 2026-09-07).
 
 This is security-critical rather than housekeeping: server/trust.py shells out
-to the base image's `openssl` binary to verify Cisco image signatures
-(CMS/PKCS#7). The two Dockerfiles share a base and must be bumped in lockstep,
+to the base image's `openssl` binary to parse the TLS trust store and verify
+CMS integrity for downloaded CA bundles (PKCS#7/CMS). It does NOT verify Cisco
+IOS image signatures -- IOS image authenticity is enforced device-side by IOS
+`copy /verify`. The two Dockerfiles share a base and must be bumped in lockstep,
 so a drift between them is itself a failure (issue #13)."""
 import os
 import re
@@ -44,3 +46,18 @@ def test_both_images_share_one_base_in_lockstep():
     # The IOx agent and the server run the same Python and the same OpenSSL;
     # bumping one without the other reintroduces the split this item closes.
     assert _base_image(SERVER_DOCKERFILE) == _base_image(IOX_DOCKERFILE)
+
+
+def test_server_dockerfile_states_trust_boundary_accurately():
+    # The OpenSSL rationale in the server Dockerfile must describe what
+    # trust.py actually does -- CA-bundle / trust-store processing -- and must
+    # NOT claim the server verifies IOS image signatures (that is enforced
+    # device-side by IOS `copy /verify`).
+    text = open(SERVER_DOCKERFILE).read().lower()
+    assert "trust.py" in text
+    assert "copy /verify" in text, (
+        "Dockerfile must credit IOS `copy /verify` for image authenticity")
+    assert re.search(r"ca[ -]?bundle|trust store|trust-store", text), (
+        "Dockerfile must describe CA-bundle/trust-store processing")
+    assert "image signature" not in text and "image-signature" not in text, (
+        "Dockerfile must not claim the server verifies IOS image signatures")
