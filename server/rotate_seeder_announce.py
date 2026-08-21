@@ -222,7 +222,9 @@ def rotate_seeder_announce(secrets_path, manifest_path, torrents,
     # canonical bytes for ALL of them (spec §6: an already-applied earlier
     # torrent must not be left rotated while a later torrent hard-fails).
     expected_info_hashes = set()
-    applied = []  # list of (idx, target, old_bytes)
+    # (idx, target, old_bytes, live_gid). aria2.addTorrent returns a NEW GID;
+    # rollback must remove that live GID, never the pre-rotation target.gid.
+    applied = []
 
     # 3+4. Serial per-torrent: prepare verified replacement, force-remove, add.
     for idx, target in enumerate(torrents):
@@ -256,7 +258,9 @@ def rotate_seeder_announce(secrets_path, manifest_path, torrents,
                 also=[(idx, target, old_bytes)], this_readd_failed=True,
                 failure_class="remove_failed")
         try:
-            deps.seeder_add(new_bytes, target.image_dir)
+            live_gid = deps.seeder_add(new_bytes, target.image_dir)
+            if not live_gid:
+                raise RuntimeError("aria2 add returned no gid")
         except Exception:
             # New-add failure: restore EXACT old bytes and attempt old add.
             _atomic_write_bytes(target.path, old_bytes)
@@ -282,7 +286,8 @@ def rotate_seeder_announce(secrets_path, manifest_path, torrents,
             return RotationResult(True, False, False, False, new_current)
 
         _mark(manifest, idx, "applied")
-        applied.append((idx, target, old_bytes))
+        applied.append((idx, target, old_bytes, live_gid))
+        manifest["torrents"][idx]["live_gid"] = str(live_gid)
         deps.manifest_write(manifest_path, manifest)
 
     # Capture the boundary only after every canonical add succeeded: an announce
@@ -327,12 +332,12 @@ def _hard_no_go(manifest, manifest_path, applied, new_current, deps,
     affected = []
     # Restore + re-add each previously applied torrent, newest first is fine;
     # order does not matter for correctness, only that ALL are restored.
-    for idx, target, old_bytes in applied:
+    for idx, target, old_bytes, live_gid in applied:
         _atomic_write_bytes(target.path, old_bytes)
         _mark(manifest, idx, "restored")
         readd_ok = True
         try:
-            deps.seeder_remove(target.gid)
+            deps.seeder_remove(live_gid)
             deps.seeder_add(old_bytes, target.image_dir)
         except Exception:
             readd_ok = False

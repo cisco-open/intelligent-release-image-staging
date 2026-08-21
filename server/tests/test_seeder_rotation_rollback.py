@@ -615,6 +615,52 @@ def test_multi_torrent_later_double_failure_restores_all_applied(tmp_path):
     assert manifest["served_claimed"] is False
 
 
+def test_later_rollback_removes_new_live_gid_not_pre_rotation_gid(tmp_path):
+    sp = _seeder_store(tmp_path)
+    manifest_path = str(tmp_path / "recovery.json")
+    canon0 = _canonical()
+    info1 = bencode.encode({"name": "img1.bin", "piece length": 16384,
+                            "pieces": b"\x22" * 20, "length": 200})
+    canon1 = (b"d8:announce"
+              + bencode.encode(b"http://h:6969/announce?announce_token=OLD")
+              + b"4:info" + info1 + b"e")
+    t0, t1 = tmp_path / "t0.torrent", tmp_path / "t1.torrent"
+    t0.write_bytes(canon0)
+    t1.write_bytes(canon1)
+    events = []
+
+    def remove(gid):
+        events.append(("remove", gid))
+        if gid == "old-gid0" and len(events) > 2:
+            raise AssertionError("rollback used stale pre-rotation gid")
+
+    def add(torrent_bytes, image_dir):
+        meta = bencode.decode(torrent_bytes)
+        name, announce = meta[b"info"][b"name"], meta[b"announce"]
+        events.append(("add", name, announce))
+        if name == b"img1.bin":
+            raise RuntimeError("later torrent add fails")
+        if b"announce_token=OLD" in announce:
+            return "restored-gid0"
+        return "new-live-gid0"
+
+    deps = rot.RotationDeps(
+        persist=lambda s, p: secrets_store.save(s, p),
+        seeder_remove=remove, seeder_add=add,
+        swarm_probe=lambda expected, not_before: True,
+        manifest_write=rot._atomic_write_json, now=lambda: 100)
+
+    result = rot.rotate_seeder_announce(
+        sp, manifest_path,
+        [rot.TorrentTarget("img0", str(t0), str(tmp_path), "old-gid0"),
+         rot.TorrentTarget("img1", str(t1), str(tmp_path), "old-gid1")],
+        "http://h:6969/announce", deps)
+
+    assert result.hard_no_go is True
+    assert ("remove", "new-live-gid0") in events
+    assert t0.read_bytes() == canon0
+
+
 # ---------------------------------------------------------------------------
 # Injectable loopback /swarm probe interface (deferred integration)
 # ---------------------------------------------------------------------------
