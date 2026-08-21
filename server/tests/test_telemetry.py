@@ -1516,12 +1516,9 @@ class TestSampleExportsMetrics:
 
 class TestReportExportEnrichment:
     def test_enrich_reaches_the_record(self):
-        emitted = []
-        class _E:
-            def emit(self, rec): emitted.append(rec)
-            def flush(self): return None
+        # Task 22: report records are emitted into the hub-owned stable
+        # LogQueue (not a passed exporter object).
         hub = telemetry.Telemetry(
-            exporter=_E(),
             device_info=lambda: {"d1": {"swarm_ip": "10.0.0.2",
                                         "model": "C9300",
                                         "free_flash_bytes": 5,
@@ -1531,6 +1528,7 @@ class TestReportExportEnrichment:
                                           "peers": [{"ip": "10.0.0.2"}],
                                           "peers_total": 1}]})
         hub._export_new_reports()
+        emitted = hub.log_queue.snapshot()
         attrs = {a["key"]: a["value"] for a in emitted[0]["attributes"]}
         assert attrs["device.model.identifier"] == {"stringValue": "C9300"}
         row = attrs["iris.transfer.peers"]["arrayValue"]["values"][0]

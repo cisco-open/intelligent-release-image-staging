@@ -250,39 +250,119 @@ def _send(sender, url, body, headers):
         sender(url, body)
 
 
-class OTLPLogExporter:
-    """Queue events with emit(); deliver them in one batch per flush()."""
+class LogQueue:
+    """Stable, bounded, thread-safe FIFO of OTLP log events, deliberately
+    SEPARATE from the mutable destination transport (design §8, Task 22). The
+    telemetry hub owns exactly ONE LogQueue for the process lifetime and swaps
+    only the transport when the console changes / disables / re-enables the
+    OTLP destination — so already-queued events are never dropped or reordered
+    by a destination change.
 
-    def __init__(self, endpoint, resource_attrs=None, max_queue=1000,
-                 sender=None, headers=None):
-        self.url = endpoint.rstrip("/") + "/v1/logs"
-        self._resource = dict(resource_attrs or DEFAULT_RESOURCE)
-        self._queue = collections.deque(maxlen=max_queue)
-        self._sender = sender or _http_post
-        self._headers = dict(headers or {})
+    Durability contract:
+      * ``emit`` appends FIFO; when the queue is full the OLDEST event is
+        dropped BEFORE the append (bounded best-effort, Day-1 in-process), and
+        ``dropped_total`` is incremented per drop. FIFO order of the kept
+        events is preserved.
+      * ``flush(send)`` hands a snapshot batch to ``send`` and removes those
+        events from the queue ONLY after ``send`` returns without raising.
+        On failure the exact original batch (same order, same identities) is
+        left in place, and any events emitted concurrently during the in-flight
+        send are preserved after it — nothing is lost or reordered.
+      * ``flush`` returns None on an empty queue (no attempt), else the count
+        of events confirmed delivered (0 on a failed send)."""
+
+    def __init__(self, max_queue=1000):
+        self._queue = collections.deque()
+        self._max = int(max_queue)
+        self._dropped = 0
         self._lock = threading.Lock()
 
     def emit(self, event):
         with self._lock:
-            self._queue.append(event)   # deque(maxlen) drops oldest when full
+            while len(self._queue) >= self._max:
+                self._queue.popleft()       # drop oldest, preserve FIFO
+                self._dropped += 1
+            self._queue.append(event)
+
+    @property
+    def queued(self):
+        with self._lock:
+            return len(self._queue)
+
+    @property
+    def dropped_total(self):
+        with self._lock:
+            return self._dropped
+
+    def snapshot(self):
+        with self._lock:
+            return list(self._queue)
+
+    def flush(self, send):
+        """Deliver the current batch via ``send(batch)`` (which must raise on
+        failure); remove exactly those events on confirmed success, otherwise
+        restore them at the FRONT preserving order and any concurrent emits at
+        the back. Returns None (empty), the delivered count, or 0 (failure)."""
+        with self._lock:
+            n = len(self._queue)
+            if n == 0:
+                return None
+            batch = [self._queue.popleft() for _ in range(n)]
+        try:
+            send(batch)
+        except Exception:
+            with self._lock:
+                # restore the exact original batch ahead of anything that
+                # landed while the send was in flight — no loss, no reorder.
+                self._queue.extendleft(reversed(batch))
+            return 0
+        return len(batch)
+
+
+class OTLPLogTransport:
+    """The MUTABLE OTLP/HTTP-JSON logs destination (endpoint + headers +
+    resource + sender), holding NO queue. ``send(batch)`` posts one batch and
+    RAISES on failure so the caller's LogQueue can retain the batch for retry.
+    The hub constructs a fresh transport on every destination change; the
+    LogQueue it feeds is unchanged (Task 22)."""
+
+    def __init__(self, endpoint, resource_attrs=None, sender=None,
+                 headers=None):
+        self.url = endpoint.rstrip("/") + "/v1/logs"
+        self._resource = dict(resource_attrs or DEFAULT_RESOURCE)
+        self._sender = sender or _http_post
+        self._headers = dict(headers or {})
+
+    def send(self, batch):
+        """POST one batch; raise on failure. Returns the delivered count."""
+        body = json.dumps(build_logs_payload(batch, self._resource)).encode()
+        _send(self._sender, self.url, body, self._headers)
+        return len(batch)
+
+
+class OTLPLogExporter:
+    """Backwards-compatible composition of a stable LogQueue and a mutable
+    OTLPLogTransport, preserving the historical emit()/flush() single-object
+    API used by direct callers and older tests. New code (the hub) drives a
+    LogQueue and OTLPLogTransport separately so a destination swap keeps the
+    queue (Task 22)."""
+
+    def __init__(self, endpoint, resource_attrs=None, max_queue=1000,
+                 sender=None, headers=None):
+        self.queue = LogQueue(max_queue=max_queue)
+        self.transport = OTLPLogTransport(
+            endpoint, resource_attrs=resource_attrs, sender=sender,
+            headers=headers)
+        self.url = self.transport.url
+
+    def emit(self, event):
+        self.queue.emit(event)
 
     def flush(self):
         """Send all queued events in one request. Returns None when the queue
         was empty (no attempt — nothing to report), 0 when a send was tried
-        and failed (best-effort, swallowed), else the count delivered. The
-        None/0 split lets export-health track real outcomes without counting
-        quiet passes as successes or failures."""
-        with self._lock:
-            batch = list(self._queue)
-            self._queue.clear()
-        if not batch:
-            return None
-        body = json.dumps(build_logs_payload(batch, self._resource)).encode()
-        try:
-            _send(self._sender, self.url, body, self._headers)
-        except Exception:
-            return 0   # collector down / network error — dropped, never raised
-        return len(batch)
+        and failed (best-effort, swallowed), else the count delivered."""
+        return self.queue.flush(self.transport.send)
 
 
 def build_metrics_payload(points, resource_attrs):

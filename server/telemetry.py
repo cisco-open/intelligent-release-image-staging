@@ -257,6 +257,22 @@ class Telemetry:
                  env_endpoint="", env_enabled=False, headers=None,
                  policy_info=None, enforcement_info=None):
         self.exporter = exporter
+        # Task 22: the OTLP log queue is a STABLE object owned by the hub for
+        # the whole process; only the destination transport is mutable and
+        # swapped on a console destination change/disable/re-enable, so
+        # already-queued events survive the swap (design §8). The mutable
+        # transport lives in self._log_transport (None when disabled / no
+        # endpoint). Legacy direct-construction callers may still pass a
+        # combined `exporter`; when they do we adopt its inner queue/transport
+        # so the two code paths share one queue object.
+        if exporter is not None and hasattr(exporter, "queue"):
+            self.log_queue = exporter.queue
+            self._log_transport = exporter.transport
+        else:
+            self.log_queue = otlp.LogQueue()
+            self._log_transport = None
+        # Sender override hook (tests). Applied to every rebuilt transport.
+        self._log_sender = None
         self.rpc = rpc
         self.interval = interval
         # OTLP metrics push (spec 7.5) + shared export-health tracker (7.7).
@@ -330,9 +346,11 @@ class Telemetry:
 
     # --- hooks called from the tracker (announce path) ---
     def on_swarm_event(self, event):
-        exp = self.exporter
-        if exp is not None:
-            exp.emit(event)
+        # Task 22: always enqueue into the stable hub-owned queue; the queue is
+        # never swapped by a destination change, so an event emitted here is
+        # never lost to a transport swap. (A legacy `exporter` passed directly
+        # shares this queue — see __init__.)
+        self.log_queue.emit(event)
 
     def note_announce(self):
         with self._lock:
@@ -386,17 +404,40 @@ class Telemetry:
         if effective == self._effective:
             return
         self._effective = effective
+        sender = self._log_sender
         if enabled and endpoint:
-            self.exporter = otlp.OTLPLogExporter(endpoint,
-                                                 headers=self._headers)
+            # Task 22: swap ONLY the mutable transport; the hub-owned
+            # log_queue is untouched, so events queued under the previous
+            # destination flush to the new one. Metrics stay conflating (no
+            # queue) and are rebuilt wholesale.
+            self._log_transport = otlp.OTLPLogTransport(
+                endpoint, sender=sender, headers=self._headers)
             self.metrics_exporter = otlp.OTLPMetricsExporter(
                 endpoint, headers=self._headers)
         else:
-            # Disabled, or no endpoint anywhere: drop the exporters. The
-            # rest of the pass still runs (seeder poll, live aggregation) —
-            # the swarm map and /metrics text don't depend on OTLP export.
-            self.exporter = None
+            # Disabled, or no endpoint anywhere: drop the transport but RETAIN
+            # the queue (no fake success — queued events wait for a live
+            # destination). The rest of the pass still runs (seeder poll, live
+            # aggregation) — the swarm map and /metrics text don't depend on
+            # OTLP export.
+            self._log_transport = None
             self.metrics_exporter = None
+        # `self.exporter` remains the "logs export enabled" gate used across
+        # the sampler; it is truthy exactly when a transport is wired.
+        self.exporter = self._log_transport
+
+    def _flush_logs(self, now):
+        """Flush the stable log queue through the current transport (if any),
+        recording per-signal export health. A disabled/absent transport is NOT
+        a success and NOT a failure — the queue is simply retained. Returns the
+        delivered count (or None when no attempt was made)."""
+        transport = self._log_transport
+        if transport is None:
+            return None
+        delivered = self.log_queue.flush(transport.send)
+        if delivered is not None:           # None = empty queue, no attempt
+            self.export_health.record(delivered > 0, "logs", now)
+        return delivered
 
     def sample(self, now=None):
         now = time.time() if now is None else now
@@ -443,9 +484,7 @@ class Telemetry:
             except Exception:
                 pass                        # telemetry never breaks on bad input
         if self.exporter is not None:
-            delivered = self.exporter.flush()
-            if delivered is not None:       # None = empty queue, no attempt
-                self.export_health.record(delivered > 0, "logs", now)
+            delivered = self._flush_logs(now)
         if self.metrics_exporter is not None:
             # Every pass exports the latest snapshot (conflation, spec 7.5) —
             # NOT gated on transfers existing: the rejected-samples counter
@@ -504,7 +543,7 @@ class Telemetry:
                 except (TypeError, ValueError, AttributeError):
                     continue
                 if rcv > seen:
-                    self.exporter.emit(otlp.build_report_record(
+                    self.log_queue.emit(otlp.build_report_record(
                         rep, str(device_id), enrich=enrich))
                     if rcv > high:
                         high = rcv
