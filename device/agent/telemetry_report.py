@@ -23,6 +23,7 @@ keys: a bump clears 'copied' flags and forces a fleet-wide ~1.2 GB re-copy):
 removes them on sight; see observe_peers.)
 """
 import os
+import secrets
 
 PEER_CAP = 64               # named peer rows per report (rest -> peers_total)
 STATE_PEER_SET_CAP = 512    # distinct peer IPs tracked per image (size valve)
@@ -35,6 +36,116 @@ FAIL_STREAK_BAD = 3         # consecutive catalog failures -> 'bad'
 BACKOFF_CAP_TICKS = 16      # defer backoff cap: 1->2->4->8->16 ticks (~16 min)
 MAX_ATTEMPTS = 60           # mark report_failed after this many deferred sends
 TICK_SECONDS = 60           # the EEM agent tick period
+
+# v2 telemetry (spec section 10). The v2 observation envelope + terminal report
+# schema. sampling_class replaces the ambiguous v1 'tier'; obs_state replaces
+# 'phase'. IDs are persisted random 128-bit values (32 lowercase hex).
+OBS_STATES = ("observed", "not_due", "paused", "disabled",
+              "not_active", "rpc_unavailable")
+SAMPLING_CLASSES = ("good", "constrained")
+LIVE_PEER_ROWS_MAX = 32     # peer_connections[] cap in a v2 observation envelope
+
+
+def mint_id():
+    """A persisted random 128-bit identity as 32 lowercase hex chars
+    (secrets.token_hex(16)) — for transfer_id and report_id. Random, not a
+    short deterministic hash (which collides and leaks structure)."""
+    return secrets.token_hex(16)
+
+
+def _tele(state, img_id):
+    return state.setdefault(img_id, {}).setdefault("tele", {})
+
+
+def ensure_transfer_id(state, img_id):
+    """Return this acquisition cycle's transfer_id, minting+persisting a random
+    one on the first observation of an image with no stored transfer (spec §2).
+    Stable across ticks for the same cycle. The image-change boundary is handled
+    by clear_transfer() (called by run_once when the assigned image changes), so
+    an A->B->A sequence mints three distinct ids. P1 boundaries (changed hash /
+    local loss) intentionally reuse the existing id — dedupe/freshness still
+    advance via report_id/sample_seq."""
+    tele = _tele(state, img_id)
+    tid = tele.get("transfer_id")
+    if not tid:
+        tid = mint_id()
+        tele["transfer_id"] = tid
+    return tid
+
+
+def clear_transfer(state, img_id):
+    """Drop the transfer identity + sequence for an image whose acquisition
+    cycle has ended (the assigned image changed away from it), so the next
+    acquisition of the same id mints a fresh transfer_id and restarts
+    sample_seq. Leaves the rest of that image's state to run_once's own
+    cleanup."""
+    tele = (state.get(img_id) or {}).get("tele")
+    if isinstance(tele, dict):
+        tele.pop("transfer_id", None)
+        tele.pop("sample_seq", None)
+
+
+def next_sample_seq(state, img_id):
+    """Increment and persist the monotonic per-transfer sample_seq, returning
+    the new value (starting at 1). The CALLER checkpoints state before the
+    heartbeat POST that carries the returned seq, so a crash-after-POST restart
+    never re-uses or rewinds it (spec §2)."""
+    tele = _tele(state, img_id)
+    seq = int(tele.get("sample_seq", 0)) + 1
+    tele["sample_seq"] = seq
+    return seq
+
+
+def build_observation(obs_state, observed_at, transfer_id, image_id,
+                      sample_seq=None, aria_session_id=None,
+                      sampling_class=None, stats=None, peers=None,
+                      peer_rows_max=LIVE_PEER_ROWS_MAX):
+    """Assemble the state-first v2 `telemetry_observation` envelope (spec
+    §3A/10.1). Pure. `aria`, `peer_connections`, and `sampling_class` appear
+    ONLY under obs_state=='observed'; a state-only envelope invents no transfer
+    fields (no phase/tier/aria/peer rows). transfer_id/image_id are included
+    only when present (absent for not_active).
+
+    Raises ValueError on an unknown obs_state, or on an observed envelope
+    missing sample_seq/sampling_class (a bad envelope is caught here rather than
+    shipped)."""
+    if obs_state not in OBS_STATES:
+        raise ValueError("unknown obs_state: %r" % (obs_state,))
+    env = {"v": 2, "obs_state": obs_state, "observed_at": float(observed_at)}
+    if transfer_id is not None:
+        env["transfer_id"] = transfer_id
+    if image_id is not None:
+        env["image_id"] = image_id
+    if obs_state != "observed":
+        return env
+    if sample_seq is None or sampling_class not in SAMPLING_CLASSES:
+        raise ValueError("observed envelope requires sample_seq + sampling_class")
+    env["sample_seq"] = int(sample_seq)
+    if aria_session_id:
+        env["aria_session_id"] = aria_session_id
+    env["sampling_class"] = sampling_class
+    stats = stats or {}
+    aria = {"receive_bps": int(stats.get("downloadSpeed", "0") or 0),
+            "send_bps": int(stats.get("uploadSpeed", "0") or 0),
+            "completed_content_bytes":
+                int(stats.get("completedLength", "0") or 0),
+            "total_content_bytes": int(stats.get("totalLength", "0") or 0),
+            "connections": int(stats.get("connections", "0") or 0)}
+    status = stats.get("status")
+    if status:
+        aria["status"] = status
+    env["aria"] = aria
+    rows = []
+    for p in (peers or [])[:peer_rows_max]:
+        ip = p.get("ip")
+        if not ip:
+            continue
+        row = {"ip": ip, "send_bps": int(p.get("send_bps", 0) or 0),
+               "receive_bps": int(p.get("receive_bps", 0) or 0)}
+        rows.append(row)
+    env["peer_connections"] = rows
+    return env
+
 
 
 def enabled(cfg):
@@ -93,6 +204,14 @@ def classify(state, avg_bps):
     if avg_bps and avg_bps < SLOW_BPS:
         return "constrained"
     return "good"
+
+
+def sampling_class_of(state, avg_bps):
+    """Derived telemetry sampling class for the v2 envelope/report (spec §3D):
+    'good' or 'constrained'. Maps the internal classify() tier ('bad' collapses
+    to 'constrained' — an observed envelope is only emitted on good/constrained
+    cadence anyway, never on 'bad'). Explicitly NOT a measured link quality."""
+    return "good" if classify(state, avg_bps) == "good" else "constrained"
 
 
 def observe_peers(tele, peers):
