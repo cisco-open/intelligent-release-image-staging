@@ -58,7 +58,8 @@ _SWARM_GAUGES = (
 
 
 def render(swarm, seeder, counters, reports_stored=0, transfers=None,
-           extras=None, otlp_health=None, peer_status=None):
+           extras=None, otlp_health=None, peer_status=None,
+           seeder_torrents=None):
     out = []
 
     def family(name, mtype, help_text):
@@ -87,6 +88,13 @@ def render(swarm, seeder, counters, reports_stored=0, transfers=None,
     for name, key, help_text in _SEEDER_GAUGES:
         family(name, "gauge", help_text)
         out.append("%s %d" % (name, _int(seeder.get(key))))
+    if seeder_torrents:
+        family("iris_seeder_torrent_upload_length_bytes", "gauge",
+               "Seeder torrent control-state upload length (bytes)")
+        for torrent in seeder_torrents:
+            out.append("iris_seeder_torrent_upload_length_bytes%s %d" % (
+                _labels(torrent["image"], torrent["info_hash"]),
+                _int(torrent.get("upload_length"))))
 
     # --- swarm (per image) ---
     for name, key, help_text in _SWARM_GAUGES:

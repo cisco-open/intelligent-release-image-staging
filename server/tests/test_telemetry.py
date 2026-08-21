@@ -7,6 +7,7 @@ import json
 import os
 import threading
 
+import metrics
 import otlp
 import telemetry
 import telemetry_destination
@@ -1559,9 +1560,9 @@ class TestExportHealth:
         # top-level compatibility fields (worst-of aggregate)
         assert d["last_success_ts"] == 130.0
         assert d["failures_total"] == 2
-        # two degrade edges (metrics, logs) + one recovery edge (metrics)
-        assert events == ["otlp-export-degraded", "otlp-export-degraded",
-                          "otlp-export-recovered"]
+        # The public audit tracks aggregate health only: metrics recovering
+        # cannot claim recovery while logs remain degraded.
+        assert events == ["otlp-export-degraded"]
 
 
 class TestSampleExportsMetrics:
@@ -1608,6 +1609,75 @@ class TestSampleExportsMetrics:
         hub.sample(now=100.0)
         names = {p["name"] for p in exported[-1]}
         assert "iris.telemetry.samples.rejected" in names
+
+    def test_seeder_torrent_upload_length_metrics_are_current_and_catalog_fenced(self):
+        exported = []
+        class _M:
+            def export(self, points):
+                exported.append(list(points))
+                return True
+        state = {"rows": [{"gid": "g1", "infoHash": "known",
+                           "uploadLength": "1500"}], "fail": False}
+        def rpc(method, params=None):
+            if method == "aria2.getGlobalStat": return {"numActive": "1"}
+            if method == "aria2.getSessionInfo": return {"sessionId": "s1"}
+            if method == "aria2.tellActive":
+                if state["fail"]: raise OSError("down")
+                return state["rows"]
+            if method == "aria2.getPeers": return []
+            raise AssertionError(method)
+        hub = telemetry.Telemetry(
+            PeerRegistry(), rpc=rpc,
+            images_info=lambda: {"img-1": {"filename": "cat9k.bin",
+                                             "info_hash_hex": "known"}})
+        hub.metrics_exporter = _M()
+        hub.sample(now=100.0)
+        points = [p for p in exported[-1]
+                  if p["name"] == "iris.seeder.torrent.upload_length"]
+        assert points == [{"name": "iris.seeder.torrent.upload_length",
+                           "unit": "By", "kind": "gauge", "value": 1500,
+                           "attrs": {"iris.image.id": "img-1",
+                                     "iris.torrent.info_hash": "known"},
+                           "ts": 100.0}]
+        state["rows"] = [{"gid": "g2", "infoHash": "unknown",
+                          "uploadLength": "9999"}]
+        hub.sample(now=101.0)
+        assert not [p for p in exported[-1]
+                    if p["name"] == "iris.seeder.torrent.upload_length"]
+        state["fail"] = True
+        hub.sample(now=102.0)
+        assert not [p for p in exported[-1]
+                    if p["name"] == "iris.seeder.torrent.upload_length"]
+
+    def test_seeder_torrent_upload_length_prometheus_omits_unknown_and_failed_polls(self):
+        state = {"rows": [{"gid": "g1", "infoHash": "known",
+                           "uploadLength": "1500"}], "fail": False}
+        def rpc(method, params=None):
+            if method == "aria2.getGlobalStat": return {"numActive": "1"}
+            if method == "aria2.getSessionInfo": return {"sessionId": "s1"}
+            if method == "aria2.tellActive":
+                if state["fail"]: raise OSError("down")
+                return state["rows"]
+            if method == "aria2.getPeers": return []
+            raise AssertionError(method)
+        hub = telemetry.Telemetry(
+            PeerRegistry(), rpc=rpc,
+            images_info=lambda: {"img-1": {"filename": "cat9k.bin",
+                                             "info_hash_hex": "known"}})
+        hub.sample(now=100.0)
+        text = metrics.render([], hub._seeder, {}, seeder_torrents=
+                              hub._seeder_torrent_metrics(100.0))
+        assert ('iris_seeder_torrent_upload_length_bytes{image="cat9k.bin",'
+                'info_hash="known"} 1500' in text)
+        state["rows"] = [{"gid": "g2", "infoHash": "unknown",
+                          "uploadLength": "9999"}]
+        hub.sample(now=101.0)
+        assert "iris_seeder_torrent_upload_length_bytes" not in metrics.render(
+            [], hub._seeder, {}, seeder_torrents=hub._seeder_torrent_metrics(101.0))
+        state["fail"] = True
+        hub.sample(now=102.0)
+        assert "iris_seeder_torrent_upload_length_bytes" not in metrics.render(
+            [], hub._seeder, {}, seeder_torrents=hub._seeder_torrent_metrics(102.0))
 
 
 class TestReportExportEnrichment:

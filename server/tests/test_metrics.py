@@ -48,6 +48,15 @@ def test_render_seeder_rpc_down_is_zero():
     assert "iris_seeder_rpc_up 0" in out
 
 
+def test_render_seeder_torrent_upload_length_gauge_is_catalog_fenced():
+    out = metrics.render([], {"rpc_up": True}, {}, seeder_torrents=[
+        {"image": "cat9k.bin", "info_hash": "known", "upload_length": 1500},
+    ])
+    assert "# TYPE iris_seeder_torrent_upload_length_bytes gauge" in out
+    assert ('iris_seeder_torrent_upload_length_bytes{image="cat9k.bin",'
+            'info_hash="known"} 1500' in out)
+
+
 def test_render_announces_total_counter():
     out = metrics.render([], {}, {"announces_total": 42})
     assert "# TYPE iris_tracker_announces_total counter" in out
@@ -191,4 +200,3 @@ class TestPerSignalExportHealthMetrics:
         assert "iris_peer_enforcement_applied_revision 6" in text
         assert "iris_peer_enforcement_desired_ips 3" in text
         assert "iris_peer_enforcement_health 1" in text
-

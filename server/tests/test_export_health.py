@@ -85,6 +85,25 @@ def test_audit_transition_once_per_edge_no_secrets():
                for n in names)
 
 
+def test_audits_only_fire_on_aggregate_degraded_edges():
+    edges = []
+    h = _health(on_transition=edges.append)
+    h.record(False, "logs", 100.0)
+    h.record(False, "metrics", 101.0)
+    h.record(True, "metrics", 102.0)
+    h.record(True, "logs", 103.0)
+    assert edges == ["otlp-export-degraded", "otlp-export-recovered"]
+
+
+def test_disable_degraded_signal_is_not_a_recovery_or_new_degrade():
+    edges = []
+    h = _health(on_transition=edges.append)
+    h.record(False, "logs", 100.0)
+    h.disable("logs")
+    h.record(True, "logs", 101.0)
+    assert edges == ["otlp-export-degraded"]
+
+
 def test_healthz_shape_matches_spec():
     h = _health(log_queue=_Q(queued=12, dropped=0))
     h.record(False, "logs", 100.0)

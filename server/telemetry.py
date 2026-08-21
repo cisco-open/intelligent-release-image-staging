@@ -182,8 +182,8 @@ class ExportHealth:
     INDEPENDENT signals, each ``off | ok | degraded``; the aggregate is
     ``worst_of`` so a metrics success can NEVER mask a logs failure. Each
     signal starts ``off`` until its first attempt. Audit transitions fire the
-    callback exactly once per signal edge (ok<->degraded) AND once per aggregate
-    edge, never carrying a secret. Disabling a signal sets it ``off`` while
+    callback exactly once per aggregate degraded edge, never carrying a secret.
+    Disabling a signal sets it ``off`` while
     retaining its historic ``last_success_ts``. ``logs`` additionally surfaces
     the bounded-retry queue depth (``queued``) and overflow drops
     (``dropped_total``) from the hub-owned LogQueue."""
@@ -209,29 +209,26 @@ class ExportHealth:
         worst = max(self._sig.values(),
                     key=lambda s: self._RANK[s["state"]])["state"]
         if worst != self._aggregate:
+            previous = self._aggregate
             self._aggregate = worst
+            if previous != "degraded" and worst == "degraded":
+                self._fire("otlp-export-degraded")
+            elif previous == "degraded" and worst == "ok":
+                self._fire("otlp-export-recovered")
 
     def record(self, ok, signal, now):
         s = self._sig.setdefault(
             signal, {"state": "off", "last_success_ts": 0.0,
                      "fail_streak": 0, "failures_total": 0})
-        prev_agg = self._aggregate
         if ok:
             s["last_success_ts"] = now
             s["fail_streak"] = 0
-            if s["state"] == "degraded":
-                self._fire("otlp-export-recovered")
             s["state"] = "ok"
         else:
             s["failures_total"] += 1
             s["fail_streak"] += 1
-            if s["state"] != "degraded":
-                self._fire("otlp-export-degraded")
             s["state"] = "degraded"
         self._recompute_aggregate()
-        # (Aggregate edges are implicit in the per-signal edges above; the
-        # per-signal callback already fires once per meaningful transition.)
-        _ = prev_agg
 
     def disable(self, signal):
         """Mark a signal ``off`` (destination disabled) while RETAINING its
@@ -277,7 +274,7 @@ class ExportHealth:
 
 
 def _metric_points(rows, extras, now, export_signals=None, peer_status=None,
-                   legacy_participants=None):
+                   legacy_participants=None, seeder_torrents=None):
     """Canonical OTLP metric points (design §10.9). OTLP dotted names, units,
     and low-cardinality image-level attrs ONLY. Ambiguous active/stalled and
     all per-device/per-peer gauges are RETIRED (high-cardinality history lives
@@ -285,6 +282,12 @@ def _metric_points(rows, extras, now, export_signals=None, peer_status=None,
     a stale image; the freshness age is always emitted so omission is
     explainable."""
     pts = []
+    for torrent in seeder_torrents or ():
+        pts.append({"name": "iris.seeder.torrent.upload_length", "unit": "By",
+                    "kind": "gauge", "value": _int(torrent["upload_length"]),
+                    "attrs": {"iris.image.id": torrent["image_id"],
+                              "iris.torrent.info_hash": torrent["info_hash"]},
+                    "ts": now})
     for r in rows:
         base = {"iris.image.id": r["image"],
                 "iris.torrent.info_hash": r["info_hash"]}
@@ -488,9 +491,37 @@ class Telemetry:
         return metrics.render(swarm, self._seeder, counters,
                               reports_stored=self._reports_stored(),
                               transfers=self._transfers,
-                              extras=extras,
-                              otlp_health=self.export_health.as_dict(),
-                              peer_status=self._peer_status_numbers())
+                               extras=extras,
+                               otlp_health=self.export_health.as_dict(),
+                               peer_status=self._peer_status_numbers(),
+                               seeder_torrents=self._seeder_torrent_metrics(
+                                   time.time()))
+
+    def _seeder_torrent_metrics(self, now):
+        """Current control-state gauges, inner-joined to the image catalog.
+
+        A failed/vanished peer poll clears ``_upload_len`` in ``sample()``, so
+        this never republishes a retained value as a zero or stale observation.
+        """
+        if (not self._seeder.get("rpc_up") or not self._upload_len
+                or not self._torrent_observed_at
+                or now - self._torrent_observed_at > 2 * self.interval):
+            return []
+        try:
+            images = self._images_info() if self._images_info else {}
+        except Exception:
+            return []
+        if not isinstance(images, dict):
+            return []
+        known = {str(entry.get("info_hash_hex")): (str(image_id),
+                 entry.get("filename", image_id))
+                 for image_id, entry in images.items()
+                 if isinstance(entry, dict) and entry.get("info_hash_hex")}
+        return [{"image_id": image_id, "image": image,
+                 "info_hash": info_hash, "upload_length": upload_length}
+                for info_hash, upload_length in self._upload_len.items()
+                for image_id, image in [known.get(str(info_hash), (None, None))]
+                if image_id is not None]
 
     def _legacy_participant_count(self):
         """Distinct current ``legacy_unattributed`` announce participants
@@ -654,7 +685,8 @@ class Telemetry:
                 self._transfers, self._extras, now,
                 export_signals=signals,
                 peer_status=self._peer_status_numbers(),
-                legacy_participants=self._legacy_participant_count()))
+                legacy_participants=self._legacy_participant_count(),
+                seeder_torrents=self._seeder_torrent_metrics(now)))
             self.export_health.record(ok, "metrics", now)
 
     def _export_new_reports(self):
