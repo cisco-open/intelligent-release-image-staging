@@ -58,7 +58,7 @@ _SWARM_GAUGES = (
 
 
 def render(swarm, seeder, counters, reports_stored=0, transfers=None,
-           extras=None, otlp_health=None):
+           extras=None, otlp_health=None, peer_status=None):
     out = []
 
     def family(name, mtype, help_text):
@@ -101,55 +101,117 @@ def render(swarm, seeder, counters, reports_stored=0, transfers=None,
                    % (_labels(s["image"], s["info_hash"]),
                       _int(s["completed"])))
 
-    # --- live transfer streaming (device transfer telemetry spec 7.3) ---
+    # --- live transfer streaming (canonical low-cardinality families,
+    #     design §10.9). Ambiguous "active"/"stalled" and the old
+    #     down/up_bps_sum / tier families are RETIRED. Business gauges
+    #     (throughput, progress) are OMITTED for a STALE image; the freshness
+    #     age is always reported so the omission is explainable. No
+    #     device/peer/report labels ever appear here (they live in OTLP logs).
     if transfers is not None:
-        per_image = (
-            ("iris_transfer_active", "active",
-             "Devices actively transferring per image"),
-            ("iris_transfer_down_bps_sum", "down_bps",
-             "Sum of device receive rates per image (bytes/sec)"),
-            ("iris_transfer_up_bps_sum", "up_bps",
-             "Sum of device send rates per image (bytes/sec)"),
-            ("iris_transfer_stalled", "stalled",
-             "Devices downloading at zero rate per image"),
-        )
-        for name, key, help_text in per_image:
-            family(name, "gauge", help_text)
-            for row in transfers:
-                out.append("%s%s %d" % (
-                    name, _labels(row["image"], row["info_hash"]),
-                    _int(row[key])))
-        family("iris_transfer_progress_ratio", "gauge",
-               "Fleet progress per image (sum done / sum total, 0..1)")
+        family("iris_transfer_devices", "gauge",
+               "Fresh streaming devices per image")
         for row in transfers:
+            out.append("iris_transfer_devices%s %d" % (
+                _labels(row["image"], row["info_hash"]),
+                _int(row.get("devices"))))
+        family("iris_transfer_throughput_bytes_per_second", "gauge",
+               "Aggregate transfer rate per image (bytes/sec); omitted when "
+               "stale")
+        for row in transfers:
+            if row.get("stale"):
+                continue
+            for direction, key in (("receive", "receive_bps"),
+                                   ("transmit", "transmit_bps")):
+                out.append(
+                    'iris_transfer_throughput_bytes_per_second'
+                    '{image="%s",info_hash="%s",direction="%s"} %d'
+                    % (_esc(row["image"]), _esc(row["info_hash"]), direction,
+                       _int(row.get(key))))
+        family("iris_transfer_progress_ratio", "gauge",
+               "Fleet progress per image (0..1); omitted when stale")
+        for row in transfers:
+            if row.get("stale"):
+                continue
             out.append("iris_transfer_progress_ratio%s %.4g" % (
                 _labels(row["image"], row["info_hash"]),
                 float(row.get("progress_ratio") or 0.0)))
-        family("iris_transfer_tier", "gauge",
-               "Streaming devices per image by link tier")
+        family("iris_transfer_zero_receive_devices", "gauge",
+               "Devices with a fresh zero receive rate per image (never from "
+               "stale)")
         for row in transfers:
-            for tier in ("good", "constrained"):
-                out.append(
-                    'iris_transfer_tier{image="%s",info_hash="%s",tier="%s"} %d'
-                    % (_esc(row["image"]), _esc(row["info_hash"]), tier,
-                       _int(row["tier_%s" % tier])))
-    if extras is not None:
+            out.append("iris_transfer_zero_receive_devices%s %d" % (
+                _labels(row["image"], row["info_hash"]),
+                0 if row.get("stale") else _int(row.get("zero_receive_devices"))))
+        family("iris_transfer_freshness_age_seconds", "gauge",
+               "Age of the newest valid observation per image (seconds)")
+        for row in transfers:
+            out.append("iris_transfer_freshness_age_seconds%s %d" % (
+                _labels(row["image"], row["info_hash"]),
+                _int(row.get("freshness_age_seconds"))))
         family("iris_stream_devices", "gauge",
-               "Devices currently streaming live samples")
-        out.append("iris_stream_devices %d"
-                   % _int(extras.get("stream_devices")))
-        family("iris_transfer_samples_rejected_total", "counter",
+               "Streaming devices per image by sampling class")
+        for row in transfers:
+            for sc in ("good", "constrained"):
+                out.append(
+                    'iris_stream_devices{image="%s",info_hash="%s",'
+                    'sampling_class="%s"} %d'
+                    % (_esc(row["image"]), _esc(row["info_hash"]), sc,
+                       _int(row.get("sampling_class_%s" % sc))))
+    if extras is not None:
+        family("iris_telemetry_samples_rejected_total", "counter",
                "Live samples rejected at ingest (catalog-originated)")
-        out.append("iris_transfer_samples_rejected_total %d"
+        out.append("iris_telemetry_samples_rejected_total %d"
                    % _int(extras.get("samples_rejected_total")))
+        family("iris_legacy_announce_participants", "gauge",
+               "Current legacy_unattributed announce participants (0 = fully "
+               "migrated)")
+        out.append("iris_legacy_announce_participants %d"
+                   % _int(extras.get("legacy_announce_participants")))
+    if peer_status is not None:
+        for name, key, help_text in (
+            ("iris_peer_policy_revision", "policy_revision",
+             "Current committed peer-policy revision"),
+            ("iris_peer_enforcement_applied_revision", "applied_revision",
+             "aria-returned applied enforcement revision"),
+            ("iris_peer_enforcement_desired_ips", "desired_ip_count",
+             "Count of addresses in the derived denied set (no per-IP labels)"),
+            ("iris_peer_enforcement_health", "health",
+             "Numeric enforcement health: 1=enforced 0=pending -1=degraded "
+             "-2=rpc_unavailable"),
+        ):
+            val = peer_status.get(key)
+            if val is None:
+                continue
+            family(name, "gauge", help_text)
+            out.append("%s %d" % (name, _int(val)))
     if otlp_health is not None:
-        family("iris_otlp_export_failures_total", "counter",
-               "Failed OTLP export attempts since start")
-        out.append("iris_otlp_export_failures_total %d"
-                   % _int(otlp_health.get("failures_total")))
-        family("iris_otlp_last_export_success_seconds", "gauge",
-               "Epoch seconds of the last successful OTLP export (0 = never)")
-        out.append("iris_otlp_last_export_success_seconds %d"
-                   % _int(otlp_health.get("last_success_ts")))
+        # Per-signal export failures / drops (design §10.9/§10.10): the
+        # `signal` label separates logs from metrics; counters are monotonic
+        # over the process lifetime. Last-success is a per-signal gauge.
+        signals = otlp_health.get("signals") \
+            if isinstance(otlp_health, dict) else None
+        signals = signals if isinstance(signals, dict) else {}
+        family("iris_telemetry_export_failures_total", "counter",
+               "Failed OTLP export attempts per signal since start")
+        for signal in sorted(signals):
+            out.append(
+                'iris_telemetry_export_failures_total{signal="%s"} %d'
+                % (_esc(signal),
+                   _int(signals[signal].get("failures_total"))))
+        family("iris_telemetry_export_dropped_total", "counter",
+               "Bounded-retry queue overflow drops per signal since start")
+        for signal in sorted(signals):
+            out.append(
+                'iris_telemetry_export_dropped_total{signal="%s"} %d'
+                % (_esc(signal),
+                   _int(signals[signal].get("dropped_total"))))
+        family("iris_telemetry_export_last_success_seconds", "gauge",
+               "Epoch seconds of the last successful export per signal "
+               "(0 = never)")
+        for signal in sorted(signals):
+            out.append(
+                'iris_telemetry_export_last_success_seconds{signal="%s"} %d'
+                % (_esc(signal),
+                   _int(signals[signal].get("last_success_ts"))))
 
     return "\n".join(out) + "\n"

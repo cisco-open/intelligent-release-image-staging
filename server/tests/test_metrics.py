@@ -88,28 +88,107 @@ def test_render_reports_stored_bad_value_is_zero():
 
 
 class TestTransferFamilies:
-    ROWS = [{"image": "cat9k.bin", "info_hash": "aa11", "active": 2,
-             "down_bps": 100, "up_bps": 10, "progress_ratio": 0.375,
-             "stalled": 1, "tier_good": 1, "tier_constrained": 1}]
-    EXTRAS = {"stream_devices": 3, "samples_rejected_total": 7}
+    # Task 23: canonical low-cardinality families (design §10.9). A fresh row
+    # carries the business gauges; a stale row OMITS them but still reports
+    # freshness age so the omission is explainable.
+    ROWS = [{"image": "cat9k.bin", "info_hash": "aa11", "devices": 2,
+             "receive_bps": 100, "transmit_bps": 10, "progress_ratio": 0.375,
+             "zero_receive_devices": 1, "freshness_age_seconds": 5,
+             "sampling_class_good": 1, "sampling_class_constrained": 1,
+             "stale": False}]
+    EXTRAS = {"stream_devices": 3, "samples_rejected_total": 7,
+              "legacy_announce_participants": 0}
 
-    def test_rendered_when_given(self):
-        text = metrics.render([], {"rpc_up": True}, {"announces_total": 0},
-                              transfers=self.ROWS, extras=self.EXTRAS,
-                              otlp_health={"failures_total": 2,
-                                           "last_success_ts": 12345})
+    def _render(self, rows=None, extras=None, health=None):
+        return metrics.render([], {"rpc_up": True}, {"announces_total": 0},
+                              transfers=rows if rows is not None else self.ROWS,
+                              extras=extras if extras is not None
+                              else self.EXTRAS,
+                              otlp_health=health)
+
+    def test_canonical_family_names_and_labels(self):
+        text = self._render()
         for needle in (
-            'iris_transfer_active{image="cat9k.bin",info_hash="aa11"} 2',
-            'iris_transfer_down_bps_sum{image="cat9k.bin",info_hash="aa11"} 100',
-            'iris_transfer_progress_ratio{image="cat9k.bin",info_hash="aa11"} 0.375',
-            'iris_transfer_tier{image="cat9k.bin",info_hash="aa11",tier="good"} 1',
-            "iris_stream_devices 3",
-            "iris_transfer_samples_rejected_total 7",
-            "iris_otlp_export_failures_total 2",
-            "iris_otlp_last_export_success_seconds 12345",
+            'iris_transfer_devices{image="cat9k.bin",info_hash="aa11"} 2',
+            'iris_transfer_throughput_bytes_per_second{image="cat9k.bin",'
+            'info_hash="aa11",direction="receive"} 100',
+            'iris_transfer_throughput_bytes_per_second{image="cat9k.bin",'
+            'info_hash="aa11",direction="transmit"} 10',
+            'iris_transfer_progress_ratio{image="cat9k.bin",'
+            'info_hash="aa11"} 0.375',
+            'iris_transfer_zero_receive_devices{image="cat9k.bin",'
+            'info_hash="aa11"} 1',
+            'iris_transfer_freshness_age_seconds{image="cat9k.bin",'
+            'info_hash="aa11"} 5',
+            'iris_stream_devices{image="cat9k.bin",info_hash="aa11",'
+            'sampling_class="good"} 1',
+            'iris_stream_devices{image="cat9k.bin",info_hash="aa11",'
+            'sampling_class="constrained"} 1',
         ):
             assert needle in text, needle
+
+    def test_retired_ambiguous_names_absent(self):
+        text = self._render()
+        for gone in ("iris_transfer_active", "iris_transfer_stalled",
+                     "iris_transfer_down_bps_sum", "iris_transfer_up_bps_sum",
+                     "iris_transfer_tier", "iris_transfer_samples_rejected"):
+            assert gone not in text, gone
+
+    def test_stale_row_omits_business_gauges_but_keeps_freshness(self):
+        row = dict(self.ROWS[0], stale=True)
+        text = self._render(rows=[row])
+        # freshness + devices still reported
+        assert 'iris_transfer_freshness_age_seconds{image="cat9k.bin",' \
+               'info_hash="aa11"} 5' in text
+        # throughput + progress gauges omitted for this image
+        assert 'iris_transfer_throughput_bytes_per_second{image="cat9k.bin"' \
+               not in text
+        assert 'iris_transfer_progress_ratio{image="cat9k.bin"' not in text
+        # zero_receive_devices is never asserted from stale
+        assert 'iris_transfer_zero_receive_devices{image="cat9k.bin",' \
+               'info_hash="aa11"} 0' in text
+
+    def test_samples_rejected_and_legacy_participants(self):
+        text = self._render()
+        assert "# TYPE iris_telemetry_samples_rejected_total counter" in text
+        assert "iris_telemetry_samples_rejected_total 7" in text
+        assert "iris_legacy_announce_participants 0" in text
 
     def test_absent_when_none(self):
         text = metrics.render([], {}, {})
         assert "iris_transfer_" not in text and "iris_stream_" not in text
+
+
+class TestPerSignalExportHealthMetrics:
+    # Task 23: per-signal export failures / drops / last-success, with `signal`
+    # label; counters monotonic; enforcement + policy numeric gauges.
+    HEALTH = {
+        "state": "degraded", "aggregate_rule": "worst_of",
+        "signals": {
+            "logs": {"state": "degraded", "last_success_ts": 100.0,
+                     "fail_streak": 3, "queued": 12, "dropped_total": 4,
+                     "failures_total": 3},
+            "metrics": {"state": "ok", "last_success_ts": 200.0,
+                        "fail_streak": 0, "failures_total": 0},
+        },
+    }
+
+    def test_per_signal_failure_drop_last_success_names(self):
+        text = metrics.render([], {}, {}, otlp_health=self.HEALTH)
+        assert ('iris_telemetry_export_failures_total{signal="logs"} 3'
+                in text)
+        assert ('iris_telemetry_export_dropped_total{signal="logs"} 4'
+                in text)
+        assert "# TYPE iris_telemetry_export_failures_total counter" in text
+        assert "# TYPE iris_telemetry_export_dropped_total counter" in text
+
+    def test_enforcement_and_policy_gauges(self):
+        text = metrics.render(
+            [], {}, {}, peer_status={
+                "policy_revision": 7, "applied_revision": 6,
+                "desired_ip_count": 3, "health": 1})
+        assert "iris_peer_policy_revision 7" in text
+        assert "iris_peer_enforcement_applied_revision 6" in text
+        assert "iris_peer_enforcement_desired_ips 3" in text
+        assert "iris_peer_enforcement_health 1" in text
+

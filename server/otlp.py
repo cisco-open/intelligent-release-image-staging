@@ -38,15 +38,6 @@ def default_resource():
 
 DEFAULT_RESOURCE = default_resource()
 
-# swarm lifecycle event fields -> semconv attribute names (spec 7.6/7.9);
-# network.transport is constant tcp (the conventions require naming the
-# transport whenever a peer port is set).
-_EVENT_ATTRS = (("ip", "network.peer.address"),
-                ("port", "network.peer.port"),
-                ("info_hash", "iris.torrent.info_hash"),
-                ("peer_id", "iris.torrent.peer_id"),
-                ("left", "iris.torrent.left"))
-
 
 def _any_value(value):
     if isinstance(value, bool):
@@ -54,6 +45,10 @@ def _any_value(value):
     if isinstance(value, int):
         # OTLP/JSON encodes int64 as a string
         return {"intValue": str(value)}
+    if isinstance(value, float):
+        return {"doubleValue": value}
+    if isinstance(value, list):
+        return {"arrayValue": {"values": [_any_value(v) for v in value]}}
     return {"stringValue": str(value)}
 
 
@@ -62,23 +57,34 @@ def _attr(key, value):
 
 
 def build_log_record(event):
-    """Map a swarm lifecycle event dict to one OTLP LogRecord. Event identity
-    lives in the top-level eventName field (iris.swarm.<start|complete|stop|
-    stale>); the body stays a short display string (spec 7.6/7.9)."""
-    ts_nano = str(int(float(event.get("ts", 0)) * 1e9))
-    attrs = [_attr(sem, event[key]) for key, sem in _EVENT_ATTRS
-             if event.get(key) is not None]
-    if event.get("port") is not None:
-        attrs.append(_attr("network.transport", "tcp"))
-    name = str(event.get("event", "unknown"))
-    return {
-        "timeUnixNano": ts_nano,
-        "eventName": "iris.swarm." + name,
-        "severityNumber": _SEVERITY_INFO,
-        "severityText": "INFO",
-        "body": {"stringValue": "swarm " + name},
-        "attributes": attrs,
+    """Map a raw swarm lifecycle event dict (from PeerRegistry.on_event) to one
+    OTLP LogRecord. Per design §10.8 the canonical name is ``iris.tracker.peer``
+    with typed attributes; ``event.id`` is the registry's in-process random id.
+    The role is derived from ``left`` (a seeder has ``left==0``). The principal
+    is composed as ``<type>:<id>`` from the typed registry principal."""
+    if not isinstance(event, dict):
+        event = {}
+    ptype = event.get("principal_type")
+    pid = event.get("principal_id")
+    principal = None
+    if ptype is not None:
+        principal = "%s:%s" % (ptype, pid if pid is not None else "")
+    role = None
+    left = event.get("left")
+    if left is not None:
+        try:
+            role = "seeder" if int(left) == 0 else "leecher"
+        except (TypeError, ValueError):
+            role = None
+    mapped = {
+        "event_id": event.get("event_id"),
+        "principal": principal,
+        "info_hash": event.get("info_hash"),
+        "role": role,
+        "ip": event.get("ip"),
+        "received_at": event.get("received_at", event.get("ts")),
     }
+    return build_tracker_record(mapped)
 
 
 _ENRICH_STR_MAX = 128
@@ -97,67 +103,166 @@ def _enrich_int(value):
         return None
 
 
-def build_report_record(report, device_id, enrich=None):
-    """One stored device report -> one OTLP LogRecord (spec 7.6). Attribute
-    names follow the semantic conventions (device.id is the sanctioned
-    enterprise-managed-device identifier); the peers observed during the
-    transfer ride as the structured attribute iris.transfer.peers
-    (participation only — per-peer bytes are not measured), with
-    iris.transfer.peers_total carrying the exact distinct count. enrich
-    (optional): {model, free_flash_bytes, stage_state,
-    peer_devices: {ip: device_id}} — heartbeat-sourced values are stored
-    verbatim from devices, so they are capped/coerced HERE at the export
-    boundary. Garbage-tolerant throughout."""
-    if not isinstance(report, dict):
-        report = {}
-    enrich = enrich if isinstance(enrich, dict) else {}
-    try:
-        ts_nano = str(int(float(report.get("ts", 0)) * 1e9))
-    except (TypeError, ValueError):
-        ts_nano = "0"
-    link = report.get("link")
-    link = link if isinstance(link, dict) else {}
-    transfer = report.get("transfer")
-    transfer = transfer if isinstance(transfer, dict) else {}
-    agent = report.get("agent")
-    agent = agent if isinstance(agent, dict) else {}
-    pairs = (("device.id", _enrich_str(device_id)),
-             ("iris.image.id", _enrich_str(report.get("image_id"))),
-             ("iris.link.tier", _enrich_str(link.get("tier"))),
-             ("iris.transfer.throughput_avg",
-              _enrich_int(transfer.get("avg_bps"))),
-             ("iris.transfer.peers_total",
-              _enrich_int(report.get("peers_total"))),
-             ("device.model.identifier", _enrich_str(enrich.get("model"))),
-             ("iris.device.flash.free",
-              _enrich_int(enrich.get("free_flash_bytes"))),
-             ("iris.stage.state", _enrich_str(enrich.get("stage_state"))),
-             ("iris.agent.runtime", _enrich_str(agent.get("runtime_mode"))),
-             ("iris.agent.version", _enrich_str(agent.get("version"))))
-    attrs = [_attr(k, v) for k, v in pairs if v is not None]
-    peer_devices = enrich.get("peer_devices")
-    peer_devices = peer_devices if isinstance(peer_devices, dict) else {}
-    rows = []
-    peers = report.get("peers")
-    for row in (peers if isinstance(peers, list) else []):
-        if not isinstance(row, dict):
-            continue
-        kv = [("network.peer.address", _enrich_str(row.get("ip"))),
-              ("device.id", _enrich_str(peer_devices.get(row.get("ip"))))]
-        rows.append({"kvlistValue": {"values": [
-            {"key": k, "value": _any_value(v)}
-            for k, v in kv if v is not None]}})
-    if rows:
-        attrs.append({"key": "iris.transfer.peers",
-                      "value": {"arrayValue": {"values": rows}}})
-    return {
+_SCHEMA_ATTR = "iris.telemetry.schema.version"
+
+
+def _record(name, ts_nano, attrs, event_id=None, body=None):
+    """Assemble one OTLP LogRecord with the canonical envelope. ``event.id`` is
+    retained unchanged through retry (design §10.8)."""
+    rec = {
         "timeUnixNano": ts_nano,
-        "eventName": "iris.device.report",
+        "eventName": name,
         "severityNumber": _SEVERITY_INFO,
         "severityText": "INFO",
-        "body": {"stringValue": "device transfer report"},
+        "body": {"stringValue": body or name},
         "attributes": attrs,
     }
+    if event_id is not None:
+        rec["event.id"] = str(event_id)
+    return rec
+
+
+def _ts_nano(value):
+    try:
+        return str(int(float(value) * 1e9))
+    except (TypeError, ValueError):
+        return "0"
+
+
+def _build_v2_report_record(report, device_id):
+    """v2 terminal report -> ``iris.device.transfer.report`` (design §10.8).
+    OTLP event time = server ``received_at`` (device ``observed_at`` rides as an
+    attribute). ``event.id`` = the stable random ``report_id``. Typed content
+    SHA / IOS-copy states and content-at-end bytes; participation IPs only."""
+    content = report.get("content") if isinstance(
+        report.get("content"), dict) else {}
+    sha = report.get("content_sha256") if isinstance(
+        report.get("content_sha256"), dict) else {}
+    ios = report.get("ios_copy_verify") if isinstance(
+        report.get("ios_copy_verify"), dict) else {}
+    pairs = [
+        ("otel.log.name", "iris.device.transfer.report"),
+        (_SCHEMA_ATTR, 2),
+        ("device.id", _enrich_str(device_id)),
+        ("iris.image.id", _enrich_str(report.get("image_id"))),
+        ("iris.transfer.id", _enrich_str(report.get("transfer_id"))),
+        ("iris.report.event", _enrich_str(report.get("event"))),
+        ("iris.transfer.content_sha256.state", _enrich_str(sha.get("state"))),
+        ("iris.transfer.ios_copy_verify.state", _enrich_str(ios.get("state"))),
+        ("iris.transfer.completed_content_bytes",
+         _enrich_int(content.get("completed_content_bytes"))),
+        ("iris.transfer.peers_total", _enrich_int(report.get("peers_total"))),
+    ]
+    attrs = [_attr(k, v) for k, v in pairs if v is not None]
+    observed = report.get("observed_at")
+    if observed is None:
+        observed = report.get("report_created_at")
+    try:
+        if observed is not None:
+            attrs.append(_attr("iris.device.observed_at", float(observed)))
+    except (TypeError, ValueError):
+        pass
+    ips = [_enrich_str(row.get("ip"))
+           for row in (report.get("peers") or [])
+           if isinstance(row, dict) and row.get("ip") is not None]
+    if ips:
+        attrs.append(_attr("network.peer.address", ips))
+    return _record("iris.device.transfer.report",
+                   _ts_nano(report.get("received_at")), attrs,
+                   event_id=report.get("report_id"),
+                   body="device transfer report")
+
+
+def _build_v1_report_record(report, device_id):
+    """v1 legacy report -> ``iris.device.report`` (design §10.8) with the SAFE
+    SUBSET only. OTLP event time = server ``received_at``; ``event.id`` = the
+    catalog-stamped random ``_event_id``. The ambiguous v1 avg_bps/total_bytes/
+    sha_ok are NEVER projected as v2-named attributes."""
+    pairs = [
+        ("otel.log.name", "iris.device.report"),
+        (_SCHEMA_ATTR, 1),
+        ("device.id", _enrich_str(device_id)),
+        ("iris.image.id", _enrich_str(report.get("image_id"))),
+        ("iris.report.event", _enrich_str(report.get("event"))),
+        ("iris.transfer.peers_total", _enrich_int(report.get("peers_total"))),
+    ]
+    attrs = [_attr(k, v) for k, v in pairs if v is not None]
+    ips = [_enrich_str(row.get("ip"))
+           for row in (report.get("peers") or [])
+           if isinstance(row, dict) and row.get("ip") is not None]
+    if ips:
+        attrs.append(_attr("network.peer.address", ips))
+    ts = report.get("received_at")
+    if ts is None:
+        ts = report.get("ts")
+    return _record("iris.device.report", _ts_nano(ts), attrs,
+                   event_id=report.get("_event_id"),
+                   body="device transfer report")
+
+
+def build_report_record(report, device_id, enrich=None):
+    """One stored device report -> one OTLP LogRecord (design §10.8). Branches
+    on report schema: a v2 report (``report_id`` present, or ``schema=="v2"``)
+    exports the typed ``iris.device.transfer.report``; anything else is treated
+    as a legacy v1 projection under ``iris.device.report`` with a safe subset.
+    ``enrich`` is accepted for call-site compatibility but is no longer folded
+    into the record (high-cardinality model/flash/stage detail is out of the
+    canonical report event). Garbage-tolerant throughout."""
+    if not isinstance(report, dict):
+        report = {}
+    is_v2 = report.get("schema") == "v2" or report.get("report_id") is not None
+    if is_v2:
+        return _build_v2_report_record(report, device_id)
+    return _build_v1_report_record(report, device_id)
+
+
+def build_policy_record(entry, status=None):
+    """Peer-policy operation outbox entry -> ``iris.peer.policy`` (design
+    §10.8, emitted by the tracker). ``event.id`` = the outbox ``event_id``
+    persisted in the policy transaction. Carries ONLY the single acted target
+    and count-only enforcement facts — never rule text, an IP list, or a
+    device-id list beyond the acted device."""
+    if not isinstance(entry, dict):
+        entry = {}
+    status = status if isinstance(status, dict) else {}
+    pairs = [
+        ("otel.log.name", "iris.peer.policy"),
+        (_SCHEMA_ATTR, 2),
+        ("iris.policy.revision", _enrich_int(entry.get("revision"))),
+        ("iris.policy.action", _enrich_str(entry.get("action"))),
+        ("iris.enforcement.state", _enrich_str(status.get("state"))),
+        ("iris.enforcement.applied_revision",
+         _enrich_int(status.get("applied_revision"))),
+        ("iris.enforcement.desired_ip_count",
+         _enrich_int(status.get("desired_ip_count"))),
+    ]
+    attrs = [_attr(k, v) for k, v in pairs if v is not None]
+    return _record("iris.peer.policy", _ts_nano(entry.get("created_at")),
+                   attrs, event_id=entry.get("event_id"),
+                   body="peer policy operation")
+
+
+def build_tracker_record(event):
+    """Tracker-lifecycle event -> ``iris.tracker.peer`` (design §10.8). OTLP
+    event time = server ``received_at`` (tracker server ts). ``event.id`` = a
+    random id minted once per lifecycle transition, retained only in-process
+    (cross-restart loss accepted under Day-1)."""
+    if not isinstance(event, dict):
+        event = {}
+    pairs = [
+        ("otel.log.name", "iris.tracker.peer"),
+        (_SCHEMA_ATTR, 2),
+        ("iris.principal", _enrich_str(event.get("principal"))),
+        ("iris.torrent.info_hash", _enrich_str(event.get("info_hash"))),
+        ("iris.peer.role", _enrich_str(event.get("role"))),
+        ("network.peer.address", _enrich_str(event.get("ip"))),
+    ]
+    attrs = [_attr(k, v) for k, v in pairs if v is not None]
+    ts = event.get("received_at")
+    if ts is None:
+        ts = event.get("ts")
+    return _record("iris.tracker.peer", _ts_nano(ts), attrs,
+                   event_id=event.get("event_id"), body="tracker peer event")
 
 
 def build_logs_payload(events, resource_attrs):

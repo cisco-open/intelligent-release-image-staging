@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import http.server
+import json
 import os
 import ssl
 import subprocess
@@ -15,30 +16,31 @@ import trust
 
 
 def test_build_log_record_maps_core_fields():
-    # semconv wire contract (spec 7.6/7.9): eventName is top-level, network
-    # peer attrs use the registry names, iris.* namespaces the torrent detail.
+    # design §10.8: lifecycle events map to iris.tracker.peer with typed attrs.
     rec = otlp.build_log_record({
         "event": "join", "info_hash": "abc", "peer_id": "p1",
-        "ip": "10.0.0.1", "port": 6881, "left": 9, "ts": 1.5})
+        "ip": "10.0.0.1", "port": 6881, "left": 9, "ts": 1.5,
+        "principal_type": "device", "principal_id": "iris8kv-1",
+        "event_id": "beef1234"})
     assert rec["timeUnixNano"] == "1500000000"
-    assert rec["eventName"] == "iris.swarm.join"
-    assert rec["body"]["stringValue"] == "swarm join"
+    assert rec["eventName"] == "iris.tracker.peer"
+    assert rec["event.id"] == "beef1234"
     attrs = {a["key"]: a["value"] for a in rec["attributes"]}
-    assert attrs["iris.torrent.peer_id"] == {"stringValue": "p1"}
+    assert attrs["iris.telemetry.schema.version"] == {"intValue": "2"}
+    assert attrs["iris.principal"] == {"stringValue": "device:iris8kv-1"}
     assert attrs["iris.torrent.info_hash"] == {"stringValue": "abc"}
     assert attrs["network.peer.address"] == {"stringValue": "10.0.0.1"}
-    assert attrs["network.peer.port"] == {"intValue": "6881"}
-    assert attrs["network.transport"] == {"stringValue": "tcp"}
-    assert attrs["iris.torrent.left"] == {"intValue": "9"}
+    assert attrs["iris.peer.role"] == {"stringValue": "leecher"}  # left>0
     assert "event" not in attrs
 
 
-def test_build_log_record_omits_none_left():
+def test_build_log_record_seeder_role_when_left_zero():
     rec = otlp.build_log_record({
-        "event": "stale", "info_hash": "abc", "peer_id": "p1",
-        "ip": "10.0.0.1", "port": 6881, "left": None, "ts": 2})
-    keys = {a["key"] for a in rec["attributes"]}
-    assert "iris.torrent.left" not in keys
+        "event": "complete", "info_hash": "abc", "ip": "10.0.0.1",
+        "left": 0, "ts": 2, "principal_type": "device",
+        "principal_id": "d1", "event_id": "x"})
+    attrs = {a["key"]: a["value"] for a in rec["attributes"]}
+    assert attrs["iris.peer.role"] == {"stringValue": "seeder"}
 
 
 def test_payload_has_resource_service_name():
@@ -53,15 +55,15 @@ def test_emit_then_flush_sends_all_events_in_one_request():
     exp = otlp.OTLPLogExporter(
         "http://collector:4318",
         sender=lambda url, body: sent.append((url, body)))
-    exp.emit({"event": "join", "peer_id": "p1", "ts": 0})
-    exp.emit({"event": "join", "peer_id": "p2", "ts": 0})
+    exp.emit({"event": "join", "ip": "10.0.0.1", "ts": 0})
+    exp.emit({"event": "join", "ip": "10.0.0.2", "ts": 0})
     n = exp.flush()
     assert n == 2
     assert len(sent) == 1
     url, body = sent[0]
     assert url == "http://collector:4318/v1/logs"
     text = body.decode()
-    assert "p1" in text and "p2" in text
+    assert "10.0.0.1" in text and "10.0.0.2" in text
 
 
 def test_flush_clears_queue():
@@ -78,11 +80,12 @@ def test_queue_is_bounded_drop_oldest():
     sent = []
     exp = otlp.OTLPLogExporter("http://c:4318", max_queue=2,
                                sender=lambda u, b: sent.append(b))
-    for pid in ("p1", "p2", "p3"):
-        exp.emit({"event": "join", "peer_id": pid, "ts": 0})
+    for ip in ("10.0.0.1", "10.0.0.2", "10.0.0.3"):
+        exp.emit({"event": "join", "ip": ip, "ts": 0})
     exp.flush()
     text = sent[0].decode()
-    assert "p3" in text and "p2" in text and "p1" not in text
+    assert "10.0.0.3" in text and "10.0.0.2" in text \
+        and "10.0.0.1" not in text
 
 
 def test_flush_empty_does_not_call_sender():
@@ -101,56 +104,92 @@ def test_sender_failure_is_swallowed():
     assert exp.flush() == 0       # swallowed; reported as 0 delivered
 
 
-# --- build_report_record (device telemetry reports, issue #13) ---
+# --- build_report_record (device telemetry reports, design §10.8) ---
 
-def _device_report():
+def _v2_report():
     return {
+        "v": 2, "schema": "v2",
+        "report_id": "7c1f0b9a2d3e4f5061728394a5b6c7d8",
+        "transfer_id": "3f0a9c1d8e2b4a6f9017c3d5e7b1a2c4",
+        "report_created_at": 1755743200.5,
+        "image_id": "cat9k_iosxe.17.15.01.SPA.bin",
+        "event": "staging-complete",
+        "content": {"completed_content_bytes": 1288490188,
+                    "total_content_bytes": 1288490188},
+        "content_sha256": {"state": "verified", "algo": "sha256"},
+        "ios_copy_verify": {"state": "ok"},
+        "peers": [{"ip": "100.92.100.14"}], "peers_total": 3,
+        "observed_at": 1755743190.0,
+        "received_at": 1755743200.0,
+    }
+
+
+def _v1_report():
+    return {
+        "v": 1, "schema": "v1",
+        "_event_id": "aa11bb22cc33dd44ee55ff6677889900",
         "ts": 1783000000,
         "image_id": "cat9k_iosxe.17.15.01.SPA.bin",
         "event": "staging-complete",
         "transfer": {"total_bytes": 1215751680, "elapsed_s": 300,
-                     "avg_bps": 4052505, "sha_ok": True,
-                     "stage_state": "ready"},
-        "link": {"tier": "good", "rtt_ms_median": 12, "rtt_samples": 8,
-                 "hb_failures": 0, "trimmed": False},
+                     "avg_bps": 4052505, "sha_ok": True},
         "peers": [{"ip": "10.0.0.7"}], "peers_total": 1,
-        "agent": {"version": "x", "runtime_mode": "guestshell"},
         "received_at": 1783000042.5,
     }
 
 
-def test_build_report_record_maps_core_fields():
-    rec = otlp.build_report_record(_device_report(), "100.92.9.3")
-    assert rec["timeUnixNano"] == str(int(float(1783000000) * 1e9))
-    assert rec["severityText"] == "INFO"
-    assert rec["eventName"] == "iris.device.report"
+def test_v2_report_uses_transfer_report_name_and_received_at_event_time():
+    rec = otlp.build_report_record(_v2_report(), "iris8kv-1")
+    # OTLP event time = server received_at (design §8/§10.8), NOT device time.
+    assert rec["timeUnixNano"] == str(int(1755743200.0 * 1e9))
+    assert rec["eventName"] == "iris.device.transfer.report"
     attrs = {a["key"]: a["value"] for a in rec["attributes"]}
-    assert attrs["device.id"] == {"stringValue": "100.92.9.3"}
+    assert attrs["otel.log.name"] == {
+        "stringValue": "iris.device.transfer.report"}
+    assert attrs["iris.telemetry.schema.version"] == {"intValue": "2"}
+    assert attrs["device.id"] == {"stringValue": "iris8kv-1"}
     assert attrs["iris.image.id"] == {
         "stringValue": "cat9k_iosxe.17.15.01.SPA.bin"}
-    assert attrs["iris.link.tier"] == {"stringValue": "good"}
-    assert attrs["iris.transfer.throughput_avg"] == {
-        "intValue": "4052505"}               # int64-as-string rule
-    assert "event" not in attrs and "device_id" not in attrs
-
-
-def test_build_report_record_missing_fields_are_omitted_not_raised():
-    rec = otlp.build_report_record({}, "d1")
-    assert rec["timeUnixNano"] == "0"
-    assert rec["eventName"] == "iris.device.report"
-    keys = {a["key"] for a in rec["attributes"]}
-    assert keys == {"device.id"}             # only the constant survives
-
-
-def test_build_report_record_tolerates_garbage_sections():
-    rec = otlp.build_report_record(
-        {"ts": "not-a-number", "link": "garbage", "transfer": None,
-         "image_id": "img.bin"}, "d1")
-    assert rec["timeUnixNano"] == "0"
-    attrs = {a["key"]: a["value"] for a in rec["attributes"]}
-    assert attrs["iris.image.id"] == {"stringValue": "img.bin"}
-    assert "iris.link.tier" not in attrs
+    assert attrs["iris.transfer.id"] == {
+        "stringValue": "3f0a9c1d8e2b4a6f9017c3d5e7b1a2c4"}
+    assert attrs["iris.report.event"] == {"stringValue": "staging-complete"}
+    assert attrs["iris.transfer.content_sha256.state"] == {
+        "stringValue": "verified"}
+    assert attrs["iris.transfer.ios_copy_verify.state"] == {"stringValue": "ok"}
+    assert attrs["iris.transfer.completed_content_bytes"] == {
+        "intValue": "1288490188"}
+    assert attrs["iris.device.observed_at"]["doubleValue"] == 1755743190.0
+    assert attrs["iris.transfer.peers_total"] == {"intValue": "3"}
+    # network.peer.address is the participation list
+    row = attrs["network.peer.address"]
+    assert row["arrayValue"]["values"][0] == {"stringValue": "100.92.100.14"}
+    # retired ambiguous v1 attrs never appear on a v2 record
     assert "iris.transfer.throughput_avg" not in attrs
+    assert "iris.link.tier" not in attrs
+
+
+def test_v2_event_id_is_report_id():
+    rec = otlp.build_report_record(_v2_report(), "iris8kv-1")
+    assert rec["event.id"] == "7c1f0b9a2d3e4f5061728394a5b6c7d8"
+
+
+def test_v1_report_uses_distinct_name_and_safe_subset():
+    rec = otlp.build_report_record(_v1_report(), "d1")
+    assert rec["eventName"] == "iris.device.report"
+    assert rec["timeUnixNano"] == str(int(1783000042.5 * 1e9))   # received_at
+    assert rec["event.id"] == "aa11bb22cc33dd44ee55ff6677889900"
+    attrs = {a["key"]: a["value"] for a in rec["attributes"]}
+    assert attrs["iris.telemetry.schema.version"] == {"intValue": "1"}
+    assert attrs["device.id"] == {"stringValue": "d1"}
+    assert attrs["iris.image.id"] == {
+        "stringValue": "cat9k_iosxe.17.15.01.SPA.bin"}
+    assert attrs["iris.report.event"] == {"stringValue": "staging-complete"}
+    assert attrs["iris.transfer.peers_total"] == {"intValue": "1"}
+    # ambiguous v1 fields are NOT projected as v2-named attributes (§10.8)
+    for gone in ("iris.transfer.throughput_avg",
+                 "iris.transfer.completed_content_bytes",
+                 "iris.transfer.content_sha256.state", "iris.link.tier"):
+        assert gone not in attrs, gone
 
 
 def test_build_report_record_non_dict_report():
@@ -198,56 +237,86 @@ class TestSemconvLogRecords:
     def test_swarm_event_record(self):
         rec = otlp.build_log_record(
             {"ts": 2, "event": "start", "info_hash": "aa11",
-             "peer_id": "p1", "ip": "10.0.0.2", "port": 6881, "left": 500})
-        assert rec["eventName"] == "iris.swarm.start"
+             "peer_id": "p1", "ip": "10.0.0.2", "port": 6881, "left": 500,
+             "principal_type": "device", "principal_id": "d1",
+             "event_id": "e1"})
+        assert rec["eventName"] == "iris.tracker.peer"
         attrs = {a["key"]: a["value"] for a in rec["attributes"]}
         assert attrs["network.peer.address"] == {"stringValue": "10.0.0.2"}
-        assert attrs["network.peer.port"] == {"intValue": "6881"}
-        assert attrs["network.transport"] == {"stringValue": "tcp"}
         assert attrs["iris.torrent.info_hash"] == {"stringValue": "aa11"}
-        assert attrs["iris.torrent.left"] == {"intValue": "500"}
+        assert attrs["iris.peer.role"] == {"stringValue": "leecher"}
+        assert attrs["iris.principal"] == {"stringValue": "device:d1"}
         assert "event" not in attrs        # legacy key gone
 
-    def test_report_record_semconv_and_peers(self):
-        report = {"ts": 3, "image_id": "img-1",
-                  "link": {"tier": "good"},
-                  "transfer": {"avg_bps": 42},
+    def test_report_record_v1_safe_subset_and_peers(self):
+        # design §10.8: a v1 report exports the SAFE SUBSET only; ambiguous
+        # avg_bps/tier are never projected. network.peer.address is the
+        # participation list.
+        report = {"v": 1, "schema": "v1", "ts": 3, "image_id": "img-1",
+                  "event": "seeding-only",
+                  "link": {"tier": "good"}, "transfer": {"avg_bps": 42},
                   "agent": {"version": "9", "runtime_mode": "container"},
                   "peers": [{"ip": "10.0.0.3", "rx_bytes": 7, "tx_bytes": 1,
-                            "avg_bps": 3}], "peers_total": 5}
-        enrich = {"model": "C9300", "free_flash_bytes": 5,
-                  "stage_state": "ready",
-                  "peer_devices": {"10.0.0.3": "d3"}}
-        rec = otlp.build_report_record(report, "d1", enrich=enrich)
+                            "avg_bps": 3}], "peers_total": 5,
+                  "received_at": 33.0}
+        rec = otlp.build_report_record(report, "d1")
         assert rec["eventName"] == "iris.device.report"
         attrs = {a["key"]: a["value"] for a in rec["attributes"]}
         assert attrs["device.id"] == {"stringValue": "d1"}
         assert attrs["iris.image.id"] == {"stringValue": "img-1"}
-        assert attrs["iris.link.tier"] == {"stringValue": "good"}
-        assert attrs["iris.transfer.throughput_avg"] == {"intValue": "42"}
-        assert attrs["device.model.identifier"] == {"stringValue": "C9300"}
-        assert attrs["iris.device.flash.free"] == {"intValue": "5"}
-        assert attrs["iris.stage.state"] == {"stringValue": "ready"}
-        assert attrs["iris.agent.runtime"] == {"stringValue": "container"}
-        assert attrs["iris.agent.version"] == {"stringValue": "9"}
+        assert attrs["iris.report.event"] == {"stringValue": "seeding-only"}
+        assert attrs["iris.telemetry.schema.version"] == {"intValue": "1"}
         assert attrs["iris.transfer.peers_total"] == {"intValue": "5"}
-        row = attrs["iris.transfer.peers"]["arrayValue"]["values"][0]
-        kv = {p["key"]: p["value"] for p in row["kvlistValue"]["values"]}
-        # legacy byte fields ride along on the SAME input row: the exact
-        # equality below proves the builder drops them, not merely that
-        # they were absent from the input.
-        assert kv == {"network.peer.address": {"stringValue": "10.0.0.3"},
-                      "device.id": {"stringValue": "d3"}}
+        row = attrs["network.peer.address"]["arrayValue"]["values"][0]
+        assert row == {"stringValue": "10.0.0.3"}
+        # ambiguous / high-cardinality fields are dropped
+        for gone in ("iris.transfer.throughput_avg", "iris.link.tier",
+                     "device.model.identifier", "iris.stage.state",
+                     "iris.agent.runtime"):
+            assert gone not in attrs, gone
 
-    def test_enrichment_sanitized(self):
-        rec = otlp.build_report_record(
-            {"ts": 1, "image_id": "i"}, "d1",
-            enrich={"model": "x" * 500, "free_flash_bytes": "junk",
-                    "stage_state": None, "peer_devices": {}})
+
+class TestPolicyAndTrackerEvents:
+    def test_policy_event_typed_attrs_and_event_id(self):
+        # design §10.8: iris.peer.policy, event.id = operation_outbox event_id,
+        # no rule text / IP list / device-id list beyond the acted target.
+        entry = {"event_id": "a71c33e90b5d4f28", "revision": 7,
+                 "action": "assign", "target": "iris8kv-1",
+                 "actor": "console:admin", "created_at": 1755743180.0}
+        status = {"state": "enforced", "applied_revision": 7,
+                  "desired_ip_count": 3}
+        rec = otlp.build_policy_record(entry, status)
+        assert rec["eventName"] == "iris.peer.policy"
+        assert rec["event.id"] == "a71c33e90b5d4f28"
         attrs = {a["key"]: a["value"] for a in rec["attributes"]}
-        assert len(attrs["device.model.identifier"]["stringValue"]) == 128
-        assert "iris.device.flash.free" not in attrs   # non-int dropped
-        assert "iris.stage.state" not in attrs
+        assert attrs["iris.telemetry.schema.version"] == {"intValue": "2"}
+        assert attrs["iris.policy.revision"] == {"intValue": "7"}
+        assert attrs["iris.policy.action"] == {"stringValue": "assign"}
+        assert attrs["iris.enforcement.state"] == {"stringValue": "enforced"}
+        assert attrs["iris.enforcement.applied_revision"] == {"intValue": "7"}
+        assert attrs["iris.enforcement.desired_ip_count"] == {"intValue": "3"}
+        # forbidden: no rule text, no IP list, no multi-device list
+        text = json.dumps(rec)
+        assert "10.0.0" not in text and "deny" not in text
+        assert "iris8kv-2" not in text
+
+    def test_tracker_lifecycle_event_named_and_typed(self):
+        # design §10.8: iris.tracker.peer with a random in-process event.id.
+        ev = {"event": "join", "event_id": "beef1234",
+              "principal": "device:iris8kv-1", "info_hash": "aa11",
+              "role": "leecher", "ip": "100.92.100.14",
+              "received_at": 1755743190.0}
+        rec = otlp.build_tracker_record(ev)
+        assert rec["eventName"] == "iris.tracker.peer"
+        assert rec["event.id"] == "beef1234"
+        # event time = server received_at
+        assert rec["timeUnixNano"] == str(int(1755743190.0 * 1e9))
+        attrs = {a["key"]: a["value"] for a in rec["attributes"]}
+        assert attrs["iris.telemetry.schema.version"] == {"intValue": "2"}
+        assert attrs["iris.principal"] == {"stringValue": "device:iris8kv-1"}
+        assert attrs["iris.peer.role"] == {"stringValue": "leecher"}
+        assert attrs["network.peer.address"] == {"stringValue": "100.92.100.14"}
+        assert attrs["iris.torrent.info_hash"] == {"stringValue": "aa11"}
 
 
 class TestMetricsPayload:

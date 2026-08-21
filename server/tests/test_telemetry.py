@@ -425,9 +425,11 @@ def test_on_swarm_event_forwards_to_exporter():
     exp = otlp.OTLPLogExporter("http://c:4318",
                                sender=lambda u, b: sent.append(b))
     hub = telemetry.Telemetry(PeerRegistry(), exporter=exp)
-    hub.on_swarm_event({"event": "join", "peer_id": "p1", "ts": 0})
+    hub.on_swarm_event({"event": "join", "ip": "10.0.0.9", "ts": 0,
+                        "principal_type": "device", "principal_id": "d1",
+                        "event_id": "e1"})
     exp.flush()
-    assert b"p1" in sent[0]
+    assert b"10.0.0.9" in sent[0]
 
 
 def test_sample_updates_seeder_stats_and_flushes_events():
@@ -439,9 +441,11 @@ def test_sample_updates_seeder_stats_and_flushes_events():
         [{"connections": "2", "infoHash": "abc",
           "files": [{"path": "/img/cat9k.bin"}]}])
     hub = telemetry.Telemetry(PeerRegistry(), exporter=exp, rpc=rpc)
-    hub.on_swarm_event({"event": "join", "peer_id": "p1", "ts": 0})
+    hub.on_swarm_event({"event": "join", "ip": "10.0.0.9", "ts": 0,
+                        "principal_type": "device", "principal_id": "d1",
+                        "event_id": "e1"})
     hub.sample()
-    assert b"p1" in sent[0]      # queued events were flushed
+    assert b"10.0.0.9" in sent[0]      # queued events were flushed
     assert "iris_seeder_upload_bytes_per_second 1000" in hub.metrics_text()
 
 
@@ -933,7 +937,7 @@ def test_on_swarm_event_does_not_track_per_peer_accumulators():
     hub.on_swarm_event({"event": "stop", "info_hash": "abc", "ip": "10.0.0.2",
                         "peer_id": "p1", "ts": 0})
     exp.flush()
-    assert b"p1" in sent[0]
+    assert b"10.0.0.2" in sent[0]
     for attr in ("_peer_sent", "_peer_sent_since"):
         assert not hasattr(hub, attr), attr
 
@@ -1105,7 +1109,7 @@ def test_sample_exports_each_stored_report_exactly_once():
     assert len(sent) == 2
     body = sent[1].decode()
     assert body.count('"device.id"') == 1
-    assert "999000000000" in body   # ts=999 -> timeUnixNano
+    assert "20000000000" in body   # received_at=20.0 -> timeUnixNano (§8)
 
 
 def test_sample_survives_reports_info_raising():
@@ -1184,36 +1188,51 @@ def _doc(now, samples):
 
 
 class TestAggregateTransfers:
-    def test_rollup_two_images(self):
+    # Task 23: canonical freshness-aware rollup over v2 observations (design
+    # §10.9). Fresh observed entries contribute rates + progress; stale/
+    # withdrawn entries never invent a fresh zero. Sampling class replaces the
+    # old link "tier".
+    def _v2(self, image_id, sc, status, receive, send, done, total_recv):
+        return {"v": 2, "schema": "v2", "obs_state": "observed",
+                "image_id": image_id, "sampling_class": sc, "valid": True,
+                "observed_received_at": total_recv, "received_at": total_recv,
+                "aria": {"status": status, "receive_bps": receive,
+                         "send_bps": send, "connections": 1,
+                         "completed_content_bytes": done}}
+
+    def test_rollup_fresh_v2(self):
         samples = {
-            "d1": {"v": 1, "image_id": "img-1", "phase": "downloading",
-                   "done_bytes": 500, "down_bps": 100, "up_bps": 10,
-                   "peers": 2, "tier": "good", "received_at": 100.0,
-                   "effective_interval": 60},
-            "d2": {"v": 1, "image_id": "img-1", "phase": "downloading",
-                   "done_bytes": 250, "down_bps": 0, "up_bps": 0,
-                   "peers": 1, "tier": "constrained", "received_at": 100.0,
-                   "effective_interval": 240},
-            "d3": {"v": 1, "image_id": "img-2", "phase": "seeding",
-                   "done_bytes": 2000, "down_bps": 0, "up_bps": 50,
-                   "peers": 1, "tier": "good", "received_at": 100.0,
-                   "effective_interval": 60},
-            "dX": {"v": 1, "image_id": "unknown", "phase": "downloading",
-                   "done_bytes": 1, "down_bps": 1, "up_bps": 0, "peers": 1,
-                   "tier": "good", "received_at": 100.0,
-                   "effective_interval": 60},
+            "d1": self._v2("img-1", "good", "active", 100, 10, 500, 100.0),
+            "d2": self._v2("img-1", "constrained", "active", 0, 0, 250, 100.0),
+            "d3": self._v2("img-2", "good", "active", 0, 50, 2000, 100.0),
+            "dX": self._v2("unknown", "good", "active", 1, 0, 1, 100.0),
         }
         rows, extras = telemetry.aggregate_transfers(
             _doc(100.0, samples), IMAGES, 100.0)
-        assert extras == {"stream_devices": 3,           # unknown dropped
-                          "samples_rejected_total": 7}
+        assert extras["stream_devices"] == 3          # unknown dropped
+        assert extras["samples_rejected_total"] == 7
         by_image = {r["image"]: r for r in rows}
         r1 = by_image["cat9k.bin"]
-        assert (r1["active"], r1["down_bps"], r1["up_bps"]) == (2, 100, 10)
-        assert r1["stalled"] == 1                        # d2 downloading @ 0
-        assert (r1["tier_good"], r1["tier_constrained"]) == (1, 1)
+        assert r1["stale"] is False
+        assert r1["devices"] == 2
+        assert (r1["receive_bps"], r1["transmit_bps"]) == (100, 10)
+        assert r1["zero_receive_devices"] == 1        # d2 active @ 0 receive
+        assert (r1["sampling_class_good"], r1["sampling_class_constrained"]) \
+            == (1, 1)
         assert abs(r1["progress_ratio"] - 750 / 2000) < 1e-9
+        assert r1["freshness_age_seconds"] == 0
         assert by_image["ie3k.bin"]["info_hash"] == "bb22"
+
+    def test_stale_image_marked_and_zero_receive_suppressed(self):
+        # observation received at 10, evaluated at 140 (>120s) -> stale image.
+        samples = {"d1": self._v2("img-1", "good", "active", 0, 0, 500, 10.0)}
+        rows, _ = telemetry.aggregate_transfers(
+            _doc(140.0, samples), IMAGES, 140.0)
+        r1 = [r for r in rows if r["image"] == "cat9k.bin"][0]
+        assert r1["stale"] is True
+        assert r1["devices"] == 0                     # no FRESH streaming device
+        assert r1["zero_receive_devices"] == 0        # never from stale
+        assert r1["freshness_age_seconds"] == 130     # explanatory
 
     def test_stale_or_missing_doc_is_empty(self):
         assert telemetry.aggregate_transfers(None, IMAGES, 100.0) == \
@@ -1457,15 +1476,26 @@ class TestExportHealth:
         events = []
         h = telemetry.ExportHealth(
             on_transition=lambda name: events.append(name))
-        h.record(True, "logs", 100.0)
-        h.record(False, "metrics", 110.0)
-        h.record(False, "logs", 120.0)          # still degraded: no new event
-        h.record(True, "metrics", 130.0)
+        h.record(True, "logs", 100.0)           # logs ok (no edge from off)
+        h.record(False, "metrics", 110.0)       # metrics degraded (edge)
+        h.record(False, "logs", 120.0)          # logs degraded (edge)
+        h.record(True, "metrics", 130.0)        # metrics recovered (edge)
         d = h.as_dict()
-        assert d["state"] == "ok" and d["last_success_ts"] == 130.0
-        assert d["failures_total"] == 2 and d["fail_streak"] == 0
-        assert d["failures_by_signal"] == {"logs": 1, "metrics": 1}
-        assert events == ["otlp-export-degraded", "otlp-export-recovered"]
+        # worst_of: logs still degraded -> aggregate degraded. A metrics
+        # recovery never masks the outstanding logs failure (design §10.10).
+        assert d["state"] == "degraded"
+        assert d["signals"]["logs"]["state"] == "degraded"
+        assert d["signals"]["metrics"]["state"] == "ok"
+        assert d["signals"]["logs"]["last_success_ts"] == 100.0
+        assert d["signals"]["metrics"]["last_success_ts"] == 130.0
+        assert d["signals"]["logs"]["failures_total"] == 1
+        assert d["signals"]["metrics"]["failures_total"] == 1
+        # top-level compatibility fields (worst-of aggregate)
+        assert d["last_success_ts"] == 130.0
+        assert d["failures_total"] == 2
+        # two degrade edges (metrics, logs) + one recovery edge (metrics)
+        assert events == ["otlp-export-degraded", "otlp-export-degraded",
+                          "otlp-export-recovered"]
 
 
 class TestSampleExportsMetrics:
@@ -1515,26 +1545,46 @@ class TestSampleExportsMetrics:
 
 
 class TestReportExportEnrichment:
-    def test_enrich_reaches_the_record(self):
-        # Task 22: report records are emitted into the hub-owned stable
-        # LogQueue (not a passed exporter object).
+    def test_v1_report_emitted_as_safe_subset(self):
+        # Task 23: a stored v1 report exports the safe subset only; model/flash
+        # enrichment is no longer folded into the canonical report event.
         hub = telemetry.Telemetry(
             device_info=lambda: {"d1": {"swarm_ip": "10.0.0.2",
-                                        "model": "C9300",
-                                        "free_flash_bytes": 5,
-                                        "stage_state": "ready"}},
-            reports_info=lambda: {"d1": [{"ts": 1, "image_id": "img-1",
+                                        "model": "C9300"}},
+            reports_info=lambda: {"d1": [{"v": 1, "schema": "v1",
+                                          "_event_id": "abc123",
+                                          "image_id": "img-1",
+                                          "event": "staging-complete",
                                           "received_at": 50.0,
                                           "peers": [{"ip": "10.0.0.2"}],
                                           "peers_total": 1}]})
         hub._export_new_reports()
         emitted = hub.log_queue.snapshot()
-        attrs = {a["key"]: a["value"] for a in emitted[0]["attributes"]}
-        assert attrs["device.model.identifier"] == {"stringValue": "C9300"}
-        row = attrs["iris.transfer.peers"]["arrayValue"]["values"][0]
-        kv = {p["key"]: p["value"] for p in row["kvlistValue"]["values"]}
-        assert kv == {"network.peer.address": {"stringValue": "10.0.0.2"},
-                      "device.id": {"stringValue": "d1"}}
+        rec = emitted[0]
+        assert rec["eventName"] == "iris.device.report"
+        attrs = {a["key"]: a["value"] for a in rec["attributes"]}
+        assert attrs["iris.telemetry.schema.version"] == {"intValue": "1"}
+        assert attrs["iris.image.id"] == {"stringValue": "img-1"}
+        assert attrs["network.peer.address"]["arrayValue"]["values"][0] == \
+            {"stringValue": "10.0.0.2"}
+        assert "device.model.identifier" not in attrs
+
+    def test_v2_report_emitted_as_transfer_report(self):
+        hub = telemetry.Telemetry(
+            reports_info=lambda: {"d1": [{"v": 2, "schema": "v2",
+                                          "report_id": "a" * 32,
+                                          "transfer_id": "b" * 32,
+                                          "image_id": "img-1",
+                                          "event": "staging-complete",
+                                          "content": {
+                                              "completed_content_bytes": 5},
+                                          "content_sha256": {
+                                              "state": "verified"},
+                                          "received_at": 50.0}]})
+        hub._export_new_reports()
+        rec = hub.log_queue.snapshot()[0]
+        assert rec["eventName"] == "iris.device.transfer.report"
+        assert rec["event.id"] == "a" * 32
 
 
 # ---- :9101 /swarm loopback gate (console-only swarm data by default) ----

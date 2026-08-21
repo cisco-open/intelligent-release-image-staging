@@ -90,11 +90,11 @@ def test_transport_send_posts_batch_and_reports_delivered():
     tx = otlp.OTLPLogTransport(
         "http://collector:4318",
         sender=lambda url, body, headers=None: sent.append((url, body)))
-    n = tx.send([{"event": "join", "peer_id": "p1", "ts": 0}])
+    n = tx.send([{"event": "join", "ip": "10.9.9.9", "ts": 0}])
     assert n == 1
     url, body = sent[0]
     assert url == "http://collector:4318/v1/logs"
-    assert "p1" in body.decode()
+    assert "10.9.9.9" in body.decode()
 
 
 def test_transport_send_failure_raises_so_queue_can_retain():
@@ -124,7 +124,7 @@ def test_hub_retains_queue_across_endpoint_change(tmp_path):
     hub._log_sender = lambda url, body, headers=None: sent.append(url)
     hub._refresh_exporters()
     # queue an event, then change endpoint BEFORE any flush
-    hub.on_swarm_event({"event": "join", "peer_id": "p1", "ts": 0})
+    hub.on_swarm_event({"event": "join", "ip": "10.9.9.9", "ts": 0})
     telemetry_destination.write(path, "http://b:4318", True)
     hub._refresh_exporters()
     # the previously queued event survives the transport swap and flushes to B
@@ -140,7 +140,7 @@ def test_hub_disable_then_reenable_retains_queue(tmp_path):
         dest_settings=_dest(tmp_path), env_endpoint="", env_enabled=False)
     hub._log_sender = lambda url, body, headers=None: sent.append(url)
     hub._refresh_exporters()
-    hub.on_swarm_event({"event": "join", "peer_id": "p1", "ts": 0})
+    hub.on_swarm_event({"event": "join", "ip": "10.9.9.9", "ts": 0})
     # disable: transport dropped, queue retained (no fake success)
     telemetry_destination.write(path, "http://a:4318", False)
     hub._refresh_exporters()

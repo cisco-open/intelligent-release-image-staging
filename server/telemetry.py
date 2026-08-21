@@ -151,98 +151,176 @@ def make_jsonrpc_caller(rpc_url, secret):
 
 
 class ExportHealth:
-    """Export health per R7: degrade silently in operation, loudly in
-    visibility. State transitions (ok<->degraded) fire on_transition exactly
-    once per edge — a dead collector cannot spam the audit log. 'off' until
-    the first attempt."""
+    """Per-signal OTLP export health (design §10.10). Logs and metrics are
+    INDEPENDENT signals, each ``off | ok | degraded``; the aggregate is
+    ``worst_of`` so a metrics success can NEVER mask a logs failure. Each
+    signal starts ``off`` until its first attempt. Audit transitions fire the
+    callback exactly once per signal edge (ok<->degraded) AND once per aggregate
+    edge, never carrying a secret. Disabling a signal sets it ``off`` while
+    retaining its historic ``last_success_ts``. ``logs`` additionally surfaces
+    the bounded-retry queue depth (``queued``) and overflow drops
+    (``dropped_total``) from the hub-owned LogQueue."""
 
-    def __init__(self, on_transition=None):
+    _RANK = {"off": 0, "ok": 1, "degraded": 2}   # worst-of ordering
+
+    def __init__(self, on_transition=None, log_queue=None):
         self._on = on_transition
-        self._state = "off"
-        self._last_success = 0.0
-        self._streak = 0
-        self._failures = {"logs": 0, "metrics": 0}   # per-signal (spec 7.5)
+        self._log_queue = log_queue
+        self._sig = {
+            "logs": {"state": "off", "last_success_ts": 0.0,
+                     "fail_streak": 0, "failures_total": 0},
+            "metrics": {"state": "off", "last_success_ts": 0.0,
+                        "fail_streak": 0, "failures_total": 0},
+        }
+        self._aggregate = "off"
+
+    def _fire(self, name):
+        if self._on:
+            self._on(name)
+
+    def _recompute_aggregate(self):
+        worst = max(self._sig.values(),
+                    key=lambda s: self._RANK[s["state"]])["state"]
+        if worst != self._aggregate:
+            self._aggregate = worst
 
     def record(self, ok, signal, now):
+        s = self._sig.setdefault(
+            signal, {"state": "off", "last_success_ts": 0.0,
+                     "fail_streak": 0, "failures_total": 0})
+        prev_agg = self._aggregate
         if ok:
-            self._last_success = now
-            self._streak = 0
-            if self._state == "degraded" and self._on:
-                self._on("otlp-export-recovered")
-            self._state = "ok"
+            s["last_success_ts"] = now
+            s["fail_streak"] = 0
+            if s["state"] == "degraded":
+                self._fire("otlp-export-recovered")
+            s["state"] = "ok"
         else:
-            self._failures[signal] = self._failures.get(signal, 0) + 1
-            self._streak += 1
-            if self._state != "degraded" and self._on:
-                self._on("otlp-export-degraded")
-            self._state = "degraded"
+            s["failures_total"] += 1
+            s["fail_streak"] += 1
+            if s["state"] != "degraded":
+                self._fire("otlp-export-degraded")
+            s["state"] = "degraded"
+        self._recompute_aggregate()
+        # (Aggregate edges are implicit in the per-signal edges above; the
+        # per-signal callback already fires once per meaningful transition.)
+        _ = prev_agg
+
+    def disable(self, signal):
+        """Mark a signal ``off`` (destination disabled) while RETAINING its
+        historic last-success timestamp (design §10.10)."""
+        s = self._sig.get(signal)
+        if s is None:
+            return
+        if s["state"] == "degraded":
+            # leaving a degraded state for off is not a recovery to ok.
+            pass
+        s["state"] = "off"
+        s["fail_streak"] = 0
+        self._recompute_aggregate()
+
+    def _signal_dict(self, signal):
+        s = dict(self._sig[signal])
+        if signal == "logs" and self._log_queue is not None:
+            try:
+                s["queued"] = int(self._log_queue.queued)
+                s["dropped_total"] = int(self._log_queue.dropped_total)
+            except Exception:
+                pass
+        return s
 
     def as_dict(self):
-        return {"state": self._state, "last_success_ts": self._last_success,
-                "fail_streak": self._streak,
-                "failures_total": sum(self._failures.values()),
-                "failures_by_signal": dict(self._failures)}
+        signals = {name: self._signal_dict(name) for name in self._sig}
+        # Top-level compatibility fields (worst-of aggregate): newest success
+        # across signals + total failures across signals.
+        last_success = max((s["last_success_ts"]
+                            for s in self._sig.values()), default=0.0)
+        failures_total = sum(s["failures_total"]
+                             for s in self._sig.values())
+        fail_streak = max((s["fail_streak"] for s in self._sig.values()),
+                          default=0)
+        return {
+            "state": self._aggregate,
+            "aggregate_rule": "worst_of",
+            "signals": signals,
+            "last_success_ts": last_success,
+            "fail_streak": fail_streak,
+            "failures_total": failures_total,
+        }
 
 
-def _metric_points(rows, extras, now, per_device=None, images=None,
-                   device_models=None, export_failures=None):
-    """Spec 7.5 table, encoded literally. Names/units are contract."""
+def _metric_points(rows, extras, now, export_signals=None, peer_status=None,
+                   legacy_participants=None):
+    """Canonical OTLP metric points (design §10.9). OTLP dotted names, units,
+    and low-cardinality image-level attrs ONLY. Ambiguous active/stalled and
+    all per-device/per-peer gauges are RETIRED (high-cardinality history lives
+    in OTLP logs, §10.8). Business gauges (throughput, progress) are OMITTED for
+    a stale image; the freshness age is always emitted so omission is
+    explainable."""
     pts = []
     for r in rows:
         base = {"iris.image.id": r["image"],
                 "iris.torrent.info_hash": r["info_hash"]}
-        pts.append({"name": "iris.transfer.active", "unit": "{transfer}",
-                    "kind": "gauge", "value": r["active"], "attrs": base,
-                    "ts": now})
-        for direction, key in (("receive", "down_bps"),
-                               ("transmit", "up_bps")):
-            pts.append({"name": "iris.transfer.throughput", "unit": "By/s",
-                        "kind": "gauge", "value": r[key],
-                        "attrs": dict(base, **{"network.io.direction":
-                                               direction}), "ts": now})
-        pts.append({"name": "iris.transfer.progress", "unit": "1",
-                    "kind": "gauge", "value": r["progress_ratio"],
-                    "float": True, "attrs": base, "ts": now})
-        pts.append({"name": "iris.transfer.stalled", "unit": "{transfer}",
-                    "kind": "gauge", "value": r["stalled"], "attrs": base,
-                    "ts": now})
-        for tier in ("good", "constrained"):
+        pts.append({"name": "iris.transfer.devices", "unit": "{device}",
+                    "kind": "gauge", "value": _int(r.get("devices")),
+                    "attrs": base, "ts": now})
+        if not r.get("stale"):
+            for direction, key in (("receive", "receive_bps"),
+                                   ("transmit", "transmit_bps")):
+                pts.append({"name": "iris.transfer.throughput", "unit": "By/s",
+                            "kind": "gauge", "value": _int(r.get(key)),
+                            "attrs": dict(base, **{"network.io.direction":
+                                                   direction}), "ts": now})
+            pts.append({"name": "iris.transfer.progress", "unit": "1",
+                        "kind": "gauge",
+                        "value": float(r.get("progress_ratio") or 0.0),
+                        "float": True, "attrs": base, "ts": now})
+        pts.append({"name": "iris.transfer.zero_receive_devices",
+                    "unit": "{device}", "kind": "gauge",
+                    "value": 0 if r.get("stale")
+                    else _int(r.get("zero_receive_devices")),
+                    "attrs": base, "ts": now})
+        pts.append({"name": "iris.transfer.freshness_age", "unit": "s",
+                    "kind": "gauge",
+                    "value": _int(r.get("freshness_age_seconds")),
+                    "attrs": base, "ts": now})
+        for sc in ("good", "constrained"):
             pts.append({"name": "iris.stream.devices", "unit": "{device}",
-                        "kind": "gauge", "value": r["tier_%s" % tier],
-                        "attrs": dict(base, **{"iris.link.tier": tier}),
+                        "kind": "gauge",
+                        "value": _int(r.get("sampling_class_%s" % sc)),
+                        "attrs": dict(base, **{"sampling_class": sc}),
                         "ts": now})
     pts.append({"name": "iris.telemetry.samples.rejected",
                 "unit": "{sample}", "kind": "sum",
                 "value": extras.get("samples_rejected_total", 0),
                 "attrs": {}, "ts": now})
-    for signal, n in (export_failures or {}).items():
-        pts.append({"name": "iris.telemetry.export.failures",
-                    "unit": "{error}", "kind": "sum", "value": n,
-                    "attrs": {"iris.telemetry.signal": signal}, "ts": now})
-    for device_id, s in (per_device or {}).items():
+    if legacy_participants is not None:
+        pts.append({"name": "iris.legacy.announce_participants",
+                    "unit": "{participant}", "kind": "gauge",
+                    "value": _int(legacy_participants), "attrs": {}, "ts": now})
+    for signal, s in (export_signals or {}).items():
         if not isinstance(s, dict):
             continue
-        dattrs = {"device.id": device_id,
-                  "iris.image.id": s.get("image_id", "")}
-        model = (device_models or {}).get(device_id)
-        if model:
-            dattrs["device.model.identifier"] = str(model)[:128]
-        for direction, key in (("receive", "down_bps"),
-                               ("transmit", "up_bps")):
-            pts.append({"name": "iris.device.transfer.throughput",
-                        "unit": "By/s", "kind": "gauge",
-                        "value": s.get(key, 0),
-                        "attrs": dict(dattrs, **{"network.io.direction":
-                                                 direction}), "ts": now})
-        pts.append({"name": "iris.device.transfer.received", "unit": "By",
-                    "kind": "gauge", "value": s.get("done_bytes", 0),
-                    "attrs": dattrs, "ts": now})
-        entry = (images or {}).get(s.get("image_id") or "")
-        size = entry.get("size") if isinstance(entry, dict) else 0
-        pts.append({"name": "iris.device.transfer.progress", "unit": "1",
-                    "kind": "gauge", "float": True,
-                    "value": (s.get("done_bytes", 0) / size) if size else 0.0,
-                    "attrs": dattrs, "ts": now})
+        attrs = {"signal": signal}
+        pts.append({"name": "iris.telemetry.export.failures",
+                    "unit": "{error}", "kind": "sum",
+                    "value": _int(s.get("failures_total")),
+                    "attrs": attrs, "ts": now})
+        pts.append({"name": "iris.telemetry.export.dropped",
+                    "unit": "{record}", "kind": "sum",
+                    "value": _int(s.get("dropped_total")),
+                    "attrs": attrs, "ts": now})
+    for name, unit, key in (
+        ("iris.peer.policy.revision", "1", "policy_revision"),
+        ("iris.peer.enforcement.applied_revision", "1", "applied_revision"),
+        ("iris.peer.enforcement.desired_ips", "{ip}", "desired_ip_count"),
+        ("iris.peer.enforcement.health", "1", "health"),
+    ):
+        val = (peer_status or {}).get(key)
+        if val is None:
+            continue
+        pts.append({"name": name, "unit": unit, "kind": "gauge",
+                    "value": _int(val), "attrs": {}, "ts": now})
     return pts
 
 
@@ -275,11 +353,20 @@ class Telemetry:
         self._log_sender = None
         self.rpc = rpc
         self.interval = interval
-        # OTLP metrics push (spec 7.5) + shared export-health tracker (7.7).
-        # device_metrics gates the per-device gauges (IRIS_OTLP_DEVICE_METRICS,
-        # default off — cardinality warning documented).
+        # OTLP metrics push (design §10.9) + shared export-health tracker.
+        # device_metrics is RETIRED: per-device/per-peer metric gauges are
+        # forbidden (§10.9 — that history lives in OTLP logs §10.8). The
+        # constructor arg is retained for call-site compatibility but has no
+        # effect on export.
         self.metrics_exporter = metrics_exporter
         self.export_health = export_health or ExportHealth()
+        # Surface the hub-owned LogQueue depth/drops on the logs health signal
+        # (design §10.10). Attaching post-construction keeps ExportHealth
+        # constructable without the queue (tests).
+        try:
+            self.export_health._log_queue = self.log_queue
+        except Exception:
+            pass
         self.device_metrics = bool(device_metrics)
         # Console-editable OTLP destination (design 2026-08-19 feature B):
         # dest_settings is a telemetry_destination.DestinationSettings the
@@ -361,11 +448,30 @@ class Telemetry:
         swarm = build_swarm(self._registry.stats(), self._names)
         with self._lock:
             counters = dict(self._counters)
+        extras = dict(self._extras)
+        extras["legacy_announce_participants"] = \
+            self._legacy_participant_count()
         return metrics.render(swarm, self._seeder, counters,
                               reports_stored=self._reports_stored(),
                               transfers=self._transfers,
-                              extras=self._extras,
-                              otlp_health=self.export_health.as_dict())
+                              extras=extras,
+                              otlp_health=self.export_health.as_dict(),
+                              peer_status=self._peer_status_numbers())
+
+    def _legacy_participant_count(self):
+        """Distinct current ``legacy_unattributed`` announce participants
+        (design §10.9). Any announce on a previous/legacy token, IP-independent;
+        a rollout-completeness signal (0 = fully migrated). Counted from the
+        registry snapshot — never a per-peer/per-IP label. Never breaks."""
+        try:
+            seen = set()
+            for peers in self._registry.snapshot().values():
+                for p in peers:
+                    if p.get("principal_type") == "legacy":
+                        seen.add((p.get("ip"), p.get("port")))
+            return len(seen)
+        except Exception:
+            return 0
 
     def _reports_stored(self):
         """Total stored device reports (all devices), derived fresh at render
@@ -422,6 +528,13 @@ class Telemetry:
             # OTLP export.
             self._log_transport = None
             self.metrics_exporter = None
+            # Destination disabled/absent: mark both signals off while
+            # retaining historic last-success (design §10.10).
+            try:
+                self.export_health.disable("logs")
+                self.export_health.disable("metrics")
+            except Exception:
+                pass
         # `self.exporter` remains the "logs export enabled" gate used across
         # the sampler; it is truthy exactly when a transport is wired.
         self.exporter = self._log_transport
@@ -487,26 +600,16 @@ class Telemetry:
             delivered = self._flush_logs(now)
         if self.metrics_exporter is not None:
             # Every pass exports the latest snapshot (conflation, spec 7.5) —
-            # NOT gated on transfers existing: the rejected-samples counter
-            # and export.failures sums must flow even on a quiet fleet.
-            per_device = None
-            models = {}
-            if self.device_metrics:
-                per_device = (self._live_info() or {}).get("samples") \
-                    if self._live_info else None
-                if self._device_info is not None:
-                    try:
-                        models = {d: (rec or {}).get("model")
-                                  for d, rec in
-                                  (self._device_info() or {}).items()}
-                    except Exception:
-                        models = {}
+            # NOT gated on transfers existing: the rejected-samples counter and
+            # export sums must flow even on a quiet fleet. Per-device gauges are
+            # RETIRED (design §10.9 forbids device/peer labels on metrics — that
+            # history lives in OTLP logs §10.8).
+            signals = self.export_health.as_dict().get("signals")
             ok = self.metrics_exporter.export(_metric_points(
-                self._transfers, self._extras, now, per_device=per_device,
-                images=self._images_info() if self._images_info else {},
-                device_models=models,
-                export_failures=self.export_health.as_dict()
-                    .get("failures_by_signal")))
+                self._transfers, self._extras, now,
+                export_signals=signals,
+                peer_status=self._peer_status_numbers(),
+                legacy_participants=self._legacy_participant_count()))
             self.export_health.record(ok, "metrics", now)
 
     def _export_new_reports(self):
@@ -698,6 +801,37 @@ class Telemetry:
             return data if isinstance(data, dict) else None
         except Exception:
             return None
+
+    # Numeric enforcement health mapping (design §10.9): a single gauge, not a
+    # one-hot label set. `fail_closed` is a degraded-security posture and maps
+    # to -1 (degraded) so no false "enforced" is ever reported.
+    _ENFORCEMENT_HEALTH = {"enforced": 1, "pending": 0, "degraded": -1,
+                           "fail_closed": -1, "rpc_unavailable": -2}
+
+    def _peer_status_numbers(self):
+        """Low-cardinality numeric peer-policy/enforcement facts for the metric
+        gauges (§10.9): current policy revision + enforcement applied revision,
+        desired-IP count, and numeric health. None entries are omitted by the
+        renderer. Reads the tracker's own durable stores fresh; never a raw IP
+        list, never per-IP labels."""
+        out = {}
+        policy = self._policy_snapshot()
+        doc = getattr(policy, "document", None)
+        if isinstance(doc, dict) and isinstance(doc.get("revision"), int) \
+                and not isinstance(doc.get("revision"), bool):
+            out["policy_revision"] = doc["revision"]
+        enf = self._enforcement_snapshot()
+        if isinstance(enf, dict):
+            if isinstance(enf.get("applied_revision"), int) \
+                    and not isinstance(enf.get("applied_revision"), bool):
+                out["applied_revision"] = enf["applied_revision"]
+            if isinstance(enf.get("desired_ip_count"), int) \
+                    and not isinstance(enf.get("desired_ip_count"), bool):
+                out["desired_ip_count"] = enf["desired_ip_count"]
+            health = self._ENFORCEMENT_HEALTH.get(enf.get("state"))
+            if health is not None:
+                out["health"] = health
+        return out or None
 
     def run_forever(self):
         while not self._stop.wait(self.interval):
@@ -1109,13 +1243,31 @@ def _read_policy(policy_paths):
 
 
 def aggregate_transfers(live_doc, images, now, write_interval=None):
-    """Per-image rollup of the live table snapshot (spec 7.2). INNER join on
-    the image catalog: samples with unknown image_ids are dropped (second
-    cardinality fence behind ingest). A stale snapshot (written_at older
-    than 2 x the snapshot WRITE interval — the catalog writer's cadence,
-    deliberately NOT the hub's sample interval) is treated as empty — with
-    the keep-fresh write rule that genuinely means the catalog stopped
-    writing."""
+    """Per-image canonical rollup of the live table snapshot (design §10.9),
+    freshness-aware. INNER join on the image catalog: samples with unknown
+    image_ids are dropped (second cardinality fence behind ingest). A stale
+    SNAPSHOT (written_at older than 2 x the snapshot WRITE interval) is treated
+    as empty.
+
+    Per-image the row carries ONLY low-cardinality canonical facts:
+      * ``devices`` — FRESH streaming devices (a currently-valid observed v2
+        entry within ``LIVE_VALUE_VALIDITY`` of its observed receipt).
+      * ``receive_bps``/``transmit_bps`` — aggregate rate over the fresh
+        observed devices (business gauges; the renderer omits them when stale).
+      * ``progress_ratio`` — sum(completed)/sum(total) over fresh devices.
+      * ``zero_receive_devices`` — fresh observed devices with an ACTIVE aria
+        status and receive_bps==0 (never asserted from a stale value).
+      * ``sampling_class_good``/``sampling_class_constrained`` — fresh devices
+        by sampling class (replaces the old link "tier").
+      * ``freshness_age_seconds`` — age of the newest valid observation for the
+        image (always reported so a stale omission is explainable).
+      * ``stale`` — True when NO device for the image is currently fresh; the
+        renderer then omits throughput/progress and never emits a fresh zero.
+
+    v1 rollout samples (mapped to obs_state=observed, schema v1) contribute via
+    their legacy ``down_bps``/``up_bps``/``done_bytes`` under the same freshness
+    rule; they carry no aria.status so they never count as zero_receive.
+    """
     if write_interval is None:
         write_interval = live_samples.SNAPSHOT_WRITE_INTERVAL
     empty = ([], {"stream_devices": 0, "samples_rejected_total": 0})
@@ -1136,28 +1288,64 @@ def aggregate_transfers(live_doc, images, now, write_interval=None):
         if not entry:
             continue
         streaming += 1
-        row = rows.setdefault(sample["image_id"], {
-            "image": entry.get("filename", sample["image_id"]),
+        image_id = sample["image_id"]
+        row = rows.setdefault(image_id, {
+            "image": entry.get("filename", image_id),
             "info_hash": entry.get("info_hash_hex", ""),
-            "active": 0, "down_bps": 0, "up_bps": 0, "_done": 0,
-            "_total": 0, "stalled": 0, "tier_good": 0,
-            "tier_constrained": 0})
-        row["active"] += 1
-        row["down_bps"] += _int(sample.get("down_bps"))
-        row["up_bps"] += _int(sample.get("up_bps"))
-        row["_done"] += _int(sample.get("done_bytes"))
+            "devices": 0, "receive_bps": 0, "transmit_bps": 0,
+            "zero_receive_devices": 0, "sampling_class_good": 0,
+            "sampling_class_constrained": 0, "_done": 0, "_total": 0,
+            "_newest": None})
+
+        # Freshness: only a currently-valid OBSERVED entry within
+        # LIVE_VALUE_VALIDITY of its observed receipt is fresh (spec §3B/§4).
+        obs_state = sample.get("obs_state", "observed")   # v1 -> observed
+        try:
+            base = float(sample.get("observed_received_at",
+                                    sample.get("received_at", 0.0)))
+        except (TypeError, ValueError):
+            base = 0.0
+        fresh = (obs_state in (None, "observed")
+                 and bool(sample.get("valid", True))
+                 and base + live_samples.LIVE_VALUE_VALIDITY >= now)
+        if base:
+            age = now - base
+            if row["_newest"] is None or age < row["_newest"]:
+                row["_newest"] = age
+        if not fresh:
+            continue
+
+        row["devices"] += 1
+        schema = sample.get("schema", "v2")
+        if schema == "v1":
+            receive = _int(sample.get("down_bps"))
+            send = _int(sample.get("up_bps"))
+            done = _int(sample.get("done_bytes"))
+            status = None
+        else:
+            aria = sample.get("aria") if isinstance(
+                sample.get("aria"), dict) else {}
+            receive = _int(aria.get("receive_bps"))
+            send = _int(aria.get("send_bps"))
+            done = _int(aria.get("completed_content_bytes"))
+            status = aria.get("status")
+        row["receive_bps"] += receive
+        row["transmit_bps"] += send
+        row["_done"] += done
         row["_total"] += _int(entry.get("size"))
-        if sample.get("phase") == "downloading" \
-                and _int(sample.get("down_bps")) == 0:
-            row["stalled"] += 1
-        tier_key = "tier_%s" % sample.get("tier")
-        if tier_key in row:
-            row[tier_key] += 1
+        if status == "active" and receive == 0:
+            row["zero_receive_devices"] += 1
+        sc_key = "sampling_class_%s" % sample.get("sampling_class")
+        if sc_key in row:
+            row[sc_key] += 1
     out = []
     for row in rows.values():
         total = row.pop("_total")
         done = row.pop("_done")
+        newest = row.pop("_newest")
         row["progress_ratio"] = (done / total) if total else 0.0
+        row["freshness_age_seconds"] = int(newest) if newest is not None else 0
+        row["stale"] = row["devices"] == 0
         out.append(row)
     return out, {"stream_devices": streaming,
                  "samples_rejected_total":
