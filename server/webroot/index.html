@@ -159,7 +159,7 @@
           </form>
         </div>
         <table class="tbl" id="devices">
-          <thead><tr><th><input type="checkbox" id="mark-all"></th><th>Device</th><th>IP</th><th>Model</th><th>Management type</th><th>Platform</th><th>Credential</th><th>Assigned image</th><th>Telemetry</th><th>Status</th></tr></thead>
+          <thead><tr><th><input type="checkbox" id="mark-all"></th><th>Device</th><th>IP</th><th>Model</th><th>Management type</th><th>Platform</th><th>Credential</th><th>Assigned image</th><th>Telemetry</th><th>Peer policy</th><th>Status</th></tr></thead>
           <tbody id="dev-rows"></tbody>
         </table>
         <div id="deploy-info-panel" hidden>
@@ -188,6 +188,7 @@
       <section id="view-swarm" hidden>
         <h2>Swarm</h2>
         <p class="muted" id="swarm-summary"></p>
+        <p class="legacy-warning" id="legacy-peer-warning" hidden></p>
         <iframe id="swarm-frame" class="swarm-frame" title="Live swarm map"></iframe>
         <p><a class="btn ghost" id="swarm-open" target="_blank" rel="noopener">Open the swarm map full-screen ↗</a></p>
       </section>

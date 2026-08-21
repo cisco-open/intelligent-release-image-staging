@@ -225,6 +225,64 @@
   var devStatus = document.getElementById('dev-status');
   var imageIds = [];
   var credOpts = [];
+  var peerPolicy = { revision: null, quarantine_assignments: [], enforcement: {} };
+  var peerPolicyBusy = {};
+  function peerPolicyAssigned(deviceId) {
+    return (peerPolicy.quarantine_assignments || []).indexOf(deviceId) !== -1;
+  }
+  function peerPolicyStatus() {
+    var e = peerPolicy.enforcement || {};
+    var state = ['pending', 'enforced', 'degraded', 'rpc_unavailable', 'fail_closed'].indexOf(e.state) !== -1
+      ? e.state : 'pending';
+    var details = 'Last tracker enforcement: ' + state + '; desired peers: ' +
+      (typeof e.desired_ip_count === 'number' ? e.desired_ip_count : 0);
+    if (e.conflict_count) details += '; conflicts: ' + (e.conflict_types || []).join(', ');
+    return '<span class="badge ' + (state === 'enforced' ? 'badge-ok' :
+      (state === 'degraded' || state === 'fail_closed' ? 'badge-fail' : 'badge-queued')) +
+      '" title="' + esc(details) + '">' + esc(state) + '</span>';
+  }
+  async function refreshPeerPolicy() {
+    var r = await fetch('/api/peer-policy');
+    if (!r.ok) throw new Error('Peer policy refresh failed (' + r.status + ')');
+    peerPolicy = await r.json();
+    return peerPolicy;
+  }
+  async function setQuarantine(btn) {
+    var id = btn.closest('tr').getAttribute('data-id');
+    var quarantined = !peerPolicyAssigned(id);
+    var action = quarantined ? 'Quarantine' : 'Release';
+    if (!confirm(action + ' ' + id + '?\n\nThis changes peer discovery and the server seeder across all torrents. ' +
+        'It may not terminate existing device-to-device sessions immediately. It never installs or reloads a device.')) return;
+    btn.disabled = true;
+    peerPolicyBusy[id] = true;
+    try {
+      var r = await fetch('/api/peer-policy/quarantine/' + encodeURIComponent(id), {
+        method: 'PUT', headers: csrfHdr({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ quarantined: quarantined, if_revision: peerPolicy.revision })
+      });
+      var body = await r.json().catch(function () { return {}; });
+      if (r.ok) {
+        peerPolicy.revision = body.revision;
+        peerPolicy.quarantine_assignments = (peerPolicy.quarantine_assignments || []).filter(function (x) { return x !== id; });
+        if (body.quarantined) peerPolicy.quarantine_assignments.push(id);
+        devStatus.textContent = action + ' intent saved for ' + id + '.';
+        await Promise.all([refreshDevices(), refreshPeerPolicy()]);
+      } else if (r.status === 409) {
+        await refreshPeerPolicy();
+        devStatus.textContent = 'Peer policy changed elsewhere. Review the current policy and retry; no change was made.';
+        refreshDevices();
+      } else if (r.status === 503 && body.error === 'operation_backlog_full') {
+        devStatus.textContent = 'Peer-policy operation backlog is full; retry later.';
+      } else {
+        devStatus.textContent = 'Peer-policy update failed: ' + (body.error || r.status) + '.';
+      }
+    } catch (e) {
+      devStatus.textContent = 'Peer-policy update failed; retry later.';
+    } finally {
+      delete peerPolicyBusy[id];
+      if (btn.isConnected) btn.disabled = false;
+    }
+  }
   // Live status: the devices table previously refreshed only on tab switches
   // and after actions, so stage_state changes (staging -> transferring ->
   // ready) sat stale until the operator clicked something. Poll every 10s —
@@ -245,8 +303,10 @@
   }
   scheduleDevices();
   async function refreshDevices() {
-    var [dr, ir, cr] = await Promise.all([fetch('/api/devices'), fetch('/api/images'), fetch('/api/credentials')]);
+    var results = await Promise.all([fetch('/api/devices'), fetch('/api/images'), fetch('/api/credentials'), fetch('/api/peer-policy')]);
+    var dr = results[0], ir = results[1], cr = results[2], pr = results[3];
     if (!dr.ok) return;
+    if (pr.ok) peerPolicy = await pr.json();
     var dbody = await dr.json();
     var devs = dbody.devices || [];
     var devNow = dbody.now || Date.now() / 1000;   // server clock for last_seen freshness
@@ -319,6 +379,12 @@
         '<td><select class="cred">' + credSel + '</select></td>' +
         '<td><select class="assign">' + opts + '</select></td>' +
         '<td>' + telemetryCell(d) + '</td>' +
+        '<td><span class="peer-intent">' + (peerPolicyAssigned(d.device_id) ? 'Quarantined intent' : 'Not quarantined') +
+        '</span> ' + peerPolicyStatus() + ' <button type="button" class="linkish peer-quarantine" ' +
+        'title="' + (peerPolicyAssigned(d.device_id) ? 'Release device from quarantine' : 'Quarantine device') + '" aria-label="' +
+        (peerPolicyAssigned(d.device_id) ? 'Release ' : 'Quarantine ') + esc(d.device_id) + '"' +
+        (peerPolicyBusy[d.device_id] ? ' disabled' : '') + '>' +
+        (peerPolicyAssigned(d.device_id) ? 'Release' : 'Quarantine') + '</button></td>' +
         '<td>' + status +
         ' <button class="linkish dinfo" title="Deployment details">ⓘ</button></td></tr>';
     }).join('');
@@ -355,6 +421,9 @@
       btn.addEventListener('click', function () {
         openDeployInfo(btn.closest('tr').getAttribute('data-id'));
       });
+    });
+    document.querySelectorAll('#dev-rows .peer-quarantine').forEach(function (btn) {
+      btn.addEventListener('click', function () { setQuarantine(btn); });
     });
     document.getElementById('mark-all').checked = false;
     document.getElementById('dev-count').textContent =
@@ -1080,6 +1149,14 @@
     var peers = (sw.images || []).reduce(function (n, im) {
       return n + ((im.peers || []).length);
     }, 0);
+    var legacyPeers = (sw.images || []).reduce(function (n, im) {
+      return n + (im.peers || []).filter(function (p) {
+        return p && p.tracker && p.tracker.participant_class === 'legacy_unattributed';
+      }).length;
+    }, 0);
+    var legacyWarning = document.getElementById('legacy-peer-warning');
+    legacyWarning.hidden = legacyPeers === 0;
+    legacyWarning.textContent = legacyPeers ? legacyPeers + ' legacy participant(s) cannot be attributed or individually quarantined until personalized torrent refresh.' : '';
     s.textContent = peers + ' peer(s) in the swarm. Open the full map for the live view.';
   }
 
@@ -1963,10 +2040,21 @@
     var el = document.getElementById('telemetry-health');
     if (!el) return;
     var state = 'unknown';
+    el.title = '';
     try {
       var r = await fetch('/api/telemetry/health');
       var d = await r.json();
-      if (d && d.otlp_export && d.otlp_export.state) state = d.otlp_export.state;
+      if (d && d.otlp_export && d.otlp_export.signals) {
+        var signals = d.otlp_export.signals;
+        state = d.otlp_export.state || 'unknown';
+        var detail = ['logs', 'metrics'].map(function (name) {
+          var signal = signals[name] || {};
+          var text = name + ': ' + (signal.state || 'unknown');
+          if (name === 'logs') text += ', queued ' + (signal.queued || 0) + ', dropped ' + (signal.dropped_total || 0);
+          return text;
+        }).join('; ');
+        el.title = detail;
+      } else if (d && d.otlp_export && d.otlp_export.state) state = d.otlp_export.state;
       else if (d && d.ok === false) state = 'unknown';
       else state = 'off';
     } catch (e) { state = 'unknown'; }

@@ -77,7 +77,7 @@ def test_devices_toolbar_regrouped():
     devices_thead = html.split('id="devices"')[1].split('</thead>')[0]
     # '<th' alone also matches the '<thead>' tag itself; use '<th>' to count
     # only real header cells.
-    assert devices_thead.count('<th>') == 10, "row action-links column removed"
+    assert devices_thead.count('<th>') == 11, "peer-policy column added without row action links"
 
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
@@ -86,6 +86,32 @@ def test_devices_toolbar_regrouped():
         and "#dev-rows .del'" not in js, "per-row action links must be gone"
     assert "function startOnboard(" not in js, "dead single-row path removed"
     assert "onclick=" not in js and "onclick=" not in html
+
+
+def test_peer_policy_console_controls_are_typed_and_safe():
+    """Device inventory gets one CSRF-protected quarantine/release action; it
+    exposes intent separately from count-only tracker enforcement, never a
+    generic ACL/seeder editor or IP-derived legacy identity."""
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    assert '<th>Peer policy</th>' in html
+    assert 'id="legacy-peer-warning" hidden' in html
+
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    assert "function refreshPeerPolicy()" in js
+    assert "'/api/peer-policy/quarantine/' + encodeURIComponent(id)" in js
+    assert "method: 'PUT', headers: csrfHdr" in js
+    assert "if_revision: peerPolicy.revision" in js
+    assert "r.status === 409" in js and "operation_backlog_full" in js
+    assert "may not terminate existing device-to-device sessions immediately" in js
+    assert "never installs or reloads a device" in js
+    assert "Quarantined intent" in js and "desired_ip_count" in js and "conflict_types" in js
+    assert "participant_class === 'legacy_unattributed'" in js
+    assert "p.tracker" in js and "device_ip" not in js.split("function refreshSwarm()")[1].split("// ---- Settings ----")[0]
+    assert "otlp_export.signals" in js and "dropped_total" in js
+    policy_area = js.split("function setQuarantine(")[1].split("async function refreshDevices")[0]
+    assert "method: 'DELETE'" not in policy_area and "acl" not in policy_area.lower()
 
 
 def test_import_from_disk_panel_wired():

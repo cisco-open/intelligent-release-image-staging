@@ -97,6 +97,8 @@ body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-
 .badge-queued { background:#eef1f6; color:#67728a; }
 .badge-running { background:#e3edfb; color:#0b5cd6; }
 .badge-cancelled { background:#f7efdc; color:#8a6d1a; }
+.legacy-warning { background:#fdf3e2; border:1px solid #ecc987; border-left:4px solid #d97706;
+  border-radius:6px; color:#6c4a07; font-size:13px; margin:0 0 16px; padding:8px 10px; }
 #batch-panel td.out { color:#67728a; max-width:420px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .cat-tag { display:inline-block; font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.3px;
   border-radius:4px; padding:1px 6px; margin-right:4px; background:#eef1f6; color:#556; }
