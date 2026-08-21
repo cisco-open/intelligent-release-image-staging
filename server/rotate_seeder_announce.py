@@ -23,9 +23,13 @@ This is the ONLY supported way to rotate the seeder announce credential
 Failure handling (spec §6):
 - New-add failure -> restore the EXACT old canonical bytes and attempt the old
   add (rollback).
-- If the old re-add ALSO fails -> abort all remaining torrents, leave
-  maintenance frozen, preserve old bytes + manifest, return a hard no-go, and
-  NEVER claim the image remains served.
+- If the old re-add ALSO fails -> a hard no-go: restore the EXACT old canonical
+  bytes for EVERY previously applied torrent too and attempt to re-add each of
+  them, abort all remaining torrents, leave maintenance frozen, preserve old
+  bytes + manifest, return a hard no-go, and NEVER claim the image remains
+  served. Every disturbed torrent is reported explicitly in
+  ``RotationResult.affected`` (with ``restore_readd_ok`` per torrent); any
+  ``restore_readd_ok=False`` means serving repair is still required there.
 
 The helper never accepts or prints token values (argv/output are nonsecret) and
 does NOT revoke any previous credential (revoke is P1). It never accesses the
@@ -51,6 +55,7 @@ import secrets
 import sys
 import tempfile
 
+import secretfs
 import secrets_store
 import torrent_personalize
 
@@ -72,7 +77,14 @@ RotationDeps = collections.namedtuple(
 RotationResult = collections.namedtuple(
     "RotationResult",
     ["rolled_back", "hard_no_go", "maintenance_frozen", "served_claimed",
-     "new_current"])
+     "new_current", "affected"])
+# ``affected`` is a (possibly empty) list of per-torrent dicts surfaced on a
+# hard no-go so the operator sees EVERY torrent whose live state was disturbed
+# and whether its old-bytes restore re-add succeeded, e.g.
+#   {"image_id": ..., "gid": ..., "restore_readd_ok": bool}
+# A ``restore_readd_ok=False`` entry means serving repair is still required for
+# that torrent; the result never claims the image remains served.
+RotationResult.__new__.__defaults__ = ((),)
 
 
 def _atomic_write_json(path, obj):
@@ -186,6 +198,12 @@ def rotate_seeder_announce(secrets_path, manifest_path, torrents,
 
     new_url = _announce_url(tracker_announce_base, new_current)
 
+    # Track torrents whose NEW bytes were successfully applied to the live
+    # seeder, so that on a later hard no-go we can restore the EXACT old
+    # canonical bytes for ALL of them (spec §6: an already-applied earlier
+    # torrent must not be left rotated while a later torrent hard-fails).
+    applied = []  # list of (idx, target, old_bytes)
+
     # 3+4. Serial per-torrent: prepare verified replacement, force-remove, add.
     for idx, target in enumerate(torrents):
         with open(target.path, "rb") as f:
@@ -194,11 +212,11 @@ def rotate_seeder_announce(secrets_path, manifest_path, torrents,
             new_bytes = prepare_replacement(old_bytes, new_url)
         except Exception:
             # Preparation failure is treated like a byte-safe abort for this
-            # torrent: nothing was removed/added yet, old bytes intact.
+            # torrent: nothing was removed/added yet, old bytes intact. Any
+            # earlier applied torrents must still be restored to old bytes.
             _mark(manifest, idx, "prepare_failed")
-            manifest["phase"] = "hard_no_go"
-            deps.manifest_write(manifest_path, manifest)
-            return RotationResult(False, True, True, False, new_current)
+            return _hard_no_go(
+                manifest, manifest_path, applied, new_current, deps)
 
         # Write the new canonical to disk atomically (durable) before add.
         _atomic_write_bytes(target.path, new_bytes)
@@ -214,25 +232,70 @@ def rotate_seeder_announce(secrets_path, manifest_path, torrents,
             try:
                 deps.seeder_add(old_bytes, target.image_dir)
             except Exception:
-                # Double failure: hard no-go. Abort remaining torrents, keep
-                # old bytes + manifest, freeze maintenance, never claim served.
+                # Double failure: hard no-go. Restore old bytes for ALL
+                # previously applied torrents too, attempt to re-add them, abort
+                # remaining, freeze maintenance, never claim served.
                 _mark(manifest, idx, "double_failure")
-                manifest["phase"] = "double_failure"
-                manifest["maintenance_frozen"] = True
-                manifest["served_claimed"] = False
-                deps.manifest_write(manifest_path, manifest)
-                return RotationResult(True, True, True, False, new_current)
+                # This torrent's old re-add failed -> record it as affected with
+                # repair still required.
+                this_failed = [(idx, target, old_bytes)]
+                return _hard_no_go(
+                    manifest, manifest_path, applied, new_current, deps,
+                    also=this_failed, this_readd_failed=True)
             # Rollback succeeded for this torrent -> stop (rotation not applied).
             manifest["phase"] = "rolled_back"
             deps.manifest_write(manifest_path, manifest)
             return RotationResult(True, False, False, False, new_current)
 
         _mark(manifest, idx, "applied")
+        applied.append((idx, target, old_bytes))
         deps.manifest_write(manifest_path, manifest)
 
     manifest["phase"] = "complete"
     deps.manifest_write(manifest_path, manifest)
     return RotationResult(False, False, False, True, new_current)
+
+
+def _hard_no_go(manifest, manifest_path, applied, new_current, deps,
+                also=None, this_readd_failed=False):
+    """Enter the hard no-go state: restore EXACT old canonical bytes for every
+    previously applied torrent, attempt to re-add each restored torrent, abort
+    remaining torrents, freeze maintenance, preserve the manifest, and never
+    claim served.
+
+    ``also`` carries the torrent whose own old re-add just failed (already
+    restored on disk); it is reported as affected with ``restore_readd_ok`` set
+    from ``this_readd_failed`` and its re-add is NOT retried here.
+
+    Returns a hard-no-go ``RotationResult`` whose ``affected`` lists every
+    disturbed torrent and whether its restore re-add succeeded — any ``False``
+    means serving repair is still required for that torrent."""
+    affected = []
+    # Restore + re-add each previously applied torrent, newest first is fine;
+    # order does not matter for correctness, only that ALL are restored.
+    for idx, target, old_bytes in applied:
+        _atomic_write_bytes(target.path, old_bytes)
+        _mark(manifest, idx, "restored")
+        readd_ok = True
+        try:
+            deps.seeder_remove(target.gid)
+            deps.seeder_add(old_bytes, target.image_dir)
+        except Exception:
+            readd_ok = False
+            _mark(manifest, idx, "restore_readd_failed")
+        affected.append({"image_id": target.image_id, "gid": target.gid,
+                         "restore_readd_ok": readd_ok})
+
+    for idx, target, _old in (also or []):
+        affected.append({"image_id": target.image_id, "gid": target.gid,
+                         "restore_readd_ok": not this_readd_failed})
+
+    manifest["phase"] = "double_failure"
+    manifest["maintenance_frozen"] = True
+    manifest["served_claimed"] = False
+    manifest["affected"] = affected
+    deps.manifest_write(manifest_path, manifest)
+    return RotationResult(True, True, True, False, new_current, affected)
 
 
 def _mark(manifest, idx, status):
@@ -263,6 +326,64 @@ def _atomic_write_bytes(path, data):
 
 
 # ---------------------------------------------------------------------------
+# Durable-first persist adapter + production deps (F3)
+#
+# The rotation core persists the rotated secret via the INJECTED ``deps.persist``
+# BEFORE any canonical torrent mutation. The operational path MUST route that
+# persist through ``secretfs.persist_store`` (durable-encrypted-FIRST): the
+# at-rest ``.age`` ciphertext is the only copy that survives a restart, so it is
+# written and confirmed before the live tmpfs plaintext is swapped. If the
+# durable write fails, ``persist_store`` leaves the live plaintext untouched and
+# re-raises, so rotation aborts before touching a single canonical torrent and
+# the caller never reports a phantom rotation.
+#
+# ``durable_persist`` REQUIRES both recipients and an enc path so the production
+# wiring cannot silently degrade to a plaintext-only ``secrets_store.save`` — the
+# unsafe path is unreachable by construction. Tests may still inject their own
+# persist seam via ``RotationDeps`` directly.
+# ---------------------------------------------------------------------------
+
+def durable_persist(recipients_csv, enc_path, age_bin=None):
+    """Build a durable-first persist callable ``persist(store, plain_path)``.
+
+    Requires non-empty ``recipients_csv`` and ``enc_path`` (raises ValueError
+    otherwise) so the operational path can never accidentally build a
+    plaintext-only persist. The returned callable delegates to
+    ``secretfs.persist_store`` (durable-encrypted-first, with rollback on a live
+    swap failure) and is marked ``_durable`` for introspection."""
+    if not (recipients_csv and recipients_csv.strip()):
+        raise ValueError("durable_persist requires recipients_csv")
+    if not (enc_path and enc_path.strip()):
+        raise ValueError("durable_persist requires enc_path")
+    age_bin = age_bin or secretfs.AGE_BIN
+
+    def persist(store, plain_path):
+        secretfs.persist_store(
+            store, plain_path, recipients_csv=recipients_csv,
+            enc_path=enc_path, age_bin=age_bin)
+
+    persist._durable = True
+    return persist
+
+
+def production_deps(seeder_remove, seeder_add, recipients_csv, enc_path,
+                    swarm_probe=None, manifest_write=None, now=None,
+                    age_bin=None):
+    """Assemble ``RotationDeps`` for the operational path with a durable-first
+    persist. The seeder RPC and (deferred) loopback ``/swarm`` probe are still
+    injected so the core stays testable; only ``persist`` is fixed to the safe
+    durable adapter."""
+    import time
+    return RotationDeps(
+        persist=durable_persist(recipients_csv, enc_path, age_bin=age_bin),
+        seeder_remove=seeder_remove,
+        seeder_add=seeder_add,
+        swarm_probe=swarm_probe if swarm_probe is not None else (lambda: True),
+        manifest_write=manifest_write or _atomic_write_json,
+        now=now or (lambda: int(time.time())))
+
+
+# ---------------------------------------------------------------------------
 # CLI (nonsecret only — no token/value argv or output, no revoke option)
 # ---------------------------------------------------------------------------
 
@@ -282,10 +403,15 @@ def main(argv=None):
                     help="recovery manifest path (default <state>/"
                          "seeder-rotation-recovery.json)")
     ap.parse_args(argv)
-    # Live wiring (real secretfs persist, real aria2 RPC, real loopback /swarm
-    # probe) is assembled by the deployment path in a later task; the pure core
-    # above is the unit under test. This CLI intentionally does not perform a
-    # live rotation without that wiring.
+    # Live wiring (real aria2 RPC, real loopback /swarm probe, live tracker
+    # resolver) is assembled by the deployment path in a later task; the pure
+    # core above is the unit under test. When that wiring lands it MUST build
+    # its persist via ``production_deps`` / ``durable_persist`` (secretfs
+    # durable-first) — the plaintext-only ``secrets_store.save`` path is not a
+    # valid operational persist. This CLI intentionally does not perform a live
+    # rotation without that wiring, and new ``announce_token=`` canonical
+    # torrents are not deployable until the tracker-side resolver integration
+    # (deferred) consumes the credential.
     print("rotate-seeder-announce: core helper; live wiring pending deployment "
           "integration", file=sys.stderr)
     return 0

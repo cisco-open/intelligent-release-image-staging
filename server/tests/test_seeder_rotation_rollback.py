@@ -374,6 +374,92 @@ def test_result_never_claims_served_on_double_failure(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Multi-torrent double failure: a LATER torrent double-fails after an EARLIER
+# torrent was already applied. The safe contract restores the exact old
+# canonical bytes for EVERY previously applied torrent (and attempts to re-add
+# them), aborts the remaining torrents, preserves the manifest, stays frozen,
+# reports all affected torrents explicitly, and never claims served — even
+# though serving repair (a re-add that itself failed) may still be required.
+# ---------------------------------------------------------------------------
+
+def test_multi_torrent_later_double_failure_restores_all_applied(tmp_path):
+    sp = _seeder_store(tmp_path)
+    manifest_path = str(tmp_path / "recovery.json")
+    # Two distinct canonical torrents so we can prove per-file restoration.
+    canon0 = _canonical(
+        announce=b"http://h:6969/announce?announce_token=OLD")
+    info1 = bencode.encode({"name": "img1.bin", "piece length": 16384,
+                            "pieces": b"\x11" * 20, "length": 200})
+    canon1 = (b"d8:announce"
+              + bencode.encode(b"http://h:6969/announce?announce_token=OLD")
+              + b"4:info" + info1 + b"e")
+    t0 = tmp_path / "t0.torrent"
+    t0.write_bytes(canon0)
+    t1 = tmp_path / "t1.torrent"
+    t1.write_bytes(canon1)
+
+    # Seeder behaviour:
+    #  - torrent0 new-add (name img.bin, NEW token): succeeds.
+    #  - torrent1 new-add (name img1.bin, NEW token): fails.
+    #  - torrent1 old re-add (name img1.bin, OLD token): ALSO fails -> double.
+    #  - torrent0 restore re-add (name img.bin, OLD token): must be attempted.
+    class SelectiveSeeder(FakeSeeder):
+        def add(self, torrent_bytes, image_dir):
+            meta = bencode.decode(torrent_bytes)
+            name = meta[b"info"][b"name"]
+            ann = meta[b"announce"]
+            self.events.append(("add", name, ann))
+            if name == b"img1.bin":
+                # Both the new add and the old re-add of torrent1 fail.
+                raise RuntimeError("torrent1 add failed")
+            return "gid-ok"
+    seeder = SelectiveSeeder()
+
+    deps = rot.RotationDeps(
+        persist=lambda s, p: secrets_store.save(s, p),
+        seeder_remove=seeder.remove, seeder_add=seeder.add,
+        swarm_probe=lambda: True,
+        manifest_write=rot._atomic_write_json, now=lambda: 100)
+
+    result = rot.rotate_seeder_announce(
+        secrets_path=sp, manifest_path=manifest_path,
+        torrents=[rot.TorrentTarget("img0", str(t0), str(tmp_path), "gid0"),
+                  rot.TorrentTarget("img1", str(t1), str(tmp_path), "gid1")],
+        tracker_announce_base="http://h:6969/announce", deps=deps)
+
+    # Hard no-go, frozen, never served.
+    assert result.hard_no_go is True
+    assert result.maintenance_frozen is True
+    assert result.served_claimed is False
+
+    # EVERY previously applied torrent's EXACT old canonical bytes are restored
+    # on disk — even torrent0, which applied successfully.
+    assert t0.read_bytes() == canon0
+    assert t1.read_bytes() == canon1
+
+    # torrent0 (already applied) had a restore re-add attempted with OLD bytes.
+    t0_readds = [e for e in seeder.events
+                 if e[0] == "add" and e[1] == b"img.bin"
+                 and b"announce_token=OLD" in e[2]]
+    assert t0_readds, "applied torrent0 must be restored/re-added with old bytes"
+
+    # All affected torrents are reported explicitly (both t0 and t1).
+    affected_ids = {a["image_id"] for a in result.affected}
+    assert affected_ids == {"img0", "img1"}
+    # torrent0's re-add succeeded (restored); torrent1's re-add failed (repair
+    # still required) — both surfaced, never masked as served.
+    by_id = {a["image_id"]: a for a in result.affected}
+    assert by_id["img1"]["restore_readd_ok"] is False
+    assert by_id["img0"]["restore_readd_ok"] is True
+
+    # Manifest preserved with the double-failure phase and frozen flag.
+    manifest = json.load(open(manifest_path))
+    assert manifest["phase"] == "double_failure"
+    assert manifest["maintenance_frozen"] is True
+    assert manifest["served_claimed"] is False
+
+
+# ---------------------------------------------------------------------------
 # Injectable loopback /swarm probe interface (deferred integration)
 # ---------------------------------------------------------------------------
 
@@ -386,3 +472,160 @@ def test_swarm_probe_is_injectable_and_not_required_for_core(tmp_path):
     assert "import tracker" not in src
     # Probe is part of the deps contract.
     assert "swarm_probe" in rot.RotationDeps._fields
+
+
+# ---------------------------------------------------------------------------
+# F3: production durable-first persist wiring (secretfs.persist_store semantics)
+# ---------------------------------------------------------------------------
+
+def test_durable_persist_adapter_uses_secretfs_not_plaintext_save(
+        tmp_path, monkeypatch):
+    """The production persist adapter routes through secretfs.persist_store
+    (durable-encrypted-first) — never the plaintext-only secrets_store.save."""
+    import secretfs
+    calls = {"persist_store": 0, "save": 0}
+
+    def fake_persist_store(store, plain_path, recipients_csv=None,
+                           enc_path=None, age_bin=secretfs.AGE_BIN):
+        calls["persist_store"] += 1
+        # Emulate the durable-first commit without touching secrets_store.save.
+        with open(plain_path, "w") as f:
+            json.dump(store, f)
+
+    def poisoned_save(store, path):
+        calls["save"] += 1
+        raise AssertionError("operational path must not call secrets_store.save")
+
+    monkeypatch.setattr(secretfs, "persist_store", fake_persist_store)
+    monkeypatch.setattr(secrets_store, "save", poisoned_save)
+
+    persist = rot.durable_persist(
+        recipients_csv="age1recipient", enc_path=str(tmp_path / "s.age"))
+    persist({"seeder": {}}, str(tmp_path / "secrets.json"))
+    assert calls["persist_store"] == 1
+    assert calls["save"] == 0
+
+
+def test_durable_persist_adapter_requires_recipients_and_enc_path(tmp_path):
+    """The adapter refuses to build a plaintext-only operational persist: it
+    demands recipients AND an enc path so it cannot silently degrade."""
+    with pytest.raises(ValueError):
+        rot.durable_persist(recipients_csv="", enc_path=str(tmp_path / "s.age"))
+    with pytest.raises(ValueError):
+        rot.durable_persist(recipients_csv="age1r", enc_path="")
+
+
+def test_production_deps_persist_is_durable(tmp_path):
+    """production_deps wires the durable adapter as its persist — the seam a
+    test could override, but whose default is never plaintext-only save."""
+    deps = rot.production_deps(
+        seeder_remove=lambda gid: None,
+        seeder_add=lambda b, d: None,
+        recipients_csv="age1r", enc_path=str(tmp_path / "s.age"))
+    # The persist closure carries the durable marker (introspectable seam).
+    assert getattr(deps.persist, "_durable", False) is True
+
+
+def test_durable_failure_leaves_canonical_bytes_and_plaintext_untouched(
+        tmp_path, monkeypatch):
+    """If the encrypted durable persist fails, rotation aborts BEFORE any
+    canonical torrent mutation: the live plaintext secrets and every canonical
+    torrent file are left byte-identical to their pre-rotation state."""
+    import secretfs
+
+    sp = _seeder_store(tmp_path)
+    plaintext_before = open(sp, "rb").read()
+    manifest_path = str(tmp_path / "recovery.json")
+    canon = _canonical()
+    torrent = tmp_path / "img1.torrent"
+    torrent.write_bytes(canon)
+
+    def failing_persist_store(store, plain_path, recipients_csv=None,
+                              enc_path=None, age_bin=secretfs.AGE_BIN):
+        # Emulate encrypt_from raising (bad recipient / age failure): the real
+        # persist_store leaves plain_path untouched and re-raises.
+        raise RuntimeError("age encrypt failed")
+
+    monkeypatch.setattr(secretfs, "persist_store", failing_persist_store)
+
+    seeder = FakeSeeder()
+    persist = rot.durable_persist(
+        recipients_csv="age1recipient", enc_path=str(tmp_path / "s.age"))
+    deps = rot.RotationDeps(
+        persist=persist, seeder_remove=seeder.remove,
+        seeder_add=seeder.add, swarm_probe=lambda: True,
+        manifest_write=rot._atomic_write_json, now=lambda: 100)
+
+    with pytest.raises(RuntimeError):
+        rot.rotate_seeder_announce(
+            secrets_path=sp, manifest_path=manifest_path,
+            torrents=[rot.TorrentTarget("img1", str(torrent), str(tmp_path),
+                                        "gid-old")],
+            tracker_announce_base="http://h:6969/announce", deps=deps)
+
+    # No canonical mutation, no live-plaintext divergence.
+    assert torrent.read_bytes() == canon
+    assert open(sp, "rb").read() == plaintext_before
+    # The seeder was never touched (durable persist precedes all add/remove).
+    assert seeder.events == []
+
+
+def test_durable_failure_rollback_ordering_precedes_seeder(tmp_path,
+                                                           monkeypatch):
+    """Ordering: durable persist is attempted (and here fails) before any
+    seeder remove/add — proving secretfs failure short-circuits the mutation
+    path entirely."""
+    import secretfs
+    order = []
+
+    def failing_persist_store(store, plain_path, recipients_csv=None,
+                              enc_path=None, age_bin=secretfs.AGE_BIN):
+        order.append("persist")
+        raise RuntimeError("durable failed")
+
+    monkeypatch.setattr(secretfs, "persist_store", failing_persist_store)
+
+    sp = _seeder_store(tmp_path)
+    canon = _canonical()
+    torrent = tmp_path / "img1.torrent"
+    torrent.write_bytes(canon)
+    seeder = FakeSeeder()
+
+    def tracking_remove(gid):
+        order.append("remove")
+    persist = rot.durable_persist(
+        recipients_csv="age1r", enc_path=str(tmp_path / "s.age"))
+    deps = rot.RotationDeps(
+        persist=persist, seeder_remove=tracking_remove,
+        seeder_add=seeder.add, swarm_probe=lambda: True,
+        manifest_write=rot._atomic_write_json, now=lambda: 100)
+    with pytest.raises(RuntimeError):
+        rot.rotate_seeder_announce(
+            secrets_path=sp, manifest_path=str(tmp_path / "r.json"),
+            torrents=[rot.TorrentTarget("img1", str(torrent), str(tmp_path),
+                                        "gid-old")],
+            tracker_announce_base="http://h:6969/announce", deps=deps)
+    assert order == ["persist"]  # never reached remove/add
+
+
+# ---------------------------------------------------------------------------
+# F1 / contract: `announce_token=` torrents are NOT deployable until the tracker
+# resolver integration lands. The core helper mints/embeds the credential but
+# the live wiring (CLI) refuses to perform a real rotation, and the module
+# documents that the tracker-side consumer is a separate integration.
+# ---------------------------------------------------------------------------
+
+def test_announce_token_not_deployable_until_tracker_resolver(monkeypatch,
+                                                              capsys):
+    # The CLI is a non-operational core helper until the deployment/tracker
+    # wiring lands; it must not perform a live rotation and must say so.
+    rc = rot.main(["--state", "/tmp/x", "--secrets", "/tmp/y"])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "live wiring pending" in err
+    # Source/contract: the module states the tracker-side consumer is deferred
+    # and the deployment path leaves the probe uncalled until then.
+    import inspect
+    src = inspect.getsource(rot)
+    assert "announce_token" in src
+    assert "deferred" in src or "later task" in src
