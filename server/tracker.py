@@ -407,8 +407,9 @@ class TrackerReconciler:
     """
 
     def __init__(self, policy_paths, endpoints_path, enforcement_path, aria,
-                 pending_queue, active_participants, revoked_principals,
-                 protected_seeder_ip=None, audit_export=None, now=None):
+                  pending_queue, active_participants, revoked_principals,
+                  protected_seeder_ip=None, audit_export=None,
+                  emit_policy_event=None, now=None):
         self._policy_paths = policy_paths
         self._endpoints_path = endpoints_path
         self._enforcement_path = enforcement_path
@@ -418,6 +419,9 @@ class TrackerReconciler:
         self._revoked_principals = revoked_principals
         self._protected_seeder_ip = protected_seeder_ip
         self._audit_export = audit_export
+        # The telemetry hub injects this to avoid a tracker -> OTLP import
+        # cycle. It queues the pre-built canonical record on its stable queue.
+        self._emit_policy_event = emit_policy_event or (lambda entry, status: True)
         self._now = now or time.time
         self._record_endpoint = _peer_endpoints.record_endpoint
 
@@ -589,7 +593,7 @@ class TrackerReconciler:
         #    Read the prior ack watermark once (centralized) and carry it
         #    forward so a status-only / non-operation pass can never reset it.
         acked = self._read_acked_revision()
-        exported_rev = self._export_outbox(policy, acked)
+        exported_rev = self._export_outbox(policy, acked, status)
         status["last_operation_exported_revision"] = exported_rev
 
         _peer_enforcement.write_status(self._enforcement_path, status)
@@ -682,13 +686,11 @@ class TrackerReconciler:
             return 0
         return prior.get("last_operation_exported_revision", 0) or 0
 
-    def _export_outbox(self, policy, acked):
+    def _export_outbox(self, policy, acked, status):
         """Export outbox entries with revision > the acked revision, in revision
-        order, then advance the ack ONLY after the audit contract succeeds
-        (spec §7/§13). On any audit failure — or a status-only pass with no new
-        entries — the prior ``acked`` watermark is returned unchanged so it is
-        preserved (never reset) and un-acked entries replay next pass / after
-        restart."""
+        order, then advance the ack ONLY after local audit append AND stable
+        queue acceptance. On either failure the prior ``acked`` watermark is
+        retained and the persisted event ids replay next pass / restart."""
         entries = _peer_policy.pending_exports(policy.document, acked)
         if not entries:
             return acked
@@ -698,11 +700,17 @@ class TrackerReconciler:
             self._audit_export(entries)
         except Exception:
             return acked   # audit best-effort failed -> replay next pass
+        try:
+            for entry in entries:
+                if self._emit_policy_event(entry, status) is False:
+                    return acked
+        except Exception:
+            return acked
         # Never regress below the prior watermark.
         return max(acked, max(e["revision"] for e in entries))
 
 
-def _build_reconciler_from_env(env, registry):
+def _build_reconciler_from_env(env, registry, emit_policy_event=None):
     """Construct the sole tracker reconciler from IRIS_* env (spec §0). The
     cross-process channel files live under ``IRIS_STATE``; the RPC secret rides
     through the injected JSON-RPC caller and is never surfaced in an error."""
@@ -739,7 +747,7 @@ def _build_reconciler_from_env(env, registry):
         # device, so it fails safe by retaining the last-known revoked set.
         revoked_principals=_make_revoked_view(secrets_path),
         protected_seeder_ip=env.get("IRIS_HOST_IP") or None,
-        audit_export=audit_export)
+        audit_export=audit_export, emit_policy_event=emit_policy_event)
 
 
 def _make_revoked_view(secrets_path):
@@ -854,7 +862,8 @@ def main():
     # The tracker is the SOLE blocklist reconciler (spec §0). Construct and
     # start it here; the announce path shares its pending queue and wakes it on
     # a tracker-authored durable endpoint change.
-    reconciler = _build_reconciler_from_env(os.environ, registry)
+    reconciler = _build_reconciler_from_env(
+        os.environ, registry, emit_policy_event=hub.emit_policy_event)
     state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
     policy_paths = (os.path.join(state_dir, "peer-policy.json"),
                     os.path.join(state_dir, "peer-policy.lkg.json"))

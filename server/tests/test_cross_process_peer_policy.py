@@ -22,7 +22,9 @@ import auth
 import peer_endpoints
 import peer_policy
 import peer_enforcement
+import telemetry
 import tracker
+from peer_registry import PeerRegistry
 
 
 # ---------------------------------------------------------------------------
@@ -68,8 +70,8 @@ def _paths(tmp_path):
 
 
 def _make_reconciler(tmp_path, aria, clock=None, active_provider=None,
-                     revoked_provider=None, protected_seeder_ip=None,
-                     pending=None, audit_ok=True):
+                      revoked_provider=None, protected_seeder_ip=None,
+                      pending=None, audit_ok=True, emit_policy_event=None):
     p = _paths(tmp_path)
     peer_policy.initialize(p["policy"], p["lkg"])
     audit_calls = []
@@ -90,6 +92,7 @@ def _make_reconciler(tmp_path, aria, clock=None, active_provider=None,
         revoked_principals=revoked_provider or (lambda: set()),
         protected_seeder_ip=protected_seeder_ip,
         audit_export=audit_export,
+        emit_policy_event=emit_policy_event,
         now=clock or time.time)
     return rec, p, audit_calls
 
@@ -298,13 +301,82 @@ def test_multiple_operations_before_poll_all_exported(tmp_path):
 
 def test_ack_not_advanced_when_audit_contract_fails(tmp_path):
     aria = FakeAria()
+    hub = telemetry.Telemetry(PeerRegistry())
     rec, p, _ = _make_reconciler(tmp_path, aria, clock=Clock(1000.0),
-                                 audit_ok=False)
+                                 audit_ok=False,
+                                 emit_policy_event=hub.emit_policy_event)
     _quarantine(p["policy"], p["lkg"], "a", 1000.0)
     rec.run_once()
     st = peer_enforcement.read_status(p["enforcement"])
     # audit failed -> ack revision NOT advanced (replay on next pass)
     assert st["last_operation_exported_revision"] == 0
+    assert hub.log_queue.queued == 0       # audit is intentionally first
+
+
+def test_policy_operation_audits_then_queues_canonical_stable_event(tmp_path):
+    aria = FakeAria()
+    hub = telemetry.Telemetry(PeerRegistry())
+    rec, p, audit_calls = _make_reconciler(
+        tmp_path, aria, clock=Clock(1000.0),
+        emit_policy_event=hub.emit_policy_event)
+    committed = _quarantine(p["policy"], p["lkg"], "a", 1000.0)
+    rec.run_once()
+    assert audit_calls
+    event = hub.log_queue.snapshot()[0]
+    assert event["eventName"] == "iris.peer.policy"
+    assert event["event.id"] == committed["operation_outbox"][-1]["event_id"]
+    attrs = {attr["key"]: attr["value"] for attr in event["attributes"]}
+    assert attrs["iris.enforcement.state"] == {"stringValue": "enforced"}
+    assert "10.0.0" not in json.dumps(event)
+    assert peer_enforcement.read_status(
+        p["enforcement"])["last_operation_exported_revision"] == \
+        committed["operation_outbox"][-1]["revision"]
+
+
+def test_ack_not_advanced_when_policy_queue_emit_fails(tmp_path):
+    aria = FakeAria()
+    rec, p, audit_calls = _make_reconciler(
+        tmp_path, aria, clock=Clock(1000.0),
+        emit_policy_event=lambda entry, status: (_ for _ in ()).throw(
+            RuntimeError("queue failed")))
+    _quarantine(p["policy"], p["lkg"], "a", 1000.0)
+    rec.run_once()
+    assert audit_calls
+    assert peer_enforcement.read_status(
+        p["enforcement"])["last_operation_exported_revision"] == 0
+
+
+def test_disabled_transport_still_accepts_and_acks_policy_event(tmp_path):
+    aria = FakeAria()
+    hub = telemetry.Telemetry(PeerRegistry())
+    rec, p, _ = _make_reconciler(
+        tmp_path, aria, clock=Clock(1000.0),
+        emit_policy_event=hub.emit_policy_event)
+    committed = _quarantine(p["policy"], p["lkg"], "a", 1000.0)
+    rec.run_once()
+    assert hub.exporter is None
+    assert hub.log_queue.snapshot()[0]["event.id"] == \
+        committed["operation_outbox"][-1]["event_id"]
+    assert peer_enforcement.read_status(
+        p["enforcement"])["last_operation_exported_revision"] == \
+        committed["operation_outbox"][-1]["revision"]
+
+
+def test_policy_queue_replay_keeps_persisted_event_id(tmp_path):
+    aria = FakeAria()
+    emitted = []
+    rec, p, _ = _make_reconciler(
+        tmp_path, aria, clock=Clock(1000.0),
+        emit_policy_event=lambda entry, status: emitted.append(
+            entry["event_id"]) or False)
+    committed = _quarantine(p["policy"], p["lkg"], "a", 1000.0)
+    rec.run_once()
+    assert emitted == [committed["operation_outbox"][-1]["event_id"]]
+    assert peer_enforcement.read_status(
+        p["enforcement"])["last_operation_exported_revision"] == 0
+    rec._emit_policy_event = lambda entry, status: emitted.append(entry["event_id"])
+    rec.run_once()
+    assert emitted == [committed["operation_outbox"][-1]["event_id"]] * 2
 
 
 def test_export_replays_after_restart(tmp_path):

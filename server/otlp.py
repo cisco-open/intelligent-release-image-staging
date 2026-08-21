@@ -154,7 +154,9 @@ def _build_v2_report_record(report, device_id):
         ("iris.transfer.peers_total", _enrich_int(report.get("peers_total"))),
     ]
     attrs = [_attr(k, v) for k, v in pairs if v is not None]
-    observed = report.get("observed_at")
+    window = report.get("window") if isinstance(report.get("window"), dict) \
+        else {}
+    observed = window.get("end")
     if observed is None:
         observed = report.get("report_created_at")
     try:
@@ -389,12 +391,13 @@ class LogQueue:
         with self._lock:
             if self._max == 0:
                 self._dropped += 1
-                return
+                return False
             while len(self._queue) >= self._max:
                 self._queue.popleft()       # drop oldest, preserve FIFO
                 self._dropped += 1
             self._queue.append((self._next_id, event))
             self._next_id += 1
+            return True
 
     @property
     def queued(self):

@@ -1159,6 +1159,25 @@ def test_sample_exports_each_stored_report_exactly_once():
     assert "20000000000" in body   # received_at=20.0 -> timeUnixNano (§8)
 
 
+def test_report_cursor_queues_equal_timestamps_once_and_replays_on_restart():
+    reports = {
+        "d2": [{"schema": "v2", "report_id": "r2", "received_at": 10}],
+        "d1": [{"schema": "v2", "report_id": "r1", "received_at": 10}],
+    }
+    hub = telemetry.Telemetry(PeerRegistry(), reports_info=lambda: reports)
+    hub._export_new_reports()
+    assert [record["event.id"] for record in hub.log_queue.snapshot()] == ["r1", "r2"]
+    hub._export_new_reports()
+    assert hub.log_queue.queued == 2
+    reports["d1"].append(
+        {"schema": "v2", "report_id": "r3", "received_at": 10})
+    hub._export_new_reports()
+    assert [record["event.id"] for record in hub.log_queue.snapshot()] == ["r1", "r2", "r3"]
+    restarted = telemetry.Telemetry(PeerRegistry(), reports_info=lambda: reports)
+    restarted._export_new_reports()
+    assert [record["event.id"] for record in restarted.log_queue.snapshot()] == ["r1", "r2", "r3"]
+
+
 def test_sample_survives_reports_info_raising():
     exp = otlp.OTLPLogExporter("http://c:4318", sender=lambda u, b: None)
     def boom():

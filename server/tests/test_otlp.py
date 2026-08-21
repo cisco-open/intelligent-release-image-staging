@@ -120,6 +120,7 @@ def _v2_report():
         "ios_copy_verify": {"state": "ok"},
         "peers": [{"ip": "100.92.100.14"}], "peers_total": 3,
         "observed_at": 1755743190.0,
+        "window": {"start": 1755743180.0, "end": 1755743195.0},
         "received_at": 1755743200.0,
     }
 
@@ -158,7 +159,7 @@ def test_v2_report_uses_transfer_report_name_and_received_at_event_time():
     assert attrs["iris.transfer.ios_copy_verify.state"] == {"stringValue": "ok"}
     assert attrs["iris.transfer.completed_content_bytes"] == {
         "intValue": "1288490188"}
-    assert attrs["iris.device.observed_at"]["doubleValue"] == 1755743190.0
+    assert attrs["iris.device.observed_at"]["doubleValue"] == 1755743195.0
     assert attrs["iris.transfer.peers_total"] == {"intValue": "3"}
     # network.peer.address is the participation list
     row = attrs["network.peer.address"]

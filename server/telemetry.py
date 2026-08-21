@@ -11,6 +11,7 @@ Ties the tracker's in-process PeerRegistry to two emitters:
 A sampler loop polls the local seeder's aria2 RPC for serving throughput and
 periodically flushes queued events. Everything here is best-effort and off the
 announce critical path."""
+import hashlib
 import json
 import os
 import threading
@@ -41,6 +42,30 @@ def _int(value):
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _report_event_id(report, device_id):
+    """Return a persisted report id or a deterministic legacy fallback.
+
+    Pre-event-id v1 rings are still exportable without minting a different id on
+    every scan/restart. Copy only for that legacy fallback so the catalog state
+    itself remains untouched.
+    """
+    key = "report_id" if report.get("schema") == "v2" \
+        or report.get("report_id") is not None else "_event_id"
+    event_id = report.get(key)
+    if event_id is not None and str(event_id):
+        return str(event_id), report
+    try:
+        encoded = json.dumps(
+            {"device_id": device_id, "report": report}, sort_keys=True,
+            separators=(",", ":"), default=str).encode()
+    except Exception:
+        encoded = (device_id + repr(report)).encode()
+    event_id = "legacy-" + hashlib.sha256(encoded).hexdigest()
+    record = dict(report)
+    record[key] = event_id
+    return event_id, record
 
 
 def poll_seeder(rpc):
@@ -412,11 +437,11 @@ class Telemetry:
         #   enforcement_info() -> peer-enforcement.json dict (or None)
         self._policy_info = policy_info
         self._enforcement_info = enforcement_info
-        # received_at watermark: every stored report newer than this gets one
-        # OTLP log record on the next sample(); advancing it makes the export
-        # exactly-once per process lifetime (a restart replays at most the
-        # ring's 5 reports per device — acceptable, and OTLP is default-off).
-        self._report_seen = 0.0
+        # Per-process report ids already queued. Bound this set to the current
+        # stored ring universe on every scan: a new hub deliberately replays the
+        # ring at-least-once, while equal received_at values never shadow one
+        # another behind a timestamp watermark.
+        self._seen_report_event_ids = set()
         self._seeder = {"rpc_up": False}
         self._names = {}                    # last good info_hash -> name
         self._totals = {}                   # last good info_hash -> total bytes
@@ -442,6 +467,11 @@ class Telemetry:
         # never lost to a transport swap. (A legacy `exporter` passed directly
         # shares this queue — see __init__.)
         self.log_queue.emit(event)
+
+    def emit_policy_event(self, entry, status):
+        """Queue the canonical policy-operation record on this stable queue.
+        This remains accepting when the OTLP transport is disabled."""
+        return self.log_queue.emit(otlp.build_policy_record(entry, status))
 
     def note_announce(self):
         with self._lock:
@@ -628,15 +658,13 @@ class Telemetry:
             self.export_health.record(ok, "metrics", now)
 
     def _export_new_reports(self):
-        """Emit one OTLP log record per stored device report not yet
-        exported (received_at watermark, exactly-once per process; compared
-        against its value at pass entry and advanced only at the end, so
-        rings scanned later in the same pass cannot shadow earlier ones).
+        """Emit one OTLP log record per stored device report not yet queued.
+        Identity, not received_at, is the cursor so reports sharing a server
+        timestamp are all exported. A fresh hub replays the bounded ring with
+        the same IDs for backend deduplication.
         Each record is enriched from the device's last heartbeat (model,
         flash, stage state — capped/coerced inside build_report_record) plus
         the swarm IP->device_id join for peer-row resolution (spec 7.6)."""
-        seen = self._report_seen
-        high = seen
         devices = {}
         if self._device_info is not None:
             try:
@@ -646,7 +674,9 @@ class Telemetry:
         device_by_ip = {rec.get("swarm_ip"): str(did)
                         for did, rec in devices.items()
                         if isinstance(rec, dict) and rec.get("swarm_ip")}
-        for device_id, ring in (self._reports_info() or {}).items():
+        reports = self._reports_info() or {}
+        candidates = []
+        for device_id, ring in reports.items():
             if not isinstance(ring, list):
                 continue
             rec = devices.get(device_id)
@@ -656,16 +686,23 @@ class Telemetry:
                       "stage_state": rec.get("stage_state"),
                       "peer_devices": device_by_ip}
             for rep in ring:
-                try:
-                    rcv = float(rep.get("received_at", 0) or 0)
-                except (TypeError, ValueError, AttributeError):
+                if not isinstance(rep, dict):
                     continue
-                if rcv > seen:
-                    self.log_queue.emit(otlp.build_report_record(
-                        rep, str(device_id), enrich=enrich))
-                    if rcv > high:
-                        high = rcv
-        self._report_seen = high
+                event_id, record = _report_event_id(rep, str(device_id))
+                try:
+                    received_at = float(rep.get("received_at", 0) or 0)
+                except (TypeError, ValueError):
+                    received_at = 0.0
+                candidates.append((received_at, event_id, str(device_id),
+                                   record, enrich))
+        current_ids = {event_id for _, event_id, _, _, _ in candidates}
+        self._seen_report_event_ids.intersection_update(current_ids)
+        for _, event_id, device_id, report, enrich in sorted(
+                candidates, key=lambda row: row[:3]):
+            if event_id not in self._seen_report_event_ids:
+                self.log_queue.emit(otlp.build_report_record(
+                    report, device_id, enrich=enrich))
+                self._seen_report_event_ids.add(event_id)
 
     # --- live per-peer swarm view (for the swarm map) ---
     def swarm_snapshot(self, now=None):
