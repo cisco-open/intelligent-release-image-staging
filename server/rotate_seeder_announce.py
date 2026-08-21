@@ -268,7 +268,9 @@ def rotate_seeder_announce(secrets_path, manifest_path, torrents,
             manifest["phase"] = "rolling_back"
             deps.manifest_write(manifest_path, manifest)
             try:
-                deps.seeder_add(old_bytes, target.image_dir)
+                restored_gid = deps.seeder_add(old_bytes, target.image_dir)
+                if not restored_gid:
+                    raise RuntimeError("aria2 rollback add returned no gid")
             except Exception:
                 # Double failure: hard no-go. Restore old bytes for ALL
                 # previously applied torrents too, attempt to re-add them, abort
@@ -338,7 +340,9 @@ def _hard_no_go(manifest, manifest_path, applied, new_current, deps,
         readd_ok = True
         try:
             deps.seeder_remove(live_gid)
-            deps.seeder_add(old_bytes, target.image_dir)
+            restored_gid = deps.seeder_add(old_bytes, target.image_dir)
+            if not restored_gid:
+                raise RuntimeError("aria2 restore add returned no gid")
         except Exception:
             readd_ok = False
             _mark(manifest, idx, "restore_readd_failed")

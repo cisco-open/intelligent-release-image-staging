@@ -387,6 +387,73 @@ def test_new_add_failure_restores_old_bytes_and_readds(tmp_path):
     assert result.hard_no_go is False
 
 
+def test_rollback_add_without_gid_is_hard_no_go(tmp_path):
+    sp = _seeder_store(tmp_path)
+    manifest_path = str(tmp_path / "recovery.json")
+    canon = _canonical()
+    torrent = tmp_path / "img1.torrent"
+    torrent.write_bytes(canon)
+
+    def add(torrent_bytes, image_dir):
+        announce = bencode.decode(torrent_bytes)[b"announce"]
+        if b"announce_token=OLD" in announce:
+            return None
+        raise RuntimeError("new add failed")
+
+    deps = rot.RotationDeps(
+        persist=lambda s, p: secrets_store.save(s, p),
+        seeder_remove=lambda gid: None, seeder_add=add,
+        swarm_probe=lambda expected, not_before: True,
+        manifest_write=rot._atomic_write_json, now=lambda: 100)
+
+    result = rot.rotate_seeder_announce(
+        sp, manifest_path,
+        [rot.TorrentTarget("img1", str(torrent), str(tmp_path), "gid-old")],
+        "http://h:6969/announce", deps)
+
+    assert result.hard_no_go is True
+    assert result.served_claimed is False
+    assert result.affected[0]["restore_readd_ok"] is False
+
+
+def test_restore_of_prior_applied_torrent_requires_returned_gid(tmp_path):
+    sp = _seeder_store(tmp_path)
+    manifest_path = str(tmp_path / "recovery.json")
+    canon0 = _canonical()
+    info1 = bencode.encode({"name": "img1.bin", "piece length": 16384,
+                            "pieces": b"\x33" * 20, "length": 200})
+    canon1 = (b"d8:announce"
+              + bencode.encode(b"http://h:6969/announce?announce_token=OLD")
+              + b"4:info" + info1 + b"e")
+    t0, t1 = tmp_path / "t0.torrent", tmp_path / "t1.torrent"
+    t0.write_bytes(canon0)
+    t1.write_bytes(canon1)
+
+    def add(torrent_bytes, image_dir):
+        meta = bencode.decode(torrent_bytes)
+        if meta[b"info"][b"name"] == b"img1.bin":
+            raise RuntimeError("later torrent add failed")
+        if b"announce_token=OLD" in meta[b"announce"]:
+            return None
+        return "new-live-gid0"
+
+    deps = rot.RotationDeps(
+        persist=lambda s, p: secrets_store.save(s, p),
+        seeder_remove=lambda gid: None, seeder_add=add,
+        swarm_probe=lambda expected, not_before: True,
+        manifest_write=rot._atomic_write_json, now=lambda: 100)
+
+    result = rot.rotate_seeder_announce(
+        sp, manifest_path,
+        [rot.TorrentTarget("img0", str(t0), str(tmp_path), "old-gid0"),
+         rot.TorrentTarget("img1", str(t1), str(tmp_path), "old-gid1")],
+        "http://h:6969/announce", deps)
+
+    by_id = {item["image_id"]: item for item in result.affected}
+    assert result.hard_no_go is True
+    assert by_id["img0"]["restore_readd_ok"] is False
+
+
 # ---------------------------------------------------------------------------
 # Double failure: old re-add ALSO fails -> hard no-go
 # ---------------------------------------------------------------------------
