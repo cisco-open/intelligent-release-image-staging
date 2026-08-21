@@ -675,15 +675,42 @@ def test_is_seeder_serving_false_on_empty_expected():
 
 
 def test_is_seeder_serving_rejects_legacy_or_device_seeder_row():
-    # A seeder announcing on a WRONG/legacy or device credential is NOT deduped:
-    # it shows up as a ring peer with role=seeder for the expected torrent. That
-    # never proves the current non-legacy service seeder -> fail.
+    # A seeder announcing on a WRONG/legacy or unattributed credential is NOT
+    # deduped: it shows up as a legacy ring peer with role=seeder for the
+    # expected torrent. That is a genuine conflict with the canonical dedup ->
+    # fail.
     legacy_seeder_peer = {"ip": "100.90.168.20", "port": 6881,
                           "tracker": {"principal_type": "legacy",
                                       "participant_class": "legacy_unattributed",
                                       "role": "seeder", "left": 0}}
     doc = _serving_swarm(["abc"], extra_peers=[legacy_seeder_peer])
     assert rot.is_seeder_serving(doc, ["abc"]) is False
+
+
+def test_is_seeder_serving_rejects_service_seeder_ring_row():
+    # A service:seeder that appears as an UN-deduped ring row (rather than under
+    # the canonical `server` source) means the current-seeder identity is not
+    # cleanly proven -> fail.
+    svc_seeder_peer = {"ip": "100.90.168.20", "port": 6881,
+                       "tracker": {"principal_type": "service",
+                                   "principal_id": "seeder",
+                                   "role": "seeder", "left": 0}}
+    doc = _serving_swarm(["abc"], extra_peers=[svc_seeder_peer])
+    assert rot.is_seeder_serving(doc, ["abc"]) is False
+
+
+def test_is_seeder_serving_allows_completed_device_seeder_row():
+    # A typed DEVICE principal that has finished its download (left=0) becomes a
+    # role=seeder ring peer. That is a legitimate completed downloader — it does
+    # NOT disprove the origin service seeder, whose identity is already proven by
+    # the canonical `server` source proof (rpc_up + expected control-state
+    # torrents). The probe must succeed and ignore device ring rows.
+    completed_device_seeder = {
+        "ip": "100.92.100.14", "port": 6881,
+        "tracker": {"principal_type": "device", "principal_id": "d1",
+                    "role": "seeder", "left": 0}}
+    doc = _serving_swarm(["abc"], extra_peers=[completed_device_seeder])
+    assert rot.is_seeder_serving(doc, ["abc"]) is True
 
 
 def test_is_seeder_serving_allows_leecher_ring_peers():
@@ -749,3 +776,40 @@ def test_swarm_probe_never_leaks_token_or_url_in_output(capsys):
         sleep=lambda s: None, retries=1)
     assert probe() is False
     assert capsys.readouterr().out == ""
+
+
+def test_make_swarm_probe_honors_iris_swarm_url_env(monkeypatch):
+    # When no explicit url is passed, the probe resolves IRIS_SWARM_URL at
+    # construction so an operator override reaches the sender.
+    monkeypatch.setenv("IRIS_SWARM_URL", "http://127.0.0.1:9999/swarm")
+    seen = []
+    doc = _serving_swarm(["abc"])
+    probe = rot.make_swarm_probe(
+        ["abc"], sender=lambda u, t: (seen.append(u) or doc),
+        sleep=lambda s: None, retries=1)
+    assert probe() is True
+    assert seen == ["http://127.0.0.1:9999/swarm"]
+
+
+def test_make_swarm_probe_explicit_url_overrides_env(monkeypatch):
+    monkeypatch.setenv("IRIS_SWARM_URL", "http://127.0.0.1:9999/swarm")
+    seen = []
+    doc = _serving_swarm(["abc"])
+    probe = rot.make_swarm_probe(
+        ["abc"], url="http://127.0.0.1:1234/swarm",
+        sender=lambda u, t: (seen.append(u) or doc),
+        sleep=lambda s: None, retries=1)
+    assert probe() is True
+    assert seen == ["http://127.0.0.1:1234/swarm"]
+
+
+def test_make_swarm_probe_never_leaks_env_url_on_error(monkeypatch, capsys):
+    # A secret-bearing IRIS_SWARM_URL must never surface in output/errors.
+    monkeypatch.setenv("IRIS_SWARM_URL",
+                       "http://user:s3cr3t-token@127.0.0.1:9999/swarm")
+    probe = rot.make_swarm_probe(
+        ["abc"], sender=lambda u, t: (_ for _ in ()).throw(OSError("x")),
+        sleep=lambda s: None, retries=1)
+    assert probe() is False
+    out = capsys.readouterr()
+    assert "s3cr3t-token" not in (out.out + out.err)

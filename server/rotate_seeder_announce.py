@@ -64,6 +64,15 @@ SEEDER_PREV_CAP = 2
 DEFAULT_SWARM_URL = "http://127.0.0.1:9101/swarm"
 
 
+def _default_swarm_url():
+    """Resolve the loopback ``/swarm`` URL, honoring an operator ``IRIS_SWARM_URL``
+    override and falling back to the token-free :data:`DEFAULT_SWARM_URL`. The
+    value is used only as the sender target; it is never echoed to output or
+    embedded in any raised message, so a credential-bearing override stays
+    confidential."""
+    return os.environ.get("IRIS_SWARM_URL") or DEFAULT_SWARM_URL
+
+
 class RotationError(Exception):
     """Rotation refused (e.g. would evict a still-valid previous credential)."""
 
@@ -396,8 +405,11 @@ def production_deps(seeder_remove, seeder_add, recipients_csv, enc_path,
 # to prove the relevant canonical torrents are serving (``rpc_up`` true and each
 # expected info_hash present in ``server_observation.torrent`` with a
 # ``control-state`` lifetime). A seeder that announced on a WRONG/legacy or
-# device credential is NOT deduped — it appears as a ``legacy`` / device peer row
-# instead, which this predicate rejects. Token/URL never appear in output.
+# unattributed credential is NOT deduped — it appears as a ``legacy`` (or an
+# un-deduped ``service:seeder``) peer row instead, which this predicate rejects.
+# A typed DEVICE principal that has completed its download (left == 0, role ==
+# seeder) is a legitimate downloader and does NOT disprove the origin seeder, so
+# device ring rows are ignored. Token/URL never appear in output.
 # ---------------------------------------------------------------------------
 
 def is_seeder_serving(swarm_doc, expected_info_hashes):
@@ -408,9 +420,11 @@ def is_seeder_serving(swarm_doc, expected_info_hashes):
     non-legacy ``service:seeder``): ``server_observation.rpc_up`` must be true
     and each expected info_hash must appear in ``server_observation.torrent``
     with ``lifetime == "control-state"``. A seeder announcing on a wrong/legacy
-    or device credential is NOT deduped and instead shows up as a ``legacy`` /
-    device peer row — its presence as a peer for an expected torrent fails the
-    predicate (the current seeder identity is not proven)."""
+    or unattributed credential is NOT deduped and instead shows up as a
+    ``legacy`` / un-deduped ``service:seeder`` peer row — its presence as a
+    seeder for an expected torrent fails the predicate (the current seeder
+    identity is not proven). A completed typed DEVICE seeder row (left == 0) is
+    a legitimate downloader, not a rival origin claim, and is ignored."""
     if not isinstance(swarm_doc, dict):
         return False
     expected = {h for h in (expected_info_hashes or []) if h}
@@ -429,9 +443,13 @@ def is_seeder_serving(swarm_doc, expected_info_hashes):
             serving.add(t["info_hash"])
     if not expected.issubset(serving):
         return False
-    # Reject: an expected torrent whose ring carries a legacy/device row that
-    # IS the seeder (left == 0) means the seeder announced on the wrong
-    # credential and was NOT deduped -> current seeder identity not proven.
+    # Reject only a ring seeder row that genuinely conflicts with the canonical
+    # dedup of the current non-legacy service seeder: a legacy/unattributed or
+    # an un-deduped service:seeder row for an expected torrent means the current
+    # seeder identity is not cleanly proven. A typed DEVICE principal that has
+    # finished (left == 0, role == seeder) is a legitimate completed downloader
+    # — it does NOT disprove the origin service seeder (already proven by the
+    # canonical `server` source above), so device ring rows are ignored.
     for image in swarm_doc.get("images") or []:
         if not isinstance(image, dict) or image.get("info_hash") not in expected:
             continue
@@ -441,26 +459,29 @@ def is_seeder_serving(swarm_doc, expected_info_hashes):
             tracker = peer.get("tracker")
             if not isinstance(tracker, dict):
                 continue
-            if tracker.get("role") == "seeder":
-                # A ring seeder for an expected torrent is never the current
-                # non-legacy service seeder (that one is deduped to `server`).
+            if tracker.get("role") == "seeder" \
+                    and tracker.get("principal_type") != "device":
                 return False
     return True
 
 
-def make_swarm_probe(expected_info_hashes, url=DEFAULT_SWARM_URL,
+def make_swarm_probe(expected_info_hashes, url=None,
                      timeout=2.0, retries=3, sender=None, sleep=None):
     """Build a zero-arg ``swarm_probe()`` -> bool for the rotation deps.
 
-    Polls the tracker's loopback ``/swarm`` (default ``DEFAULT_SWARM_URL``) with
-    a per-attempt ``timeout`` and up to ``retries`` attempts, returning True only
-    when :func:`is_seeder_serving` confirms the current non-legacy service seeder
-    serves every expected torrent. Injectable ``sender(url, timeout) -> doc``
-    and ``sleep(seconds)`` seams keep it fully unit-testable off any live tracker.
+    Polls the tracker's loopback ``/swarm`` with a per-attempt ``timeout`` and up
+    to ``retries`` attempts, returning True only when :func:`is_seeder_serving`
+    confirms the current non-legacy service seeder serves every expected torrent.
+    When ``url`` is None the target is resolved once at construction from
+    :func:`_default_swarm_url` (operator ``IRIS_SWARM_URL`` override, else the
+    token-free :data:`DEFAULT_SWARM_URL`). Injectable ``sender(url, timeout)
+    -> doc`` and ``sleep(seconds)`` seams keep it fully unit-testable off any live
+    tracker.
 
     Fail-closed: any transport error, malformed body, or unproven observation
     returns False. The token/URL is NEVER included in any raised message or
     output (the helper prints nothing here; the caller logs only pass/fail)."""
+    url = url if url is not None else _default_swarm_url()
     expected = list(expected_info_hashes or [])
     sender = sender if sender is not None else _http_swarm_sender
     if sleep is None:

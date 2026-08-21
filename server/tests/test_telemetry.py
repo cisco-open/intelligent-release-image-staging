@@ -1364,18 +1364,37 @@ class TestPeerPolicyEnforcementFacts:
         assert row["peer_policy"]["fail_closed"] is True
         assert row["peer_policy"]["decision"] == "deny"
 
-    def test_enforcement_blocked_from_typed_conflict_not_raw_ip(self):
-        # blocked is composed from the tracker's typed conflicts + aggregate
-        # state — never from a raw denied-IP list (which is not exposed).
+    def test_conflict_surfaced_without_inferring_block_when_not_globally_blocked(
+            self):
+        # A shared_permit_deny conflict with global_block_applied False means the
+        # tracker recorded a conflict but did NOT globally block this IP (Day1
+        # semantics, spec §5/§7). The fact must surface the conflict truthfully
+        # yet must NEVER infer blocked from mere conflict membership: blocked is
+        # explicitly False here (not derived from the conflict or aggregate
+        # count). See blocklist_reconciler._derive_valid.
         enforcement = {"state": "enforced", "conflicts": [
             {"denied_principal_type": "device",
              "denied_principal_id": "iris8kv-1",
              "reason": "shared_permit_deny", "global_block_applied": False}]}
         row = self._row(self._hub(enforcement=enforcement))
-        assert row["peer_enforcement"]["blocked"] is True
-        assert row["peer_enforcement"]["state"] == "enforced"
-        assert row["peer_enforcement"]["conflict"]["reason"] == \
-            "shared_permit_deny"
+        enf = row["peer_enforcement"]
+        assert enf["blocked"] is False
+        assert enf["state"] == "enforced"
+        assert enf["conflict"]["reason"] == "shared_permit_deny"
+        assert enf["conflict"]["global_block_applied"] is False
+
+    def test_conflict_with_global_block_applied_surfaces_blocked(self):
+        # When the tracker DID globally block the IP for this conflict, blocked
+        # is a directly-known fact (True) — not an inference from conflict
+        # presence, but from the tracker's own global_block_applied signal.
+        enforcement = {"state": "enforced", "conflicts": [
+            {"denied_principal_type": "device",
+             "denied_principal_id": "iris8kv-1",
+             "reason": "shared_permit_deny", "global_block_applied": True}]}
+        row = self._row(self._hub(enforcement=enforcement))
+        enf = row["peer_enforcement"]
+        assert enf["blocked"] is True
+        assert enf["conflict"]["global_block_applied"] is True
 
     def test_enforcement_not_blocked_when_absent(self):
         enforcement = {"state": "enforced", "conflicts": []}

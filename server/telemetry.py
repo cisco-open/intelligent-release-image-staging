@@ -940,17 +940,23 @@ def _peer_policy_fact(policy, principal_type, device_id, ipv4):
 
 
 def _derived_denied_ids(enforcement):
-    """The tracker's current derived-denied set expressed as principal ids
-    (never a raw IP list — the enforcement status intentionally exposes only a
-    count and typed conflicts). We compose per-participant block facts from the
-    typed conflicts the tracker DID publish. Returns a set of denied device ids."""
+    """The set of device ids the tracker DIRECTLY tells us it globally blocked
+    via typed conflicts (never a raw IP list — the enforcement status
+    intentionally exposes only a count and typed conflicts). A conflict is only
+    a block fact when its ``global_block_applied`` is truthy; a recorded
+    shared_permit_deny conflict with ``global_block_applied`` false means the
+    tracker did NOT block this IP (spec §5/§7 Day1 semantics), so it must NOT
+    be inferred as denied. The count-only enforcement path lacks the actual
+    denied principal list, so membership is never inferred from conflict
+    presence or the aggregate desired count. Returns a set of denied device ids."""
     denied = set()
     if not isinstance(enforcement, dict):
         return denied
     for c in enforcement.get("conflicts") or []:
         if not isinstance(c, dict):
             continue
-        if c.get("denied_principal_type") == "device":
+        if c.get("denied_principal_type") == "device" \
+                and c.get("global_block_applied"):
             did = c.get("denied_principal_id")
             if did is not None:
                 denied.add(did)
@@ -960,11 +966,15 @@ def _derived_denied_ids(enforcement):
 def _peer_enforcement_fact(enforcement, derived_denied, principal_type,
                            device_id, ipv4):
     """Per-participant ``peer_enforcement`` fact (spec §7/§10.3). Factual, not a
-    causal claim: ``blocked`` iff this device principal is in the tracker's
-    current derived-denied set (composed from typed conflicts + the current
-    aggregate ``state``); we never claim a disconnect cause. The raw denied-IP
-    list is never read (it is not exposed). ``state`` mirrors the tracker's
-    aggregate enforcement state (``fail_closed`` explicit). None when unwired."""
+    causal claim: ``blocked`` is asserted True ONLY when directly known — either
+    the tracker's aggregate ``state`` is ``fail_closed`` (an explicit global
+    deny) or a typed conflict for this device carries ``global_block_applied``
+    true. It is NEVER inferred from mere conflict presence nor from the aggregate
+    desired count (the count-only enforcement path does not expose the actual
+    denied principal list). A recorded shared_permit_deny conflict with
+    ``global_block_applied`` false is surfaced but leaves ``blocked`` False. The
+    raw denied-IP list is never read (it is not exposed). ``state`` mirrors the
+    tracker's aggregate enforcement state. None when unwired."""
     if not isinstance(enforcement, dict):
         return None
     state = enforcement.get("state")
