@@ -118,7 +118,7 @@ def test_manifest_written_before_any_mutation(tmp_path):
 
     deps = rot.RotationDeps(
         persist=fake_persist, seeder_remove=seeder.remove,
-        seeder_add=seeder.add, swarm_probe=lambda expected: True,
+        seeder_add=seeder.add, swarm_probe=lambda expected, not_before: True,
         manifest_write=tracking_manifest_write, now=lambda: 100)
 
     rot.rotate_seeder_announce(
@@ -143,7 +143,7 @@ def test_manifest_contains_no_tokens_or_urls(tmp_path):
     deps = rot.RotationDeps(
         persist=lambda s, p: secrets_store.save(s, p),
         seeder_remove=seeder.remove, seeder_add=seeder.add,
-        swarm_probe=lambda expected: True,
+        swarm_probe=lambda expected, not_before: True,
         manifest_write=rot._atomic_write_json, now=lambda: 100)
     rot.rotate_seeder_announce(
         secrets_path=sp, manifest_path=manifest_path,
@@ -181,7 +181,7 @@ def test_durable_persist_before_canonical_replacement(tmp_path):
 
     deps = rot.RotationDeps(
         persist=fake_persist, seeder_remove=seeder.remove,
-        seeder_add=tracking_add, swarm_probe=lambda expected: True,
+        seeder_add=tracking_add, swarm_probe=lambda expected, not_before: True,
         manifest_write=rot._atomic_write_json, now=lambda: 100)
     rot.rotate_seeder_announce(
         secrets_path=sp, manifest_path=manifest_path,
@@ -208,7 +208,7 @@ def test_replacement_preserves_info_hash_and_uses_current_token(tmp_path):
     deps = rot.RotationDeps(
         persist=lambda s, p: secrets_store.save(s, p),
         seeder_remove=seeder.remove, seeder_add=seeder.add,
-        swarm_probe=lambda expected: True,
+        swarm_probe=lambda expected, not_before: True,
         manifest_write=rot._atomic_write_json, now=lambda: 100)
     rot.rotate_seeder_announce(
         secrets_path=sp, manifest_path=manifest_path,
@@ -243,7 +243,7 @@ def test_serial_remove_then_add_per_torrent(tmp_path):
     deps = rot.RotationDeps(
         persist=lambda s, p: secrets_store.save(s, p),
         seeder_remove=seeder.remove, seeder_add=seeder.add,
-        swarm_probe=lambda expected: True,
+        swarm_probe=lambda expected, not_before: True,
         manifest_write=rot._atomic_write_json, now=lambda: 100)
     rot.rotate_seeder_announce(
         secrets_path=sp, manifest_path=manifest_path,
@@ -263,18 +263,20 @@ def test_success_claims_served_only_after_probe(tmp_path):
     deps = rot.RotationDeps(
         persist=lambda s, p: secrets_store.save(s, p),
         seeder_remove=seeder.remove, seeder_add=seeder.add,
-        swarm_probe=lambda expected: (calls.append(expected) or True),
+        swarm_probe=lambda expected, not_before: (
+            calls.append((expected, not_before)) or True),
         manifest_write=rot._atomic_write_json, now=lambda: 100)
     result = rot.rotate_seeder_announce(
         sp, str(tmp_path / "recovery.json"),
         [rot.TorrentTarget("img", str(torrent), str(tmp_path), "gid")],
         "http://h:6969/announce", deps)
     assert result.served_claimed is True
-    assert calls == [{rot._info_hash(torrent.read_bytes())}]
+    assert calls == [({rot._info_hash(torrent.read_bytes())}, 100)]
     assert seeder.events[-1][0] == "add"
 
 
-@pytest.mark.parametrize("swarm_probe", [None, object(), lambda: True])
+@pytest.mark.parametrize("swarm_probe", [
+    None, object(), lambda: True, lambda expected, not_before: False])
 def test_absent_or_misconfigured_probe_never_claims_served(tmp_path,
                                                            swarm_probe):
     sp = _seeder_store(tmp_path)
@@ -303,7 +305,7 @@ def test_failed_probe_freezes_and_never_claims_served(tmp_path):
     deps = rot.RotationDeps(
         persist=lambda s, p: secrets_store.save(s, p),
         seeder_remove=seeder.remove, seeder_add=seeder.add,
-        swarm_probe=lambda expected: (_ for _ in ()).throw(TimeoutError()),
+        swarm_probe=lambda expected, not_before: (_ for _ in ()).throw(TimeoutError()),
         manifest_write=rot._atomic_write_json, now=lambda: 100)
     result = rot.rotate_seeder_announce(
         sp, manifest_path,
@@ -344,7 +346,7 @@ def test_new_add_failure_restores_old_bytes_and_readds(tmp_path):
     deps = rot.RotationDeps(
         persist=lambda s, p: secrets_store.save(s, p),
         seeder_remove=seeder.remove, seeder_add=seeder.add,
-        swarm_probe=lambda expected: True,
+        swarm_probe=lambda expected, not_before: True,
         manifest_write=rot._atomic_write_json, now=lambda: 100)
 
     result = rot.rotate_seeder_announce(
@@ -387,7 +389,7 @@ def test_double_failure_is_hard_no_go(tmp_path):
     deps = rot.RotationDeps(
         persist=lambda s, p: secrets_store.save(s, p),
         seeder_remove=seeder.remove, seeder_add=seeder.add,
-        swarm_probe=lambda expected: True,
+        swarm_probe=lambda expected, not_before: True,
         manifest_write=rot._atomic_write_json, now=lambda: 100)
 
     result = rot.rotate_seeder_announce(
@@ -425,7 +427,7 @@ def test_result_never_claims_served_on_double_failure(tmp_path):
     deps = rot.RotationDeps(
         persist=lambda s, p: secrets_store.save(s, p),
         seeder_remove=seeder.remove, seeder_add=seeder.add,
-        swarm_probe=lambda expected: True,
+        swarm_probe=lambda expected, not_before: True,
         manifest_write=rot._atomic_write_json, now=lambda: 100)
     result = rot.rotate_seeder_announce(
         secrets_path=sp, manifest_path=manifest_path,
@@ -479,7 +481,7 @@ def test_multi_torrent_later_double_failure_restores_all_applied(tmp_path):
     deps = rot.RotationDeps(
         persist=lambda s, p: secrets_store.save(s, p),
         seeder_remove=seeder.remove, seeder_add=seeder.add,
-        swarm_probe=lambda expected: True,
+        swarm_probe=lambda expected, not_before: True,
         manifest_write=rot._atomic_write_json, now=lambda: 100)
 
     result = rot.rotate_seeder_announce(
@@ -593,8 +595,9 @@ def test_production_deps_default_probe_requires_typed_swarm_proof(tmp_path):
         seeder_remove=lambda gid: None, seeder_add=lambda b, d: None,
         recipients_csv="age1r", enc_path=str(tmp_path / "s.age"),
         swarm_sender=lambda url, timeout: (calls.append((url, timeout)) or
-                                           _serving_swarm(["abc"])))
-    assert deps.swarm_probe({"abc"}) is True
+                                            _serving_swarm(["abc"],
+                                                          last_seen=101)))
+    assert deps.swarm_probe({"abc"}, 100) is True
     assert calls == [(rot.DEFAULT_SWARM_URL, 2.0)]
 
     # The default probe cannot be satisfied by a malformed/misidentified
@@ -603,17 +606,15 @@ def test_production_deps_default_probe_requires_typed_swarm_proof(tmp_path):
         seeder_remove=lambda gid: None, seeder_add=lambda b, d: None,
         recipients_csv="age1r", enc_path=str(tmp_path / "bad.age"),
         swarm_sender=lambda url, timeout: {"server": {}})
-    assert bad_deps.swarm_probe({"abc"}) is False
+    assert bad_deps.swarm_probe({"abc"}, 100) is False
 
 
-def test_production_deps_accepts_explicit_expected_hash_probe(tmp_path):
-    seen = []
-    deps = rot.production_deps(
-        seeder_remove=lambda gid: None, seeder_add=lambda b, d: None,
-        recipients_csv="age1r", enc_path=str(tmp_path / "s.age"),
-        swarm_probe=lambda expected: (seen.append(expected) or True))
-    assert deps.swarm_probe({"abc"}) is True
-    assert seen == [{"abc"}]
+def test_production_deps_rejects_arbitrary_swarm_probe(tmp_path):
+    with pytest.raises(TypeError):
+        rot.production_deps(
+            seeder_remove=lambda gid: None, seeder_add=lambda b, d: None,
+            recipients_csv="age1r", enc_path=str(tmp_path / "s.age"),
+            swarm_probe=lambda expected, not_before: True)
 
 
 def test_durable_failure_leaves_canonical_bytes_and_plaintext_untouched(
@@ -643,7 +644,7 @@ def test_durable_failure_leaves_canonical_bytes_and_plaintext_untouched(
         recipients_csv="age1recipient", enc_path=str(tmp_path / "s.age"))
     deps = rot.RotationDeps(
         persist=persist, seeder_remove=seeder.remove,
-        seeder_add=seeder.add, swarm_probe=lambda expected: True,
+        seeder_add=seeder.add, swarm_probe=lambda expected, not_before: True,
         manifest_write=rot._atomic_write_json, now=lambda: 100)
 
     with pytest.raises(RuntimeError):
@@ -687,7 +688,7 @@ def test_durable_failure_rollback_ordering_precedes_seeder(tmp_path,
         recipients_csv="age1r", enc_path=str(tmp_path / "s.age"))
     deps = rot.RotationDeps(
         persist=persist, seeder_remove=tracking_remove,
-        seeder_add=seeder.add, swarm_probe=lambda expected: True,
+        seeder_add=seeder.add, swarm_probe=lambda expected, not_before: True,
         manifest_write=rot._atomic_write_json, now=lambda: 100)
     with pytest.raises(RuntimeError):
         rot.rotate_seeder_announce(
@@ -729,7 +730,7 @@ def test_announce_token_not_deployable_until_tracker_resolver(monkeypatch,
 # canonical `server` source) proving the relevant canonical torrents serve.
 # ---------------------------------------------------------------------------
 
-def _serving_swarm(info_hashes, rpc_up=True, extra_peers=None):
+def _serving_swarm(info_hashes, rpc_up=True, extra_peers=None, last_seen=100.0):
     return {
         "now": 100.0,
         "server": {"host": "100.90.168.20", "server_observation": {
@@ -737,7 +738,7 @@ def _serving_swarm(info_hashes, rpc_up=True, extra_peers=None):
             "tracker_observation": {"principal_type": "service",
                                     "principal_id": "seeder",
                                     "observed_info_hashes": list(info_hashes),
-                                    "last_seen": 100.0},
+                                    "last_seen": last_seen},
             "aria_session_id": "s1", "global": {},
             "torrent": [{"info_hash": h, "image": "cat9k.bin",
                          "upload_length_bytes": 1, "lifetime": "control-state"}
@@ -749,34 +750,43 @@ def _serving_swarm(info_hashes, rpc_up=True, extra_peers=None):
     }
 
 
+def test_is_seeder_serving_requires_post_rotation_service_marker():
+    for last_seen in (99, 100):
+        assert rot.is_seeder_serving(_serving_swarm(["abc"],
+                                                     last_seen=last_seen),
+                                    ["abc"], 100) is False
+    assert rot.is_seeder_serving(_serving_swarm(["abc"], last_seen=101),
+                                ["abc"], 100) is True
+
+
 def test_is_seeder_serving_true_when_server_source_proves_torrents():
     doc = _serving_swarm(["abc", "def"])
-    assert rot.is_seeder_serving(doc, ["abc", "def"]) is True
+    assert rot.is_seeder_serving(doc, ["abc", "def"], 99) is True
 
 
 def test_is_seeder_serving_false_when_rpc_down():
     doc = _serving_swarm(["abc"], rpc_up=False)
-    assert rot.is_seeder_serving(doc, ["abc"]) is False
+    assert rot.is_seeder_serving(doc, ["abc"], 99) is False
 
 
 def test_is_seeder_serving_false_when_expected_torrent_missing():
     doc = _serving_swarm(["abc"])
-    assert rot.is_seeder_serving(doc, ["abc", "def"]) is False
+    assert rot.is_seeder_serving(doc, ["abc", "def"], 99) is False
 
 
 def test_is_seeder_serving_requires_current_typed_service_marker():
     doc = _serving_swarm(["abc"])
     del doc["server"]["server_observation"]["tracker_observation"]
-    assert rot.is_seeder_serving(doc, ["abc"]) is False
+    assert rot.is_seeder_serving(doc, ["abc"], 99) is False
 
 
 def test_is_seeder_serving_requires_exact_active_hashes():
     doc = _serving_swarm(["abc", "stale"])
-    assert rot.is_seeder_serving(doc, ["abc"]) is False
+    assert rot.is_seeder_serving(doc, ["abc"], 99) is False
 
 
 def test_is_seeder_serving_false_on_empty_expected():
-    assert rot.is_seeder_serving(_serving_swarm(["abc"]), []) is False
+    assert rot.is_seeder_serving(_serving_swarm(["abc"]), [], 99) is False
 
 
 def test_is_seeder_serving_rejects_legacy_or_device_seeder_row():
@@ -789,7 +799,7 @@ def test_is_seeder_serving_rejects_legacy_or_device_seeder_row():
                                       "participant_class": "legacy_unattributed",
                                       "role": "seeder", "left": 0}}
     doc = _serving_swarm(["abc"], extra_peers=[legacy_seeder_peer])
-    assert rot.is_seeder_serving(doc, ["abc"]) is False
+    assert rot.is_seeder_serving(doc, ["abc"], 99) is False
 
 
 def test_is_seeder_serving_rejects_service_seeder_ring_row():
@@ -801,7 +811,7 @@ def test_is_seeder_serving_rejects_service_seeder_ring_row():
                                    "principal_id": "seeder",
                                    "role": "seeder", "left": 0}}
     doc = _serving_swarm(["abc"], extra_peers=[svc_seeder_peer])
-    assert rot.is_seeder_serving(doc, ["abc"]) is False
+    assert rot.is_seeder_serving(doc, ["abc"], 99) is False
 
 
 def test_is_seeder_serving_allows_completed_device_seeder_row():
@@ -815,7 +825,7 @@ def test_is_seeder_serving_allows_completed_device_seeder_row():
         "tracker": {"principal_type": "device", "principal_id": "d1",
                     "role": "seeder", "left": 0}}
     doc = _serving_swarm(["abc"], extra_peers=[completed_device_seeder])
-    assert rot.is_seeder_serving(doc, ["abc"]) is True
+    assert rot.is_seeder_serving(doc, ["abc"], 99) is True
 
 
 def test_is_seeder_serving_allows_leecher_ring_peers():
@@ -823,19 +833,19 @@ def test_is_seeder_serving_allows_leecher_ring_peers():
                "tracker": {"principal_type": "device", "principal_id": "d1",
                            "role": "leecher", "left": 5}}
     doc = _serving_swarm(["abc"], extra_peers=[leecher])
-    assert rot.is_seeder_serving(doc, ["abc"]) is True
+    assert rot.is_seeder_serving(doc, ["abc"], 99) is True
 
 
 def test_is_seeder_serving_false_on_garbage():
-    assert rot.is_seeder_serving(None, ["abc"]) is False
-    assert rot.is_seeder_serving({}, ["abc"]) is False
+    assert rot.is_seeder_serving(None, ["abc"], 99) is False
+    assert rot.is_seeder_serving({}, ["abc"], 99) is False
 
 
 def test_make_swarm_probe_polls_with_injectable_sender_and_succeeds():
     calls = []
     doc = _serving_swarm(["abc"])
     probe = rot.make_swarm_probe(
-        ["abc"], url="http://127.0.0.1:9101/swarm", timeout=1.0, retries=3,
+        ["abc"], 99, url="http://127.0.0.1:9101/swarm", timeout=1.0, retries=3,
         sender=lambda u, t: (calls.append((u, t)) or doc),
         sleep=lambda s: None)
     assert probe() is True
@@ -850,7 +860,7 @@ def test_make_swarm_probe_retries_then_fails_closed():
         attempts["n"] += 1
         raise OSError("connection refused")
 
-    probe = rot.make_swarm_probe(["abc"], retries=3, timeout=0.5,
+    probe = rot.make_swarm_probe(["abc"], 99, retries=3, timeout=0.5,
                                  sender=sender, sleep=sleeps.append)
     assert probe() is False
     assert attempts["n"] == 3
@@ -867,7 +877,7 @@ def test_make_swarm_probe_succeeds_after_transient_failure():
             raise v
         return v
 
-    probe = rot.make_swarm_probe(["abc"], retries=3, sender=sender,
+    probe = rot.make_swarm_probe(["abc"], 99, retries=3, sender=sender,
                                  sleep=lambda s: None)
     assert probe() is True
 
@@ -877,7 +887,7 @@ def test_swarm_probe_never_leaks_token_or_url_in_output(capsys):
     # URL constant carries no token.
     assert "token" not in rot.DEFAULT_SWARM_URL.lower()
     probe = rot.make_swarm_probe(
-        ["abc"], sender=lambda u, t: (_ for _ in ()).throw(OSError("x")),
+        ["abc"], 99, sender=lambda u, t: (_ for _ in ()).throw(OSError("x")),
         sleep=lambda s: None, retries=1)
     assert probe() is False
     assert capsys.readouterr().out == ""
@@ -890,7 +900,7 @@ def test_make_swarm_probe_honors_iris_swarm_url_env(monkeypatch):
     seen = []
     doc = _serving_swarm(["abc"])
     probe = rot.make_swarm_probe(
-        ["abc"], sender=lambda u, t: (seen.append(u) or doc),
+        ["abc"], 99, sender=lambda u, t: (seen.append(u) or doc),
         sleep=lambda s: None, retries=1)
     assert probe() is True
     assert seen == ["http://127.0.0.1:9999/swarm"]
@@ -901,7 +911,7 @@ def test_make_swarm_probe_explicit_url_overrides_env(monkeypatch):
     seen = []
     doc = _serving_swarm(["abc"])
     probe = rot.make_swarm_probe(
-        ["abc"], url="http://127.0.0.1:1234/swarm",
+        ["abc"], 99, url="http://127.0.0.1:1234/swarm",
         sender=lambda u, t: (seen.append(u) or doc),
         sleep=lambda s: None, retries=1)
     assert probe() is True
@@ -913,7 +923,7 @@ def test_make_swarm_probe_never_leaks_env_url_on_error(monkeypatch, capsys):
     monkeypatch.setenv("IRIS_SWARM_URL",
                        "http://user:s3cr3t-token@127.0.0.1:9999/swarm")
     probe = rot.make_swarm_probe(
-        ["abc"], sender=lambda u, t: (_ for _ in ()).throw(OSError("x")),
+        ["abc"], 99, sender=lambda u, t: (_ for _ in ()).throw(OSError("x")),
         sleep=lambda s: None, retries=1)
     assert probe() is False
     out = capsys.readouterr()

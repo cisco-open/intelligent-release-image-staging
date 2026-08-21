@@ -34,8 +34,9 @@ Failure handling (spec §6):
 The helper never accepts or prints token values (argv/output are nonsecret) and
 does NOT revoke any previous credential (revoke is P1). It never accesses the
 tracker's in-process registry — the loopback ``/swarm`` verification is an
-injectable probe (``deps.swarm_probe(expected_info_hashes)``) that must prove
-the typed current service seeder and exact control-state torrent set.
+injectable probe (``deps.swarm_probe(expected_info_hashes, not_before)``) that
+must prove a post-rotation typed current service seeder and exact control-state
+torrent set.
 
 Compatibility note: ``rotate_announce`` and the additive
 ``announce_token_previous`` store shape live here for the torrent lane; the
@@ -268,7 +269,7 @@ def rotate_seeder_announce(secrets_path, manifest_path, torrents,
     # credential is revoked and the recovery manifest remains terminal.
     try:
         serving = (callable(deps.swarm_probe)
-                   and deps.swarm_probe(expected_info_hashes))
+                    and deps.swarm_probe(expected_info_hashes, now))
     except Exception:
         serving = False
     if not serving:
@@ -402,19 +403,20 @@ def durable_persist(recipients_csv, enc_path, age_bin=None):
 
 
 def production_deps(seeder_remove, seeder_add, recipients_csv, enc_path,
-                    swarm_probe=None, manifest_write=None, now=None,
-                    age_bin=None, swarm_sender=None):
+                    manifest_write=None, now=None, age_bin=None,
+                    swarm_sender=None, swarm_sleep=None, swarm_timeout=2.0,
+                    swarm_retries=3):
     """Assemble ``RotationDeps`` for the operational path with a durable-first
-    persist. Unless an explicit ``swarm_probe(expected_info_hashes)`` is
-    injected, the deps build a real loopback ``/swarm`` probe. Its proof is
-    bound to the exact info hashes for the rotation operation. ``swarm_sender``
-    is an injectable transport seam for tests; it cannot bypass the typed
-    predicate enforced by :func:`make_swarm_probe`."""
+    persist and the canonical loopback ``/swarm`` probe. Its proof is bound to
+    exact info hashes and the post-rotation observation boundary.
+    ``swarm_sender`` is an injectable transport seam for tests; it cannot
+    bypass the typed predicate enforced by :func:`make_swarm_probe`."""
     import time
-    if swarm_probe is None:
-        def swarm_probe(expected_info_hashes):
-            return make_swarm_probe(
-                expected_info_hashes, sender=swarm_sender)()
+    def swarm_probe(expected_info_hashes, not_before):
+        return make_swarm_probe(
+            expected_info_hashes, not_before=not_before, sender=swarm_sender,
+            sleep=swarm_sleep, timeout=swarm_timeout,
+            retries=swarm_retries)()
 
     return RotationDeps(
         persist=durable_persist(recipients_csv, enc_path, age_bin=age_bin),
@@ -443,9 +445,10 @@ def production_deps(seeder_remove, seeder_add, recipients_csv, enc_path,
 # device ring rows are ignored. Token/URL never appear in output.
 # ---------------------------------------------------------------------------
 
-def is_seeder_serving(swarm_doc, expected_info_hashes):
+def is_seeder_serving(swarm_doc, expected_info_hashes, not_before):
     """True iff the loopback ``/swarm`` document proves the current, non-legacy
-    service-seeder is serving EVERY expected canonical torrent (spec §6/§10.3).
+    service-seeder is serving EVERY expected canonical torrent after
+    ``not_before`` (spec §6/§10.3).
 
     Proof lives under the canonical ``server`` source (the deduped current
     non-legacy ``service:seeder``): ``server_observation.rpc_up`` must be true
@@ -456,7 +459,8 @@ def is_seeder_serving(swarm_doc, expected_info_hashes):
     seeder for an expected torrent fails the predicate (the current seeder
     identity is not proven). A completed typed DEVICE seeder row (left == 0) is
     a legitimate downloader, not a rival origin claim, and is ignored."""
-    if not isinstance(swarm_doc, dict):
+    if not isinstance(swarm_doc, dict) \
+            or not isinstance(not_before, (int, float)):
         return False
     expected = {h for h in (expected_info_hashes or []) if h}
     if not expected:
@@ -476,7 +480,8 @@ def is_seeder_serving(swarm_doc, expected_info_hashes):
     if not isinstance(marker, dict) \
             or marker.get("principal_type") != "service" \
             or marker.get("principal_id") != "seeder" \
-            or marker.get("last_seen") is None \
+            or not isinstance(marker.get("last_seen"), (int, float)) \
+            or marker["last_seen"] <= not_before \
             or set(marker.get("observed_info_hashes") or []) != expected:
         return False
     if serving != expected:
@@ -503,13 +508,14 @@ def is_seeder_serving(swarm_doc, expected_info_hashes):
     return True
 
 
-def make_swarm_probe(expected_info_hashes, url=None,
+def make_swarm_probe(expected_info_hashes, not_before, url=None,
                      timeout=2.0, retries=3, sender=None, sleep=None):
     """Build a zero-arg ``swarm_probe()`` -> bool for the rotation deps.
 
     Polls the tracker's loopback ``/swarm`` with a per-attempt ``timeout`` and up
     to ``retries`` attempts, returning True only when :func:`is_seeder_serving`
-    confirms the current non-legacy service seeder serves every expected torrent.
+    confirms the current non-legacy service seeder serves every expected torrent
+    with a tracker observation strictly after ``not_before``.
     When ``url`` is None the target is resolved once at construction from
     :func:`_default_swarm_url` (operator ``IRIS_SWARM_URL`` override, else the
     token-free :data:`DEFAULT_SWARM_URL`). Injectable ``sender(url, timeout)
@@ -533,7 +539,7 @@ def make_swarm_probe(expected_info_hashes, url=None,
                 doc = sender(url, timeout)
             except Exception:
                 doc = None
-            if doc is not None and is_seeder_serving(doc, expected):
+            if doc is not None and is_seeder_serving(doc, expected, not_before):
                 return True
             if attempt + 1 < attempts:
                 sleep(min(timeout, 1.0))
