@@ -629,3 +629,123 @@ def test_announce_token_not_deployable_until_tracker_resolver(monkeypatch,
     src = inspect.getsource(rot)
     assert "announce_token" in src
     assert "deferred" in src or "later task" in src
+
+
+# ---------------------------------------------------------------------------
+# Loopback /swarm live verification (spec §6 step 5): the probe proves a
+# current, non-legacy service-seeder observation via the /swarm contract only,
+# never the tracker's in-process registry. It succeeds ONLY on a
+# principal_type='service', principal_id='seeder' observation (deduped under the
+# canonical `server` source) proving the relevant canonical torrents serve.
+# ---------------------------------------------------------------------------
+
+def _serving_swarm(info_hashes, rpc_up=True, extra_peers=None):
+    return {
+        "now": 100.0,
+        "server": {"host": "100.90.168.20", "server_observation": {
+            "observed_at": 100.0, "rpc_up": rpc_up,
+            "aria_session_id": "s1", "global": {},
+            "torrent": [{"info_hash": h, "image": "cat9k.bin",
+                         "upload_length_bytes": 1, "lifetime": "control-state"}
+                        for h in info_hashes]}},
+        "images": [{"image": "cat9k.bin", "info_hash": h, "total_bytes": 1,
+                    "seeders": 0, "leechers": 0,
+                    "peers": list(extra_peers or [])}
+                   for h in info_hashes],
+    }
+
+
+def test_is_seeder_serving_true_when_server_source_proves_torrents():
+    doc = _serving_swarm(["abc", "def"])
+    assert rot.is_seeder_serving(doc, ["abc", "def"]) is True
+
+
+def test_is_seeder_serving_false_when_rpc_down():
+    doc = _serving_swarm(["abc"], rpc_up=False)
+    assert rot.is_seeder_serving(doc, ["abc"]) is False
+
+
+def test_is_seeder_serving_false_when_expected_torrent_missing():
+    doc = _serving_swarm(["abc"])
+    assert rot.is_seeder_serving(doc, ["abc", "def"]) is False
+
+
+def test_is_seeder_serving_false_on_empty_expected():
+    assert rot.is_seeder_serving(_serving_swarm(["abc"]), []) is False
+
+
+def test_is_seeder_serving_rejects_legacy_or_device_seeder_row():
+    # A seeder announcing on a WRONG/legacy or device credential is NOT deduped:
+    # it shows up as a ring peer with role=seeder for the expected torrent. That
+    # never proves the current non-legacy service seeder -> fail.
+    legacy_seeder_peer = {"ip": "100.90.168.20", "port": 6881,
+                          "tracker": {"principal_type": "legacy",
+                                      "participant_class": "legacy_unattributed",
+                                      "role": "seeder", "left": 0}}
+    doc = _serving_swarm(["abc"], extra_peers=[legacy_seeder_peer])
+    assert rot.is_seeder_serving(doc, ["abc"]) is False
+
+
+def test_is_seeder_serving_allows_leecher_ring_peers():
+    leecher = {"ip": "100.92.100.14", "port": 6881,
+               "tracker": {"principal_type": "device", "principal_id": "d1",
+                           "role": "leecher", "left": 5}}
+    doc = _serving_swarm(["abc"], extra_peers=[leecher])
+    assert rot.is_seeder_serving(doc, ["abc"]) is True
+
+
+def test_is_seeder_serving_false_on_garbage():
+    assert rot.is_seeder_serving(None, ["abc"]) is False
+    assert rot.is_seeder_serving({}, ["abc"]) is False
+
+
+def test_make_swarm_probe_polls_with_injectable_sender_and_succeeds():
+    calls = []
+    doc = _serving_swarm(["abc"])
+    probe = rot.make_swarm_probe(
+        ["abc"], url="http://127.0.0.1:9101/swarm", timeout=1.0, retries=3,
+        sender=lambda u, t: (calls.append((u, t)) or doc),
+        sleep=lambda s: None)
+    assert probe() is True
+    assert calls == [("http://127.0.0.1:9101/swarm", 1.0)]
+
+
+def test_make_swarm_probe_retries_then_fails_closed():
+    attempts = {"n": 0}
+    sleeps = []
+
+    def sender(url, timeout):
+        attempts["n"] += 1
+        raise OSError("connection refused")
+
+    probe = rot.make_swarm_probe(["abc"], retries=3, timeout=0.5,
+                                 sender=sender, sleep=sleeps.append)
+    assert probe() is False
+    assert attempts["n"] == 3
+    assert sleeps == [0.5, 0.5]      # slept between attempts, not after last
+
+
+def test_make_swarm_probe_succeeds_after_transient_failure():
+    doc = _serving_swarm(["abc"])
+    seq = [OSError("nope"), doc]
+
+    def sender(url, timeout):
+        v = seq.pop(0)
+        if isinstance(v, Exception):
+            raise v
+        return v
+
+    probe = rot.make_swarm_probe(["abc"], retries=3, sender=sender,
+                                 sleep=lambda s: None)
+    assert probe() is True
+
+
+def test_swarm_probe_never_leaks_token_or_url_in_output(capsys):
+    # The probe prints nothing; any error is swallowed to a bool. The default
+    # URL constant carries no token.
+    assert "token" not in rot.DEFAULT_SWARM_URL.lower()
+    probe = rot.make_swarm_probe(
+        ["abc"], sender=lambda u, t: (_ for _ in ()).throw(OSError("x")),
+        sleep=lambda s: None, retries=1)
+    assert probe() is False
+    assert capsys.readouterr().out == ""

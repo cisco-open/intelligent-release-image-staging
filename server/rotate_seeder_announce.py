@@ -61,6 +61,8 @@ import torrent_personalize
 
 SEEDER_PREV_CAP = 2
 
+DEFAULT_SWARM_URL = "http://127.0.0.1:9101/swarm"
+
 
 class RotationError(Exception):
     """Rotation refused (e.g. would evict a still-valid previous credential)."""
@@ -381,6 +383,112 @@ def production_deps(seeder_remove, seeder_add, recipients_csv, enc_path,
         swarm_probe=swarm_probe if swarm_probe is not None else (lambda: True),
         manifest_write=manifest_write or _atomic_write_json,
         now=now or (lambda: int(time.time())))
+
+
+# ---------------------------------------------------------------------------
+# Loopback /swarm live verification (spec §6 step 5)
+#
+# The helper is a SEPARATE process; it NEVER touches the tracker's in-process
+# peer registry. It verifies a current, non-legacy service-seeder observation
+# using ONLY the tracker's loopback ``/swarm`` contract (spec §10.3): the
+# current, non-legacy seeder is deduped out of the peer rings and represented
+# under the canonical ``server`` source. Success requires the ``server`` source
+# to prove the relevant canonical torrents are serving (``rpc_up`` true and each
+# expected info_hash present in ``server_observation.torrent`` with a
+# ``control-state`` lifetime). A seeder that announced on a WRONG/legacy or
+# device credential is NOT deduped — it appears as a ``legacy`` / device peer row
+# instead, which this predicate rejects. Token/URL never appear in output.
+# ---------------------------------------------------------------------------
+
+def is_seeder_serving(swarm_doc, expected_info_hashes):
+    """True iff the loopback ``/swarm`` document proves the current, non-legacy
+    service-seeder is serving EVERY expected canonical torrent (spec §6/§10.3).
+
+    Proof lives under the canonical ``server`` source (the deduped current
+    non-legacy ``service:seeder``): ``server_observation.rpc_up`` must be true
+    and each expected info_hash must appear in ``server_observation.torrent``
+    with ``lifetime == "control-state"``. A seeder announcing on a wrong/legacy
+    or device credential is NOT deduped and instead shows up as a ``legacy`` /
+    device peer row — its presence as a peer for an expected torrent fails the
+    predicate (the current seeder identity is not proven)."""
+    if not isinstance(swarm_doc, dict):
+        return False
+    expected = {h for h in (expected_info_hashes or []) if h}
+    if not expected:
+        return False
+    server = swarm_doc.get("server")
+    if not isinstance(server, dict):
+        return False
+    obs = server.get("server_observation")
+    if not isinstance(obs, dict) or obs.get("rpc_up") is not True:
+        return False
+    serving = set()
+    for t in obs.get("torrent") or []:
+        if isinstance(t, dict) and t.get("lifetime") == "control-state" \
+                and t.get("info_hash"):
+            serving.add(t["info_hash"])
+    if not expected.issubset(serving):
+        return False
+    # Reject: an expected torrent whose ring carries a legacy/device row that
+    # IS the seeder (left == 0) means the seeder announced on the wrong
+    # credential and was NOT deduped -> current seeder identity not proven.
+    for image in swarm_doc.get("images") or []:
+        if not isinstance(image, dict) or image.get("info_hash") not in expected:
+            continue
+        for peer in image.get("peers") or []:
+            if not isinstance(peer, dict):
+                continue
+            tracker = peer.get("tracker")
+            if not isinstance(tracker, dict):
+                continue
+            if tracker.get("role") == "seeder":
+                # A ring seeder for an expected torrent is never the current
+                # non-legacy service seeder (that one is deduped to `server`).
+                return False
+    return True
+
+
+def make_swarm_probe(expected_info_hashes, url=DEFAULT_SWARM_URL,
+                     timeout=2.0, retries=3, sender=None, sleep=None):
+    """Build a zero-arg ``swarm_probe()`` -> bool for the rotation deps.
+
+    Polls the tracker's loopback ``/swarm`` (default ``DEFAULT_SWARM_URL``) with
+    a per-attempt ``timeout`` and up to ``retries`` attempts, returning True only
+    when :func:`is_seeder_serving` confirms the current non-legacy service seeder
+    serves every expected torrent. Injectable ``sender(url, timeout) -> doc``
+    and ``sleep(seconds)`` seams keep it fully unit-testable off any live tracker.
+
+    Fail-closed: any transport error, malformed body, or unproven observation
+    returns False. The token/URL is NEVER included in any raised message or
+    output (the helper prints nothing here; the caller logs only pass/fail)."""
+    expected = list(expected_info_hashes or [])
+    sender = sender if sender is not None else _http_swarm_sender
+    if sleep is None:
+        import time as _time
+        sleep = _time.sleep
+    attempts = max(1, int(retries))
+
+    def probe():
+        for attempt in range(attempts):
+            try:
+                doc = sender(url, timeout)
+            except Exception:
+                doc = None
+            if doc is not None and is_seeder_serving(doc, expected):
+                return True
+            if attempt + 1 < attempts:
+                sleep(min(timeout, 1.0))
+        return False
+
+    return probe
+
+
+def _http_swarm_sender(url, timeout):
+    """Loopback ``/swarm`` GET returning the parsed JSON document. Errors
+    propagate to the probe (which fails closed); the URL is never echoed."""
+    import urllib.request
+    with urllib.request.urlopen(url, timeout=timeout) as r:
+        return json.loads(r.read().decode())
 
 
 # ---------------------------------------------------------------------------

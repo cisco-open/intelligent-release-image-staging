@@ -94,10 +94,12 @@ def test_swarm_snapshot_builds_per_peer_progress():
     assert img["image"] == "cat9k.bin"
     assert img["total_bytes"] == 1000
     by_ip = {p["ip"]: p for p in img["peers"]}
-    assert by_ip["10.0.0.1"]["is_seeder"] is True
-    assert abs(by_ip["10.0.0.1"]["progress"] - 1.0) < 1e-9
-    assert abs(by_ip["10.0.0.2"]["progress"] - 0.5) < 1e-9
-    assert snap["seeder"]["connections"] == 2
+    # tracker source carries presence/role/progress (spec §10.3)
+    assert by_ip["10.0.0.1"]["tracker"]["role"] == "seeder"
+    assert abs(by_ip["10.0.0.1"]["tracker"]["progress"] - 1.0) < 1e-9
+    assert abs(by_ip["10.0.0.2"]["tracker"]["progress"] - 0.5) < 1e-9
+    # global rates live under the canonical server source object
+    assert snap["server"]["server_observation"]["global"]["connections"] == 2
 
 
 def _peers_rpc(active_gid, peers_by_gid, session_id="s0"):
@@ -183,11 +185,16 @@ def test_swarm_snapshot_surfaces_measured_peer_rate_no_inferred_bytes():
 
     hub = telemetry.Telemetry(PeerRegistry(), rpc=rpc, interval=10)
     hub.sample()
-    hub._registry.announce("abc", "l1", "10.0.0.2", 6882, left=500)
+    import auth
+    hub._registry.announce("abc", "l1", "10.0.0.2", 6882, left=500,
+                           principal=auth.Principal("device", "d1"))
     p = [x for x in hub.swarm_snapshot()["images"][0]["peers"]
          if x["ip"] == "10.0.0.2"][0]
-    assert p["server_up_bps"] == 100
+    # MEASURED current send rate under the server_observation.peer source
+    assert p["server_observation"]["peer"]["send_bps"] == 100
     assert "server_sent_bytes" not in p          # no inferred cumulative bytes
+    # no ambiguous flat per-peer cumulative/rate field either
+    assert "server_up_bps" not in p
 
 
 def test_swarm_snapshot_torrent_upload_length_is_a_gauge():
@@ -220,8 +227,13 @@ def test_swarm_snapshot_torrent_upload_length_is_a_gauge():
     upload_len["abc"] = 1500          # overshoot past the 1000 B image size
     hub.sample()
     hub._registry.announce("abc", "l1", "10.0.0.2", 6882, left=500)
-    img = hub.swarm_snapshot()["images"][0]
-    assert img["upload_length_bytes"] == 1500   # reported as-is on one session
+    snap = hub.swarm_snapshot()
+    # the gauge lives on the canonical server source (server_observation.torrent),
+    # never split across peers, as a control-state-lifetime gauge.
+    torrents = {t["info_hash"]: t
+                for t in snap["server"]["server_observation"]["torrent"]}
+    assert torrents["abc"]["upload_length_bytes"] == 1500
+    assert torrents["abc"]["lifetime"] == "control-state"
 
 
 def test_sample_unchanged_session_reports_upload_length_verbatim():
@@ -555,40 +567,48 @@ def test_metrics_port_default_explicit_and_disabled():
     assert telemetry.metrics_port({"IRIS_METRICS_PORT": ""}) is None
 
 
-def test_swarm_snapshot_joins_device_model_by_swarm_ip():
-    # The catalog records a device's model keyed to the heartbeat source IP
-    # (== its swarm peer IP); swarm_snapshot must label that peer with the model,
-    # and leave peers with no matching record as model=None (never error).
-    devices = {"100.92.9.3": {"device_id": "100.92.9.3", "model": "C9300-48UXM",
-                               "swarm_ip": "10.0.0.2"}}
+def test_swarm_snapshot_joins_device_model_by_principal_id():
+    # Device attribution joins on the AUTHENTICATED device principal id (== the
+    # catalog's device_id key), NEVER on the heartbeat/source IP (spec §10.3).
+    # model appears only for typed device principals; unattributed peers omit it.
+    import auth
+    devices = {"iris8kv-1": {"device_id": "iris8kv-1", "model": "C9300-48UXM",
+                             "swarm_ip": "10.0.0.2"}}
     hub = telemetry.Telemetry(PeerRegistry(), device_info=lambda: devices)
-    hub._registry.announce("abc", "p1", "10.0.0.2", 6882, left=0, now=0)
-    hub._registry.announce("abc", "p2", "10.0.0.9", 6883, left=5, now=0)
+    hub._registry.announce("abc", "p1", "10.0.0.2", 6882, left=0, now=0,
+                           principal=auth.Principal("device", "iris8kv-1"))
+    hub._registry.announce("abc", "p2", "10.0.0.9", 6883, left=5, now=0,
+                           principal=auth.Principal("device", "iris8kv-2"))
     peers = {p["ip"]: p for p in hub.swarm_snapshot(now=0)["images"][0]["peers"]}
     assert peers["10.0.0.2"]["model"] == "C9300-48UXM"
-    assert peers["10.0.0.9"]["model"] is None
+    assert peers["10.0.0.2"]["device_id"] == "iris8kv-1"
+    # device principal with no matching record -> no model key, device_id kept
+    assert "model" not in peers["10.0.0.9"]
+    assert peers["10.0.0.9"]["device_id"] == "iris8kv-2"
 
 
-def test_swarm_snapshot_joins_telemetry_enabled_by_swarm_ip():
-    # telemetry_enabled travels the same swarm_ip join as model/device_id (#13
-    # final review Important-3): the console drawer branches its "no report
-    # yet" text on this, so True/False/None (unknown — absent or a
-    # pre-telemetry agent) must all survive the join, not just truthy values.
-    devices = {"100.92.9.3": {"device_id": "100.92.9.3",
-                              "swarm_ip": "10.0.0.2",
-                              "telemetry_enabled": False},
-               "100.90.168.99": {"device_id": "100.90.168.99",
-                                 "swarm_ip": "10.0.0.5",
-                                 "telemetry_enabled": True}}
+def test_swarm_snapshot_legacy_peer_is_unattributed_no_identity_join():
+    # A legacy-credential participant is legacy_unattributed regardless of IP:
+    # no model/device_observation/latest_report/peer_policy, no quarantine
+    # control, and the heartbeat swarm_ip must NOT establish identity (spec §10.3).
+    import auth
+    devices = {"iris8kv-1": {"device_id": "iris8kv-1", "model": "C9300-48UXM",
+                             "swarm_ip": "10.0.0.2"}}
     hub = telemetry.Telemetry(PeerRegistry(), device_info=lambda: devices)
-    hub._registry.announce("abc", "p1", "10.0.0.2", 6882, left=0, now=0)
-    hub._registry.announce("abc", "p2", "10.0.0.5", 6883, left=5, now=0)
-    hub._registry.announce("abc", "p3", "10.0.0.9", 6884, left=5, now=0)
-    peers = {p["ip"]: p for p in hub.swarm_snapshot(now=0)["images"][0]["peers"]}
-    assert peers["10.0.0.2"]["telemetry_enabled"] is False
-    assert peers["10.0.0.5"]["telemetry_enabled"] is True
-    # no matching device record at all -> unknown, not falsely "disabled"
-    assert peers["10.0.0.9"]["telemetry_enabled"] is None
+    # legacy announce from the SAME IP a device record claims — must not join.
+    hub._registry.announce("abc", "p1", "10.0.0.2", 6882, left=5, now=0,
+                           principal=auth.Principal("legacy", ""))
+    peer = hub.swarm_snapshot(now=0)["images"][0]["peers"][0]
+    assert peer["tracker"]["principal_type"] == "legacy"
+    assert "principal_id" not in peer["tracker"]
+    assert peer["tracker"]["participant_class"] == "legacy_unattributed"
+    assert peer["warning"] == "legacy_unattributed"
+    assert peer["device_id"] is None
+    assert peer["quarantine_available"] is False
+    assert "model" not in peer
+    assert "device_observation" not in peer
+    assert "latest_report" not in peer
+    assert "peer_policy" not in peer
 
 
 def _swarmmap_html():
@@ -891,12 +911,16 @@ def test_swarmmap_explains_telemetry_disabled_device():
     assert "telemetry is disabled on this device" in html
 
 
-def test_swarm_snapshot_includes_host_from_env(monkeypatch):
-    # The swarm map needs the server's own IP to dedupe the seeder (it's the
-    # central hub, not a peer node). swarm_snapshot surfaces it from IRIS_HOST_IP.
+def test_swarm_snapshot_includes_host_under_server_source(monkeypatch):
+    # The origin host lives on the canonical `server` source object (spec §10.3):
+    # the seeder is the central hub, not a peer node. From IRIS_HOST_IP.
     monkeypatch.setenv("IRIS_HOST_IP", "100.90.168.20")
     hub = telemetry.Telemetry(PeerRegistry())
-    assert hub.swarm_snapshot()["host"] == "100.90.168.20"
+    snap = hub.swarm_snapshot()
+    assert snap["server"]["host"] == "100.90.168.20"
+    # no legacy top-level flat host / seeder objects
+    assert "host" not in snap
+    assert "seeder" not in snap
 
 
 def test_on_swarm_event_does_not_track_per_peer_accumulators():
@@ -954,73 +978,112 @@ def test_from_env_wires_reports_info_to_state_dir(tmp_path):
     assert hub._reports_info() == data
 
 
-def test_swarm_snapshot_joins_device_id_and_report_by_swarm_ip():
-    devices = {"100.92.9.3": {"device_id": "100.92.9.3",
-                              "model": "C9300-48UXM", "swarm_ip": "10.0.0.2"},
-               "100.90.168.99": {"device_id": "100.90.168.99",
-                                 "swarm_ip": "10.0.0.5"}}
-    reports = {"100.92.9.3": [
+def test_swarm_snapshot_joins_device_id_and_report_by_principal_id():
+    import auth
+    devices = {"iris8kv-1": {"device_id": "iris8kv-1",
+                             "model": "C9300-48UXM", "swarm_ip": "10.0.0.2"},
+               "iris8kv-2": {"device_id": "iris8kv-2", "swarm_ip": "10.0.0.5"}}
+    reports = {"iris8kv-1": [
         _stored_report(ts=50, event="pull", tier="constrained"),
         _stored_report(ts=100, event="staging-complete", tier="good",
                        rtt=12, avg_bps=4052505)]}
     hub = telemetry.Telemetry(PeerRegistry(),
                               device_info=lambda: devices,
                               reports_info=lambda: reports)
-    hub._registry.announce("abc", "p1", "10.0.0.2", 6882, left=0, now=0)
-    hub._registry.announce("abc", "p2", "10.0.0.5", 6883, left=5, now=0)
-    hub._registry.announce("abc", "p3", "10.0.0.9", 6884, left=5, now=0)
+    hub._registry.announce("abc", "p1", "10.0.0.2", 6882, left=0, now=0,
+                           principal=auth.Principal("device", "iris8kv-1"))
+    hub._registry.announce("abc", "p2", "10.0.0.5", 6883, left=5, now=0,
+                           principal=auth.Principal("device", "iris8kv-2"))
+    hub._registry.announce("abc", "p3", "10.0.0.9", 6884, left=5, now=0,
+                           principal=auth.Principal("device", "iris8kv-3"))
     peers = {p["ip"]: p
              for p in hub.swarm_snapshot(now=0)["images"][0]["peers"]}
-    # joined device: id + summary of the LATEST report (last ring entry)
-    assert peers["10.0.0.2"]["device_id"] == "100.92.9.3"
-    assert peers["10.0.0.2"]["report"] == {
-        "ts": 100, "event": "staging-complete", "tier": "good",
-        "rtt_ms_median": 12, "avg_bps": 4052505}
-    # device known but no stored reports -> id joined, report None
-    assert peers["10.0.0.5"]["device_id"] == "100.90.168.99"
-    assert peers["10.0.0.5"]["report"] is None
-    # unknown IP -> both None (keys still present: stable /swarm shape)
-    assert peers["10.0.0.9"]["device_id"] is None
-    assert peers["10.0.0.9"]["report"] is None
+    # joined by principal id: latest_report is a SAFE v1 summary (no avg_bps
+    # reinterpreted as v2), taken from the last ring entry.
+    assert peers["10.0.0.2"]["device_id"] == "iris8kv-1"
+    assert peers["10.0.0.2"]["latest_report"] == {
+        "schema": "v1", "event": "staging-complete", "tier": "good",
+        "rtt_ms_median": 12, "received_at": 200.0, "ts": 100}
+    assert "avg_bps" not in peers["10.0.0.2"]["latest_report"]
+    # device known but no stored reports -> id joined, no latest_report key
+    assert peers["10.0.0.5"]["device_id"] == "iris8kv-2"
+    assert "latest_report" not in peers["10.0.0.5"]
+    # device with no record at all -> device_id kept, no latest_report/model
+    assert peers["10.0.0.9"]["device_id"] == "iris8kv-3"
+    assert "latest_report" not in peers["10.0.0.9"]
+
+
+def test_latest_report_v2_summary_uses_taxonomy_fields():
+    # A v2 stored report surfaces the taxonomy-correct summary (spec §10.2):
+    # report_id/event/content_sha256_state/ios_copy_verify_state/received_at.
+    import auth
+    v2 = {"v": 2, "schema": "v2",
+          "report_id": "7c1f0b9a2d3e4f5061728394a5b6c7d8",
+          "event": "staging-complete",
+          "content_sha256": {"state": "verified", "algo": "sha256"},
+          "ios_copy_verify": {"state": "ok"},
+          "received_at": 200.0}
+    hub = telemetry.Telemetry(PeerRegistry(),
+                              reports_info=lambda: {"iris8kv-1": [v2]})
+    hub._registry.announce("abc", "p1", "10.0.0.2", 6882, left=0, now=0,
+                           principal=auth.Principal("device", "iris8kv-1"))
+    p = hub.swarm_snapshot(now=0)["images"][0]["peers"][0]
+    assert p["latest_report"] == {
+        "schema": "v2",
+        "report_id": "7c1f0b9a2d3e4f5061728394a5b6c7d8",
+        "event": "staging-complete",
+        "content_sha256_state": "verified",
+        "ios_copy_verify_state": "ok",
+        "received_at": 200.0}
 
 
 def test_swarm_snapshot_report_join_never_breaks_on_garbage():
+    import auth
     devices = {"d1": {"swarm_ip": "10.0.0.2", "model": "C9300"}}
     garbage = {"d1": "not-a-list", "d2": [123], "d3": []}
     hub = telemetry.Telemetry(PeerRegistry(), device_info=lambda: devices,
                               reports_info=lambda: garbage)
-    hub._registry.announce("abc", "p1", "10.0.0.2", 6882, left=0, now=0)
+    hub._registry.announce("abc", "p1", "10.0.0.2", 6882, left=0, now=0,
+                           principal=auth.Principal("device", "d1"))
     p = hub.swarm_snapshot(now=0)["images"][0]["peers"][0]
     assert p["device_id"] == "d1"
-    assert p["report"] is None          # garbage ring -> no summary
+    assert "latest_report" not in p     # garbage ring -> no summary
     assert p["model"] == "C9300"        # model join unaffected
 
 
 def test_swarm_snapshot_survives_reports_info_raising():
+    import auth
     def boom():
         raise OSError("state dir gone")
     hub = telemetry.Telemetry(PeerRegistry(), reports_info=boom)
-    hub._registry.announce("abc", "p1", "10.0.0.2", 6882, left=0, now=0)
+    hub._registry.announce("abc", "p1", "10.0.0.2", 6882, left=0, now=0,
+                           principal=auth.Principal("device", "d1"))
     p = hub.swarm_snapshot(now=0)["images"][0]["peers"][0]
-    assert p["report"] is None
-    assert p["device_id"] is None
+    assert "latest_report" not in p
+    assert p["device_id"] == "d1"
 
 
-def test_swarm_peer_rows_keep_existing_fields_plus_device_id_and_report():
-    # /swarm response shape: existing fields stay, EXCEPT the retired inferred
-    # server_sent_bytes; two device-join fields are present. The measured
-    # server_up_bps rate stays; the torrent gauge lives on the image row.
+def test_swarm_peer_row_is_source_grouped():
+    # Canonical source-grouped row (spec §10.3): the tracker source carries
+    # presence; no ambiguous flat legacy fields survive; the torrent gauge lives
+    # on the server source, not the image or peer.
+    import auth
     hub = telemetry.Telemetry(PeerRegistry())
-    hub._registry.announce("abc", "p1", "10.0.0.2", 6882, left=0, now=0)
-    img = hub.swarm_snapshot(now=0)["images"][0]
-    assert "upload_length_bytes" in img
+    hub._registry.announce("abc", "p1", "10.0.0.2", 6882, left=0, now=0,
+                           principal=auth.Principal("device", "d1"))
+    snap = hub.swarm_snapshot(now=0)
+    img = snap["images"][0]
+    assert "upload_length_bytes" not in img       # gauge lives under server
     p = img["peers"][0]
-    for key in ("ip", "port", "left", "last_seen", "is_seeder", "progress",
-                "server_up_bps", "model", "device_id", "report"):
-        assert key in p, key
-    assert "server_sent_bytes" not in p        # inferred cumulative bytes retired
-    assert p["device_id"] is None
-    assert p["report"] is None
+    assert set(p["tracker"]) >= {"principal_type", "principal_id", "role",
+                                 "left", "last_seen", "progress"}
+    assert p["ip"] == "10.0.0.2" and p["port"] == 6882
+    assert p["device_id"] == "d1"
+    # retired / ambiguous flat fields must be gone
+    for gone in ("server_sent_bytes", "server_up_bps", "is_seeder",
+                 "report", "down_bps", "up_bps", "sample_age_s",
+                 "telemetry_enabled"):
+        assert gone not in p, gone
 
 
 def test_sample_exports_each_stored_report_exactly_once():
@@ -1161,21 +1224,211 @@ class TestAggregateTransfers:
 
 
 class TestSwarmSampleEnrichment:
-    def test_rows_with_device_id_gain_live_fields(self):
+    def _hub(self, sample, principal_id="d1"):
+        import auth
         hub = telemetry.Telemetry(
-            device_info=lambda: {"d1": {"swarm_ip": "10.0.0.2",
-                                        "model": "C9300"}},
-            live_info=lambda: _doc(100.0, {
-                "d1": {"v": 1, "image_id": "img-1", "phase": "downloading",
-                       "done_bytes": 500, "down_bps": 123, "up_bps": 4,
-                       "peers": 2, "tier": "good", "received_at": 90.0,
-                       "effective_interval": 60}}))
+            live_info=lambda: {"written_at": 100.0,
+                               "counters": {"samples_rejected_total": 0},
+                               "samples": {principal_id: sample}})
         hub.registry.announce("aa11", "peer1", "10.0.0.2", 6881,
-                              left=500, now=100.0)
-        snap = hub.swarm_snapshot(now=100.0)
-        row = snap["images"][0]["peers"][0]
-        assert row["down_bps"] == 123 and row["done_bytes"] == 500
-        assert row["sample_age_s"] == 10
+                              left=500, now=100.0,
+                              principal=auth.Principal("device", principal_id))
+        return hub
+
+    def test_fresh_v2_observed_surfaces_rates_under_device_observation(self):
+        # A currently-valid observed v2 entry surfaces the aria rates/counters
+        # under the device_observation source (spec §3B/§10.3).
+        sample = {"v": 2, "schema": "v2", "obs_state": "observed",
+                  "observed_at": 89.0, "observed_received_at": 90.0,
+                  "received_at": 90.0, "valid": True,
+                  "aria": {"status": "active", "receive_bps": 123,
+                           "send_bps": 4, "connections": 2,
+                           "completed_content_bytes": 500}}
+        row = self._hub(sample).swarm_snapshot(now=100.0)["images"][0][
+            "peers"][0]
+        dobs = row["device_observation"]
+        assert dobs["schema"] == "v2" and dobs["valid"] is True
+        assert dobs["stale"] is False and dobs["age_s"] == 10
+        assert dobs["receive_bps"] == 123 and dobs["send_bps"] == 4
+        assert dobs["connections"] == 2
+        assert dobs["completed_content_bytes"] == 500
+        assert dobs["zero_receive_rate"] is False
+
+    def test_zero_receive_rate_only_on_fresh_active_zero(self):
+        # zero_receive_rate is a fresh-snapshot boolean: true only when a
+        # currently-valid observed snapshot has receive_bps==0 & status active.
+        sample = {"v": 2, "schema": "v2", "obs_state": "observed",
+                  "observed_at": 89.0, "observed_received_at": 90.0,
+                  "received_at": 90.0, "valid": True,
+                  "aria": {"status": "active", "receive_bps": 0,
+                           "send_bps": 4, "connections": 2,
+                           "completed_content_bytes": 500}}
+        dobs = self._hub(sample).swarm_snapshot(now=100.0)["images"][0][
+            "peers"][0]["device_observation"]
+        assert dobs["zero_receive_rate"] is True
+
+    def test_stale_observation_retains_context_omits_rates(self):
+        # Past LIVE_VALUE_VALIDITY the row is stale retained context: it keeps
+        # age_s but OMITS receive/send/connections/current counters (never a
+        # fresh zero).
+        sample = {"v": 2, "schema": "v2", "obs_state": "observed",
+                  "observed_at": 9.0, "observed_received_at": 10.0,
+                  "received_at": 10.0, "valid": True,
+                  "aria": {"status": "active", "receive_bps": 123,
+                           "send_bps": 4, "connections": 2,
+                           "completed_content_bytes": 500}}
+        # observation is 130s old at now=140 (> 120s validity) while the peer
+        # announced at now=100 is still within the registry window.
+        dobs = self._hub(sample).swarm_snapshot(now=140.0)["images"][0][
+            "peers"][0]["device_observation"]
+        assert dobs["valid"] is False and dobs["stale"] is True
+        assert dobs["age_s"] == 130
+        for omitted in ("receive_bps", "send_bps", "connections",
+                        "zero_receive_rate"):
+            assert omitted not in dobs, omitted
+
+    def test_paused_state_has_no_fresh_rates(self):
+        # A withdrawn/non-observed state (paused/disabled/not_active/rpc) is
+        # represented without fresh rates.
+        sample = {"v": 2, "schema": "v2", "obs_state": "paused",
+                  "observed_at": 89.0, "observed_received_at": 90.0,
+                  "received_at": 90.0, "valid": False}
+        dobs = self._hub(sample).swarm_snapshot(now=100.0)["images"][0][
+            "peers"][0]["device_observation"]
+        assert dobs["obs_state"] == "paused"
+        assert dobs["valid"] is False and dobs["stale"] is True
+        assert "receive_bps" not in dobs
+
+    def test_v1_projected_under_schema_marker_no_v2_reinterpretation(self):
+        # A v1 rollout sample is projected with a schema:"v1" marker using its
+        # mapped legacy fields — never reinterpreted as a v2 measurement.
+        sample = {"v": 1, "schema": "v1", "image_id": "img-1",
+                  "phase": "downloading", "done_bytes": 500, "down_bps": 123,
+                  "up_bps": 4, "tier": "good",
+                  "observed_received_at": 90.0, "received_at": 90.0,
+                  "valid": True}
+        dobs = self._hub(sample).swarm_snapshot(now=100.0)["images"][0][
+            "peers"][0]["device_observation"]
+        assert dobs["schema"] == "v1" and dobs["valid"] is True
+        assert dobs["receive_bps"] == 123 and dobs["send_bps"] == 4
+        assert dobs["completed_content_bytes"] == 500
+        assert dobs["zero_receive_rate"] is False
+        assert "connections" not in dobs   # v1 has no aria connections
+
+
+# ---- per-participant peer_policy / peer_enforcement facts (spec §7/§10.3) ----
+
+class TestPeerPolicyEnforcementFacts:
+    def _hub(self, policy=None, enforcement=None, principal_id="iris8kv-1",
+             ip="100.92.100.14"):
+        import auth
+        hub = telemetry.Telemetry(
+            PeerRegistry(),
+            policy_info=(lambda: policy) if policy is not None else None,
+            enforcement_info=(lambda: enforcement)
+            if enforcement is not None else None)
+        hub._registry.announce("abc", "p1", ip, 6881, left=5, now=0,
+                               principal=auth.Principal("device", principal_id))
+        return hub
+
+    def _row(self, hub):
+        return hub.swarm_snapshot(now=0)["images"][0]["peers"][0]
+
+    def test_permit_and_no_quarantine(self):
+        import peer_policy
+        policy = peer_policy.PolicyResult(
+            peer_policy.base_document(), degraded=False, fail_closed=False)
+        row = self._row(self._hub(policy=policy))
+        assert row["peer_policy"] == {
+            "decision": "permit", "matched_seq": None,
+            "assignment": None, "quarantined": False, "fail_closed": False}
+
+    def test_quarantine_assignment_surfaces_decision_and_status(self):
+        import peer_policy
+        doc = peer_policy.base_document()
+        doc["assignments"]["iris8kv-1"] = peer_policy.RESERVED_QUARANTINE
+        policy = peer_policy.PolicyResult(doc, degraded=False,
+                                          fail_closed=False)
+        row = self._row(self._hub(policy=policy))
+        assert row["peer_policy"]["decision"] == "deny"
+        assert row["peer_policy"]["matched_seq"] == 10
+        assert row["peer_policy"]["assignment"] == "quarantine"
+        assert row["peer_policy"]["quarantined"] is True
+
+    def test_fail_closed_is_explicit_deny(self):
+        import peer_policy
+        policy = peer_policy.PolicyResult(
+            peer_policy._fail_closed_document(), degraded=True,
+            fail_closed=True)
+        row = self._row(self._hub(policy=policy))
+        assert row["peer_policy"]["fail_closed"] is True
+        assert row["peer_policy"]["decision"] == "deny"
+
+    def test_enforcement_blocked_from_typed_conflict_not_raw_ip(self):
+        # blocked is composed from the tracker's typed conflicts + aggregate
+        # state — never from a raw denied-IP list (which is not exposed).
+        enforcement = {"state": "enforced", "conflicts": [
+            {"denied_principal_type": "device",
+             "denied_principal_id": "iris8kv-1",
+             "reason": "shared_permit_deny", "global_block_applied": False}]}
+        row = self._row(self._hub(enforcement=enforcement))
+        assert row["peer_enforcement"]["blocked"] is True
+        assert row["peer_enforcement"]["state"] == "enforced"
+        assert row["peer_enforcement"]["conflict"]["reason"] == \
+            "shared_permit_deny"
+
+    def test_enforcement_not_blocked_when_absent(self):
+        enforcement = {"state": "enforced", "conflicts": []}
+        row = self._row(self._hub(enforcement=enforcement))
+        assert row["peer_enforcement"]["blocked"] is False
+        assert "conflict" not in row["peer_enforcement"]
+
+    def test_fail_closed_enforcement_state_blocks(self):
+        enforcement = {"state": "fail_closed", "conflicts": []}
+        row = self._row(self._hub(enforcement=enforcement))
+        assert row["peer_enforcement"]["blocked"] is True
+        assert row["peer_enforcement"]["state"] == "fail_closed"
+
+    def test_legacy_peer_gets_no_policy_or_enforcement(self):
+        import auth
+        import peer_policy
+        policy = peer_policy.PolicyResult(
+            peer_policy.base_document(), degraded=False, fail_closed=False)
+        hub = telemetry.Telemetry(
+            PeerRegistry(), policy_info=lambda: policy,
+            enforcement_info=lambda: {"state": "enforced", "conflicts": []})
+        hub._registry.announce("abc", "p1", "100.92.100.31", 6881, left=5,
+                               now=0, principal=auth.Principal("legacy", ""))
+        row = hub.swarm_snapshot(now=0)["images"][0]["peers"][0]
+        assert "peer_policy" not in row
+        assert "peer_enforcement" not in row
+
+    def test_service_seeder_deduped_from_rings(self):
+        # The current non-legacy service:seeder is the hub, deduped out of the
+        # peer rings (represented under `server`), not a peer node.
+        import auth
+        hub = telemetry.Telemetry(PeerRegistry())
+        hub._registry.announce("abc", "seed", "100.90.168.20", 6881, left=0,
+                               now=0,
+                               principal=auth.Principal("service", "seeder"))
+        hub._registry.announce("abc", "dev", "100.92.100.14", 6881, left=5,
+                               now=0,
+                               principal=auth.Principal("device", "d1"))
+        peers = hub.swarm_snapshot(now=0)["images"][0]["peers"]
+        assert [p["ip"] for p in peers] == ["100.92.100.14"]
+
+    def test_device_named_seeder_stays_a_device_peer(self):
+        # A device literally named `seeder` (device:seeder) is NOT the service
+        # seeder and remains a device peer row.
+        import auth
+        hub = telemetry.Telemetry(PeerRegistry())
+        hub._registry.announce("abc", "p1", "100.92.100.14", 6881, left=5,
+                               now=0,
+                               principal=auth.Principal("device", "seeder"))
+        peers = hub.swarm_snapshot(now=0)["images"][0]["peers"]
+        assert len(peers) == 1
+        assert peers[0]["tracker"]["principal_type"] == "device"
+        assert peers[0]["device_id"] == "seeder"
 
 
 # ---- OTLP export health + metrics push (spec 7.5/7.7) ----

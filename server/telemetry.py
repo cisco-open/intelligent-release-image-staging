@@ -20,10 +20,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 import audit
+import auth
 import ipaddress
 import live_samples
 import metrics
 import otlp
+import peer_enforcement as _peer_enforcement
+import peer_policy as _peer_policy
 import telemetry_destination
 from peer_registry import PeerRegistry
 
@@ -251,7 +254,8 @@ class Telemetry:
                  reports_info=None, live_info=None, images_info=None,
                  metrics_exporter=None, export_health=None,
                  device_metrics=False, dest_settings=None,
-                 env_endpoint="", env_enabled=False, headers=None):
+                 env_endpoint="", env_enabled=False, headers=None,
+                 policy_info=None, enforcement_info=None):
         self.exporter = exporter
         self.rpc = rpc
         self.interval = interval
@@ -292,6 +296,17 @@ class Telemetry:
         # None in tests/standalone -> peers carry no report summary, nothing
         # is exported and the stored-reports gauge reads 0.
         self._reports_info = reports_info
+        # Optional callables giving the tracker's CURRENT durable policy and
+        # enforcement facts, so each typed device peer row carries its
+        # per-participant peer_policy (operator intent) and peer_enforcement
+        # (factual block state) from the tracker — the GUI/map never computes an
+        # IP list or derives enforcement itself (spec §7/§10.3). Read fresh per
+        # snapshot in the SAME (tracker) process; no cross-process identity
+        # assumption. None (tests/standalone) -> rows carry no policy/enforcement.
+        #   policy_info() -> peer_policy.PolicyResult (or None)
+        #   enforcement_info() -> peer-enforcement.json dict (or None)
+        self._policy_info = policy_info
+        self._enforcement_info = enforcement_info
         # received_at watermark: every stored report newer than this gets one
         # OTLP log record on the next sample(); advancing it makes the export
         # exactly-once per process lifetime (a restart replays at most the
@@ -497,95 +512,153 @@ class Telemetry:
 
     # --- live per-peer swarm view (for the swarm map) ---
     def swarm_snapshot(self, now=None):
+        """Canonical source-grouped swarm snapshot (spec §10.3). Every value
+        sits under a NAMED source object with its own observation time:
+
+          * ``server`` — the origin seeder/hub (its own ``server_observation``:
+            global rates, per-torrent control-state ``upload_length_bytes``
+            gauge). Never a peer node in the rings.
+          * ``images[].peers[]`` — each participant grouped by source:
+            ``tracker`` (authenticated presence), optional ``device_observation``
+            (freshness-gated live snapshot), optional current
+            ``server_observation.peer`` (this-connection rate), optional
+            ``latest_report``, optional ``peer_policy``/``peer_enforcement``.
+
+        Identity joins (device_observation / latest_report / policy /
+        enforcement) are keyed ONLY by the authenticated device **principal id**
+        from the registry — NEVER by source IP. A heartbeat ``swarm_ip`` may not
+        establish identity. Legacy-credential rows are ``legacy_unattributed``
+        and carry no device attribution or quarantine control.
+        """
         now = time.time() if now is None else now
-        # device model + id per swarm IP, joined from the catalog's heartbeat
-        # records by the heartbeat source IP (== the agent's swarm/announce
-        # IP); then each device id's LATEST stored report as a small summary.
-        model_by_ip, device_by_ip, tele_by_ip = {}, {}, {}
-        if self._device_info is not None:
-            try:
-                for device_id, rec in (self._device_info() or {}).items():
-                    ip = rec.get("swarm_ip")
-                    if not ip:
-                        continue
-                    device_by_ip[ip] = str(device_id)
-                    if rec.get("model"):
-                        model_by_ip[ip] = rec["model"]
-                    # True/False/None (unknown — absent or pre-telemetry agent);
-                    # the console drawer branches its "no report yet" text on
-                    # this, so preserve all three states (don't drop on falsy).
-                    tele_by_ip[ip] = rec.get("telemetry_enabled")
-            except Exception:
-                pass                        # telemetry never breaks on bad input
-        report_by_device = {}
-        if self._reports_info is not None:
-            try:
-                for device_id, ring in (self._reports_info() or {}).items():
-                    summary = _report_summary(ring)
-                    if summary is not None:
-                        report_by_device[str(device_id)] = summary
-            except Exception:
-                pass                        # telemetry never breaks on bad input
-        live_by_device = {}
-        if self._live_info is not None:
-            try:
-                doc = self._live_info() or {}
-                live_by_device = doc.get("samples") or {}
-            except Exception:
-                pass                        # telemetry never breaks on bad input
+        # Identity-keyed joins: device_id -> record / report / live sample.
+        # Keyed by device_id (== the authenticated device principal id), NOT by
+        # any heartbeat/source IP (spec §10.3: no IP-based identity join).
+        devices_by_id = self._devices_by_id()
+        report_by_device = self._reports_by_device()
+        live_by_device = self._live_by_device()
+        policy = self._policy_snapshot()
+        enforcement = self._enforcement_snapshot()
+        derived_denied = _derived_denied_ids(enforcement)
+
         images = []
         for info_hash, peers in self._registry.snapshot(now=now).items():
             total = self._totals.get(info_hash)
             up_now = self._peer_up.get(info_hash, {})
             out = []
             for p in peers:
-                left = p.get("left")
-                if p["is_seeder"]:
-                    progress = 1.0
-                elif total and left is not None:
-                    progress = max(0.0, min(1.0, 1.0 - left / total))
-                else:
-                    progress = None
-                did = device_by_ip.get(p["ip"])
-                out.append({**p, "progress": progress,
-                            # MEASURED current send rate to this peer (no
-                            # inferred cumulative per-peer bytes — retired)
-                            "server_up_bps": up_now.get(p["ip"], 0),
-                            "model": model_by_ip.get(p["ip"]),
-                            # joined by swarm IP; summary of the device's
-                            # LATEST stored report (full rows stay in the
-                            # console drawer — /swarm payload discipline)
-                            "device_id": did,
-                            "telemetry_enabled": tele_by_ip.get(p["ip"]),
-                            "report": (report_by_device.get(did)
-                                       if did is not None else None),
-                            **_live_fields(live_by_device.get(did), now)})
+                ptype = p.get("principal_type")
+                pid = p.get("principal_id")
+                # The current, non-legacy service seeder is the central hub, not
+                # a peer node: dedupe it out of the rings (labelled seeder lives
+                # under `server`). A device literally named `seeder`
+                # (device:seeder) stays a device peer.
+                if ptype == "service" and pid == "seeder":
+                    continue
+                out.append(_peer_row(
+                    p, total, up_now, devices_by_id, report_by_device,
+                    live_by_device, policy, enforcement, derived_denied, now))
             images.append({
                 "image": self._names.get(info_hash, info_hash),
                 "info_hash": info_hash,
                 "total_bytes": total,
-                # control-state uploadLength gauge (server_observation.torrent):
-                # BitTorrent piece payload over the torrent's control-state
-                # lifetime — may exceed the image size, never a per-device total
-                "upload_length_bytes": self._upload_len.get(info_hash, 0),
                 "seeders": sum(1 for p in peers if p["is_seeder"]),
                 "leechers": sum(1 for p in peers if not p["is_seeder"]),
                 "peers": out,
             })
         return {
             "now": now,
-            # the server's own IP (the seeder/hub) so the swarm map can dedupe it
-            # out of the per-image peer rings — it's the central hub, not a node.
-            "host": os.environ.get("IRIS_HOST_IP", ""),
+            "server": self._server_source(now),
             "images": images,
-            "seeder": {
-                "upload_bps": self._seeder.get("upload_speed", 0),
-                "download_bps": self._seeder.get("download_speed", 0),
-                "connections": self._seeder.get("connections", 0),
-                "active_torrents": self._seeder.get("active_torrents", 0),
+        }
+
+    def _server_source(self, now):
+        """The ``server`` source object (spec §10.3): the origin seeder's own
+        ``server_observation`` — global current rates/connections/active
+        torrents plus per-torrent control-state ``upload_length_bytes`` gauges.
+        No secret, no session token; ``aria_session_id`` is the nonsecret epoch
+        id already surfaced by the seeder poll."""
+        torrents = []
+        for info_hash in sorted(self._upload_len):
+            torrents.append({
+                "info_hash": info_hash,
+                "image": self._names.get(info_hash, info_hash),
+                # control-state uploadLength gauge (BitTorrent piece payload over
+                # the torrent's control-state lifetime — may exceed image size,
+                # never a per-device total).
+                "upload_length_bytes": self._upload_len.get(info_hash, 0),
+                "lifetime": "control-state",
+            })
+        return {
+            "host": os.environ.get("IRIS_HOST_IP", ""),
+            "server_observation": {
+                "observed_at": now,
                 "rpc_up": bool(self._seeder.get("rpc_up")),
+                "aria_session_id": self._session_id,
+                "global": {
+                    "send_bps": self._seeder.get("upload_speed", 0),
+                    "receive_bps": self._seeder.get("download_speed", 0),
+                    "connections": self._seeder.get("connections", 0),
+                    "active_torrents": self._seeder.get("active_torrents", 0),
+                },
+                "torrent": torrents,
             },
         }
+
+    def _devices_by_id(self):
+        """{device_id: heartbeat record}. The catalog's devices.json is keyed by
+        device_id; we key our join on the authenticated principal id (device_id),
+        never on any ``swarm_ip``. Telemetry never breaks on bad input."""
+        out = {}
+        if self._device_info is None:
+            return out
+        try:
+            for device_id, rec in (self._device_info() or {}).items():
+                if isinstance(rec, dict):
+                    out[str(device_id)] = rec
+        except Exception:
+            pass
+        return out
+
+    def _reports_by_device(self):
+        out = {}
+        if self._reports_info is None:
+            return out
+        try:
+            for device_id, ring in (self._reports_info() or {}).items():
+                summary = _report_summary(ring)
+                if summary is not None:
+                    out[str(device_id)] = summary
+        except Exception:
+            pass
+        return out
+
+    def _live_by_device(self):
+        if self._live_info is None:
+            return {}
+        try:
+            doc = self._live_info() or {}
+            samples = doc.get("samples") or {}
+            return samples if isinstance(samples, dict) else {}
+        except Exception:
+            return {}
+
+    def _policy_snapshot(self):
+        if self._policy_info is None:
+            return None
+        try:
+            return self._policy_info()
+        except Exception:
+            return None
+
+    def _enforcement_snapshot(self):
+        if self._enforcement_info is None:
+            return None
+        try:
+            data = self._enforcement_info()
+            return data if isinstance(data, dict) else None
+        except Exception:
+            return None
 
     def run_forever(self):
         while not self._stop.wait(self.interval):
@@ -648,6 +721,15 @@ def from_env(env=None):
     reports_info = lambda: _read_reports(state_dir)
     live_info = lambda: _read_live_samples(state_dir)
     images_info = lambda: _read_images(state_dir)
+    # Per-participant policy/enforcement facts (spec §7/§10.3). Read the tracker
+    # process's own durable stores — same process, no cross-process identity
+    # assumption. peer-policy resolves the current authoritative/LKG/fail-closed
+    # PolicyResult; peer-enforcement reads the tracker-written status file.
+    policy_paths = (os.path.join(state_dir, "peer-policy.json"),
+                    os.path.join(state_dir, "peer-policy.lkg.json"))
+    enforcement_path = os.path.join(state_dir, "peer-enforcement.json")
+    policy_info = lambda: _read_policy(policy_paths)
+    enforcement_info = lambda: _peer_enforcement.read_status(enforcement_path)
     dest = telemetry_destination.DestinationSettings(
         telemetry_destination.settings_path(state_dir))
     hub = Telemetry(rpc=rpc, interval=interval,
@@ -658,7 +740,9 @@ def from_env(env=None):
                     dest_settings=dest,
                     env_endpoint=endpoint,
                     env_enabled=observability_enabled(env),
-                    headers=headers)
+                    headers=headers,
+                    policy_info=policy_info,
+                    enforcement_info=enforcement_info)
     # Build the initial exporters NOW (not on the first pass) so swarm events
     # from the announce path are captured from process start, exactly as the
     # construction-time exporters were before the destination became editable.
@@ -689,19 +773,258 @@ def _read_reports(state_dir):
         return {}
 
 
-def _live_fields(sample, now):
-    """/swarm enrichment from the device's live sample (spec 7.4): attaches
-    only to rows whose device_id the existing IP join resolved; {} keeps the
-    row unchanged for devices without samples."""
-    if not isinstance(sample, dict):
-        return {}
+def _peer_row(p, total, up_now, devices_by_id, report_by_device,
+              live_by_device, policy, enforcement, derived_denied, now):
+    """One canonical peer row (spec §10.3), source-grouped. All device
+    attribution joins on the authenticated device principal id, never on the
+    source IP."""
+    ptype = p.get("principal_type")
+    pid = p.get("principal_id")
+    left = p.get("left")
+    if p["is_seeder"]:
+        progress = 1.0
+    elif total and left is not None:
+        progress = max(0.0, min(1.0, 1.0 - left / total))
+    else:
+        progress = None
+
+    tracker = {
+        "principal_type": ptype,
+        "role": "seeder" if p["is_seeder"] else "leecher",
+        "left": left,
+        "last_seen": p.get("last_seen"),
+        "progress": progress,
+    }
+    # principal_id present for attributable (device/service) principals; omitted
+    # for legacy (spec §0a/§10.3).
+    if ptype != "legacy" and pid is not None:
+        tracker["principal_id"] = pid
+
+    row = {"ip": p["ip"], "port": p["port"], "tracker": tracker}
+
+    # Legacy-credential participant: no device to attribute (regardless of IP).
+    # No device_observation / latest_report / peer_policy / model; cannot be
+    # individually quarantined until it re-downloads a personalized torrent.
+    if ptype == "legacy":
+        tracker["participant_class"] = p.get(
+            "participant_class", "legacy_unattributed")
+        row["warning"] = "legacy_unattributed"
+        row["device_id"] = None
+        row["quarantine_available"] = False
+        return row
+
+    # Measured current this-connection send rate to this peer, scoped under the
+    # server_observation.peer source (never an inferred cumulative per-peer
+    # total — that machinery is retired). Present only when measured (>0 or a
+    # known connection); we surface it whenever the seeder poll saw the ip.
+    if p["ip"] in up_now:
+        row["server_observation"] = {
+            "peer": {"send_bps": up_now.get(p["ip"], 0)}}
+
+    # Attributable device principals only: identity-keyed joins by principal id.
+    if ptype == "device" and pid is not None:
+        device_id = pid
+        rec = devices_by_id.get(device_id) or {}
+        model = rec.get("model")
+        dobs = _device_observation(live_by_device.get(device_id), now)
+        if dobs is not None:
+            row["device_observation"] = dobs
+        report = report_by_device.get(device_id)
+        if report is not None:
+            row["latest_report"] = report
+        pol = _peer_policy_fact(policy, ptype, device_id, p["ip"])
+        if pol is not None:
+            row["peer_policy"] = pol
+        enf = _peer_enforcement_fact(
+            enforcement, derived_denied, ptype, device_id, p["ip"])
+        if enf is not None:
+            row["peer_enforcement"] = enf
+        # model + device_id ONLY for typed device principals (spec §10.3).
+        if model is not None:
+            row["model"] = model
+        row["device_id"] = device_id
+    return row
+
+
+def _device_observation(entry, now):
+    """The ``device_observation`` source object (spec §3/§10.3) built from the
+    canonical live-samples state (Task 20 LiveTable snapshot). Interprets v1/v2
+    freshness exactly:
+
+      * ``valid = observed_received_at + LIVE_VALUE_VALIDITY(120s) >= now`` and
+        only for a currently-``observed`` entry. A valid observed row surfaces
+        the current rates/counters. Once invalid it is ``stale`` retained
+        context: it keeps ``age_s`` but OMITS receive/send/connections/current
+        counters (the map greys the last value, never a fresh zero).
+      * ``zero_receive_rate`` is a fresh-snapshot boolean — true ONLY when a
+        currently-valid observed aria snapshot reports ``receive_bps==0`` while
+        ``aria.status=="active"``; never asserted from a stale value.
+      * paused/disabled/not_active/rpc_unavailable are non-observed states
+        represented WITHOUT fresh rates.
+
+    v1 entries are projected under a ``schema:"v1"`` marker using their mapped
+    legacy fields with explicit names/source — never reinterpreted as v2."""
+    if not isinstance(entry, dict):
+        return None
+    schema = entry.get("schema", "v2")
+    obs_state = entry.get("obs_state", "observed")
     try:
-        return {"down_bps": _int(sample.get("down_bps")),
-                "up_bps": _int(sample.get("up_bps")),
-                "done_bytes": _int(sample.get("done_bytes")),
-                "sample_age_s": int(now - float(sample.get("received_at", now)))}
+        base = float(entry.get("observed_received_at",
+                               entry.get("received_at", 0.0)))
     except (TypeError, ValueError):
-        return {}
+        base = 0.0
+    age_s = int(now - base) if base else None
+    # Recompute freshness against OUR now (the live-samples.json is written on
+    # the catalog's own cadence, so a stored ``valid`` flag can lag): the value
+    # is valid only for a currently-observed entry within LIVE_VALUE_VALIDITY of
+    # its observed receipt (spec §3B/§4). A withdrawn/non-observed state is never
+    # valid regardless of age.
+    valid = (obs_state in (None, "observed")
+             and bool(entry.get("valid"))
+             and base + live_samples.LIVE_VALUE_VALIDITY >= now)
+
+    out = {"schema": schema, "obs_state": obs_state,
+           "observed_at": entry.get("observed_at"),
+           "valid": valid, "stale": not valid, "age_s": age_s}
+
+    if not valid:
+        # Stale / withdrawn: retained context only; omit all fresh counters.
+        return out
+
+    if schema == "v1":
+        # v1 rollout: map its legacy fields with explicit v1-source names; do
+        # NOT reinterpret them as v2 measurements.
+        out["receive_bps"] = _int(entry.get("down_bps"))
+        out["send_bps"] = _int(entry.get("up_bps"))
+        out["completed_content_bytes"] = _int(entry.get("done_bytes"))
+        # v1 has no aria.status; zero_receive_rate needs an active aria status.
+        out["zero_receive_rate"] = False
+        return out
+
+    aria = entry.get("aria") if isinstance(entry.get("aria"), dict) else {}
+    receive_bps = _int(aria.get("receive_bps"))
+    out["receive_bps"] = receive_bps
+    out["send_bps"] = _int(aria.get("send_bps"))
+    out["connections"] = _int(aria.get("connections"))
+    out["completed_content_bytes"] = _int(aria.get("completed_content_bytes"))
+    out["zero_receive_rate"] = (aria.get("status") == "active"
+                                and receive_bps == 0)
+    return out
+
+
+def _peer_policy_fact(policy, principal_type, device_id, ipv4):
+    """Per-participant ``peer_policy`` fact (operator intent) for a typed device
+    principal, evaluated against the tracker's CURRENT PolicyStore (spec §7).
+    Exposes the decision, matched rule sequence, the assigned ACL name, and
+    whether the reserved quarantine ACL is assigned. ``fail_closed`` is explicit.
+    None when no policy is wired."""
+    if policy is None:
+        return None
+    doc = getattr(policy, "document", None)
+    if not isinstance(doc, dict):
+        return None
+    fail_closed = bool(getattr(policy, "fail_closed", False))
+    principal = auth.Principal(principal_type, device_id)
+    try:
+        decision, matched_seq = _peer_policy.evaluate(doc, principal, ipv4)
+    except Exception:
+        decision, matched_seq = ("permit", None)
+    assignment = doc.get("assignments", {}).get(device_id)
+    return {
+        "decision": "deny" if fail_closed else decision,
+        "matched_seq": matched_seq,
+        "assignment": assignment,
+        "quarantined": assignment == _peer_policy.RESERVED_QUARANTINE,
+        "fail_closed": fail_closed,
+    }
+
+
+def _derived_denied_ids(enforcement):
+    """The tracker's current derived-denied set expressed as principal ids
+    (never a raw IP list — the enforcement status intentionally exposes only a
+    count and typed conflicts). We compose per-participant block facts from the
+    typed conflicts the tracker DID publish. Returns a set of denied device ids."""
+    denied = set()
+    if not isinstance(enforcement, dict):
+        return denied
+    for c in enforcement.get("conflicts") or []:
+        if not isinstance(c, dict):
+            continue
+        if c.get("denied_principal_type") == "device":
+            did = c.get("denied_principal_id")
+            if did is not None:
+                denied.add(did)
+    return denied
+
+
+def _peer_enforcement_fact(enforcement, derived_denied, principal_type,
+                           device_id, ipv4):
+    """Per-participant ``peer_enforcement`` fact (spec §7/§10.3). Factual, not a
+    causal claim: ``blocked`` iff this device principal is in the tracker's
+    current derived-denied set (composed from typed conflicts + the current
+    aggregate ``state``); we never claim a disconnect cause. The raw denied-IP
+    list is never read (it is not exposed). ``state`` mirrors the tracker's
+    aggregate enforcement state (``fail_closed`` explicit). None when unwired."""
+    if not isinstance(enforcement, dict):
+        return None
+    state = enforcement.get("state")
+    blocked = device_id in derived_denied or state == "fail_closed"
+    fact = {"blocked": bool(blocked), "state": state}
+    # Surface a shared-IP conflict for this participant when the tracker
+    # published one (typed, count-safe — no raw list).
+    for c in enforcement.get("conflicts") or []:
+        if isinstance(c, dict) \
+                and c.get("denied_principal_type") == "device" \
+                and c.get("denied_principal_id") == device_id:
+            fact["conflict"] = {
+                "reason": c.get("reason"),
+                "global_block_applied": c.get("global_block_applied"),
+            }
+            break
+    return fact
+
+
+def _report_summary(ring):
+    """The ``latest_report`` summary of a device's LATEST stored report. v2
+    reports (spec §10.2) surface the taxonomy-correct fields
+    (report_id/event/content_sha256_state/ios_copy_verify_state/received_at,
+    schema:"v2"). v1 reports get a SAFE legacy summary only (event/tier and
+    legacy link/transfer fields, schema:"v1") and are NEVER reinterpreted as v2
+    (e.g. a v1 ``avg_bps`` is never surfaced as a v2 field). Full per-peer rows
+    stay in the console drawer (payload discipline). None on empty/garbage."""
+    try:
+        rep = ring[-1]
+        if not isinstance(rep, dict):
+            return None
+    except Exception:
+        return None
+    schema = rep.get("schema")
+    is_v2 = schema == "v2" or rep.get("v") == 2 or "report_id" in rep
+    if is_v2:
+        sha = rep.get("content_sha256")
+        sha = sha if isinstance(sha, dict) else {}
+        ios = rep.get("ios_copy_verify")
+        ios = ios if isinstance(ios, dict) else {}
+        return {
+            "schema": "v2",
+            "report_id": rep.get("report_id"),
+            "event": rep.get("event"),
+            "content_sha256_state": sha.get("state"),
+            "ios_copy_verify_state": ios.get("state"),
+            "received_at": rep.get("received_at"),
+        }
+    # v1 SAFE summary only — legacy fields kept under an explicit v1 marker,
+    # never mapped onto a v2 field name.
+    link = rep.get("link")
+    link = link if isinstance(link, dict) else {}
+    return {
+        "schema": "v1",
+        "event": rep.get("event"),
+        "tier": link.get("tier"),
+        "rtt_ms_median": link.get("rtt_ms_median"),
+        "received_at": rep.get("received_at"),
+        "ts": rep.get("ts"),
+    }
 
 
 def _read_live_samples(state_dir):
@@ -724,6 +1047,16 @@ def _read_images(state_dir):
         return images if isinstance(images, dict) else {}
     except Exception:
         return {}
+
+
+def _read_policy(policy_paths):
+    """Resolve the current peer-policy PolicyResult (authoritative/LKG/
+    fail-closed) for per-participant intent facts. None on any error so
+    telemetry never breaks (rows simply carry no peer_policy)."""
+    try:
+        return _peer_policy.load_policy(policy_paths[0], policy_paths[1])
+    except Exception:
+        return None
 
 
 def aggregate_transfers(live_doc, images, now, write_interval=None):
@@ -780,25 +1113,6 @@ def aggregate_transfers(live_doc, images, now, write_interval=None):
     return out, {"stream_devices": streaming,
                  "samples_rejected_total":
                      _int(counters.get("samples_rejected_total"))}
-
-
-def _report_summary(ring):
-    """The swarm-map summary of a device's LATEST stored report ({ts, event,
-    tier, rtt_ms_median, avg_bps}) or None when the ring is empty/garbage.
-    Full per-peer rows are deliberately NOT inlined into /swarm (payload
-    discipline) — the console drawer fetches them on demand."""
-    try:
-        rep = ring[-1]
-        link = rep.get("link")
-        link = link if isinstance(link, dict) else {}
-        transfer = rep.get("transfer")
-        transfer = transfer if isinstance(transfer, dict) else {}
-        return {"ts": rep.get("ts"), "event": rep.get("event"),
-                "tier": link.get("tier"),
-                "rtt_ms_median": link.get("rtt_ms_median"),
-                "avg_bps": transfer.get("avg_bps")}
-    except Exception:
-        return None
 
 
 def observability_enabled(env=None):
