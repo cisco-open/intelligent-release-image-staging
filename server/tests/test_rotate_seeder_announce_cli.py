@@ -161,3 +161,38 @@ def test_cli_hard_no_go_keeps_manifest_and_returns_one(tmp_path, monkeypatch):
     monkeypatch.setattr(rot, "rotate_seeder_announce", failed)
     assert rot.main(["--maintenance-frozen", "--state", str(state)]) == 1
     assert (state / "seeder-rotation-recovery.json").exists()
+
+
+def test_announce_base_accepts_carrier_grade_nat():
+    """The tracker explicitly admits 100.64.0.0/10 as fleet address space --
+    "carrier-grade NAT (used by deployed fleets) are accepted"
+    (server/tracker.py:_OVERRIDE_NETS). Rotation used Python's
+    ipaddress.is_private, which does NOT classify RFC 6598 as private, so the
+    two disagreed and rotation was impossible on any CGNAT-addressed fleet.
+    Found by running the lab gate against 100.90.168.20.
+    """
+    base = rot._tracker_announce_base(
+        {"IRIS_HOST_IP": "100.90.168.20"})
+    assert base == "http://100.90.168.20:6969/announce"
+
+
+def test_announce_base_still_refuses_a_public_address():
+    """The check must keep refusing genuinely routable space."""
+    with pytest.raises(ValueError):
+        rot._tracker_announce_base({"IRIS_HOST_IP": "8.8.8.8"})
+
+
+def test_announce_base_still_refuses_loopback_and_linklocal():
+    """Loopback/link-local are not fleet address space; the tracker refuses them
+    too, and an announce base pointing there would be advertised to peers."""
+    for host in ("127.0.0.1", "169.254.1.1"):
+        with pytest.raises(ValueError):
+            rot._tracker_announce_base({"IRIS_HOST_IP": host})
+
+
+def test_announce_base_matches_tracker_fleet_space():
+    """Rotation and the tracker must agree on what fleet address space is.
+    They disagreed once -- the tracker admitted CGNAT, rotation did not -- and
+    a whole class of deployment could not rotate its seeder credential."""
+    import tracker
+    assert rot._FLEET_NETS == tracker._OVERRIDE_NETS

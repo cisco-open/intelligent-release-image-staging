@@ -658,6 +658,12 @@ def _http_swarm_sender(url, timeout):
 # CLI (nonsecret only — no token/value argv or output, no revoke option)
 # ---------------------------------------------------------------------------
 
+# Non-routable fleet address space. MUST stay identical to tracker._OVERRIDE_NETS
+# (RFC1918 plus RFC 6598 carrier-grade NAT); a drift test asserts the two match.
+_FLEET_NETS = tuple(ipaddress.ip_network(n) for n in (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"))
+
+
 def _tracker_announce_base(env):
     """Return the token-free HTTP announce base without ever echoing it."""
     value = env.get("IRIS_TRACKER_ANNOUNCE")
@@ -671,10 +677,19 @@ def _tracker_announce_base(env):
     if (parsed.scheme != "http" or not parsed.netloc or parsed.query
             or parsed.fragment):
         raise ValueError("invalid tracker announce base")
+    # Fleet address space, identical to the tracker's _OVERRIDE_NETS. Python's
+    # ipaddress.is_private is the wrong test in BOTH directions here: it rejects
+    # 100.64.0.0/10 (RFC 6598 carrier-grade NAT), which the tracker explicitly
+    # admits because deployed fleets are addressed there -- so rotation was
+    # impossible on such a fleet -- and it accepts loopback and link-local,
+    # which the tracker refuses because an announce base pointing at them would
+    # be advertised to every peer as a download endpoint.
+    # test_announce_base_matches_tracker_fleet_space pins these to the tracker.
     try:
-        if not ipaddress.ip_address(parsed.hostname).is_private:
-            raise ValueError("tracker announce base is not private")
+        addr = ipaddress.ip_address(parsed.hostname)
     except ValueError:
+        raise ValueError("tracker announce base is not private")
+    if addr.version != 4 or not any(addr in net for net in _FLEET_NETS):
         raise ValueError("tracker announce base is not private")
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path or "/announce",
                        "", ""))
