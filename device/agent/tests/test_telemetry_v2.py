@@ -276,7 +276,7 @@ def test_stream_off_downloading_heartbeat_is_paused_state_only():
     iris_agent.run_once(cfg, deps, {"image_id": "img1", "img1": {"tele": {}}})
     obs = cat.heartbeats[-1]["telemetry_observation"]
     assert obs["obs_state"] == "paused"
-    assert "aria" not in obs and "sample_seq" not in obs
+    assert "aria" not in obs and obs["sample_seq"] == 1
     assert HEX32.match(obs["transfer_id"])
 
 
@@ -318,8 +318,7 @@ def test_checkpoint_failure_downgrades_observed_to_not_due_without_rewind():
                  aria_peers=lambda p: [], checkpoint=boom)
     state = {"image_id": "img1", "img1": {"tele": {}}}
     iris_agent.run_once(_CFG, deps, state)
-    obs = cat.heartbeats[-1]["telemetry_observation"]
-    assert obs["obs_state"] == "not_due"
+    assert "telemetry_observation" not in cat.heartbeats[-1]
     # the un-persisted seq increment was rolled back (stays at 0)
     assert state["img1"]["tele"].get("sample_seq", 0) == 0
 

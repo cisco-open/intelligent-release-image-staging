@@ -147,11 +147,14 @@ def build_observation(obs_state, observed_at, transfer_id, image_id,
         env["transfer_id"] = transfer_id
     if image_id is not None:
         env["image_id"] = image_id
+    if sample_seq is not None:
+        env["sample_seq"] = int(sample_seq)
     if obs_state != "observed":
         return env
-    if sample_seq is None or sampling_class not in SAMPLING_CLASSES:
-        raise ValueError("observed envelope requires sample_seq + sampling_class")
-    env["sample_seq"] = int(sample_seq)
+    if sample_seq is None:
+        raise ValueError("observed envelope requires sample_seq")
+    if sampling_class not in SAMPLING_CLASSES:
+        raise ValueError("observed envelope requires sampling_class")
     if aria_session_id:
         env["aria_session_id"] = aria_session_id
     env["sampling_class"] = sampling_class
@@ -174,6 +177,8 @@ def build_observation(obs_state, observed_at, transfer_id, image_id,
         if not ip:
             continue
         row = {"ip": ip}
+        if "port" in p:
+            row["port"] = p["port"]
         for key in ("send_bps", "receive_bps", "peer_client_name", "progress"):
             if key in p:
                 row[key] = p[key]

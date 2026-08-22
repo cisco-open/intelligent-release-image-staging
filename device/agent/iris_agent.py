@@ -250,23 +250,32 @@ def _build_observation(cfg, deps, state, img_id, stage, phase, now):
                 sample_seq=sample_seq, aria_session_id=aria_session_id,
                 sampling_class=sampling_class, stats=stats, peers=peers)
 
+        def state_envelope(obs_state):
+            seq = telemetry_report.next_sample_seq(state, img_id)
+            if not _checkpoint_or_skip(
+                    deps, state, "TELEMETRY-CKPT",
+                    "%s sample_seq checkpoint failed" % img_id):
+                tele["sample_seq"] = seq - 1
+                return None
+            return envelope(obs_state, sample_seq=seq)
+
         # Only live-transfer phases carry an aria snapshot; steady seeding uses
         # the RPC-free path and reports not_due (last value ages to stale).
         if phase not in ("downloading", "seeding-only"):
-            return envelope("not_due"), None
+            return state_envelope("not_due"), None
         if not telemetry_report.stream_enabled(cfg):
-            return envelope("paused"), None
+            return state_envelope("paused"), None
         tier = telemetry_report.classify(state, tele.get("avg_bps"))
         _every, paused = telemetry_report.active_directives(state, now)
         if paused:
-            return envelope("paused"), None
+            return state_envelope("paused"), None
         if not telemetry_report.should_sample(state, tele, tier, now):
-            return envelope("not_due"), None
+            return state_envelope("not_due"), None
         stats = deps.aria_stats(stage)
         peers = deps.aria_peers(stage)
         if not stats:
             # RPC unreachable / no matching download: never retain an old rate.
-            return envelope("rpc_unavailable"), None
+            return state_envelope("rpc_unavailable"), None
         session = None
         get_session = getattr(deps, "aria_session", None)
         if callable(get_session):
@@ -282,7 +291,7 @@ def _build_observation(cfg, deps, state, img_id, stage, phase, now):
                 deps, state, "TELEMETRY-CKPT",
                 "%s sample_seq checkpoint failed" % img_id):
             tele["sample_seq"] = seq - 1
-            return envelope("not_due"), None
+            return None, None
         tele["stream_last_ts"] = now
         obs = envelope("observed", sample_seq=seq, aria_session_id=session,
                        sampling_class=sampling_class, stats=stats, peers=peers)
@@ -1165,8 +1174,9 @@ def _aria_stats_impl(rpc, stage_path):
         if gid is None:
             return None
         status = rpc("aria2.tellStatus",
-                     [gid, ["gid", "completedLength", "totalLength",
-                            "downloadSpeed", "uploadSpeed", "connections"]])
+                      [gid, ["gid", "completedLength", "totalLength",
+                             "downloadSpeed", "uploadSpeed", "connections",
+                             "status"]])
         # _rpc defaults a missing "result" to [] — never leak a non-dict out.
         return status if isinstance(status, dict) else None
     except Exception:
@@ -1184,7 +1194,7 @@ def _aria_peers_impl(rpc, stage_path):
         if gid is None:
             return []
         raw_rows = rpc("aria2.getPeers", [
-            gid, ["ip", "downloadSpeed", "uploadSpeed", "peerClientName",
+            gid, ["ip", "port", "downloadSpeed", "uploadSpeed", "peerClientName",
                   "progress"]])
         if not isinstance(raw_rows, list):
             return []
@@ -1196,6 +1206,9 @@ def _aria_peers_impl(rpc, stage_path):
             if not isinstance(ip, str) or not ip or len(ip) > 64:
                 continue
             row = {"ip": ip}
+            port = _optional_bounded_int(peer.get("port"), 65535)
+            if port is not None and port > 0:
+                row["port"] = port
             receive = _optional_bounded_int(peer.get("downloadSpeed"), 10 ** 12)
             send = _optional_bounded_int(peer.get("uploadSpeed"), 10 ** 12)
             if receive is not None:

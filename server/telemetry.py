@@ -68,6 +68,17 @@ def _report_event_id(report, device_id):
     return event_id, record
 
 
+def _otlp_record_event_id(record):
+    """Return an OTLP LogRecord event.id attribute, if present."""
+    if not isinstance(record, dict) or "timeUnixNano" not in record:
+        return None
+    for attr in record.get("attributes", []):
+        if isinstance(attr, dict) and attr.get("key") == "event.id":
+            value = attr.get("value", {})
+            return value.get("stringValue") if isinstance(value, dict) else None
+    return None
+
+
 def poll_seeder(rpc):
     """Query the seeder aria2 RPC. `rpc(method, params)` returns the result.
     Returns (stats_dict, names, totals) where names maps info_hash -> image
@@ -109,9 +120,9 @@ def poll_seeder_peers(rpc):
     caller can detect a counter epoch (session change / decrease).
 
     Returns (peer_up, upload_lengths, session_id):
-      * peer_up: {info_hash: {ip: upload_bps}} — how fast THIS server is
+      * peer_up: {info_hash: {(ip, port): upload_bps}} — exact aria endpoint
         INSTANTANEOUSLY sending to each connected device, from
-        getPeers(gid, ["ip","uploadSpeed"]) (rate-only; never bitfield, never
+        getPeers(gid, ["ip","port","uploadSpeed"]) (rate-only; never bitfield, never
         cumulative per-peer counters — aria2 has no cross-connection per-peer
         total, and inferring one from the torrent-wide counter was division,
         not measurement).
@@ -137,14 +148,19 @@ def poll_seeder_peers(rpc):
             continue
         upload_lengths[ih] = _int(d.get("uploadLength"))
         try:
-            peers = rpc("aria2.getPeers", [gid, ["ip", "uploadSpeed"]])
+            peers = rpc("aria2.getPeers", [gid, ["ip", "port", "uploadSpeed"]])
         except Exception:
             continue
         m = peer_up.setdefault(ih, {})
         for p in peers:
             ip = p.get("ip")
-            if ip:
-                m[ip] = m.get(ip, 0) + _int(p.get("uploadSpeed"))
+            port = p.get("port")
+            try:
+                port = int(port)
+            except (TypeError, ValueError):
+                port = None
+            if ip and port and 0 < port <= 65535:
+                m[(ip, port)] = m.get((ip, port), 0) + _int(p.get("uploadSpeed"))
     return peer_up, upload_lengths, session_id
 
 
@@ -365,6 +381,7 @@ class Telemetry:
                  env_endpoint="", env_enabled=False, headers=None,
                  policy_info=None, enforcement_info=None):
         self.exporter = exporter
+        self._seen_report_event_ids = set()
         # Task 22: the OTLP log queue is a STABLE object owned by the hub for
         # the whole process; only the destination transport is mutable and
         # swapped on a console destination change/disable/re-enable, so
@@ -379,6 +396,8 @@ class Telemetry:
         else:
             self.log_queue = otlp.LogQueue()
             self._log_transport = None
+        self.log_queue.configure_dedupe(
+            _otlp_record_event_id, self._reports_delivered)
         # Sender override hook (tests). Applied to every rebuilt transport.
         self._log_sender = None
         self.rpc = rpc
@@ -444,7 +463,6 @@ class Telemetry:
         # stored ring universe on every scan: a new hub deliberately replays the
         # ring at-least-once, while equal received_at values never shadow one
         # another behind a timestamp watermark.
-        self._seen_report_event_ids = set()
         self._seeder = {"rpc_up": False}
         self._names = {}                    # last good info_hash -> name
         self._totals = {}                   # last good info_hash -> total bytes
@@ -623,7 +641,9 @@ class Telemetry:
         if self.rpc is not None:
             seeder, names, totals = poll_seeder(self.rpc)
             self._seeder = seeder
-            if seeder.get("rpc_up"):
+            peer_up, upload_lengths, session_id = poll_seeder_peers(self.rpc)
+            polls_ok = seeder.get("rpc_up") and upload_lengths is not None
+            if polls_ok:
                 # A successful tellActive is a complete replacement snapshot:
                 # vanished torrents are no longer current control state.
                 self._names = names
@@ -638,9 +658,7 @@ class Telemetry:
             # mean a new counter epoch / control-state loss). Because nothing is
             # integrated into a per-peer allocation, an epoch reset loses no
             # attributed bytes: there is simply nothing to carry.
-            peer_up, upload_lengths, session_id = \
-                poll_seeder_peers(self.rpc)
-            if upload_lengths is not None:
+            if polls_ok:
                 self._peer_up = peer_up
                 self._upload_len = {}
                 self._torrent_observed_at = now
@@ -649,6 +667,9 @@ class Telemetry:
                 # after a failed control-state poll.
                 self._peer_up = {}
                 self._upload_len = {}
+                self._torrent_upload_bps = {}
+                self._torrent_observed_at = 0.0
+                self._seeder = {"rpc_up": False}
             new_epoch = (self._session_id is not None
                          and session_id != self._session_id)
             self._session_id = session_id
@@ -727,14 +748,15 @@ class Telemetry:
                     received_at = 0.0
                 candidates.append((received_at, event_id, str(device_id),
                                    record, enrich))
-        current_ids = {event_id for _, event_id, _, _, _ in candidates}
-        self._seen_report_event_ids.intersection_update(current_ids)
         for _, event_id, device_id, report, enrich in sorted(
                 candidates, key=lambda row: row[:3]):
-            if event_id not in self._seen_report_event_ids:
+            if (event_id not in self._seen_report_event_ids
+                    and not self.log_queue.contains(event_id)):
                 self.log_queue.emit(otlp.build_report_record(
                     report, device_id, enrich=enrich))
-                self._seen_report_event_ids.add(event_id)
+
+    def _reports_delivered(self, event_ids):
+        self._seen_report_event_ids.update(event_ids)
 
     # --- live per-peer swarm view (for the swarm map) ---
     def swarm_snapshot(self, now=None):
@@ -770,7 +792,9 @@ class Telemetry:
         images = []
         for info_hash, peers in self._registry.snapshot(now=now).items():
             total = self._totals.get(info_hash)
-            up_now = self._peer_up.get(info_hash, {})
+            up_now = self._peer_up.get(info_hash, {}) \
+                if (self._torrent_observed_at and
+                    now - self._torrent_observed_at <= 2 * self.interval) else {}
             out = []
             for p in peers:
                 ptype = p.get("principal_type")
@@ -783,7 +807,8 @@ class Telemetry:
                     continue
                 out.append(_peer_row(
                     p, total, up_now, devices_by_id, report_by_device,
-                    live_by_device, policy, enforcement, derived_denied, now))
+                    live_by_device, policy, enforcement, derived_denied, now,
+                    self._torrent_observed_at))
             images.append({
                 "image": self._names.get(info_hash, info_hash),
                 "info_hash": info_hash,
@@ -838,14 +863,15 @@ class Telemetry:
             "rpc_up": bool(self._seeder.get("rpc_up")),
             "unavailable": not bool(self._seeder.get("rpc_up")),
             "aria_session_id": self._session_id,
-            "global": {
-                "send_bps": self._seeder.get("upload_speed", 0),
-                "receive_bps": self._seeder.get("download_speed", 0),
-                "connections": self._seeder.get("connections", 0),
-                "active_torrents": self._seeder.get("active_torrents", 0),
-            },
-            "torrent": torrents,
         }
+        if self._seeder.get("rpc_up"):
+            observation["global"] = {
+                "send_bps": self._seeder["upload_speed"],
+                "receive_bps": self._seeder["download_speed"],
+                "connections": self._seeder["connections"],
+                "active_torrents": self._seeder["active_torrents"],
+            }
+            observation["torrent"] = torrents
         if service:
             observation["tracker_observation"] = {
                 "principal_type": "service", "principal_id": "seeder",
@@ -1058,7 +1084,8 @@ def _read_reports(state_dir):
 
 
 def _peer_row(p, total, up_now, devices_by_id, report_by_device,
-              live_by_device, policy, enforcement, derived_denied, now):
+              live_by_device, policy, enforcement, derived_denied, now,
+              server_observed_at=None):
     """One canonical peer row (spec §10.3), source-grouped. All device
     attribution joins on the authenticated device principal id, never on the
     source IP."""
@@ -1101,9 +1128,11 @@ def _peer_row(p, total, up_now, devices_by_id, report_by_device,
     # server_observation.peer source (never an inferred cumulative per-peer
     # total — that machinery is retired). Present only when measured (>0 or a
     # known connection); we surface it whenever the seeder poll saw the ip.
-    if p["ip"] in up_now:
+    endpoint = (p["ip"], p["port"])
+    if endpoint in up_now:
         row["server_observation"] = {
-            "peer": {"send_bps": up_now.get(p["ip"], 0)}}
+            "peer": {"send_bps": up_now[endpoint],
+                     "observed_at": server_observed_at}}
 
     # Attributable device principals only: identity-keyed joins by principal id.
     if ptype == "device" and pid is not None:
@@ -1386,8 +1415,22 @@ def aggregate_transfers(live_doc, images, now, write_interval=None):
     if not isinstance(live_doc, dict):
         return empty
     try:
-        if now - float(live_doc.get("written_at", 0)) > 2 * write_interval:
-            return empty
+        written_at = float(live_doc.get("written_at", 0))
+        if now - written_at > 2 * write_interval:
+            stale_rows = []
+            for image_id in {s.get("image_id") for s in
+                             (live_doc.get("samples") or {}).values()
+                             if isinstance(s, dict)}:
+                entry = images.get(image_id)
+                if entry:
+                    stale_rows.append({
+                        "image": entry.get("filename", image_id),
+                        "info_hash": entry.get("info_hash_hex", ""),
+                        "devices": 0, "sampling_class_good": 0,
+                        "sampling_class_constrained": 0,
+                        "zero_receive_devices": 0, "stale": True,
+                        "freshness_age_seconds": int(now - written_at)})
+            return stale_rows, empty[1]
     except (TypeError, ValueError):
         return empty
     counters = live_doc.get("counters") or {}

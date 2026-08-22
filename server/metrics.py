@@ -86,8 +86,9 @@ def render(swarm, seeder, counters, reports_stored=0, transfers=None,
            "1 if the most recent aria2 RPC poll succeeded")
     out.append("iris_seeder_rpc_up %d" % (1 if seeder.get("rpc_up") else 0))
     for name, key, help_text in _SEEDER_GAUGES:
-        family(name, "gauge", help_text)
-        out.append("%s %d" % (name, _int(seeder.get(key))))
+        if seeder.get("rpc_up") and key in seeder:
+            family(name, "gauge", help_text)
+            out.append("%s %d" % (name, _int(seeder[key])))
     if seeder_torrents:
         family("iris_seeder_torrent_upload_length_bytes", "gauge",
                "Seeder torrent control-state upload length (bytes)")

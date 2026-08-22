@@ -180,6 +180,17 @@ class TestSanitizeObservation:
 # --- LiveTable canonical observation model ---------------------------------
 
 class TestLiveTableObservation:
+    def test_unsequenced_delayed_state_cannot_overwrite_sequenced_observed(self):
+        t = live_samples.LiveTable()
+        clean, _ = live_samples.sanitize_observation(_obs(), "img-1", 32)
+        assert t.observe("d1", clean, now=1000.0, stream_every=1)
+        delayed, _ = live_samples.sanitize_observation(
+            {"v": 2, "obs_state": "paused", "observed_at": 0.5,
+             "transfer_id": TID, "image_id": "img-1", "sample_seq": 41},
+            "img-1", 32)
+        assert not t.observe("d1", delayed, now=1001.0, stream_every=1)
+        assert t.snapshot(1001.0)["samples"]["d1"]["obs_state"] == "observed"
+
     def test_observed_sets_valid_value(self):
         t = live_samples.LiveTable()
         clean, _ = live_samples.sanitize_observation(_obs(), "img-1", 32)

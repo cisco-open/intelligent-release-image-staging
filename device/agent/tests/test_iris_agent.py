@@ -2157,7 +2157,7 @@ def test_aria_stats_finds_gid_in_tellactive_returns_status_subset():
     assert method == "aria2.tellStatus"
     assert params[0] == "gidA"
     assert params[1] == ["gid", "completedLength", "totalLength",
-                         "downloadSpeed", "uploadSpeed", "connections"]
+                         "downloadSpeed", "uploadSpeed", "connections", "status"]
     # found in tellActive -> never paged tellStopped
     assert all(m != "aria2.tellStopped" for m, _ in calls)
 
@@ -2214,7 +2214,7 @@ def test_aria_peers_requests_measured_fields_and_returns_canonical_rows():
          "peer_client_name": "aria2/1.37", "progress": 87.5},
         {"ip": "10.0.0.8", "receive_bps": 0, "send_bps": 2048}]
     assert calls[-1] == ("aria2.getPeers", [
-        "gidA", ["ip", "downloadSpeed", "uploadSpeed", "peerClientName",
+        "gidA", ["ip", "port", "downloadSpeed", "uploadSpeed", "peerClientName",
                  "progress"]])
     assert "bitfield" not in calls[-1][1][1]
 

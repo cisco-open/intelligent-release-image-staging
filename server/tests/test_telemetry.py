@@ -116,7 +116,7 @@ def _peers_rpc(active_gid, peers_by_gid, session_id="s0"):
             assert params and params[0] == ["gid", "infoHash", "uploadLength"]
             return active_gid()
         if method == "aria2.getPeers":
-            assert params[1] == ["ip", "uploadSpeed"]      # rate-only, no bitfield
+            assert params[1] == ["ip", "port", "uploadSpeed"]
             return peers_by_gid.get(params[0], [])
         raise AssertionError(method)
     return rpc
@@ -128,11 +128,12 @@ def test_poll_seeder_peers_uses_filtered_keys_and_reports_session():
     # comes from aria2.getSessionInfo so the caller can detect a counter epoch.
     def active_gid():
         return [{"gid": "g1", "infoHash": "abc", "uploadLength": "12345"}]
-    peers = {"g1": [{"ip": "10.0.0.2", "uploadSpeed": "500000"},
-                    {"ip": "10.0.0.3", "uploadSpeed": "0"}]}
+    peers = {"g1": [{"ip": "10.0.0.2", "port": "6882", "uploadSpeed": "500000"},
+                    {"ip": "10.0.0.3", "port": "6883", "uploadSpeed": "0"}]}
     pu, upload_lengths, session_id = telemetry.poll_seeder_peers(
         _peers_rpc(active_gid, peers, session_id="sess-1"))
-    assert pu == {"abc": {"10.0.0.2": 500000, "10.0.0.3": 0}}
+    assert pu == {"abc": {("10.0.0.2", 6882): 500000,
+                           ("10.0.0.3", 6883): 0}}
     assert upload_lengths == {"abc": 12345}
     assert session_id == "sess-1"
 
@@ -149,10 +150,10 @@ def test_poll_seeder_peers_session_absent_is_empty_string():
         if method == "aria2.tellActive":
             return active_gid()
         if method == "aria2.getPeers":
-            return [{"ip": "10.0.0.2", "uploadSpeed": "7"}]
+            return [{"ip": "10.0.0.2", "port": "6882", "uploadSpeed": "7"}]
         raise AssertionError(method)
     pu, upload_lengths, session_id = telemetry.poll_seeder_peers(rpc)
-    assert pu == {"abc": {"10.0.0.2": 7}}
+    assert pu == {"abc": {("10.0.0.2", 6882): 7}}
     assert upload_lengths == {"abc": 10}
     assert session_id == ""
 
@@ -163,7 +164,7 @@ def test_swarm_snapshot_surfaces_measured_peer_rate_no_inferred_bytes():
     # gone from the row entirely (it was division, not measurement).
     def active_gid():
         return [{"gid": "g1", "infoHash": "abc", "uploadLength": "1000"}]
-    peers = {"g1": [{"ip": "10.0.0.2", "uploadSpeed": "100"}]}
+    peers = {"g1": [{"ip": "10.0.0.2", "port": "6882", "uploadSpeed": "100"}]}
     ga = {"uploadSpeed": "500000", "downloadSpeed": "0", "numActive": "1"}
     active_full = [{"connections": "1", "infoHash": "abc", "totalLength": "1000",
                     "files": [{"path": "/img/cat9k.bin"}]}]
@@ -180,7 +181,7 @@ def test_swarm_snapshot_surfaces_measured_peer_rate_no_inferred_bytes():
         if method == "aria2.getSessionInfo":
             return {"sessionId": "s0"}
         if method == "aria2.getPeers":
-            assert params[1] == ["ip", "uploadSpeed"]
+            assert params[1] == ["ip", "port", "uploadSpeed"]
             return peers.get(params[0], [])
         raise AssertionError(method)
 
@@ -1201,16 +1202,32 @@ def test_report_cursor_queues_equal_timestamps_once_and_replays_on_restart():
     }
     hub = telemetry.Telemetry(PeerRegistry(), reports_info=lambda: reports)
     hub._export_new_reports()
-    assert [record["event.id"] for record in hub.log_queue.snapshot()] == ["r1", "r2"]
+    assert [telemetry._otlp_record_event_id(record)
+            for record in hub.log_queue.snapshot()] == ["r1", "r2"]
     hub._export_new_reports()
     assert hub.log_queue.queued == 2
     reports["d1"].append(
         {"schema": "v2", "report_id": "r3", "received_at": 10})
     hub._export_new_reports()
-    assert [record["event.id"] for record in hub.log_queue.snapshot()] == ["r1", "r2", "r3"]
+    assert [telemetry._otlp_record_event_id(record)
+            for record in hub.log_queue.snapshot()] == ["r1", "r2", "r3"]
     restarted = telemetry.Telemetry(PeerRegistry(), reports_info=lambda: reports)
     restarted._export_new_reports()
-    assert [record["event.id"] for record in restarted.log_queue.snapshot()] == ["r1", "r2", "r3"]
+    assert [telemetry._otlp_record_event_id(record)
+            for record in restarted.log_queue.snapshot()] == ["r1", "r2", "r3"]
+
+
+def test_evicted_report_is_requeued_but_delivered_report_is_not():
+    reports = {"d": [{"schema": "v2", "report_id": "r1", "received_at": 1}]}
+    hub = telemetry.Telemetry(PeerRegistry(), reports_info=lambda: reports)
+    hub.log_queue._max = 1
+    hub._export_new_reports()
+    hub.log_queue.emit({"event": "join"})
+    hub._export_new_reports()
+    assert telemetry._otlp_record_event_id(hub.log_queue.snapshot()[0]) == "r1"
+    assert hub.log_queue.flush(lambda batch: None) == 1
+    hub._export_new_reports()
+    assert hub.log_queue.queued == 0
 
 
 def test_sample_survives_reports_info_raising():
@@ -1754,7 +1771,7 @@ class TestReportExportEnrichment:
         hub._export_new_reports()
         rec = hub.log_queue.snapshot()[0]
         assert rec["eventName"] == "iris.device.transfer.report"
-        assert rec["event.id"] == "a" * 32
+        assert telemetry._otlp_record_event_id(rec) == "a" * 32
 
 
 # ---- :9101 /swarm loopback gate (console-only swarm data by default) ----

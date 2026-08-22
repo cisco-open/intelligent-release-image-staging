@@ -143,19 +143,23 @@ def sanitize_observation(data, approved_image_id, configured_max_peers):
             raise ValueError("image_id is not the device's assigned image")
         out["image_id"] = image_id
 
+    seq = data.get("sample_seq")
+    if seq is not None:
+        if isinstance(seq, bool) or not isinstance(seq, int) or seq < 0:
+            raise ValueError("bad sample_seq")
+        out["sample_seq"] = seq
+
     if obs_state != "observed":
         # State-only: aria / peer_connections / sampling_class forbidden.
         for forbidden in ("aria", "peer_connections", "sampling_class",
-                          "sample_seq"):
+                          ):
             if forbidden in data:
                 raise ValueError("%s forbidden when not observed" % forbidden)
         return out, False
 
     # observed: sample_seq + sampling_class required.
-    seq = data.get("sample_seq")
-    if isinstance(seq, bool) or not isinstance(seq, int) or seq < 0:
+    if "sample_seq" not in out:
         raise ValueError("bad sample_seq")
-    out["sample_seq"] = seq
     sampling_class = data.get("sampling_class")
     if sampling_class not in SAMPLING_CLASSES:
         raise ValueError("bad sampling_class")
@@ -192,6 +196,8 @@ def sanitize_observation(data, approved_image_id, configured_max_peers):
         if not isinstance(ip, str) or not ip or len(ip) > 64:
             raise ValueError("bad peer_connection ip")
         clean = {"ip": ip}
+        if "port" in row:
+            clean["port"] = _bounded_int(row["port"], 65535)
         for key in ("send_bps", "receive_bps"):
             if key in row:
                 clean[key] = _bounded_int(row[key], _PEER_ROW_BPS_CAP)
@@ -263,16 +269,18 @@ class LiveTable:
             obs_state = clean.get("obs_state", "observed")   # v1 -> observed
 
             # Reorder protection: same transfer, older-or-equal seq -> drop.
-            if obs_state == "observed" and "sample_seq" in clean and prior \
+            if "sample_seq" in clean and prior \
                     and prior.get("transfer_id") == clean.get("transfer_id") \
-                    and "last_observed_seq" in prior \
-                    and clean["sample_seq"] <= prior["last_observed_seq"]:
+                    and "last_sample_seq" in prior \
+                    and clean["sample_seq"] <= prior["last_sample_seq"]:
                 return False
 
             entry = dict(clean)
             entry["received_at"] = now
             entry["retention_seconds"] = _retention_seconds(
                 _sampling_class_of(clean), stream_every)
+            if "sample_seq" in clean:
+                entry["last_sample_seq"] = clean["sample_seq"]
 
             if obs_state == "observed":
                 entry["valid"] = True
