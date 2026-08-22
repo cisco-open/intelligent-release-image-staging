@@ -241,10 +241,17 @@
       (state === 'degraded' || state === 'fail_closed' ? 'badge-fail' : 'badge-queued')) +
       '" title="' + esc(details) + '">' + esc(state) + '</span>';
   }
+  var devicesRefreshGeneration = 0, devicesRefreshController = null;
+  var peerPolicyGeneration = 0, peerPolicyController = null;
   async function refreshPeerPolicy() {
-    var r = await fetch('/api/peer-policy');
+    var mine = ++peerPolicyGeneration;
+    if (peerPolicyController) peerPolicyController.abort();
+    peerPolicyController = new AbortController();
+    var r = await fetch('/api/peer-policy', { signal: peerPolicyController.signal });
     if (!r.ok) throw new Error('Peer policy refresh failed (' + r.status + ')');
-    peerPolicy = await r.json();
+    var next = await r.json();
+    if (mine !== peerPolicyGeneration) return peerPolicy;
+    peerPolicy = next;
     return peerPolicy;
   }
   async function setQuarantine(btn) {
@@ -305,15 +312,22 @@
   }
   scheduleDevices();
   async function refreshDevices() {
-    var results = await Promise.all([fetch('/api/devices'), fetch('/api/images'), fetch('/api/credentials'), fetch('/api/peer-policy')]);
+    var mine = ++devicesRefreshGeneration;
+    if (devicesRefreshController) devicesRefreshController.abort();
+    devicesRefreshController = new AbortController();
+    var signal = devicesRefreshController.signal;
+    var results = await Promise.all([fetch('/api/devices', { signal: signal }), fetch('/api/images', { signal: signal }), fetch('/api/credentials', { signal: signal }), fetch('/api/peer-policy', { signal: signal })]);
     var dr = results[0], ir = results[1], cr = results[2], pr = results[3];
-    if (!dr.ok) return;
-    if (pr.ok) peerPolicy = await pr.json();
+    if (!dr.ok || mine !== devicesRefreshGeneration) return;
+    var nextPolicy = pr.ok ? await pr.json() : peerPolicy;
     var dbody = await dr.json();
+    if (mine !== devicesRefreshGeneration) return;
+    peerPolicy = nextPolicy;
     var devs = dbody.devices || [];
     var devNow = dbody.now || Date.now() / 1000;   // server clock for last_seen freshness
     imageIds = ir.ok ? ((await ir.json()).images || []).map(function (i) { return i.id; }) : [];
     credOpts = cr.ok ? ((await cr.json()).profiles || []) : [];
+    if (mine !== devicesRefreshGeneration) return;
     syncCredSelected();
     // keep batch checkbox selections across the periodic re-render
     var marked = {};
@@ -2229,6 +2243,10 @@
       var nav = document.getElementById('nav-' + v);
       if (nav) nav.classList.toggle('active', v === view);
     });
+    var swarmFrame = document.getElementById('swarm-frame');
+    if (swarmFrame && swarmFrame.contentWindow) {
+      swarmFrame.contentWindow.postMessage(view === 'swarm' ? 'MAP_RESUME' : 'MAP_PAUSE', location.origin);
+    }
     document.getElementById('settings-submenu').hidden = view !== 'settings';
     if (view === 'settings') showSettingsSub(sub || 'general');
     document.getElementById('monitoring-submenu').hidden = view !== 'monitoring';

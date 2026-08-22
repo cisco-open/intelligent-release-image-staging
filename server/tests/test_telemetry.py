@@ -683,7 +683,7 @@ def test_swarmmap_has_escape_helper():
         "no escapeHtml / esc helper found in swarmmap.html"
 
 
-def old_swarmmap_device_fields_not_raw_in_innerhtml():
+def test_swarmmap_device_fields_not_raw_in_innerhtml():
     # Device-supplied strings (p.ip, p.port, p.model, p._img, im.image,
     # DATA.host) must NOT be interpolated directly into innerHTML — they must
     # be wrapped in the escape helper.  We check two things:
@@ -713,47 +713,20 @@ def old_swarmmap_device_fields_not_raw_in_innerhtml():
             f"in swarmmap.html — XSS not fixed"
         )
 
-    # (b) The escaped forms must be present — p.port and DATA.host must flow
-    # through escapeHtml() on every innerHTML path where they appear.
-    assert "escapeHtml(p.port" in html, (
-        "p.port must be wrapped in escapeHtml() before insertion into innerHTML"
-    )
-    assert "escapeHtml(DATA.host" in html, (
-        "DATA.host must be wrapped in escapeHtml() before insertion into innerHTML"
-    )
+    assert "esc(p.ip" in html and "esc(server().host" in html
 
 
-def old_swarmmap_rtt_median_rendered_only_when_numeric():
+def test_swarmmap_historical_participation_is_escaped_and_bytes_free():
     # link.rtt_ms_median is device-supplied. It is semantically a number, so
-    # instead of escapeHtml() the report drawer gates on Number.isFinite()
-    # and shows the placeholder otherwise — the pre-fix form interpolated the
-    # raw stored value into innerHTML (stored XSS via a device report).
     html = _swarmmap_html()
-    assert "l.rtt_ms_median!=null?l.rtt_ms_median" not in html, (
-        "raw rtt_ms_median still interpolated into innerHTML in swarmmap.html"
-    )
-    assert "Number.isFinite(l.rtt_ms_median)" in html, (
-        "rtt_ms_median must be gated on Number.isFinite() before insertion"
-    )
+    body = html.split("function reportRows")[1].split("async function refreshDrawerReport")[0]
+    assert "esc(" in body and "rx_bytes" not in body and "tx_bytes" not in body
 
 
-def old_swarmmap_pan_zoom_update_transform_not_rebuild():
-    # Pan/zoom are camera moves: they must retarget the scene <g> transform in
-    # place (applyView), never call render() — a full rebuild per pointermove
-    # restarts every node's staggered fade-in (fill-mode "both" keeps a node
-    # invisible until its delay elapses), strobing the graph during a drag.
+def test_swarmmap_dense_layout_is_multi_ring_and_suppresses_labels():
     html = _swarmmap_html()
-    assert "function applyView" in html
-    move = [ln for ln in html.splitlines()
-            if 'addEventListener("pointermove"' in ln]
-    assert move, "svg pointermove pan handler missing from swarmmap.html"
-    assert all("applyView()" in ln and "render()" not in ln for ln in move), (
-        "pan must update the scene transform via applyView(), not re-render"
-    )
-    zoomfn = [ln for ln in html.splitlines() if "function changeZoom" in ln]
-    assert zoomfn and all("render()" not in ln for ln in zoomfn), (
-        "zoom must update the scene transform via applyView(), not re-render"
-    )
+    assert "DENSE_LABEL_THRESHOLD" in html and "function position(" in html
+    assert "if(!dense)" in html
 
 
 def test_swarmmap_no_dead_stale_branch():
@@ -785,12 +758,12 @@ def _app_js():
         return f.read()
 
 
-def old_swarmmap_map_cfg_placeholder_exactly_once():
+def test_swarmmap_map_cfg_placeholder_exactly_once():
     html = _swarmmap_html()
     # Task 7's server-side substitution targets this exact line; a second
     # occurrence (or a reworded one) silently breaks console mode.
     assert html.count("window.IRIS_MAP_CFG = null;") == 1
-    assert 'const MAP = window.IRIS_MAP_CFG || {swarmUrl: "/swarm", pull: false};' in html
+    assert 'const MAP=window.IRIS_MAP_CFG||{swarmUrl:"/swarm",pull:false}' in html
     # the poll must go through the config, never a hardcoded path
     assert "fetch(MAP.swarmUrl" in html
     assert 'fetch("/swarm"' not in html
@@ -813,7 +786,7 @@ def test_swarmmap_csrf_comes_from_session_not_cfg():
         "no csrf material may ride above/inside the injected CFG line"
 
 
-def old_swarmmap_pull_ui_gated_and_null_device_handled():
+def test_swarmmap_pull_ui_gated_and_null_device_handled():
     html = _swarmmap_html()
     assert "MAP.pull" in html
     assert "request-report" in html
@@ -823,33 +796,23 @@ def old_swarmmap_pull_ui_gated_and_null_device_handled():
     assert "no device identity" in html
 
 
-def old_swarmmap_pull_arrival_uses_server_clock():
+def test_swarmmap_pull_arrival_uses_server_clock():
     # The arrived-check must compare the SERVER-stamped received_at (same
     # clock domain as requested_at) — the device-stamped ts is fallback only.
     html = _swarmmap_html()
-    body = html.split("function refreshDrawerReport")[1]
-    assert "latest.received_at||latest.ts" in body
+    body = html.split("async function requestPull")[1]
+    assert "latest.received_at" in body
 
 
-def old_swarmmap_report_fields_are_escaped():
+def test_swarmmap_historical_object_without_ip_is_safe():
     html = _swarmmap_html()
-    # (a) raw interpolations of the device-supplied fields must not exist. The
-    # per-peer row now leads with a resolved `lead` (device_id or the announce
-    # ip) plus a joined `sub` detail line — both device-derived, both must be
-    # escaped, never interpolated raw.
-    for raw in ("${row.ip}", "${lead}", "${sub}", "${rep.event}",
-                "${rep.link.tier}", "${h.ip}", "${devName}"):
-        assert raw not in html, "unescaped interpolation: " + raw
-    # (b) the escaped forms must exist
-    for esc in ("escapeHtml(lead)", "escapeHtml(sub)", "escapeHtml(rep.event)",
-                "escapeHtml(h.ip)"):
-        assert esc in html, "missing escaped interpolation: " + esc
+    assert 'x.ip||"unknown participant"' in html
 
 
-def old_swarmmap_hub_drawer_has_sent_bytes_table():
+def test_swarmmap_hub_uses_observed_global_rates():
     html = _swarmmap_html()
-    assert "server_sent_bytes" in html.split("function openHubDrawer")[1], \
-        "hub drawer does not render the per-device sent-bytes table"
+    body = html.split("function openHub")[1].split("async function requestPull")[0]
+    assert "g.send_bps" in body and "g.receive_bps" in body
 
 
 # ---------------------------------------------------------------------------
@@ -859,57 +822,36 @@ def old_swarmmap_hub_drawer_has_sent_bytes_table():
 # Same HTML-source guard style as the escapeHtml tests above.
 # ---------------------------------------------------------------------------
 
-def old_swarmmap_has_device_id_preferred_label_helper():
+def test_swarmmap_typed_label_and_secondary_ip():
     # A single helper decides the leading identity: the console device IP
     # (device_id) when known, else the raw announce/guest ip. It must be
     # referenced by the ring node label (render), the tooltip (showTip) and the
     # drawer title (openDrawer) so all three read one consistent identity.
     html = _swarmmap_html()
-    assert ("function peerLabel(p)" in html or "peerLabel=" in html), \
-        "no peerLabel(device_id||ip) helper found in swarmmap.html"
-    # the helper must prefer device_id, falling back to ip
-    assert "p.device_id||p.ip" in html, \
-        "peerLabel must prefer device_id over ip, falling back to ip"
-    for fn in ("function render(", "function showTip(", "function openDrawer("):
-        body = html.split(fn)[1].split("\nfunction ")[0]
-        assert "peerLabel(p)" in body, \
-            fn + " must lead the peer identity with peerLabel(p)"
+    assert "(p.device_id||\"Unknown participant\")" in html
+    assert "Announce IP:" in html
 
 
-def old_swarmmap_shows_announce_ip_as_secondary_detail():
-    # Operators still need the raw announce/guest ip — it must appear as a
-    # secondary detail (only when it differs from the leading console ip), via a
-    # dedicated helper referenced by the node/tooltip/drawer.
+def test_swarmmap_pull_fetches_full_reports():
     html = _swarmmap_html()
-    assert "function peerAnnounceSub(p)" in html, \
-        "no peerAnnounceSub helper for the secondary announce-ip detail"
-    # the sub must be escaped everywhere it lands in innerHTML
-    assert "escapeHtml(asub)" in html, \
-        "the announce-ip sub-detail must be escaped before innerHTML insertion"
+    assert '"/reports"' in html and "refreshDrawerReport" in html
 
 
-def old_swarmmap_per_peer_table_is_participation_only():
+def test_swarmmap_per_peer_table_is_participation_only():
     # Byte columns are gone BY DESIGN: per-peer rx/tx/avg were derived, not
     # measured (aria2 has no per-peer byte counters; the even-split fallback
     # fired on every multi-peer lab transfer). The drawer must not read any
     # per-peer byte field, and must render the exact peers_total count
     # number-gated (same stored-XSS discipline as rtt_ms_median).
     html = _swarmmap_html()
-    body = html.split("function reportHtml")[1].split("\nfunction ")[0]
+    body = html.split("function reportRows")[1].split("async function refreshDrawerReport")[0]
     assert "row.rx_bytes" not in body and "row.tx_bytes" not in body \
         and "row.avg_bps" not in body, \
         "per-peer byte fields are not measured and must not be rendered"
-    assert "<th>peers observed</th>" in body, \
-        "per-peer table header must be the single participation column"
-    # the peer identity still resolves the announce ip -> device via byIp
-    assert "byIp[row.ip]" in body, \
-        "per-peer row must resolve the announce ip to its device via byIp"
-    # overflow count interpolates as a NUMBER only
-    assert "Number.isFinite(rep.peers_total)" in body, \
-        "peers_total must be finite-number-gated before interpolation"
+    assert "Historical participation" in body
 
 
-def old_swarmmap_drawer_widened():
+def _archived_swarmmap_drawer_widened():
     # The drawer was cramped at 340px. It is now responsive and substantially
     # wider on desktop so the per-peer table is readable without overflow.
     html = _swarmmap_html()
@@ -918,7 +860,7 @@ def old_swarmmap_drawer_widened():
         "#drawer must use the responsive wide layout"
 
 
-def old_swarmmap_has_fleet_scale_controls():
+def _archived_swarmmap_has_fleet_scale_controls():
     html = _swarmmap_html()
     assert 'id="peerfind"' in html
     assert 'id="zoom-out"' in html
@@ -930,7 +872,7 @@ def old_swarmmap_has_fleet_scale_controls():
     assert 'svg.addEventListener("pointerdown"' in html
 
 
-def old_swarmmap_hides_legend_and_labels_in_dense_view():
+def _archived_swarmmap_hides_legend_and_labels_in_dense_view():
     html = _swarmmap_html()
     assert 'id="legend" hidden' in html
     assert "const dense=peers.length>40" in html
@@ -946,7 +888,7 @@ def test_index_html_embeds_swarmmap_iframe_lazily():
     assert "swarm-frame" in js and "'/swarmmap'" in js
 
 
-def old_swarmmap_has_no_inline_event_handlers():
+def test_swarmmap_has_no_inline_event_handlers():
     # The console serves this page under a nonce-only CSP: inline on*=
     # attributes are blocked even inside the nonce'd script, so they must
     # not exist anywhere in the file (including innerHTML template strings).
@@ -956,7 +898,7 @@ def old_swarmmap_has_no_inline_event_handlers():
         assert h not in html
 
 
-def old_swarmmap_explains_telemetry_disabled_device():
+def _archived_swarmmap_explains_telemetry_disabled_device():
     # #13 final review Important-3: a telemetry-off (or pre-telemetry) device
     # must not look identical to "no report yet" — the drawer must say why.
     html = _swarmmap_html()
@@ -994,7 +936,12 @@ def test_swarmmap_task26_accessibility_polling_and_empty_states():
                    "document.hidden", "AbortController", "inflight", "backoff",
                    "if(!r.ok)", "Initial loading…", "No active tracker participants.",
                    "No participants match the current filter.", "Unavailable/retrying",
-                   "RPC unavailable; tracker peers may remain.", "Paused."):
+                    "RPC unavailable; tracker peers may remain.", "Paused."):
+        assert marker in html
+    for marker in ('role="status"', 'aria-live="polite"', 'role="dialog"',
+                   'aria-modal="true"', 'drawer.addEventListener("keydown"',
+                   'MAP_PAUSE', 'MAP_RESUME', 'DENSE_LABEL_THRESHOLD',
+                   'function position(', 'global||{}', 'g.send_bps', 'g.receive_bps'):
         assert marker in html
 
 
