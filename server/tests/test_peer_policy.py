@@ -168,6 +168,35 @@ class TestMutualPermit:
         assert peer_policy.mutual_permit(
             doc, DEV1, "10.0.0.1", DEV2, "10.0.0.2") is True
 
+    @pytest.mark.parametrize("match", [
+        {"type": "device", "value": DEV2.id},
+        {"type": "host", "value": "10.0.0.2"},
+        {"type": "cidr", "value": "10.0.0.0/24"},
+        {"type": "service", "value": SVC.id},
+    ])
+    def test_requester_acl_is_evaluated_against_candidate(self, match):
+        doc = _doc_with(
+            acls={"a": {"rules": [{"seq": 10, "action": "deny",
+                                      "match": match}]}},
+            assignments={DEV1.id: "a"})
+        candidate = SVC if match["type"] == "service" else DEV2
+        assert not peer_policy.mutual_permit(
+            doc, DEV1, "10.0.0.1", candidate, "10.0.0.2")
+
+    def test_candidate_acl_is_evaluated_reciprocally(self):
+        doc = _doc_with(
+            acls={"a": {"rules": [{"seq": 10, "action": "deny",
+                                      "match": {"type": "device",
+                                                "value": DEV1.id}}]}},
+            assignments={DEV2.id: "a"})
+        assert not peer_policy.mutual_permit(
+            doc, DEV1, "10.0.0.1", DEV2, "10.0.0.2")
+
+    def test_quarantine_still_denies_mutually(self):
+        doc = _doc_with(assignments={DEV1.id: "quarantine"})
+        assert not peer_policy.mutual_permit(
+            doc, DEV1, "10.0.0.1", DEV2, "10.0.0.2")
+
 
 class TestQuarantineImmutable:
     def test_quarantine_materialized_on_validate_when_absent(self):
@@ -297,6 +326,34 @@ class TestReadPrecedence:
 
 
 class TestCommitTransaction:
+    @pytest.mark.parametrize("valid_lkg", [True, False])
+    def test_corrupt_authoritative_never_overwritten(self, paths, valid_lkg):
+        auth, lkg = paths
+        auth_bytes = b"{ corrupt authoritative"
+        lkg_bytes = (json.dumps(_base()).encode() if valid_lkg
+                     else b"{ corrupt lkg")
+        with open(auth, "wb") as f:
+            f.write(auth_bytes)
+        with open(lkg, "wb") as f:
+            f.write(lkg_bytes)
+        error = (peer_policy.PolicyDegradedError if valid_lkg
+                 else peer_policy.PolicyError)
+        with pytest.raises(error):
+            peer_policy.commit_mutation(
+                auth, lkg, "assign", DEV1.id, "a", 1.0,
+                lambda d: d["assignments"].__setitem__(DEV1.id, "quarantine"))
+        assert open(auth, "rb").read() == auth_bytes
+        assert open(lkg, "rb").read() == lkg_bytes
+
+    def test_fresh_absence_can_commit_without_intermediate_materialization(self,
+                                                                           paths):
+        auth, lkg = paths
+        result = peer_policy.commit_mutation(
+            auth, lkg, "assign", DEV1.id, "a", 1.0,
+            lambda d: d["assignments"].__setitem__(DEV1.id, "quarantine"))
+        assert result["revision"] == 2
+        assert json.load(open(lkg))["revision"] == 1
+
     def test_commit_writes_prior_to_lkg_then_candidate(self, paths):
         auth, lkg = paths
         peer_policy.initialize(auth, lkg)  # rev 1 to both

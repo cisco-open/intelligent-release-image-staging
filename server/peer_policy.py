@@ -52,6 +52,10 @@ class PolicyError(ValueError):
     """Raised when a policy document fails schema/bounds/immutability checks."""
 
 
+class PolicyDegradedError(PolicyError):
+    """Raised when mutation is unsafe because authoritative policy is invalid."""
+
+
 class OperationBacklogFull(Exception):
     """Raised when 256 unacknowledged outbox operations block a mutation."""
 
@@ -210,11 +214,16 @@ def _rule_matches(rule, principal, ipv4):
 def evaluate(doc, principal, ipv4):
     """Evaluate ``principal`` + ``ipv4`` against its assigned ACL. Returns
     ``(decision, matched_seq)``; no match is ``("permit", None)``."""
-    acl = _assigned_acl(doc, principal)
+    return evaluate_for(doc, principal, principal, ipv4)
+
+
+def evaluate_for(doc, owner_principal, subject_principal, subject_ipv4):
+    """Evaluate ``subject`` against the ACL assigned to ``owner``."""
+    acl = _assigned_acl(doc, owner_principal)
     if acl is None:
         return ("permit", None)
     for rule in sorted(acl["rules"], key=lambda r: r["seq"]):
-        if _rule_matches(rule, principal, ipv4):
+        if _rule_matches(rule, subject_principal, subject_ipv4):
             return (rule["action"], rule["seq"])
     return ("permit", None)
 
@@ -226,8 +235,10 @@ def mutual_permit(doc, requester_principal, requester_ipv4,
     (see :func:`load_policy`) denies all mutual discovery."""
     if doc.get("_fail_closed"):
         return False
-    req = evaluate(doc, candidate_principal, candidate_ipv4)[0]
-    cand = evaluate(doc, requester_principal, requester_ipv4)[0]
+    req = evaluate_for(doc, requester_principal,
+                       candidate_principal, candidate_ipv4)[0]
+    cand = evaluate_for(doc, candidate_principal,
+                        requester_principal, requester_ipv4)[0]
     return req == "permit" and cand == "permit"
 
 
@@ -342,10 +353,16 @@ def commit_mutation(auth_path, lkg_path, action, target, actor, now,
     candidate (the atomic replace is the commit).
     """
     with _umbrella_lock(auth_path):
+        auth_exists = os.path.exists(auth_path)
+        lkg_exists = os.path.exists(lkg_path)
         prior = _read_valid(auth_path)
         if prior is None:
+            if auth_exists or lkg_exists:
+                if _read_valid(lkg_path) is not None:
+                    raise PolicyDegradedError(
+                        "authoritative policy invalid; repair before mutation")
+                raise PolicyError("policy state invalid; mutation denied")
             prior = base_document()
-            _atomic_write_json(auth_path, prior)
         if expected_revision is not None and prior["revision"] != expected_revision:
             raise RevisionConflict(prior["revision"])
         outbox = _prune_acked(list(prior.get("operation_outbox", [])),
