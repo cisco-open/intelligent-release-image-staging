@@ -13,8 +13,9 @@
   <div class="top">
     <span>◈ Intelligent Release &amp; Image Staging <span class="tag">IRIS</span></span>
     <span class="spacer"></span>
+    <span class="who" id="who"></span>
     <div class="menu-wrap">
-      <button class="btn ghost" id="help-btn" aria-expanded="false" aria-label="Help" title="Help">?</button>
+      <button class="btn ghost icon" id="help-btn" aria-expanded="false" aria-label="Help" title="Help">?</button>
       <div class="menu right" id="help-pop" hidden>
         <div class="help-row muted" id="help-version"></div>
         <div class="help-row muted">Deployment id
@@ -26,7 +27,6 @@
         <a class="menu-item menu-close" id="help-server-guide" href="/help-server.html" target="_blank" rel="noopener">Server-side setup &amp; troubleshooting ↗</a>
       </div>
     </div>
-    <span class="who" id="who"></span>
     <button class="btn ghost" id="logout">Sign out</button>
   </div>
   <div class="stripe"></div>
@@ -69,6 +69,11 @@
           <div class="progress" id="prog" hidden><div class="bar" id="bar"></div></div>
           <p class="muted" id="status"></p>
         </div>
+        <p class="muted">Images copied onto the server under
+          <span class="mono">/opt/images</span> — for example
+          <span class="mono">/opt/images/iosxe/c9300/</span> — are offered for
+          import below without uploading. Set <span class="mono">IMAGES_ROOT</span>
+          to scan a different directory.</p>
         <div id="import-panel" hidden>
           <h3>Import from disk</h3>
           <p class="muted">Images already present on this server that are not in the
