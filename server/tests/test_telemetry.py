@@ -1230,6 +1230,26 @@ def test_evicted_report_is_requeued_but_delivered_report_is_not():
     assert hub.log_queue.queued == 0
 
 
+def test_delivered_report_ids_are_bounded_to_current_ring():
+    reports = {}
+    hub = telemetry.Telemetry(PeerRegistry(), reports_info=lambda: reports)
+
+    for generation in range(50):
+        reports.clear()
+        reports.update({
+            "d%d" % device: [
+                {"schema": "v2", "report_id": "r%d-%d-%d" %
+                 (generation, device, report), "received_at": report}
+                for report in range(3)]
+            for device in range(10)})
+        hub._export_new_reports()
+        assert hub.log_queue.flush(lambda batch: None) == 30
+        ring_ids = {report["report_id"]
+                    for ring in reports.values() for report in ring}
+        assert hub._seen_report_event_ids <= ring_ids
+        assert len(hub._seen_report_event_ids) <= len(ring_ids)
+
+
 def test_sample_survives_reports_info_raising():
     exp = otlp.OTLPLogExporter("http://c:4318", sender=lambda u, b: None)
     def boom():

@@ -729,6 +729,7 @@ class Telemetry:
                         if isinstance(rec, dict) and rec.get("swarm_ip")}
         reports = self._reports_info() or {}
         candidates = []
+        ring_event_ids = set()
         for device_id, ring in reports.items():
             if not isinstance(ring, list):
                 continue
@@ -742,12 +743,17 @@ class Telemetry:
                 if not isinstance(rep, dict):
                     continue
                 event_id, record = _report_event_id(rep, str(device_id))
+                ring_event_ids.add(event_id)
                 try:
                     received_at = float(rep.get("received_at", 0) or 0)
                 except (TypeError, ValueError):
                     received_at = 0.0
                 candidates.append((received_at, event_id, str(device_id),
                                    record, enrich))
+        # Delivered report IDs need only cover the current durable ring. Queued
+        # records are independently deduped by LogQueue, so forgetting an ID
+        # that has left the ring cannot cause a scan-time re-enqueue.
+        self._seen_report_event_ids.intersection_update(ring_event_ids)
         for _, event_id, device_id, report, enrich in sorted(
                 candidates, key=lambda row: row[:3]):
             if (event_id not in self._seen_report_event_ids
