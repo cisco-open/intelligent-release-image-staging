@@ -190,9 +190,11 @@ def test_docs_state_enforcement_status_is_count_only():
 
 
 def test_docs_state_announce_credential_travels_over_http():
-    """The announce credential rides a private HTTP URL; that residual is a
-    stated boundary, not an oversight."""
-    _require("security.md", ["private HTTP"])
+    """The announce credential rides an HTTP URL, so it crosses the network in
+    cleartext. The base may be any routable IPv4 -- nothing enforces a private
+    one -- so the docs must state the exposure rather than imply a guarantee
+    the code does not make."""
+    _require("security.md", ["cleartext"])
 
 
 def test_docs_state_no_day1_revoke_or_migration():
