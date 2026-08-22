@@ -135,6 +135,40 @@ def test_quarantined_device_endpoint_is_blocked(tmp_path):
     assert peer_enforcement.read_status(p["enforcement"])["desired_ip_count"] == 1
 
 
+def test_corrupt_endpoints_retain_blocklist_and_report_fail_closed(tmp_path):
+    aria = FakeAria()
+    rec, p, _ = _make_reconciler(tmp_path, aria, clock=Clock(1000.0))
+    _quarantine(p["policy"], p["lkg"], "bad", 1000.0)
+    peer_endpoints.record_endpoint(p["endpoints"], _dev("bad"),
+                                   "10.0.0.9", 6881, 1000.0)
+    rec.run_once()
+    assert aria.calls == [["10.0.0.9"]]
+    with open(p["endpoints"], "w") as f:
+        f.write("{ corrupt")
+    status = rec.run_once()
+    assert aria.calls == [["10.0.0.9"]]
+    assert status["state"] == "fail_closed"
+    assert status["last_error"] == "EndpointStoreError"
+    assert status["desired_ip_count"] == 1
+
+
+def test_shared_ip_conflict_applies_other_blocks_but_reports_degraded(tmp_path):
+    aria = FakeAria()
+    rec, p, _ = _make_reconciler(tmp_path, aria, clock=Clock(1000.0))
+    for device_id in ("denied-shared", "denied-only"):
+        _quarantine(p["policy"], p["lkg"], device_id, 1000.0)
+    peer_endpoints.record_endpoint(p["endpoints"], _dev("denied-shared"),
+                                   "10.0.0.9", 6881, 1000.0)
+    peer_endpoints.record_endpoint(p["endpoints"], _dev("permitted"),
+                                   "10.0.0.9", 6881, 1000.0)
+    peer_endpoints.record_endpoint(p["endpoints"], _dev("denied-only"),
+                                   "10.0.0.10", 6881, 1000.0)
+    status = rec.run_once()
+    assert aria.calls[-1] == ["10.0.0.10"]
+    assert status["state"] == "degraded"
+    assert len(status["conflicts"]) == 1
+
+
 def test_running_flag_prevents_overlap_and_schedules_rerun(tmp_path):
     aria = FakeAria()
     rec, p, _ = _make_reconciler(tmp_path, aria)

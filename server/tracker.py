@@ -564,7 +564,24 @@ class TrackerReconciler:
         # 2) Recompute desired from durable + pending + active + revocation +
         #    policy + protected seeder (never in-memory residue).
         policy = _peer_policy.load_policy(*self._policy_paths)
-        durable = _peer_endpoints.fresh_endpoints(self._endpoints_path, now)
+        try:
+            durable = _peer_endpoints.fresh_endpoints(self._endpoints_path, now)
+        except _peer_endpoints.EndpointStoreError:
+            prior = _peer_enforcement.read_status(self._enforcement_path) or {}
+            status = _peer_enforcement.build_status(
+                state="fail_closed",
+                aria_session_id=prior.get("aria_session_id"),
+                desired_hash=prior.get("desired_hash"),
+                applied_revision=prior.get("applied_revision"),
+                desired_ip_count=prior.get("desired_ip_count", 0), now=now,
+                last_operation_exported_revision=prior.get(
+                    "last_operation_exported_revision", 0),
+                conflicts=prior.get("conflicts"),
+                last_effect=prior.get("last_effect"),
+                last_error="EndpointStoreError")
+            _peer_enforcement.write_status(self._enforcement_path, status)
+            self._schedule_maintenance()
+            return status
         active = list(self._active_participants() or [])
         revoked = set(self._revoked_principals() or set())
         derived = _reconciler.derive_denied_set(
@@ -644,6 +661,8 @@ class TrackerReconciler:
         elif pending_outstanding:
             state = "degraded"
         elif policy.degraded:
+            state = "degraded"
+        elif derived.conflicts:
             state = "degraded"
         elif outcome is not None and outcome.applied and not outcome.success:
             state = "degraded" if session else "rpc_unavailable"

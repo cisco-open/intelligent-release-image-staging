@@ -11,6 +11,7 @@ import collections
 import glob
 import json
 import os
+import threading
 
 import pytest
 
@@ -69,6 +70,23 @@ class TestKeyAndRecord:
 
 
 class TestDurableWrite:
+    @pytest.mark.parametrize("operation", ["record", "clear", "prune", "read"])
+    def test_corruption_fails_closed_without_overwrite(self, store_path,
+                                                       operation):
+        corrupt = b"{ definitely corrupt"
+        with open(store_path, "wb") as f:
+            f.write(corrupt)
+        calls = {
+            "record": lambda: peer_endpoints.record_endpoint(
+                store_path, DEV, "10.0.0.1", 6881, 1.0),
+            "clear": lambda: peer_endpoints.clear_principal(store_path, DEV),
+            "prune": lambda: peer_endpoints.prune(store_path, 1.0),
+            "read": lambda: peer_endpoints.fresh_endpoints(store_path, 1.0),
+        }
+        with pytest.raises(peer_endpoints.EndpointStoreError):
+            calls[operation]()
+        assert open(store_path, "rb").read() == corrupt
+
     def test_records_attributable_device_endpoint(self, store_path):
         peer_endpoints.record_endpoint(
             store_path, DEV, "100.92.100.16", 6881, now=1000.0)
@@ -264,6 +282,29 @@ class TestPendingQueue:
 
 
 class TestRetryWithoutAnnounce:
+    def test_concurrent_newer_enqueue_survives_successful_retry(self,
+                                                               store_path):
+        q = peer_endpoints.PendingEndpointQueue()
+        q.enqueue(DEV, "10.0.0.1", 6881, now=1.0)
+        writing = threading.Event()
+        release = threading.Event()
+
+        def blocked_writer(*args):
+            writing.set()
+            assert release.wait(2)
+
+        thread = threading.Thread(target=peer_endpoints.retry_pending,
+                                  args=(store_path, q),
+                                  kwargs={"writer": blocked_writer})
+        thread.start()
+        assert writing.wait(2)
+        q.enqueue(DEV, "10.0.0.2", 6881, now=2.0)
+        release.set()
+        thread.join(2)
+        assert not thread.is_alive()
+        endpoint = q.snapshot()["device:iris8kv-3"]["endpoints"][0]
+        assert endpoint["ipv4"] == "10.0.0.2"
+
     def test_retry_drains_to_durable_and_resolves(self, store_path):
         q = peer_endpoints.PendingEndpointQueue()
         q.enqueue(DEV, "10.0.0.1", 6881, now=1000.0)

@@ -24,12 +24,17 @@ import fcntl
 import json
 import os
 import tempfile
+import threading
 
 ENDPOINT_CAP = 4              # endpoints per principal, newest-first
 ENDPOINT_TTL = 900           # seconds; default, overridable via env
 MAX_PRINCIPALS = 10000       # durable-map and pending-queue LRU cap
 
 _SCHEMA = 1
+
+
+class EndpointStoreError(ValueError):
+    """Existing endpoint state is corrupt and must not be overwritten."""
 
 
 def endpoint_ttl():
@@ -88,16 +93,27 @@ def _load(path):
     try:
         with open(path) as f:
             data = json.load(f)
-        if not isinstance(data, dict):
-            raise ValueError("not a dict")
+    except FileNotFoundError:
+        return {"schema": _SCHEMA, "updated_at": 0.0, "principals": {}}
+    except (OSError, ValueError) as exc:
+        raise EndpointStoreError("endpoint store is unreadable") from exc
+    try:
+        if not isinstance(data, dict) or data.get("schema") != _SCHEMA:
+            raise ValueError("bad document")
         principals = data.get("principals")
         if not isinstance(principals, dict):
-            principals = {}
-        return {"schema": _SCHEMA,
-                "updated_at": data.get("updated_at", 0.0),
-                "principals": principals}
-    except (OSError, ValueError):
-        return {"schema": _SCHEMA, "updated_at": 0.0, "principals": {}}
+            raise ValueError("bad principals")
+        for key, entry in principals.items():
+            if not isinstance(key, str) or not isinstance(entry, dict):
+                raise ValueError("bad principal")
+            if not isinstance(entry.get("endpoints"), list):
+                raise ValueError("bad endpoints")
+            if not isinstance(entry.get("principal_type"), str) \
+                    or not isinstance(entry.get("principal_id"), str):
+                raise ValueError("bad principal identity")
+        return data
+    except ValueError as exc:
+        raise EndpointStoreError("endpoint store is corrupt") from exc
 
 
 def _endpoint(ipv4, port, now):
@@ -220,35 +236,47 @@ class PendingEndpointQueue:
         self.cap = MAX_PRINCIPALS if cap is None else cap
         # insertion-ordered dict; re-enqueue replaces in place (keeps position)
         self._items = {}
+        self._lock = threading.Lock()
 
     def __len__(self):
-        return len(self._items)
+        with self._lock:
+            return len(self._items)
 
     def enqueue(self, principal, ipv4, port, now):
         key = principal_key(principal)
-        self._items[key] = {"principal_type": principal.type,
-                            "principal_id": principal.id,
-                            "endpoint": _endpoint(ipv4, port, now)}
-        while len(self._items) > self.cap:
-            oldest = next(iter(self._items))
-            del self._items[oldest]
+        with self._lock:
+            self._items[key] = {"principal_type": principal.type,
+                                "principal_id": principal.id,
+                                "endpoint": _endpoint(ipv4, port, now)}
+            while len(self._items) > self.cap:
+                oldest = next(iter(self._items))
+                del self._items[oldest]
 
     def resolve(self, principal):
-        self._items.pop(principal_key(principal), None)
+        with self._lock:
+            self._items.pop(principal_key(principal), None)
 
     def snapshot(self):
-        return {key: {"principal_type": v["principal_type"],
-                      "principal_id": v["principal_id"],
-                      "endpoints": [dict(v["endpoint"])]}
-                for key, v in self._items.items()}
+        with self._lock:
+            return {key: {"principal_type": v["principal_type"],
+                          "principal_id": v["principal_id"],
+                          "endpoints": [dict(v["endpoint"])]}
+                    for key, v in self._items.items()}
 
     def items(self):
         """(key, principal_type, principal_id, endpoint) tuples for retry."""
-        return [(k, v["principal_type"], v["principal_id"], v["endpoint"])
-                for k, v in list(self._items.items())]
+        with self._lock:
+            return [(k, v["principal_type"], v["principal_id"], v["endpoint"])
+                    for k, v in self._items.items()]
 
-    def _drop_key(self, key):
-        self._items.pop(key, None)
+    def _drop_key(self, key, endpoint=None):
+        with self._lock:
+            current = self._items.get(key)
+            if current is not None and (endpoint is None or
+                                        current["endpoint"] is endpoint):
+                self._items.pop(key, None)
+                return True
+            return False
 
 
 class _StructPrincipal:
@@ -281,8 +309,8 @@ def retry_pending(path, queue, now=None, writer=None):
         try:
             write(path, principal, endpoint["ipv4"],
                   endpoint["port"], endpoint["observed_at"])
-        except OSError:
+        except (OSError, EndpointStoreError):
             continue
-        queue._drop_key(key)
-        resolved.append(key)
+        if queue._drop_key(key, endpoint):
+            resolved.append(key)
     return resolved
