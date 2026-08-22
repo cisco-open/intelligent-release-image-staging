@@ -99,7 +99,10 @@ def test_peer_policy_console_controls_are_typed_and_safe():
 
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
-    assert "function refreshPeerPolicy()" in js
+    # refreshDevices owns the policy snapshot, so an older peer-policy request
+    # cannot overwrite the generation that rendered the device table.
+    assert "function refreshPeerPolicy()" not in js
+    assert "fetch('/api/peer-policy', { signal: signal })" in js
     assert "'/api/peer-policy/quarantine/' + encodeURIComponent(id)" in js
     assert "method: 'PUT', headers: csrfHdr" in js
     assert "if_revision: peerPolicy.revision" in js
@@ -238,22 +241,6 @@ def test_undeploy_and_status_ui_wired():
     assert "waiting for heartbeat" in js
     assert "onboarding…" in js and "undeploying…" in js
     assert "Waiting for heartbeat" in js         # overview card
-
-
-def _archived_swarmmap_peer_resolution_wired():
-    """Source guards for the swarm-map fixes: (1) peers deduped by ip so a
-    re-announce or multi-image device can't render twice, (2) stored-report
-    peer rows resolve device identity through the FLEET too (guest ips of
-    devices that left the swarm), (3) the seed host row is labeled."""
-    with open(gui_server.SWARMMAP_PATH) as f:
-        src = f.read()
-    assert "dedupePeers" in src
-    assert "/api/devices" in src
-    assert "seed server" in src
-    assert "avg download" in src           # renamed from the ambiguous "avg throughput"
-    # per-peer byte columns (↓ received / ↑ sent) and their legend were
-    # removed by design -- see test_swarmmap_per_peer_table_is_participation_only
-    # in test_telemetry.py for the participation-only replacement.
 
 
 def test_monitoring_timeline_wired():

@@ -793,7 +793,7 @@ def test_swarmmap_pull_ui_gated_and_null_device_handled():
     assert "Pull fresh data from device" in html
     # a peer with no device_id (no heartbeat join) gets a disabled note, not a
     # broken POST to /api/devices/null/...
-    assert "no device identity" in html
+    assert "no device identity" in html.lower()
 
 
 def test_swarmmap_pull_arrival_uses_server_clock():
@@ -851,34 +851,6 @@ def test_swarmmap_per_peer_table_is_participation_only():
     assert "Historical participation" in body
 
 
-def _archived_swarmmap_drawer_widened():
-    # The drawer was cramped at 340px. It is now responsive and substantially
-    # wider on desktop so the per-peer table is readable without overflow.
-    html = _swarmmap_html()
-    assert "width:340px" not in html, "old 340px drawer width still present"
-    assert "#drawer{" in html and "width:min(560px,52vw)" in html, \
-        "#drawer must use the responsive wide layout"
-
-
-def _archived_swarmmap_has_fleet_scale_controls():
-    html = _swarmmap_html()
-    assert 'id="peerfind"' in html
-    assert 'id="zoom-out"' in html
-    assert 'id="zoom-in"' in html
-    assert 'id="fit"' in html
-    assert 'id="legend-toggle"' in html
-    assert "filterPeers" in html
-    assert 'svg.addEventListener("wheel"' not in html
-    assert 'svg.addEventListener("pointerdown"' in html
-
-
-def _archived_swarmmap_hides_legend_and_labels_in_dense_view():
-    html = _swarmmap_html()
-    assert 'id="legend" hidden' in html
-    assert "const dense=peers.length>40" in html
-    assert "if(!dense || peerFilter)" in html
-
-
 def test_index_html_embeds_swarmmap_iframe_lazily():
     idx = _index_html()
     assert '<iframe id="swarm-frame"' in idx
@@ -898,15 +870,6 @@ def test_swarmmap_has_no_inline_event_handlers():
         assert h not in html
 
 
-def _archived_swarmmap_explains_telemetry_disabled_device():
-    # #13 final review Important-3: a telemetry-off (or pre-telemetry) device
-    # must not look identical to "no report yet" — the drawer must say why.
-    html = _swarmmap_html()
-    assert "telemetry_enabled" in html, \
-        "swarm_snapshot's telemetry_enabled join must be consumed by the drawer"
-    assert "telemetry is disabled on this device" in html
-
-
 def test_swarmmap_task26_canonical_topology_structure():
     """Static guards only; browser interaction remains a Task30 manual check."""
     html = _swarmmap_html()
@@ -924,6 +887,17 @@ def test_swarmmap_task26_canonical_topology_structure():
     assert "no per-device quarantine" in html
     assert "o.blocked===true" in html
     assert "conflict" in html
+
+
+def test_swarmmap_measured_edge_uses_canonical_producer_timestamp_fallback():
+    # A peer observation may omit observed_at while it is produced in the same
+    # server poll. In that case the canonical server observation timestamp is
+    # the valid freshness clock; a peer timestamp still wins when supplied.
+    html = _swarmmap_html()
+    body = html.split("function freshServerPeer")[1].split("function position")[0]
+    assert "x?.observed_at??obs().observed_at" in body
+    assert "Number(x.send_bps)>0" in body
+    assert "MEASURED_RATE_FRESH_S" in body
 
 
 def test_swarmmap_task26_accessibility_polling_and_empty_states():

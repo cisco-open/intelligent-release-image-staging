@@ -242,18 +242,6 @@
       '" title="' + esc(details) + '">' + esc(state) + '</span>';
   }
   var devicesRefreshGeneration = 0, devicesRefreshController = null;
-  var peerPolicyGeneration = 0, peerPolicyController = null;
-  async function refreshPeerPolicy() {
-    var mine = ++peerPolicyGeneration;
-    if (peerPolicyController) peerPolicyController.abort();
-    peerPolicyController = new AbortController();
-    var r = await fetch('/api/peer-policy', { signal: peerPolicyController.signal });
-    if (!r.ok) throw new Error('Peer policy refresh failed (' + r.status + ')');
-    var next = await r.json();
-    if (mine !== peerPolicyGeneration) return peerPolicy;
-    peerPolicy = next;
-    return peerPolicy;
-  }
   async function setQuarantine(btn) {
     var id = btn.closest('tr').getAttribute('data-id');
     var quarantined = !peerPolicyAssigned(id);
@@ -316,7 +304,15 @@
     if (devicesRefreshController) devicesRefreshController.abort();
     devicesRefreshController = new AbortController();
     var signal = devicesRefreshController.signal;
-    var results = await Promise.all([fetch('/api/devices', { signal: signal }), fetch('/api/images', { signal: signal }), fetch('/api/credentials', { signal: signal }), fetch('/api/peer-policy', { signal: signal })]);
+    var results;
+    try {
+      results = await Promise.all([fetch('/api/devices', { signal: signal }), fetch('/api/images', { signal: signal }), fetch('/api/credentials', { signal: signal }), fetch('/api/peer-policy', { signal: signal })]);
+    } catch (e) {
+      // Superseding a refresh is expected; callers must not see an unhandled
+      // AbortError. Other failures still reach their caller/status handling.
+      if (e && e.name === 'AbortError') return;
+      throw e;
+    }
     var dr = results[0], ir = results[1], cr = results[2], pr = results[3];
     if (!dr.ok || mine !== devicesRefreshGeneration) return;
     var nextPolicy = pr.ok ? await pr.json() : peerPolicy;
