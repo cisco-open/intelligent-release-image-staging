@@ -79,9 +79,13 @@ def main(argv=None):
         # Mint only if absent so re-enrolling a device does not churn an
         # announce/rpc out from under an already-running agent.
         dev = store["devices"][device_id]
-        if not secrets_store.valid(dev.get("announce_token", {}), now, 0):
+        announce = dev.get("announce_token")
+        if not isinstance(announce, dict) or not announce.get("value") \
+                or not secrets_store.valid(announce, now, 0):
             secrets_store.mint(store, device_id, "announce_token", now)
-        if not secrets_store.valid(dev.get("rpc_secret", {}), now, 0):
+        rpc = dev.get("rpc_secret")
+        if not isinstance(rpc, dict) or not rpc.get("value") \
+                or not secrets_store.valid(rpc, now, 0):
             secrets_store.mint(store, device_id, "rpc_secret", now)
 
         # Persist durable-FIRST: the at-rest .age ciphertext is the only copy

@@ -297,11 +297,8 @@ def test_reonboard_aborts_when_endpoint_clear_fails(tmp_path, monkeypatch):
     assert "dev-1" not in store.get("devices", {})
 
 
-def test_device_seeder_id_distinct_from_service_seeder(tmp_path, monkeypatch):
-    """A device literally named 'seeder' clears its OWN device:seeder endpoint
-    rows, never the service:seeder endpoint (typed-namespace separation). The
-    enrollment endpoint-clear keys on ``device:<id>``, so the service seeder's
-    retained endpoint is untouched."""
+def test_device_seeder_id_is_reserved_at_enrollment(tmp_path, monkeypatch):
+    """The secret store cannot represent this typed namespace safely."""
     ep_path = str(tmp_path / "peer-endpoints.json")
     now = time.time()
     peer_endpoints.record_endpoint(
@@ -313,21 +310,11 @@ def test_device_seeder_id_distinct_from_service_seeder(tmp_path, monkeypatch):
     monkeypatch.setenv("IRIS_AGE_RECIPIENTS", "")
     monkeypatch.setenv("IRIS_STATE", str(tmp_path))
     mod = _load_mint()
-    # Isolate the endpoint-clear ordering from the store's separate seeder
-    # pseudo-device slot (secrets_store.mint routes id "seeder" to the seeder
-    # slot); stub mint/persist so this test asserts ONLY the typed-namespace
-    # endpoint separation the retirement contract requires.
-    monkeypatch.setattr(mod.secrets_store, "mint", lambda *a, **k: "tok")
-    monkeypatch.setattr(mod.secretfs, "persist_store", lambda *a, **k: None)
-    # store["devices"]["seeder"] must exist for the TTL-override line; seed it.
-    monkeypatch.setattr(
-        mod.secrets_store, "load",
-        lambda p: {"devices": {"seeder": {"catalog_token": {}}}, "seeder": {}})
-    assert mod.main(["seeder"]) == 0
+    assert mod.main(["seeder"]) == 2
 
     fresh = peer_endpoints.fresh_endpoints(ep_path, now)
-    assert "device:seeder" not in fresh   # device rows cleared
-    assert "service:seeder" in fresh       # service seeder untouched
+    assert "device:seeder" in fresh
+    assert "service:seeder" in fresh
 
 
 # ---------------------------------------------------------------------------
