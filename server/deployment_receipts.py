@@ -18,7 +18,17 @@ _STATES = frozenset(("planned", "applying", "active", "unknown", "drifted",
 _NONTERMINAL = frozenset(("planned", "applying"))
 # States that are not active but still describe a deployment IRIS applied, so a
 # teardown may be authorized from them (see recoverable_for_device).
-_RECOVERABLE = frozenset(("unknown", "drifted", "needs-reconcile"))
+#
+# "applying" is here because it is the durable marker written BEFORE the device
+# is touched: an onboard that dies mid-run leaves it, and it already carries the
+# resolved plan and owned resources teardown validates. Without it the marker
+# was readable only after recover_interrupted() ran at process start, so with no
+# restart a device stayed stranded forever -- not undeployable (no readable
+# receipt), not adoptable (routers never are), not re-onboardable (preflight
+# refuses the live Guest Shell). A genuinely in-flight onboard is NOT at risk:
+# its job is still non-terminal, so the busy guard in gui_onboard refuses the
+# undeploy before teardown is ever rendered.
+_RECOVERABLE = frozenset(("unknown", "drifted", "needs-reconcile", "applying"))
 _TRANSITIONS = {
     "planned": frozenset(("applying", "unknown", "needs-reconcile", "removed")),
     "applying": frozenset(("active", "unknown", "needs-reconcile", "removed")),

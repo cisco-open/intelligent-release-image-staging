@@ -1744,3 +1744,24 @@ def test_log_persistence_failure_never_fails_the_job(tmp_path):
     svc = _svc(lambda p, e, on: 0, log_dir=str(blocked))
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done" and job["returncode"] == 0
+
+
+def test_a_job_past_the_deadline_stops_blocking_the_device():
+    """A recipe whose output pipe never EOFs hangs forever. The job then never
+    becomes terminal, is never evicted, and the busy guard refuses BOTH a
+    re-onboard and an undeploy for that device -- permanently. That is how
+    100.90.168.116 was stranded: onboard_start with no onboard_finished, no log,
+    and a device already carrying a live Guest Shell.
+
+    Past the deadline the job must be marked failed so the device frees up.
+    """
+    svc = _svc(lambda *a, **k: 0)
+    svc._jobs["stuck"] = {
+        "id": "stuck", "device_id": "dev-x", "action": "onboard",
+        "state": "running", "queued_at": 1000, "started_at": 1000,
+        "finished_at": None, "log": [],
+    }
+    # not yet overdue
+    assert svc._reap_overdue(1000.0 + gui_onboard._JOB_DEADLINE - 1) == []
+    # past the deadline it is reported
+    assert svc._reap_overdue(1000.0 + gui_onboard._JOB_DEADLINE + 1) == ["stuck"]

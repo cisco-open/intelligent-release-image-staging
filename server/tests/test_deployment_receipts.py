@@ -274,3 +274,35 @@ def test_recoverable_refuses_to_guess_between_two_candidates(tmp_path):
         assert False, "expected ValueError"
     except ValueError as exc:
         assert "edge-01" in str(exc)
+
+
+def test_an_applying_receipt_authorizes_teardown(tmp_path):
+    """An onboard that dies mid-run leaves its receipt in `applying`. That
+    receipt already carries the ownership proof teardown validates, and it is
+    the ONLY durable record that IRIS mutated the device -- so teardown must be
+    able to read it.
+
+    Before this, `applying` became readable only via recover_interrupted(),
+    which runs once at process start. With no restart the marker was written,
+    never read, and never would be: the device could not be undeployed (no
+    readable receipt), could not be adopted (routers never can) and could not be
+    re-onboarded (preflight refuses the live Guest Shell). That is exactly how
+    100.90.168.116 was stranded in the lab.
+    """
+    store = deployment_receipts.ReceiptStore(str(tmp_path))
+    store.create(_receipt(receipt_id="r-applying", device_id="dev-1"))
+    store.transition("r-applying", "applying")
+    got = store.recoverable_for_device("dev-1")
+    assert got is not None, "an applying receipt must authorize teardown"
+    assert got["receipt_id"] == "r-applying"
+    assert got["state"] == "applying"
+
+
+def test_applying_can_still_be_closed_out_as_removed(tmp_path):
+    """Teardown closes the receipt with `removed`; that edge must already exist
+    so the rescue path does not dead-end."""
+    store = deployment_receipts.ReceiptStore(str(tmp_path))
+    store.create(_receipt(receipt_id="r-close", device_id="dev-2"))
+    store.transition("r-close", "applying")
+    store.transition("r-close", "removed")
+    assert store.recoverable_for_device("dev-2") is None

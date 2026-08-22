@@ -22,11 +22,18 @@ import os
 import queue
 import re
 import secrets
+import signal
 import subprocess
 import threading
 import time
 
 _JOB_TTL = 3600  # seconds a terminal onboard job is retained before eviction
+# Wall-clock bound on a RUNNING job. Without one, a recipe whose output pipe
+# never EOFs hangs forever: the job never becomes terminal, so it is never
+# evicted, so the device stays permanently "busy" and every later onboard AND
+# undeploy for it is refused. Comfortably above the slowest real recipe (the
+# router guestshell wait plus copy retries, ~7-10 min).
+_JOB_DEADLINE = int(os.environ.get("IRIS_ONBOARD_JOB_TIMEOUT") or 7200)
 _TERMINAL = ("done", "error", "cancelled")
 _DEFAULT_CONCURRENCY = 25  # simultaneous installer runs (env IRIS_ONBOARD_CONCURRENCY)
 # A fleet action may legitimately be large, but a request storm must not retain
@@ -169,9 +176,14 @@ def _default_runner(install_path, env, on_line, on_proc=None):
     """Run device-install.sh, calling on_line(line) for each stdout/stderr line.
     Returns the process exit code. on_proc(proc), when given, receives the live
     Popen so the caller can terminate it (abort)."""
+    # start_new_session puts the recipe in its OWN process group. Without it,
+    # terminating "bash" leaves the ssh -tt it spawned holding the stdout pipe,
+    # so the read loop below never sees EOF and the job hangs forever instead of
+    # failing -- which is how a device ends up mutated with no finish, no log
+    # and no reapable job record.
     proc = subprocess.Popen(["bash", install_path], env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, bufsize=1)
+                            text=True, bufsize=1, start_new_session=True)
     if on_proc is not None:
         on_proc(proc)
     try:
@@ -676,6 +688,14 @@ class OnboardService:
             # Only now, holding the lock and past the dedup guard, do we mint the
             # receipt — so exactly one receipt exists per genuinely started job.
             job["receipt_id"] = prepare() if prepare else None
+            for _stale in self._reap_overdue(self._now()):
+                self._jobs[_stale]["state"] = "error"
+                self._jobs[_stale]["finished_at"] = int(self._now())
+                self._jobs[_stale]["rc"] = -1
+                self._append_locked(
+                    self._jobs[_stale],
+                    "[job exceeded %ds deadline; marked failed so the device is "
+                    "not left permanently busy]" % _JOB_DEADLINE)
             self._evict_old(self._now())
             self._jobs[job_id] = job
 
@@ -920,7 +940,12 @@ class OnboardService:
                 return True
             self._append_locked(j, "[abort requested by operator]")
         try:
-            proc.terminate()
+            # Signal the whole group: the recipe's ssh child is what holds the
+            # pipe, so terminating only the shell leaves the job hung.
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except (OSError, AttributeError, ProcessLookupError):
+                proc.terminate()
         except Exception:
             return False
         return True
@@ -1083,6 +1108,22 @@ class OnboardService:
             if not self._transition_or_note(jid, receipt_id, "removed"):
                 self._append(jid, "cancelled job receipt could not be retired")
         return n
+
+    def _reap_overdue(self, now):
+        """Fail any job that has been running past the deadline.
+
+        A hung recipe is indistinguishable from a slow one from here, so the
+        bound is deliberately generous. What matters is that the job becomes
+        TERMINAL: that releases the busy guard, lets the record be evicted, and
+        leaves the receipt in a state teardown can read -- turning a permanent
+        strand into an ordinary failure. Caller must hold self._lock."""
+        overdue = []
+        for jid, j in self._jobs.items():
+            if j.get("state") not in _TERMINAL and j.get("finished_at") is None:
+                started = j.get("started_at") or j.get("queued_at")
+                if started is not None and now - started > _JOB_DEADLINE:
+                    overdue.append(jid)
+        return overdue
 
     def _evict_old(self, now):
         """Drop terminal (done/error/cancelled) jobs finished more than
