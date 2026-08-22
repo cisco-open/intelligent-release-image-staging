@@ -96,6 +96,13 @@ def render(swarm, seeder, counters, reports_stored=0, transfers=None,
             out.append("iris_seeder_torrent_upload_length_bytes%s %d" % (
                 _labels(torrent["image"], torrent["info_hash"]),
                 _int(torrent.get("upload_length"))))
+        family("iris_seeder_torrent_upload_bytes_per_second", "gauge",
+               "Origin seeder send rate per torrent, measured (lower bound: "
+               "device-to-device reseed traffic is not counted)")
+        for torrent in seeder_torrents:
+            out.append("iris_seeder_torrent_upload_bytes_per_second%s %d" % (
+                _labels(torrent["image"], torrent["info_hash"]),
+                _int(torrent.get("upload_bps"))))
 
     # --- swarm (per image) ---
     for name, key, help_text in _SWARM_GAUGES:

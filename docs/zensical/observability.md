@@ -169,6 +169,7 @@ are contract:
 | `iris_transfer_freshness_age_seconds` | `iris.transfer.freshness_age` | `s` | image attrs |
 | `iris_stream_devices` | `iris.stream.devices` | `{device}` | image attrs + `sampling_class` = `good` \| `constrained` |
 | `iris_seeder_torrent_upload_length_bytes` | `iris.seeder.torrent.upload_length` | `By` | image attrs |
+| `iris_seeder_torrent_upload_bytes_per_second` | `iris.seeder.torrent.upload_rate` | `By/s` | image attrs |
 | `iris_legacy_announce_participants` | `iris.legacy.announce_participants` | `{participant}` | — |
 | `iris_telemetry_samples_rejected_total` | `iris.telemetry.samples.rejected` | `{sample}` | — (counter; no `_total` on the OTLP wire) |
 | `iris_telemetry_export_failures_total` | `iris.telemetry.export.failures` | `{error}` | `signal` = `logs` \| `metrics` |
@@ -182,6 +183,18 @@ are contract:
 Throughput and progress are **omitted** for an image with no currently fresh
 device rather than published as a zero, and the freshness age is exported so the
 omission is explainable.
+
+!!! note "Which throughput number to trust"
+    `iris.transfer.throughput` is reported **by the devices**, and a device
+    samples once per 60-second agent tick. A transfer that finishes inside one
+    tick is therefore never observed: the reading is a truthful instantaneous
+    zero taken outside the transfer, not a broken metric. On a fast fabric a
+    1 GB image lands in well under a minute, so expect this to read zero there.
+
+    `iris.seeder.torrent.upload_rate` is measured by the **origin's own** aria2
+    poll, independent of any device tick, so it does see a short transfer. It is
+    a **lower bound** on total swarm throughput: device-to-device reseed traffic
+    never passes through the origin and is invisible to it.
 
 !!! warning "Metric names changed in 2026.08.22"
     Several transfer metric families were retired and others renamed in this

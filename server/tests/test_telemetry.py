@@ -2125,3 +2125,29 @@ def test_sampler_emits_a_peer_rate_record_per_measured_edge():
     assert a["iris.principal"] == "device:dz"
     assert int(a["iris.transfer.peer_send_bps"]) == 2048
     assert a["iris.peer.role"] == "leecher"
+
+
+def test_seeder_torrent_upload_rate_is_exported_and_measured():
+    """The device-reported iris.transfer.throughput cannot see a transfer that
+    finishes inside one 60s agent tick -- and at lab speed a 929 MB image lands
+    in 7-33s, so it reads a truthful zero taken outside the window. The origin
+    measures its own send rate every poll, independent of any device tick;
+    export that so a fast transfer is visible at all.
+
+    It is a LOWER BOUND: device-to-device reseed traffic is invisible to the
+    origin. That limit is documented, not papered over.
+    """
+    pts = telemetry._metric_points(
+        [], {}, now=1000.0,
+        seeder_torrents=[{"image_id": "img-1", "image": "img-1.bin",
+                          "info_hash": "abc", "upload_length": 4096,
+                          "upload_bps": 92_173_949}])
+    by = {p["name"]: p for p in pts}
+    assert "iris.seeder.torrent.upload_rate" in by, sorted(by)
+    rate = by["iris.seeder.torrent.upload_rate"]
+    assert rate["value"] == 92_173_949
+    assert rate["unit"] == "By/s"
+    assert rate["attrs"]["iris.image.id"] == "img-1"
+    # low cardinality preserved: no device or peer label ever
+    assert not any(k.startswith("device.") or "peer" in k
+                   for k in rate["attrs"])

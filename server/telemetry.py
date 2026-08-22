@@ -305,6 +305,16 @@ def _metric_points(rows, extras, now, export_signals=None, peer_status=None,
                     "attrs": {"iris.image.id": torrent["image_id"],
                               "iris.torrent.info_hash": torrent["info_hash"]},
                     "ts": now})
+        # Origin -> swarm send rate, MEASURED by the origin's aria2 poll. It is
+        # a LOWER BOUND on total swarm throughput: device-to-device reseed
+        # traffic is invisible from here. It is emitted because the
+        # device-reported iris.transfer.throughput is structurally unable to
+        # observe a transfer shorter than one 60 s agent tick.
+        pts.append({"name": "iris.seeder.torrent.upload_rate", "unit": "By/s",
+                    "kind": "gauge", "value": _int(torrent.get("upload_bps")),
+                    "attrs": {"iris.image.id": torrent["image_id"],
+                              "iris.torrent.info_hash": torrent["info_hash"]},
+                    "ts": now})
     for r in rows:
         base = {"iris.image.id": r["image"],
                 "iris.torrent.info_hash": r["info_hash"]}
@@ -578,7 +588,15 @@ class Telemetry:
                  for image_id, entry in images.items()
                  if isinstance(entry, dict) and entry.get("info_hash_hex")}
         return [{"image_id": image_id, "image": image,
-                 "info_hash": info_hash, "upload_length": upload_length}
+                 "info_hash": info_hash, "upload_length": upload_length,
+                 # Measured by the origin's own aria2 poll every `interval`
+                 # seconds, independent of any device tick. This is what makes
+                 # a transfer visible at all: the device-reported rate is
+                 # sampled once per 60 s agent tick, and a 929 MB image at lab
+                 # speed finishes in 7-33 s, so the device tick can never land
+                 # inside the transfer window.
+                 "upload_bps": _int(
+                     (self._torrent_upload_bps or {}).get(info_hash))}
                 for info_hash, upload_length in self._upload_len.items()
                 for image_id, image in [known.get(str(info_hash), (None, None))]
                 if image_id is not None]
