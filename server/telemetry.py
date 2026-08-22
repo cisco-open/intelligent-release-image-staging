@@ -14,6 +14,7 @@ announce critical path."""
 import hashlib
 import json
 import os
+import secrets
 import threading
 import time
 import urllib.request
@@ -489,6 +490,47 @@ class Telemetry:
         # shares this queue — see __init__.)
         self.log_queue.emit(event)
 
+    def _emit_peer_rates(self, peer_up, now):
+        """One ``iris.swarm.peer_rate`` record per measured connection.
+
+        aria2 reports the socket endpoint, so match the announced endpoint
+        first and fall back to the address when it is unambiguous — the same
+        rule the swarm document uses. A peer we cannot attribute is skipped
+        rather than guessed at.
+        """
+        if not peer_up:
+            return
+        try:
+            snap = self._registry.snapshot(now=now)
+        except Exception:
+            return                      # telemetry is never on the critical path
+        for info_hash, endpoints in (peer_up or {}).items():
+            peers = snap.get(info_hash) or []
+            by_ip = {}
+            for row in peers:
+                by_ip.setdefault(row.get("ip"), []).append(row)
+            image_id = self._names.get(info_hash)
+            for (ip, port), bps in (endpoints or {}).items():
+                cands = by_ip.get(ip) or []
+                match = next((c for c in cands if c.get("port") == port), None)
+                if match is None and len(cands) == 1:
+                    match = cands[0]
+                if match is None:
+                    continue
+                ptype = match.get("principal_type")
+                pid = match.get("principal_id")
+                principal = ("%s:%s" % (ptype, pid)) if ptype and pid else None
+                left = match.get("left")
+                try:
+                    self.log_queue.emit(otlp.build_peer_rate_record({
+                        "principal": principal, "info_hash": info_hash,
+                        "image_id": image_id, "ip": ip, "port": port,
+                        "send_bps": bps, "left": left,
+                        "role": "seeder" if left == 0 else "leecher",
+                        "ts": now, "event_id": secrets.token_hex(16)}))
+                except Exception:
+                    pass
+
     def emit_policy_event(self, entry, status):
         """Queue the canonical policy-operation record on this stable queue.
         This remains accepting when the OTLP transport is disabled."""
@@ -662,6 +704,11 @@ class Telemetry:
                 self._peer_up = peer_up
                 self._upload_len = {}
                 self._torrent_observed_at = now
+                # Peer-labelled history belongs in the OTLP LOG stream, not in
+                # metrics: one record per measured edge, per sample, so a
+                # backend can chart origin -> peer speed over time without the
+                # cardinality a per-peer metric label would create.
+                self._emit_peer_rates(peer_up, now)
             else:
                 # Do not present retained gauges/rates as a current observation
                 # after a failed control-state poll.

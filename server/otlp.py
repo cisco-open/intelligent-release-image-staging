@@ -267,6 +267,33 @@ def build_tracker_record(event):
                    event_id=event.get("event_id"), body="tracker peer event")
 
 
+def build_peer_rate_record(row):
+    """Measured origin -> peer send rate -> ``iris.swarm.peer_rate``.
+
+    The rate is what aria2 actually measured for this connection; no per-peer
+    cumulative byte total is derived from it (that machinery is retired). This
+    is a LOG record, not a metric, so peer- and device-labelled history does not
+    multiply metric cardinality.
+    """
+    if not isinstance(row, dict):
+        row = {}
+    pairs = [
+        ("otel.log.name", "iris.swarm.peer_rate"),
+        (_SCHEMA_ATTR, 2),
+        ("iris.principal", _enrich_str(row.get("principal"))),
+        ("iris.torrent.info_hash", _enrich_str(row.get("info_hash"))),
+        ("iris.image.id", _enrich_str(row.get("image_id"))),
+        ("network.peer.address", _enrich_str(row.get("ip"))),
+        ("network.peer.port", _enrich_int(row.get("port"))),
+        ("iris.transfer.peer_send_bps", _enrich_int(row.get("send_bps"))),
+        ("iris.torrent.left", _enrich_int(row.get("left"))),
+        ("iris.peer.role", _enrich_str(row.get("role"))),
+    ]
+    attrs = [_attr(k, v) for k, v in pairs if v is not None]
+    return _record("iris.swarm.peer_rate", _ts_nano(row.get("ts")), attrs,
+                   event_id=row.get("event_id"), body="measured peer rate")
+
+
 def build_logs_payload(events, resource_attrs):
     """Wrap log records in the OTLP/HTTP-JSON ExportLogsServiceRequest shape.
     The queue (OTLPLogExporter.emit/flush) carries two shapes: raw swarm

@@ -2086,3 +2086,42 @@ def test_exact_endpoint_match_is_preferred_and_not_marked_aggregated():
     peer = p["server_observation"]["peer"]
     assert peer["send_bps"] == 777
     assert "aggregated_connections" not in peer
+
+
+def test_peer_rate_record_carries_the_measured_edge():
+    """Per-peer speed has to reach the backend as a LOG record: the release put
+    device- and peer-labelled history in logs so it does not multiply metric
+    cardinality. The record must name both ends of the edge and the measured
+    rate, plus an image id so a dashboard can filter by rollout."""
+    import otlp
+    rec = otlp.build_peer_rate_record({
+        "principal": "device:100.90.168.114", "info_hash": "abc",
+        "image_id": "cat9k_iosxe.26.01.01", "ip": "100.92.100.2", "port": 6881,
+        "send_bps": 8_000_000, "left": 512, "role": "leecher",
+        "ts": 1787000000.0, "event_id": "e1"})
+    attrs = {a["key"]: list(a["value"].values())[0] for a in rec["attributes"]}
+    assert rec["eventName"] == "iris.swarm.peer_rate"
+    assert attrs["iris.principal"] == "device:100.90.168.114"
+    assert attrs["network.peer.address"] == "100.92.100.2"
+    assert attrs["iris.image.id"] == "cat9k_iosxe.26.01.01"
+    assert int(attrs["iris.transfer.peer_send_bps"]) == 8_000_000
+    assert int(attrs["iris.torrent.left"]) == 512
+    assert attrs["iris.peer.role"] == "leecher"
+
+
+def test_sampler_emits_a_peer_rate_record_per_measured_edge():
+    """End to end: a measured connection produces one peer_rate log record
+    naming the typed principal, the image and the rate."""
+    import auth
+    emitted = []
+    hub = _rate_hub([{"ip": "10.0.0.5", "port": "51999", "uploadSpeed": "2048"}])
+    hub._registry.announce("abc", "lx", "10.0.0.5", 6881, left=900,
+                           principal=auth.Principal("device", "dz"))
+    hub.log_queue.emit = lambda rec: emitted.append(rec)
+    hub.sample()
+    rates = [r for r in emitted if r.get("eventName") == "iris.swarm.peer_rate"]
+    assert len(rates) == 1, emitted
+    a = {x["key"]: list(x["value"].values())[0] for x in rates[0]["attributes"]}
+    assert a["iris.principal"] == "device:dz"
+    assert int(a["iris.transfer.peer_send_bps"]) == 2048
+    assert a["iris.peer.role"] == "leecher"
