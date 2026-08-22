@@ -180,7 +180,11 @@ def test_manifest_has_durable_exact_backup_and_new_digest(tmp_path):
     assert row["live_gid"] == "gid-1"
 
 
-def test_recover_restores_backup_and_reconciles_active_gid(tmp_path):
+@pytest.mark.parametrize("phase", [
+    "started", "secret_rotated", "new_canonical_written", "removing_old",
+    "old_removed", "adding_new", "applied", "swarm_probe_failed",
+    "rolling_back", "hard_no_go", "double_failure"])
+def test_recover_restores_backup_and_reconciles_active_gid(tmp_path, phase):
     old = _canonical()
     canonical = tmp_path / "torrents" / "img.torrent"
     canonical.parent.mkdir()
@@ -191,7 +195,7 @@ def test_recover_restores_backup_and_reconciles_active_gid(tmp_path):
     backup.write_bytes(old)
     manifest_path = tmp_path / "seeder-rotation-recovery.json"
     rot._atomic_write_json(str(manifest_path), {
-        "version": 2, "phase": "adding_new", "maintenance_frozen": True,
+        "version": 2, "phase": phase, "maintenance_frozen": True,
         "torrents": [{"image_id": "img", "path": str(canonical),
                       "image_dir": str(tmp_path), "gid": "old-gid",
                       "info_hash": rot._info_hash(old),
