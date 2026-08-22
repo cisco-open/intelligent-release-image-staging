@@ -12,6 +12,8 @@ import gzip
 import hashlib
 import io
 import json
+import math
+import ipaddress
 import os
 import re
 import secrets
@@ -122,6 +124,8 @@ def _sanitize_report_v2(data):
     created = data.get("report_created_at")
     if isinstance(created, bool) or not isinstance(created, (int, float)):
         raise ValueError("bad report_created_at")
+    if not math.isfinite(created) or created < 0:
+        raise ValueError("bad report_created_at")
     image_id = data.get("image_id")
     if not isinstance(image_id, str) or not _IMAGE_RE.match(image_id):
         raise ValueError("bad image_id")
@@ -133,6 +137,10 @@ def _sanitize_report_v2(data):
         v = win.get(key)
         if isinstance(v, bool) or not isinstance(v, (int, float)):
             raise ValueError("bad window.%s" % key)
+        if not math.isfinite(v) or v < 0:
+            raise ValueError("bad window.%s" % key)
+    if win["start"] > win["end"]:
+        raise ValueError("bad window order")
     if not isinstance(win.get("complete"), bool):
         raise ValueError("bad window.complete")
 
@@ -144,14 +152,21 @@ def _sanitize_report_v2(data):
             content.get("completed_content_bytes"), _CONTENT_CAP),
         "total_content_bytes": _bounded_report_int(
             content.get("total_content_bytes"), _CONTENT_CAP)}
+    if content_out["completed_content_bytes"] > content_out["total_content_bytes"]:
+        raise ValueError("completed content exceeds total")
 
     csha = data.get("content_sha256")
     if not isinstance(csha, dict) or csha.get("state") not in \
             _CONTENT_SHA256_STATES:
         raise ValueError("bad content_sha256")
     content_sha256 = {"state": csha["state"]}
-    if csha.get("algo") is not None:
-        content_sha256["algo"] = _cap_strings(str(csha["algo"]))
+    checked = csha["state"] != "not_checked"
+    if checked and csha.get("algo") != "sha256":
+        raise ValueError("checked content requires sha256")
+    if not checked and "algo" in csha:
+        raise ValueError("unchecked content forbids algo")
+    if checked:
+        content_sha256["algo"] = "sha256"
 
     iocv = data.get("ios_copy_verify")
     if not isinstance(iocv, dict) or iocv.get("state") not in \
@@ -180,15 +195,31 @@ def _sanitize_report_v2(data):
         if not isinstance(row, dict):
             raise ValueError("bad peer row")
         ip = row.get("ip")
-        clean = {"ip": str(ip or "")[:64]}
+        if not isinstance(ip, str) or not ip or len(ip) > 64:
+            raise ValueError("bad peer ip")
+        try:
+            ipaddress.ip_address(ip)
+        except ValueError:
+            raise ValueError("bad peer ip")
+        clean = {"ip": ip}
         for key in ("first_observed", "last_observed"):
             v = row.get(key)
-            if isinstance(v, (int, float)) and not isinstance(v, bool):
-                clean[key] = float(v)
-        clean["observations"] = _peer_int(row.get("observations"))
+            if (isinstance(v, bool) or not isinstance(v, (int, float))
+                    or not math.isfinite(v) or v < 0):
+                raise ValueError("bad peer timestamp")
+            clean[key] = float(v)
+        if clean.get("first_observed", 0) > clean.get("last_observed", 0):
+            raise ValueError("bad peer timestamp order")
+        clean["observations"] = _bounded_report_int(
+            row.get("observations"), _CONTENT_CAP)
         rows.append(clean)
-    peers_total = min(max(_peer_int(data.get("peers_total")), len(rows)),
-                      _STATE_PEER_SET_CAP)
+    peers_total = _bounded_report_int(data.get("peers_total"),
+                                      _STATE_PEER_SET_CAP)
+    if peers_total < len(rows):
+        raise ValueError("peers_total below rows")
+    for key in ("peers_truncated", "peers_saturated"):
+        if not isinstance(data.get(key), bool):
+            raise ValueError("bad %s" % key)
 
     report = {"v": 2, "schema": "v2", "report_id": report_id,
               "transfer_id": transfer_id, "report_request_id": rrid,
@@ -201,8 +232,8 @@ def _sanitize_report_v2(data):
               "ios_copy_verify": {"state": iocv["state"]},
               "sampling": sampling_out, "stage_state": stage_state,
               "peers": rows, "peers_total": peers_total,
-              "peers_truncated": bool(data.get("peers_truncated")),
-              "peers_saturated": bool(data.get("peers_saturated"))}
+              "peers_truncated": data["peers_truncated"],
+              "peers_saturated": data["peers_saturated"]}
     agent = data.get("agent")
     if isinstance(agent, dict):
         report["agent"] = _cap_strings(agent)
@@ -811,6 +842,11 @@ class Catalog:
                 report = _sanitize_report(data)
             except ValueError:
                 return self._json(400, {"error": "bad report"})
+            if report.get("schema") == "v2":
+                assigned = self.store.get_policy(parts[2]).get(
+                    "approved_image_id")
+                if not assigned or report.get("image_id") != assigned:
+                    return self._json(400, {"error": "bad report"})
             self.store.record_telemetry(parts[2], report)
             return self._json(200, {"ok": True})
         if len(parts) == 4 and parts[:2] == ["v1", "devices"] \
