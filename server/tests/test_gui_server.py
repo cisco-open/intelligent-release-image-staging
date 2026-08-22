@@ -240,7 +240,7 @@ def test_undeploy_and_status_ui_wired():
     assert "Waiting for heartbeat" in js         # overview card
 
 
-def old_swarmmap_peer_resolution_wired():
+def _archived_swarmmap_peer_resolution_wired():
     """Source guards for the swarm-map fixes: (1) peers deduped by ip so a
     re-announce or multi-image device can't render twice, (2) stored-report
     peer rows resolve device identity through the FLEET too (guest ips of
@@ -2897,7 +2897,9 @@ def _serve_reports(tmp_path):
     secrets_path = str(tmp_path / "secrets.json")
     app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
     cat = catalog_mod.CatalogStore(str(tmp_path / "state"))
-    srv = gui_server.make_server("127.0.0.1", 0, app, None, None, None, cat,
+    fleet = gui_fleet.FleetStore(str(tmp_path / "state"))
+    _policy_device(fleet)
+    srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, None, cat,
                                  certfile=None)
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -2977,10 +2979,10 @@ def test_device_reports_roundtrip(tmp_path):
         assert reports[0]["event"] == "staging-complete"
         assert reports[0]["peers"][0]["ip"] == "10.0.0.7"
         assert "received_at" in reports[0]      # stamped by record_telemetry
-        # unknown device -> empty ring, still 200
+        # Reports are only available for known fleet devices.
         st, _, b = _req(host, port, "GET", "/api/devices/ghost/reports",
                         headers={"Cookie": ck})
-        assert st == 200 and json.loads(b)["reports"] == []
+        assert st == 422 and json.loads(b)["error"] == "device is not in fleet"
     finally:
         stop()
 
@@ -3011,6 +3013,17 @@ def test_request_report_session_csrf_and_429(tmp_path):
         st, _, _ = _req(host, port, "POST", "/api/devices/d1/request-report",
                         {}, headers=hh)
         assert st == 200
+    finally:
+        stop()
+
+
+def test_request_report_rejects_unknown_fleet_device(tmp_path):
+    host, port, _cat, stop = _serve_reports(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        st, _, body = _req(host, port, "POST", "/api/devices/ghost/request-report",
+                           {}, headers={"Cookie": ck, "X-CSRF-Token": csrf})
+        assert st == 422 and json.loads(body)["error"] == "device is not in fleet"
     finally:
         stop()
 

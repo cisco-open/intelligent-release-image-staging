@@ -1064,6 +1064,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 did = unquote(path[len("/api/devices/"):-len("/reports")])
                 if not did.strip():
                     self._json(400, {"error": "bad device id"}); return
+                if fleet is None or fleet.get_device(did) is None:
+                    self._json(422, {"error": "device is not in fleet"}); return
                 reports = catalog.get_telemetry(did) if catalog else []
                 self._json(200, {"reports": reports}); return
             if path.startswith("/api/devices/") and path.endswith("/deployment"):
@@ -2137,6 +2139,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 did = unquote(path[len("/api/devices/"):-len("/request-report")])
                 if not did.strip():
                     self._json(400, {"error": "bad device id"}); return
+                if fleet is None or fleet.get_device(did) is None:
+                    self._json(422, {"error": "device is not in fleet"}); return
                 if catalog is None:
                     self._json(404, {"error": "not found"}); return
                 now = time.time()
