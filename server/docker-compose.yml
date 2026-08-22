@@ -84,6 +84,13 @@ services:
       # endpoint, e.g. IRIS_OTLP_ENDPOINT=http://<collector-ip>:4318. Inert
       # unless IRIS_OBSERVABILITY=1.
       IRIS_OTLP_ENDPOINT: "${IRIS_OTLP_ENDPOINT:-}"
+      # Seeder/telemetry poll cadence in seconds (default 15). On a fast
+      # link a whole image can transfer inside one interval -- a 1 GB image at
+      # ~90 MB/s lands in ~15s -- and the poll then observes no connected peer
+      # at all, so per-peer rates and the swarm map's measured edges never
+      # appear. Lower it (2-5s) on fast fabrics or for a live demo; the cost is
+      # more aria2 RPC calls.
+      IRIS_SAMPLE_INTERVAL: "${IRIS_SAMPLE_INTERVAL:-}"
       # Overrides the :9101 pointer page's console link verbatim (e.g. on a
       # shared host publishing the console on a non-default port). Unset ->
       # the moved_page() default of https://<IRIS_HOST_IP>:8080/.
