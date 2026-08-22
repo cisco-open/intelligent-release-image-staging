@@ -34,14 +34,9 @@ The server image creates a system user `iris` with a **fixed uid and gid of
 10001** and declares `USER iris`. Every service — tracker (6969), catalog
 (8443), artifact server (8000), seeder and `aria2c` (6881), Console (8080), and
 telemetry (9101) — runs as that uid. No listener uses a privileged port, no
-service needs a raw socket, and nothing chowns anything at runtime, so the
-Compose service also sets:
-
-| Setting | Effect |
-| --- | --- |
-| `user: "10001:10001"` | Restates the image's uid/gid so `docker compose run` and `exec` cannot regress to root. |
-| `cap_drop: [ALL]` | Removes every Linux capability. |
-| `security_opt: [no-new-privileges:true]` | Blocks regaining privilege through setuid binaries or file capabilities. |
+service needs a raw socket, and nothing chowns anything at runtime. Compose pins
+the same identity and drops the remaining privilege surface; the exact settings
+are in [Runtime identity](server.md#runtime-identity).
 
 Plaintext secrets live only on the `/run/iris` tmpfs, which is mounted with
 `uid=`, `gid=`, and `mode=` mount options so the directory is owned by and
@@ -124,6 +119,117 @@ inside the namespace as `127.0.0.1`, and under host networking every
 host-local process is loopback — in those deployments the gate is void, and
 the hard control is `IRIS_METRICS_HOST=127.0.0.1` (bind the listener to
 loopback) or not publishing port 9101 at all.
+
+## Typed identity and peer policy
+
+Every tracker and catalog credential resolves to a **typed principal** — a
+`(type, id)` pair. `device:<id>` is an onboarded device, `service:seeder` is the
+server's own seeder, and `legacy` is a credential that authenticated but cannot
+be attributed to either. The two namespaces are distinct, so a device registered
+under the name `seeder` and the seeder service are different identities rather
+than one colliding key. The device id `seeder` is reserved and refused at
+enrollment.
+
+A `legacy` participant is visible, answered, and counted, but it carries no
+device identity: it is never written to the durable endpoint map, never joined to
+a device row, and cannot be quarantined individually.
+
+**Duplicate credential ownership** fails closed. The announce and catalog
+authorization indexes are built strictly: if two records share a credential
+value, index construction raises and every request in that lane is refused — a
+tracker 403 or a catalog authorization failure — rather than silently resolving
+to whichever record loaded last. No error message carries the offending value.
+
+### The announce credential travels over HTTP
+
+The tracker announce is a **private HTTP** URL on the operator's own management
+network; the announce credential therefore rides an unencrypted hop. Rotation
+refuses to run unless the configured announce base is a private HTTP URL. This is
+a stated boundary, not an oversight: treat the management network as the
+control, and note that the catalog (HTTPS) and the console are the surfaces that
+do carry transport security.
+
+### Peer policy failure posture
+
+Peer ACLs and per-device assignments live in `peer-policy.json` under
+`IRIS_STATE`, with a last-known-good copy at `peer-policy.lkg.json`. Every commit
+writes the current authoritative document to the LKG before atomically replacing
+the authoritative file, so the last-known-good copy is the revision before the
+current one and never a half-written candidate. On a fresh start, when neither
+file exists, both are written with the same base revision.
+
+Read precedence decides the posture:
+
+| State on disk | Result |
+| --- | --- |
+| Neither file present | Open discovery. The validated base document is materialized to both paths; not degraded, not fail-closed. |
+| Valid authoritative | Used as-is. |
+| Corrupt authoritative, valid LKG | The LKG is used and the policy reports `degraded`. |
+| At least one file present, neither valid | `fail_closed`: no announce is offered any candidate peer, and the seeder blocklist switches to the emergency deny list below. |
+
+The first and last rows are easy to confuse and lead to opposite repairs. Both
+files *missing* is the open case, not the deny-everything case.
+
+Recovery is to put a valid document back at `peer-policy.json`. Copying
+`peer-policy.lkg.json` over it restores service, but that copy is one revision
+behind: the most recent policy change is lost and has to be reapplied from the
+console. Removing both files re-materializes the base policy, which drops every
+device's ACL assignment — including every quarantine assignment — and every
+operator-defined ACL; only the reserved `quarantine` ACL is re-created.
+
+A **valid but empty** policy is not the same as a broken one. The tracker applies
+an empty blocklist — a full replace, so anything previously blocked is released —
+and reports `enforced` once that call succeeds against a live seeder RPC session.
+
+### Emergency deny
+
+Under `fail_closed` the tracker stops consulting policy and derives an emergency
+deny list instead: every address it knows that is **not** attributed to a
+`service` principal is denied. Durable endpoint rows within the TTL and endpoint
+writes still queued for retry supply device addresses; the live announce registry
+supplies the rest, including legacy participants.
+
+The address configured as `IRIS_HOST_IP` is the exclusion — it is never added to
+the deny list in either mode. The emergency list additionally skips addresses it
+knows only through a `service` principal, but that skip is **not** a guarantee:
+the emergency list is a set of addresses with no shared-address handling, so an
+address the tracker also knows under a device principal is denied even if a
+service principal announces from it. Protecting the seeder therefore depends on
+`IRIS_HOST_IP` being set to the address it actually announces from.
+
+A fail-closed pass is recorded as `fail_closed`, never as `enforced`:
+`fail_closed` is decided before any other state, and the status writer rejects an
+`enforced` claim with no current seeder RPC session behind it.
+
+### When no address is known
+
+If the tracker is fail-closed and knows no address to deny, the derived set is
+empty — and an empty set produced by the fail-closed path is the one desired set
+the tracker computes and **deliberately does not send**. Sending it would be a
+full replace that released every existing block. The state stays `fail_closed`
+and is never reported as `enforced`.
+
+### Enforcement status is count-only
+
+The tracker is the only process that writes the aria2 peer blocklist, and its
+status file `peer-enforcement.json` records the denied set as a **count**, not a
+list. That file therefore cannot tell you whether one particular peer is blocked.
+
+One exception is deliberate and narrow: a conflict record names the single
+address that two principals disagree about, so `peer-enforcement.json` is
+**not address-free**. Treat it accordingly when deciding who may read it or
+where it is backed up. The console API is the boundary — it rebuilds the payload field by
+field and reduces conflicts to a count and the reason names, so no address
+crosses into a browser.
+
+### Announce credentials are not revoked on rotation
+
+Rotating the seeder announce credential keeps the previous credential valid.
+Rotation does not revoke it, at most two valid previous records are allowed, and
+a rotation that would exceed that is refused. Revoking a previous record is
+library-level support in this release: **no shipped command** performs it, and
+there is no automated migration. Old and new credentials are both valid, and
+retiring one is a separate operator decision.
 
 ## First-run admin claim
 

@@ -252,4 +252,19 @@ is described in [Audit export](operations.md#audit-export).
 
 ## When to use the CLI
 
-Use the CLI when you want a reproducible batch operation from reviewed CSV files. Use the console when you need visibility, one-off onboarding, or fast assignment changes during a lab.
+Nothing in the everyday workflow requires it. Publishing images, assigning them,
+onboarding and undeploying devices, importing inventory, and watching progress
+are all console operations, and most entries in the
+[command quick reference](reference.md#command-quick-reference) have a console
+equivalent.
+
+The command line stays the right tool for four things:
+
+| Task | Why it stays on the CLI |
+| --- | --- |
+| Bringing the server up | The console does not exist until the server is running. |
+| Reproducible batch operations | Reviewed CSV files give you a diff and a rollback path. |
+| Building agent bundles and IOx packages | Build-time tooling, not a runtime operation. |
+| Credential minting, revocation, and seeder rotation | Deliberately kept off the browser surface. |
+
+Use the console when you need visibility, one-off onboarding, or fast assignment changes during a lab.

@@ -10,9 +10,7 @@ Use this guide for a first proof-of-concept or proof-of-value deployment. It is
 not a production runbook: it does not cover high availability, scale hardening,
 or change control.
 
-IRIS distributes, verifies, and stages IOS-XE images. It never installs,
-activates, reloads, changes boot variables, or otherwise changes a device's
-running software state.
+IRIS is stage-only — see [Guardrails](security.md#guardrails).
 
 ## Before you start
 

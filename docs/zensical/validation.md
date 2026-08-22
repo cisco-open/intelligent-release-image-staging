@@ -40,7 +40,7 @@ For the commands and the pinned Zensical and Python versions, see
 | Management type recorded | Device shows routed, inband, router-routed, or router-nat; onboarding records an applied receipt. |
 | Installer runs | Device has trustpoint, Guest Shell or IOx app, bootstrap, and agent config. |
 | Inband preserves network | For inband, before/after `show running-config` shows the existing VLAN/SVI/gateway/VRF unchanged. |
-| Catalyst 8000V router path | `router-routed` and `router-nat` onboard, stage a verified image, and undeploy from their receipts. Swarm Map shows the device, and the operator's OTLP backend (e.g., Splunk) shows its telemetry when observability is enabled. |
+| Catalyst 8000V router path | `router-routed` and `router-nat` onboard, stage a verified image, and undeploy from their receipts. Swarm Map shows the device, and the operator's OTLP backend shows its telemetry when observability is enabled. |
 | Assignment applies | Device reports the approved image id. |
 | Download completes | Swarm state shows completed pieces. |
 | Verification passes | Agent reports the staged file and IOS verify success. |
@@ -54,6 +54,23 @@ the inband command-stream assertions in
 command streams in `device/tests/test_router_install.bats` and
 `device/tests/test_router_uninstall.bats`. See
 [Management Type and VLAN Ownership](network-attachment.md).
+
+## What automated tests do not cover
+
+The console swarm map is verified **by hand in a browser**. There are no
+automated browser tests in this repository: the Python suites assert the shape of
+the documents the map consumes, not the rendering, focus behavior, or polling of
+the page itself. A green test run is not evidence that the map behaves.
+
+Check these by hand when the map or its data source changes:
+
+| Check | What to look for |
+| --- | --- |
+| Hidden-tab pause | Polling stops when the tab is hidden or the view is left, and resumes on return. |
+| Backoff | While `/swarm` is unreachable the poll backs off and the header says so, rather than hammering. |
+| Keyboard | Graph nodes are reachable and operable from the keyboard; the detail drawer keeps focus and closes on Escape. |
+| Reduced motion | The graph respects the reduced-motion preference. |
+| Empty and error states | An empty swarm, an unreachable origin RPC, and a stale device observation each render as themselves rather than as a zero. |
 
 ## Reporting bugs
 

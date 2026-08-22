@@ -56,6 +56,31 @@ Device reports are useful for both current status and post-incident review. Typi
 | Verification | Hash checks, IOS copy or verify result, failure reason. |
 | Timing | Last poll, last report, and operation duration. |
 
+## Legacy participants
+
+A peer whose credential authenticates but cannot be attributed to a device or to
+the seeder service is typed `legacy`. It announces normally, is answered, and is
+counted in participation totals — but it carries no device identity, is never
+written to the durable endpoint map, is not joined to a device row, and cannot be
+quarantined individually. The swarm view marks these rows explicitly and warns
+when any are present, because a quarantine action cannot reach them.
+
+A rotated-out seeder credential announces this way too: still valid, still
+serving, but unattributed until the peer moves to the current credential.
+
+## Event identity
+
+Telemetry reports carry their own identity. A v2 device report is minted with a
+`report_id` on the device and frozen before the first POST, so a retry after a
+crash sends the byte-identical report and the server stores it once.
+
+Legacy **v1** telemetry has no device-supplied identifier. Its event id is
+**stamped at ingest** by the server on receipt, so v1 records are still
+deduplicable downstream — but the id reflects when the hub received the event,
+not when the device observed it. Do not read a v1 event id as device-side
+evidence, and do not compare it with a v2 `report_id` as though they were minted
+the same way.
+
 ## Transfer streaming
 
 Transfer streaming adds a live, fleet-scale view of in-flight transfers: which
@@ -132,7 +157,7 @@ per state transition (`otlp-export-degraded` / `otlp-export-recovered`).
 
 The hub aggregates samples per image and exports OTLP metrics alongside the
 Prometheus exposition on `:9101 /metrics`. Point `IRIS_OTLP_ENDPOINT` at your
-collector and route to e.g. Splunk — or any other OTLP backend. These names
+collector and route it to whichever OTLP backend you run. These names
 are contract:
 
 | Prometheus family (`:9101`) | OTLP metric | Unit | Attributes |

@@ -8,6 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 
 IRIS separates network onboarding from image assignment. That keeps connectivity data and release intent in different files, which makes review and rollback easier.
 
+These CSV workflows exist for reviewed, repeatable batches. The same inventory, assignment, and onboarding actions are available in the console — see [Bulk device actions](console.md#bulk-device-actions).
+
 ## Inventory
 
 Start from the template:
@@ -69,9 +71,8 @@ delete, and credential assignment all act on the checked rows and report
 per-device refusals instead of failing the whole batch. See
 [Bulk device actions](console.md#bulk-device-actions).
 
-Deleting inventory rows is not an undeploy — an onboarded device keeps its agent
-and its staged image with no inventory entry left to manage it — so undeploy the
-devices before deleting their rows.
+Deleting inventory rows is not an undeploy — undeploy the devices first. See
+[Bulk device actions](console.md#bulk-device-actions).
 
 ### Onboarding path
 

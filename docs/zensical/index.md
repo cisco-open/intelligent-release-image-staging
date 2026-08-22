@@ -11,6 +11,9 @@ IRIS, Intelligent Release and Image Staging, stages Cisco IOS-XE images across a
 !!! warning "Stage-only invariant"
     IRIS distributes, verifies, and stages images. It never installs, activates, reloads, changes boot variables, or mutates the running software state of a device.
 
+!!! note "You do not need the CLI to run IRIS"
+    Bringing the server up is a command-line task. After that, publishing images, assigning them, onboarding and undeploying devices, and watching progress are all done in the [web console](console.md). The command-line steps shown throughout these pages are the same operations for people who want them scripted or reviewed in CSV — see [When to use the CLI](console.md#when-to-use-the-cli).
+
 ## What IRIS provides
 
 | Area | Purpose |
@@ -44,6 +47,7 @@ flowchart LR
 
 | If you want to… | Read |
 | --- | --- |
+| Drive the whole workflow from a browser | [Web Console](console.md) |
 | Stand up a lab and stage one image | [Getting Started](getting-started.md) |
 | Understand the trust boundaries before touching production | [Architecture](architecture.md), then [Security Model](security.md) |
 | Decide how a device attaches to the network | [Management Type and VLAN Ownership](network-attachment.md) |

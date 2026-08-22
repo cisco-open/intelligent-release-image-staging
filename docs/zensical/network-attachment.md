@@ -10,10 +10,9 @@ IRIS supports four explicit management type models for the staging agent. The
 choice is per device, recorded in inventory, and — critically — determines what
 IRIS is allowed to create and remove on the device.
 
-> **Stage-only, network-preserving.** IRIS distributes, verifies, and stages
-> images. It never installs, activates, reloads, changes boot variables, or
-> mutates running software state. Inband additionally never creates, changes, or
-> removes the operator's network.
+> **Stage-only, network-preserving.** Inband never creates, changes, or removes
+> the operator's network, and IRIS never mutates running software state — see
+> [Guardrails](security.md#guardrails).
 
 ## Routed — IRIS-managed app network
 
