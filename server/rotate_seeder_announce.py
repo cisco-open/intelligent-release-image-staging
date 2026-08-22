@@ -485,13 +485,18 @@ def durable_persist(recipients_csv, enc_path, age_bin=None):
 
 
 # The post-add proof requires every expected info_hash to re-announce AFTER the
-# boundary, and clients re-announce on the tracker's interval
-# (peer_registry.INTERVAL, 30s). Only the LAST-added torrent can announce inside
-# a short window; the earlier ones announced during their own add, i.e. before
-# the boundary, so a 2s window fails them deterministically even though the
-# rotation itself succeeded. Poll for longer than one announce interval plus the
-# sampler lag that rebuilds server_observation.
-_SWARM_RETRIES = 50          # x 1s cadence ~= 49s > 30s announce + 15s sampler
+# boundary. Clients re-announce on the tracker's interval (peer_registry.
+# INTERVAL, 30s), and the earlier torrents announced during their own add --
+# before the boundary -- so a short window fails them deterministically even
+# though the rotation itself succeeded.
+#
+# Sized from measurement, not theory: in the lab the three re-announces landed
+# 54-63s after the boundary (aria2 does not re-announce immediately on re-add;
+# it waits out its own schedule), and server_observation is only rebuilt on the
+# sampler tick. 50s was still short. 120s covers two announce intervals plus a
+# sampler tick with margin; it only costs wall-clock on a maintenance operation
+# that is already under freeze.
+_SWARM_RETRIES = 120         # x 1s cadence ~= 120s
 
 
 def production_deps(seeder_remove, seeder_add, recipients_csv, enc_path,
