@@ -4,6 +4,8 @@ IRIS stages Cisco IOS-XE images across a network before an operator performs any
 
 > IRIS distributes, verifies, and stages images. It never installs, activates, reloads, changes boot variables, or mutates the running software state of a device.
 
+> Bringing the server up is a command-line task. After that the [web console](docs/zensical/console.md) covers the everyday workflow — publishing images, assigning them, onboarding devices, and watching progress — so the commands below are one way to drive IRIS, not the only one.
+
 ## Documentation
 
 The detailed manual now lives in the Zensical documentation tree:
@@ -109,7 +111,7 @@ credential or from the CLI, both covered in
 docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin
 ```
 
-Publish an image mounted under `/opt/images`:
+Publish an image mounted under `/opt/images` — or upload it, or import it in place, from the console's Images page:
 
 ```bash
 docker compose -f server/docker-compose.yml exec iris \
@@ -124,7 +126,8 @@ cp fleet/assignments.csv.example fleet/assignments.csv
 ```
 
 Fill in `fleet/devices.csv` and import it from the console's Devices page. Then
-apply the assignments:
+apply the assignments — the console's Assignments page does the same thing one
+device at a time:
 
 ```bash
 tools/apply-assignments.sh fleet/assignments.csv
