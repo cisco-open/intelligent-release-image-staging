@@ -34,15 +34,17 @@ Docs build commands and their tool pins live in [Development](development.md#doc
 
 ## Port quick reference
 
-| Port | Service | Device-facing |
-| --- | --- | --- |
-| 6969 | Tracker | Yes |
-| 8443 | Catalog | Yes |
-| 8000 | Artifact server | Yes |
-| 6881 | Seeder data | Yes |
-| 8080 | Web console | Operator-facing |
-| 9101 | Telemetry | Operator-facing |
-| 6800 | aria2 RPC | No, local-only |
+| Port | Transport | Protocol | Service | Device-facing |
+| --- | --- | --- | --- | --- |
+| 6969 | TCP | HTTP | Tracker | Yes |
+| 8443 | TCP | HTTPS | Catalog | Yes |
+| 8000 | TCP | HTTPS | Artifact server | Yes |
+| 6881 | TCP | BitTorrent | Seeder data | Yes |
+| 8080 | TCP | HTTPS | Web console | Operator-facing |
+| 9101 | TCP | HTTP | Telemetry | Operator-facing |
+| 6800 | TCP | HTTP | aria2 RPC | No, local-only |
+
+Every port is TCP. IRIS opens no UDP listener.
 
 ## Environment variables
 
