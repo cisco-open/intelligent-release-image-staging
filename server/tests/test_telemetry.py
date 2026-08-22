@@ -2019,3 +2019,70 @@ class TestFromEnvDestination:
             "IRIS_STATE": str(tmp_path),
             "IRIS_OTLP_HEADERS": "Authorization=Bearer x"})
         assert hub._headers == {"Authorization": "Bearer x"}
+
+
+def _rate_hub(peer_rows):
+    """A hub whose seeder poll reports *peer_rows* from aria2.getPeers."""
+    def rpc(method, params=None):
+        if method == "aria2.getGlobalStat":
+            return {"uploadSpeed": "500000", "downloadSpeed": "0", "numActive": "1"}
+        if method == "aria2.tellActive":
+            keys = params[0] if params else []
+            if "files" in keys:
+                return [{"connections": "1", "infoHash": "abc",
+                         "totalLength": "1000",
+                         "files": [{"path": "/img/cat9k.bin"}]}]
+            return [{"gid": "g1", "infoHash": "abc", "uploadLength": "1000"}]
+        if method == "aria2.getSessionInfo":
+            return {"sessionId": "s0"}
+        if method == "aria2.getPeers":
+            return peer_rows
+        raise AssertionError(method)
+    return telemetry.Telemetry(PeerRegistry(), rpc=rpc, interval=10)
+
+
+def test_measured_rate_survives_an_ephemeral_source_port():
+    """aria2 reports the SOCKET endpoint. A leecher dials the seeder, so the
+    port aria2 sees is the peer's ephemeral source port -- not the listen port
+    it announced to the tracker. Keying the join on (ip, port) alone therefore
+    drops the rate for every incoming connection, which is every normal
+    transfer: no measured arrow ever renders."""
+    import auth
+    hub = _rate_hub([{"ip": "10.0.0.2", "port": "51422", "uploadSpeed": "4096"}])
+    hub.sample()
+    hub._registry.announce("abc", "l1", "10.0.0.2", 6881, left=500,
+                           principal=auth.Principal("device", "d1"))
+    p = [x for x in hub.swarm_snapshot()["images"][0]["peers"]
+         if x["ip"] == "10.0.0.2"][0]
+    assert p["server_observation"]["peer"]["send_bps"] == 4096
+
+
+def test_two_connections_from_one_address_are_marked_aggregated():
+    """The (ip, port) key existed to stop two connections being silently summed
+    into one row. Keep that honesty: when the address is ambiguous the row still
+    carries a rate, but says it is a sum rather than one connection."""
+    import auth
+    hub = _rate_hub([{"ip": "10.0.0.9", "port": "51422", "uploadSpeed": "1000"},
+                     {"ip": "10.0.0.9", "port": "51423", "uploadSpeed": "2000"}])
+    hub.sample()
+    hub._registry.announce("abc", "l2", "10.0.0.9", 6881, left=500,
+                           principal=auth.Principal("device", "d2"))
+    p = [x for x in hub.swarm_snapshot()["images"][0]["peers"]
+         if x["ip"] == "10.0.0.9"][0]
+    peer = p["server_observation"]["peer"]
+    assert peer["send_bps"] == 3000
+    assert peer["aggregated_connections"] == 2
+
+
+def test_exact_endpoint_match_is_preferred_and_not_marked_aggregated():
+    """When aria2's endpoint matches the announced one exactly, use it verbatim."""
+    import auth
+    hub = _rate_hub([{"ip": "10.0.0.3", "port": "6881", "uploadSpeed": "777"}])
+    hub.sample()
+    hub._registry.announce("abc", "l3", "10.0.0.3", 6881, left=500,
+                           principal=auth.Principal("device", "d3"))
+    p = [x for x in hub.swarm_snapshot()["images"][0]["peers"]
+         if x["ip"] == "10.0.0.3"][0]
+    peer = p["server_observation"]["peer"]
+    assert peer["send_bps"] == 777
+    assert "aggregated_connections" not in peer

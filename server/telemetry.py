@@ -466,7 +466,7 @@ class Telemetry:
         self._seeder = {"rpc_up": False}
         self._names = {}                    # last good info_hash -> name
         self._totals = {}                   # last good info_hash -> total bytes
-        self._peer_up = {}                  # info_hash -> {ip: server upload bps}
+        self._peer_up = {}          # info_hash -> {(ip, port): server upload bps}
         self._upload_len = {}               # info_hash -> control-state uploadLength gauge (epoch-baselined)
         self._torrent_upload_bps = {}       # info_hash -> aria2 current uploadSpeed
         self._torrent_observed_at = 0.0     # last successful control-state poll
@@ -1134,11 +1134,30 @@ def _peer_row(p, total, up_now, devices_by_id, report_by_device,
     # server_observation.peer source (never an inferred cumulative per-peer
     # total — that machinery is retired). Present only when measured (>0 or a
     # known connection); we surface it whenever the seeder poll saw the ip.
+    #
+    # aria2 reports the SOCKET endpoint. A leecher dials the origin seeder, so
+    # the port aria2 sees is that peer's ephemeral source port, not the listen
+    # port it announced to the tracker. Matching on (ip, port) alone therefore
+    # drops the rate for every incoming connection — i.e. every normal transfer.
+    # Prefer the exact endpoint; fall back to the address when it is
+    # unambiguous. When one address really does carry several connections, sum
+    # them but SAY SO, so the row is never a silent merge.
     endpoint = (p["ip"], p["port"])
+    measured, same_ip = None, None
     if endpoint in up_now:
-        row["server_observation"] = {
-            "peer": {"send_bps": up_now[endpoint],
-                     "observed_at": server_observed_at}}
+        measured = up_now[endpoint]
+    else:
+        same_ip = [bps for (ip_, _port), bps in up_now.items()
+                   if ip_ == p["ip"]]
+        if len(same_ip) == 1:
+            measured = same_ip[0]
+        elif len(same_ip) > 1:
+            measured = sum(same_ip)
+    if measured is not None:
+        peer_obs = {"send_bps": measured, "observed_at": server_observed_at}
+        if same_ip is not None and len(same_ip) > 1:
+            peer_obs["aggregated_connections"] = len(same_ip)
+        row["server_observation"] = {"peer": peer_obs}
 
     # Attributable device principals only: identity-keyed joins by principal id.
     if ptype == "device" and pid is not None:
