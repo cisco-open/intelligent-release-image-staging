@@ -35,6 +35,13 @@ def _seeder_store(tmp_path, value="OLD"):
     return sp
 
 
+def _recovery_catalog(tmp_path, image_dir=None):
+    image_dir = image_dir or tmp_path
+    (image_dir / "img.bin").write_bytes(b"image")
+    (tmp_path / "catalog.json").write_text(json.dumps({"images": {
+        "img": {"filename": "img.bin", "source_dir": str(image_dir)}}}))
+
+
 class FakeSeeder:
     """Records force-remove / add calls and can be told to fail specific ones."""
 
@@ -183,9 +190,10 @@ def test_manifest_has_durable_exact_backup_and_new_digest(tmp_path):
 @pytest.mark.parametrize("phase", [
     "started", "secret_rotated", "new_canonical_written", "removing_old",
     "old_removed", "adding_new", "applied", "swarm_probe_failed",
-    "rolling_back", "hard_no_go", "double_failure"])
+    "rolling_back", "rolled_back", "hard_no_go", "double_failure"])
 def test_recover_restores_backup_and_reconciles_active_gid(tmp_path, phase):
     old = _canonical()
+    _recovery_catalog(tmp_path)
     canonical = tmp_path / "torrents" / "img.torrent"
     canonical.parent.mkdir()
     canonical.write_bytes(b"changed")
@@ -238,6 +246,7 @@ def test_recover_rejects_backup_path_outside_recovery_dir(tmp_path, backup_path)
 
 def test_recover_failure_keeps_actionable_manifest(tmp_path):
     old = _canonical()
+    _recovery_catalog(tmp_path)
     recovery = tmp_path / "seeder-rotation-recovery"
     recovery.mkdir()
     backup = recovery / "0000.torrent"
@@ -263,6 +272,64 @@ def test_recover_failure_keeps_actionable_manifest(tmp_path):
     assert manifest["phase"] == "repair_needed"
     assert manifest["maintenance_frozen"] is True
     assert manifest["torrents"][0]["status"] == "restore_failed"
+
+
+@pytest.mark.parametrize("image_dir", ["", "/tmp/attacker-controlled", "gone"])
+def test_recover_rejects_invalid_image_dir_before_write_or_rpc(tmp_path, image_dir):
+    old = _canonical()
+    _recovery_catalog(tmp_path)
+    recovery = tmp_path / "seeder-rotation-recovery"
+    recovery.mkdir()
+    backup = recovery / "0000.torrent"
+    backup.write_bytes(old)
+    canonical = tmp_path / "torrents" / "img.torrent"
+    canonical.parent.mkdir()
+    canonical.write_bytes(b"changed")
+    manifest_path = tmp_path / "seeder-rotation-recovery.json"
+    rot._atomic_write_json(str(manifest_path), {
+        "version": 2, "phase": "started", "torrents": [{
+            "image_id": "img", "path": str(canonical),
+            "image_dir": str(tmp_path / image_dir) if image_dir == "gone" else image_dir,
+            "backup_path": str(backup), "old_sha256": hashlib.sha256(old).hexdigest(),
+            "info_hash": rot._info_hash(old)}]})
+    checkpoint = tmp_path / "identity-compatible-ready"
+    checkpoint.write_text("ready\n")
+
+    with pytest.raises(ValueError, match="invalid recovery manifest image directory"):
+        rot.recover_rotation(str(manifest_path), str(tmp_path),
+                             lambda *args: pytest.fail("RPC called"))
+    assert canonical.read_bytes() == b"changed"
+    assert checkpoint.exists()
+
+
+def test_recover_retracts_deployment_gate_after_validated_recovery_starts(tmp_path):
+    old = _canonical()
+    _recovery_catalog(tmp_path)
+    recovery = tmp_path / "seeder-rotation-recovery"
+    recovery.mkdir()
+    backup = recovery / "0000.torrent"
+    backup.write_bytes(old)
+    canonical = tmp_path / "torrents" / "img.torrent"
+    canonical.parent.mkdir()
+    canonical.write_bytes(b"changed")
+    manifest_path = tmp_path / "seeder-rotation-recovery.json"
+    rot._atomic_write_json(str(manifest_path), {
+        "version": 2, "phase": "started", "torrents": [{
+            "image_id": "img", "path": str(canonical), "image_dir": str(tmp_path),
+            "backup_path": str(backup), "old_sha256": hashlib.sha256(old).hexdigest(),
+            "info_hash": rot._info_hash(old)}]})
+    (tmp_path / "identity-compatible-ready").write_text("ready\n")
+
+    def rpc(method, params):
+        if method == "aria2.tellActive":
+            return []
+        if method == "aria2.addTorrent":
+            return "restored-gid"
+        if method == "aria2.tellStatus":
+            return {"gid": "restored-gid", "infoHash": rot._info_hash(old)}
+
+    assert rot.recover_rotation(str(manifest_path), str(tmp_path), rpc) is True
+    assert not (tmp_path / "identity-compatible-ready").exists()
 
 
 # ---------------------------------------------------------------------------

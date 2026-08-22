@@ -787,6 +787,31 @@ def _contained_path(path, parent):
         return False
 
 
+def _recovery_image_dirs(rows, state, env):
+    """Validate manifest image directories against the current catalog."""
+    try:
+        with open(os.path.join(state, "catalog.json")) as f:
+            catalog = json.load(f)
+        images = catalog.get("images") if isinstance(catalog, dict) else None
+        if not isinstance(images, dict):
+            raise ValueError
+    except Exception:
+        raise ValueError("invalid recovery manifest image directory")
+
+    image_dirs = []
+    for row in rows:
+        image_id = row.get("image_id") if isinstance(row, dict) else None
+        image_dir = row.get("image_dir") if isinstance(row, dict) else None
+        entry = images.get(image_id) if isinstance(image_id, str) and image_id else None
+        expected = _image_dir(entry, env) if isinstance(entry, dict) else None
+        if (not isinstance(image_dir, str) or not image_dir or expected is None
+                or not os.path.isdir(image_dir)
+                or os.path.realpath(image_dir) != os.path.realpath(expected)):
+            raise ValueError("invalid recovery manifest image directory")
+        image_dirs.append(os.path.realpath(expected))
+    return image_dirs
+
+
 def recover_rotation(manifest_path, state, rpc):
     """Restore exact pre-rotation torrent bytes and reconcile aria2.
 
@@ -804,8 +829,11 @@ def recover_rotation(manifest_path, state, rpc):
     if manifest.get("phase") in ("complete", "recovered"):
         raise ValueError("recovery manifest is already terminal")
 
+    # Validate every attacker-controlled image_dir against current authoritative
+    # catalog data before any canonical write or aria2 call.
+    image_dirs = _recovery_image_dirs(rows, state, os.environ)
     validated = []
-    for row in rows:
+    for row, image_dir in zip(rows, image_dirs):
         if not isinstance(row, dict):
             raise ValueError("invalid recovery manifest")
         backup = row.get("backup_path")
@@ -824,15 +852,18 @@ def recover_rotation(manifest_path, state, rpc):
         if (hashlib.sha256(old_bytes).hexdigest() != digest
                 or _info_hash(old_bytes).lower() != info_hash.lower()):
             raise ValueError("recovery backup verification failed")
-        validated.append((row, canonical, old_bytes, info_hash.lower()))
+        validated.append((row, canonical, old_bytes, info_hash.lower(), image_dir))
 
     try:
+        checkpoint = os.path.join(state, "identity-compatible-ready")
+        if os.path.exists(checkpoint):
+            os.remove(checkpoint)
         active = rpc("aria2.tellActive", [["gid", "infoHash"]]) or []
         by_hash = collections.defaultdict(list)
         for item in active:
             if isinstance(item, dict) and item.get("gid") and item.get("infoHash"):
                 by_hash[str(item["infoHash"]).lower()].append(str(item["gid"]))
-        for row, canonical, old_bytes, info_hash in validated:
+        for row, canonical, old_bytes, info_hash, image_dir in validated:
             _atomic_write_bytes(canonical, old_bytes)
             for gid in by_hash.get(info_hash, []):
                 rpc("aria2.forceRemove", [gid])
@@ -842,7 +873,7 @@ def recover_rotation(manifest_path, state, rpc):
                     pass
             gid = rpc("aria2.addTorrent", [
                 base64.b64encode(old_bytes).decode(), [],
-                {"dir": row["image_dir"], "seed-ratio": "0",
+                {"dir": image_dir, "seed-ratio": "0",
                  "bt-seed-unverified": "true"}])
             if not gid:
                 raise RuntimeError("aria2 restore returned no gid")
@@ -857,7 +888,7 @@ def recover_rotation(manifest_path, state, rpc):
         manifest["phase"] = "repair_needed"
         manifest["maintenance_frozen"] = True
         manifest["served_claimed"] = False
-        for row, _canonical, _old_bytes, _info_hash_value in validated:
+        for row, _canonical, _old_bytes, _info_hash_value, _image_dir_value in validated:
             if row.get("status") != "restored":
                 row["status"] = "restore_failed"
         _atomic_write_json(manifest_path, manifest)
