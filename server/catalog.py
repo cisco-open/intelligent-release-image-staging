@@ -613,7 +613,7 @@ class CatalogStore:
 class Catalog:
     def __init__(self, store, secrets_path,
                  audit_path=None, live_table=None, stream_settings=None,
-                 deployment_open=True):
+                 deployment_open=True, deployment_checkpoint=None):
         self.store = store
         self.secrets_path = secrets_path
         self.live_table = live_table
@@ -630,12 +630,18 @@ class Catalog:
         # misconfigured. ``personalized_served_count`` proves zero personalized
         # GETs before open.
         self.deployment_open = deployment_open
+        self.deployment_checkpoint = deployment_checkpoint
         self.personalized_served_count = 0
 
     def open_deployment(self):
         """Reach the deployment checkpoint: personalized torrents may now be
         served (spec §6 — call only after rotate/reload/verify)."""
         self.deployment_open = True
+
+    def _deployment_is_open(self):
+        return (self.deployment_open
+                and (self.deployment_checkpoint is None
+                     or os.path.isfile(self.deployment_checkpoint)))
 
     def _load_store(self):
         """Load the secrets store fresh from disk; return (store_dict, index)."""
@@ -722,7 +728,7 @@ class Catalog:
         if ptype == "device":
             # Deployment gate: refuse to serve any personalized torrent before
             # the checkpoint (spec §6 — proves zero personalized GET pre-open).
-            if not self.deployment_open:
+            if not self._deployment_is_open():
                 return self._json(
                     503, {"error": "catalog not open for device personalization"})
             now = time.time()
@@ -989,10 +995,11 @@ class Catalog:
 
 def make_server(host, port, store, secrets_path, certfile=None,
                 audit_path=None, live_table=None, stream_settings=None,
-                deployment_open=True):
+                deployment_open=True, deployment_checkpoint=None):
     cat = Catalog(store, secrets_path, audit_path=audit_path,
-                  live_table=live_table, stream_settings=stream_settings,
-                  deployment_open=deployment_open)
+                   live_table=live_table, stream_settings=stream_settings,
+                   deployment_open=deployment_open,
+                   deployment_checkpoint=deployment_checkpoint)
 
     grace = int(os.environ.get("IRIS_TOKEN_SKEW_GRACE", "300"))
 
@@ -1175,6 +1182,9 @@ def main():
     live_table = live_samples.LiveTable()
     stream_settings = live_samples.StreamSettings(
         os.path.join(state_dir, "telemetry-settings.json"))
+    require_identity_gate = os.environ.get("IRIS_REQUIRE_IDENTITY_GATE") == "1"
+    deployment_checkpoint = (os.path.join(
+        state_dir, "identity-compatible-ready") if require_identity_gate else None)
     stop = threading.Event()
     threading.Thread(
         target=live_samples.writer_loop,
@@ -1182,7 +1192,8 @@ def main():
               live_samples.SNAPSHOT_WRITE_INTERVAL, stop),
         daemon=True).start()
     srv = make_server(host, port, store, secrets_path, certfile=certfile,
-                      live_table=live_table, stream_settings=stream_settings)
+                      live_table=live_table, stream_settings=stream_settings,
+                      deployment_checkpoint=deployment_checkpoint)
     scheme = "https" if certfile else "http"
     print("catalog on %s://%s:%d/v1/images" % (scheme, host, port), flush=True)
     srv.serve_forever()

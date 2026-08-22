@@ -114,3 +114,56 @@ def test_make_server_can_start_closed(tmp_path):
         assert r.status == 503
     finally:
         srv.shutdown()
+
+
+def test_make_server_observes_checkpoint_created_after_start(tmp_path):
+    checkpoint = tmp_path / "identity-compatible-ready"
+    cat = _catalog_with_torrent(tmp_path, deployment_open=True)
+    cat.deployment_checkpoint = str(checkpoint)
+    assert cat.route_get("/v1/torrents/img1.torrent",
+                         auth_ctx=_device_ctx(),
+                         store_dict=_device_store())[0] == 503
+    checkpoint.write_text("ready\n")
+    assert cat.route_get("/v1/torrents/img1.torrent",
+                         auth_ctx=_device_ctx(),
+                         store_dict=_device_store())[0] == 200
+
+
+def test_main_wires_required_identity_checkpoint(tmp_path, monkeypatch):
+    captured = {}
+
+    class Server:
+        def serve_forever(self):
+            captured["served"] = True
+
+    def fake_make_server(*args, **kwargs):
+        captured.update(kwargs)
+        return Server()
+
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path))
+    monkeypatch.setenv("IRIS_REQUIRE_IDENTITY_GATE", "1")
+    monkeypatch.setattr(catalog, "make_server", fake_make_server)
+    monkeypatch.setattr(catalog.threading, "Thread",
+                        lambda *a, **k: type("T", (), {"start": lambda self: None})())
+    catalog.main()
+
+    assert captured["deployment_checkpoint"] == str(
+        tmp_path / "identity-compatible-ready")
+    assert captured["served"] is True
+
+
+def test_main_preserves_upgrade_default_without_gate(tmp_path, monkeypatch):
+    captured = {}
+
+    class Server:
+        def serve_forever(self):
+            pass
+
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path))
+    monkeypatch.delenv("IRIS_REQUIRE_IDENTITY_GATE", raising=False)
+    monkeypatch.setattr(catalog, "make_server",
+                        lambda *a, **kw: captured.update(kw) or Server())
+    monkeypatch.setattr(catalog.threading, "Thread",
+                        lambda *a, **k: type("T", (), {"start": lambda self: None})())
+    catalog.main()
+    assert captured["deployment_checkpoint"] is None
