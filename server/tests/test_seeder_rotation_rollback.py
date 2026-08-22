@@ -158,6 +158,109 @@ def test_manifest_contains_no_tokens_or_urls(tmp_path):
     assert store["seeder"]["announce_token"]["value"] not in text
 
 
+def test_manifest_has_durable_exact_backup_and_new_digest(tmp_path):
+    sp = _seeder_store(tmp_path)
+    torrent = tmp_path / "img.torrent"
+    old = _canonical()
+    torrent.write_bytes(old)
+    seeder = FakeSeeder()
+    manifest_path = str(tmp_path / "recovery.json")
+    rot.rotate_seeder_announce(
+        sp, manifest_path,
+        [rot.TorrentTarget("img", str(torrent), str(tmp_path), "old-gid")],
+        "http://h:6969/announce",
+        rot.RotationDeps(lambda s, p: secrets_store.save(s, p), seeder.remove,
+                         seeder.add, lambda expected, boundary: True,
+                         rot._atomic_write_json, lambda: 100))
+    manifest = json.load(open(manifest_path))
+    row = manifest["torrents"][0]
+    assert open(row["backup_path"], "rb").read() == old
+    assert row["old_sha256"] == hashlib.sha256(old).hexdigest()
+    assert row["new_sha256"] == hashlib.sha256(torrent.read_bytes()).hexdigest()
+    assert row["live_gid"] == "gid-1"
+
+
+def test_recover_restores_backup_and_reconciles_active_gid(tmp_path):
+    old = _canonical()
+    canonical = tmp_path / "torrents" / "img.torrent"
+    canonical.parent.mkdir()
+    canonical.write_bytes(b"changed")
+    recovery = tmp_path / "seeder-rotation-recovery"
+    recovery.mkdir()
+    backup = recovery / "0000.torrent"
+    backup.write_bytes(old)
+    manifest_path = tmp_path / "seeder-rotation-recovery.json"
+    rot._atomic_write_json(str(manifest_path), {
+        "version": 2, "phase": "adding_new", "maintenance_frozen": True,
+        "torrents": [{"image_id": "img", "path": str(canonical),
+                      "image_dir": str(tmp_path), "gid": "old-gid",
+                      "info_hash": rot._info_hash(old),
+                      "backup_path": str(backup),
+                      "old_sha256": hashlib.sha256(old).hexdigest(),
+                      "status": "adding_new"}]})
+    calls = []
+
+    def rpc(method, params):
+        calls.append((method, params))
+        if method == "aria2.tellActive":
+            return [{"gid": "current-gid", "infoHash": rot._info_hash(old)}]
+        if method == "aria2.addTorrent":
+            return "restored-gid"
+        if method == "aria2.tellStatus":
+            return {"gid": "restored-gid", "infoHash": rot._info_hash(old)}
+
+    result = rot.recover_rotation(str(manifest_path), str(tmp_path), rpc)
+    assert result is True
+    assert canonical.read_bytes() == old
+    assert ("aria2.forceRemove", ["current-gid"]) in calls
+    manifest = json.load(open(manifest_path))
+    assert manifest["phase"] == "recovered"
+    assert manifest["maintenance_frozen"] is True
+    assert manifest["torrents"][0]["restored_gid"] == "restored-gid"
+
+
+@pytest.mark.parametrize("backup_path", ["../escape.torrent", "/tmp/escape.torrent"])
+def test_recover_rejects_backup_path_outside_recovery_dir(tmp_path, backup_path):
+    manifest_path = tmp_path / "seeder-rotation-recovery.json"
+    rot._atomic_write_json(str(manifest_path), {
+        "version": 2, "phase": "started", "torrents": [{
+            "path": str(tmp_path / "torrents" / "img.torrent"),
+            "image_dir": str(tmp_path), "backup_path": backup_path,
+            "old_sha256": "0" * 64, "info_hash": "0" * 40}]})
+    with pytest.raises(ValueError):
+        rot.recover_rotation(str(manifest_path), str(tmp_path), lambda *a: [])
+    assert json.load(open(manifest_path))["phase"] == "started"
+
+
+def test_recover_failure_keeps_actionable_manifest(tmp_path):
+    old = _canonical()
+    recovery = tmp_path / "seeder-rotation-recovery"
+    recovery.mkdir()
+    backup = recovery / "0000.torrent"
+    backup.write_bytes(old)
+    canonical = tmp_path / "torrents" / "img.torrent"
+    canonical.parent.mkdir()
+    canonical.write_bytes(old)
+    manifest_path = tmp_path / "seeder-rotation-recovery.json"
+    rot._atomic_write_json(str(manifest_path), {
+        "version": 2, "phase": "old_removed", "torrents": [{
+            "image_id": "img", "path": str(canonical),
+            "image_dir": str(tmp_path), "backup_path": str(backup),
+            "old_sha256": hashlib.sha256(old).hexdigest(),
+            "info_hash": rot._info_hash(old)}]})
+
+    def rpc(method, params):
+        if method == "aria2.tellActive":
+            return []
+        raise RuntimeError("second failure")
+
+    assert rot.recover_rotation(str(manifest_path), str(tmp_path), rpc) is False
+    manifest = json.load(open(manifest_path))
+    assert manifest["phase"] == "repair_needed"
+    assert manifest["maintenance_frozen"] is True
+    assert manifest["torrents"][0]["status"] == "restore_failed"
+
+
 # ---------------------------------------------------------------------------
 # Durable secret persist BEFORE canonical mutation
 # ---------------------------------------------------------------------------

@@ -112,7 +112,10 @@ def _atomic_write_json(path, obj):
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(obj, f, indent=2, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, path)
+        _fsync_dir(d)
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
@@ -192,17 +195,29 @@ def rotate_seeder_announce(secrets_path, manifest_path, torrents,
     now = deps.now()
 
     # 1. Recovery manifest FIRST — nonsecret only (no URLs, no tokens).
+    recovery_dir = os.path.join(os.path.dirname(manifest_path) or ".",
+                                "seeder-rotation-recovery")
+    os.makedirs(recovery_dir, mode=0o700, exist_ok=True)
+    torrent_rows = []
+    for idx, target in enumerate(torrents):
+        with open(target.path, "rb") as f:
+            old_bytes = f.read()
+        backup_path = os.path.join(recovery_dir, "%04d.torrent" % idx)
+        _atomic_write_bytes(backup_path, old_bytes, mode=0o600)
+        torrent_rows.append({
+            "image_id": target.image_id, "path": os.path.realpath(target.path),
+            "image_dir": os.path.realpath(target.image_dir), "gid": target.gid,
+            "info_hash": _info_hash(old_bytes),
+            "backup_path": backup_path,
+            "old_sha256": hashlib.sha256(old_bytes).hexdigest(),
+            "status": "pending"})
     manifest = {
+        "version": 2,
         "phase": "started",
         "created_at": int(now),
-        "torrents": [
-            {"image_id": t.image_id,
-             "path": t.path,
-             "gid": t.gid,
-             "old_sha256": _sha256_file(t.path),
-             "status": "pending"}
-            for t in torrents
-        ],
+        "maintenance_frozen": True,
+        "served_claimed": False,
+        "torrents": torrent_rows,
     }
     deps.manifest_write(manifest_path, manifest)
 
@@ -233,6 +248,9 @@ def rotate_seeder_announce(secrets_path, manifest_path, torrents,
         try:
             new_bytes = prepare_replacement(old_bytes, new_url)
             expected_info_hashes.add(_info_hash(old_bytes))
+            manifest["torrents"][idx]["new_sha256"] = hashlib.sha256(
+                new_bytes).hexdigest()
+            deps.manifest_write(manifest_path, manifest)
         except Exception:
             # Preparation failure is treated like a byte-safe abort for this
             # torrent: nothing was removed/added yet, old bytes intact. Any
@@ -243,8 +261,14 @@ def rotate_seeder_announce(secrets_path, manifest_path, torrents,
 
         # Write the new canonical to disk atomically (durable) before add.
         _atomic_write_bytes(target.path, new_bytes)
+        _mark(manifest, idx, "new_canonical_written")
+        deps.manifest_write(manifest_path, manifest)
         try:
+            _mark(manifest, idx, "removing_old")
+            deps.manifest_write(manifest_path, manifest)
             deps.seeder_remove(target.gid)
+            _mark(manifest, idx, "old_removed")
+            deps.manifest_write(manifest_path, manifest)
         except Exception:
             # forceRemove may have reached aria2 before its caller observed an
             # error.  The live state is therefore unknown: restore the exact
@@ -258,6 +282,8 @@ def rotate_seeder_announce(secrets_path, manifest_path, torrents,
                 also=[(idx, target, old_bytes)], this_readd_failed=True,
                 failure_class="remove_failed")
         try:
+            _mark(manifest, idx, "adding_new")
+            deps.manifest_write(manifest_path, manifest)
             live_gid = deps.seeder_add(new_bytes, target.image_dir)
             if not live_gid:
                 raise RuntimeError("aria2 add returned no gid")
@@ -271,6 +297,8 @@ def rotate_seeder_announce(secrets_path, manifest_path, torrents,
                 restored_gid = deps.seeder_add(old_bytes, target.image_dir)
                 if not restored_gid:
                     raise RuntimeError("aria2 rollback add returned no gid")
+                manifest["torrents"][idx]["restored_gid"] = str(restored_gid)
+                deps.manifest_write(manifest_path, manifest)
             except Exception:
                 # Double failure: hard no-go. Restore old bytes for ALL
                 # previously applied torrents too, attempt to re-add them, abort
@@ -343,6 +371,8 @@ def _hard_no_go(manifest, manifest_path, applied, new_current, deps,
             restored_gid = deps.seeder_add(old_bytes, target.image_dir)
             if not restored_gid:
                 raise RuntimeError("aria2 restore add returned no gid")
+            manifest["torrents"][idx]["restored_gid"] = str(restored_gid)
+            deps.manifest_write(manifest_path, manifest)
         except Exception:
             readd_ok = False
             _mark(manifest, idx, "restore_readd_failed")
@@ -385,13 +415,29 @@ def _info_hash(torrent_bytes):
     return hashlib.sha1(torrent_bytes[start:end]).hexdigest()
 
 
-def _atomic_write_bytes(path, data):
+def _fsync_dir(path):
+    try:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
+def _atomic_write_bytes(path, data, mode=None):
     d = os.path.dirname(path) or "."
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".torrent-", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        if mode is not None:
+            os.chmod(tmp, mode)
         os.replace(tmp, path)
+        _fsync_dir(d)
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
@@ -732,6 +778,98 @@ def _seeder_rpc_ops(rpc):
     return remove, add
 
 
+def _contained_path(path, parent):
+    path = os.path.realpath(path)
+    parent = os.path.realpath(parent)
+    try:
+        return os.path.commonpath((path, parent)) == parent
+    except ValueError:
+        return False
+
+
+def recover_rotation(manifest_path, state, rpc):
+    """Restore exact pre-rotation torrent bytes and reconcile aria2.
+
+    Evidence is retained and maintenance remains frozen. Invalid/tampered
+    manifests are rejected before any filesystem or RPC mutation.
+    """
+    with open(manifest_path) as f:
+        manifest = json.load(f)
+    rows = manifest.get("torrents") if isinstance(manifest, dict) else None
+    recovery_dir = os.path.join(os.path.dirname(manifest_path) or ".",
+                                "seeder-rotation-recovery")
+    torrents_dir = os.path.join(state, "torrents")
+    if manifest.get("version") != 2 or not isinstance(rows, list) or not rows:
+        raise ValueError("unsupported recovery manifest")
+    if manifest.get("phase") in ("complete", "recovered"):
+        raise ValueError("recovery manifest is already terminal")
+
+    validated = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("invalid recovery manifest")
+        backup = row.get("backup_path")
+        canonical = row.get("path")
+        digest = row.get("old_sha256")
+        info_hash = row.get("info_hash")
+        if (not isinstance(backup, str) or not os.path.isabs(backup)
+                or not _contained_path(backup, recovery_dir)
+                or not isinstance(canonical, str) or not os.path.isabs(canonical)
+                or not _contained_path(canonical, torrents_dir)
+                or not isinstance(digest, str) or len(digest) != 64
+                or not isinstance(info_hash, str) or len(info_hash) != 40):
+            raise ValueError("invalid recovery manifest path or digest")
+        with open(backup, "rb") as f:
+            old_bytes = f.read()
+        if (hashlib.sha256(old_bytes).hexdigest() != digest
+                or _info_hash(old_bytes).lower() != info_hash.lower()):
+            raise ValueError("recovery backup verification failed")
+        validated.append((row, canonical, old_bytes, info_hash.lower()))
+
+    try:
+        active = rpc("aria2.tellActive", [["gid", "infoHash"]]) or []
+        by_hash = collections.defaultdict(list)
+        for item in active:
+            if isinstance(item, dict) and item.get("gid") and item.get("infoHash"):
+                by_hash[str(item["infoHash"]).lower()].append(str(item["gid"]))
+        for row, canonical, old_bytes, info_hash in validated:
+            _atomic_write_bytes(canonical, old_bytes)
+            for gid in by_hash.get(info_hash, []):
+                rpc("aria2.forceRemove", [gid])
+                try:
+                    rpc("aria2.removeDownloadResult", [gid])
+                except Exception:
+                    pass
+            gid = rpc("aria2.addTorrent", [
+                base64.b64encode(old_bytes).decode(), [],
+                {"dir": row["image_dir"], "seed-ratio": "0",
+                 "bt-seed-unverified": "true"}])
+            if not gid:
+                raise RuntimeError("aria2 restore returned no gid")
+            status = rpc("aria2.tellStatus", [gid, ["gid", "infoHash"]])
+            if (not isinstance(status, dict) or str(status.get("gid")) != str(gid)
+                    or str(status.get("infoHash", "")).lower() != info_hash):
+                raise RuntimeError("aria2 restore verification failed")
+            row["restored_gid"] = str(gid)
+            row["status"] = "restored"
+            _atomic_write_json(manifest_path, manifest)
+    except Exception:
+        manifest["phase"] = "repair_needed"
+        manifest["maintenance_frozen"] = True
+        manifest["served_claimed"] = False
+        for row, _canonical, _old_bytes, _info_hash_value in validated:
+            if row.get("status") != "restored":
+                row["status"] = "restore_failed"
+        _atomic_write_json(manifest_path, manifest)
+        return False
+
+    manifest["phase"] = "recovered"
+    manifest["maintenance_frozen"] = True
+    manifest["served_claimed"] = False
+    _atomic_write_json(manifest_path, manifest)
+    return True
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="rotate-seeder-announce",
@@ -749,23 +887,38 @@ def main(argv=None):
                           "seeder-rotation-recovery.json)")
     ap.add_argument("--maintenance-frozen", action="store_true", required=True,
                     help="acknowledge maintenance is externally frozen; required")
+    ap.add_argument("--recover", action="store_true",
+                    help="restore exact pre-rotation bytes from the manifest")
     args = ap.parse_args(argv)
+    args.state = os.path.abspath(args.state)
     manifest = args.manifest or os.path.join(args.state,
                                               "seeder-rotation-recovery.json")
+    manifest = os.path.abspath(manifest)
     # Every condition below is preflight-only. In particular, no manifest is
     # created until the live seeder has been proved to host every target.
     try:
-        if os.path.exists(manifest):
+        if args.recover and not os.path.isfile(manifest):
+            raise ValueError("recovery manifest unavailable")
+        if not args.recover and os.path.exists(manifest):
             raise ValueError("recovery manifest already exists; archive or remove it safely")
-        recipients = os.environ.get("IRIS_AGE_RECIPIENTS", "")
-        enc_path = os.environ.get("IRIS_SECRETS_ENC", "")
-        if not recipients.strip() or not enc_path.strip():
-            raise ValueError("durable encrypted secrets configuration unavailable")
         rpc_secret = telemetry._read_rpc_secret(os.environ)
         if not rpc_secret:
             raise ValueError("aria RPC secret unavailable")
         rpc = telemetry.make_jsonrpc_caller(
             os.environ.get("IRIS_RPC", telemetry.DEFAULT_RPC_URL), rpc_secret)
+        if args.recover:
+            recovered = recover_rotation(manifest, args.state, rpc)
+            if recovered:
+                print("rotate-seeder-announce: recovered; maintenance remains frozen; "
+                      "manifest preserved", file=sys.stderr)
+                return 0
+            print("rotate-seeder-announce: repair needed; maintenance remains frozen; "
+                  "manifest preserved", file=sys.stderr)
+            return 1
+        recipients = os.environ.get("IRIS_AGE_RECIPIENTS", "")
+        enc_path = os.environ.get("IRIS_SECRETS_ENC", "")
+        if not recipients.strip() or not enc_path.strip():
+            raise ValueError("durable encrypted secrets configuration unavailable")
         targets = discover_targets(args.state, os.environ, rpc)
         tracker_base = _tracker_announce_base(os.environ)
         remove, add = _seeder_rpc_ops(rpc)
@@ -778,6 +931,9 @@ def main(argv=None):
               % exc.__class__.__name__, file=sys.stderr)
         return 2
     if result.served_claimed and not result.hard_no_go:
+        _atomic_write_bytes(os.path.join(args.state,
+                                         "identity-compatible-ready"),
+                            b"ready\n", mode=0o644)
         print("rotate-seeder-announce: complete; maintenance may remain frozen",
               file=sys.stderr)
         return 0
