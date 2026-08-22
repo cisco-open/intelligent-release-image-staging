@@ -162,20 +162,37 @@ are contract:
 
 | Prometheus family (`:9101`) | OTLP metric | Unit | Attributes |
 | --- | --- | --- | --- |
-| `iris_transfer_active` | `iris.transfer.active` | `{transfer}` | `iris.image.id`, `iris.torrent.info_hash` |
-| `iris_transfer_down_bps_sum` / `iris_transfer_up_bps_sum` | `iris.transfer.throughput` | `By/s` | image attrs + `network.io.direction` = `receive` \| `transmit` |
+| `iris_transfer_devices` | `iris.transfer.devices` | `{device}` | image attrs |
+| `iris_transfer_throughput_bytes_per_second` | `iris.transfer.throughput` | `By/s` | image attrs + `network.io.direction` = `receive` \| `transmit` |
 | `iris_transfer_progress_ratio` | `iris.transfer.progress` | `1` | image attrs |
-| `iris_transfer_stalled` | `iris.transfer.stalled` | `{transfer}` | image attrs |
-| `iris_transfer_tier` + `iris_stream_devices` | `iris.stream.devices` | `{device}` | `iris.image.id`, `iris.link.tier` |
-| `iris_transfer_samples_rejected_total` | `iris.telemetry.samples.rejected` | `{sample}` | — (counter; no `_total` on the OTLP wire) |
-| `iris_otlp_export_failures_total` | `iris.telemetry.export.failures` | `{error}` | `iris.telemetry.signal` = `logs` \| `metrics` |
-| `iris_otlp_last_export_success_seconds` | — (Prometheus + `/healthz` only) | | |
+| `iris_transfer_zero_receive_devices` | `iris.transfer.zero_receive_devices` | `{device}` | image attrs |
+| `iris_transfer_freshness_age_seconds` | `iris.transfer.freshness_age` | `s` | image attrs |
+| `iris_stream_devices` | `iris.stream.devices` | `{device}` | image attrs + `sampling_class` = `good` \| `constrained` |
+| `iris_seeder_torrent_upload_length_bytes` | `iris.seeder.torrent.upload_length` | `By` | image attrs |
+| `iris_legacy_announce_participants` | `iris.legacy.announce_participants` | `{participant}` | — |
+| `iris_telemetry_samples_rejected_total` | `iris.telemetry.samples.rejected` | `{sample}` | — (counter; no `_total` on the OTLP wire) |
+| `iris_telemetry_export_failures_total` | `iris.telemetry.export.failures` | `{error}` | `signal` = `logs` \| `metrics` |
+| `iris_telemetry_export_dropped_total` | `iris.telemetry.export.dropped` | `{record}` | `signal` = `logs` \| `metrics` |
+| `iris_telemetry_export_last_success_seconds` | — (Prometheus + `/healthz` only) | | |
+| `iris_peer_policy_revision` | `iris.peer.policy.revision` | `1` | — |
+| `iris_peer_enforcement_applied_revision` | `iris.peer.enforcement.applied_revision` | `1` | — |
+| `iris_peer_enforcement_desired_ips` | `iris.peer.enforcement.desired_ips` | `{ip}` | — |
+| `iris_peer_enforcement_health` | `iris.peer.enforcement.health` | `1` | — |
 
-`IRIS_OTLP_DEVICE_METRICS=on` additionally exports per-device gauges
-(`iris.device.transfer.throughput`, `iris.device.transfer.progress`,
-`iris.device.transfer.received` with `device.id` attributes). Default off:
-at 10,000 devices this is roughly 30,000 datapoints per push at your backend —
-enable it deliberately.
+Throughput and progress are **omitted** for an image with no currently fresh
+device rather than published as a zero, and the freshness age is exported so the
+omission is explainable.
+
+!!! warning "Metric names changed in 2026.08.22"
+    Several transfer metric families were retired and others renamed in this
+    release, and the OTLP names moved with them. The table above is the current
+    contract; dashboards and alerts built against an earlier release need
+    updating. The release entry in `CHANGELOG.md` lists the exact before-and-after.
+
+`IRIS_OTLP_DEVICE_METRICS` is still accepted so an existing deployment starts,
+but it no longer exports anything. The per-device gauges it used to enable were
+retired; device- and peer-labelled history now lives only in the OTLP log
+records, where it does not multiply metric cardinality.
 
 ### Log attributes (operator contract)
 
