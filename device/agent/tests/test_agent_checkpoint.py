@@ -136,4 +136,3 @@ def test_checkpoint_exception_prevents_post():
     # logged rather than raised (never unwinds the tick).
     assert iris_agent._checkpoint_or_skip(deps, {"a": 1}, "CKPT", "det") is False
     assert deps.emitted and deps.emitted[0][0] == "CKPT"
-
