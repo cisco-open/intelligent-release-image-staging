@@ -15,6 +15,10 @@ import otlp
 import trust
 
 
+def _attrs(record):
+    return {attr["key"]: attr["value"] for attr in record["attributes"]}
+
+
 def test_build_log_record_maps_core_fields():
     # design §10.8: lifecycle events map to iris.tracker.peer with typed attrs.
     rec = otlp.build_log_record({
@@ -24,7 +28,8 @@ def test_build_log_record_maps_core_fields():
         "event_id": "beef1234"})
     assert rec["timeUnixNano"] == "1500000000"
     assert rec["eventName"] == "iris.tracker.peer"
-    assert rec["event.id"] == "beef1234"
+    assert "event.id" not in rec
+    assert _attrs(rec)["event.id"]["stringValue"] == "beef1234"
     attrs = {a["key"]: a["value"] for a in rec["attributes"]}
     assert attrs["iris.telemetry.schema.version"] == {"intValue": "2"}
     assert attrs["iris.principal"] == {"stringValue": "device:iris8kv-1"}
@@ -171,14 +176,14 @@ def test_v2_report_uses_transfer_report_name_and_received_at_event_time():
 
 def test_v2_event_id_is_report_id():
     rec = otlp.build_report_record(_v2_report(), "iris8kv-1")
-    assert rec["event.id"] == "7c1f0b9a2d3e4f5061728394a5b6c7d8"
+    assert _attrs(rec)["event.id"]["stringValue"] == "7c1f0b9a2d3e4f5061728394a5b6c7d8"
 
 
 def test_v1_report_uses_distinct_name_and_safe_subset():
     rec = otlp.build_report_record(_v1_report(), "d1")
     assert rec["eventName"] == "iris.device.report"
     assert rec["timeUnixNano"] == str(int(1783000042.5 * 1e9))   # received_at
-    assert rec["event.id"] == "aa11bb22cc33dd44ee55ff6677889900"
+    assert _attrs(rec)["event.id"]["stringValue"] == "aa11bb22cc33dd44ee55ff6677889900"
     attrs = {a["key"]: a["value"] for a in rec["attributes"]}
     assert attrs["iris.telemetry.schema.version"] == {"intValue": "1"}
     assert attrs["device.id"] == {"stringValue": "d1"}
@@ -288,7 +293,7 @@ class TestPolicyAndTrackerEvents:
                   "desired_ip_count": 3}
         rec = otlp.build_policy_record(entry, status)
         assert rec["eventName"] == "iris.peer.policy"
-        assert rec["event.id"] == "a71c33e90b5d4f28"
+        assert _attrs(rec)["event.id"]["stringValue"] == "a71c33e90b5d4f28"
         attrs = {a["key"]: a["value"] for a in rec["attributes"]}
         assert attrs["iris.telemetry.schema.version"] == {"intValue": "2"}
         assert attrs["iris.policy.revision"] == {"intValue": "7"}
@@ -309,7 +314,7 @@ class TestPolicyAndTrackerEvents:
               "received_at": 1755743190.0}
         rec = otlp.build_tracker_record(ev)
         assert rec["eventName"] == "iris.tracker.peer"
-        assert rec["event.id"] == "beef1234"
+        assert _attrs(rec)["event.id"]["stringValue"] == "beef1234"
         # event time = server received_at
         assert rec["timeUnixNano"] == str(int(1755743190.0 * 1e9))
         attrs = {a["key"]: a["value"] for a in rec["attributes"]}

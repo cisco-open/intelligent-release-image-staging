@@ -358,7 +358,8 @@ def test_policy_operation_audits_then_queues_canonical_stable_event(tmp_path):
     assert audit_calls
     event = hub.log_queue.snapshot()[0]
     assert event["eventName"] == "iris.peer.policy"
-    assert event["event.id"] == committed["operation_outbox"][-1]["event_id"]
+    assert telemetry._otlp_record_event_id(event) == \
+        committed["operation_outbox"][-1]["event_id"]
     attrs = {attr["key"]: attr["value"] for attr in event["attributes"]}
     assert attrs["iris.enforcement.state"] == {"stringValue": "enforced"}
     assert "10.0.0" not in json.dumps(event)
@@ -389,7 +390,7 @@ def test_disabled_transport_still_accepts_and_acks_policy_event(tmp_path):
     committed = _quarantine(p["policy"], p["lkg"], "a", 1000.0)
     rec.run_once()
     assert hub.exporter is None
-    assert hub.log_queue.snapshot()[0]["event.id"] == \
+    assert telemetry._otlp_record_event_id(hub.log_queue.snapshot()[0]) == \
         committed["operation_outbox"][-1]["event_id"]
     assert peer_enforcement.read_status(
         p["enforcement"])["last_operation_exported_revision"] == \

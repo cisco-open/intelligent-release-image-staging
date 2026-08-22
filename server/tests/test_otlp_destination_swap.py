@@ -161,6 +161,26 @@ def test_successful_inflight_flush_removes_only_sent_prefix():
     assert [event["peer_id"] for event in q.snapshot()] == ["p2"]
 
 
+def test_successful_inflight_eviction_is_delivery_not_drop():
+    q = otlp.LogQueue(max_queue=1)
+    q.emit({"peer_id": "p1"})
+    sending = threading.Event()
+    release = threading.Event()
+
+    def send(batch):
+        sending.set()
+        assert release.wait(1.0)
+
+    thread = threading.Thread(target=lambda: q.flush(send))
+    thread.start()
+    assert sending.wait(1.0)
+    q.emit({"peer_id": "p2"})
+    release.set()
+    thread.join(1.0)
+    assert q.dropped_total == 0
+    assert [event["peer_id"] for event in q.snapshot()] == ["p2"]
+
+
 # --- OTLPLogTransport: mutable destination, no queue ----------------------
 
 def test_transport_send_posts_batch_and_reports_delivered():

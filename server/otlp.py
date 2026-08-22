@@ -118,7 +118,7 @@ def _record(name, ts_nano, attrs, event_id=None, body=None):
         "attributes": attrs,
     }
     if event_id is not None:
-        rec["event.id"] = str(event_id)
+        rec["attributes"].append(_attr("event.id", str(event_id)))
     return rec
 
 
@@ -379,23 +379,60 @@ class LogQueue:
       * ``flush`` returns None on an empty queue (no attempt), else the count
         of events confirmed delivered (0 on a failed send)."""
 
-    def __init__(self, max_queue=1000):
+    def __init__(self, max_queue=1000, event_key=None,
+                 delivered_callback=None):
         self._queue = collections.deque()
         self._max = max(0, int(max_queue))
         self._dropped = 0
         self._lock = threading.Lock()
         self._flush_lock = threading.Lock()
         self._next_id = 0
+        self._event_key = event_key
+        self._keys = set()
+        self._inflight_ids = set()
+        self._inflight_keys = set()
+        self._delivered_callback = delivered_callback
+
+    def _key(self, event):
+        if self._event_key is None:
+            return None
+        try:
+            return self._event_key(event)
+        except Exception:
+            return None
+
+    def contains(self, key):
+        with self._lock:
+            return key in self._keys or key in self._inflight_keys
+
+    def configure_dedupe(self, event_key, delivered_callback=None):
+        """Enable key dedupe before producers begin emitting."""
+        with self._lock:
+            self._event_key = event_key
+            self._delivered_callback = delivered_callback
+            self._queue = collections.deque(
+                (event_id, event, self._key(event))
+                for event_id, event, _ in self._queue)
+            self._keys = {key for _, _, key in self._queue}
+            self._keys.discard(None)
 
     def emit(self, event):
         with self._lock:
+            key = self._key(event)
+            if key is not None and (key in self._keys or
+                                    key in self._inflight_keys):
+                return False
             if self._max == 0:
                 self._dropped += 1
                 return False
             while len(self._queue) >= self._max:
-                self._queue.popleft()       # drop oldest, preserve FIFO
+                dropped_id, _, dropped_key = self._queue.popleft()
+                if dropped_key is not None:
+                    self._keys.discard(dropped_key)
                 self._dropped += 1
-            self._queue.append((self._next_id, event))
+            self._queue.append((self._next_id, event, key))
+            if key is not None:
+                self._keys.add(key)
             self._next_id += 1
             return True
 
@@ -411,7 +448,7 @@ class LogQueue:
 
     def snapshot(self):
         with self._lock:
-            return [event for _, event in self._queue]
+            return [event for _, event, _ in self._queue]
 
     def flush(self, send):
         """Deliver the current FIFO prefix via ``send(batch)`` (which must
@@ -421,20 +458,41 @@ class LogQueue:
         with self._flush_lock:
             with self._lock:
                 queued_batch = list(self._queue)
+                self._inflight_ids = {event_id for event_id, _, _ in queued_batch}
+                self._inflight_keys = {key for _, _, key in queued_batch
+                                       if key is not None}
             if not queued_batch:
                 return None
-            batch = [event for _, event in queued_batch]
+            batch = [event for _, event, _ in queued_batch]
             try:
                 send(batch)
             except Exception:
+                with self._lock:
+                    self._inflight_ids.clear()
+                    self._inflight_keys.clear()
                 return 0
-            sent_ids = {event_id for event_id, _ in queued_batch}
+            sent_ids = {event_id for event_id, _, _ in queued_batch}
+            sent_keys = {key for _, _, key in queued_batch if key is not None}
             with self._lock:
+                retained_sent_ids = {event_id for event_id, _, _ in self._queue
+                                     if event_id in sent_ids}
                 # Overflow may have dropped part of this in-flight prefix.
                 # Remove only its still-retained contiguous suffix; later
                 # concurrent emits have distinct IDs and stay queued.
                 while self._queue and self._queue[0][0] in sent_ids:
-                    self._queue.popleft()
+                    _, _, key = self._queue.popleft()
+                    if key is not None:
+                        self._keys.discard(key)
+                # Events evicted while this successful send was in flight were
+                # delivered, not lost. Undo only those provisional drop counts.
+                self._dropped -= len(sent_ids - retained_sent_ids)
+                self._inflight_ids.clear()
+                self._inflight_keys.clear()
+            if self._delivered_callback is not None and sent_keys:
+                try:
+                    self._delivered_callback(sent_keys)
+                except Exception:
+                    pass
             return len(batch)
 
 
