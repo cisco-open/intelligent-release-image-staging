@@ -484,10 +484,20 @@ def durable_persist(recipients_csv, enc_path, age_bin=None):
     return persist
 
 
+# The post-add proof requires every expected info_hash to re-announce AFTER the
+# boundary, and clients re-announce on the tracker's interval
+# (peer_registry.INTERVAL, 30s). Only the LAST-added torrent can announce inside
+# a short window; the earlier ones announced during their own add, i.e. before
+# the boundary, so a 2s window fails them deterministically even though the
+# rotation itself succeeded. Poll for longer than one announce interval plus the
+# sampler lag that rebuilds server_observation.
+_SWARM_RETRIES = 50          # x 1s cadence ~= 49s > 30s announce + 15s sampler
+
+
 def production_deps(seeder_remove, seeder_add, recipients_csv, enc_path,
                     manifest_write=None, now=None, age_bin=None,
                     swarm_sender=None, swarm_sleep=None, swarm_timeout=2.0,
-                    swarm_retries=3):
+                    swarm_retries=_SWARM_RETRIES):
     """Assemble ``RotationDeps`` for the operational path with a durable-first
     persist and the canonical loopback ``/swarm`` probe. Its proof is bound to
     exact info hashes and the post-rotation observation boundary.
@@ -677,20 +687,23 @@ def _tracker_announce_base(env):
     if (parsed.scheme != "http" or not parsed.netloc or parsed.query
             or parsed.fragment):
         raise ValueError("invalid tracker announce base")
-    # Fleet address space, identical to the tracker's _OVERRIDE_NETS. Python's
-    # ipaddress.is_private is the wrong test in BOTH directions here: it rejects
-    # 100.64.0.0/10 (RFC 6598 carrier-grade NAT), which the tracker explicitly
-    # admits because deployed fleets are addressed there -- so rotation was
-    # impossible on such a fleet -- and it accepts loopback and link-local,
-    # which the tracker refuses because an announce base pointing at them would
-    # be advertised to every peer as a download endpoint.
-    # test_announce_base_matches_tracker_fleet_space pins these to the tracker.
+    # Any IPv4 the operator routes is acceptable -- fleets are not always on
+    # RFC1918/RFC6598, and refusing public space made rotation impossible for
+    # them. What is still refused is an address that cannot serve as an announce
+    # endpoint at all: this base is handed to every peer as the tracker to dial,
+    # so loopback, link-local, unspecified and multicast are nonsense there.
+    #
+    # NOTE: the announce credential rides this URL over HTTP, so on a routable
+    # address it crosses the network in cleartext. That is a deployment choice
+    # about where the management network sits, not something this check makes
+    # safe -- see docs/zensical/security.md.
     try:
         addr = ipaddress.ip_address(parsed.hostname)
     except ValueError:
-        raise ValueError("tracker announce base is not private")
-    if addr.version != 4 or not any(addr in net for net in _FLEET_NETS):
-        raise ValueError("tracker announce base is not private")
+        raise ValueError("tracker announce base is not a usable IPv4 endpoint")
+    if (addr.version != 4 or addr.is_loopback or addr.is_link_local
+            or addr.is_unspecified or addr.is_multicast or addr.is_reserved):
+        raise ValueError("tracker announce base is not a usable IPv4 endpoint")
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path or "/announce",
                        "", ""))
 

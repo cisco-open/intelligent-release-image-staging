@@ -163,25 +163,6 @@ def test_cli_hard_no_go_keeps_manifest_and_returns_one(tmp_path, monkeypatch):
     assert (state / "seeder-rotation-recovery.json").exists()
 
 
-def test_announce_base_accepts_carrier_grade_nat():
-    """The tracker explicitly admits 100.64.0.0/10 as fleet address space --
-    "carrier-grade NAT (used by deployed fleets) are accepted"
-    (server/tracker.py:_OVERRIDE_NETS). Rotation used Python's
-    ipaddress.is_private, which does NOT classify RFC 6598 as private, so the
-    two disagreed and rotation was impossible on any CGNAT-addressed fleet.
-    Found by running the lab gate against 100.90.168.20.
-    """
-    base = rot._tracker_announce_base(
-        {"IRIS_HOST_IP": "100.90.168.20"})
-    assert base == "http://100.90.168.20:6969/announce"
-
-
-def test_announce_base_still_refuses_a_public_address():
-    """The check must keep refusing genuinely routable space."""
-    with pytest.raises(ValueError):
-        rot._tracker_announce_base({"IRIS_HOST_IP": "8.8.8.8"})
-
-
 def test_announce_base_still_refuses_loopback_and_linklocal():
     """Loopback/link-local are not fleet address space; the tracker refuses them
     too, and an announce base pointing there would be advertised to peers."""
@@ -190,9 +171,34 @@ def test_announce_base_still_refuses_loopback_and_linklocal():
             rot._tracker_announce_base({"IRIS_HOST_IP": host})
 
 
-def test_announce_base_matches_tracker_fleet_space():
-    """Rotation and the tracker must agree on what fleet address space is.
-    They disagreed once -- the tracker admitted CGNAT, rotation did not -- and
-    a whole class of deployment could not rotate its seeder credential."""
-    import tracker
-    assert rot._FLEET_NETS == tracker._OVERRIDE_NETS
+def test_swarm_proof_window_outlasts_one_announce_interval():
+    """The proof needs every expected info_hash to re-announce after the
+    post-add boundary. Clients re-announce on peer_registry.INTERVAL, and only
+    the last-added torrent announces inside a short window -- the earlier ones
+    announced during their own add, before the boundary. A window shorter than
+    one announce interval therefore fails deterministically, which is exactly
+    what happened in the lab: exit 1 "not proven" with every torrent applied.
+    """
+    import peer_registry
+    window_s = rot._SWARM_RETRIES * 1.0        # sleep is min(timeout, 1.0)
+    assert window_s > peer_registry.INTERVAL, (
+        "probe window %.0fs must outlast the %ss announce interval"
+        % (window_s, peer_registry.INTERVAL))
+
+
+def test_announce_base_accepts_any_routable_ipv4():
+    """Fleets are not always on RFC1918/RFC6598. The old check used
+    ipaddress.is_private, which refused 100.64.0.0/10 (the lab) and every public
+    address, so those deployments could never rotate a seeder credential."""
+    for host in ("100.90.168.20", "10.1.2.3", "192.168.5.4", "203.0.113.9",
+                 "8.8.8.8"):
+        assert rot._tracker_announce_base({"IRIS_HOST_IP": host}) == \
+            "http://%s:6969/announce" % host
+
+
+def test_announce_base_refuses_addresses_no_peer_could_dial():
+    """This base is handed to every peer as the tracker to dial, so an address
+    that cannot serve that role is still refused."""
+    for host in ("127.0.0.1", "169.254.1.1", "0.0.0.0", "224.0.0.1"):
+        with pytest.raises(ValueError):
+            rot._tracker_announce_base({"IRIS_HOST_IP": host})

@@ -142,12 +142,15 @@ to whichever record loaded last. No error message carries the offending value.
 
 ### The announce credential travels over HTTP
 
-The tracker announce is a **private HTTP** URL on the operator's own management
-network; the announce credential therefore rides an unencrypted hop. Rotation
-refuses to run unless the configured announce base is a private HTTP URL. This is
-a stated boundary, not an oversight: treat the management network as the
-control, and note that the catalog (HTTPS) and the console are the surfaces that
-do carry transport security.
+The tracker announce is an **HTTP** URL, so the announce credential rides an
+unencrypted hop. The address may be any routable IPv4 the operator uses —
+fleets are not always on RFC1918 space — and rotation only refuses a base no
+peer could dial (loopback, link-local, unspecified, multicast).
+
+That makes the placement of the announce endpoint a deployment decision with a
+real consequence: on a routable address the credential crosses that network in
+cleartext. Put the tracker on a management network you trust. The catalog
+(HTTPS) and the console are the surfaces that do carry transport security.
 
 ### Peer policy failure posture
 
