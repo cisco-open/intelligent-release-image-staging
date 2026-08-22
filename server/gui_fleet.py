@@ -106,6 +106,7 @@ def validate_record(record, allow_legacy=False):
     did = result.get("device_id", "")
     if not _ID_RE.fullmatch(did):
         raise ValueError("device_id must contain only letters, numbers, dot, underscore, or hyphen")
+    secrets_store.validate_device_id(did)
     result["device_ip"] = _ipv4(result.get("device_ip"), "device_ip")
     attachment = result.get("management_type", "")
     if attachment == "legacy_routed" and allow_legacy:
@@ -178,6 +179,7 @@ def _legacy_record(row):
     result = {key: _text(value) for key, value in result.items() if value is not None}
     if not _ID_RE.fullmatch(result.get("device_id", "")):
         raise ValueError("legacy row has invalid device_id")
+    secrets_store.validate_device_id(result["device_id"])
     result["device_ip"] = _ipv4(result.get("device_ip"), "device_ip")
     result["management_type"] = "legacy_routed"
     return result
@@ -194,6 +196,7 @@ def _legacy_like(record):
     if not _ID_RE.fullmatch(result.get("device_id", "")):
         raise ValueError("device_id must contain only letters, numbers, dot, "
                          "underscore, or hyphen")
+    secrets_store.validate_device_id(result["device_id"])
     result["device_ip"] = _ipv4(result.get("device_ip"), "device_ip")
     result["management_type"] = "legacy_routed"
     return result

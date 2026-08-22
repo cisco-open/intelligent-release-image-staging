@@ -32,6 +32,11 @@ def main(argv=None):
         return 2
 
     device_id = argv[0]
+    try:
+        secrets_store.validate_device_id(device_id)
+    except ValueError as exc:
+        print("error: %s" % exc, file=sys.stderr)
+        return 2
     secrets_path = os.environ.get("IRIS_SECRETS", "/run/iris/secrets.json")
     enroll_ttl = int(os.environ.get("IRIS_ENROLL_TTL", "3600"))
     state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
@@ -50,7 +55,7 @@ def main(argv=None):
     try:
         peer_endpoints.clear_principal(
             endpoints_path, auth.Principal("device", device_id))
-    except OSError as exc:
+    except (OSError, peer_endpoints.EndpointStoreError) as exc:
         print("error: endpoint clear failed, enrollment NOT minted: %s" % exc,
               file=sys.stderr)
         return 1
@@ -74,9 +79,9 @@ def main(argv=None):
         # Mint only if absent so re-enrolling a device does not churn an
         # announce/rpc out from under an already-running agent.
         dev = store["devices"][device_id]
-        if "announce_token" not in dev:
+        if not secrets_store.valid(dev.get("announce_token", {}), now, 0):
             secrets_store.mint(store, device_id, "announce_token", now)
-        if "rpc_secret" not in dev:
+        if not secrets_store.valid(dev.get("rpc_secret", {}), now, 0):
             secrets_store.mint(store, device_id, "rpc_secret", now)
 
         # Persist durable-FIRST: the at-rest .age ciphertext is the only copy

@@ -184,6 +184,16 @@ class DuplicateCredentialError(Exception):
     """
 
 
+class CredentialMintError(Exception):
+    """A unique credential could not be generated."""
+
+
+def validate_device_id(device_id):
+    if device_id == "seeder":
+        raise ValueError("device_id 'seeder' is reserved for the seeder service")
+    return device_id
+
+
 def _principal():
     # Local import avoids a module-load cycle: auth imports secrets_store.
     import auth
@@ -279,7 +289,17 @@ def mint(store, device_id, secret_name, now):
     """
     stype = SECRET_TYPES[secret_name]
     ttl = stype["ttl"]
-    value = secrets.token_hex(16)
+    existing = set(build_index(store))
+    for rec in store.get("seeder", {}).get(
+            "announce_token_previous", []) or []:
+        if isinstance(rec, dict) and rec.get("value"):
+            existing.add(rec["value"])
+    for _attempt in range(128):
+        value = secrets.token_hex(16)
+        if value not in existing:
+            break
+    else:
+        raise CredentialMintError("unable to mint unique credential")
     inow = int(now)  # coerce: callers may pass time.time() (float); store only holds int epochs
     record = {
         "value":      value,

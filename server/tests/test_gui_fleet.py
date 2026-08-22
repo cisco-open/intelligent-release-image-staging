@@ -36,6 +36,11 @@ def test_upsert_get_list_delete(tmp_path):
     assert fs.delete("d1") is False
 
 
+def test_reserved_seeder_device_id_rejected(tmp_path):
+    with pytest.raises(ValueError, match="reserved"):
+        _fs(tmp_path).upsert(dict(_ROUTED, device_id="seeder"))
+
+
 def test_upsert_rejects_invalid_records(tmp_path):
     fs = _fs(tmp_path)
     bad = [

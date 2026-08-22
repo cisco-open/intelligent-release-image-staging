@@ -7,6 +7,7 @@ import json
 import os
 import threading
 
+import pytest
 import secrets_store
 
 
@@ -24,6 +25,22 @@ def test_load_corrupt_returns_skeleton(tmp_path):
     p.write_text("NOT JSON {{}")
     store = secrets_store.load(str(p))
     assert store == {"devices": {}, "seeder": {}}
+
+
+def test_mint_retries_catalog_token_collision(monkeypatch):
+    store = {"devices": {}, "seeder": {}}
+    first = secrets_store.mint(store, "d1", "catalog_token", 1)
+    values = iter((first, "b" * 32))
+    monkeypatch.setattr(secrets_store.secrets, "token_hex", lambda _n: next(values))
+    assert secrets_store.mint(store, "d2", "catalog_token", 2) == "b" * 32
+
+
+def test_mint_collision_exhaustion_is_typed(monkeypatch):
+    store = {"devices": {}, "seeder": {}}
+    first = secrets_store.mint(store, "d1", "catalog_token", 1)
+    monkeypatch.setattr(secrets_store.secrets, "token_hex", lambda _n: first)
+    with pytest.raises(secrets_store.CredentialMintError):
+        secrets_store.mint(store, "d2", "catalog_token", 2)
 
 
 def test_load_roundtrip(tmp_path):
