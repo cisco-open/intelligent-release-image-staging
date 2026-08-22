@@ -674,6 +674,7 @@
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && openMenuPanel) closeMenus(); });
   wireMenu('csv-menu-btn', 'csv-menu');
   wireMenu('onboard-menu-btn', 'onboard-pop');
+  wireMenu('undeploy-menu-btn', 'undeploy-pop');
   wireMenu('help-btn', 'help-pop');
   function updateSelBar() {
     var n = document.querySelectorAll('#dev-rows .mark:checked').length;
@@ -815,10 +816,13 @@
   async function startBatch(action) {
     var ids = claimSelection();
     if (!ids) return;
+    var forceEl = document.getElementById('undeploy-force');
+    var forced = action === 'undeploy' && forceEl && forceEl.checked;
     if (action === 'undeploy' &&
-        !confirm('Undeploy ' + ids.length + ' device(s)?\n\nThis removes the device agent ' +
-                  '(Guest Shell or IOx app) and only receipt-owned resources. Inband deployments preserve their existing network; router NAT preserves a pre-existing outside marking. Staged images at ' +
-                 'the filesystem root are left in place. Running jobs are never interrupted.')) {
+        !confirm('Undeploy ' + ids.length + ' device(s)?' + (forced
+          ? '\n\nFORCE is on. For any device with no deployment receipt this removes the IRIS agent footprint only — EEM applets, Guest Shell and the IRIS guest-share files. The VirtualPortGroup and NAT are NOT removed, because without a receipt there is no proof IRIS created them; clean those up yourself if IRIS did.'
+          : '\n\nThis removes the device agent (Guest Shell or IOx app) and only receipt-owned resources. Inband deployments preserve their existing network; router NAT preserves a pre-existing outside marking.') +
+                 '\n\nStaged images at the filesystem root are left in place. Running jobs are never interrupted.')) {
       setBulkBusy(false); return;
     }
     var gen = ++batchGen;
@@ -832,7 +836,8 @@
       await Promise.all(ids.map(async function (id) {
         try {
           var r = await jpost('/api/devices/' + encodeURIComponent(id) + '/' + action,
-                              action === 'onboard' ? telemetryFlags() : {});
+                              action === 'onboard' ? telemetryFlags()
+                                : (forced ? { force: true } : {}));
           if (r.ok) { batchJobs[(await r.json()).job_id] = id; } else {
             // surface WHY it was refused — a bare id reads as a mystery
             var reason = '';

@@ -2255,6 +2255,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 body_flags = self._json_body(raw)
                 if body_flags is None:
                     return
+                # Force teardown: an onboard that died after enabling the
+                # agent but before its receipt was written leaves a router that
+                # cannot be undeployed (no receipt), cannot be adopted (routers
+                # never can) and cannot be re-onboarded (preflight refuses the
+                # existing Guest Shell). Force removes ONLY the agent footprint.
+                force = body_flags.get("force", False) is True
                 t_on = body_flags.get("telemetry", True) is not False
                 s_on = body_flags.get("telemetry_stream", False) is True
                 env_extra = {"TELEMETRY": "on" if t_on else "off",
@@ -2351,18 +2357,39 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             # supersedes siblings; startup collapses legacy dupes)
                             # — but surface the reason instead of a 500 if not.
                             _reject(409, str(exc)); return
-                        if receipt is None:
+                        if receipt is None and not force:
                             _reject(409, "no deployment receipt for this "
-                                    "device; adopt it first, then undeploy"); return
-                        try:
-                            resolved = self._router_teardown_resolved(receipt)
-                        except ValueError as exc:
-                            receipts.transition(receipt["receipt_id"], "needs-reconcile")
-                            _reject(409, str(exc)); return
+                                    "device; adopt it first, then undeploy, or "
+                                    "retry with force to remove the agent "
+                                    "footprint only"); return
+                        if receipt is None:
+                            # No receipt => no proof IRIS created the VPG/NAT,
+                            # so the recipe must leave the operator's network
+                            # exactly as it is and strip only what is named
+                            # IRIS. Recorded distinctly in the audit trail.
+                            env_extra["IRIS_FORCE_AGENT_ONLY"] = "1"
+                            try:
+                                degraded_plan = self._plan(
+                                    did, fleet.get_device(did))
+                            except ValueError as exc:
+                                _reject(409, str(exc)); return
+                            resolved = degraded_plan["resolved"]
+                            self._audit("undeploy_forced", "onboard",
+                                        action="start", target=did,
+                                        actor=actor, result="ok",
+                                        detail="forced agent-footprint teardown "
+                                               "with no receipt; VPG/NAT left "
+                                               "untouched")
+                        else:
+                            try:
+                                resolved = self._router_teardown_resolved(receipt)
+                            except ValueError as exc:
+                                receipts.transition(receipt["receipt_id"], "needs-reconcile")
+                                _reject(409, str(exc)); return
 
-                        def prepare():
-                            receipt_ref["id"] = receipt["receipt_id"]
-                            return receipt["receipt_id"]
+                            def prepare():
+                                receipt_ref["id"] = receipt["receipt_id"]
+                                return receipt["receipt_id"]
                     else:
                         try:
                             degraded_plan = self._plan(did, fleet.get_device(did))

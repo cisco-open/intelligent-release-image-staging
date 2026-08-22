@@ -167,6 +167,9 @@ body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-
 .menu.right { left:auto; right:0; }
 .menu a.menu-item { text-decoration:none; }
 .help-row { padding:4px 8px; white-space:nowrap; }
+/* Explanatory note inside a popover: unlike the one-line rows above it
+   wraps, so a caveat can be stated in full where the action is taken. */
+.menu-note { max-width:320px; white-space:normal; }
 #help-pop { min-width:250px; }
 /* per-file upload rows: each upload owns its bar and state text */
 #uploads { max-width:560px; margin:0 auto; text-align:left; }

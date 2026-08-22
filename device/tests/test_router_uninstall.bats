@@ -125,3 +125,38 @@ setup() {
   [[ "$output" == *"access-list standard IRIS-NAT"* ]] && \
   [[ "$output" == *"re-run this undeploy"* ]]
 }
+
+@test "force teardown removes the agent footprint but never the VPG or NAT" {
+  # A router whose onboard died after enabling Guest Shell but before its
+  # receipt was written cannot be undeployed (no receipt), cannot be adopted
+  # (routers never can) and cannot be re-onboarded (preflight refuses an
+  # existing Guest Shell). Force mode is the only way out -- and because no
+  # receipt proves IRIS created the VPG/NAT, it must not touch them.
+  IRIS_FORCE_AGENT_ONLY=1 run bash "$UNINSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  # agent footprint IS removed
+  [[ "$output" == *"no event manager applet IRIS-AGENT"* ]]
+  [[ "$output" == *"guestshell destroy"* ]] || [[ "$output" == *"guestshell disable"* ]]
+  [[ "$output" == *"delete /force /recursive bootflash:guest-share/iris"* ]]
+  # operator network is NOT touched
+  [[ "$output" != *"no interface VirtualPortGroup"* ]]
+  [[ "$output" != *"IRIS-NAT-"* ]]
+  [[ "$output" != *"ip nat inside source"* ]]
+  [[ "$output" == *"SKIPPED"* ]]
+}
+
+@test "force teardown does not require a receipt VPG number" {
+  # Without a receipt there is no VPG number to validate; requiring one would
+  # re-strand the device this mode exists to rescue.
+  unset VPG_NUMBER
+  IRIS_FORCE_AGENT_ONLY=1 run bash "$UNINSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"missing a valid VPG_NUMBER"* ]]
+}
+
+@test "non-force teardown still refuses without a valid VPG number" {
+  unset VPG_NUMBER
+  run bash "$UNINSTALL" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"missing a valid VPG_NUMBER"* ]]
+}

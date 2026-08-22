@@ -118,7 +118,20 @@
               <button class="btn menu-close" id="onboard-selected">Start onboard</button>
             </div>
           </div>
-          <button class="btn ghost" id="undeploy-selected">Undeploy</button>
+          <div class="menu-wrap">
+            <button class="btn ghost" id="undeploy-menu-btn" aria-expanded="false">Undeploy ▾</button>
+            <div class="menu" id="undeploy-pop" hidden>
+              <label class="muted"><input type="checkbox" id="undeploy-force"> Force (device has no deployment receipt)</label>
+              <div class="help-row muted menu-note">
+                Use only when a device is stranded: an onboard that died before its
+                receipt was written leaves a router that cannot be undeployed,
+                adopted, or re-onboarded. Force removes the IRIS agent footprint
+                only — the VirtualPortGroup and NAT are left untouched, because
+                without a receipt there is no proof IRIS created them.
+              </div>
+              <button class="btn menu-close" id="undeploy-selected">Start undeploy</button>
+            </div>
+          </div>
           <button class="btn ghost" id="adopt-selected">Adopt</button>
           <span class="sep"></span>
           <span class="joined">

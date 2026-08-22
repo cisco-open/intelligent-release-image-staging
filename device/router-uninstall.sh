@@ -16,6 +16,15 @@ NAT_INTERFACE="${NAT_INTERFACE:-}"
 BT_LISTEN_PORT="${BT_LISTEN_PORT:-6881}"
 NAT_OUTSIDE_OWNED="${NAT_OUTSIDE_OWNED:-0}"
 ROUTER_RESOURCES_OWNED="${ROUTER_RESOURCES_OWNED:-0}"
+# Force teardown for a device stranded WITHOUT a receipt: an onboard that died
+# after enabling Guest Shell but before its receipt was written leaves a router
+# that cannot be undeployed (no receipt), cannot be adopted (routers never can)
+# and cannot be re-onboarded (preflight refuses an existing Guest Shell).
+# Force mode removes only the AGENT footprint, which is identifiable by name.
+# It must never touch the VPG/NAT: with no receipt there is no proof IRIS
+# created them, and removing an operator's network would be exactly the harm
+# the receipt design exists to prevent.
+FORCE_AGENT_ONLY="${IRIS_FORCE_AGENT_ONLY:-0}"
 APP_IP="${APP_IP:-}"
 IOS_ROOT="bootflash:guest-share"
 IRIS_DIR="$IOS_ROOT/iris"
@@ -26,9 +35,11 @@ case "$NETWORK_ATTACHMENT" in
     || { echo "ERROR: router-nat receipt is missing NAT_INTERFACE or APP_IP" >&2; exit 1; } ;;
   *) echo "ERROR: NETWORK_ATTACHMENT must be router-routed or router-nat" >&2; exit 1 ;;
 esac
-[[ "$VPG_NUMBER" =~ ^[0-9]+$ ]] && [ "$VPG_NUMBER" -ge 0 ] \
-  && [ "$VPG_NUMBER" -le 31 ] \
-  || { echo "ERROR: receipt is missing a valid VPG_NUMBER" >&2; exit 1; }
+if [ "$FORCE_AGENT_ONLY" != "1" ]; then
+  [[ "$VPG_NUMBER" =~ ^[0-9]+$ ]] && [ "$VPG_NUMBER" -ge 0 ] \
+    && [ "$VPG_NUMBER" -le 31 ] \
+    || { echo "ERROR: receipt is missing a valid VPG_NUMBER" >&2; exit 1; }
+fi
 if [ -n "$NAT_INTERFACE" ] && ! [[ "$NAT_INTERFACE" =~ ^[A-Za-z][A-Za-z0-9./_-]{0,63}$ ]]; then
   echo "ERROR: NAT_INTERFACE contains unsupported characters" >&2; exit 1
 fi
@@ -38,9 +49,16 @@ EXPECTED_DEVICE_IDENTITY="${EXPECTED_DEVICE_IDENTITY:-}"
 if [ "$DRY" -eq 0 ]; then
   : "${DEVICE_IP:?set DEVICE_IP}"; : "${DEVICE_USER:?set DEVICE_USER}"
   : "${DEVICE_PASS:?set DEVICE_PASS}"
-  : "${EXPECTED_DEVICE_IDENTITY:?set EXPECTED_DEVICE_IDENTITY from the deployment receipt}"
-  [ "$ROUTER_RESOURCES_OWNED" = "1" ] \
-    || { echo "ERROR: receipt does not prove ownership of router resources" >&2; exit 1; }
+  if [ "$FORCE_AGENT_ONLY" = "1" ]; then
+    echo "===== FORCE: agent-footprint-only teardown (no receipt) ====="
+    echo "  Removing: IRIS EEM applets, Guest Shell, and $IRIS_DIR."
+    echo "  NOT touching VirtualPortGroup/NAT: without a receipt there is no"
+    echo "  proof IRIS created them, so they are left exactly as they are."
+  else
+    : "${EXPECTED_DEVICE_IDENTITY:?set EXPECTED_DEVICE_IDENTITY from the deployment receipt}"
+    [ "$ROUTER_RESOURCES_OWNED" = "1" ] \
+      || { echo "ERROR: receipt does not prove ownership of router resources" >&2; exit 1; }
+  fi
   VERSION_OUT="$(printf 'show version\n' \
     | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>/dev/null)"
   LIVE_MODEL="$(printf '%s\n' "$VERSION_OUT" \
@@ -108,6 +126,9 @@ EOF
 if [ "$DRY" -eq 1 ]; then
   echo "===== [1/5] EEM applets removed FIRST ====="; config_teardown
   echo "===== [2/5] guestshell disable  [3/5] guestshell destroy ====="
+  if [ "$FORCE_AGENT_ONLY" = "1" ]; then
+    echo "===== [4/5] SKIPPED: no receipt, so VPG/NAT ownership is unproven ====="
+  else
   echo "===== [4/5] receipt-owned config removal ====="
   if [ "$NETWORK_ATTACHMENT" = "router-nat" ]; then
     echo "no ip nat inside source static tcp $APP_IP $BT_LISTEN_PORT interface $NAT_INTERFACE $BT_LISTEN_PORT"
@@ -117,6 +138,7 @@ if [ "$DRY" -eq 1 ]; then
     echo "verify overload mapping is absent before removing IRIS-NAT-$VPG_NUMBER"
   fi
   config_cleanup
+  fi
   echo "===== [5/5] remove only IRIS files under $IOS_ROOT (preserve directory) ====="
   echo "delete /force /recursive $IRIS_DIR"
   for name in bootstrap.sh iris-agent.conf rpc-secret bundle.tgz iris-catalog.pem; do
@@ -149,6 +171,9 @@ for _ in $(seq 1 30); do
 done
 [ -z "$st" ] || { echo "ERROR: guestshell still present after destroy: $st" >&2; exit 1; }
 
+if [ "$FORCE_AGENT_ONLY" = "1" ]; then
+  echo "[4/5] SKIPPED (force): VPG/NAT left untouched - no receipt proves IRIS created them"
+else
 echo "[4/5] remove receipt-owned VPG and NAT footprint"
 # IOS refuses to unconfigure a dynamic NAT mapping while translations still
 # reference it. Remove the static rule, clear only translations whose inside
@@ -240,6 +265,8 @@ for line in sys.stdin:
   fi
 fi
 { echo "configure terminal"; config_cleanup; echo "end"; } | "$RUN" "$DEVICE_IP" >/dev/null
+
+fi
 
 echo "[5/5] remove IRIS files under $IOS_ROOT (preserve the platform directory)"
 {
