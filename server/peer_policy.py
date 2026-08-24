@@ -365,8 +365,11 @@ def commit_mutation(auth_path, lkg_path, action, target, actor, now,
             prior = base_document()
         if expected_revision is not None and prior["revision"] != expected_revision:
             raise RevisionConflict(prior["revision"])
+        # An ack watermark above this document's own revision cannot be real
+        # (a restored/reset document with a stale enforcement status); pruning on
+        # it would silently discard every unacknowledged entry.
         outbox = _prune_acked(list(prior.get("operation_outbox", [])),
-                              acked_revision)
+                              effective_acked(prior, acked_revision))
         if len(outbox) >= OUTBOX_CAP:
             raise OperationBacklogFull("256 unacknowledged operations")
 
@@ -388,9 +391,33 @@ def commit_mutation(auth_path, lkg_path, action, target, actor, now,
         return candidate
 
 
+def effective_acked(doc, acked_revision):
+    """Sanitize an outbox ack watermark against the document it is applied to.
+
+    ``last_operation_exported_revision`` is persisted in the enforcement status
+    file, SEPARATELY from the policy document, so a restored/reset document can
+    carry a revision BELOW a watermark written for an older, higher-revisioned
+    document. Such a watermark cannot describe this document, and honoring it is
+    doubly destructive: ``pending_exports`` selects ``revision > acked`` so every
+    export is suppressed, and ``_prune_acked`` then silently DISCARDS every
+    outbox entry at the next write. The outbox contract is at-least-once and
+    never-lost, so an impossible watermark fails safe to 0 — nothing counts as
+    acknowledged and the entries re-export. A non-int or negative watermark, or a
+    document with no usable revision, fails safe the same way.
+    """
+    if type(acked_revision) is not int or acked_revision < 0:
+        return 0
+    revision = doc.get("revision") if isinstance(doc, dict) else None
+    if type(revision) is not int:
+        return 0
+    return 0 if acked_revision > revision else acked_revision
+
+
 def pending_exports(doc, exported_revision):
     """Outbox entries with ``revision > exported_revision``, in revision order
-    (at-least-once; re-exportable, never lost)."""
+    (at-least-once; re-exportable, never lost). The watermark is sanitized
+    against *doc* first, so an impossible one cannot suppress every export."""
+    exported_revision = effective_acked(doc, exported_revision)
     return sorted((e for e in doc.get("operation_outbox", [])
                    if e["revision"] > exported_revision),
                   key=lambda e: e["revision"])

@@ -167,3 +167,73 @@ class TestRestartRetainsEntries:
         # simulate restart: fresh load from disk
         reloaded = peer_policy.load_policy(auth, lkg).document
         assert [e["revision"] for e in reloaded["operation_outbox"]] == [2, 3]
+
+
+class TestImpossibleAckWatermark:
+    """`last_operation_exported_revision` is persisted in the enforcement status
+    file, separately from the policy document. A restored/reset document can sit
+    BELOW a watermark written for an older, higher-revisioned one. Honoring such a
+    watermark is doubly destructive: it suppresses every export AND silently
+    discards every unacknowledged entry at the next write. It must fail safe."""
+
+    def test_watermark_above_document_revision_does_not_suppress_export(self, paths):
+        auth, lkg = paths
+        _assign(auth, lkg, "iris8kv-1")
+        doc = _read(auth)
+        assert doc["revision"] == 2
+        # a watermark carried over from a higher-revisioned document
+        assert [e["revision"] for e in peer_policy.pending_exports(doc, 306)] == [2]
+        assert peer_policy.pending_exports(doc, 306) == \
+            peer_policy.pending_exports(doc, 0)
+
+    def test_impossible_watermark_does_not_discard_entries(self, paths):
+        auth, lkg = paths
+        _assign(auth, lkg, "iris8kv-1")
+        _assign(auth, lkg, "iris8kv-2")
+        before = [e["event_id"] for e in _read(auth)["operation_outbox"]]
+        assert len(before) == 2
+        peer_policy.commit_mutation(
+            auth, lkg, action="assign", target="iris8kv-3", actor="a",
+            now=1.0, acked_revision=306,
+            mutate=lambda d: d["assignments"].__setitem__("iris8kv-3",
+                                                          "quarantine"))
+        outbox = _read(auth)["operation_outbox"]
+        assert [e["event_id"] for e in outbox][:2] == before
+        assert [e["revision"] for e in outbox] == [2, 3, 4]
+
+    def test_legitimate_watermark_still_prunes(self, paths):
+        """Regression guard: the fix must not disable ordinary ack-pruning."""
+        auth, lkg = paths
+        _assign(auth, lkg, "iris8kv-1")
+        _assign(auth, lkg, "iris8kv-2")
+        peer_policy.commit_mutation(
+            auth, lkg, action="assign", target="iris8kv-3", actor="a",
+            now=1.0, acked_revision=3,
+            mutate=lambda d: d["assignments"].__setitem__("iris8kv-3",
+                                                          "quarantine"))
+        assert [e["revision"] for e in _read(auth)["operation_outbox"]] == [4]
+
+    def test_watermark_equal_to_revision_is_honored(self, paths):
+        """The boundary is `>`, not `>=`: acking the current revision is real."""
+        auth, lkg = paths
+        _assign(auth, lkg, "iris8kv-1")
+        doc = _read(auth)
+        assert peer_policy.pending_exports(doc, doc["revision"]) == []
+
+    @pytest.mark.parametrize("bad", [-1, "306", True, None, 3.5])
+    def test_junk_watermark_fails_safe_to_zero(self, bad):
+        doc = {"revision": 9, "operation_outbox": [
+            {"revision": 4, "event_id": "a", "action": "assign",
+             "target": "d", "actor": "x", "created_at": 1.0}]}
+        assert peer_policy.effective_acked(doc, bad) == 0
+        assert len(peer_policy.pending_exports(doc, bad)) == 1
+
+    def test_document_without_usable_revision_fails_safe(self):
+        assert peer_policy.effective_acked({}, 5) == 0
+        assert peer_policy.effective_acked({"revision": "9"}, 5) == 0
+        assert peer_policy.effective_acked(None, 5) == 0
+
+    def test_effective_acked_passes_through_a_real_watermark(self):
+        assert peer_policy.effective_acked({"revision": 9}, 4) == 4
+        assert peer_policy.effective_acked({"revision": 9}, 9) == 9
+        assert peer_policy.effective_acked({"revision": 9}, 0) == 0
