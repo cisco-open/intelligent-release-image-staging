@@ -2712,6 +2712,71 @@ def test_settings_get(tmp_path):
         stop()
 
 
+import setup_status
+
+
+def test_setup_status_route_requires_auth(tmp_path, monkeypatch):
+    """test_setup_status.py::test_route_is_registered_and_session_gated only
+    greps gui_server.py for the session-check string -- it would still pass
+    if the check were dead code. Prove it over real HTTP: no session cookie
+    must get refused, not a crash or a 200 with data."""
+    monkeypatch.setenv("IRIS_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
+    host, port, _ctx, stop = _serve_full(tmp_path)
+    try:
+        status, _, _ = _req(host, port, "GET", "/api/settings/setup-status")
+        assert status == 401
+    finally:
+        stop()
+
+
+def test_setup_status_route_returns_documented_shape(tmp_path, monkeypatch):
+    """Authenticated GET must actually reach setup_status.build_status and
+    return its three-card shape wired to the real session + credential
+    store -- unlike the source-scan test, this fails if the route raises,
+    returns the wrong shape, or never calls the builder at all."""
+    monkeypatch.setenv("IRIS_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
+    host, port, _ctx, stop = _serve_full(tmp_path)
+    try:
+        ck, _csrf = _auth(host, port)
+        status, _, body = _req(host, port, "GET", "/api/settings/setup-status",
+                               headers={"Cookie": ck})
+        assert status == 200
+        st = json.loads(body)
+        assert set(("admin", "stage_host", "packages")) <= set(st)
+        # the session's real username must flow through, not a placeholder
+        assert st["admin"]["username"] == "admin"
+        pkgs = st["packages"]
+        assert set(("state", "items", "remedy")) <= set(pkgs)
+        assert len(pkgs["items"]) == len(setup_status.IOX_PACKAGES)
+        for item in pkgs["items"]:
+            assert "name" in item and "state" in item
+    finally:
+        stop()
+
+
+def test_setup_status_route_response_has_no_secret_material(tmp_path, monkeypatch):
+    """The card exists to be trustworthy about system state; it must never
+    leak stage-host credentials onto the wire, even after a real stage-host
+    password has been set through the credential store it reads from."""
+    monkeypatch.setenv("IRIS_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
+    host, port, _ctx, stop = _serve_full(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        status, _, _ = _req(host, port, "POST", "/api/settings/stage-host",
+                            {"username": "svc-iris", "password": "hostpw-s3cr3t"},
+                            headers=hh)
+        assert status == 200
+        status, _, body = _req(host, port, "GET", "/api/settings/setup-status",
+                               headers={"Cookie": ck})
+        assert status == 200
+        blob = body.decode().lower()
+        for banned in ("password", "secret", "token", "private", "begin "):
+            assert banned not in blob
+    finally:
+        stop()
+
+
 def test_settings_console_port_is_dynamic(tmp_path, monkeypatch):
     """The Settings page must show the actual published console port
     (IRIS_GUI_PUBLISH), not a hardcoded 8080."""
