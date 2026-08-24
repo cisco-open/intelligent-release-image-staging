@@ -92,3 +92,43 @@ setup() {
   VLAN='' run bash "$UNINSTALL"
   [ "$status" -ne 0 ] && [[ "$output" == *"VLAN not set"* ]]
 }
+
+# --- IRIS_FORCE_AGENT_ONLY: receipt-less force undeploy ---------------------
+# A device stranded WITHOUT a deployment receipt (onboard died after enabling
+# Guest Shell but before its receipt was written) has no receipt to prove the
+# VLAN/SVI, IRISQ discriminator, or PKI trustpoint are uniquely IRIS-owned.
+# gui_server.py sets IRIS_FORCE_AGENT_ONLY=1 for exactly this case; the script
+# must reduce to the same agent-footprint-only scope NETWORK_ATTACHMENT=inband
+# already uses, regardless of what NETWORK_ATTACHMENT is set to.
+
+@test "force dry-run does not emit the operator-owned teardown commands" {
+  IRIS_FORCE_AGENT_ONLY=1 run bash "$UNINSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"no interface Vlan"* ]] && \
+  [[ "$output" != *"no vlan 666"* ]] && \
+  [[ "$output" != *"discriminator IRISQ"* ]] && \
+  [[ "$output" != *"no crypto pki trustpoint IRIS"* ]] && \
+  [[ "$output" != *"no ip http client secure-trustpoint IRIS"* ]]
+}
+
+@test "non-force dry-run DOES emit the operator-owned teardown commands" {
+  # proves the gate actually gates: without IRIS_FORCE_AGENT_ONLY, the same
+  # routed default undeploy still removes the VLAN/SVI, IRISQ, and trustpoint
+  run bash "$UNINSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no interface Vlan666"* ]] && \
+  [[ "$output" == *"no vlan 666"* ]] && \
+  [[ "$output" == *"no logging discriminator IRISQ"* ]] && \
+  [[ "$output" == *"no crypto pki trustpoint IRIS"* ]]
+}
+
+@test "force dry-run still removes the full IRIS agent footprint" {
+  IRIS_FORCE_AGENT_ONLY=1 run bash "$UNINSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no event manager applet IRIS-AGENT"* ]] && \
+  [[ "$output" == *"no event manager applet IRIS-COPYROOT"* ]] && \
+  [[ "$output" == *"no app-hosting appid guestshell"* ]] && \
+  [[ "$output" == *"guestshell disable"* ]] && \
+  [[ "$output" == *"guestshell destroy"* ]] && \
+  [[ "$output" == *"delete /force /recursive flash:guest-share"* ]]
+}

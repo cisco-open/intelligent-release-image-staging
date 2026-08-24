@@ -20,6 +20,11 @@
 #   iox, file prompt quiet, the AppGigabitEthernet trunk, ip scp server enable,
 #   the staged OS image on the selected IOS disk. Successful cleanup is
 #   persisted to startup-config so a reload cannot restore IRIS configuration.
+# IRIS_FORCE_AGENT_ONLY=1 forces the same reduction NETWORK_ATTACHMENT=inband
+#   already applies (appid + EEM applets only), regardless of what
+#   NETWORK_ATTACHMENT is set to: a device stranded WITHOUT a deployment
+#   receipt has no receipt to prove the VLAN/SVI or PKI trustpoint are
+#   uniquely IRIS-owned, so they must be left exactly as they are.
 #
 # Env (subset of the installer's, supplied by OnboardService._build_env):
 #   DEVICE_IP DEVICE_USER DEVICE_PASS [DEVICE_ENABLE] [VLAN=666]
@@ -35,6 +40,10 @@ DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
 NETWORK_ATTACHMENT="${NETWORK_ATTACHMENT:-routed}"
 VLAN_IN="${VLAN:-${INBAND_VLAN:-}}"
 VLAN="${VLAN_IN:-666}"
+# See header: forces the same agent-footprint-only reduction as inband,
+# regardless of NETWORK_ATTACHMENT, because no receipt proves the VLAN/SVI or
+# PKI trustpoint are uniquely IRIS-owned.
+FORCE_AGENT_ONLY="${IRIS_FORCE_AGENT_ONLY:-0}"
 PKG="${PKG:-iris-arm64.tar}"; PKG_FS="${PKG_FS:-flash:}"
 # C9k share-mount transfer: when set, [3/4] also deletes OUR iris/ subdir of
 # the shared CAF dir (transient image copies orphaned by a mid-transfer kill).
@@ -58,7 +67,7 @@ config_cleanup() {
 # Inband removes ONLY the app footprint: it preserves the operator-owned VLAN/
 # SVI and the shared PKI trustpoint / HTTP-client settings (a receipt cannot
 # prove those globals remain uniquely IRIS-owned).
-if [ "$NETWORK_ATTACHMENT" = "inband" ]; then
+if [ "$NETWORK_ATTACHMENT" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
 cat <<EOF
 no app-hosting appid $APPID
 no event manager applet IRIS-AGENT
@@ -86,7 +95,11 @@ if [ "$DRY" -eq 1 ]; then
   echo "===== [1/4] app-hosting stop -> deactivate -> uninstall '$APPID' ====="
   printf 'app-hosting stop appid %s\napp-hosting deactivate appid %s\napp-hosting uninstall appid %s\n' \
     "$APPID" "$APPID" "$APPID"
-  echo "===== [2/4] remove config footprint (appid, VLAN$VLAN, applets, trustpoint) ====="
+  if [ "$NETWORK_ATTACHMENT" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
+    echo "===== [2/4] agent-footprint-only config removal (VLAN/SVI, PKI trustpoint left in place) ====="
+  else
+    echo "===== [2/4] remove config footprint (appid, VLAN$VLAN, applets, trustpoint) ====="
+  fi
   config_cleanup
   echo "===== [3/4] delete ${PKG_FS}${PKG} ====="
   if [ -n "$SHARE_IOS_PATH" ]; then
@@ -106,6 +119,13 @@ fi
 : "${DEVICE_PASS:?set DEVICE_PASS}"
 [ -n "$VLAN_IN" ] || { echo "ERROR: VLAN not set (the device's fleet row is" \
   "missing its vlan); refusing to guess — set the vlan on the device and retry" >&2; exit 1; }
+if [ "$FORCE_AGENT_ONLY" = "1" ]; then
+  echo "===== FORCE: agent-footprint-only teardown (no receipt) ====="
+  echo "  Removing: IRIS EEM applets, the '$APPID' app, and its staged files."
+  echo "  NOT touching Vlan$VLAN/SVI or the PKI trustpoint: without a receipt"
+  echo "  there is no proof IRIS created them, so they are left exactly as"
+  echo "  they are."
+fi
 RUN() { "$HERE/../../lab/device-run.sh" "$DEVICE_IP"; }
 app_state() { printf 'show app-hosting list\n' | RUN 2>/dev/null | awk -v a="$APPID" '$1==a{print $2}'; }
 
@@ -125,8 +145,8 @@ done
 st="$(app_state)"
 [ -z "$st" ] || echo "  WARN: '$APPID' still shows state '$st' after uninstall"
 
-if [ "$NETWORK_ATTACHMENT" = "inband" ]; then
-  echo "[2/4] remove inband app footprint (appid, EEM applets; existing network preserved)"
+if [ "$NETWORK_ATTACHMENT" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
+  echo "[2/4] remove agent-only app footprint (appid, EEM applets; existing network preserved)"
 else
   echo "[2/4] remove config footprint (appid, Vlan$VLAN, EEM applets, PKI trustpoint)"
 fi
@@ -148,7 +168,7 @@ echo "  removing the scp-push staging dir $IRIS_STAGE_DIR"
 printf 'delete /force /recursive %s\n\n' "$IRIS_STAGE_DIR" | RUN >/dev/null 2>&1 || true
 
 echo "[4/4] verify no '$APPID' app, config footprint, or $IRIS_STAGE_DIR remains"
-if [ "$NETWORK_ATTACHMENT" = "inband" ]; then
+if [ "$NETWORK_ATTACHMENT" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
   inc="app-hosting appid $APPID|applet IRIS-"
   artifact_re="^$APPID |^app-hosting appid $APPID|^event manager applet IRIS-"
 else

@@ -20,6 +20,12 @@
 #     guest-share). It preserves the operator-owned VLAN/SVI/routes/VRF AND the
 #     shared logging discriminator and PKI trustpoint/HTTP-client settings,
 #     because a receipt cannot prove those globals remain uniquely IRIS-owned.
+# IRIS_FORCE_AGENT_ONLY=1 forces that same agent-footprint-only reduction
+#   regardless of NETWORK_ATTACHMENT: a device stranded WITHOUT a deployment
+#   receipt (onboard died after enabling Guest Shell but before its receipt was
+#   written) has no receipt to prove the VLAN/SVI, IRISQ discriminator, or PKI
+#   trustpoint are uniquely IRIS-owned, so they must be left exactly as they
+#   are. Only what is identifiable by name as IRIS is removed.
 # Deliberately LEFT IN PLACE (both modes): `iox`, `file prompt quiet`, the
 # AppGig trunk (the installer re-applies idempotently on the next onboard), any
 # staged image at flash root (a delivered artifact, never IRIS machinery),
@@ -44,6 +50,10 @@ VLAN_IN="${VLAN:-${INBAND_VLAN:-}}"
 VLAN="${VLAN_IN:-666}"
 IOS_FS="${IOS_FS:-flash:}"
 IOS_ROOT="${IOS_FS}guest-share"
+# See header: forces the same agent-footprint-only reduction as inband,
+# regardless of NETWORK_ATTACHMENT, because no receipt proves the VLAN/SVI,
+# IRISQ discriminator, or PKI trustpoint are uniquely IRIS-owned.
+FORCE_AGENT_ONLY="${IRIS_FORCE_AGENT_ONLY:-0}"
 
 config_teardown() {
 # Every EEM applet the agent may have left in running-config: the 60s bootstrap
@@ -59,7 +69,7 @@ EOF
 }
 
 config_cleanup() {
-if [ "$NETWORK_ATTACHMENT" = "inband" ]; then
+if [ "$NETWORK_ATTACHMENT" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
 cat <<EOF
 no app-hosting appid guestshell
 EOF
@@ -83,7 +93,11 @@ if [ "$DRY" -eq 1 ]; then
   echo "===== [1/5] EEM applets removed FIRST (stops the 60s bootstrap timer) ====="
   config_teardown
   echo "===== [2/5] guestshell disable  [3/5] guestshell destroy (polled) ====="
-  echo "===== [4/5] config footprint removal ====="
+  if [ "$NETWORK_ATTACHMENT" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
+    echo "===== [4/5] agent-footprint-only config removal (VLAN/SVI, IRISQ, PKI trustpoint left in place) ====="
+  else
+    echo "===== [4/5] config footprint removal ====="
+  fi
   config_cleanup
   echo "===== [5/5] delete /force /recursive $IOS_ROOT ====="
    echo "===== PERSIST: copy running-config startup-config (after successful cleanup) ====="
@@ -95,6 +109,13 @@ fi
 : "${DEVICE_PASS:?set DEVICE_PASS}"
 [ -n "$VLAN_IN" ] || { echo "ERROR: VLAN not set (the deployment receipt is" \
   "missing its vlan); refusing to guess — set the vlan on the device and retry" >&2; exit 1; }
+if [ "$FORCE_AGENT_ONLY" = "1" ]; then
+  echo "===== FORCE: agent-footprint-only teardown (no receipt) ====="
+  echo "  Removing: IRIS EEM applets, Guest Shell, and $IOS_ROOT."
+  echo "  NOT touching Vlan$VLAN/SVI, IRISQ, or the PKI trustpoint: without a"
+  echo "  receipt there is no proof IRIS created them, so they are left"
+  echo "  exactly as they are."
+fi
 RUN="$HERE/../lab/device-run.sh"
 
 echo "[1/5] remove EEM applets on $DEVICE_IP (stops the 60s bootstrap timer)"
@@ -123,8 +144,8 @@ if [ -n "$st" ]; then
 fi
 echo "  guestshell destroyed"
 
-if [ "$NETWORK_ATTACHMENT" = "inband" ]; then
-  echo "[4/5] remove inband app footprint (app-hosting only; existing network preserved)"
+if [ "$NETWORK_ATTACHMENT" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
+  echo "[4/5] remove agent-only app footprint (app-hosting only; existing network preserved)"
 else
   echo "[4/5] remove config footprint (app-hosting block, Vlan$VLAN, IRISQ, PKI trustpoint)"
 fi
@@ -137,9 +158,10 @@ echo "verify: no app-hosting entry, no leftover config lines, no guest-share"
 # terminal width 512 stops IOS wrapping the echoed command lines (wrap
 # fragments would false-match the artifact greps below); lines carrying the
 # prompt '#' are the command echoes themselves — excluded.
-# Inband intentionally preserves the operator-owned network, discriminator, and
-# trustpoint, so its verify only asserts the app footprint is gone.
-if [ "$NETWORK_ATTACHMENT" = "inband" ]; then
+# Inband (and a receipt-less force undeploy) intentionally preserves the
+# operator-owned network, discriminator, and trustpoint, so its verify only
+# asserts the app footprint is gone.
+if [ "$NETWORK_ATTACHMENT" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
   verify_filter="applet IRIS-"
   artifact_re="^guestshell|^event manager applet IRIS-|guest-share"
 else
