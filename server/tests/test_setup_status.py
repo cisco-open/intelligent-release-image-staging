@@ -356,3 +356,29 @@ def test_refresh_setup_paints_unknown_on_failed_or_thrown_fetch():
     assert reset.count("setupChip('unknown')") == 3
     assert "#setup-pkg-table tbody" in reset
     assert "setup-pkg-remedy" in reset
+
+
+def test_fingerprint_reads_a_combined_cert_and_key_file(tmp_path):
+    """IRIS_CERT is the SHARED combined file the TLS services load: a
+    certificate followed by its private key. ssl.PEM_cert_to_DER_cert rejects
+    that (it demands the text END with the certificate footer), so reading the
+    reference must extract the leading certificate block rather than hand the
+    whole file over. Without this the reference is unreadable in the real
+    deployment and every package reports `unknown`/`no-reference` -- correct
+    per the never-green rule, but useless."""
+    combined = CERT_A + (
+        "-----BEGIN PRIVATE KEY-----\n"
+        "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7\n"
+        "-----END PRIVATE KEY-----\n")
+    p = tmp_path / "cert.pem"
+    p.write_text(combined)
+    assert setup_status.read_pem_fingerprint(str(p)) == \
+        setup_status.fingerprint_pem(CERT_A)
+
+
+def test_fingerprint_never_returns_a_key_block(tmp_path):
+    """A file holding ONLY a private key must not fingerprint to anything."""
+    p = tmp_path / "key.pem"
+    p.write_text("-----BEGIN PRIVATE KEY-----\nMIIEvQIBADAN\n"
+                 "-----END PRIVATE KEY-----\n")
+    assert setup_status.read_pem_fingerprint(str(p)) is None

@@ -33,14 +33,42 @@ IOX_PACKAGES = ("iris-amd64.tar", "iris-arm64.tar")
 _CERT_MEMBER = "iris-catalog.pem"
 
 
+_CERT_BEGIN = "-----BEGIN CERTIFICATE-----"
+_CERT_END = "-----END CERTIFICATE-----"
+
+
+def _first_certificate_block(pem_text):
+    """The FIRST certificate block in *pem_text*, or None.
+
+    ``IRIS_CERT`` is the SHARED combined file all three TLS services load: a
+    certificate followed by its private key. ``ssl.PEM_cert_to_DER_cert``
+    demands the text END with the certificate footer, so the whole file cannot
+    be handed to it. Slicing the leading block also keeps the private key out
+    of the parser entirely -- this module has no business touching key material.
+    """
+    if not isinstance(pem_text, str):
+        return None
+    start = pem_text.find(_CERT_BEGIN)
+    if start < 0:
+        return None
+    end = pem_text.find(_CERT_END, start)
+    if end < 0:
+        return None
+    return pem_text[start:end + len(_CERT_END)] + "\n"
+
+
 def fingerprint_pem(pem_text):
     """Colon-separated uppercase SHA-256 of a PEM certificate, or None.
 
     Matches ``openssl x509 -noout -fingerprint -sha256`` byte for byte: both
-    hash the DER encoding.
+    hash the DER encoding. Accepts a combined certificate+key file by reading
+    only its leading certificate.
     """
+    block = _first_certificate_block(pem_text)
+    if block is None:
+        return None
     try:
-        der = ssl.PEM_cert_to_DER_cert(pem_text)
+        der = ssl.PEM_cert_to_DER_cert(block)
     except (ValueError, TypeError):
         return None
     digest = hashlib.sha256(der).hexdigest().upper()
