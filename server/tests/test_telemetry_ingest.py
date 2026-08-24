@@ -247,3 +247,85 @@ class TestV2ObservationIngest:
                                "tier": "good"}})
         ent = table.snapshot(1.0)["samples"]["d1"]
         assert ent["schema"] == "v2"
+
+
+class TestWithdrawalReasonIsPreserved:
+    """A policy-driven withdrawal must record WHY it withdrew (spec §3A
+    obs_state fidelity). The agent genuinely emits `disabled` when its master
+    toggle is off and `paused` when streaming is off/paused, but the server's
+    tele_off short-circuit used to flatten every cause to `not_active`, so those
+    two states could never appear in live-samples.json or /api/swarm at all.
+    The reason is derived from the SERVER's own flags, never from the device's
+    claimed obs_state."""
+
+    def _seed(self, table):
+        cat = _cat(table=table)
+        _post(cat, {"current_image_id": "img-1", "telemetry_observation": _obs()})
+        assert table.snapshot(1.0)["samples"]["d1"]["valid"] is True
+
+    def test_master_toggle_off_records_disabled(self):
+        table = live_samples.LiveTable()
+        self._seed(table)
+        _post(_cat(table=table),
+              {"current_image_id": "img-1", "telemetry_enabled": False,
+               "telemetry_observation": _obs(sample_seq=2)})
+        ent = table.snapshot(1.0)["samples"]["d1"]
+        assert ent["obs_state"] == "disabled"
+        assert ent["valid"] is False
+
+    def test_stream_toggle_off_records_paused(self):
+        table = live_samples.LiveTable()
+        self._seed(table)
+        _post(_cat(table=table),
+              {"current_image_id": "img-1", "telemetry_stream_enabled": False,
+               "telemetry_observation": _obs(sample_seq=2)})
+        ent = table.snapshot(1.0)["samples"]["d1"]
+        assert ent["obs_state"] == "paused"
+        assert ent["valid"] is False
+
+    def test_global_stream_pause_records_paused(self, tmp_path):
+        p = str(tmp_path / "telemetry-settings.json")
+        live_samples.write_settings(p, 1, True)
+        table = live_samples.LiveTable()
+        cat0 = _cat(table=table)
+        _post(cat0, {"current_image_id": "img-1", "telemetry_observation": _obs()})
+        cat = _cat(table=table, settings=live_samples.StreamSettings(p))
+        _post(cat, {"current_image_id": "img-1",
+                    "telemetry_observation": _obs(sample_seq=2)})
+        ent = table.snapshot(1.0)["samples"]["d1"]
+        assert ent["obs_state"] == "paused"
+        assert ent["valid"] is False
+
+    def test_master_toggle_outranks_stream_toggle(self):
+        """Mirrors the agent's own ladder: master beats stream beats assignment."""
+        table = live_samples.LiveTable()
+        self._seed(table)
+        _post(_cat(table=table),
+              {"current_image_id": "img-1", "telemetry_enabled": False,
+               "telemetry_stream_enabled": False,
+               "telemetry_observation": _obs(sample_seq=2)})
+        assert table.snapshot(1.0)["samples"]["d1"]["obs_state"] == "disabled"
+
+    def test_unassigned_still_records_not_active(self):
+        """Regression guard: assignment loss keeps its original label."""
+        table = live_samples.LiveTable()
+        self._seed(table)
+        cat = _cat(store=_Store(approved=None), table=table)
+        cat.route_post("/v1/devices/d1/heartbeat",
+                       json.dumps({"telemetry_observation":
+                                   {"v": 2, "obs_state": "not_active",
+                                    "observed_at": 1.0}}).encode(),
+                       "10.0.0.9")
+        ent = table.snapshot(1.0)["samples"]["d1"]
+        assert ent["obs_state"] == "not_active"
+        assert ent["valid"] is False
+
+    def test_withdrawal_reason_is_not_taken_from_the_device(self):
+        """The device claiming `observed` while the server says the master
+        toggle is off must still be recorded as `disabled`, not `observed`."""
+        table = live_samples.LiveTable()
+        self._seed(table)
+        _post(_cat(table=table),
+              {"current_image_id": "img-1", "telemetry_enabled": False,
+               "telemetry_observation": _obs(sample_seq=2, obs_state="observed")})
+        assert table.snapshot(1.0)["samples"]["d1"]["obs_state"] == "disabled"

@@ -797,6 +797,18 @@ class Catalog:
                 tele_off = (data.get("telemetry_enabled") is False
                             or data.get("telemetry_stream_enabled") is False
                             or paused or not approved)
+                # Withdraw under the SERVER's own reason rather than flattening
+                # every cause to not_active (spec 3A obs_state fidelity). The
+                # value is derived from the heartbeat flags + stream settings
+                # this server already trusts, never from the device's claimed
+                # obs_state, and the ladder mirrors the agent's: the master
+                # toggle outranks the stream toggle, which outranks assignment.
+                if data.get("telemetry_enabled") is False:
+                    off_state = "disabled"
+                elif data.get("telemetry_stream_enabled") is False or paused:
+                    off_state = "paused"
+                else:
+                    off_state = "not_active"
                 obs = data.get("telemetry_observation")
                 sample = data.get("sample")
                 if tele_off:
@@ -810,7 +822,7 @@ class Catalog:
                     # counter is left untouched — only a genuinely malformed
                     # envelope WHILE still assigned rejects/leaves prior good.
                     if obs is not None or sample is not None:
-                        self.live_table.withdraw(parts[2])
+                        self.live_table.withdraw(parts[2], off_state)
                 elif obs is not None:
                     try:
                         clean, _trunc = live_samples.sanitize_observation(
