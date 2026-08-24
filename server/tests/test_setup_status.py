@@ -207,6 +207,22 @@ def test_distributed_cert_unavailable_is_unknown(tmp_path):
     assert st["packages"]["reason"] == "distributed-cert-unavailable"
 
 
+def test_stale_package_not_masked_by_missing_distributed_cert(tmp_path):
+    """When one package is stale and distributed cert is missing, the stale
+    finding must not be masked by the unknown state from missing cert. Stale
+    is the more urgent fact: a rebuild is needed."""
+    other = CERT_A.replace("MIIBdzCCAR2", "MIIBdzCCAR3")
+    d, served = _artifacts(tmp_path, other, CERT_A)  # arm64 stale, amd64 ok
+    # Delete the distributed cert to simulate it being unavailable
+    os.remove(os.path.join(d, "iris-catalog.pem"))
+    st = _call(d, served)
+    assert st["packages"]["state"] == "stale"
+    assert st["packages"]["reason"] == "distributed-cert-unavailable"
+    by_name = {i["name"]: i for i in st["packages"]["items"]}
+    assert by_name["iris-arm64.tar"]["state"] == "stale"
+    assert by_name["iris-amd64.tar"]["state"] == "ok"
+
+
 def test_response_carries_no_secret_material(tmp_path):
     d, served = _artifacts(tmp_path, CERT_A, CERT_A)
     st = _call(d, served, stage_host={"configured": True, "username": "svc"})

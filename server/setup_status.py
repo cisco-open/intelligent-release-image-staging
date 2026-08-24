@@ -154,7 +154,10 @@ def build_status(artifacts_dir, served_cert_path, distributed_cert_path,
         "remedy": REMEDY,
     }
     if distributed is None and reference is not None:
-        packages["state"] = "unknown"
+        # Not knowing what devices are told to trust is missing evidence, so
+        # this can never leave us at ok -- but it must not DEMOTE a worse
+        # finding either: a stale package is the more urgent fact.
+        packages["state"] = _worst([packages["state"], "unknown"])
         packages["reason"] = "distributed-cert-unavailable"
     elif mismatch:
         packages["state"] = "unknown"
