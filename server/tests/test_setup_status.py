@@ -95,6 +95,13 @@ def test_package_fingerprint_without_baked_cert(tmp_path):
     assert fp is None and reason == "no-cert"
 
 
+def test_package_fingerprint_with_unparseable_cert(tmp_path):
+    p = str(tmp_path / "iris-arm64.tar")
+    _make_iox_package(p, "not a valid certificate at all")
+    fp, reason = setup_status.package_fingerprint(p)
+    assert fp is None and reason == "bad-cert"
+
+
 def test_package_fingerprint_unreadable_tar(tmp_path):
     p = str(tmp_path / "iris-arm64.tar")
     with open(p, "wb") as f:
