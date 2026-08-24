@@ -160,3 +160,224 @@ setup() {
   [ "$status" -ne 0 ]
   [[ "$output" == *"missing a valid VPG_NUMBER"* ]]
 }
+
+# --- SSH session consolidation: the trailing verify block (show
+# running-config, show app-hosting list, dir bootflash:guest-share[/iris])
+# now rides one lab/device-run.sh login using the same __IRIS_PREFLIGHT_-style
+# markers as _default_router_preflight in server/gui_onboard.py, instead of
+# a fresh SSH connection per check. FAKE_COMMAND_LOG records one
+# "=== CALL START ===".."=== CALL END ===" block per device-run.sh
+# invocation so tests can inspect exactly which commands landed together.
+
+_router_uninstall_stub_setup() {
+  STUBDIR="$BATS_TEST_TMPDIR/stub"
+  mkdir -p "$STUBDIR/lab" "$STUBDIR/device"
+  FAKE_STATE_DIR="$BATS_TEST_TMPDIR/state"
+  mkdir -p "$FAKE_STATE_DIR"
+  FAKE_COMMAND_LOG="$BATS_TEST_TMPDIR/device-commands.log"
+  : > "$FAKE_COMMAND_LOG"
+  export FAKE_STATE_DIR FAKE_COMMAND_LOG
+
+  cat > "$STUBDIR/lab/device-run.sh" <<'STUB'
+#!/usr/bin/env bash
+cmds="$(cat)"
+if [ -n "${FAKE_COMMAND_LOG:-}" ]; then
+  {
+    echo "=== CALL START ==="
+    printf '%s\n' "$cmds"
+    echo "=== CALL END ==="
+  } >> "$FAKE_COMMAND_LOG"
+fi
+
+# "show app-hosting list" is sent by both the disable-wait poll and the
+# destroy-wait poll. A shared counter partitioned into two fixed windows
+# (FAKE_DISABLE_POLLS calls, then FAKE_DESTROY_POLLS calls) lets the stub
+# answer each phase distinctly without the phases bleeding into each other.
+apphost_reply() {
+  local n disable_polls destroy_polls k
+  n=$(( $(cat "$FAKE_STATE_DIR/apphost_n" 2>/dev/null || echo 0) + 1 ))
+  echo "$n" > "$FAKE_STATE_DIR/apphost_n"
+  disable_polls="${FAKE_DISABLE_POLLS:-1}"
+  destroy_polls="${FAKE_DESTROY_POLLS:-1}"
+  if [ "$n" -le "$disable_polls" ]; then
+    [ "$n" -lt "$disable_polls" ] && echo "guestshell RUNNING" || echo ""
+  elif [ "$n" -le "$((disable_polls + destroy_polls))" ]; then
+    k=$((n - disable_polls))
+    [ "$k" -lt "$destroy_polls" ] && echo "guestshell RUNNING" || echo ""
+  else
+    echo ""
+  fi
+}
+
+# The NAT overload retry loop mutates ("no $NAT_RULE") then re-observes
+# (plain "show running-config", no verify markers) before deciding whether
+# to retry. FAKE_NAT_DRAIN_ROUNDS controls how many observes still show the
+# rule present before it reports clean.
+natcheck_reply() {
+  local n rounds
+  n=$(( $(cat "$FAKE_STATE_DIR/natcheck_n" 2>/dev/null || echo 0) + 1 ))
+  echo "$n" > "$FAKE_STATE_DIR/natcheck_n"
+  rounds="${FAKE_NAT_DRAIN_ROUNDS:-1}"
+  if [ "$n" -lt "$rounds" ]; then
+    echo "ip nat inside source list IRIS-NAT-${VPG_NUMBER} interface ${NAT_INTERFACE} overload"
+  else
+    echo "! clean, no residue"
+  fi
+}
+
+case "$cmds" in
+  *"__IRIS_VERIFY_RUNNING__"*)
+    echo "terminal width 512"
+    if [ "${FAKE_VERIFY_OMIT_RUNNING:-no}" != "yes" ]; then
+      echo "__IRIS_VERIFY_RUNNING__"
+      if [ "${FAKE_UNINSTALL_LEAVE_RESIDUE:-no}" = "yes" ]; then
+        echo "interface VirtualPortGroup${VPG_NUMBER}"
+        echo "app-hosting appid guestshell"
+      else
+        echo "hostname iris8kv-1"
+        echo "!"
+        echo "end"
+      fi
+    fi
+    if [ "${FAKE_VERIFY_OMIT_APPS:-no}" != "yes" ]; then
+      echo "__IRIS_VERIFY_APPS__"
+      echo "No App found"
+    fi
+    if [ "${FAKE_VERIFY_OMIT_FILES:-no}" != "yes" ]; then
+      echo "__IRIS_VERIFY_FILES__"
+      echo "Directory of bootflash:/guest-share/"
+      echo "No files in directory"
+      echo "%Error opening bootflash:/guest-share/iris (No such file or directory)"
+    fi
+    ;;
+  *"show version"*)
+    echo "cisco ${FAKE_MODEL:-C8000V} (x86) processor"
+    echo "Processor board ID ${FAKE_DEVICE_IDENTITY:-FOC1234TEST}"
+    ;;
+  *"show app-hosting list"*)
+    apphost_reply
+    ;;
+  *"show ip nat translations"*)
+    printf '%s\n' "${FAKE_NAT_TRANSLATIONS:-}"
+    ;;
+  *"show running-config"*)
+    natcheck_reply
+    ;;
+  *"copy running-config startup-config"*)
+    echo "[OK]"
+    ;;
+  *)
+    echo "ok"
+    ;;
+esac
+STUB
+  chmod +x "$STUBDIR/lab/device-run.sh"
+
+  ln -sf "$UNINSTALL" "$STUBDIR/device/router-uninstall.sh"
+}
+
+_router_uninstall_run_live() {
+  env DEVICE_IP=192.0.2.10 DEVICE_USER=test DEVICE_PASS=test \
+    EXPECTED_DEVICE_IDENTITY=FOC1234TEST ROUTER_RESOURCES_OWNED=1 \
+    NAT_REMOVE_SETTLE=1 \
+    bash "$STUBDIR/device/router-uninstall.sh"
+}
+
+_calls_containing() {
+  local log="$1"; shift
+  python3 - "$log" "$@" <<'PY'
+import sys
+text = open(sys.argv[1]).read()
+needles = sys.argv[2:]
+blocks = text.split("=== CALL START ===\n")[1:]
+count = sum(1 for b in blocks
+            if all(n in b.split("=== CALL END ===\n")[0] for n in needles))
+print(count)
+PY
+}
+
+_calls_between_containing() {
+  local log="$1" start="$2" end="$3" target="$4"
+  python3 - "$log" "$start" "$end" "$target" <<'PY2'
+import sys
+log, start, end, target = sys.argv[1:5]
+text = open(log).read()
+blocks = [b.split("=== CALL END ===\n")[0]
+          for b in text.split("=== CALL START ===\n")[1:]]
+start_i = next((i for i, b in enumerate(blocks) if start in b), None)
+if start_i is None:
+    print(0); sys.exit()
+end_i = next((i for i in range(start_i + 1, len(blocks)) if end in blocks[i]),
+             len(blocks))
+print(sum(1 for b in blocks[start_i + 1:end_i] if target in b))
+PY2
+}
+
+@test "undeploy verify merges running-config, app-hosting state, and file listing into ONE call" {
+  _router_uninstall_stub_setup
+  run _router_uninstall_run_live
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"is clean and persisted"* ]]
+  merged="$(_calls_containing "$FAKE_COMMAND_LOG" '__IRIS_VERIFY_RUNNING__' \
+    'show running-config' 'show app-hosting list' 'dir bootflash:guest-share')"
+  [ "$merged" -eq 1 ]
+}
+
+@test "undeploy fails closed (never reports clean) when the FILES marker is missing" {
+  # A dropped FILES section must never read as "nothing left" -- the
+  # forbidden-artifact scan treats absence as proof of a clean teardown, so
+  # a truncated response has to fail loudly instead of quietly passing.
+  _router_uninstall_stub_setup
+  FAKE_VERIFY_OMIT_FILES=yes run _router_uninstall_run_live
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"ERROR: undeploy verify did not return guest-share file listing"* ]]
+  [[ "$output" != *"is clean and persisted"* ]]
+}
+
+@test "undeploy fails closed (never reports clean) when the RUNNING marker is missing" {
+  _router_uninstall_stub_setup
+  FAKE_VERIFY_OMIT_RUNNING=yes run _router_uninstall_run_live
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"ERROR: undeploy verify did not return running-config"* ]]
+  [[ "$output" != *"is clean and persisted"* ]]
+}
+
+@test "undeploy verify does NOT falsely declare clean when residue is actually present" {
+  # Sanity check that the merge didn't also weaken the forbidden-artifact
+  # scan itself: real residue in a well-formed (marker-complete) response
+  # must still be caught.
+  _router_uninstall_stub_setup
+  FAKE_UNINSTALL_LEAVE_RESIDUE=yes run _router_uninstall_run_live
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"artifacts still present after undeploy"* ]]
+}
+
+@test "NAT overload retry loop still mutates, re-observes, and retries as separate calls" {
+  # Must NOT be flattened: IOS refuses the overload no-form while
+  # translations still reference it, so this has to stay mutate -> observe
+  # -> retry across separate device-run.sh calls, never a single shot.
+  _router_uninstall_stub_setup
+  NETWORK_ATTACHMENT=router-nat NAT_INTERFACE=GigabitEthernet1 \
+    FAKE_NAT_DRAIN_ROUNDS=2 run _router_uninstall_run_live
+  [ "$status" -eq 0 ]
+  mutates="$(_calls_between_containing "$FAKE_COMMAND_LOG" \
+    'no ip nat inside source static tcp' 'no app-hosting appid guestshell' \
+    'no ip nat inside source list IRIS-NAT-10 interface GigabitEthernet1 overload')"
+  observes="$(_calls_between_containing "$FAKE_COMMAND_LOG" \
+    'no ip nat inside source static tcp' 'no app-hosting appid guestshell' \
+    'show running-config')"
+  [ "$mutates" -ge 2 ]
+  [ "$observes" -ge 2 ]
+}
+
+@test "guestshell disable-wait and destroy-wait polls remain separate calls, not merged" {
+  _router_uninstall_stub_setup
+  FAKE_DISABLE_POLLS=2 FAKE_DESTROY_POLLS=2 run _router_uninstall_run_live
+  [ "$status" -eq 0 ]
+  disable_calls="$(_calls_between_containing "$FAKE_COMMAND_LOG" \
+    'guestshell disable' 'guestshell destroy' 'show app-hosting list')"
+  destroy_calls="$(_calls_between_containing "$FAKE_COMMAND_LOG" \
+    'guestshell destroy' 'no app-hosting appid guestshell' 'show app-hosting list')"
+  [ "$disable_calls" -ge 2 ]
+  [ "$destroy_calls" -ge 2 ]
+}

@@ -254,25 +254,38 @@ setup_stage_local() {
   # FAKE_CLOCK_LINE defaults to a recent year so every pre-existing test below
   # still sails past [pre] unmodified; only the dedicated PREREQ tests further
   # down override those.
+  #
+  # [1/7]+[pre] now ride ONE combined SSH session (marker __IRIS_PRECHECK_)
+  # instead of up to three — see device-install.sh. The stub recognizes that
+  # single request by the marker prefix and answers all of its sections
+  # (FLASH always, ROUTING only when the request actually asked for it, i.e.
+  # NETWORK_ATTACHMENT=routed, CLOCK always) in one reply. Real sessions echo
+  # commands back; FAKE_DEVICE_DOWN=yes simulates a dead session that echoes
+  # nothing at all — no markers either — which is exactly what a missing
+  # section looks like to the installer's fail-closed ROUTING parse.
   STUBDIR="$BATS_TEST_TMPDIR/stub"
   mkdir -p "$STUBDIR/lab"
   cat > "$STUBDIR/lab/device-run.sh" <<'STUB'
 #!/usr/bin/env bash
 cmds="$(cat)"   # drain stdin (the CLI commands piped to the "device")
 case "$cmds" in
-  *"show running-config"*)
-    # Real sessions echo the commands back; the installer's transport check
-    # keys on that echo. FAKE_DEVICE_DOWN=yes simulates a dead session.
+  *"__IRIS_PRECHECK_"*)
     [ "${FAKE_DEVICE_DOWN:-no}" = "yes" ] && exit 0
-    echo "show running-config | include no ip routing"
-    if [ "${FAKE_IP_ROUTING:-yes}" = "yes" ]; then
-      echo "Gateway of last resort is 100.90.168.1 to network 0.0.0.0"
-    else
-      echo "no ip routing"
-      echo "Default gateway is not set"
-    fi
-    ;;
-  *"show clock"*)
+    echo "__IRIS_PRECHECK_FLASH__"
+    echo "bytes free stub"
+    case "$cmds" in
+      *"__IRIS_PRECHECK_ROUTING__"*)
+        echo "__IRIS_PRECHECK_ROUTING__"
+        echo "show running-config | include no ip routing"
+        if [ "${FAKE_IP_ROUTING:-yes}" = "yes" ]; then
+          echo "Gateway of last resort is 100.90.168.1 to network 0.0.0.0"
+        else
+          echo "no ip routing"
+          echo "Default gateway is not set"
+        fi
+        ;;
+    esac
+    echo "__IRIS_PRECHECK_CLOCK__"
     echo "${FAKE_CLOCK_LINE:-14:23:07.512 UTC Thu Aug 20 2026}"
     ;;
   *)
@@ -598,6 +611,16 @@ EOF
 cmds="\$(cat)"
 printf '%s\n' "\$cmds" >> '$BATS_TEST_TMPDIR/device-commands'
 case "\$cmds" in
+  *'__IRIS_PRECHECK_'*)
+    # [1/7]+[pre] ride ONE combined session now (marker __IRIS_PRECHECK_) --
+    # answer all three sections so the real run sails past the PREREQ gate.
+    echo '__IRIS_PRECHECK_FLASH__'
+    echo 'bytes free stub'
+    echo '__IRIS_PRECHECK_ROUTING__'
+    echo 'show running-config | include no ip routing'
+    echo 'Gateway of last resort is 100.90.168.1 to network 0.0.0.0'
+    echo '__IRIS_PRECHECK_CLOCK__'
+    echo '14:23:07.512 UTC Thu Aug 20 2026' ;;
   *'show running-config | include ^ip routing'*) echo 'ip routing' ;;
   *'show clock'*) echo '14:23:07.512 UTC Thu Aug 20 2026' ;;
   *'show app-hosting list'*) echo 'guestshell RUNNING' ;;
@@ -623,4 +646,88 @@ EOF
   [ -f "$ARTDIR/staging/rpc-secret-$cap" ]
   grep -qF "staging/iris-agent-100.92.9.3-$cap.conf" "$BATS_TEST_TMPDIR/device-commands"
   grep -qF "staging/rpc-secret-$cap" "$BATS_TEST_TMPDIR/device-commands"
+}
+
+# --- SSH session consolidation ([1/7] flash pre-check + [pre] ip routing +
+# [pre] device clock, formerly up to three separate lab/device-run.sh logins,
+# now one combined session keyed by the __IRIS_PRECHECK_ marker -- same
+# pattern as _default_router_preflight in server/gui_onboard.py). ---
+
+@test "[1/7]+[pre] pre-checks issue exactly ONE device-run.sh session, not up to three" {
+  setup_stage_local
+  unset HOST_USER HOST_PASS
+  CALLLOG="$BATS_TEST_TMPDIR/precheck-calls"
+  : > "$CALLLOG"
+  cat > "$STUBDIR/lab/device-run.sh" <<STUB
+#!/usr/bin/env bash
+cmds="\$(cat)"
+case "\$cmds" in
+  *"__IRIS_PRECHECK_"*) printf 'PRECHECK\n' >> '$CALLLOG' ;;
+esac
+case "\$cmds" in
+  *"__IRIS_PRECHECK_"*)
+    echo "__IRIS_PRECHECK_FLASH__"
+    echo "bytes free stub"
+    echo "__IRIS_PRECHECK_ROUTING__"
+    echo "show running-config | include no ip routing"
+    echo "Gateway of last resort is 100.90.168.1 to network 0.0.0.0"
+    echo "__IRIS_PRECHECK_CLOCK__"
+    echo "14:23:07.512 UTC Thu Aug 20 2026"
+    ;;
+  *"show app-hosting list"*) echo "guestshell RUNNING" ;;
+  *) echo "bytes free stub" ;;
+esac
+STUB
+  chmod +x "$STUBDIR/lab/device-run.sh"
+
+  run_with_timeout 5 env IRIS_STAGE_LOCAL=1 IRIS_ARTIFACTS_DIR="$ARTDIR" \
+    DEVICE_IP=100.92.9.3 VLAN=666 SVI_IP=100.92.9.125 SVI_MASK=255.255.255.252 \
+    GUEST_IP=100.92.9.126 CATALOG_URL=https://100.90.168.20:8443 \
+    CATALOG_TOKEN=deadbeef DEVICE_ID=100.92.9.3 STAGE_HOST=100.90.168.20 \
+    IRIS_CRT_FILE="$CRTFILE" \
+    bash "$STUBDIR/device/device-install.sh"
+
+  # got past [2/7] (staging succeeded), i.e. past the whole pre-check block
+  [ "$(find "$ARTDIR/staging" -name 'iris-agent-100.92.9.3-*.conf' | wc -l)" -eq 1 ]
+  # exactly one device-run.sh invocation carried the precheck marker -- were
+  # this the old code, flash/routing/clock would show up as THREE
+  [ "$(wc -l < "$CALLLOG" | tr -d ' ')" -eq 1 ]
+}
+
+@test "PRECHECK: a response missing the ROUTING marker section fails closed, not silently as empty/safe" {
+  setup_stage_local
+  unset HOST_USER HOST_PASS
+  # Simulate a device that echoes FLASH and CLOCK back but, for whatever
+  # reason (a truncated/garbled session), never echoes the ROUTING marker at
+  # all. A correct fail-closed parser must treat that as "could not verify",
+  # never as "no routing problem found" -- an empty ROUTING section would be
+  # the wrong, unsafe reading (it could just as easily mean routing IS
+  # disabled and the disabled-detecting lines were dropped in transit).
+  cat > "$STUBDIR/lab/device-run.sh" <<'STUB'
+#!/usr/bin/env bash
+cmds="$(cat)"
+case "$cmds" in
+  *"__IRIS_PRECHECK_"*)
+    echo "__IRIS_PRECHECK_FLASH__"
+    echo "bytes free stub"
+    echo "__IRIS_PRECHECK_CLOCK__"
+    echo "14:23:07.512 UTC Thu Aug 20 2026"
+    ;;
+  *) echo "bytes free stub" ;;
+esac
+STUB
+  chmod +x "$STUBDIR/lab/device-run.sh"
+
+  run_with_timeout 5 env IRIS_STAGE_LOCAL=1 IRIS_ARTIFACTS_DIR="$ARTDIR" \
+    DEVICE_IP=100.92.9.3 VLAN=666 SVI_IP=100.92.9.125 SVI_MASK=255.255.255.252 \
+    GUEST_IP=100.92.9.126 CATALOG_URL=https://100.90.168.20:8443 \
+    CATALOG_TOKEN=deadbeef DEVICE_ID=100.92.9.3 STAGE_HOST=100.90.168.20 \
+    IRIS_CRT_FILE="$CRTFILE" \
+    bash "$STUBDIR/device/device-install.sh"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"PREREQ: could not verify ip routing"* ]]
+  [[ "$output" != *"PREREQ: ip routing is disabled"* ]]
+  # must fail BEFORE staging -- [pre] sits ahead of [2/7]
+  [ "$(find "$ARTDIR" -name 'iris-agent-100.92.9.3-*.conf' | wc -l)" -eq 0 ]
 }

@@ -203,9 +203,14 @@ echo "end"
 }
 
 iox_ready() {
-  printf 'show iox\n' | RUN 2>/dev/null | grep -q \
-    'IOx service (CAF).*Running' \
-    && printf 'show iox\n' | RUN 2>/dev/null | grep -q 'Dockerd.*Running'
+  # ONE login per observation: both fields live in the SAME `show iox` output,
+  # so reading it twice paid a second ssh handshake for nothing. The poll loop
+  # around this still re-observes live state on every iteration -- only the
+  # duplicated read WITHIN one observation is collapsed, never the polling.
+  local out
+  out="$(printf 'show iox\n' | RUN 2>/dev/null)" || return 1
+  printf '%s' "$out" | grep -q 'IOx service (CAF).*Running' \
+    && printf '%s' "$out" | grep -q 'Dockerd.*Running'
 }
 
 wait_iox_ready() {  # $1=timeout_s

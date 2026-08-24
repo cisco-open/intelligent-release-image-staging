@@ -276,8 +276,41 @@ echo "[5/5] remove IRIS files under $IOS_ROOT (preserve the platform directory)"
   done
 } | "$RUN" "$DEVICE_IP" >/dev/null 2>&1 || true
 
-RUNNING="$(printf 'terminal width 512\nshow running-config\n' \
-  | "$RUN" "$DEVICE_IP" | grep -v '#' || true)"
+# One SSH login for all three read-only verify checks instead of three --
+# same consolidation as _default_router_preflight in server/gui_onboard.py.
+# IOS XE echoes these markers verbatim; a missing marker is a hard error,
+# never treated as empty/safe output. Treating a dropped section as empty
+# here would be actively dangerous: the forbidden-artifact scan below reads
+# "nothing found" as "nothing left to remove," so a truncated response must
+# fail the undeploy, not silently pass it as clean.
+VERIFY_MARKER="__IRIS_VERIFY_"
+verify_request() {
+cat <<EOF
+terminal width 512
+echo ${VERIFY_MARKER}RUNNING__
+show running-config
+echo ${VERIFY_MARKER}APPS__
+show app-hosting list
+echo ${VERIFY_MARKER}FILES__
+dir bootflash:guest-share
+dir bootflash:guest-share/iris
+EOF
+}
+verify_section() {
+  python3 -c 'import re, sys
+marker = "__IRIS_VERIFY_"
+name = sys.argv[1]
+text = sys.stdin.read()
+start = marker + name + "__"
+match = re.search(re.escape(start) + r"\r?\n?(.*?)(?=" + re.escape(marker) + r"[A-Z_]+__|\Z)", text, re.DOTALL)
+if not match:
+    sys.exit(1)
+sys.stdout.write(match.group(1))' "$1"
+}
+VERIFY_OUT="$(verify_request | "$RUN" "$DEVICE_IP" || true)"
+RUNNING_RAW="$(printf '%s' "$VERIFY_OUT" | verify_section RUNNING)" \
+  || { echo "ERROR: undeploy verify did not return running-config; refusing to declare the device clean" >&2; exit 1; }
+RUNNING="$(printf '%s' "$RUNNING_RAW" | grep -v '#' || true)"
 config_block() {
   python3 -c 'import re,sys
 name = re.escape(sys.argv[1])
@@ -285,10 +318,12 @@ text = sys.stdin.read()
 match = re.search(r"(?ms)^interface %s\s*$\n(.*?)(?=^!\s*$|^interface |^end\s*$|\Z)" % name, text)
 print(match.group(0) if match else "")' "$1"
 }
-APP_STATE="$(printf 'show app-hosting list\n' \
-  | "$RUN" "$DEVICE_IP" | grep -v '#' || true)"
-FILES="$(printf 'dir bootflash:guest-share\ndir bootflash:guest-share/iris\n' \
-  | "$RUN" "$DEVICE_IP" | grep -v '#' || true)"
+APPS_RAW="$(printf '%s' "$VERIFY_OUT" | verify_section APPS)" \
+  || { echo "ERROR: undeploy verify did not return app-hosting state; refusing to declare the device clean" >&2; exit 1; }
+APP_STATE="$(printf '%s' "$APPS_RAW" | grep -v '#' || true)"
+FILES_RAW="$(printf '%s' "$VERIFY_OUT" | verify_section FILES)" \
+  || { echo "ERROR: undeploy verify did not return guest-share file listing; refusing to declare the device clean" >&2; exit 1; }
+FILES="$(printf '%s' "$FILES_RAW" | grep -v '#' || true)"
 
 forbidden=""
 for artifact in \

@@ -241,7 +241,47 @@ ssh_host() {                       # run a command on STAGE_HOST
 }
 
 echo "[1/7] flash pre-check on $DEVICE_IP"
-printf 'dir flash: | include bytes free\n' | "$HERE/../lab/device-run.sh" "$DEVICE_IP" | grep -i 'bytes free' || true
+# One SSH login for all three read-only pre-checks (flash free space, ip
+# routing, device clock) instead of up to three -- same consolidation as
+# _default_router_preflight in server/gui_onboard.py. IOS XE echoes these
+# markers verbatim. The flash pre-check and clock check stay best-effort /
+# informational, exactly as before a missing section there is silently
+# skipped, never fatal. ip routing keeps its HARD fail-closed semantics: a
+# missing ROUTING section (the session never echoed anything back) is a
+# TRANSPORT failure and must not masquerade as, or be silently read as, a
+# routing problem -- see the PREREQ checks below.
+PRECHECK_MARKER="__IRIS_PRECHECK_"
+precheck_request() {
+cat <<EOF
+echo ${PRECHECK_MARKER}FLASH__
+dir flash: | include bytes free
+EOF
+if [ "$NETWORK_ATTACHMENT" = "routed" ]; then
+cat <<EOF
+echo ${PRECHECK_MARKER}ROUTING__
+show running-config | include no ip routing
+show ip route | include Gateway|Default gateway
+EOF
+fi
+cat <<EOF
+echo ${PRECHECK_MARKER}CLOCK__
+show clock
+EOF
+}
+precheck_section() {
+  python3 -c 'import re, sys
+marker = "__IRIS_PRECHECK_"
+name = sys.argv[1]
+text = sys.stdin.read()
+start = marker + name + "__"
+match = re.search(re.escape(start) + r"\r?\n?(.*?)(?=" + re.escape(marker) + r"[A-Z_]+__|\Z)", text, re.DOTALL)
+if not match:
+    sys.exit(1)
+sys.stdout.write(match.group(1))' "$1"
+}
+PRECHECK_OUT="$(precheck_request | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>/dev/null || true)"
+FLASH_RAW="$(printf '%s' "$PRECHECK_OUT" | precheck_section FLASH)" || true
+printf '%s\n' "$FLASH_RAW" | grep -i 'bytes free' || true
 
 echo "[pre] prerequisite checks (ip routing, device clock)"
 # 2026-08-20 incident: an IE-3400 lost `ip routing` on re-image; onboarding still
@@ -257,24 +297,21 @@ if [ "$NETWORK_ATTACHMENT" = "routed" ]; then
   # the positive line false-fails a healthy switch. Decide from authoritative
   # signals instead: an explicit `no ip routing` line, or the route table
   # answering in host mode (`Default gateway ...`), means disabled — while a
-  # session that never echoes the command back is a TRANSPORT failure and
-  # must not masquerade as a routing problem.
-  routing_out="$(printf 'show running-config | include no ip routing\nshow ip route | include Gateway|Default gateway\n' \
-    | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>/dev/null || true)"
-  if ! printf '%s\n' "$routing_out" | grep -q 'show running-config'; then
-    echo "PREREQ: could not verify ip routing on $DEVICE_IP — the device session failed (check reachability and device credentials)" >&2
-    exit 1
-  fi
-  if printf '%s\n' "$routing_out" | grep -qE '^no ip routing[[:space:]]*$' \
-     || printf '%s\n' "$routing_out" | grep -qE '^Default gateway'; then
+  # ROUTING section missing from the response entirely is a TRANSPORT failure
+  # (the session never echoed anything back) and must not masquerade as a
+  # routing problem.
+  ROUTING_RAW="$(printf '%s' "$PRECHECK_OUT" | precheck_section ROUTING)" \
+    || { echo "PREREQ: could not verify ip routing on $DEVICE_IP — the device session failed (check reachability and device credentials)" >&2; exit 1; }
+  if printf '%s\n' "$ROUTING_RAW" | grep -qE '^no ip routing[[:space:]]*$' \
+     || printf '%s\n' "$ROUTING_RAW" | grep -qE '^Default gateway'; then
     echo "PREREQ: ip routing is disabled on this switch — the app network (VLAN $VLAN -> SVI $SVI_IP) cannot reach $STAGE_HOST. Enable it first:  configure terminal ; ip routing ; end ; write" >&2
     exit 1
   fi
 fi
-clock_out="$(printf 'show clock\n' | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>/dev/null || true)"
+CLOCK_RAW="$(printf '%s' "$PRECHECK_OUT" | precheck_section CLOCK)" || true
 # no four-digit year (odd format, probe hiccup) leaves clock_year empty and
 # skips the warning — the grep must not be fatal under pipefail
-clock_year="$(printf '%s' "$clock_out" | grep -oE '[0-9]{4}' | tail -1 || true)"
+clock_year="$(printf '%s' "$CLOCK_RAW" | grep -oE '[0-9]{4}' | tail -1 || true)"
 if [ -n "$clock_year" ] && [ "$clock_year" -lt 2024 ]; then
   echo "PREREQ WARNING: device clock is $clock_year — TLS certificate validation may fail; set the clock or NTP"
 fi

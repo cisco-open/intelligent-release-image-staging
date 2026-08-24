@@ -295,8 +295,39 @@ done
 
 echo "[6/7] verify applied config and persist to startup-config"
 RUN="$HERE/../lab/device-run.sh"
-RUNNING="$(printf 'terminal width 512\nshow running-config\n' \
-  | "$RUN" "$DEVICE_IP" | grep -v '#' || true)"
+# One SSH login for all three read-only verify checks instead of three --
+# same consolidation as _default_router_preflight in server/gui_onboard.py.
+# IOS XE echoes these markers verbatim; a missing marker is a hard error,
+# never treated as empty/safe output (an empty section here could otherwise
+# read as "nothing to verify" instead of "the check didn't run").
+VERIFY_MARKER="__IRIS_VERIFY_"
+verify_request() {
+cat <<EOF
+terminal width 512
+echo ${VERIFY_MARKER}RUNNING__
+show running-config
+echo ${VERIFY_MARKER}APPS__
+show app-hosting list
+echo ${VERIFY_MARKER}FILES__
+dir bootflash:guest-share
+dir bootflash:guest-share/iris
+EOF
+}
+verify_section() {
+  python3 -c 'import re, sys
+marker = "__IRIS_VERIFY_"
+name = sys.argv[1]
+text = sys.stdin.read()
+start = marker + name + "__"
+match = re.search(re.escape(start) + r"\r?\n?(.*?)(?=" + re.escape(marker) + r"[A-Z_]+__|\Z)", text, re.DOTALL)
+if not match:
+    sys.exit(1)
+sys.stdout.write(match.group(1))' "$1"
+}
+VERIFY_OUT="$(verify_request | "$RUN" "$DEVICE_IP" || true)"
+RUNNING_RAW="$(printf '%s' "$VERIFY_OUT" | verify_section RUNNING)" \
+  || { echo "ERROR: router verify did not return running-config" >&2; exit 1; }
+RUNNING="$(printf '%s' "$RUNNING_RAW" | grep -v '#' || true)"
 config_block() {
   python3 -c 'import re,sys
 name = re.escape(sys.argv[1])
@@ -305,10 +336,12 @@ match = re.search(r"(?ms)^interface %s\s*$\n(.*?)(?=^!\s*$|^interface |^end\s*$|
 print(match.group(0) if match else "")' "$1"
 }
 VPG_RUNNING="$(printf '%s\n' "$RUNNING" | config_block "VirtualPortGroup$VPG_NUMBER")"
-APP_STATE="$(printf 'show app-hosting list\n' \
-  | "$RUN" "$DEVICE_IP" | grep -v '#' || true)"
-FILES="$(printf 'dir bootflash:guest-share\ndir bootflash:guest-share/iris\n' \
-  | "$RUN" "$DEVICE_IP" | grep -v '#' || true)"
+APPS_RAW="$(printf '%s' "$VERIFY_OUT" | verify_section APPS)" \
+  || { echo "ERROR: router verify did not return app-hosting state" >&2; exit 1; }
+APP_STATE="$(printf '%s' "$APPS_RAW" | grep -v '#' || true)"
+FILES_RAW="$(printf '%s' "$VERIFY_OUT" | verify_section FILES)" \
+  || { echo "ERROR: router verify did not return guest-share file listing" >&2; exit 1; }
+FILES="$(printf '%s' "$FILES_RAW" | grep -v '#' || true)"
 
 require_text() {
   local text="$1" expected="$2" description="$3"
