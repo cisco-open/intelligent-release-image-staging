@@ -89,3 +89,83 @@ def package_fingerprint(tar_path):
     if fingerprint is None:
         return None, "bad-cert"
     return fingerprint, ""
+
+
+# Worst-of ordering. Higher wins, so a stale package is never masked by an
+# unreadable sibling and "cannot determine" never resolves to done.
+_RANK = {"ok": 0, "absent": 1, "unknown": 2, "unset": 3, "stale": 4}
+
+REMEDY = "tools/provision-iox-packages.sh"
+
+_REASON_STATE = {
+    "absent": "absent",
+    "unreadable": "unknown",
+    "no-artifacts": "unknown",
+    "no-cert": "unknown",
+    "bad-cert": "unknown",
+}
+
+
+def _worst(states):
+    """The most severe state in *states*; 'ok' only when everything is ok."""
+    if not states:
+        return "unknown"
+    return max(states, key=lambda s: _RANK.get(s, 2))
+
+
+def build_status(artifacts_dir, served_cert_path, distributed_cert_path,
+                 admin_username, stage_host):
+    """Assemble the three-card setup status. Pure: all inputs are supplied."""
+    reference = read_pem_fingerprint(served_cert_path)
+    distributed = read_pem_fingerprint(distributed_cert_path)
+    # A disagreement here is worse than a stale package: every NEW onboard is
+    # broken too, and rebuilding packages would not fix it.
+    mismatch = (reference is not None and distributed is not None
+                and reference != distributed)
+
+    items = []
+    for name in IOX_PACKAGES:
+        fingerprint, reason = package_fingerprint(
+            os.path.join(artifacts_dir, name))
+        entry = {"name": name, "fingerprint": fingerprint, "built_at": None}
+        path = os.path.join(artifacts_dir, name)
+        try:
+            entry["built_at"] = int(os.path.getmtime(path))
+        except OSError:
+            pass
+        if reason:
+            entry["state"] = _REASON_STATE.get(reason, "unknown")
+            entry["reason"] = reason
+        elif reference is None:
+            # We cannot say whether this pins the right certificate, so we do
+            # not say it is fine.
+            entry["state"] = "unknown"
+            entry["reason"] = "no-reference"
+        elif fingerprint == reference:
+            entry["state"] = "ok"
+        else:
+            entry["state"] = "stale"
+        items.append(entry)
+
+    packages = {
+        "state": _worst([i["state"] for i in items]),
+        "reference_fingerprint": reference,
+        "items": items,
+        "remedy": REMEDY,
+    }
+    if mismatch:
+        packages["state"] = "unknown"
+        packages["reason"] = "served-vs-distributed-mismatch"
+
+    stage_host = stage_host or {"configured": False, "username": ""}
+    return {
+        "admin": {
+            "state": "ok" if admin_username else "unknown",
+            "username": admin_username or "",
+        },
+        "stage_host": {
+            "state": "ok" if stage_host.get("configured") else "unset",
+            "username": stage_host.get("username", ""),
+        },
+        "packages": packages,
+    }

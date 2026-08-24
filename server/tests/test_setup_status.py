@@ -108,3 +108,97 @@ def test_package_fingerprint_unreadable_tar(tmp_path):
         f.write(b"this is not a tar at all")
     fp, reason = setup_status.package_fingerprint(p)
     assert fp is None and reason == "unreadable"
+
+
+# --- status assembly -------------------------------------------------------
+
+def _artifacts(tmp_path, arm_pem, amd_pem, served_pem=CERT_A,
+               distributed_pem=None):
+    d = tmp_path / "artifacts"
+    d.mkdir()
+    if arm_pem is not None:
+        _make_iox_package(str(d / "iris-arm64.tar"), arm_pem)
+    if amd_pem is not None:
+        _make_iox_package(str(d / "iris-amd64.tar"), amd_pem)
+    served = tmp_path / "cert.pem"
+    served.write_text(served_pem)
+    # the copy handed to devices; defaults to matching the served cert
+    (d / "iris-catalog.pem").write_text(
+        distributed_pem if distributed_pem is not None else served_pem)
+    return str(d), str(served)
+
+
+def _call(d, served, admin="admin", stage_host=None):
+    return setup_status.build_status(
+        d, served, os.path.join(d, "iris-catalog.pem"), admin, stage_host)
+
+
+def test_all_ok(tmp_path):
+    d, served = _artifacts(tmp_path, CERT_A, CERT_A)
+    st = _call(d, served, stage_host={"configured": True, "username": "svc"})
+    assert st["admin"]["state"] == "ok"
+    assert st["admin"]["username"] == "admin"
+    assert st["stage_host"]["state"] == "ok"
+    assert st["packages"]["state"] == "ok"
+    assert len(st["packages"]["items"]) == 2
+
+
+def test_stage_host_unset(tmp_path):
+    d, served = _artifacts(tmp_path, CERT_A, CERT_A)
+    st = _call(d, served, stage_host={"configured": False, "username": ""})
+    assert st["stage_host"]["state"] == "unset"
+
+
+def test_stale_package_wins_over_ok_sibling(tmp_path):
+    # arm64 pins a DIFFERENT cert than the one served -> stale
+    other = CERT_A.replace("MIIBdzCCAR2", "MIIBdzCCAR3")
+    d, served = _artifacts(tmp_path, other, CERT_A)
+    st = _call(d, served)
+    assert st["packages"]["state"] == "stale"
+    by_name = {i["name"]: i for i in st["packages"]["items"]}
+    assert by_name["iris-amd64.tar"]["state"] == "ok"
+    assert by_name["iris-arm64.tar"]["state"] == "stale"
+    assert st["packages"]["remedy"]
+
+
+def test_absent_package_is_not_ok(tmp_path):
+    d, served = _artifacts(tmp_path, CERT_A, None)
+    st = _call(d, served)
+    by_name = {i["name"]: i for i in st["packages"]["items"]}
+    assert by_name["iris-amd64.tar"]["state"] == "absent"
+    assert st["packages"]["state"] != "ok"
+
+
+def test_stale_outranks_absent(tmp_path):
+    other = CERT_A.replace("MIIBdzCCAR2", "MIIBdzCCAR3")
+    d, served = _artifacts(tmp_path, other, None)   # one stale, one absent
+    st = _call(d, served)
+    assert st["packages"]["state"] == "stale"
+
+
+def test_unreadable_served_cert_is_unknown_never_ok(tmp_path):
+    d, _ = _artifacts(tmp_path, CERT_A, CERT_A)
+    st = setup_status.build_status(
+        d, str(tmp_path / "missing.pem"),
+        os.path.join(d, "iris-catalog.pem"), "admin", None)
+    assert st["packages"]["state"] == "unknown"
+    assert st["packages"]["reference_fingerprint"] is None
+
+
+def test_served_vs_distributed_mismatch_is_unknown_not_stale(tmp_path):
+    """If the cert we SERVE differs from the one we hand devices, new onboards
+    are broken too -- rebuilding packages would not fix it, so this must not be
+    reported as a mere stale package."""
+    other = CERT_A.replace("MIIBdzCCAR2", "MIIBdzCCAR3")
+    d, served = _artifacts(tmp_path, CERT_A, CERT_A, distributed_pem=other)
+    st = _call(d, served)
+    assert st["packages"]["state"] == "unknown"
+    assert st["packages"]["reason"] == "served-vs-distributed-mismatch"
+
+
+def test_response_carries_no_secret_material(tmp_path):
+    d, served = _artifacts(tmp_path, CERT_A, CERT_A)
+    st = _call(d, served, stage_host={"configured": True, "username": "svc"})
+    blob = repr(st).lower()
+    for banned in ("password", "secret", "token", "private", "begin "):
+        assert banned not in blob
