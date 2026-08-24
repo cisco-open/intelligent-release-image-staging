@@ -1196,10 +1196,58 @@
     return '<span class="badge ' + cls + '">' + esc(label) + '</span>';
   }
 
+  // packages.reason (present only in some non-ok states) needs its own
+  // guidance -- the plain rebuild remedy is actively WRONG for a
+  // served-vs-distributed mismatch, since new onboards are broken too and
+  // rebuilding packages would not fix it.
+  var SETUP_PKG_REASON_TEXT = {
+    'served-vs-distributed-mismatch':
+      'The certificate this server currently serves does not match the ' +
+      'copy handed to devices during onboarding. New onboards are ' +
+      'affected as well as existing ones, and rebuilding packages alone ' +
+      'will not resolve this.',
+    'distributed-cert-unavailable':
+      'The copy of the certificate handed to devices could not be read, ' +
+      'so package state cannot be confirmed.'
+  };
+
+  function setupPkgRemedyText(pkg) {
+    if (pkg.state === 'ok') return '';
+    var parts = [];
+    var reasonText = SETUP_PKG_REASON_TEXT[pkg.reason];
+    if (reasonText) parts.push(reasonText);
+    // The rebuild remedy only applies once a package is confirmed stale --
+    // and never for a served-vs-distributed mismatch, where rebuilding
+    // packages would not fix anything.
+    if (pkg.state === 'stale' && pkg.reason !== 'served-vs-distributed-mismatch') {
+      parts.push('Rebuild on the Docker host, then re-onboard affected devices: '
+        + pkg.remedy);
+    }
+    return parts.join(' ');
+  }
+
+  // A failed or thrown fetch must never leave a PREVIOUS render on screen --
+  // that would be evidence-free chips still claiming "done" (spec:
+  // error handling must show "cannot determine" per card and never silently
+  // render a stale/empty checklist as if it were healthy).
+  function setupShowUnknown() {
+    document.getElementById('setup-admin-chip').innerHTML = setupChip('unknown');
+    document.getElementById('setup-sh-chip').innerHTML = setupChip('unknown');
+    document.getElementById('setup-pkg-chip').innerHTML = setupChip('unknown');
+    document.querySelector('#setup-pkg-table tbody').innerHTML = '';
+    document.getElementById('setup-pkg-remedy').textContent = '';
+  }
+
   async function refreshSetup() {
-    var r = await fetch('/api/settings/setup-status');
-    if (!r.ok) return;
-    var s = await r.json();
+    var s;
+    try {
+      var r = await fetch('/api/settings/setup-status');
+      if (!r.ok) { setupShowUnknown(); return; }
+      s = await r.json();
+    } catch (e) {
+      setupShowUnknown();
+      return;
+    }
     document.getElementById('setup-admin-chip').innerHTML =
       setupChip(s.admin.state);
     document.getElementById('setup-sh-chip').innerHTML =
@@ -1215,9 +1263,7 @@
                esc(when) + '</td></tr>';
       }).join('');
     document.getElementById('setup-pkg-remedy').textContent =
-      s.packages.state === 'ok' ? ''
-      : 'Rebuild on the Docker host, then re-onboard affected devices: '
-        + s.packages.remedy;
+      setupPkgRemedyText(s.packages);
   }
 
   async function refreshSettings() {

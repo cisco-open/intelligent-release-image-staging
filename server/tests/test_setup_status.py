@@ -266,3 +266,93 @@ def test_setup_pane_explains_why_each_step_matters():
     html = _webroot("index.html")
     for phrase in ("pins this server", "Guest Shell", "stage host"):
         assert phrase.lower() in html.lower()
+
+
+# --- console pane: packages.reason must not produce the wrong remedy ------
+#
+# app.js has no runtime test harness in this repo (no node/jsdom driver
+# anywhere under server/tests/) -- every existing app.js test asserts on the
+# SOURCE TEXT of the function bodies, the same idiom used throughout
+# test_onboard_feedback_ux.py / test_tls_page_ux.py. These tests follow that
+# idiom: they are source-level, not behavioural -- they cannot execute the
+# JS and observe the rendered DOM. What they DO prove is that the specific
+# code shape the bug required is gone, and the specific code shape the fix
+# requires is present, so reverting either half of the fix fails them.
+
+def _setup_pkg_remedy_fn(js):
+    return js.split("function setupPkgRemedyText(pkg) {", 1)[1].split(
+        "\n  function setupShowUnknown", 1)[0]
+
+
+def _setup_pkg_reason_map(js):
+    return js.split("var SETUP_PKG_REASON_TEXT = {", 1)[1].split(
+        "\n  };", 1)[0]
+
+
+def test_mismatch_reason_gets_its_own_guidance_not_the_rebuild_remedy():
+    """served-vs-distributed-mismatch must render mismatch-specific text,
+    and the package-rebuild remedy line must be structurally unreachable
+    when that reason is set. Rebuilding does not fix a mismatch
+    (setup_status.build_status forces state='unknown', never 'stale', for
+    this reason) -- so handing the operator the rebuild remedy here is
+    exactly the wrong advice the fix removes."""
+    js = _webroot("app.js")
+    reason_map = _setup_pkg_reason_map(js)
+    assert "'served-vs-distributed-mismatch':" in reason_map
+    mismatch_text = reason_map.split(
+        "'served-vs-distributed-mismatch':", 1)[1].split(
+        "'distributed-cert-unavailable':", 1)[0]
+    assert "match" in mismatch_text.lower()
+    # The explanation may legitimately SAY rebuilding won't help, but must
+    # never contain the rebuild instruction/remedy path itself.
+    assert "Rebuild on the Docker host" not in mismatch_text
+    assert "provision-iox-packages.sh" not in mismatch_text
+
+    fn = _setup_pkg_remedy_fn(js)
+    # The rebuild-remedy push must require BOTH a confirmed-stale state AND
+    # that the reason isn't the mismatch. Losing either half of this guard
+    # (e.g. falling back to "any non-ok state gets the rebuild line") is
+    # exactly the bug this test guards against.
+    assert ("pkg.state === 'stale' && "
+            "pkg.reason !== 'served-vs-distributed-mismatch'") in fn
+
+
+def test_distributed_cert_unavailable_reason_explains_itself():
+    """distributed-cert-unavailable must say the distributed copy couldn't
+    be read and that package state can't be confirmed -- not the generic
+    rebuild line, which assumes a package is actually known to be stale."""
+    js = _webroot("app.js")
+    reason_map = _setup_pkg_reason_map(js)
+    assert "'distributed-cert-unavailable':" in reason_map
+    text = reason_map.split("'distributed-cert-unavailable':", 1)[1]
+    assert "could not be read" in text
+    assert "cannot be confirmed" in text
+
+
+def test_refresh_setup_paints_unknown_on_failed_or_thrown_fetch():
+    """A failed status fetch (non-ok response) or a thrown/network error
+    must never leave the PREVIOUS render on screen -- that would be
+    evidence-free chips still reading "done". Both paths must route
+    through the same reset, which must paint all three chips unknown and
+    clear the package table and remedy line (spec: never silently render a
+    stale/empty checklist as if it were healthy)."""
+    js = _webroot("app.js")
+    rf = js.split("async function refreshSetup() {", 1)[1].split(
+        "\n  async function refreshSettings", 1)[0]
+    assert "try {" in rf and "catch (e)" in rf
+
+    ok_branch = rf.split("if (!r.ok)", 1)[1].split("\n", 1)[0]
+    assert "setupShowUnknown()" in ok_branch, \
+        "a failed (non-ok) fetch must reset the pane, not just bail out"
+
+    catch_branch = rf.split("catch (e) {", 1)[1].split("}", 1)[0]
+    assert "setupShowUnknown()" in catch_branch, \
+        "a thrown/network error must reset the pane too"
+
+    reset = js.split("function setupShowUnknown() {", 1)[1].split(
+        "\n  }", 1)[0]
+    for chip_id in ("setup-admin-chip", "setup-sh-chip", "setup-pkg-chip"):
+        assert ("getElementById('%s')" % chip_id) in reset
+    assert reset.count("setupChip('unknown')") == 3
+    assert "#setup-pkg-table tbody" in reset
+    assert "setup-pkg-remedy" in reset

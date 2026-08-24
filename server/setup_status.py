@@ -74,9 +74,14 @@ def package_fingerprint(tar_path):
             if inner_file is None:
                 return None, "no-artifacts"
             with tarfile.open(fileobj=inner_file, mode="r:gz") as inner:
-                member = next(
-                    (m for m in inner.getmembers()
-                     if os.path.basename(m.name) == _CERT_MEMBER), None)
+                # Stream member-by-member and stop at the first match instead
+                # of getmembers(), which walks the ENTIRE inner archive
+                # (packages run ~60 MB) before we ever look at a name.
+                member = None
+                for m in inner:
+                    if os.path.basename(m.name) == _CERT_MEMBER:
+                        member = m
+                        break
                 if member is None:
                     return None, "no-cert"
                 pem_file = inner.extractfile(member)
