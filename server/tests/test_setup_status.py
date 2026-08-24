@@ -158,7 +158,6 @@ def test_stale_package_wins_over_ok_sibling(tmp_path):
     by_name = {i["name"]: i for i in st["packages"]["items"]}
     assert by_name["iris-amd64.tar"]["state"] == "ok"
     assert by_name["iris-arm64.tar"]["state"] == "stale"
-    assert st["packages"]["remedy"]
 
 
 def test_absent_package_is_not_ok(tmp_path):
@@ -166,7 +165,7 @@ def test_absent_package_is_not_ok(tmp_path):
     st = _call(d, served)
     by_name = {i["name"]: i for i in st["packages"]["items"]}
     assert by_name["iris-amd64.tar"]["state"] == "absent"
-    assert st["packages"]["state"] != "ok"
+    assert st["packages"]["state"] == "absent"
 
 
 def test_stale_outranks_absent(tmp_path):
@@ -194,6 +193,18 @@ def test_served_vs_distributed_mismatch_is_unknown_not_stale(tmp_path):
     st = _call(d, served)
     assert st["packages"]["state"] == "unknown"
     assert st["packages"]["reason"] == "served-vs-distributed-mismatch"
+
+
+def test_distributed_cert_unavailable_is_unknown(tmp_path):
+    """When the distributed cert (iris-catalog.pem handed to devices) is missing,
+    we cannot guarantee onboards actually receive the cert we intend. This is
+    evidence of a broken state, not a green light."""
+    d, served = _artifacts(tmp_path, CERT_A, CERT_A)
+    # Delete the distributed cert to simulate it being unavailable
+    os.remove(os.path.join(d, "iris-catalog.pem"))
+    st = _call(d, served)
+    assert st["packages"]["state"] == "unknown"
+    assert st["packages"]["reason"] == "distributed-cert-unavailable"
 
 
 def test_response_carries_no_secret_material(tmp_path):

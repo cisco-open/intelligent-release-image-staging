@@ -153,7 +153,10 @@ def build_status(artifacts_dir, served_cert_path, distributed_cert_path,
         "items": items,
         "remedy": REMEDY,
     }
-    if mismatch:
+    if distributed is None and reference is not None:
+        packages["state"] = "unknown"
+        packages["reason"] = "distributed-cert-unavailable"
+    elif mismatch:
         packages["state"] = "unknown"
         packages["reason"] = "served-vs-distributed-mismatch"
 
