@@ -9,7 +9,7 @@ SPDX-License-Identifier: Apache-2.0
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>IRIS | Intelligent Release and Image Staging</title>
-    <meta name="description" content="IRIS stages Cisco IOS-XE images safely across a fleet with a private swarm, catalog policy, and device-side verification.">
+    <meta name="description" content="IRIS stages Cisco images and patches safely across a fleet with a private swarm, catalog policy, and device-side verification.">
     <link rel="stylesheet" href="styles.css">
   </head>
   <body>
@@ -24,7 +24,6 @@ SPDX-License-Identifier: Apache-2.0
         <a href="#architecture">How it works</a>
         <a href="#workflow">Workflow</a>
         <a href="#operators">Platforms</a>
-        <a href="#ports">Ports</a>
         <a href="docs/">Docs</a>
       </nav>
     </header>
@@ -32,10 +31,10 @@ SPDX-License-Identifier: Apache-2.0
     <main id="top">
       <section class="hero" aria-labelledby="hero-title">
         <div class="hero-copy">
-          <p class="eyebrow">Cisco IOS-XE image staging with private peer delivery</p>
+          <p class="eyebrow">Cisco image and patch staging with private peer delivery</p>
           <h1 id="hero-title">IRIS</h1>
           <p class="hero-lede">
-            IRIS gets large Cisco IOS-XE images onto routers and switches faster by letting devices share downloaded image chunks with each other. Each device verifies the image and stops at staging.
+            IRIS gets large Cisco images and patches onto routers and switches faster by letting devices share downloaded pieces with each other. Each device verifies what it receives and stops at staging.
           </p>
           <div class="hero-actions" aria-label="Primary actions">
             <a class="button primary" href="docs/">Read the docs</a>
@@ -137,6 +136,9 @@ SPDX-License-Identifier: Apache-2.0
         <div class="section-heading">
           <p class="eyebrow">Workflow</p>
           <h2>Publish, assign, stage, stop.</h2>
+          <p>
+            Run it your way. Every step below shows the command line — and every one is equally a few clicks in the IRIS Console: publish an image, choose who gets it, and watch the fleet stage in real time. Script it into your automation or drive it from the browser; the guarantees never change — swarm delivery, verification on the device, and a hard stop before activation.
+          </p>
         </div>
         <div class="flow-shell">
           <div class="step-list" role="tablist" aria-label="IRIS workflow steps">
@@ -148,8 +150,8 @@ SPDX-License-Identifier: Apache-2.0
           </div>
           <article class="flow-detail" aria-live="polite">
             <h3 id="flow-title">Publish an image</h3>
-            <p id="flow-body">The operator publishes one IOS-XE image. IRIS records the hashes and creates private swarm metadata for the fleet.</p>
-            <code id="flow-command">iris-publish /opt/images/iosxe/c9300/&lt;image&gt;.bin</code>
+            <p id="flow-body">The operator publishes one Cisco image or patch. IRIS records the hashes and creates private swarm metadata for the fleet.</p>
+            <code id="flow-command">iris-publish /opt/images/&lt;image&gt;.bin</code>
           </article>
         </div>
       </section>
@@ -157,17 +159,18 @@ SPDX-License-Identifier: Apache-2.0
       <section id="operators" class="section-grid reverse">
         <div class="path-panel">
           <div class="path-tabs" role="tablist" aria-label="Operator paths">
-            <button class="path-tab active" type="button" role="tab" aria-selected="true" data-path="guest">C9300</button>
-            <button class="path-tab" type="button" role="tab" aria-selected="false" data-path="iox">IE-3400</button>
+            <button class="path-tab active" type="button" role="tab" aria-selected="true" data-path="guest">Catalyst 9000</button>
+            <button class="path-tab" type="button" role="tab" aria-selected="false" data-path="router">Catalyst 8000</button>
+            <button class="path-tab" type="button" role="tab" aria-selected="false" data-path="iox">Industrial Ethernet</button>
             <button class="path-tab" type="button" role="tab" aria-selected="false" data-path="server">Server</button>
           </div>
           <div class="path-body" aria-live="polite">
-            <h3 id="path-title">Catalyst 9300 Guest Shell</h3>
-            <p id="path-copy">Generate a per-device installer, bootstrap Guest Shell, and let EEM keep the staging agent alive — or run the amd64 IOx app on switches with app-hosting SSD storage.</p>
+            <h3 id="path-title">Catalyst 9000 Guest Shell</h3>
+            <p id="path-copy">Generate a per-device installer, bootstrap Guest Shell, and let EEM keep the staging agent alive — or run the amd64 IOx app on switches with app-hosting storage.</p>
             <ul id="path-list">
               <li>Installs catalog trust material.</li>
               <li>Runs the agent every 60 seconds.</li>
-              <li>Stages approved images to `flash:`.</li>
+              <li>Stages approved images to device storage.</li>
             </ul>
           </div>
         </div>
@@ -175,50 +178,16 @@ SPDX-License-Identifier: Apache-2.0
           <p class="eyebrow">Platforms</p>
           <h2>Same delivery model, platform-specific staging.</h2>
           <p>
-            Catalyst 9000 switches run the agent in Guest Shell and stage to `flash:`, or as an IOx app on switches with app-hosting SSD storage, staging to `usbflash1:`. IE platforms run the IOx app and stage to `sdflash:`. Catalyst 8000 routers run Guest Shell through a VirtualPortGroup, in routed or NAT attachment, and stage to `bootflash:`. Router preflight repeats before token mint, receipts bind management IP and processor-board identity, and router adoption requires re-onboarding. Transfers appear on the Swarm Map, and telemetry exports through the OpenTelemetry pipeline to the OTLP destination you configure — Splunk in the reference deployment. Every path downloads by swarm, verifies on the device, and stops before activation.
+            Catalyst 9000 switches run the agent in Guest Shell, or as an IOx app where app-hosting storage is available. Industrial Ethernet platforms run the IOx app. Catalyst 8000 routers run Guest Shell through a VirtualPortGroup, in routed or NAT attachment. Every platform stages to its own device storage. Router preflight repeats before token mint, receipts bind management IP and processor-board identity, and router adoption requires re-onboarding. Visibility is built in, not bolted on: every transfer is live on the Swarm Map, and open OpenTelemetry export streams the same signals into Cisco Splunk in the reference deployment — or any OTLP destination you choose. Every path downloads by swarm, verifies on the device, and stops before activation.
           </p>
         </div>
       </section>
 
-      <section id="ports" class="section">
-        <div class="section-heading row-heading">
-          <div>
-            <p class="eyebrow">Ports</p>
-            <h2>Know what must be reachable.</h2>
-          </div>
-          <div class="filters" aria-label="Port filters">
-            <button class="filter active" type="button" data-filter="all">All</button>
-            <button class="filter" type="button" data-filter="device">Device</button>
-            <button class="filter" type="button" data-filter="operator">Operator</button>
-            <button class="filter" type="button" data-filter="local">Local</button>
-          </div>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Port</th>
-                <th>Service</th>
-                <th>Traffic</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr data-scope="device"><td>6969</td><td>Private tracker</td><td>Device announces</td></tr>
-              <tr data-scope="device"><td>8443</td><td>Catalog</td><td>Policy, metadata, token refresh</td></tr>
-              <tr data-scope="device"><td>8000</td><td>Artifact server</td><td>Bootstrap, bundle, certificates</td></tr>
-              <tr data-scope="device"><td>6881</td><td>Seeder data</td><td>BitTorrent pieces</td></tr>
-              <tr data-scope="operator"><td>8080</td><td>Console</td><td>Admin browser workflow</td></tr>
-              <tr data-scope="operator"><td>9101</td><td>Telemetry</td><td>Health, swarm, metrics</td></tr>
-              <tr data-scope="local"><td>6800</td><td>aria2 RPC</td><td>Local-only inside container</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
 
       <section class="docs-band">
         <div>
           <p class="eyebrow">Documentation</p>
-          <h2>Deep details live in the generated Zensical site.</h2>
+          <h2>Deep dives, guides, and reference details live on the documentation site.</h2>
         </div>
         <div class="doc-links">
           <a href="docs/getting-started/">Getting started</a>

@@ -164,7 +164,6 @@ h3 {
 }
 
 .hero-actions,
-.filters,
 .path-tabs,
 .step-list {
   display: flex;
@@ -174,7 +173,6 @@ h3 {
 
 .button,
 .copy-button,
-.filter,
 .path-tab,
 .step {
   min-height: 42px;
@@ -209,7 +207,6 @@ h3 {
 .delivery-card,
 .path-panel,
 .flow-detail,
-.table-wrap,
 .distribution-visual,
 .benefits-grid article {
   min-width: 0;
@@ -575,7 +572,6 @@ code {
 }
 
 .step,
-.filter,
 .path-tab {
   padding: 10px 14px;
   color: var(--forest);
@@ -585,7 +581,6 @@ code {
 }
 
 .step.active,
-.filter.active,
 .path-tab.active {
   color: #100719;
   background: var(--forest);
@@ -613,33 +608,6 @@ code {
   padding-left: 20px;
   color: var(--muted);
   line-height: 1.8;
-}
-
-.table-wrap {
-  overflow-x: auto;
-  box-shadow: none;
-}
-
-table {
-  width: 100%;
-  border-collapse: collapse;
-  min-width: 640px;
-}
-
-th,
-td {
-  padding: 16px;
-  border-bottom: 1px solid var(--line);
-  text-align: left;
-}
-
-th {
-  color: var(--forest);
-  background: #21152d;
-}
-
-tr[hidden] {
-  display: none;
 }
 
 .docs-band {

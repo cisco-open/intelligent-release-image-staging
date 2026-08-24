@@ -7,8 +7,8 @@ SPDX-License-Identifier: Apache-2.0
 const workflow = {
   publish: {
     title: "Publish an image",
-    body: "The operator publishes one IOS-XE image. IRIS records the hashes and creates private swarm metadata for the fleet.",
-    command: "iris-publish /opt/images/iosxe/c9300/<image>.bin",
+    body: "The operator publishes one Cisco image or patch. IRIS records the hashes and creates private swarm metadata for the fleet.",
+    command: "iris-publish /opt/images/<image>.bin",
   },
   assign: {
     title: "Choose who should stage it",
@@ -22,8 +22,8 @@ const workflow = {
   },
   verify: {
     title: "Verify on the device",
-    body: "The agent checks the downloaded file and IOS verifies the staged copy before IRIS reports success.",
-    command: "copy /verify <staged-file> flash:<image>.bin",
+    body: "The agent checks the downloaded file and the device verifies the staged copy before IRIS reports success.",
+    command: "copy /verify <staged-file> <device-storage>:<image>.bin",
   },
   report: {
     title: "Report staged and stop",
@@ -34,21 +34,30 @@ const workflow = {
 
 const paths = {
   guest: {
-    title: "Catalyst 9300 Guest Shell",
-    copy: "Generate a per-device installer, bootstrap Guest Shell, and let EEM keep the staging agent alive — or run the amd64 IOx app on switches with app-hosting SSD storage.",
+    title: "Catalyst 9000 Guest Shell",
+    copy: "Generate a per-device installer, bootstrap Guest Shell, and let EEM keep the staging agent alive — or run the amd64 IOx app on switches with app-hosting storage.",
     items: [
       "Installs catalog trust material.",
       "Downloads image pieces through the private swarm.",
-      "Stages approved images to `flash:`.",
+      "Stages approved images to device storage.",
     ],
   },
   iox: {
-    title: "IE-3x00 and IE-3400 IOx",
+    title: "Industrial Ethernet IOx",
     copy: "Package the same staging model as an IOx Docker app and use SSH-to-self for IOS copy and verify commands.",
     items: [
       "Serves operator-built `iris-arm64.tar` from artifacts.",
       "Downloads image pieces through the private swarm.",
-      "Stages approved images to `sdflash:`.",
+      "Stages approved images to device storage.",
+    ],
+  },
+  router: {
+    title: "Catalyst 8000 Guest Shell",
+    copy: "Bring up Guest Shell through a VirtualPortGroup in routed or NAT attachment, with preflight repeated before token mint and receipts bound to device identity.",
+    items: [
+      "Repeats preflight before token mint.",
+      "Downloads image pieces through the private swarm.",
+      "Stages approved images to device storage.",
     ],
   },
   server: {
@@ -141,20 +150,6 @@ function initPaths() {
   });
 }
 
-function initFilters() {
-  const buttons = Array.from(document.querySelectorAll(".filter"));
-  const rows = Array.from(document.querySelectorAll("tbody tr[data-scope]"));
-
-  buttons.forEach((button) => {
-    button.addEventListener("click", () => {
-      setActive(buttons, button);
-      const filter = button.dataset.filter;
-      rows.forEach((row) => {
-        row.hidden = filter !== "all" && row.dataset.scope !== filter;
-      });
-    });
-  });
-}
 
 function initCanvas() {
   const canvas = document.getElementById("swarm-canvas");
@@ -241,5 +236,4 @@ initHeader();
 initCopies();
 initWorkflow();
 initPaths();
-initFilters();
 initCanvas();
