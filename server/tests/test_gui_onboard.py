@@ -581,7 +581,7 @@ def test_router_execution_preflight_failure_never_mints_or_runs(tmp_path):
 
 
 def _router_preflight_stub(monkeypatch, running="", apps="", guest_share="%Error opening",
-                           interface="GigabitEthernet1 is up, line protocol is up"):
+                            interface="GigabitEthernet1 is up, line protocol is up"):
     outputs = {
         "show version": ("Cisco IOS XE Software\n"
                          "cisco C8000V (VXE) processor\n"
@@ -593,7 +593,15 @@ def _router_preflight_stub(monkeypatch, running="", apps="", guest_share="%Error
     }
 
     def run(_argv, input=None, **_kwargs):
-        return SimpleNamespace(returncode=0, stdout=outputs.get(input.strip(), ""))
+        chunks = []
+        for name, command in (("VERSION", "show version"),
+                              ("RUNNING", "show running-config"),
+                              ("APPS", "show app-hosting list"),
+                              ("GUEST_SHARE", "dir bootflash:guest-share"),
+                              ("INTERFACES", "show interfaces Gi1")):
+            if command in input:
+                chunks.append("__IRIS_PREFLIGHT_%s__\n%s" % (name, outputs[command]))
+        return SimpleNamespace(returncode=0, stdout="\n".join(chunks))
 
     monkeypatch.setattr(gui_onboard.subprocess, "run", run)
 
@@ -618,6 +626,25 @@ def test_default_router_preflight_canonicalizes_interface_and_records_globals(mo
         "file_prompt_quiet_preexisting": True,
         "nat_outside_preexisting": True,
         "nat_interface": "GigabitEthernet1"}
+
+
+def test_default_router_preflight_uses_one_ssh_session(monkeypatch):
+    calls = []
+
+    def run(_argv, input=None, **_kwargs):
+        calls.append(input)
+        return SimpleNamespace(returncode=0, stdout=(
+            "__IRIS_PREFLIGHT_VERSION__\nCisco IOS XE\n"
+            "cisco C8000V (VXE) processor\nProcessor board ID 9ABC123\n"
+            "__IRIS_PREFLIGHT_RUNNING__\n"
+            "__IRIS_PREFLIGHT_APPS__\nNo App found\n"
+            "__IRIS_PREFLIGHT_GUEST_SHARE__\n%Error opening\n"))
+
+    monkeypatch.setattr(gui_onboard.subprocess, "run", run)
+    evidence = gui_onboard._default_router_preflight(
+        {}, {"DEVICE_IP": "192.0.2.10"}, _router_resolved("router-routed"), "/repo")
+    assert evidence["status"] == "passed"
+    assert len(calls) == 1
 
 
 def test_default_router_preflight_rejects_secondary_subnet_overlap(monkeypatch):

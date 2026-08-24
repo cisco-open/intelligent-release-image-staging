@@ -1956,7 +1956,7 @@ def test_router_onboard_uses_router_recipe_env_and_router_resource_kinds(tmp_pat
         assert status == 200
         job = _wait_onboard_job(host, port, cookie, json.loads(body)["job_id"])
         assert job["state"] == "done"
-        assert events == ["preflight", "preflight", "mint"]
+        assert events == ["preflight", "mint"]
         path, env = ran[-1]
         assert path.endswith("device/router-install.sh")
         assert {key: env[key] for key in ("NETWORK_ATTACHMENT", "VPG_NUMBER",
@@ -1975,7 +1975,7 @@ def test_router_onboard_uses_router_recipe_env_and_router_resource_kinds(tmp_pat
         stop()
 
 
-def test_router_preflight_failure_mints_nothing_and_creates_no_receipt(tmp_path):
+def test_router_preflight_failure_is_reported_by_the_queued_job(tmp_path):
     minted, ran = [], []
 
     def reject(*_args):
@@ -1988,8 +1988,12 @@ def test_router_preflight_failure_mints_nothing_and_creates_no_receipt(tmp_path)
         cookie, csrf = _auth(host, port)
         status, _, body = _req(host, port, "POST", "/api/devices/r1/onboard", {},
                                headers={"Cookie": cookie, "X-CSRF-Token": csrf})
-        assert status == 409 and "preflight failed" in json.loads(body)["error"]
-        assert minted == [] and ran == [] and receipts.list("r1") == []
+        assert status == 200
+        job = _wait_onboard_job(host, port, cookie, json.loads(body)["job_id"])
+        assert job["state"] == "error"
+        assert any("preflight failed" in line for line in job["lines"])
+        assert minted == [] and ran == []
+        assert receipts.list("r1")[0]["state"] == "removed"
     finally:
         stop()
 

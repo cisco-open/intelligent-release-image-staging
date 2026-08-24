@@ -2291,10 +2291,6 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             plan = self._plan(did, device)
                         except ValueError as exc:
                             _reject(409, str(exc)); return
-                        try:
-                            preflight = onboard.preflight(did, plan["resolved"])
-                        except (ValueError, OSError) as exc:
-                            _reject(409, "preflight failed: %s" % exc); return
                         if plan["resolved"].get("platform") == "router":
                             try:
                                 # Any receipt IRIS already applied blocks a
@@ -2310,10 +2306,6 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                         "deployment receipt; undeploy it before "
                                         "onboarding again"
                                         % existing.get("state", "recorded")); return
-                            try:
-                                plan = self._apply_router_preflight(plan, preflight)
-                            except ValueError as exc:
-                                _reject(409, "preflight failed: %s" % exc); return
                         resolved = plan["resolved"]
 
                         def prepare():
@@ -2323,7 +2315,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             rid = receipts.create({"controller_id": "iris",
                                 "device_id": did, "inventory_revision": fleet.revision(),
                                 "plan_hash": plan["plan_hash"], "resolved": plan["resolved"],
-                                "preflight": preflight,
+                                # Router preflight runs in the bounded worker pool,
+                                # not synchronously in this HTTP request. This lets a
+                                # large selected batch show queued progress immediately.
+                                "preflight": ({"status": "pending"}
+                                              if resolved.get("platform") == "router"
+                                              else {"status": "not-required"}),
                                 "resources": self._owned_resources(plan["resolved"])})["receipt_id"]
                             receipt_ref["id"] = rid
                             return rid

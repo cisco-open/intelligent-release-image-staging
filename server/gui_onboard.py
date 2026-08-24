@@ -229,16 +229,36 @@ def _default_probe(dev, env, repo_root):
 def _default_router_preflight(dev, env, resolved, repo_root):
     """Read-only collision check for a Catalyst 8000 VPG deployment."""
     runner = os.path.join(repo_root, "lab", "device-run.sh")
+    commands = [
+        ("version", "show version"),
+        ("running", "show running-config"),
+        ("apps", "show app-hosting list"),
+        ("guest_share", "dir bootflash:guest-share"),
+    ]
+    if resolved.get("attachment") == "router-nat":
+        commands.append(("interfaces", "show interfaces %s" % resolved["nat_interface"]))
+    # One SSH login per router is essential for large fleet submissions. IOS XE
+    # echoes these markers verbatim, letting the same fail-closed checks consume
+    # each command's output without paying a connection setup per check.
+    marker = "__IRIS_PREFLIGHT_"
+    request = "\n".join(
+        "echo %s%s__\n%s" % (marker, name.upper(), command)
+        for name, command in commands) + "\n"
+    out = subprocess.run(["bash", runner, env["DEVICE_IP"]], input=request,
+                         capture_output=True, text=True, env=env, timeout=60)
+    if out.returncode != 0:
+        raise ValueError("router preflight could not run")
+    sections = {}
+    for name, _command in commands:
+        start = "%s%s__" % (marker, name.upper())
+        match = re.search(re.escape(start) + r"\r?\n?(.*?)(?=" +
+                          re.escape(marker) + r"[A-Z_]+__|\Z)",
+                          out.stdout or "", re.DOTALL)
+        if not match:
+            raise ValueError("router preflight did not return %s" % name)
+        sections[name] = match.group(1)
 
-    def show(command):
-        out = subprocess.run(["bash", runner, env["DEVICE_IP"]],
-                             input=command + "\n", capture_output=True,
-                             text=True, env=env, timeout=60)
-        if out.returncode != 0:
-            raise ValueError("router preflight could not run %r" % command)
-        return out.stdout or ""
-
-    version = show("show version")
+    version = sections["version"]
     model, device_identity = _parse_show_version(version)
     if not re.match(r"^C8[0-9]{3}", model, re.IGNORECASE):
         raise ValueError("router modes support the Catalyst 8000 family only; %s is not yet supported"
@@ -246,7 +266,7 @@ def _default_router_preflight(dev, env, resolved, repo_root):
     if not device_identity:
         raise ValueError("could not determine the router's processor board ID")
 
-    running = show("show running-config")
+    running = sections["running"]
     vpg = str(resolved.get("vpg_number", ""))
     if re.search(r"(?m)^interface VirtualPortGroup%s\s*$" % re.escape(vpg), running):
         raise ValueError("VirtualPortGroup%s already exists" % vpg)
@@ -264,7 +284,7 @@ def _default_router_preflight(dev, env, resolved, repo_root):
         if candidate.overlaps(configured):
             raise ValueError("router app subnet %s is already configured" % candidate)
 
-    apps = show("show app-hosting list")
+    apps = sections["apps"]
     if re.search(r"(?im)^\s*(?:app id\s*:\s*)?guestshell(?:\s|$)", apps):
         raise ValueError("guestshell is already enabled")
     collisions = (
@@ -281,7 +301,7 @@ def _default_router_preflight(dev, env, resolved, repo_root):
     for pattern, description in collisions:
         if re.search(pattern, running):
             raise ValueError("%s already exists" % description)
-    guest_share = show("dir bootflash:guest-share")
+    guest_share = sections["guest_share"]
     if re.search(r"(?im)Directory of\s+bootflash:/?guest-share/?", guest_share) \
             and not re.search(r"(?im)^No files in directory\s*$", guest_share):
         raise ValueError("bootflash:guest-share is not empty")
@@ -296,7 +316,7 @@ def _default_router_preflight(dev, env, resolved, repo_root):
         return evidence
 
     requested_outside = resolved["nat_interface"]
-    interfaces = show("show interfaces %s" % requested_outside)
+    interfaces = sections["interfaces"]
     interface_match = re.search(
         r"(?m)^([A-Za-z][A-Za-z0-9./_-]{0,63}) is ", interfaces)
     if not interface_match:
@@ -709,25 +729,19 @@ class OnboardService:
                 j["started_at"] = int(self._now())
             try:
                 # Build credentials and resolve the recipe without minting. A
-                # queued router job must repeat ownership-sensitive preflight at
-                # execution time, immediately before its receipt becomes
-                # applying and before an enrollment token is created.
+                # Router preflight runs only here, in the bounded worker pool,
+                # immediately before its receipt becomes applying and before an
+                # enrollment token is created. Batch submissions therefore do
+                # not block their HTTP requests on individual routers' SSH.
                 dev, env = self._build_env(device_id, mint=False,
                                            resolved=j.get("resolved"),
                                            env_extra=j.get("env_extra"))
                 platform, script = self._resolve(device_id, dev, env, action)
                 if action == "onboard" and platform == "guestshell":
-                    # Job-start reachability gate. Router deployments already
-                    # get a REAL, live preflight -- at HTTP submit time (see
-                    # gui_server's preflight()) and again just below, before
-                    # minting -- and IOx onboard runs its own live identity
-                    # preflight a few lines down, so both platforms already
-                    # fail loud (existing error path + audit) on an
-                    # unreachable device. Guest Shell has no live check at
-                    # all before the installer runs, so a mistyped device_ip
-                    # would otherwise sail straight into device-install.sh
-                    # and only surface (if at all) as an opaque SSH timeout
-                    # deep in its output. Probe first and fail clearly.
+                    # Router and IOx workers do live preflight below. Guest
+                    # Shell has no equivalent check before its installer, so
+                    # fail clearly for an unreachable device here instead of
+                    # surfacing an opaque SSH timeout from the recipe.
                     if not self._probe(dev, env):
                         raise ValueError(
                             "cannot reach device %s — ping/SSH probe "
