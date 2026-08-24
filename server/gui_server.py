@@ -35,6 +35,7 @@ import peer_policy
 import peer_enforcement
 import secretfs
 import secrets_store
+import setup_status
 import telemetry
 import telemetry_destination
 import trust
@@ -1180,6 +1181,19 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     path[len("/api/settings/audit-export/run/"):])
                 self._json(200, job) if job else self._json(
                     404, {"error": "no such job"})
+                return
+            if path == "/api/settings/setup-status":
+                info = app.session_info(self._sid())
+                if info is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                artifacts_dir = os.environ.get(
+                    "IRIS_ARTIFACTS_DIR", "/srv/artifacts")
+                self._json(200, setup_status.build_status(
+                    artifacts_dir,
+                    os.environ.get("IRIS_CERT", _IRIS_CERT_DEFAULT),
+                    os.path.join(artifacts_dir, "iris-catalog.pem"),
+                    info["username"],
+                    creds.get_stage_host() if creds is not None else None))
                 return
             if path == "/api/settings":
                 info = app.session_info(self._sid())

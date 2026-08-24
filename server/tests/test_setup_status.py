@@ -229,3 +229,17 @@ def test_response_carries_no_secret_material(tmp_path):
     blob = repr(st).lower()
     for banned in ("password", "secret", "token", "private", "begin "):
         assert banned not in blob
+
+
+# --- route ----------------------------------------------------------------
+
+def test_route_is_registered_and_session_gated():
+    """The console route must exist and must sit behind the session check,
+    like every other /api/settings read."""
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = open(os.path.join(here, "gui_server.py")).read()
+    assert '"/api/settings/setup-status"' in src
+    idx = src.index('"/api/settings/setup-status"')
+    window = src[idx:idx + 400]
+    assert "session_info" in window          # gated like its neighbours
+    assert "setup_status.build_status" in window
