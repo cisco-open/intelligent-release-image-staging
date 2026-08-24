@@ -1183,6 +1183,43 @@
   // means "no override" (server default), "mozilla" is this curated URL,
   // anything else is "custom" and shows the raw input.
   var CA_MOZILLA_URL = 'https://curl.se/ca/cacert.pem';
+
+  // ---- Settings: post-install setup checklist ----
+  // Chip classes reuse the existing badge-* palette (see the telemetry
+  // health badge above) rather than the bare ok/warn/muted classes, which
+  // don't exist as standalone selectors in styles.css.
+  function setupChip(state) {
+    var label = {ok: 'done', unset: 'not configured', stale: 'needs rebuild',
+                 absent: 'not built', unknown: 'cannot determine'}[state] || state;
+    var cls = state === 'ok' ? 'badge-ok'
+      : (state === 'unset' || state === 'stale') ? 'badge-cancelled' : 'badge-queued';
+    return '<span class="badge ' + cls + '">' + esc(label) + '</span>';
+  }
+
+  async function refreshSetup() {
+    var r = await fetch('/api/settings/setup-status');
+    if (!r.ok) return;
+    var s = await r.json();
+    document.getElementById('setup-admin-chip').innerHTML =
+      setupChip(s.admin.state);
+    document.getElementById('setup-sh-chip').innerHTML =
+      setupChip(s.stage_host.state);
+    document.getElementById('setup-pkg-chip').innerHTML =
+      setupChip(s.packages.state);
+    document.querySelector('#setup-pkg-table tbody').innerHTML =
+      s.packages.items.map(function (i) {
+        var when = i.built_at
+          ? new Date(i.built_at * 1000).toLocaleString() : '—';
+        return '<tr><td class="muted">' + esc(i.name) + '</td><td>' +
+               setupChip(i.state) + '</td><td class="muted">built ' +
+               esc(when) + '</td></tr>';
+      }).join('');
+    document.getElementById('setup-pkg-remedy').textContent =
+      s.packages.state === 'ok' ? ''
+      : 'Rebuild on the Docker host, then re-onboard affected devices: '
+        + s.packages.remedy;
+  }
+
   async function refreshSettings() {
     var r = await fetch('/api/settings'); if (!r.ok) return;
     var s = await r.json();
@@ -1688,6 +1725,9 @@
   // separately so the original trio stays a literal for the source guard
   // that pins it.
   SETTINGS_SUBS.push('audit');
+  // The setup pane rides the same pane/nav id pattern; appended for the
+  // same reason (keeps the original trio a literal for the source guard).
+  SETTINGS_SUBS.push('setup');
   function showSettingsSub(sub) {
     if (SETTINGS_SUBS.indexOf(sub) < 0) sub = 'general';
     SETTINGS_SUBS.forEach(function (t) {
@@ -2256,7 +2296,7 @@
     else if (view === 'images') { refreshImages(); refreshImportable(); }
     else if (view === 'devices') refreshDevices();
     else if (view === 'swarm') refreshSwarm();
-    else if (view === 'settings') refreshSettings();
+    else if (view === 'settings') { refreshSettings(); refreshSetup(); }
     else if (view === 'monitoring') refreshMonitoring();
   }
   function current() { return (location.hash || '#overview').slice(1); }

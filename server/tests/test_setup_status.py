@@ -243,3 +243,26 @@ def test_route_is_registered_and_session_gated():
     window = src[idx:idx + 400]
     assert "session_info" in window          # gated like its neighbours
     assert "setup_status.build_status" in window
+
+
+# --- console pane ---------------------------------------------------------
+
+def _webroot(name):
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return open(os.path.join(here, "webroot", name)).read()
+
+
+def test_console_has_a_setup_pane_wired_to_the_endpoint():
+    html = _webroot("index.html")
+    js = _webroot("app.js")
+    assert 'id="nav-settings-setup"' in html
+    assert 'id="settings-pane-setup"' in html
+    assert "'setup'" in js                       # registered in the pane list
+    assert "'/api/settings/setup-status'" in js
+
+
+def test_setup_pane_explains_why_each_step_matters():
+    """Each card carries operator-facing rationale, not just a status chip."""
+    html = _webroot("index.html")
+    for phrase in ("pins this server", "Guest Shell", "stage host"):
+        assert phrase.lower() in html.lower()
