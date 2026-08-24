@@ -68,6 +68,33 @@ counts the successes and names the devices that refused. The controls and their
 individual effects are documented in
 [Bulk device actions](console.md#bulk-device-actions).
 
+## Onboarding at scale
+
+A batch onboard no longer blocks its HTTP request on a router's live SSH
+session. `POST /api/devices/<id>/onboard` resolves the plan, checks for a
+conflicting deployment receipt, and returns a job id immediately; router
+preflight — the read-only collision, identity, and NAT checks in
+[Router preflight and ownership](network-attachment.md#router-preflight-and-ownership)
+— runs afterward, in the bounded onboarding worker pool, right before that
+job mints its enrollment token. Selecting a large batch of routers therefore
+shows queued and running progress at once instead of the page hanging while
+each router is probed in turn, and a preflight failure fails only that job,
+with its own log, rather than blocking the routers behind it in the batch.
+Every ownership, collision, identity, NAT, and Guest Shell reachability check
+still completes before any token is minted or any device configuration is
+applied — only when it runs moved.
+
+Worker concurrency is bounded and configurable with `IRIS_ONBOARD_CONCURRENCY`
+(default 25); `GET /api/onboard/jobs` reports the current limit as
+`max_concurrent`.
+
+The generated installers and Console recipes also cut down on device logins:
+the read-only pre-checks before an install and the verification checks after
+an install or undeploy each now run over a single device session instead of
+one login per command. State-gated poll and retry loops — waiting for
+`guestshell destroy`, IOx readiness, or app-hosting state — are unchanged,
+because each iteration has to re-observe live device state.
+
 ## Peer-policy operations and their backlog
 
 Every policy mutation — a quarantine assignment from the console, or its removal
@@ -170,10 +197,14 @@ inventory row, so a later inventory edit cannot retarget cleanup. An
 **inband** device's teardown removes only the app footprint and preserves the
 operator-owned VLAN/SVI/routes/VRF. A device deployed before receipts existed
 has no active receipt and must be **adopted** (an explicit, audited, no-change
-recording of ownership) before it can be undeployed — except a Catalyst 8000
-router, which cannot be adopted and must be re-onboarded to record live
-ownership evidence. A missing, drifted, or
-uncertain receipt stops cleanup in `needs-reconcile` rather than guessing. See
+recording of ownership) before it can be undeployed, or undeployed with
+**Force** to strip only the agent footprint when there is no receipt at all —
+see [Bulk device actions](console.md#bulk-device-actions). A Catalyst 8000
+router cannot be adopted, so a receipt-less router relies on re-onboarding or
+Force. Force behaves identically on every platform: it removes only what is
+identifiable by name as IRIS and leaves the VLAN/SVI, VPG, NAT, and PKI
+trustpoint exactly as they are. A missing, drifted, or uncertain receipt
+otherwise stops cleanup in `needs-reconcile` rather than guessing. See
 [Management Type and VLAN Ownership](network-attachment.md).
 
 Deleting an inventory row is not an undeploy — undeploy before deleting anything
@@ -209,15 +240,41 @@ including the fallback for entries published before that field existed.
 
 Rotating or regenerating the server's TLS certificate invalidates IOx packages
 that were already built: each `iris-arm64.tar` / `iris-amd64.tar` bakes the
-catalog CA in at build time, and the server only refreshes the *served*
-`iris-catalog.pem` on start — it does not rebuild the tars.
+catalog's certificate in at **build** time, and the server only refreshes the
+*served* `iris-catalog.pem` on container start — it does not rebuild the
+tars. A rebuilt server, a fresh volume, or a deliberate certificate rotation
+all silently break every package that was built before the change.
 
-Symptom: the IOx app runs and its TCP connection to the catalog succeeds, but
-the device never heartbeats, because the pinned certificate is rejected.
+Symptom: the device installs cleanly and its IOx app reports RUNNING, and its
+TCP connection to the catalog even succeeds, but it can never authenticate and
+so never checks in. The only evidence is a `TOKEN-REFRESH-FAIL` line in the
+**device's own syslog** — nothing on the server distinguishes "never
+onboarded" from "onboarded but rejecting our certificate". Guest Shell
+devices are immune: their served artifacts, including `iris-catalog.pem`, are
+regenerated on every container start, and the installer always fetches
+whatever is current.
+
+Two ways to catch this before it reaches a device:
+
+- Console **Settings → Setup** carries a *device packages* card showing each
+  package's build time and state (`ok`, `stale`, `absent`, `unknown`) against
+  the server's live certificate — see [Setup](console.md#setup).
+- `tools/check-package-freshness.sh` is the read-only, scriptable equivalent.
+  It compares the certificate the catalog actually serves, the copy handed to
+  Guest Shell devices, and the certificate pinned inside each served IOx
+  package, and exits non-zero if any package is stale:
+
+  ```bash
+  tools/check-package-freshness.sh              # report only
+  tools/check-package-freshness.sh --rebuild    # report, then rebuild if stale
+  ```
+
+  Run it after any catalog certificate change.
 
 Remedy: re-run `tools/provision-iox-packages.sh`, then re-onboard the affected
-IOx devices. Guest Shell devices need no such fix — the installer pushes the
-current certificate on every run, so they heal on re-onboard automatically.
+IOx devices. If instead the certificate the server currently serves disagrees
+with the copy already handed to devices, rebuilding packages alone will not
+fix it — new onboards are affected too — so reconcile the certificate first.
 
 ## Rotating the seeder announce credential
 

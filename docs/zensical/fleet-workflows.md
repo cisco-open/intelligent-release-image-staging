@@ -78,10 +78,15 @@ Deleting inventory rows is not an undeploy — undeploy the devices first. See
 
 Management-type-aware onboarding runs through the **Console / API**, which resolves
 an immutable plan, records a durable *receipt* of what it applies, and drives
-teardown from that receipt (not from the editable inventory). A router deployment
-runs its preflight again at execution time and cannot be adopted afterwards; see
-[Router preflight and ownership](network-attachment.md#router-preflight-and-ownership)
-and [Web Console](console.md#onboarding-from-the-console).
+teardown from that receipt (not from the editable inventory). A router
+deployment's preflight runs once, at job execution in the bounded onboarding
+worker pool — not inside the onboard request itself — so submitting a large
+batch of routers returns a job per device promptly instead of the request
+waiting on live SSH to each one; a router deployment cannot be adopted
+afterwards. See
+[Router preflight and ownership](network-attachment.md#router-preflight-and-ownership),
+[Onboarding at scale](operations.md#onboarding-at-scale), and
+[Web Console](console.md#onboarding-from-the-console).
 
 The legacy CLI generator is **routed-only** and deliberately refuses a v2
 (`management_type`) header, because a self-contained installer cannot record

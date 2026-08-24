@@ -68,6 +68,7 @@ Compose refuses to start without these; none has a default.
 | `IRIS_VERSION` | unset | Build argument that bakes the release string the console's Settings page shows. Unset means the `VERSION` file in the image. |
 | `IRIS_SAMPLE_INTERVAL` | `15` (seconds) | Seeder/telemetry poll cadence. A transfer that completes inside one interval can be observed with no connected peer, so per-peer rates and the map's measured edges never appear — a 1 GB image at ~90 MB/s lands in about 15 seconds. Lower it to 2–5 on a fast fabric or for a live demo; the cost is more aria2 RPC calls. |
 | `IRIS_REQUIRE_IDENTITY_GATE` | unset (off) | Set to `1` to make the catalog answer 503 to every per-device torrent request until the checkpoint file `identity-compatible-ready` exists under `IRIS_STATE` — the file a proven seeder rotation writes and `--recover` removes. Read per request, so opening or closing the gate needs no restart. The canonical (service) torrent path is unaffected. A deployment that does not set it serves per-device torrents as before. |
+| `IRIS_ONBOARD_CONCURRENCY` | `25` | Maximum onboard/undeploy jobs the worker pool runs at once; the rest queue. `GET /api/onboard/jobs` reports the active value as `max_concurrent`. |
 
 The host-side ownership these paths need is in
 [Server](server.md#host-paths-to-chown-on-every-deploy).
@@ -202,6 +203,7 @@ at 8 MiB and the streamed image upload at 4 GiB.
 | `POST /api/logout` | Revokes the current session and expires the cookie. |
 | `GET /api/session` | The current session's info, or 401. |
 | `GET /api/settings` | Console settings, published port, and the running version — plus the active console certificate (`gui_cert`), the installed trust entries (`trust`), the CA download settings (`ca_trust`), the effective telemetry destination with its source (`telemetry_destination`), and the audit-export destination with its last-run status (`audit_export`; a `password_set` flag only, never the password). |
+| `GET /api/settings/setup-status` | The Settings → Setup checklist: `admin`, `stage_host`, and `packages`, each with a `state` of `ok`, `unset`, `stale`, `absent`, or `unknown`. `packages` additionally carries `items` (per-package build time, state, and reason) and a `remedy` command. See [Setup](console.md#setup). |
 | `POST /api/settings/password` | `{current, new, confirm}`; changes the admin password and revokes every other session. |
 | `POST /api/settings/sessions/revoke-others` | Revokes every session except the caller's. |
 | `POST /api/settings/stage-host` | Stores the stage-host SSH credential; returns the redacted record. |

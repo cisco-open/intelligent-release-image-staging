@@ -164,6 +164,17 @@ re-onboarding as the safer and idempotent alternative, states up front that
 routers cannot be adopted, and sends the acknowledgement the server requires —
 an adopt that omits it is refused.
 
+The **Undeploy** dialog's **Force** checkbox covers a device stranded with no
+deployment receipt at all — typically an onboard that enabled the agent but
+died before its receipt was written. Forcing removes only the IRIS agent
+footprint (EEM applets, Guest Shell or the IOx app, and staged files) and
+leaves every operator-owned network setting untouched, because with no
+receipt nothing proves IRIS created the VLAN/SVI, VPG, NAT, or PKI
+trustpoint. It behaves the same on every platform, including a router, which
+has no other way to clear a receipt-less agent — it cannot be adopted, and
+its preflight refuses to re-onboard over an already-enabled Guest Shell.
+Recorded in Audit as `undeploy_forced`.
+
 Bulk operations report per-device refusals rather than failing the whole batch:
 the status line shows how many devices succeeded and names the ones that did
 not, with the server's reason. Adopting a router, for example, comes back as a
@@ -218,10 +229,39 @@ bottom of that device's deployment-details panel on the Devices screen.
 
 ## Settings
 
-Settings is a sidebar feature with its own sub-menu — **General**, **TLS &
-trust**, **Telemetry**, and **Audit export** — rather than an in-page tab
-strip. Each sub-page is deep-linkable: `#settings/general`, `#settings/tls`,
-`#settings/telemetry`, `#settings/audit`.
+Settings is a sidebar feature with its own sub-menu — **Setup**, **General**,
+**TLS & trust**, **Telemetry**, and **Audit export** — rather than an in-page
+tab strip. Each sub-page is deep-linkable: `#settings/setup`,
+`#settings/general`, `#settings/tls`, `#settings/telemetry`,
+`#settings/audit`.
+
+### Setup
+
+The **Setup** sub-page (`#settings/setup`) is a post-install checklist: three
+cards — **admin account**, **stage-host credentials**, and **device
+packages** — each carrying a live status chip and a short rationale, meant to
+be revisited any time after installing a server rather than completed in one
+sitting. Every card's status is one of `ok`, `unset`, `stale`, `absent`, or
+`unknown`. `absent` and `unknown` both mean the server could not determine
+the state; a failed or malformed status fetch shows every chip as `unknown`
+rather than leaving a previous, possibly stale, render on screen. Neither is
+ever presented as success.
+
+The **device packages** card exists because the IOx device packages
+(`iris-arm64.tar`, `iris-amd64.tar`) bake the catalog's TLS certificate in at
+**build** time. If the server's certificate later changes — a rebuilt
+server, a fresh volume, a deliberate rotation — every package already built
+against the old certificate silently stops working: the device installs and
+its app reports RUNNING, but it can never authenticate to the catalog and so
+never checks in. See
+[TLS rotation and IOx packages](operations.md#tls-rotation-and-iox-packages)
+for the full failure mode and the fix. The card lists each package's build
+time and state against the server's live certificate; `absent` for an
+architecture you do not deploy (for example `iris-amd64.tar` at a site with
+no Catalyst 9300 IOx devices) needs no action. A `stale` row links to the
+rebuild command; if instead the certificate the server currently serves
+disagrees with the copy already handed to devices, the card names that
+condition specifically, because rebuilding packages alone would not fix it.
 
 ### TLS & trust
 

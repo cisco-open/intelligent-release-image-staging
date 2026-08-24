@@ -195,11 +195,17 @@ action, which records current ownership without changing the device.
 
 ### Router preflight and ownership
 
-Router preflight is read-only and runs once before planning and again at job
-execution, immediately before the enrollment token is minted. It rejects
-collisions for the VPG, NAT entries, named IRIS globals, and
-`bootflash:guest-share`. These names and the guest share are receipt-owned;
-teardown removes only resources proven by that receipt.
+Router preflight is read-only and runs once, in the bounded onboarding worker
+pool, immediately before the enrollment token is minted — not synchronously
+inside the `POST /api/devices/<id>/onboard` request. Submitting a batch of
+routers therefore returns a job id per device promptly, with progress shown
+as each job queues and then runs, instead of the request blocking on live SSH
+to every router in turn. Preflight rejects collisions for the VPG, NAT
+entries, named IRIS globals, and `bootflash:guest-share`. These names and the
+guest share are receipt-owned; teardown removes only resources proven by that
+receipt. Every one of these checks, together with device identity and (for
+router NAT) the outside interface, still completes before any enrollment
+token is minted or router configuration is applied.
 
 ## Console and CLI
 
