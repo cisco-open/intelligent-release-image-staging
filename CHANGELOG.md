@@ -9,6 +9,127 @@ This project uses **Calendar Versioning (CalVer)**: `YYYY.0M.0D` with an optiona
 `2026.06.11.1`). Releases are tagged `vYYYY.0M.0D`. The current version is in the
 top-level `VERSION` file.
 
+## [Unreleased]
+
+### Added
+- **Settings > Setup gives the console a read-only, post-install completion
+  checklist — three cards for admin account, stage-host credentials, and
+  device packages — and a package card that catches a certificate-drift
+  failure mode with no other symptom.** `GET /api/settings/setup-status`
+  (session-gated) is backed by `server/setup_status.py`, which fingerprints
+  the certificate this server currently serves (`IRIS_CERT`, reading only
+  the leading certificate block so the combined cert+key file parses), the
+  certificate handed to devices at onboard time (`iris-catalog.pem` in the
+  artifacts directory), and the certificate baked into each served IOx
+  package (`iris-amd64.tar`, `iris-arm64.tar`) at build time — streaming the
+  ~60 MB package's inner archive instead of unpacking it. This matters
+  because an IOx package pins the catalog certificate at *build* time: if
+  the certificate later changes, a device installed from that package still
+  installs, its app still reports RUNNING, and it silently never checks in
+  again — the only evidence is a `TOKEN-REFRESH-FAIL` line in the device's
+  own syslog, with nothing server-side to distinguish "never onboarded" from
+  "onboarded but rejecting our certificate." Guest Shell platforms are
+  unaffected, since their artifacts (including the certificate) are
+  regenerated at every container start. Each package's state
+  (ok/stale/absent/unknown) rolls up worst-of, so a stale package is never
+  masked by a merely unknown sibling; the top-level state is separately
+  demoted to unknown — without masking a worse stale finding underneath —
+  when the served and distributed certificates disagree or the distributed
+  copy can't be read, and a mismatch gets its own console guidance rather
+  than the rebuild remedy, since rebuilding packages does not fix a
+  disagreement between what this server serves and what it told devices to
+  trust. A failed or thrown status fetch repaints every chip to "cannot
+  determine" instead of leaving a stale "done" on screen.
+- **`tools/check-package-freshness.sh` puts the same certificate-drift check
+  on the command line.** Read-only: it fingerprints the certificate the
+  catalog currently serves, the certificate handed to Guest Shell devices at
+  onboard time, and the certificate pinned inside each built IOx package,
+  and reports any package whose pinned certificate no longer matches,
+  exiting 1 on drift. `--rebuild` re-runs `tools/provision-iox-packages.sh`
+  and re-checks. It never touches a device.
+
+### Changed
+- **Router preflight for `POST /api/devices/<id>/onboard` now runs once, in
+  the bounded worker pool, instead of twice.** It used to run synchronously
+  before the HTTP request returned, and then again inside the queued job
+  right before minting — necessary because a delayed job can still be
+  invalidated by a change made after the first check ran — so a large batch
+  submission sat through serial SSH round-trips to every selected router
+  before any job ID came back, while the blocking check at submit time
+  changed nothing about whether the worker's own check still had to run.
+  The route now records the preflight as pending and returns immediately, so
+  a batch shows queued progress right away, and a preflight failure is
+  reported as that individual job's own error with an actionable log line
+  instead of rejecting the request or blocking unrelated routers behind it.
+  Preflight itself is also cheaper to run: its four commands (five when NAT
+  attachment adds an outside-interface check) now travel in one
+  `lab/device-run.sh` session instead of one SSH login per command, using
+  IOS XE's own command echo as a marker to split the single response back
+  into sections.
+- **The read-only pre-check and verify passes in the install/uninstall
+  recipes now cost one device login instead of several.** The flash/routing
+  /clock pre-checks in `device/device-install.sh`, the `show iox` readiness
+  check in `device/iox/install.sh`, and the running-config/app-hosting/
+  file-listing verify block in both `device/router-install.sh` and
+  `device/router-uninstall.sh` each used to open a separate SSH session per
+  command; every command in a group now travels in one session, split back
+  into sections on IOS XE's own command echo. A missing section is still
+  treated as a hard transport failure, never read as an empty, safe result.
+  State-gated polling and retry loops — for example the IOx readiness poll,
+  which still re-observes live state on every iteration — are unchanged:
+  only the repeated read *within* a single observation was collapsed, never
+  the polling itself.
+
+### Fixed
+- **An outbox ack watermark above the policy document's own revision is now
+  treated as impossible and ignored, instead of being honored.**
+  `last_operation_exported_revision` is persisted in the enforcement status
+  file, separately from the policy document itself, so a document restored
+  or reset after a lower-revisioned backup can sit below a watermark that
+  was written for an older, higher-revisioned document. Honoring that
+  watermark was doubly destructive: `pending_exports` selects
+  `revision > acked`, so it suppressed every export outright, and the next
+  commit's pruning step then silently discarded every unacknowledged outbox
+  entry. `server/peer_policy.py` now sanitizes the watermark against the
+  document it is applied to and falls back to 0 — nothing counts as
+  acknowledged, and the entries re-export — whenever the watermark exceeds
+  the document's own revision, is not a non-negative integer, or the
+  document itself carries no usable revision.
+- **A live telemetry withdrawal now records the reason the server actually
+  has, instead of flattening every cause to `not_active`.** The heartbeat
+  handler in `server/catalog.py` called the live table's withdrawal with no
+  reason on every policy-driven withdrawal, so the `disabled` and `paused`
+  states a device genuinely reports for its own master toggle or a stream
+  pause could never appear in a live sample or in `/api/swarm` — every
+  withdrawal read as `not_active` regardless of cause. The reason is now
+  derived from the server's own flags, in the same precedence the agent
+  itself uses (master toggle first, then stream-off or a global pause, then
+  `not_active` for a device that lost its assignment), and never from the
+  device's own claimed `obs_state` — a device claiming `observed` while the
+  server has it disabled is still recorded as `disabled`.
+- **A forced undeploy on Guest Shell and IOx now honors
+  `IRIS_FORCE_AGENT_ONLY`, which it previously ignored.** The console sets
+  this flag when it undeploys a device that has no deployment receipt — for
+  example, an onboard that died after enabling Guest Shell but before its
+  receipt was written — because with no receipt there is no proof the
+  VLAN/SVI, logging discriminator, or PKI trustpoint are uniquely
+  IRIS-owned. Only `device/router-uninstall.sh` read the variable;
+  `device/device-uninstall.sh` (Guest Shell) and `device/iox/uninstall.sh`
+  ignored it and ran their full teardown regardless, which could remove
+  operator network configuration IRIS never created. Both scripts now
+  reduce to the same agent-footprint-only scope `NETWORK_ATTACHMENT=inband`
+  already uses whenever the flag is set, regardless of the configured
+  attachment.
+
+### Documentation
+- The public site's copy now speaks to Cisco images and patches generally
+  instead of IOS-XE alone, describes Guest Shell and IOx staging in
+  platform-neutral terms ("device storage" rather than naming `flash:` /
+  `sdflash:`), renames the platform tabs to "Catalyst 9000" and "Industrial
+  Ethernet," adds a "Catalyst 8000" tab for router Guest Shell over a
+  VirtualPortGroup, and drops the standalone ports table and its filter
+  buttons.
+
 ## [2026.08.22]
 
 ### Added
