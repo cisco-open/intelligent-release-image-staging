@@ -335,14 +335,18 @@ def test_setup_pane_explains_why_each_step_matters():
         assert phrase.lower() in html.lower()
 
 
-def test_setup_pane_has_a_telemetry_card_linked_to_the_telemetry_settings():
+def test_setup_pane_telemetry_card_funnels_into_the_setup_flow():
+    """The card still reports telemetry state -- Settings > Setup survives as
+    the status panel -- but its action now enters the setup flow instead of
+    dropping the operator on a settings page to find the form themselves."""
     html = _webroot("index.html")
     js = _webroot("app.js")
     assert 'id="setup-td-chip"' in html
     # scope to the card itself (between its heading and the next h3) so this
     # cannot pass merely because the sidebar nav happens to link there too
     card = html.split('id="setup-td-chip"', 1)[1].split("<h3>", 1)[0]
-    assert 'href="#settings/telemetry"' in card
+    assert 'href="#setup"' in card
+    assert 'href="#settings/telemetry"' not in card
     assert "published anywhere" in card.lower()
     assert "s.telemetry.state" in js
     assert "setupTelemetryNote" in js
@@ -470,7 +474,7 @@ def test_fingerprint_never_returns_a_key_block(tmp_path):
 # after first-run setup must continue into Settings > Setup rather than drop the
 # operator on the Overview with the remaining steps buried in a submenu.
 
-def test_first_run_setup_hands_off_to_the_checklist():
+def test_first_run_setup_hands_off_to_the_wizard():
     setup_js = _webroot("setup.js")
     login_js = _webroot("login.js")
 
@@ -481,8 +485,10 @@ def test_first_run_setup_hands_off_to_the_checklist():
     assert "iris_post_setup" not in conflict, \
         "a 409 means setup already ran; it must not arm the handoff"
 
-    # consumed once, and it must land on the Setup pane
+    # consumed once, and it must land on the setup FLOW -- the checklist sent
+    # the operator to a status page and left them to find the forms
     assert "iris_post_setup" in login_js
-    assert "'/#settings/setup'" in login_js
+    assert "'/#setup'" in login_js
+    assert "#settings/setup" not in login_js
     assert "removeItem('iris_post_setup')" in login_js, \
         "the handoff must be one-shot, or every later sign-in lands there"
