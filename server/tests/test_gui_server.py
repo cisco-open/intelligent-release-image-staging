@@ -5693,3 +5693,23 @@ def test_telemetry_health_badge_lives_on_overview_not_monitoring():
     assert "refreshTelemetryHealth" not in monitoring_fn
     overview_fn = js.split("async function refreshOverview()", 1)[1].split("\n  }", 1)[0]
     assert "refreshTelemetryHealth" in overview_fn
+
+
+def test_console_refreshes_the_visible_view_periodically():
+    """The console had no periodic refresh at all — `setInterval` appeared
+    nowhere — so a view only updated on navigation or after an explicit
+    action. Device state that changes server-side (heartbeats, staging
+    progress, deployment state) was invisible until the operator navigated
+    away and back. refreshDevices() already preserved batch checkbox
+    selections "across the periodic re-render" that never existed.
+
+    The poll must also stop: on view change, and while the tab is hidden, so
+    a backgrounded console does not keep hitting the server."""
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    assert "setInterval" in js, "no periodic refresh wired up"
+    assert "clearInterval" in js, "poll is never cancelled"
+    # a backgrounded tab must not keep polling
+    assert "visibilitychange" in js or "document.hidden" in js
+    # the poll re-runs the CURRENT view, so it must go through the same router
+    assert "startViewPoll" in js and "stopViewPoll" in js

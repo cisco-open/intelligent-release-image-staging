@@ -2339,6 +2339,38 @@
 
   // ---- hash router ----
   var VIEWS = ['overview', 'images', 'devices', 'swarm', 'settings', 'monitoring'];
+
+  // Periodic refresh of whatever view is on screen. Without this the console
+  // only updated on navigation or after an explicit action, so device state
+  // that changes server-side -- heartbeats, staging progress, deployment
+  // state -- stayed invisible until the operator navigated away and back.
+  // refreshDevices() already preserves batch checkbox selections across a
+  // re-render, so a poll does not cost the operator their selection.
+  var VIEW_POLL_MS = 10000;
+  var viewPollTimer = null;
+  var viewPollFn = null;
+  function stopViewPoll() {
+    if (viewPollTimer !== null) { clearInterval(viewPollTimer); viewPollTimer = null; }
+  }
+  function startViewPoll(fn) {
+    stopViewPoll();
+    viewPollFn = fn;
+    if (!fn) return;
+    viewPollTimer = setInterval(function () {
+      // A backgrounded tab must not keep hitting the server. The
+      // visibilitychange handler restarts the poll when the tab returns.
+      if (document.hidden) return;
+      try { fn(); } catch (e) { /* a failed refresh must not kill the poll */ }
+    }, VIEW_POLL_MS);
+  }
+  document.addEventListener('visibilitychange', function () {
+    // Refresh immediately on return so the operator never reads stale state
+    // while waiting out the rest of an interval.
+    if (!document.hidden && viewPollFn) {
+      try { viewPollFn(); } catch (e) { /* ignore */ }
+    }
+  });
+
   function show(view) {
     // "#settings/tls" style hashes: the part before the slash picks the view,
     // the rest picks the view's sub-page (showSettingsSub / showMonitoringSub
@@ -2359,12 +2391,19 @@
     if (view === 'settings') showSettingsSub(sub || 'general');
     document.getElementById('monitoring-submenu').hidden = view !== 'monitoring';
     if (view === 'monitoring') showMonitoringSub(sub || 'audit');
-    if (view === 'overview') refreshOverview();
-    else if (view === 'images') { refreshImages(); refreshImportable(); }
-    else if (view === 'devices') refreshDevices();
-    else if (view === 'swarm') refreshSwarm();
+    // Each view names the refresh the poll should repeat. Settings is
+    // deliberately excluded: it is a set of forms, and re-rendering them
+    // under the operator's cursor would discard half-typed input.
+    var poll = null;
+    if (view === 'overview') { refreshOverview(); poll = refreshOverview; }
+    else if (view === 'images') {
+      refreshImages(); refreshImportable();
+      poll = function () { refreshImages(); refreshImportable(); };
+    } else if (view === 'devices') { refreshDevices(); poll = refreshDevices; }
+    else if (view === 'swarm') { refreshSwarm(); poll = refreshSwarm; }
     else if (view === 'settings') { refreshSettings(); refreshSetup(); }
-    else if (view === 'monitoring') refreshMonitoring();
+    else if (view === 'monitoring') { refreshMonitoring(); poll = refreshMonitoring; }
+    startViewPoll(poll);
   }
   function current() { return (location.hash || '#overview').slice(1); }
   window.addEventListener('hashchange', function () { show(current()); });
