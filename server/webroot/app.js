@@ -1485,8 +1485,12 @@
       s.sessions.active + ' active session(s); idle timeout ' +
       s.sessions.idle_ttl_minutes + ' min.';
     var sh = s.stage_host || {};
-    document.getElementById('sh-user').value = sh.username || '';
-    document.getElementById('sh-status').textContent = sh.configured
+    // These live in a template and are only present while mounted, so every
+    // write guards -- refreshSettings also runs for surfaces that host neither.
+    var shUser = document.getElementById('sh-user');
+    if (shUser) shUser.value = sh.username || '';
+    var shStatus = document.getElementById('sh-status');
+    if (shStatus) shStatus.textContent = sh.configured
       ? ('Configured — onboarding will ssh to the stage host as "' + sh.username +
          '". To change it, edit the username and/or re-enter the password below and Save.')
       : 'Not configured — needed when the Console runs in Docker, so the onboard ' +
@@ -1557,7 +1561,8 @@
     // --- Telemetry destination (replaces the old read-only Observability row) ---
     var td = s.telemetry_destination || {};
     var obs = s.observability || {};
-    document.getElementById('td-status').innerHTML =
+    var tdStatus = document.getElementById('td-status');
+    if (tdStatus) tdStatus.innerHTML =
       (td.source === 'override'
         ? '<span class="badge badge-running">console override</span> '
         : '<span class="badge badge-queued">deployment default</span> ') +
@@ -1566,9 +1571,12 @@
         : 'export off') +
       (obs.metrics_url
         ? ' · Prometheus scrape ' + esc(obs.metrics_url) : '');
-    document.getElementById('td-endpoint').value = td.effective_endpoint || '';
-    document.getElementById('td-enabled').checked = !!td.effective_enabled;
-    document.getElementById('td-revert').hidden = td.source !== 'override';
+    var tdEndpoint = document.getElementById('td-endpoint');
+    if (tdEndpoint) tdEndpoint.value = td.effective_endpoint || '';
+    var tdEnabled = document.getElementById('td-enabled');
+    if (tdEnabled) tdEnabled.checked = !!td.effective_enabled;
+    var tdRevert = document.getElementById('td-revert');
+    if (tdRevert) tdRevert.hidden = td.source !== 'override';
     // --- Audit export (the settings echo never carries the password) ---
     var ae = s.audit_export || {};
     document.getElementById('ae-host').value = ae.host || '';
@@ -1620,6 +1628,38 @@
     m.textContent = 'Signed out ' + (await r.json()).revoked + ' other session(s).';
     refreshSettings();
   });
+  // ---- Shared settings forms: one markup source, mounted where it is needed
+  // The telemetry and stage-host forms live in a <template> in the settings
+  // pane and are cloned into whichever surface is showing -- Settings, or a
+  // step of the first-run wizard. Cloning rather than duplicating the markup
+  // keeps a single source of truth, and only ever ONE clone is mounted, so the
+  // ids inside stay unique. Handlers bind per mount, which is why they live in
+  // wire*Form() rather than running once at startup.
+  var FORM_MOUNTS = {
+    td: { tpl: 'tpl-td-form', wire: function () { wireTelemetryForm(); } },
+    sh: { tpl: 'tpl-sh-form', wire: function () { wireStageHostForm(); } }
+  };
+  var formMountedAt = { td: null, sh: null };
+
+  function mountSettingsForm(which, hostId) {
+    var spec = FORM_MOUNTS[which];
+    var host = document.getElementById(hostId);
+    var tpl = document.getElementById(spec.tpl);
+    if (!host || !tpl) return false;
+    if (formMountedAt[which] === hostId && host.firstChild) return true;
+    // tear the previous clone down first -- two live clones would duplicate ids
+    if (formMountedAt[which] && formMountedAt[which] !== hostId) {
+      var prev = document.getElementById(formMountedAt[which]);
+      if (prev) prev.innerHTML = '';
+    }
+    host.innerHTML = '';
+    host.appendChild(tpl.content.cloneNode(true));
+    formMountedAt[which] = hostId;
+    spec.wire();
+    return true;
+  }
+
+  function wireStageHostForm() {
   document.getElementById('sh-form').addEventListener('submit', async function (e) {
     e.preventDefault();
     var msg = document.getElementById('sh-msg'); msg.textContent = ''; msg.classList.remove('ok');
@@ -1642,6 +1682,8 @@
     msg.textContent = 'Stage host credentials cleared.'; msg.classList.add('ok');
     refreshSettings();
   });
+  }
+
 
   // ---- Settings: certificate / trust store / telemetry destination ----
 
@@ -1856,6 +1898,7 @@
     msg.textContent = 'Downloading…';
     pollCaRefresh((await r.json()).job);
   });
+  function wireTelemetryForm() {
   document.getElementById('td-form').addEventListener('submit', async function (e) {
     e.preventDefault();
     var msg = document.getElementById('td-msg'); msg.textContent = ''; msg.classList.remove('ok');
@@ -1882,6 +1925,8 @@
     msg.textContent = 'Reverted to the deployment default.'; msg.classList.add('ok');
     refreshSettings();
   });
+  }
+
 
   // ---- Settings: audit export (SCP + age) ----
   document.getElementById('ae-form').addEventListener('submit', async function (e) {
@@ -1981,6 +2026,11 @@
       document.getElementById('settings-pane-' + t).hidden = t !== sub;
       document.getElementById('nav-settings-' + t).classList.toggle('active', t === sub);
     });
+    // Claim the shared forms back from the wizard, then repopulate them --
+    // a freshly cloned form is empty until refreshSettings writes to it.
+    if (sub === 'general') mountSettingsForm('sh', 'sh-mount');
+    if (sub === 'telemetry') mountSettingsForm('td', 'td-mount');
+    refreshSettings();
   }
   // Monitoring uses the same sidebar sub-menu pattern (audit | deploylogs):
   // when a view hosts multiple features, each gets its own sub-page instead

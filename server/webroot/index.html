@@ -301,6 +301,8 @@
             <span class="err" id="pw-msg"></span>
           </form>
           <h3>Stage host (Docker onboarding)</h3>
+          <div class="form-mount" id="sh-mount"></div>
+          <template id="tpl-sh-form">
           <p class="muted" id="sh-status"></p>
           <form class="inline-form" id="sh-form">
             <input id="sh-user" placeholder="Stage host username" autocomplete="username">
@@ -310,6 +312,7 @@
             <button class="btn ghost" type="button" id="sh-clear">Clear</button>
             <span class="err" id="sh-msg"></span>
           </form>
+          </template>
           <h3>Sessions</h3>
           <p class="muted" id="sessions-info"></p>
           <p>
@@ -375,6 +378,8 @@
         </div>
         <div id="settings-pane-telemetry" hidden>
           <h3>Telemetry destination</h3>
+          <div class="form-mount" id="td-mount"></div>
+          <template id="tpl-td-form">
           <p class="muted" id="td-status"></p>
           <form class="inline-form" id="td-form">
             <input id="td-endpoint" placeholder="OTLP endpoint (https://collector:4318)">
@@ -383,6 +388,7 @@
             <button class="linkish danger-link" type="button" id="td-revert" hidden>Revert to deployment default</button>
             <span class="err" id="td-msg"></span>
           </form>
+          </template>
         </div>
         <div id="settings-pane-audit" hidden>
           <h3>Audit export</h3>
