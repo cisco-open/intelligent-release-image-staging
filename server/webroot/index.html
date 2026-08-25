@@ -107,6 +107,47 @@
           <span class="muted push" id="dev-count"></span>
           <span class="muted" id="dev-status"></span>
         </div>
+        <div class="toolbar" id="dev-filters">
+          <input id="dev-filter-q" placeholder="Filter devices, IP, model…" aria-label="Filter by device, IP or model">
+          <select id="dev-filter-attachment" aria-label="Filter by management type">
+            <option value="">Management type: any</option>
+            <option value="routed">routed</option>
+            <option value="inband">inband</option>
+            <option value="router-routed">router-routed</option>
+            <option value="router-nat">router-nat</option>
+            <option value="legacy">legacy</option>
+          </select>
+          <select id="dev-filter-platform" aria-label="Filter by platform">
+            <option value="">Platform: any</option>
+            <option value="guestshell">Guest Shell</option>
+            <option value="iox">IOx</option>
+            <option value="router">Router</option>
+            <option value="__none">— unset —</option>
+          </select>
+          <select id="dev-filter-cred" aria-label="Filter by credential profile">
+            <option value="">Credential: any</option>
+            <option value="__none">— none —</option>
+          </select>
+          <select id="dev-filter-telemetry" aria-label="Filter by telemetry state">
+            <option value="">Telemetry: any</option>
+            <option value="on">on</option>
+            <option value="off">off</option>
+          </select>
+          <select id="dev-filter-peer" aria-label="Filter by peer policy">
+            <option value="">Peer policy: any</option>
+            <option value="quarantined">quarantined</option>
+            <option value="not-quarantined">not quarantined</option>
+          </select>
+          <select id="dev-filter-status" aria-label="Filter by status">
+            <option value="">Status: any</option>
+            <option value="deployed">deployed</option>
+            <option value="enrolled">enrolled</option>
+            <option value="not-enrolled">not enrolled</option>
+            <option value="offline">offline</option>
+          </select>
+          <button class="linkish" id="dev-filter-clear">clear filters</button>
+          <span class="muted push" id="dev-filter-count"></span>
+        </div>
         <div class="selbar" id="sel-bar" hidden>
           <span class="sel-count" id="sel-count"></span>
           <button class="linkish" id="sel-clear">clear</button>
@@ -134,6 +175,8 @@
             </div>
           </div>
           <button class="btn ghost" id="adopt-selected">Adopt</button>
+          <button class="btn ghost" id="quarantine-selected">Quarantine</button>
+          <button class="btn ghost" id="release-selected">Release</button>
           <span class="sep"></span>
           <span class="joined">
             <select id="cred-selected"><option value="">— credential for selected —</option></select>
@@ -407,18 +450,43 @@
         <div id="monitoring-pane-deploylogs" hidden>
           <h3>Deployment logs</h3>
           <p class="muted">Per-job onboard and undeploy logs kept on the server
-            (newest 200) — they survive console reloads and session changes.</p>
+            (newest 200) — they survive console reloads and session changes.
+            The graph covers exactly those logs, not all history.</p>
+          <div id="dl-graph" aria-label="Deployments over time"></div>
           <div class="toolbar">
             <span class="joined">
-              <input id="dl-filter" placeholder="Filter by device id" spellcheck="false">
+              <input id="dl-search" placeholder="Search device, action or result" spellcheck="false">
+              <select id="dl-action" aria-label="Filter by action">
+                <option value="">Action: any</option>
+                <option value="onboard">onboard</option>
+                <option value="undeploy">undeploy</option>
+              </select>
+              <select id="dl-result" aria-label="Filter by result">
+                <option value="">Result: any</option>
+                <option value="done">done</option>
+                <option value="error">error</option>
+                <option value="cancelled">cancelled</option>
+              </select>
               <button class="btn ghost" id="dl-refresh">Refresh</button>
             </span>
+            <span class="muted push" id="dl-count"></span>
           </div>
           <table class="tbl" id="dl-tbl">
             <thead><tr><th>Finished</th><th>Device</th><th>Action</th><th>Result</th><th>Size</th><th></th></tr></thead>
             <tbody id="dl-rows"></tbody>
           </table>
-          <pre class="log" id="dl-text" hidden></pre>
+          <div class="toolbar" id="dl-pager">
+            <button class="btn ghost" id="dl-prev">‹ Newer</button>
+            <span class="muted" id="dl-page"></span>
+            <button class="btn ghost" id="dl-next">Older ›</button>
+          </div>
+        </div>
+        <div id="dl-drawer" hidden aria-label="Deployment log">
+          <div class="dl-drawer-head">
+            <span class="mono" id="dl-drawer-title"></span>
+            <button class="btn ghost" id="dl-drawer-close" aria-label="Close log">✕</button>
+          </div>
+          <pre class="log" id="dl-text"></pre>
         </div>
       </section>
     </main>

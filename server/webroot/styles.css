@@ -211,3 +211,23 @@ body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-
 .doc .warn { background:#fdf3e2; border:1px solid #ecc987; border-left:4px solid #d97706;
   border-radius:8px; padding:12px 14px; margin:18px 0; }
 .doc .warn strong { color:#8a4b06; }
+
+
+/* Deployment-log drawer: slides in from the RIGHT so the list it was opened
+   from stays where the operator left it, instead of being pushed off screen
+   by a panel appended below the table. */
+#dl-drawer { position:fixed; top:0; right:0; bottom:0; width:min(720px, 92vw);
+  z-index:60; display:flex; flex-direction:column; background:var(--panel, #fff);
+  border-left:1px solid var(--line, #d7dee8); box-shadow:-8px 0 24px rgba(11,37,69,.18);
+  transform:translateX(100%); transition:transform .18s ease; }
+#dl-drawer:not([hidden]) { transform:translateX(0); }
+#dl-drawer[hidden] { display:none; }
+.dl-drawer-head { display:flex; align-items:center; justify-content:space-between;
+  gap:10px; padding:10px 12px; border-bottom:1px solid var(--line, #d7dee8); }
+#dl-drawer .log { flex:1; margin:0; overflow:auto; border:0; border-radius:0; }
+#dl-graph { min-height:56px; margin:8px 0 4px; }
+#dl-graph .bar { fill:#9fc0f0; }
+
+@media (prefers-reduced-motion: reduce) {
+  #dl-drawer { transition:none; }
+}

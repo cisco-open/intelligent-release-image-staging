@@ -5713,3 +5713,56 @@ def test_console_refreshes_the_visible_view_periodically():
     assert "visibilitychange" in js or "document.hidden" in js
     # the poll re-runs the CURRENT view, so it must go through the same router
     assert "startViewPoll" in js and "stopViewPoll" in js
+
+
+def test_devices_filter_every_column_and_act_on_the_filtered_set():
+    """The devices table could not be filtered, so an operator working a
+    subset had to hand-pick rows. Every meaningful column gets a filter, the
+    row count reports the match, and 'select all' marks the FILTERED rows so
+    every bulk action -- quarantine included -- operates on exactly what the
+    filter selected."""
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    devices = html.split('id="view-devices"', 1)[1].split("</section>", 1)[0]
+    # one control per meaningful column, plus free text across the row
+    for control in ("dev-filter-q", "dev-filter-attachment", "dev-filter-platform",
+                    "dev-filter-cred", "dev-filter-telemetry", "dev-filter-peer",
+                    "dev-filter-status", "dev-filter-clear"):
+        assert 'id="%s"' % control in devices, "missing filter control: %s" % control
+    # quarantine is available as a BULK action, not only per row
+    assert 'id="quarantine-selected"' in devices
+    assert 'id="release-selected"' in devices
+    # the predicate exists and is applied before the rows are rendered
+    assert "deviceMatchesFilters" in js
+    # filters re-render, and the periodic poll must not wipe them
+    assert "applyDeviceFilters" in js
+
+
+def test_deploy_logs_paging_graph_search_and_side_drawer():
+    """The deployment-logs pane listed every log in one unpaged table, could
+    only filter by exact device id, had no sense of when deployments happened,
+    and opened a log in a <pre> BELOW the table — pushing the list off screen.
+
+    It gets: a time graph over the logs it holds, free-text search across
+    device/action/result plus action and result pickers, paging, and a
+    right-hand drawer so the list stays put while a log is open."""
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    with open(os.path.join(gui_server.WEBROOT, "styles.css")) as f:
+        css = f.read()
+    pane = html.split('id="monitoring-pane-deploylogs"', 1)[1].split("</div>\n      </section>", 1)[0]
+    for control in ("dl-search", "dl-action", "dl-result", "dl-graph",
+                    "dl-prev", "dl-next", "dl-page", "dl-drawer", "dl-drawer-close"):
+        assert 'id="%s"' % control in pane, "missing deploy-log control: %s" % control
+    # the log body lives in the drawer now, not loose under the table
+    drawer = pane.split('id="dl-drawer"', 1)[1]
+    assert 'id="dl-text"' in drawer
+    # paging + client-side matching exist
+    assert "dlPage" in js and "deployLogMatches" in js
+    # the drawer slides in from the right, and respects reduce-motion
+    assert "#dl-drawer" in css
+    assert "prefers-reduced-motion" in css

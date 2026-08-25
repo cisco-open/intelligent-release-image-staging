@@ -23,6 +23,77 @@
   // Telemetry posture as the DEVICE last reported it (not what onboarding
   // asked for). Tri-state: an agent that predates the flag reports nothing,
   // which is "unknown" — never shown as "off", since off is a real choice.
+  // ---- Devices: column filters -------------------------------------------
+  // Every bulk action operates on the checked rows, and only FILTERED rows are
+  // rendered, so filtering then "select all" is how an operator acts on a
+  // subset without hand-picking. Filter state lives in the DOM controls, not
+  // in the row data, so the periodic re-render never clears it.
+  var LAST_DEVICES = [];
+  var LAST_DEV_NOW = 0;
+
+  function deviceFilterState() {
+    function val(id) {
+      var el = document.getElementById(id);
+      return el ? el.value : '';
+    }
+    return {
+      q: val('dev-filter-q').trim().toLowerCase(),
+      attachment: val('dev-filter-attachment'),
+      platform: val('dev-filter-platform'),
+      cred: val('dev-filter-cred'),
+      telemetry: val('dev-filter-telemetry'),
+      peer: val('dev-filter-peer'),
+      status: val('dev-filter-status')
+    };
+  }
+
+  // Same derivations the row renderer uses, so a filter can never disagree
+  // with the cell the operator is reading.
+  function deviceStatusKey(d, devNow) {
+    if (d.stage_state === 'ready' && d.current_image_id &&
+        d.current_image_id === d.assigned_image_id) return 'deployed';
+    if (d.last_seen) return 'enrolled';
+    return 'not-enrolled';
+  }
+  function deviceIsOffline(d, devNow) {
+    return !!(d.last_seen && (devNow - d.last_seen) >= 600);
+  }
+
+  function deviceMatchesFilters(d, f, devNow) {
+    if (f.q) {
+      var hay = [d.device_id, d.device_ip, d.model, d.heartbeat_model]
+        .filter(Boolean).join(' ').toLowerCase();
+      if (hay.indexOf(f.q) === -1) return false;
+    }
+    if (f.attachment &&
+        (d.management_type || d.network_attachment || 'legacy') !== f.attachment) return false;
+    if (f.platform) {
+      var plat = d.platform || '';
+      if (f.platform === '__none' ? plat !== '' : plat !== f.platform) return false;
+    }
+    if (f.cred) {
+      var cred = d.credential_profile_id || '';
+      if (f.cred === '__none' ? cred !== '' : cred !== f.cred) return false;
+    }
+    if (f.telemetry) {
+      var tel = d.telemetry_enabled === false ? 'off' : 'on';
+      if (tel !== f.telemetry) return false;
+    }
+    if (f.peer) {
+      var q = peerPolicyAssigned(d.device_id) ? 'quarantined' : 'not-quarantined';
+      if (q !== f.peer) return false;
+    }
+    if (f.status) {
+      if (f.status === 'offline') { if (!deviceIsOffline(d, devNow)) return false; }
+      else if (deviceStatusKey(d, devNow) !== f.status) return false;
+    }
+    return true;
+  }
+
+  // Re-render from the devices already in hand -- filtering must not wait on
+  // (or fire) a network round trip.
+  function applyDeviceFilters() { renderDevices(LAST_DEVICES, LAST_DEV_NOW); }
+
   function telemetryCell(d) {
     if (d.telemetry_enabled === false) {
       return '<span class="badge badge-off" title="the agent sends no telemetry">off</span>';
@@ -325,6 +396,32 @@
     credOpts = cr.ok ? ((await cr.json()).profiles || []) : [];
     if (mine !== devicesRefreshGeneration) return;
     syncCredSelected();
+    LAST_DEVICES = devs;
+    LAST_DEV_NOW = devNow;
+    syncDeviceFilterOptions();
+    renderDevices(devs, devNow);
+  }
+
+  // Populate the credential filter from the profiles that actually exist,
+  // preserving the operator's current choice even if it is momentarily absent
+  // from a slow /api/credentials response.
+  function syncDeviceFilterOptions() {
+    var sel = document.getElementById('dev-filter-cred');
+    if (!sel) return;
+    var keep = sel.value;
+    sel.innerHTML = ['<option value="">Credential: any</option>',
+                     '<option value="__none">— none —</option>']
+      .concat(credOpts.map(function (c) {
+        return '<option value="' + esc(c.id) + '">' + esc(c.id) + '</option>';
+      })).join('');
+    sel.value = keep;
+    if (sel.value !== keep) sel.value = '';
+  }
+
+  function renderDevices(devs, devNow) {
+    var filters = deviceFilterState();
+    var total = devs.length;
+    devs = devs.filter(function (d) { return deviceMatchesFilters(d, filters, devNow); });
     // keep batch checkbox selections across the periodic re-render
     var marked = {};
     document.querySelectorAll('#dev-rows .mark:checked').forEach(function (cb) {
@@ -439,7 +536,12 @@
     });
     document.getElementById('mark-all').checked = false;
     document.getElementById('dev-count').textContent =
-      devs.length + ' device' + (devs.length === 1 ? '' : 's');
+      total + ' device' + (total === 1 ? '' : 's');
+    var fc = document.getElementById('dev-filter-count');
+    if (fc) {
+      fc.textContent = devs.length === total ? ''
+        : ('showing ' + devs.length + ' of ' + total);
+    }
     updateSelBar();
   }
   // ---- Device deployment details (per-row ⓘ) ----
@@ -865,7 +967,8 @@
   // an onboard batch is still starting, removing inventory out from under a
   // running job — onboard/undeploy previously guarded only each other.
   var BULK_BTNS = ['onboard-selected', 'undeploy-selected', 'adopt-selected',
-                   'delete-selected', 'apply-cred-selected'];
+                   'delete-selected', 'apply-cred-selected',
+                   'quarantine-selected', 'release-selected'];
   var bulkBusy = false;
   function setBulkBusy(busy) {
     bulkBusy = busy;
@@ -937,6 +1040,83 @@
                    { method: 'DELETE', headers: csrfHdr() });
     });
   });
+  // ---- Devices: filter wiring ----
+  ['dev-filter-q', 'dev-filter-attachment', 'dev-filter-platform',
+   'dev-filter-cred', 'dev-filter-telemetry', 'dev-filter-peer',
+   'dev-filter-status'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input',
+                        applyDeviceFilters);
+  });
+  (function () {
+    var clear = document.getElementById('dev-filter-clear');
+    if (!clear) return;
+    clear.addEventListener('click', function () {
+      ['dev-filter-q', 'dev-filter-attachment', 'dev-filter-platform',
+       'dev-filter-cred', 'dev-filter-telemetry', 'dev-filter-peer',
+       'dev-filter-status'].forEach(function (id) {
+        var el = document.getElementById(id);
+        if (el) el.value = '';
+      });
+      applyDeviceFilters();
+    });
+  })();
+
+  // Quarantine/release the whole selection. The peer-policy API is one device
+  // per call and carries a revision, so these run in sequence and carry the
+  // revision forward; a losing race re-reads the policy once rather than
+  // stamping a stale revision over someone else's change.
+  async function bulkQuarantine(quarantined) {
+    var ids = selectedIds();
+    if (!ids.length || bulkBusy) return;
+    var verb = quarantined ? 'Quarantine' : 'Release';
+    if (!confirm(verb + ' ' + ids.length + ' device' + (ids.length === 1 ? '' : 's') +
+        '?\n\nThis changes peer discovery and the server seeder across all torrents. ' +
+        'It may not terminate existing device-to-device sessions immediately. ' +
+        'It never installs or reloads a device.')) return;
+    setBulkBusy(true);
+    var ok = 0, failed = [];
+    try {
+      for (var i = 0; i < ids.length; i++) {
+        var id = ids[i];
+        var done = false;
+        for (var attempt = 0; attempt < 2 && !done; attempt++) {
+          var r = await fetch('/api/peer-policy/quarantine/' + encodeURIComponent(id), {
+            method: 'PUT', headers: csrfHdr({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify({ quarantined: quarantined, if_revision: peerPolicy.revision })
+          });
+          var body = await r.json().catch(function () { return {}; });
+          if (r.ok) {
+            peerPolicy.revision = body.revision;
+            peerPolicy.quarantine_assignments =
+              (peerPolicy.quarantine_assignments || []).filter(function (x) { return x !== id; });
+            if (body.quarantined) peerPolicy.quarantine_assignments.push(id);
+            ok++; done = true;
+          } else if (r.status === 409 && attempt === 0) {
+            // someone else moved the policy on: re-read and try this one again
+            var pr = await fetch('/api/peer-policy');
+            if (pr.ok) peerPolicy = await pr.json();
+          } else {
+            failed.push(id); done = true;
+          }
+        }
+      }
+      devStatus.textContent = verb + ' intent saved for ' + ok + ' device' +
+        (ok === 1 ? '' : 's') +
+        (failed.length ? ('; ' + failed.length + ' failed: ' + failed.join(', ')) : '.');
+    } finally {
+      setBulkBusy(false);
+      refreshDevices().catch(function () {});
+    }
+  }
+  document.getElementById('quarantine-selected').addEventListener('click', function () {
+    bulkQuarantine(true);
+  });
+  document.getElementById('release-selected').addEventListener('click', function () {
+    bulkQuarantine(false);
+  });
+
   document.getElementById('adopt-selected').addEventListener('click', async function () {
     var ids = claimSelection();
     if (!ids) return;
@@ -2125,38 +2305,145 @@
     if (gen !== deployLogGen) return;
     pre.textContent = text;
   }
+  // The API returns the newest 200; search, action/result pickers, the graph
+  // and paging all work over exactly that set, which is what the pane says it
+  // shows. Filtering client-side keeps typing responsive and avoids a refetch
+  // per keystroke.
+  var DL_PAGE_SIZE = 25;
+  var dlAll = [];
+  var dlPage = 0;
+
+  function dlFilterState() {
+    function val(id) { var el = document.getElementById(id); return el ? el.value : ''; }
+    return {
+      q: val('dl-search').trim().toLowerCase(),
+      action: val('dl-action'),
+      result: val('dl-result')
+    };
+  }
+  function deployLogMatches(l, f) {
+    if (f.action && (l.action || '') !== f.action) return false;
+    if (f.result && (l.state || 'done') !== f.result) return false;
+    if (f.q) {
+      var hay = [l.device_id, l.action, l.state, l.rc == null ? '' : ('rc=' + l.rc)]
+        .filter(Boolean).join(' ').toLowerCase();
+      if (hay.indexOf(f.q) === -1) return false;
+    }
+    return true;
+  }
+
+  // Counts per bucket across the span the logs actually cover. Drawn as an
+  // inline SVG because CSP forbids inline style attributes.
+  function renderDeployGraph(logs) {
+    var host = document.getElementById('dl-graph');
+    if (!host) return;
+    var stamps = logs.map(function (l) { return l.finished_at; })
+      .filter(function (t) { return typeof t === 'number' && t > 0; });
+    if (stamps.length < 2) { host.innerHTML = ''; return; }
+    var min = Math.min.apply(null, stamps), max = Math.max.apply(null, stamps);
+    if (max <= min) { host.innerHTML = ''; return; }
+    var N = 32, counts = new Array(N).fill(0);
+    stamps.forEach(function (t) {
+      var i = Math.min(N - 1, Math.floor((t - min) / (max - min) * N));
+      counts[i]++;
+    });
+    var peak = Math.max.apply(null, counts) || 1;
+    var W = 100, H = 48, bw = W / N;
+    var bars = counts.map(function (c, i) {
+      var h = c ? Math.max(1.5, c / peak * (H - 6)) : 0;
+      if (!h) return '';
+      return '<rect class="bar" x="' + (i * bw + bw * 0.15).toFixed(2) + '" y="' +
+        (H - h).toFixed(2) + '" width="' + (bw * 0.7).toFixed(2) + '" height="' +
+        h.toFixed(2) + '"><title>' + c + ' deployment' + (c === 1 ? '' : 's') +
+        '</title></rect>';
+    }).join('');
+    host.innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" ' +
+      'width="100%" height="56" role="img">' + bars + '</svg>' +
+      '<div class="muted" style="display:flex;justify-content:space-between;font-size:11px">' +
+      '<span>' + esc(fmtDate(min)) + '</span><span>' + esc(fmtDate(max)) + '</span></div>';
+  }
+
+  function renderDeployLogs() {
+    var tbody = document.getElementById('dl-rows');
+    var f = dlFilterState();
+    var rows = dlAll.filter(function (l) { return deployLogMatches(l, f); });
+    renderDeployGraph(rows);
+    var pages = Math.max(1, Math.ceil(rows.length / DL_PAGE_SIZE));
+    if (dlPage >= pages) dlPage = pages - 1;
+    if (dlPage < 0) dlPage = 0;
+    var page = rows.slice(dlPage * DL_PAGE_SIZE, (dlPage + 1) * DL_PAGE_SIZE);
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="muted">No deployment logs match.</td></tr>';
+    } else {
+      tbody.innerHTML = page.map(function (l) {
+        return '<tr data-file="' + esc(l.file) + '"><td>' + esc(fmtDate(l.finished_at)) +
+          '</td><td>' + esc(l.device_id || '') + '</td><td>' + esc(l.action || '') +
+          '</td><td>' + deployLogResult(l) + '</td><td>' + esc(fmtSize(l.size)) + '</td>' +
+          '<td><button class="linkish dlog-view">view</button></td></tr>';
+      }).join('');
+      document.querySelectorAll('#dl-rows .dlog-view').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          openDeployLogDrawer(btn.closest('tr').getAttribute('data-file'));
+        });
+      });
+    }
+    document.getElementById('dl-count').textContent =
+      rows.length + ' log' + (rows.length === 1 ? '' : 's') +
+      (rows.length === dlAll.length ? '' : ' of ' + dlAll.length);
+    document.getElementById('dl-page').textContent = 'page ' + (dlPage + 1) + ' of ' + pages;
+    document.getElementById('dl-prev').disabled = dlPage === 0;
+    document.getElementById('dl-next').disabled = dlPage >= pages - 1;
+  }
+
+  function openDeployLogDrawer(file) {
+    var drawer = document.getElementById('dl-drawer');
+    document.getElementById('dl-drawer-title').textContent = file;
+    drawer.hidden = false;
+    showDeployLog(file, document.getElementById('dl-text'));
+  }
+  function closeDeployLogDrawer() {
+    document.getElementById('dl-drawer').hidden = true;
+  }
+
   async function refreshDeployLogs() {
     var tbody = document.getElementById('dl-rows');
-    var dev = document.getElementById('dl-filter').value.trim();
-    var url = '/api/deploy-logs' + (dev ? '?device_id=' + encodeURIComponent(dev) : '');
     var r = null;
-    try { r = await fetch(url); } catch (e) { }
+    try { r = await fetch('/api/deploy-logs'); } catch (e) { }
     if (!r || !r.ok) {
       tbody.innerHTML = '<tr><td colspan="6" class="muted">Deployment logs unavailable' +
         (r ? ' (' + r.status + ')' : '') + '.</td></tr>';
       return;
     }
-    var logs = (await r.json()).logs || [];
-    if (!logs.length) {
-      tbody.innerHTML = '<tr><td colspan="6" class="muted">No deployment logs' +
-        (dev ? ' for ' + esc(dev) : '') + ' yet.</td></tr>';
+    dlAll = (await r.json()).logs || [];
+    if (!dlAll.length) {
+      document.getElementById('dl-graph').innerHTML = '';
+      tbody.innerHTML = '<tr><td colspan="6" class="muted">No deployment logs yet.</td></tr>';
+      document.getElementById('dl-count').textContent = '';
+      document.getElementById('dl-page').textContent = '';
       return;
     }
-    tbody.innerHTML = logs.map(function (l) {
-      return '<tr data-file="' + esc(l.file) + '"><td>' + esc(fmtDate(l.finished_at)) +
-        '</td><td>' + esc(l.device_id || '') + '</td><td>' + esc(l.action || '') +
-        '</td><td>' + deployLogResult(l) + '</td><td>' + esc(fmtSize(l.size)) + '</td>' +
-        '<td><button class="linkish dlog-view">view</button></td></tr>';
-    }).join('');
-    document.querySelectorAll('#dl-rows .dlog-view').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        showDeployLog(btn.closest('tr').getAttribute('data-file'),
-                      document.getElementById('dl-text'));
-      });
-    });
+    renderDeployLogs();
   }
   document.getElementById('dl-refresh').addEventListener('click', refreshDeployLogs);
-  document.getElementById('dl-filter').addEventListener('change', refreshDeployLogs);
+  ['dl-search', 'dl-action', 'dl-result'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', function () {
+      dlPage = 0; renderDeployLogs();
+    });
+  });
+  document.getElementById('dl-prev').addEventListener('click', function () {
+    if (dlPage > 0) { dlPage--; renderDeployLogs(); }
+  });
+  document.getElementById('dl-next').addEventListener('click', function () {
+    dlPage++; renderDeployLogs();
+  });
+  document.getElementById('dl-drawer-close').addEventListener('click', closeDeployLogDrawer);
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !document.getElementById('dl-drawer').hidden) {
+      closeDeployLogDrawer();
+    }
+  });
 
   // OTLP export health badge (spec 8.3), via the console's session-gated
   // proxy — never the unauthenticated :9101 directly.
