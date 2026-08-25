@@ -74,6 +74,13 @@ no event manager applet IRIS-AGENT
 no event manager applet IRIS-COPYROOT
 no event manager applet IRIS-RECLAIM
 no event manager applet IRIS-RECLAIM-BUNDLE
+no logging buffered discriminator IRISQ
+no logging console discriminator IRISQ
+no logging monitor discriminator IRISQ
+no logging discriminator IRISQ
+no ip http client secure-trustpoint IRIS
+no crypto pki trustpoint IRIS
+yes
 EOF
 return
 fi
@@ -173,8 +180,10 @@ printf 'delete /force /recursive %s\n\n' "$IRIS_STAGE_DIR" | RUN >/dev/null 2>&1
 
 echo "[4/4] verify no '$APPID' app, config footprint, or $IRIS_STAGE_DIR remains"
 if [ "$NETWORK_ATTACHMENT" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
-  inc="app-hosting appid $APPID|applet IRIS-"
-  artifact_re="^$APPID |^app-hosting appid $APPID|^event manager applet IRIS-"
+  # VLAN/SVI preserved (operator network); IRIS-named artifacts removed, so
+  # they are verified here too.
+  inc="app-hosting appid $APPID|applet IRIS-|crypto pki trustpoint IRIS|discriminator IRISQ"
+  artifact_re="^$APPID |^app-hosting appid $APPID|^event manager applet IRIS-|^crypto pki trustpoint IRIS *\$|IRISQ"
 else
   inc="app-hosting appid $APPID|applet IRIS-|interface Vlan$VLAN|crypto pki trustpoint IRIS"
   artifact_re="^$APPID |^app-hosting appid $APPID|^event manager applet IRIS-|^interface Vlan$VLAN|^crypto pki trustpoint IRIS *\$"

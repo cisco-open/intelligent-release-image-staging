@@ -89,12 +89,18 @@ setup() {
   [[ "$output" == *"no event manager applet IRIS-COPYROOT"* ]]
 }
 
-@test "inband dry-run never removes the existing VLAN/SVI/trustpoint" {
+@test "inband dry-run keeps the existing VLAN/SVI but clears IRIS-named config" {
+  # "Operator-owned" is the VLAN and its SVI -- network IRIS merely configured,
+  # which no receipt proves it created. The IRISQ discriminator and the IRIS
+  # PKI trustpoint carry IRIS's own name, so a teardown clears them in every
+  # mode: leaving them behind is what made a "clean" device refuse the next
+  # onboard on an artifact we put there ourselves.
   NETWORK_ATTACHMENT=inband INBAND_VLAN=120 run bash "$UNINSTALL" --dry-run
-  [[ "$output" != *"no vlan "* ]] && \
-  [[ "$output" != *"no interface Vlan"* ]] && \
-  [[ "$output" != *"no crypto pki trustpoint"* ]] && \
-  [[ "$output" != *"no ip http client"* ]]
+  [[ "$output" != *"no vlan "* ]] || return 1
+  [[ "$output" != *"no interface Vlan"* ]] || return 1
+  [[ "$output" == *"no crypto pki trustpoint IRIS"* ]] || return 1
+  [[ "$output" == *"no logging discriminator IRISQ"* ]] || return 1
+  [ "$status" -eq 0 ]
 }
 
 @test "dry-run with SHARE_IOS_PATH removes only iris-prefixed share files" {
@@ -146,13 +152,18 @@ setup() {
 # same agent-footprint-only scope NETWORK_ATTACHMENT=inband already uses,
 # regardless of what NETWORK_ATTACHMENT is set to.
 
-@test "force dry-run does not emit the operator-owned teardown commands" {
+@test "force dry-run keeps the operator VLAN but clears IRIS-named config" {
+  # "Operator-owned" is the VLAN and its SVI -- network IRIS merely configured,
+  # which no receipt proves it created. The IRISQ discriminator and the IRIS
+  # PKI trustpoint carry IRIS's own name, so a teardown clears them in every
+  # mode: leaving them behind is what made a "clean" device refuse the next
+  # onboard on an artifact we put there ourselves.
   IRIS_FORCE_AGENT_ONLY=1 run bash "$UNINSTALL" --dry-run
+  [[ "$output" != *"no interface Vlan"* ]] || return 1
+  [[ "$output" != *"no vlan 666"* ]] || return 1
+  [[ "$output" == *"no crypto pki trustpoint IRIS"* ]] || return 1
+  [[ "$output" == *"no logging discriminator IRISQ"* ]] || return 1
   [ "$status" -eq 0 ]
-  [[ "$output" != *"no interface Vlan"* ]] && \
-  [[ "$output" != *"no vlan 666"* ]] && \
-  [[ "$output" != *"no crypto pki trustpoint IRIS"* ]] && \
-  [[ "$output" != *"no ip http client secure-trustpoint IRIS"* ]]
 }
 
 @test "non-force dry-run DOES emit the operator-owned teardown commands" {

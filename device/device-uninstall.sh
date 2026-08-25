@@ -69,9 +69,22 @@ EOF
 }
 
 config_cleanup() {
+# What a teardown may remove is decided by NAME, not by mode. Everything below
+# carries IRIS's own name, so IRIS owns it and a teardown clears it in every
+# mode -- otherwise a "clean" device still refuses the next onboard on an
+# artifact we put there. What inband and force must NOT touch is the
+# operator's network: the VLAN and its SVI, which IRIS merely configured and
+# no receipt proves it created.
 if [ "$NETWORK_ATTACHMENT" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
 cat <<EOF
 no app-hosting appid guestshell
+no logging buffered discriminator IRISQ
+no logging console discriminator IRISQ
+no logging monitor discriminator IRISQ
+no logging discriminator IRISQ
+no ip http client secure-trustpoint IRIS
+no crypto pki trustpoint IRIS
+yes
 EOF
 return
 fi
@@ -166,8 +179,11 @@ echo "verify: no app-hosting entry, no leftover config lines, no guest-share"
 # operator-owned network, discriminator, and trustpoint, so its verify only
 # asserts the app footprint is gone.
 if [ "$NETWORK_ATTACHMENT" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
-  verify_filter="applet IRIS-"
-  artifact_re="^guestshell|^event manager applet IRIS-|guest-share"
+  # The VLAN/SVI is deliberately absent here -- it is preserved, so scanning
+  # for it would fail a teardown that did exactly what it promised. The
+  # IRIS-named artifacts ARE removed in this mode, so they are verified.
+  verify_filter="applet IRIS-|crypto pki trustpoint IRIS|discriminator IRISQ"
+  artifact_re="^guestshell|^event manager applet IRIS-|^crypto pki trustpoint IRIS *\$|IRISQ|guest-share"
 else
   verify_filter="applet IRIS-|interface Vlan$VLAN|crypto pki trustpoint IRIS|discriminator IRISQ"
   artifact_re="^guestshell|^event manager applet IRIS-|^interface Vlan$VLAN|^crypto pki trustpoint IRIS *\$|IRISQ|guest-share"

@@ -101,14 +101,19 @@ setup() {
 # must reduce to the same agent-footprint-only scope NETWORK_ATTACHMENT=inband
 # already uses, regardless of what NETWORK_ATTACHMENT is set to.
 
-@test "force dry-run does not emit the operator-owned teardown commands" {
+@test "force dry-run keeps the operator VLAN but clears IRIS-named config" {
+  # "Operator-owned" is the VLAN and its SVI -- network IRIS merely configured,
+  # which no receipt proves it created. The IRISQ discriminator and the IRIS
+  # PKI trustpoint carry IRIS's own name, so a teardown clears them in every
+  # mode: leaving them behind is what made a "clean" device refuse the next
+  # onboard on an artifact we put there ourselves.
   IRIS_FORCE_AGENT_ONLY=1 run bash "$UNINSTALL" --dry-run
+  [[ "$output" != *"no interface Vlan"* ]] || return 1
+  [[ "$output" != *"no vlan 666"* ]] || return 1
+  [[ "$output" == *"no logging discriminator IRISQ"* ]] || return 1
+  [[ "$output" == *"no crypto pki trustpoint IRIS"* ]] || return 1
+  [[ "$output" == *"no ip http client secure-trustpoint IRIS"* ]] || return 1
   [ "$status" -eq 0 ]
-  [[ "$output" != *"no interface Vlan"* ]] && \
-  [[ "$output" != *"no vlan 666"* ]] && \
-  [[ "$output" != *"discriminator IRISQ"* ]] && \
-  [[ "$output" != *"no crypto pki trustpoint IRIS"* ]] && \
-  [[ "$output" != *"no ip http client secure-trustpoint IRIS"* ]]
 }
 
 @test "non-force dry-run DOES emit the operator-owned teardown commands" {
