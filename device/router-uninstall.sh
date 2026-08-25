@@ -107,13 +107,24 @@ no event manager applet IRIS-RECLAIM-BUNDLE
 EOF
 }
 
-# Force mode skips config_cleanup, but the app-hosting stanza router-install.sh
-# writes is IRIS's own artifact, identifiable by name -- the same thing
-# device-uninstall.sh removes in its force branch. Leaving it behind both fails
-# the residue scan and keeps preflight refusing a re-onboard.
+# Force mode skips config_cleanup, which owns the removal of everything IRIS
+# configured. What it must NOT remove is the operator's network -- the
+# VirtualPortGroup and the NAT rules -- because with no receipt there is no
+# proof IRIS created those. Everything else here is IRIS-named and
+# unambiguously ours, and router preflight refuses a re-onboard while ANY of
+# it is present (see the collisions list in gui_onboard.py). Leaving it behind
+# left the device exactly as stranded as before the teardown ran, which is the
+# one thing force mode exists to prevent.
 config_cleanup_force() {
 cat <<EOF
 no app-hosting appid guestshell
+no logging buffered discriminator IRISQ
+no logging console discriminator IRISQ
+no logging monitor discriminator IRISQ
+no logging discriminator IRISQ
+no ip http client secure-trustpoint IRIS
+no crypto pki trustpoint IRIS
+yes
 EOF
 }
 
@@ -366,21 +377,18 @@ for artifact in \
   "event manager applet IRIS-"; do
   case "$RUNNING" in *"$artifact"*) forbidden="${forbidden}${forbidden:+, }$artifact" ;; esac
 done
-# Only config_cleanup removes these, and force mode skips config_cleanup by
-# design -- router-install.sh puts them on EVERY router, so scanning for them
-# after a forced teardown fails 100% of the time, and fails AFTER the
-# destructive work but BEFORE the config is saved, so a reload undoes it.
-if [ "$FORCE_AGENT_ONLY" != "1" ]; then
-  for artifact in \
-    "logging discriminator IRISQ" \
-    "logging buffered discriminator IRISQ" \
-    "logging console discriminator IRISQ" \
-    "logging monitor discriminator IRISQ" \
-    "crypto pki trustpoint IRIS" \
-    "ip http client secure-trustpoint IRIS"; do
-    case "$RUNNING" in *"$artifact"*) forbidden="${forbidden}${forbidden:+, }$artifact" ;; esac
-  done
-fi
+# Scanned in BOTH modes: force removes these too, because preflight refuses a
+# re-onboard while any of them is present and force exists to clear exactly
+# that condition.
+for artifact in \
+  "logging discriminator IRISQ" \
+  "logging buffered discriminator IRISQ" \
+  "logging console discriminator IRISQ" \
+  "logging monitor discriminator IRISQ" \
+  "crypto pki trustpoint IRIS" \
+  "ip http client secure-trustpoint IRIS"; do
+  case "$RUNNING" in *"$artifact"*) forbidden="${forbidden}${forbidden:+, }$artifact" ;; esac
+done
 case "$APP_STATE" in *guestshell*) forbidden="${forbidden}${forbidden:+, }guestshell" ;; esac
 case "$FILES" in
   *"Directory of bootflash:/guest-share/iris"*)

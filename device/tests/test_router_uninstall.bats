@@ -444,17 +444,24 @@ PY2
   [ "$status" -ne 0 ]
 }
 
-@test "forced live teardown ignores the IRIS config force mode deliberately leaves" {
-  # router-install.sh configures the IRISQ discriminators and the IRIS
-  # trustpoint on EVERY router (lines 132-135, 163-177) and only
-  # config_cleanup removes them -- which force mode skips entirely. Scanning
-  # for them after a forced teardown therefore fails on every real router,
-  # and it fails AFTER the destructive work but BEFORE the config is saved,
-  # so a reload undoes the teardown that did succeed.
-  _router_uninstall_stub_setup
-  FAKE_RUNNING_AGENT_CONFIG=yes run _router_uninstall_run_live_forced
-  [[ "$output" != *"artifacts still present"* ]] || return 1
-  [[ "$output" == *"is clean and persisted"* ]] || return 1
+@test "forced teardown removes the IRIS config that blocks a re-onboard" {
+  # Force mode exists so a stranded router can be recovered AND re-onboarded.
+  # Router preflight (gui_onboard.py collisions) refuses on the IRISQ
+  # discriminator, its bindings, and the IRIS PKI trustpoint -- all of which
+  # only config_cleanup removed, and force skips config_cleanup. So a forced
+  # teardown left behind precisely what stops the device being onboarded again,
+  # which is the condition force exists to clear.
+  #
+  # These are IRIS-named artifacts, unambiguously ours -- the same argument
+  # that applies to `app-hosting appid guestshell`. The VPG and NAT stay
+  # untouched, because no receipt proves IRIS created those.
+  IRIS_FORCE_AGENT_ONLY=1 run bash "$UNINSTALL" --dry-run
+  [[ "$output" == *"no logging discriminator IRISQ"* ]] || return 1
+  [[ "$output" == *"no logging buffered discriminator IRISQ"* ]] || return 1
+  [[ "$output" == *"no crypto pki trustpoint IRIS"* ]] || return 1
+  [[ "$output" == *"no ip http client secure-trustpoint IRIS"* ]] || return 1
+  # operator network still off limits
+  [[ "$output" != *"no interface VirtualPortGroup"* ]] || return 1
   [ "$status" -eq 0 ]
 }
 
