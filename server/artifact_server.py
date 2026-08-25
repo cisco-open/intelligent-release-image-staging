@@ -27,10 +27,19 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 # per-device credentials are reachable from the network.
 _STAGING_PREFIX = "staging" + os.sep
 
-# How long (seconds) a staging file is retained after creation.  Must be long
-# enough for device-install.sh's 3-attempt retry loop (2 × 10 s sleep = at least
-# 20 s needed; 600 s gives ample headroom for SSH reconnects and slow IOS copies).
-STAGING_MAX_AGE_SECONDS = 600
+# How long (seconds) a staging file is retained after creation.  This must cover
+# the whole span from STAGING a file to the LAST retry of FETCHING it -- not, as
+# it was originally sized, the copy retry loop alone.  A recipe stages at step 2
+# and fetches at step 5, with `guestshell enable` in between: router-install.sh
+# alone budgets 12x10 s + 30x15 s = 570 s of polling there, and that is before
+# any SSH round-trip (~3 s each, and it makes many), the IOS config apply, or
+# the copy retries.  A measured router onboard ran 900 s against that 570 s
+# budget.  At 600 s the file expired mid-install and the device's own GET
+# triggered the lazy sweep that deleted the file it was asking for, which
+# failed four routers at step 5 with an opaque "copy ... failed after 3
+# attempts".  An hour still bounds how long a per-device credential is
+# reachable from the network, which is the point of sweeping at all.
+STAGING_MAX_AGE_SECONDS = 3600
 
 
 def sweep_staging(directory, now=None):

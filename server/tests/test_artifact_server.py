@@ -374,3 +374,43 @@ def test_staging_file_swept_after_window(tmp_path):
     assert new_conf.exists(), (
         "staging file within the window must NOT be swept"
     )
+
+
+def test_staging_ttl_outlives_the_install_that_has_to_use_it():
+    """The staging TTL must cover the whole span from staging a file to the
+    LAST retry of fetching it -- not just the retry loop.
+
+    It was sized for the retry loop alone ("2 x 10 s sleep = at least 20 s
+    needed"), on the unstated assumption that a device fetches its config
+    shortly after it is staged. It does not: router-install.sh stages at step
+    2 and fetches at step 5, with `guestshell enable` in between, and that
+    step's own poll budget is larger than the TTL was. Four routers failed
+    this way -- the device's GET triggered the lazy sweep, which deleted the
+    very file the request was for, then served a 404.
+
+    The budget is parsed out of the recipe so the two cannot drift apart
+    silently again."""
+    import re as _re
+    recipe = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))), "device", "router-install.sh")
+    with open(recipe) as f:
+        body = f.read()
+    # every `for _ in $(seq 1 N); do ... sleep M` poll between stage and fetch
+    budget = 0
+    for count, sleep_s in _re.findall(
+            r"seq 1 (\d+)\s*\)?;\s*do(?:(?!done).)*?sleep (\d+)", body, _re.DOTALL):
+        budget += int(count) * int(sleep_s)
+    assert budget > 0, "could not parse the recipe's poll budget"
+    # The polls are only PART of the span: SSH round-trips (~3 s each, and the
+    # recipe makes many), applying IOS config, and the copy retry loop all sit
+    # outside those loops. A measured router onboard took 900 s against a 570 s
+    # poll budget -- about 1.6x -- so merely exceeding the budget is not
+    # enough. The old 600 s cleared it by thirty seconds and still expired
+    # mid-install on all four routers.
+    assert artifact_server.STAGING_MAX_AGE_SECONDS >= 2 * budget, (
+        "staging TTL (%ds) leaves no room over the install's own poll budget "
+        "(%ds) between staging a file and fetching it. Polls are only part of "
+        "the span; a measured onboard ran ~1.6x its poll budget, and the TTL "
+        "expiring mid-install makes the device's own GET sweep the file it is "
+        "asking for."
+        % (artifact_server.STAGING_MAX_AGE_SECONDS, budget))
