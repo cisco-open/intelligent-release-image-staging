@@ -11,6 +11,8 @@ top-level `VERSION` file.
 
 ## [Unreleased]
 
+## [2026.08.25]
+
 ### Added
 - **First-run setup is a guided flow, and Settings > Setup keeps reporting the
   same state afterwards.** A stepped wizard at its own top-level view walks
