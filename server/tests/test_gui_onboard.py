@@ -52,6 +52,21 @@ def _wait(svc, job_id, timeout=3.0):
     return svc.get_job(job_id)
 
 
+# Guest Shell now runs a collision preflight at job start, like every other
+# platform. The many tests about job MECHANICS would otherwise shell out to a
+# real device, so default it to "clean device" here; the tests that exercise
+# the preflight itself call the real implementation through this reference.
+_REAL_GUESTSHELL_PREFLIGHT = gui_onboard._default_guestshell_preflight
+
+
+@pytest.fixture(autouse=True)
+def _clean_guestshell_preflight(monkeypatch):
+    monkeypatch.setattr(
+        gui_onboard, "_default_guestshell_preflight",
+        lambda dev, env, resolved, repo_root: {
+            "status": "passed", "device_identity": "FOC0000TEST"})
+
+
 def _svc(run_fn, stage_host=None, **kw):
     fleet = _Fleet({"d1": {"device_id": "d1", "device_ip": "10.0.0.1", "vlan": "666",
                            "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
@@ -68,6 +83,13 @@ def _svc(run_fn, stage_host=None, **kw):
     # exercising run_fn as before; tests of the gate itself override
     # probe_fn explicitly via **kw.
     kw.setdefault("probe_fn", lambda dev, env: "C9300")
+    # Guest Shell now runs the same collision preflight as every other
+    # platform, so a job-start would otherwise shell out to a real device.
+    # Default it to "clean device" for the many tests that are about job
+    # mechanics; tests of the preflight itself override it via **kw.
+    kw.setdefault("guestshell_preflight_fn",
+                  lambda dev, env, resolved: {"status": "passed",
+                                              "device_identity": "FOC0000TEST"})
     kw.setdefault("mint_fn", lambda did: "TOK-" + did)
     return gui_onboard.OnboardService(
         fleet, creds, device_install="/fake/device-install.sh",
@@ -715,9 +737,16 @@ def _iox_show_version(model="IE-3400", identity="9ABC123"):
 
 
 def test_default_iox_preflight_extracts_identity_and_model(monkeypatch):
+    """IOx now probes running-config and the app list too, so it can run the
+    same IRIS-named collision checks as every other platform -- it used to
+    ask for `show version` and nothing else."""
     def run(argv, input=None, **kwargs):
-        assert input.strip() == "show version"
-        return SimpleNamespace(returncode=0, stdout=_iox_show_version())
+        assert "show version" in input
+        assert "show running-config" in input
+        return SimpleNamespace(returncode=0, stdout=(
+            "__IRIS_PREFLIGHT_VERSION__\n" + _iox_show_version() +
+            "\n__IRIS_PREFLIGHT_RUNNING__\nhostname sw1\n"
+            "\n__IRIS_PREFLIGHT_APPS__\nNo App found\n"))
     monkeypatch.setattr(gui_onboard.subprocess, "run", run)
     evidence = gui_onboard._default_iox_preflight(
         {}, {"DEVICE_IP": "192.0.2.30"}, {}, "/repo")
@@ -739,8 +768,11 @@ def test_default_iox_preflight_raises_when_identity_unparseable(monkeypatch):
     output, unexpected prompt, truncated capture) must fail closed rather
     than let an empty identity through to the installer's guard."""
     def run(argv, input=None, **kwargs):
-        return SimpleNamespace(returncode=0,
-                               stdout="Cisco IOS XE Software\ncisco IE-3400 (ARMv7) processor\n")
+        return SimpleNamespace(returncode=0, stdout=(
+            "__IRIS_PREFLIGHT_VERSION__\nCisco IOS XE Software\n"
+            "cisco IE-3400 (ARMv7) processor\n"
+            "\n__IRIS_PREFLIGHT_RUNNING__\nhostname sw1\n"
+            "\n__IRIS_PREFLIGHT_APPS__\nNo App found\n"))
     monkeypatch.setattr(gui_onboard.subprocess, "run", run)
     with pytest.raises(ValueError, match="processor board ID"):
         gui_onboard._default_iox_preflight(
@@ -1792,3 +1824,85 @@ def test_a_job_past_the_deadline_stops_blocking_the_device():
     assert svc._reap_overdue(1000.0 + gui_onboard._JOB_DEADLINE - 1) == []
     # past the deadline it is reported
     assert svc._reap_overdue(1000.0 + gui_onboard._JOB_DEADLINE + 1) == ["stuck"]
+
+
+# ---- uniform collision preflight across every platform --------------------
+#
+# preflight() used to return "not-required" for anything that was not a router,
+# so Guest Shell did no checks at all and IOx only probed identity. Three
+# platforms behaved three different ways, and a device left carrying IRIS-named
+# config was refused on a router and silently accepted elsewhere.
+
+_IRIS_NAMED = [
+    "event manager applet IRIS-AGENT authorization bypass\n",
+    "logging discriminator IRISQ mnemonics drops IOX_INST_WARN\n",
+    "logging buffered discriminator IRISQ\n",
+    "crypto pki trustpoint IRIS\n",
+    "ip http client secure-trustpoint IRIS\n",
+]
+
+
+def _common_preflight_stub(monkeypatch, running="", apps="", files=""):
+    """Feed a marker-delimited transcript to the shared preflight probe."""
+    def run(argv, input=None, **kwargs):
+        out = []
+        for name, body in (("VERSION", _iox_show_version()),
+                           ("RUNNING", running), ("APPS", apps),
+                           ("FILES", files)):
+            out.append("__IRIS_PREFLIGHT_%s__\n%s" % (name, body))
+        return SimpleNamespace(returncode=0, stdout="\n".join(out))
+    monkeypatch.setattr(gui_onboard.subprocess, "run", run)
+
+
+@pytest.mark.parametrize("collision", _IRIS_NAMED)
+def test_guestshell_preflight_rejects_iris_named_collisions(monkeypatch, collision):
+    _common_preflight_stub(monkeypatch, running=collision)
+    with pytest.raises(ValueError, match="already exists"):
+        _REAL_GUESTSHELL_PREFLIGHT(
+            {}, {"DEVICE_IP": "192.0.2.20"}, {"platform": "guestshell"}, "/repo")
+
+
+@pytest.mark.parametrize("collision", _IRIS_NAMED)
+def test_iox_preflight_rejects_iris_named_collisions(monkeypatch, collision):
+    _common_preflight_stub(monkeypatch, running=collision)
+    with pytest.raises(ValueError, match="already exists"):
+        gui_onboard._default_iox_preflight(
+            {}, {"DEVICE_IP": "192.0.2.30"}, {"platform": "iox"}, "/repo")
+
+
+def test_guestshell_preflight_passes_on_a_clean_device(monkeypatch):
+    _common_preflight_stub(monkeypatch, running="hostname sw1\n", apps="No App found\n",
+                           files="Directory of bootflash:/guest-share/\n\nNo files in directory\n")
+    evidence = _REAL_GUESTSHELL_PREFLIGHT(
+        {}, {"DEVICE_IP": "192.0.2.20"}, {"platform": "guestshell"}, "/repo")
+    assert evidence["status"] == "passed"
+    assert evidence["device_identity"]
+
+
+def test_iox_preflight_still_returns_the_identity_it_always_did(monkeypatch):
+    _common_preflight_stub(monkeypatch, running="hostname sw1\n", apps="No App found\n")
+    evidence = gui_onboard._default_iox_preflight(
+        {}, {"DEVICE_IP": "192.0.2.30"}, {"platform": "iox"}, "/repo")
+    assert evidence["status"] == "passed"
+    assert evidence["device_identity"] == "9ABC123"
+    assert evidence["detected_model"] == "IE-3400"
+
+
+def test_preflight_is_required_on_every_platform():
+    """The dispatcher must not hand back 'not-required' for a platform simply
+    because it is not a router -- that asymmetry was the bug."""
+    svc = _svc(lambda p, e, on: 0)
+    seen = {}
+
+    def stub(dev, env, resolved):
+        seen[resolved.get("platform")] = True
+        return {"status": "passed"}
+
+    svc._router_preflight = stub
+    svc._iox_preflight = stub
+    svc._guestshell_preflight = stub
+    for platform in ("router", "guestshell", "iox"):
+        result = svc.preflight("d1", {"platform": platform})
+        assert result.get("status") != "not-required", \
+            "%s still skips the collision preflight" % platform
+    assert seen == {"router": True, "guestshell": True, "iox": True}

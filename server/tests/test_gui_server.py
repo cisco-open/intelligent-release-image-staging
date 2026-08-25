@@ -1444,6 +1444,15 @@ def test_csv_import_rejects_oversized(tmp_path):
 import gui_onboard
 
 
+# Guest Shell now runs the same collision preflight as every other platform at
+# job start. These harnesses exist to exercise routes and job mechanics, so
+# default the preflight to a clean device; a test about the preflight itself
+# overrides guestshell_preflight_fn explicitly.
+_CLEAN_GUESTSHELL_PREFLIGHT = (
+    lambda dev, env, resolved: {"status": "passed",
+                                "device_identity": "FOC0000TEST"})
+
+
 def _serve_onboard(tmp_path, run_fn, **svc_kw):
     secrets_path = str(tmp_path / "secrets.json")
     app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
@@ -1461,6 +1470,7 @@ def _serve_onboard(tmp_path, run_fn, **svc_kw):
     # onboard behavior keep exercising run_fn as before; a test of the gate
     # itself would override probe_fn via svc_kw.
     svc_kw.setdefault("probe_fn", lambda dev, env: "C9300")
+    svc_kw.setdefault("guestshell_preflight_fn", _CLEAN_GUESTSHELL_PREFLIGHT)
     onboard = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
                                          mint_fn=lambda d: "TOK", run_fn=run_fn,
                                          **svc_kw)
@@ -1754,6 +1764,7 @@ def _serve_inband(tmp_path, run_fn, device=None):
                                          # the job-start reachability gate (see
                                          # gui_onboard.py) probes it before run_fn
                                          probe_fn=lambda dev, env: "C9300",
+                                         guestshell_preflight_fn=_CLEAN_GUESTSHELL_PREFLIGHT,
                                          iox_preflight_fn=lambda dev, env, resolved: {
                                              "status": "passed",
                                              "device_identity": "FCW0000TEST",
@@ -2164,6 +2175,7 @@ def _serve_onboard_audit(tmp_path, run_fn, **svc_kw):
         audit_mod.append_event(audit_path, kw.pop("event"), **kw)
 
     svc_kw.setdefault("probe_fn", lambda dev, env: "C9300")  # see _serve_onboard
+    svc_kw.setdefault("guestshell_preflight_fn", _CLEAN_GUESTSHELL_PREFLIGHT)
     onboard = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
                                          mint_fn=lambda d: "TOK", run_fn=run_fn,
                                          audit_fn=audit_fn, **svc_kw)

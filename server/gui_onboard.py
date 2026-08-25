@@ -226,6 +226,82 @@ def _default_probe(dev, env, repo_root):
     return m.group(1) if m else None
 
 
+# Collisions that mean the same thing on EVERY platform: each carries IRIS's
+# own name, so its presence says a previous deployment is still on the device.
+# Preflight used to check these for routers only, so the identical device was
+# refused as a router and silently accepted as Guest Shell or IOx.
+_IRIS_NAMED_COLLISIONS = (
+    (r"(?m)^event manager applet IRIS-(?:AGENT|COPYROOT|RECLAIM|RECLAIM-BUNDLE)(?:\s|$)",
+     "an IRIS EEM applet"),
+    (r"(?m)^logging discriminator IRISQ(?:\s|$)", "logging discriminator IRISQ"),
+    (r"(?m)^logging (?:buffered|console|monitor) discriminator IRISQ\s*$",
+     "an IRISQ logging binding"),
+    (r"(?m)^crypto pki trustpoint IRIS\s*$", "crypto pki trustpoint IRIS"),
+    (r"(?m)^ip http client secure-trustpoint IRIS\s*$",
+     "the IRIS HTTP client trustpoint binding"),
+)
+
+
+def _check_iris_named_collisions(running, extra=()):
+    """Raise on any IRIS-named artifact still present. ``extra`` carries the
+    platform's own app-hosting stanza, which differs per platform."""
+    for pattern, description in tuple(extra) + _IRIS_NAMED_COLLISIONS:
+        if re.search(pattern, running):
+            raise ValueError("%s already exists" % description)
+
+
+def _probe_sections(runner, env, commands, label):
+    """Run every command in ONE ssh login and split the output on echoed
+    markers. One login per device is what makes a large fleet submission
+    viable -- see the note in the router preflight."""
+    marker = "__IRIS_PREFLIGHT_"
+    request = "\n".join(
+        "echo %s%s__\n%s" % (marker, name.upper(), command)
+        for name, command in commands) + "\n"
+    out = subprocess.run(["bash", runner, env["DEVICE_IP"]], input=request,
+                         capture_output=True, text=True, env=env, timeout=60)
+    if out.returncode != 0:
+        raise ValueError("%s preflight could not run" % label)
+    sections = {}
+    for name, _command in commands:
+        start = "%s%s__" % (marker, name.upper())
+        match = re.search(re.escape(start) + r"\r?\n?(.*?)(?=" +
+                          re.escape(marker) + r"[A-Z_]+__|\Z)",
+                          out.stdout or "", re.DOTALL)
+        if not match:
+            raise ValueError("%s preflight did not return %s" % (label, name))
+        sections[name] = match.group(1)
+    return sections
+
+
+def _default_guestshell_preflight(dev, env, resolved, repo_root):
+    """Read-only collision check for a Guest Shell deployment -- the same
+    checks the router flow has always run, minus the VPG/NAT specifics that
+    only exist on a router."""
+    runner = os.path.join(repo_root, "lab", "device-run.sh")
+    sections = _probe_sections(runner, env, (
+        ("version", "show version"),
+        ("running", "show running-config"),
+        ("apps", "show app-hosting list"),
+        ("files", "dir bootflash:guest-share"),
+    ), "guestshell")
+    model, device_identity = _parse_show_version(sections["version"])
+    if not device_identity:
+        raise ValueError("could not determine the device's processor board ID")
+    _check_iris_named_collisions(sections["running"], extra=(
+        (r"(?m)^app-hosting appid guestshell\s*$", "guestshell app-hosting config"),))
+    if re.search(r"(?im)^\s*(?:app id\s*:\s*)?guestshell(?:\s|$)", sections["apps"]):
+        raise ValueError("guestshell is already enabled")
+    files = sections["files"]
+    if re.search(r"(?im)Directory of\s+bootflash:/?guest-share/?", files) \
+            and not re.search(r"(?im)^No files in directory\s*$", files):
+        raise ValueError("bootflash:guest-share is not empty")
+    evidence = {"status": "passed", "device_identity": device_identity}
+    if model:
+        evidence["detected_model"] = model
+    return evidence
+
+
 def _default_router_preflight(dev, env, resolved, repo_root):
     """Read-only collision check for a Catalyst 8000 VPG deployment."""
     runner = os.path.join(repo_root, "lab", "device-run.sh")
@@ -287,20 +363,8 @@ def _default_router_preflight(dev, env, resolved, repo_root):
     apps = sections["apps"]
     if re.search(r"(?im)^\s*(?:app id\s*:\s*)?guestshell(?:\s|$)", apps):
         raise ValueError("guestshell is already enabled")
-    collisions = (
-        (r"(?m)^app-hosting appid guestshell\s*$", "guestshell app-hosting config"),
-        (r"(?m)^event manager applet IRIS-(?:AGENT|COPYROOT|RECLAIM|RECLAIM-BUNDLE)(?:\s|$)",
-         "an IRIS EEM applet"),
-        (r"(?m)^logging discriminator IRISQ(?:\s|$)", "logging discriminator IRISQ"),
-        (r"(?m)^logging (?:buffered|console|monitor) discriminator IRISQ\s*$",
-         "an IRISQ logging binding"),
-        (r"(?m)^crypto pki trustpoint IRIS\s*$", "crypto pki trustpoint IRIS"),
-        (r"(?m)^ip http client secure-trustpoint IRIS\s*$",
-         "the IRIS HTTP client trustpoint binding"),
-    )
-    for pattern, description in collisions:
-        if re.search(pattern, running):
-            raise ValueError("%s already exists" % description)
+    _check_iris_named_collisions(running, extra=(
+        (r"(?m)^app-hosting appid guestshell\s*$", "guestshell app-hosting config"),))
     guest_share = sections["guest_share"]
     if re.search(r"(?im)Directory of\s+bootflash:/?guest-share/?", guest_share) \
             and not re.search(r"(?im)^No files in directory\s*$", guest_share):
@@ -389,24 +453,28 @@ def apply_router_preflight(resolved, evidence):
 
 
 def _default_iox_preflight(dev, env, resolved, repo_root):
-    """Read-only 'show version' probe that resolves an IOx device's live
-    processor board ID (and model) over the same lab/device-run.sh channel
-    the router preflight uses. device/iox/install.sh hard-requires
-    EXPECTED_DEVICE_IDENTITY (and MODEL) so a typo'd DEVICE_IP can't tear
-    down the app on the wrong switch -- but the console has no other source
-    for the live identity, so IOx gets its own single-purpose probe instead
-    of the router's fuller collision-check preflight. Raises ValueError
-    (fail-closed) when the identity can't be parsed; never proceeds with an
-    empty value."""
+    """Read-only preflight for an IOx deployment: the live processor board ID
+    (device/iox/install.sh hard-requires EXPECTED_DEVICE_IDENTITY so a typo'd
+    DEVICE_IP cannot reconfigure the wrong switch) AND the same IRIS-named
+    collision checks every other platform runs.
+
+    It used to resolve identity and nothing else, which is why a device still
+    carrying IRIS config was refused as a router and accepted as IOx. Raises
+    ValueError (fail-closed) on an unparseable identity; never proceeds with
+    an empty value."""
     runner = os.path.join(repo_root, "lab", "device-run.sh")
-    out = subprocess.run(["bash", runner, env["DEVICE_IP"]],
-                         input="show version\n", capture_output=True,
-                         text=True, env=env, timeout=60)
-    if out.returncode != 0:
-        raise ValueError("iox preflight could not run 'show version'")
-    model, device_identity = _parse_show_version(out.stdout or "")
+    appid = str((resolved or {}).get("iox_appid") or "iris")
+    sections = _probe_sections(runner, env, (
+        ("version", "show version"),
+        ("running", "show running-config"),
+        ("apps", "show app-hosting list"),
+    ), "iox")
+    model, device_identity = _parse_show_version(sections["version"])
     if not device_identity:
         raise ValueError("could not determine the device's processor board ID")
+    _check_iris_named_collisions(sections["running"], extra=(
+        (r"(?m)^app-hosting appid %s\s*$" % re.escape(appid),
+         "the %s app-hosting config" % appid),))
     evidence = {"status": "passed", "device_identity": device_identity}
     if model:
         evidence["detected_model"] = model
@@ -441,7 +509,8 @@ class OnboardService:
                  mint_fn=None, run_fn=_default_runner, now_fn=time.time,
                  probe_fn=None, artifacts_dir=None, audit_fn=None,
                  max_concurrent=None, clear_state_fn=None, receipts=None,
-                 preflight_fn=None, iox_preflight_fn=None, log_dir=None):
+                 preflight_fn=None, iox_preflight_fn=None, log_dir=None,
+                 guestshell_preflight_fn=None):
         self.fleet = fleet
         self.creds = creds
         self.server_dir = server_dir or os.path.dirname(os.path.abspath(__file__))
@@ -463,6 +532,9 @@ class OnboardService:
         self._probe = probe_fn or (lambda dev, env: _default_probe(dev, env, self.repo_root))
         self._router_preflight = preflight_fn or (
             lambda dev, env, resolved: _default_router_preflight(
+                dev, env, resolved, self.repo_root))
+        self._guestshell_preflight = guestshell_preflight_fn or (
+            lambda dev, env, resolved: _default_guestshell_preflight(
                 dev, env, resolved, self.repo_root))
         self._iox_preflight = iox_preflight_fn or (
             lambda dev, env, resolved: _default_iox_preflight(
@@ -601,11 +673,20 @@ class OnboardService:
         return resolved_dev, env
 
     def preflight(self, device_id, resolved):
-        """Run a router deployment's read-only checks before token minting."""
+        """Run a deployment's read-only checks before token minting.
+
+        Every platform runs one. Returning "not-required" for anything that
+        was not a router meant the same device was refused as a router and
+        silently accepted as Guest Shell or IOx."""
         dev, env = self._build_env(device_id, mint=False, resolved=resolved)
-        if resolved.get("platform") != "router":
-            return {"status": "not-required"}
-        return self._router_preflight(dev, env, resolved)
+        platform = resolved.get("platform")
+        if platform == "router":
+            return self._router_preflight(dev, env, resolved)
+        if platform == "iox":
+            return self._iox_preflight(dev, env, resolved)
+        if platform == "guestshell":
+            return self._guestshell_preflight(dev, env, resolved)
+        return {"status": "not-required"}
 
     def _resolve(self, device_id, dev, env, action="onboard"):
         """Resolve (platform, script) for a device, using the live probe (if
@@ -738,15 +819,23 @@ class OnboardService:
                                            env_extra=j.get("env_extra"))
                 platform, script = self._resolve(device_id, dev, env, action)
                 if action == "onboard" and platform == "guestshell":
-                    # Router and IOx workers do live preflight below. Guest
-                    # Shell has no equivalent check before its installer, so
-                    # fail clearly for an unreachable device here instead of
-                    # surfacing an opaque SSH timeout from the recipe.
+                    # The reachability probe stays AHEAD of the collision
+                    # preflight: an unreachable device is far more common than
+                    # a collision, and "preflight could not run" tells an
+                    # operator nothing about which of the two to go and check.
                     if not self._probe(dev, env):
                         raise ValueError(
                             "cannot reach device %s — ping/SSH probe "
                             "failed; check the device IP and credentials"
                             % env.get("DEVICE_IP", device_id))
+                    # Guest Shell used to stop there, so a device still
+                    # carrying IRIS config was refused as a router and
+                    # silently accepted here.
+                    try:
+                        self._guestshell_preflight(
+                            dev, env, j.get("resolved") or dev)
+                    except Exception as exc:
+                        raise ValueError("preflight failed: %s" % exc)
                 if action == "onboard" and platform == "router":
                     try:
                         evidence = self._router_preflight(
