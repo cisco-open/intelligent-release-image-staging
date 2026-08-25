@@ -1132,6 +1132,10 @@
 
   // ---- Overview ----
   async function refreshOverview() {
+    // Telemetry export health is dashboard state, so it rides the Overview
+    // refresh. Deliberately not awaited with the overview fetch: a slow or
+    // unreachable collector must not delay the cards.
+    refreshTelemetryHealth();
     var r = await fetch('/api/overview'); if (!r.ok) return;
     var ov = await r.json();
     var cards = [['Images', ov.images], ['Devices', ov.devices],
@@ -2093,7 +2097,7 @@
 
   async function refreshMonitoring() {
     await Promise.all([refreshHistogram(), refreshAuditTable(),
-                       refreshTelemetryHealth(), refreshDeployLogs()]);
+                       refreshDeployLogs()]);
   }
 
   // ---- Monitoring: persistent deployment logs pane ----

@@ -5669,3 +5669,27 @@ def test_force_undeploy_delivers_the_force_flag_to_the_recipe(tmp_path):
             "forced undeploy reached the recipe without the force flag")
     finally:
         stop()
+
+
+def test_telemetry_health_badge_lives_on_overview_not_monitoring():
+    """Telemetry export health belongs on the Overview dashboard.
+
+    The Monitoring page is about the audit trail and deployment logs; a
+    telemetry-export badge in its heading described something that page has
+    nothing to do with. Overview is the dashboard, so the badge moves there
+    and must refresh with the Overview, not with Monitoring."""
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    # the badge is declared inside the Overview heading
+    overview = html.split('id="view-overview"', 1)[1].split("</section>", 1)[0]
+    assert 'id="telemetry-health"' in overview
+    # ...and no longer anywhere in the Monitoring section
+    monitoring = html.split('id="view-monitoring"', 1)[1].split("</section>", 1)[0]
+    assert 'id="telemetry-health"' not in monitoring
+    # it refreshes with the Overview, not as part of refreshMonitoring()
+    monitoring_fn = js.split("async function refreshMonitoring()", 1)[1].split("}", 1)[0]
+    assert "refreshTelemetryHealth" not in monitoring_fn
+    overview_fn = js.split("async function refreshOverview()", 1)[1].split("\n  }", 1)[0]
+    assert "refreshTelemetryHealth" in overview_fn
