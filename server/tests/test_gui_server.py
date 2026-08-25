@@ -5884,3 +5884,29 @@ def test_setup_wizard_shows_every_step_even_when_already_complete():
     assert "renderWizardStepList" in js
     # and any step can be opened directly, not just the first incomplete one
     assert "wz-steplist-item" in js
+
+
+def test_onboard_category_chip_does_not_read_as_the_sentence_subject():
+    """auditRowHtml puts the category chip immediately before the verb phrase,
+    so an undeploy event rendered as "onboard started undeploying <device>" --
+    the chip labels the SUBSYSTEM, but it sits where a sentence subject goes.
+
+    One service handles both onboard and undeploy jobs, so the stored category
+    is legitimately "onboard" and must stay that way: it is persisted in
+    audit.jsonl and drives the category filter. Only the visible label changes."""
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+
+    # a display-label map exists and the chip renders through it
+    assert "AUDIT_CAT_LABELS" in js
+    chip = js.split("function auditRowHtml", 1)[1].split("return", 1)[0]
+    assert "AUDIT_CAT_LABELS" in chip, "the chip still prints the raw category"
+    # ...while the class stays keyed on the real category, for the styling
+    assert "cat-' + esc(category)" in chip, \
+        "the chip class must stay keyed on the REAL category, for styling"
+    # the filter still SENDS onboard, whatever it displays
+    assert 'value="onboard"' in html
+    # and the label an operator reads is no longer the bare subsystem name
+    assert ">onboard</option>" not in html

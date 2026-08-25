@@ -2344,13 +2344,21 @@
     return '<span class="badge ' + (result === 'ok' ? 'badge-ok' : 'badge-fail') +
       '">' + esc(result) + '</span>';
   }
+  // The chip labels the SUBSYSTEM, but it sits immediately before the verb
+  // phrase, so it reads as the sentence's subject: one service runs both
+  // onboard and undeploy jobs, which rendered as "onboard started undeploying
+  // <device>". The stored category stays "onboard" -- it is persisted in
+  // audit.jsonl and drives the category filter -- only the label changes.
+  var AUDIT_CAT_LABELS = { onboard: 'deployment' };
+
   function auditRowHtml(e) {
     var category = e.category || AUDIT_LEGACY_CATS[e.event] || 'system';
+    var catLabel = AUDIT_CAT_LABELS[category] || category;
     var target = e.target || e.device_id || '';
     var actor = e.actor || (e.device_id ? 'device:' + e.device_id : 'system');
     var detail = e.detail ||
       (e.secret_name ? e.secret_name + ' ' + (e.old_id || '?') + ' -> ' + (e.new_id || '?') : '');
-    var msg = '<span class="cat-tag cat-' + esc(category) + '">' + esc(category) + '</span> ' +
+    var msg = '<span class="cat-tag cat-' + esc(category) + '">' + esc(catLabel) + '</span> ' +
       auditVerb(e, target) +
       (detail ? ' <span class="detail">— ' + esc(detail) + '</span>' : '') +
       (e.src_ip && category === 'auth' ? ' <span class="muted">(from ' + esc(e.src_ip) + ')</span>' : '');
