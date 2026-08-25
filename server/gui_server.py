@@ -66,6 +66,18 @@ def _map_cfg_line():
                       .replace("&", "\\u0026"))
     return ('window.IRIS_MAP_CFG = {"swarmUrl":"/api/swarm","pull":true,'
             '"eventsUrlTemplate":%s};' % payload)
+def _telemetry_status_args():
+    """(override_endpoint, override_enabled, env_endpoint, env_enabled) for
+    setup_status.build_status's telemetry card -- the exact same resolution
+    _settings_info uses for telemetry_destination (console override file,
+    else IRIS_OTLP_ENDPOINT / IRIS_OBSERVABILITY), read fresh at request time
+    so the setup checklist never disagrees with the Telemetry settings pane."""
+    state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
+    dest = telemetry_destination.read(
+        telemetry_destination.settings_path(state_dir))
+    return (dest["endpoint"], dest["enabled"],
+            os.environ.get("IRIS_OTLP_ENDPOINT", "").strip(),
+            telemetry.observability_enabled())
 _CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".js": "application/javascript",
@@ -1193,7 +1205,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     os.environ.get("IRIS_CERT", _IRIS_CERT_DEFAULT),
                     os.path.join(artifacts_dir, "iris-catalog.pem"),
                     info["username"],
-                    creds.get_stage_host() if creds is not None else None))
+                    creds.get_stage_host() if creds is not None else None,
+                    *_telemetry_status_args()))
                 return
             if path == "/api/settings":
                 info = app.session_info(self._sid())

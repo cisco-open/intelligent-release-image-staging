@@ -128,9 +128,13 @@ def _artifacts(tmp_path, arm_pem, amd_pem, served_pem=CERT_A,
     return str(d), str(served)
 
 
-def _call(d, served, admin="admin", stage_host=None):
+def _call(d, served, admin="admin", stage_host=None,
+         telemetry_override_endpoint=None, telemetry_override_enabled=None,
+         telemetry_env_endpoint="", telemetry_env_enabled=False):
     return setup_status.build_status(
-        d, served, os.path.join(d, "iris-catalog.pem"), admin, stage_host)
+        d, served, os.path.join(d, "iris-catalog.pem"), admin, stage_host,
+        telemetry_override_endpoint, telemetry_override_enabled,
+        telemetry_env_endpoint, telemetry_env_enabled)
 
 
 def test_all_ok(tmp_path):
@@ -147,6 +151,67 @@ def test_stage_host_unset(tmp_path):
     d, served = _artifacts(tmp_path, CERT_A, CERT_A)
     st = _call(d, served, stage_host={"configured": False, "username": ""})
     assert st["stage_host"]["state"] == "unset"
+
+
+# --- telemetry destination card --------------------------------------
+#
+# telemetry.read(path) returns {"endpoint": None|str, "enabled": None|bool}
+# where None means "inherit the deployment environment" (IRIS_OTLP_ENDPOINT /
+# IRIS_OBSERVABILITY). build_status is pure, so the caller (gui_server.py)
+# resolves the file and the env and hands both in; these tests exercise that
+# resolution the same way the route does.
+
+def test_telemetry_explicit_override_is_ok_and_reported_as_override(tmp_path):
+    d, served = _artifacts(tmp_path, CERT_A, CERT_A)
+    st = _call(d, served,
+              telemetry_override_endpoint="https://collector.example:4318",
+              telemetry_override_enabled=True,
+              # a deployment default is ALSO present -- the override must win
+              telemetry_env_endpoint="https://env-default:4318",
+              telemetry_env_enabled=False)
+    assert st["telemetry"]["state"] == "ok"
+    assert st["telemetry"]["source"] == "override"
+    assert st["telemetry"]["endpoint"] == "https://collector.example:4318"
+    assert st["telemetry"]["enabled"] is True
+
+
+def test_telemetry_deployment_default_is_ok_and_reported_as_env(tmp_path):
+    """No console override at all -- the env-supplied endpoint and enabled
+    flag are what resolve, and the card must say so (not 'override')."""
+    d, served = _artifacts(tmp_path, CERT_A, CERT_A)
+    st = _call(d, served,
+              telemetry_override_endpoint=None,
+              telemetry_override_enabled=None,
+              telemetry_env_endpoint="https://otel.example:4318",
+              telemetry_env_enabled=True)
+    assert st["telemetry"]["state"] == "ok"
+    assert st["telemetry"]["source"] == "env"
+    assert st["telemetry"]["endpoint"] == "https://otel.example:4318"
+    assert st["telemetry"]["enabled"] is True
+
+
+def test_telemetry_nothing_configured_is_unset(tmp_path):
+    """No override and no deployment default anywhere -- nothing is being
+    exported, and this must never read as ok."""
+    d, served = _artifacts(tmp_path, CERT_A, CERT_A)
+    st = _call(d, served,
+              telemetry_override_endpoint=None,
+              telemetry_override_enabled=None,
+              telemetry_env_endpoint="",
+              telemetry_env_enabled=False)
+    assert st["telemetry"]["state"] == "unset"
+    assert st["telemetry"]["endpoint"] == ""
+
+
+def test_telemetry_export_disabled_is_not_ok_even_with_an_endpoint(tmp_path):
+    """An endpoint alone is not enough -- if export is gated off, nothing is
+    actually being sent, so this must not read as ok."""
+    d, served = _artifacts(tmp_path, CERT_A, CERT_A)
+    st = _call(d, served,
+              telemetry_override_endpoint="https://collector.example:4318",
+              telemetry_override_enabled=False)
+    assert st["telemetry"]["state"] != "ok"
+    assert st["telemetry"]["state"] == "unset"
 
 
 def test_stale_package_wins_over_ok_sibling(tmp_path):
@@ -225,7 +290,9 @@ def test_stale_package_not_masked_by_missing_distributed_cert(tmp_path):
 
 def test_response_carries_no_secret_material(tmp_path):
     d, served = _artifacts(tmp_path, CERT_A, CERT_A)
-    st = _call(d, served, stage_host={"configured": True, "username": "svc"})
+    st = _call(d, served, stage_host={"configured": True, "username": "svc"},
+              telemetry_override_endpoint="https://collector.example:4318",
+              telemetry_override_enabled=True)
     blob = repr(st).lower()
     for banned in ("password", "secret", "token", "private", "begin "):
         assert banned not in blob
@@ -266,6 +333,19 @@ def test_setup_pane_explains_why_each_step_matters():
     html = _webroot("index.html")
     for phrase in ("pins this server", "Guest Shell", "stage host"):
         assert phrase.lower() in html.lower()
+
+
+def test_setup_pane_has_a_telemetry_card_linked_to_the_telemetry_settings():
+    html = _webroot("index.html")
+    js = _webroot("app.js")
+    assert 'id="setup-td-chip"' in html
+    # scope to the card itself (between its heading and the next h3) so this
+    # cannot pass merely because the sidebar nav happens to link there too
+    card = html.split('id="setup-td-chip"', 1)[1].split("<h3>", 1)[0]
+    assert 'href="#settings/telemetry"' in card
+    assert "published anywhere" in card.lower()
+    assert "s.telemetry.state" in js
+    assert "setupTelemetryNote" in js
 
 
 # --- console pane: packages.reason must not produce the wrong remedy ------
@@ -351,9 +431,10 @@ def test_refresh_setup_paints_unknown_on_failed_or_thrown_fetch():
 
     reset = js.split("function setupShowUnknown() {", 1)[1].split(
         "\n  }", 1)[0]
-    for chip_id in ("setup-admin-chip", "setup-sh-chip", "setup-pkg-chip"):
+    for chip_id in ("setup-admin-chip", "setup-td-chip", "setup-sh-chip",
+                    "setup-pkg-chip"):
         assert ("getElementById('%s')" % chip_id) in reset
-    assert reset.count("setupChip('unknown')") == 3
+    assert reset.count("setupChip('unknown')") == 4
     assert "#setup-pkg-table tbody" in reset
     assert "setup-pkg-remedy" in reset
 
@@ -382,3 +463,26 @@ def test_fingerprint_never_returns_a_key_block(tmp_path):
     p.write_text("-----BEGIN PRIVATE KEY-----\nMIIEvQIBADAN\n"
                  "-----END PRIVATE KEY-----\n")
     assert setup_status.read_pem_fingerprint(str(p)) is None
+
+
+# --- first-run handoff into the checklist ----------------------------------
+# Creating the admin IS step one of post-install setup, so the sign-in right
+# after first-run setup must continue into Settings > Setup rather than drop the
+# operator on the Overview with the remaining steps buried in a submenu.
+
+def test_first_run_setup_hands_off_to_the_checklist():
+    setup_js = _webroot("setup.js")
+    login_js = _webroot("login.js")
+
+    # armed ONLY on a genuine first-run success, never on the 409
+    ok_branch = setup_js.split("if (res.ok) {", 1)[1].split("} else if", 1)[0]
+    assert "iris_post_setup" in ok_branch
+    conflict = setup_js.split("res.status === 409", 1)[1].split("} else", 1)[0]
+    assert "iris_post_setup" not in conflict, \
+        "a 409 means setup already ran; it must not arm the handoff"
+
+    # consumed once, and it must land on the Setup pane
+    assert "iris_post_setup" in login_js
+    assert "'/#settings/setup'" in login_js
+    assert "removeItem('iris_post_setup')" in login_js, \
+        "the handoff must be one-shot, or every later sign-in lands there"

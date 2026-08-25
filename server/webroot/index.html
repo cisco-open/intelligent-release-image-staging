@@ -214,7 +214,7 @@
       <section id="view-settings" hidden>
         <h2>Settings</h2>
         <div id="settings-pane-setup" hidden>
-          <p class="muted">Three things to complete after installing a server.
+          <p class="muted">Four things to complete after installing a server.
             They can be done in any order, and this page keeps reporting their
             state so you can come back and check.</p>
 
@@ -222,6 +222,13 @@
           <p class="muted">The single account that signs in to this console.
             It was created during first-run setup.</p>
           <p><a href="#settings/general" class="btn ghost">Change password</a></p>
+
+          <h3>Telemetry destination <span id="setup-td-chip"></span></h3>
+          <p class="muted">Telemetry export is how swarm progress, device
+            reports and export health reach the dashboards. Without a
+            destination configured, none of it is published anywhere.</p>
+          <p class="muted" id="setup-td-note"></p>
+          <p><a href="#settings/telemetry" class="btn ghost">Configure</a></p>
 
           <h3>Stage host (Docker onboarding) <span id="setup-sh-chip"></span></h3>
           <p class="muted">Credentials IRIS uses to reach the Docker host that

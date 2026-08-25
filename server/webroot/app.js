@@ -1226,12 +1226,25 @@
     return parts.join(' ');
   }
 
+  // telemetry.source distinguishes an explicit console override from the
+  // deployment default (whatever the compose/env file happens to set) --
+  // meaningfully different to an operator, so this note names which one is
+  // in effect rather than just showing the chip.
+  function setupTelemetryNote(t) {
+    var scope = t.source === 'override' ? 'console override' : 'deployment default';
+    if (t.state === 'ok') return 'Exporting to ' + t.endpoint + ' (' + scope + ').';
+    if (!t.enabled) return 'Export is disabled (' + scope + ').';
+    return 'No endpoint is set (' + scope + ').';
+  }
+
   // A failed or thrown fetch must never leave a PREVIOUS render on screen --
   // that would be evidence-free chips still claiming "done" (spec:
   // error handling must show "cannot determine" per card and never silently
   // render a stale/empty checklist as if it were healthy).
   function setupShowUnknown() {
     document.getElementById('setup-admin-chip').innerHTML = setupChip('unknown');
+    document.getElementById('setup-td-chip').innerHTML = setupChip('unknown');
+    document.getElementById('setup-td-note').textContent = '';
     document.getElementById('setup-sh-chip').innerHTML = setupChip('unknown');
     document.getElementById('setup-pkg-chip').innerHTML = setupChip('unknown');
     document.querySelector('#setup-pkg-table tbody').innerHTML = '';
@@ -1250,6 +1263,10 @@
     }
     document.getElementById('setup-admin-chip').innerHTML =
       setupChip(s.admin.state);
+    document.getElementById('setup-td-chip').innerHTML =
+      setupChip(s.telemetry.state);
+    document.getElementById('setup-td-note').textContent =
+      setupTelemetryNote(s.telemetry);
     document.getElementById('setup-sh-chip').innerHTML =
       setupChip(s.stage_host.state);
     document.getElementById('setup-pkg-chip').innerHTML =

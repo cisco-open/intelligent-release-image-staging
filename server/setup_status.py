@@ -146,9 +146,39 @@ def _worst(states):
     return max(states, key=lambda s: _RANK.get(s, 2))
 
 
+def _telemetry_status(override_endpoint, override_enabled,
+                      env_endpoint, env_enabled):
+    """Resolve the effective telemetry destination card.
+
+    Mirrors the /api/settings resolution exactly (per-field: an explicit
+    console override wins, else the deployment environment -- IRIS_OTLP_ENDPOINT
+    / IRIS_OBSERVABILITY) so this card can never disagree with the Telemetry
+    settings pane. ``ok`` requires BOTH export enabled and an endpoint that
+    actually resolves -- an enabled export with nowhere to send is still
+    nothing reaching the dashboards, so it is not ok (governing rule: never
+    green on missing evidence).
+    """
+    is_override = override_endpoint is not None or override_enabled is not None
+    endpoint = (override_endpoint if override_endpoint is not None
+                else (env_endpoint or ""))
+    enabled = bool(override_enabled if override_enabled is not None
+                   else env_enabled)
+    return {
+        "state": "ok" if (enabled and endpoint) else "unset",
+        # "override" = an operator explicitly set this from the console;
+        # "env" = whatever the deployment's compose/env file happens to say.
+        # Meaningfully different to an operator, per the spec.
+        "source": "override" if is_override else "env",
+        "endpoint": endpoint,
+        "enabled": enabled,
+    }
+
+
 def build_status(artifacts_dir, served_cert_path, distributed_cert_path,
-                 admin_username, stage_host):
-    """Assemble the three-card setup status. Pure: all inputs are supplied."""
+                 admin_username, stage_host,
+                 telemetry_override_endpoint=None, telemetry_override_enabled=None,
+                 telemetry_env_endpoint="", telemetry_env_enabled=False):
+    """Assemble the four-card setup status. Pure: all inputs are supplied."""
     reference = read_pem_fingerprint(served_cert_path)
     distributed = read_pem_fingerprint(distributed_cert_path)
     # A disagreement here is worse than a stale package: every NEW onboard is
@@ -202,6 +232,9 @@ def build_status(artifacts_dir, served_cert_path, distributed_cert_path,
             "state": "ok" if admin_username else "unknown",
             "username": admin_username or "",
         },
+        "telemetry": _telemetry_status(
+            telemetry_override_endpoint, telemetry_override_enabled,
+            telemetry_env_endpoint, telemetry_env_enabled),
         "stage_host": {
             "state": "ok" if stage_host.get("configured") else "unset",
             "username": stage_host.get("username", ""),
