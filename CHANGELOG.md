@@ -12,10 +12,29 @@ top-level `VERSION` file.
 ## [Unreleased]
 
 ### Added
-- **Settings > Setup gives the console a read-only, post-install completion
-  checklist — three cards for admin account, stage-host credentials, and
-  device packages — and a package card that catches a certificate-drift
-  failure mode with no other symptom.** `GET /api/settings/setup-status`
+- **First-run setup is a guided flow, and Settings > Setup keeps reporting the
+  same state afterwards.** A stepped wizard at its own top-level view walks
+  telemetry destination, stage host and device packages, with the admin
+  account shown as already complete because first-run has just created it.
+  The forms are hosted in the flow rather than linked to, so completing setup
+  no longer bounces the operator between Settings pages; a step list shows
+  every step's state and any step can be opened directly, which matters
+  because a step already satisfied by the deployment environment (a telemetry
+  destination from `IRIS_OTLP_ENDPOINT`) would otherwise be skipped past and
+  read as missing. Every step can be skipped and the wizard resumes at the
+  first incomplete one — necessarily, since the device-packages step can never
+  be completed from the console at all: the container has no Docker socket, so
+  it can detect a stale package but not rebuild one, and that step is shaped as
+  detect-and-instruct rather than as a form whose submit button would be a lie.
+  A banner brings the operator back while anything is unfinished, dismissed for
+  the session only, because a package that goes stale later is a silent
+  regression and a permanently dismissed banner would hide exactly the failure
+  this catches. The telemetry and stage-host forms live in one template cloned
+  into whichever surface is showing, so there is a single implementation of
+  each. First-run sign-in hands off to the flow. Settings > Setup survives as
+  the status panel — four cards, admin included — and its actions now enter the
+  flow. The package card catches a certificate-drift
+  failure mode with no other symptom: `GET /api/settings/setup-status`
   (session-gated) is backed by `server/setup_status.py`, which fingerprints
   the certificate this server currently serves (`IRIS_CERT`, reading only
   the leading certificate block so the combined cert+key file parses), the
@@ -49,6 +68,54 @@ top-level `VERSION` file.
   and re-checks. It never touches a device.
 
 ### Changed
+- **Every platform now runs the same collision preflight.** It used to run for
+  routers only: `preflight()` returned "not-required" for anything else, IOx
+  resolved a device identity and nothing more, and Guest Shell did no more than
+  a reachability ping. The same device still carrying IRIS configuration was
+  therefore refused as a router and silently accepted as the other two. The
+  IRIS-named collisions — the EEM applets, the IRISQ discriminator and its
+  logging bindings, `crypto pki trustpoint IRIS`, `ip http client
+  secure-trustpoint IRIS` — move into one shared set that every platform
+  checks, and each keeps what is genuinely its own: the router its Catalyst
+  8000 gate, VirtualPortGroup collision, app-subnet overlap and NAT interface
+  check; Guest Shell the guest-share emptiness check; and each its own
+  app-hosting stanza, `guestshell` on one and `iris` on the other. IOx
+  consequently probes running-config and the app list alongside `show version`,
+  over the single-login marker channel the router already used; what it reports
+  about identity is unchanged. On Guest Shell the reachability probe stays
+  ahead of the collision check deliberately — an unreachable device is far
+  commoner than a collision, and "preflight could not run" tells an operator
+  nothing about which of the two to go and look at. Paired with the teardown
+  change above, undeploy now clears exactly what preflight refuses.
+- **Telemetry export health moved from Monitoring to the Overview dashboard.**
+  Monitoring is the audit trail and the deployment logs; a telemetry-export
+  badge in its heading described something that page has nothing to do with.
+  It refreshes with the Overview, and is deliberately not awaited alongside the
+  overview fetch so an unreachable collector cannot hold up the cards.
+- **The devices table can be filtered, and bulk actions act on the filter.**
+  Every meaningful column gets a filter — free text across device, IP and
+  model, plus management type, platform, credential, telemetry, peer policy and
+  status — and only matching rows are rendered, so filtering and then "select
+  all" is how an operator acts on a subset instead of hand-picking rows out of
+  the whole fleet. The filter predicate reuses the same derivations the row
+  renderer uses, so a filter can never disagree with the cell being read.
+  Quarantine and release join the other bulk actions under the same
+  selected-action lock; because the peer-policy API is one device per call and
+  carries a revision, they run in sequence carrying it forward, and a losing
+  race re-reads the policy once rather than stamping a stale revision over
+  someone else's change.
+- **The deployment logs get the audit page's time filter, not a picture of
+  one.** `GET /api/deploy-logs/histogram` bins logs into buckets over a window,
+  mirroring the audit histogram's semantics including the `since_ts`/`until_ts`
+  brush window, and `GET /api/deploy-logs` now accepts `after_ts`/`before_ts`
+  so a selection narrows the list. The console gains range chips, a
+  server-binned histogram and a brush with edge handles, panning and
+  click-to-clear; the timeline and the table refresh together, or a selection
+  would move the bars while the rows below still showed the old range. Search
+  covers device, action and result with action and result pickers, results are
+  paged, and a log opens in a right-hand drawer — closed on Escape, its slide
+  dropped entirely under `prefers-reduced-motion` — so the list stays where the
+  operator left it instead of being pushed off screen.
 - **Router preflight for `POST /api/devices/<id>/onboard` now runs once, in
   the bounded worker pool, instead of twice.** It used to run synchronously
   before the HTTP request returned, and then again inside the queued job
@@ -81,6 +148,30 @@ top-level `VERSION` file.
   the polling itself.
 
 ### Fixed
+- **The console never refreshed a view on its own.** `setInterval` appeared
+  nowhere, and the only live mechanism was a per-job `EventSource`, so a view
+  updated on navigation or after an explicit action and at no other time —
+  device state that changes server-side (heartbeats, staging progress,
+  deployment state) stayed invisible until the operator navigated away and came
+  back. `refreshDevices()` had even been written to preserve batch checkbox
+  selections "across the periodic re-render" that never existed. Each view now
+  names the refresh its poll repeats; Settings is excluded, being a set of
+  forms that re-rendering under the cursor would clear, and a hidden tab skips
+  its tick and refreshes on return.
+- **The setup nudge could never hide.** `.nudge { display:flex }` is a class
+  selector and outranks the user-agent stylesheet's `[hidden] { display:none }`,
+  so setting `hidden` changed nothing on screen; because the code returns before
+  rewriting the text once the outstanding count reaches zero, a fully configured
+  server kept displaying a stale "1 setup step still needs attention". `.badge`
+  had the same shape, leaving the telemetry-health badge as an empty pill until
+  its first refresh. Both are now pinned back to `display:none` when hidden.
+- **An audit row read "onboard started undeploying &lt;device&gt;".** The
+  category chip labels the subsystem, but it sits immediately before the verb
+  phrase, where a sentence's subject goes — and one service runs both onboard
+  and undeploy jobs, so the category legitimately is `onboard`. The stored value
+  is unchanged, being persisted in the audit trail and driving the category
+  filter; only the label an operator reads becomes "deployment", which is true
+  of both actions.
 - **An outbox ack watermark above the policy document's own revision is now
   treated as impossible and ignored, instead of being honored.**
   `last_operation_exported_revision` is persisted in the enforcement status
@@ -107,19 +198,45 @@ top-level `VERSION` file.
   `not_active` for a device that lost its assignment), and never from the
   device's own claimed `obs_state` — a device claiming `observed` while the
   server has it disabled is still recorded as `disabled`.
-- **A forced undeploy on Guest Shell and IOx now honors
-  `IRIS_FORCE_AGENT_ONLY`, which it previously ignored.** The console sets
-  this flag when it undeploys a device that has no deployment receipt — for
-  example, an onboard that died after enabling Guest Shell but before its
-  receipt was written — because with no receipt there is no proof the
-  VLAN/SVI, logging discriminator, or PKI trustpoint are uniquely
-  IRIS-owned. Only `device/router-uninstall.sh` read the variable;
-  `device/device-uninstall.sh` (Guest Shell) and `device/iox/uninstall.sh`
-  ignored it and ran their full teardown regardless, which could remove
-  operator network configuration IRIS never created. Both scripts now
-  reduce to the same agent-footprint-only scope `NETWORK_ATTACHMENT=inband`
-  already uses whenever the flag is set, regardless of the configured
-  attachment.
+- **A forced undeploy now works at all, on every platform.** It is the only
+  exit for a device that cannot be undeployed (no receipt), cannot be adopted
+  (routers never are) and cannot be re-onboarded (preflight refuses the live
+  agent) — and it had never once run end to end. The flag never left the
+  server: `OnboardService.start()` received the console's extra environment
+  only for the *onboard* action, while `IRIS_FORCE_AGENT_ONLY` is set only in
+  the *undeploy* branch, so no teardown recipe ever saw it. On Guest Shell and
+  IOx that was not a failed rescue but a destructive one — the full teardown
+  ran, removing `Vlan$VLAN` and the VLAN itself from an inventory row no
+  receipt has proven, while the audit trail recorded that the operator's
+  network had been left untouched. Undeploy now carries its own environment,
+  so the telemetry flags stay onboard-only and the force flag reaches the
+  recipe.
+
+  On routers the recipe then refused to run: the processor-board identity
+  guard sat outside the force branch and compared a live board ID against the
+  empty `EXPECTED_DEVICE_IDENTITY` that force mode deliberately does not
+  require, aborting every time before touching the device. Two residue scans
+  then failed a teardown that had already succeeded — one flagging the IRISQ
+  discriminator and PKI trustpoint that only `config_cleanup` removes, the
+  other the NAT rules force preserves, whose ACL pattern collapsed to the bare
+  prefix `ip access-list standard IRIS-NAT-` and matched any other group's ACL
+  once no receipt supplied a VPG number. Both failed *after* the destructive
+  work and *before* `copy running-config startup-config`, leaving a reload to
+  undo whatever had succeeded.
+
+- **What a teardown removes is now decided by name, not by mode.** Every
+  IRIS-named artifact — the EEM applets, the IRISQ discriminator and its
+  logging bindings, `crypto pki trustpoint IRIS`, `ip http client
+  secure-trustpoint IRIS`, the app-hosting stanza and the staged files — is
+  removed in every mode, including force and inband. Previously those were
+  preserved whenever the mode was inband or forced, on the reasoning that a
+  receipt cannot prove such globals remain uniquely IRIS-owned; that does not
+  survive contact with the names, and it left a "clean" device refusing its
+  next onboard on artifacts IRIS had put there itself. What the modes protect
+  is the operator's *network* — the VLAN and its SVI, the VirtualPortGroup,
+  the NAT rules — which IRIS merely configured and no receipt proves it
+  created. That distinction is preserved exactly, and the verify scans follow
+  the same rule: what is removed in every mode is checked in every mode.
 
 ### Documentation
 - The public site's copy now speaks to Cisco images and patches generally
