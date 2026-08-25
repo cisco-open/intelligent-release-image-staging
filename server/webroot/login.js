@@ -25,6 +25,13 @@ document.getElementById('login-form').addEventListener('submit', async function 
       window.location.href = '/setup.html';
       return;
     }
+    if (window.sessionStorage.getItem('iris_post_setup')) {
+      // One-shot: the sign-in immediately after first-run setup continues the
+      // checklist. Cleared here so later sign-ins land on the Overview.
+      window.sessionStorage.removeItem('iris_post_setup');
+      window.location.href = '/#settings/setup';
+      return;
+    }
     window.location.href = '/';
   } else {
     err.textContent = 'Invalid username or password.';
