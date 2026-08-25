@@ -18,23 +18,60 @@ https://<server-ip>:8080/
 
 The server uses a self-signed certificate by default. Before an admin account
 exists, sign in with the default credential `iris` / `irisisgreat!` — it only
-works pre-setup — which takes you straight to the setup wizard to create the
+works pre-setup — which takes you straight to the account-creation page for the
 real admin account. Or create the initial admin from the container instead:
 
 ```bash
 docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin
 ```
 
+### Finishing setup
+
+Creating the admin is the first of four things a new server needs. The sign-in
+straight after it lands on the **setup flow** (`#setup`), which walks the other
+three in order:
+
+1. **Telemetry destination** — where swarm progress, device reports and export
+   health are published. Already satisfied if the deployment environment sets
+   `IRIS_OTLP_ENDPOINT` and observability is enabled, in which case the step
+   shows as done rather than being hidden.
+2. **Stage host** — the credentials IRIS uses to reach the Docker host that
+   builds and serves device onboarding material. Without them, onboarding over
+   the Docker path cannot start.
+3. **Device packages** — whether each served IOx package still pins the
+   certificate this server hands to devices.
+
+The forms are hosted in the flow itself, so finishing setup does not send you
+round the Settings pages. A step list across the top shows every step with its
+current state and lets you open any of them directly, in any order.
+
+Every step can be skipped, and re-entering `#setup` resumes at the first one
+still outstanding. That is not merely a convenience: **the device-packages step
+can never be completed from the console**, because the console container has no
+Docker socket and so can detect a stale package but not rebuild one. That step
+is therefore a report and a command to run on the Docker host, plus a
+**Re-check** button — not a form whose submit button would be pretending to do
+something. A wizard that insisted on completion could never be finished.
+
+While anything is outstanding, a banner offers the way back. It dismisses for
+the session rather than permanently, because a package that goes stale later is
+a silent failure with no other symptom, and a banner dismissed for good would
+hide precisely the case this exists to catch.
+
+Settings › Setup keeps reporting the same four states afterwards, for checking a
+server long after it was installed.
+
 ## Console areas
 
 | Area | What it does |
 | --- | --- |
+| Overview | Rollout counters and per-image staging progress. Carries the *Telemetry export* badge (`ok` / `degraded` / `off`, or `unknown` when the health endpoint cannot be read), fed by the hub's OTLP export health. |
 | Images | Shows published image metadata and staged network status, uploads new images, and imports images already on disk. |
 | Devices | Lists known devices, their **management type**, platform details, current assignment, and recent reports. |
 | Assignments | Maps each device to the image it should stage. |
 | Onboarding | Starts and tracks install or undeploy jobs when the device's assigned credential profile is configured. |
-| Swarm | Shows peer progress and seeder/device participation. With `IRIS_EVENTS_URL_TEMPLATE` configured, the peer drawer renders a "View this device's events" link into the operator's own backend; without it, no link renders. |
-| Monitoring | Holds the audit trail and per-job deployment logs. Carries the *Telemetry export* badge (`ok` / `degraded` / `off`) fed by the hub's OTLP export health. |
+| Swarm | Shows peer progress and seeder/device participation. |
+| Monitoring | Holds the audit trail and per-job deployment logs. |
 | Settings | Shows server configuration, version, and operational settings. |
 | Audit | Records administrative and workflow actions. |
 
@@ -166,11 +203,15 @@ an adopt that omits it is refused.
 
 The **Undeploy** dialog's **Force** checkbox covers a device stranded with no
 deployment receipt at all — typically an onboard that enabled the agent but
-died before its receipt was written. Forcing removes only the IRIS agent
-footprint (EEM applets, Guest Shell or the IOx app, and staged files) and
-leaves every operator-owned network setting untouched, because with no
-receipt nothing proves IRIS created the VLAN/SVI, VPG, NAT, or PKI
-trustpoint. It behaves the same on every platform, including a router, which
+died before its receipt was written. Forcing removes every artifact that
+carries IRIS's own name — the EEM applets, Guest Shell or the IOx app and its
+app-hosting stanza, the IRISQ logging discriminator and its
+buffered/console/monitor bindings, `crypto pki trustpoint IRIS` and `ip http
+client secure-trustpoint IRIS`, and the staged files — and preserves only the
+operator's network: the VLAN and SVI, the VirtualPortGroup, and the NAT rules,
+which without a receipt nothing proves IRIS created. Everything IRIS-named has
+to go, or the next onboard's preflight refuses the device the forced teardown
+just rescued. It behaves the same on every platform, including a router, which
 has no other way to clear a receipt-less agent — it cannot be adopted, and
 its preflight refuses to re-onboard over an already-enabled Guest Shell.
 Recorded in Audit as `undeploy_forced`.
@@ -223,9 +264,15 @@ Job windows are live views; the durable record is Monitoring →
 undeploy job's installer output is persisted on the server under the state
 directory, so the logs survive console reloads, session changes, and server
 restarts; the newest 200 are kept. The table lists each log's finish time,
-device, action, result, and size, filters by device id, and shows the full
-log in place. The same list, already filtered to one device, sits at the
-bottom of that device's deployment-details panel on the Devices screen.
+device, action, result, and size. A histogram above it bins the retained logs
+over the selected window — 24h, 7d (the default), 30d, 90d or All — and
+dragging a range across the graph filters the table to that span; a search box
+plus Action and Result pickers narrow it further, and rows page 25 at a time.
+**view** opens the log in a drawer beside the table. If a job you expect is
+missing, widen the range before concluding the log was not kept: the table only
+ever shows the selected window. The same list, already filtered to one device,
+sits at the bottom of that device's deployment-details panel on the Devices
+screen.
 
 ## Settings
 
@@ -237,11 +284,15 @@ tab strip. Each sub-page is deep-linkable: `#settings/setup`,
 
 ### Setup
 
-The **Setup** sub-page (`#settings/setup`) is a post-install checklist: three
-cards — **admin account**, **stage-host credentials**, and **device
-packages** — each carrying a live status chip and a short rationale, meant to
-be revisited any time after installing a server rather than completed in one
-sitting. Every card's status is one of `ok`, `unset`, `stale`, `absent`, or
+The **Setup** sub-page (`#settings/setup`) is a post-install status panel: four
+cards — **admin account**, **telemetry destination**, **stage-host
+credentials**, and **device packages** — each carrying a live status chip and a
+short rationale, meant to be revisited any time after installing a server
+rather than completed in one sitting. The admin card links to Settings ›
+General; the telemetry and stage-host cards open the setup flow (`#setup`),
+which hosts those forms. The telemetry card also names the endpoint in effect
+and whether it is a console override or the deployment default. Every card's
+status is one of `ok`, `unset`, `stale`, `absent`, or
 `unknown`. `absent` and `unknown` both mean the server could not determine
 the state; a failed or malformed status fetch shows every chip as `unknown`
 rather than leaving a previous, possibly stale, render on screen. Neither is

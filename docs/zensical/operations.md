@@ -194,17 +194,26 @@ Use `device/device-uninstall.sh` (Guest Shell devices), `device/router-uninstall
 
 Undeploy is driven by the device's applied **receipt**, not its editable
 inventory row, so a later inventory edit cannot retarget cleanup. An
-**inband** device's teardown removes only the app footprint and preserves the
-operator-owned VLAN/SVI/routes/VRF. A device deployed before receipts existed
+**inband** device's teardown removes the app footprint and every other
+IRIS-named artifact — the EEM applets, the IRISQ discriminator and its logging
+bindings, and the IRIS PKI trustpoint and HTTP-client binding — and preserves
+the operator-owned VLAN/SVI/routes/VRF. A device deployed before receipts
+existed
 has no active receipt and must be **adopted** (an explicit, audited, no-change
 recording of ownership) before it can be undeployed, or undeployed with
 **Force** to strip only the agent footprint when there is no receipt at all —
 see [Bulk device actions](console.md#bulk-device-actions). A Catalyst 8000
-router cannot be adopted, so a receipt-less router relies on re-onboarding or
-Force. Force behaves identically on every platform: it removes only what is
-identifiable by name as IRIS and leaves the VLAN/SVI, VPG, NAT, and PKI
-trustpoint exactly as they are. A missing, drifted, or uncertain receipt
-otherwise stops cleanup in `needs-reconcile` rather than guessing. See
+router cannot be adopted, and preflight refuses an onboard over a live agent, so
+a receipt-less router's only path is Force. Force behaves identically on every
+platform: it removes every artifact identifiable by name as IRIS — the IRIS EEM
+applets, the IRISQ logging discriminator and its buffered/console/monitor
+bindings, `crypto pki trustpoint IRIS` and `ip http client secure-trustpoint
+IRIS`, the app-hosting stanza, and the staged IRIS files — and leaves only the
+operator's network exactly as it is: the VLAN/SVI, the VirtualPortGroup, and the
+NAT rules, which no receipt proves IRIS created. Undeploy therefore clears
+exactly what preflight refuses, so a forced teardown leaves the device able to be
+onboarded again. A missing, drifted, or uncertain receipt otherwise stops cleanup
+in `needs-reconcile` rather than guessing. See
 [Management Type and VLAN Ownership](network-attachment.md).
 
 Deleting an inventory row is not an undeploy — undeploy before deleting anything

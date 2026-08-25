@@ -79,8 +79,10 @@ running copy), makes sure `aria2c` is up and serving, and finally runs
 
 **Dropping a new `bundle.tgz` on the device is the agent upgrade** for Guest
 Shell and router — the next tick unpacks it and runs the new code. There is no
-separate upgrade command. Re-running the installer has the same effect (it
-mints a new capability and re-copies the bundle). `router-install.sh`
+separate upgrade command. Re-running the installer script directly has the same
+effect (it mints a new capability and re-copies the bundle). A console
+re-onboard is not that path: its preflight refuses a device that still carries
+the live agent, so undeploy first and then onboard again. `router-install.sh`
 additionally destroys any pre-existing Guest Shell before re-applying config,
 so a re-onboard never leaves the guest running on stale networking from a
 previous install — see
@@ -103,8 +105,11 @@ config already exists on the persistent mount. There is no EEM timer on IOx:
 **Upgrade on IOx is uninstall, then reinstall** — there is no in-place package
 update. `device/iox/install.sh` is idempotent by design: its first step always
 stops, deactivates, and uninstalls any existing `iris` app before copying the
-new package and reinstalling, so re-running the installer with a freshly
-built package is the supported upgrade path. `device/iox/uninstall.sh`
+new package and reinstalling, so re-running `device/iox/install.sh` directly
+with a freshly built package is the supported upgrade path. The same upgrade
+from the console needs an undeploy first: onboarding preflight refuses a device
+that still has the `iris` app-hosting stanza or any other IRIS-named config.
+`device/iox/uninstall.sh`
 performs the same teardown standalone, for a clean removal with no reinstall.
 
 ### Confirming it worked

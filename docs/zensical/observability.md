@@ -108,26 +108,28 @@ as checkboxes, and bulk redeploy covers site-scale enablement.
 
 ### The live sample
 
-While a transfer is active, the agent embeds one compact sample (≤250 B) in
-its heartbeat:
+While a transfer is active the agent embeds one `telemetry_observation` envelope
+in its heartbeat, bounded server-side at 8 KB:
 
 | Field | Meaning |
 | --- | --- |
-| `v` | Sample schema version (currently `1`). |
-| `image_id` | The device's policy-assigned image (validated server-side). |
-| `phase` | `downloading` or `seeding`. |
-| `done_bytes` | Bytes completed. |
-| `down_bps` / `up_bps` | Current receive / send rate. |
-| `peers` | Connected peer count. |
-| `tier` | Link quality tier, `good` or `constrained`. |
+| `v` | Envelope schema version (currently `2`). |
+| `obs_state` | `observed`, `not_due`, `paused`, `disabled`, `not_active`, or `rpc_unavailable`. Only `observed` carries transfer fields; the rest are state-only. |
+| `observed_at` | Device-side observation time. |
+| `transfer_id` / `image_id` | The transfer and the device's policy-assigned image (validated server-side). |
+| `sample_seq` | Monotonic per-transfer sequence, checkpointed before the POST. |
+| `sampling_class` | `good` or `constrained`. |
+| `aria` | `receive_bps`, `send_bps`, `completed_content_bytes`, `total_content_bytes`, `connections`, `status`. |
+| `peer_connections` | Up to 32 rows: `ip`, `port`, `send_bps`, `receive_bps`, `peer_client_name`, `progress`. Extra rows are truncated and flagged, not rejected. |
 
 The sample is transport-independent by design — it rides inside the heartbeat
 only because that is the current carrier — and carries an explicit schema
-version (`v`), but that version is not yet forward-compatible: the server
-accepts only `v == 1` today and drops anything else the same way it drops any
-other malformed field, silently and without ever failing the heartbeat. A
-future `v2` agent talking to an older server would have every sample rejected
-until the server is upgraded.
+version (`v`). Two versions are accepted today: the current agent sends only
+`v == 2` `telemetry_observation` envelopes, and `v == 1` `sample` objects are
+still accepted from agents that predate the bump (`phase`, `done_bytes`,
+`down_bps`/`up_bps`, `peers`, `tier`). Anything else is dropped the same way any
+other malformed field is dropped, silently and without ever failing the
+heartbeat.
 
 ### Cadence and tuning
 
@@ -209,18 +211,36 @@ records, where it does not multiply metric cardinality.
 
 ### Log attributes (operator contract)
 
-Terminal per-device reports and swarm lifecycle events flow as OTLP logs with
-OpenTelemetry semantic-convention names. Event identity is the top-level
-`eventName` field: `iris.device.report` for reports,
-`iris.swarm.start|complete|stop|stale` for swarm events. Key attributes:
-`device.id`, `device.model.identifier`, `iris.image.id`, `iris.link.tier`,
-`iris.transfer.throughput_avg`, `network.peer.address` / `network.peer.port` /
-`network.transport`, `iris.torrent.info_hash`, the peers observed during the
-transfer as the structured attribute `iris.transfer.peers` (each row: peer
-address, resolved `device.id` where known), and `iris.transfer.peers_total`
-(exact distinct peers observed, saturating at the device's 512-IP tracking
-cap; rows beyond the named cap are counted here, not listed). Per-peer byte
-counts are deliberately absent: aria2 (the on-device client) exposes only
+Terminal per-device reports, tracker lifecycle events, peer-policy operations and
+measured peer rates flow as OTLP logs with OpenTelemetry semantic-convention
+names. Event identity is the top-level `eventName` field:
+`iris.device.transfer.report` (v2 reports), `iris.device.report` (legacy v1
+reports), `iris.tracker.peer` (tracker lifecycle), `iris.peer.policy`, and
+`iris.swarm.peer_rate`.
+
+Key attributes per event. `iris.device.transfer.report`: `device.id`,
+`iris.image.id`, `iris.transfer.id`, `iris.report.event`,
+`iris.transfer.content_sha256.state`, `iris.transfer.ios_copy_verify.state`,
+`iris.transfer.completed_content_bytes`, `iris.transfer.peers_total`,
+`iris.device.observed_at`, and the observed peer addresses as a flat
+`network.peer.address` string array. `iris.device.report` (v1) carries a subset:
+`device.id`, `iris.image.id`, `iris.report.event`, `iris.transfer.peers_total`,
+`network.peer.address`. `iris.tracker.peer`: `iris.principal`,
+`iris.torrent.info_hash`, `iris.peer.role`, `network.peer.address`.
+`iris.peer.policy`: `iris.policy.revision`, `iris.policy.action`,
+`iris.enforcement.state`, `iris.enforcement.applied_revision`,
+`iris.enforcement.desired_ip_count`. `iris.swarm.peer_rate`: `iris.principal`,
+`iris.image.id`, `iris.torrent.info_hash`, `network.peer.address`,
+`network.peer.port`, `iris.transfer.peer_send_bps`, `iris.torrent.left`,
+`iris.peer.role`.
+
+The attributes `device.model.identifier`, `iris.link.tier`,
+`iris.transfer.throughput_avg`, `network.transport` and the structured
+`iris.transfer.peers` list were retired in this release; per-peer detail now
+lives in `iris.swarm.peer_rate` records. `iris.transfer.peers_total` still
+carries the exact distinct peer count, saturating at the device's 512-IP
+tracking cap; rows beyond the named cap are counted there, not listed. Per-peer
+byte counts are deliberately absent: aria2 (the on-device client) exposes only
 instantaneous per-peer rates, so any per-peer byte figure would be derived
 rather than measured. Exact byte totals are transfer-level.
 

@@ -16,16 +16,18 @@
 #       attachments (EXPLICIT-name no-forms)
 #     - crypto pki trustpoint IRIS + ip http client secure-trustpoint IRIS
 #     - <fs>guest-share (agent, conf, bundle, staged seeding copy)
-#   inband removes ONLY the app footprint (EEM applets, guestshell/app-hosting,
-#     guest-share). It preserves the operator-owned VLAN/SVI/routes/VRF AND the
-#     shared logging discriminator and PKI trustpoint/HTTP-client settings,
-#     because a receipt cannot prove those globals remain uniquely IRIS-owned.
-# IRIS_FORCE_AGENT_ONLY=1 forces that same agent-footprint-only reduction
-#   regardless of NETWORK_ATTACHMENT: a device stranded WITHOUT a deployment
-#   receipt (onboard died after enabling Guest Shell but before its receipt was
-#   written) has no receipt to prove the VLAN/SVI, IRISQ discriminator, or PKI
-#   trustpoint are uniquely IRIS-owned, so they must be left exactly as they
-#   are. Only what is identifiable by name as IRIS is removed.
+#   inband preserves the operator-owned VLAN/SVI/routes/VRF, which existed
+#     before IRIS and which no receipt proves IRIS created. It still removes
+#     everything carrying IRIS's own name -- the EEM applets, guestshell/
+#     app-hosting, guest-share, the IRISQ discriminator and its logging
+#     bindings, and the IRIS PKI trustpoint / HTTP-client binding.
+# IRIS_FORCE_AGENT_ONLY=1 applies that same reduction regardless of
+#   NETWORK_ATTACHMENT: a device stranded WITHOUT a deployment receipt (onboard
+#   died after enabling Guest Shell but before its receipt was written) has no
+#   receipt proving the VLAN/SVI is IRIS's, so the network is left exactly as
+#   it is. What is identifiable by name as IRIS is still removed -- leaving it
+#   would strand the device against its own next onboard, which preflight
+#   refuses while any of it is present.
 # Deliberately LEFT IN PLACE (both modes): `iox`, `file prompt quiet`, the
 # AppGig trunk (the installer re-applies idempotently on the next onboard), any
 # staged image at flash root (a delivered artifact, never IRIS machinery),
@@ -107,7 +109,7 @@ if [ "$DRY" -eq 1 ]; then
   config_teardown
   echo "===== [2/5] guestshell disable  [3/5] guestshell destroy (polled) ====="
   if [ "$NETWORK_ATTACHMENT" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
-    echo "===== [4/5] agent-footprint-only config removal (VLAN/SVI, IRISQ, PKI trustpoint left in place) ====="
+    echo "===== [4/5] IRIS-named config removal (operator VLAN/SVI left in place) ====="
   else
     echo "===== [4/5] config footprint removal ====="
   fi

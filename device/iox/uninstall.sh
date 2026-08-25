@@ -64,9 +64,11 @@ config_cleanup() {
 # agent never self-removes. IRIS-AGENT won't exist on IOx (no 60s timer) but
 # the no-op is harmless. All no-ops if absent.
 #
-# Inband removes ONLY the app footprint: it preserves the operator-owned VLAN/
-# SVI and the shared PKI trustpoint / HTTP-client settings (a receipt cannot
-# prove those globals remain uniquely IRIS-owned).
+# Inband preserves the operator-owned VLAN/SVI, which no receipt proves IRIS
+# created. It still removes everything carrying IRIS's own name, including the
+# IRISQ discriminator and the IRIS PKI trustpoint / HTTP-client binding:
+# leaving those behind strands the device against its own next onboard, which
+# preflight refuses while any of them is present.
 if [ "$NETWORK_ATTACHMENT" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
 cat <<EOF
 no app-hosting appid $APPID
@@ -103,7 +105,7 @@ if [ "$DRY" -eq 1 ]; then
   printf 'app-hosting stop appid %s\napp-hosting deactivate appid %s\napp-hosting uninstall appid %s\n' \
     "$APPID" "$APPID" "$APPID"
   if [ "$NETWORK_ATTACHMENT" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
-    echo "===== [2/4] agent-footprint-only config removal (VLAN/SVI, PKI trustpoint left in place) ====="
+    echo "===== [2/4] IRIS-named config removal (operator VLAN/SVI left in place) ====="
   else
     echo "===== [2/4] remove config footprint (appid, VLAN$VLAN, applets, trustpoint) ====="
   fi

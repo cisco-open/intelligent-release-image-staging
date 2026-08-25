@@ -97,8 +97,15 @@ The collector is external to IRIS and is not published by the Compose stack.
   LoadBalancer. Preserve source IP as described in [Kubernetes](kubernetes.md).
 - For **inband** devices, these flows traverse the existing operator-owned
   management VLAN and its SVI; IRIS adds no VLAN, SVI, gateway, route, or VRF.
-  Preflight only confirms that path can reach the catalog, artifact, tracker,
-  and seeder ports. See [Management Type and VLAN Ownership](network-attachment.md).
+  Onboarding preflight is read-only and does not test that path from the device:
+  it confirms the device answers SSH from the server, and — as on every other
+  platform — refuses the onboard if the device still carries any IRIS-named
+  artifact (an IRIS-* EEM applet, the IRISQ logging discriminator or its
+  bindings, `crypto pki trustpoint IRIS`, `ip http client secure-trustpoint
+  IRIS`, the app-hosting stanza), has Guest Shell already enabled, or has a
+  non-empty `bootflash:guest-share`. The installer separately verifies from the
+  server host that the artifact server (8000) is serving over trusted HTTPS.
+  See [Management Type and VLAN Ownership](network-attachment.md).
 - For **router-routed** devices, the operator must route the VPG app subnet to
   the IRIS server and peers. **router-nat** uses the configured outside
   interface; permit inbound TCP 6881 to its outside address for peer reachability.

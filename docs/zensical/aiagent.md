@@ -81,7 +81,13 @@ At the end of every step, state the next action required from me.
 3. **Create the Console admin.** Accept the self-signed certificate warning only
    for the expected server, sign in with the default first-run credential
    `iris` / `irisisgreat!`, and create the initial admin account. The default
-   credential works only before an admin account exists.
+   credential works only before an admin account exists. The next sign-in opens
+   the first-run setup wizard at `#setup`: telemetry destination, stage host,
+   and device packages. Any step can be skipped and resumed later — a banner
+   keeps offering the unfinished ones, and Settings › Setup reports their state.
+   The device-packages step is the same check as step 6 below; it cannot be
+   completed from the console, because the console container has no Docker
+   socket.
 4. **Publish an image.** Upload through the Console, import a file that is
    already on the server from the Console **Import from disk** panel, or use
    `iris-publish` from inside the server container. Publishing creates catalog

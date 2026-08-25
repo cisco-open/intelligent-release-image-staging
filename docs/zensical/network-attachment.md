@@ -65,11 +65,14 @@ app-hosting port. Install sets `switchport mode trunk` and **adds** the inband
 VLAN with `switchport trunk allowed vlan add` — the additive form only, so an
 existing allowed list is never replaced — because without it the agent's
 traffic has no L2 path off the box. Teardown never removes the VLAN from the
-trunk (it is operator-owned and the trunk may carry other apps) and removes
-only the app footprint: Guest Shell or the IOx app, IRIS EEM applets, and
-agent files. It deliberately leaves shared globals (logging discriminator, PKI
-trustpoint, HTTP-client settings) in place because a receipt cannot prove those
-remain uniquely IRIS-owned.
+trunk (it is operator-owned and the trunk may carry other apps). Its scope is
+decided by name, not by mode: it removes the app footprint (Guest Shell or the
+IOx app, IRIS EEM applets, agent files) *and* every IRIS-named global — the
+IRISQ logging discriminator with its buffered/console/monitor bindings,
+`crypto pki trustpoint IRIS`, and `ip http client secure-trustpoint IRIS` —
+because each of those carries IRIS's own name and the next onboard's preflight
+refuses while any of them is present. What inband preserves is the operator's
+network: the VLAN, its SVI, routes, and VRF.
 
 ### Inband IOx and the IOS SSH endpoint
 
@@ -175,23 +178,32 @@ planned → applying → active → (applying) → removed
 
 A controller restart converts any non-terminal (`planned`/`applying`) receipt to
 `unknown`; in-flight device work is never silently resumed. A device has exactly
-one live deployment, so when a new receipt becomes `active` — a re-onboard's
-idempotent redeploy, or an explicit adopt — any previous `active` receipt for
+one live deployment, so when a new receipt becomes `active` — an explicit
+adopt, or an onboard of a device that was undeployed first — any previous
+`active` receipt for
 that device is retired to the terminal `superseded` state. Undeploy therefore
 always finds at most one active receipt.
 
 Undeploy renders **exclusively from an active receipt**, never from the editable
 inventory — so changing a VLAN, model, or CSV import after onboarding cannot
-retarget a device's cleanup. If a receipt is missing, uncertain, drifted, or
-legacy, cleanup stops in `needs-reconcile` instead of guessing.
+retarget a device's cleanup. The one exception is a forced undeploy of a device
+that has no receipt at all: with nothing to render from it resolves the device
+from inventory and skips the processor-board identity check, so it is limited by
+scope instead — it removes only IRIS-named artifacts and never the operator's
+VLAN/SVI, VirtualPortGroup, or NAT. If a receipt is missing, uncertain, drifted,
+or legacy, cleanup stops in `needs-reconcile` instead of guessing.
 
 ### Adopting a pre-existing deployment
 
-Devices deployed before receipts existed have no active receipt, so undeploy is
-refused. Router deployments cannot be adopted because their live identity and
-ownership evidence must be collected during onboarding; **re-onboard** the
-router instead. Non-router deployments may use the explicit, audited **Adopt**
-action, which records current ownership without changing the device.
+Devices deployed before receipts existed have no active receipt, so a normal
+undeploy is refused. Non-router deployments may use the explicit, audited
+**Adopt** action, which records current ownership without changing the device.
+Routers cannot be adopted, and preflight refuses to onboard over a live agent,
+so their path is the Undeploy dialog's **Force** checkbox: it strips only the
+IRIS-named agent footprint (EEM applets, Guest Shell or the IOx app, the
+app-hosting stanza, the IRISQ discriminator, the IRIS trustpoint, staged files),
+leaves the VLAN/SVI, VirtualPortGroup and NAT untouched, and is recorded in
+Audit as `undeploy_forced`. Onboard again after it completes.
 
 ### Router preflight and ownership
 
