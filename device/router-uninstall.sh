@@ -31,8 +31,13 @@ IRIS_DIR="$IOS_ROOT/iris"
 
 case "$NETWORK_ATTACHMENT" in
   router-routed) ;;
-  router-nat) [ -n "$NAT_INTERFACE" ] && [ -n "$APP_IP" ] \
-    || { echo "ERROR: router-nat receipt is missing NAT_INTERFACE or APP_IP" >&2; exit 1; } ;;
+  router-nat)
+    # Force skips the NAT teardown entirely, so requiring receipt-derived NAT
+    # values would re-strand the device this mode exists to rescue.
+    if [ "${IRIS_FORCE_AGENT_ONLY:-0}" != "1" ]; then
+      [ -n "$NAT_INTERFACE" ] && [ -n "$APP_IP" ] \
+        || { echo "ERROR: router-nat receipt is missing NAT_INTERFACE or APP_IP" >&2; exit 1; }
+    fi ;;
   *) echo "ERROR: NETWORK_ATTACHMENT must be router-routed or router-nat" >&2; exit 1 ;;
 esac
 if [ "$FORCE_AGENT_ONLY" != "1" ]; then
@@ -82,7 +87,7 @@ case "$(printf '%s' "$MODEL" | tr 'a-z' 'A-Z')" in
      exit 1 ;;
 esac
 
-if [ "$NETWORK_ATTACHMENT" = "router-nat" ]; then
+if [ "$NETWORK_ATTACHMENT" = "router-nat" ] && [ "$FORCE_AGENT_ONLY" != "1" ]; then
   python3 - "$APP_IP" <<'PY'
 import ipaddress
 import sys
@@ -343,17 +348,27 @@ if [ "$FORCE_AGENT_ONLY" != "1" ]; then
       forbidden="interface VirtualPortGroup$VPG_NUMBER" ;;
   esac
 fi
+# The agent footprint every teardown removes, forced or not.
 for artifact in \
   "app-hosting appid guestshell" \
-  "event manager applet IRIS-" \
-  "logging discriminator IRISQ" \
-  "logging buffered discriminator IRISQ" \
-  "logging console discriminator IRISQ" \
-  "logging monitor discriminator IRISQ" \
-  "crypto pki trustpoint IRIS" \
-  "ip http client secure-trustpoint IRIS"; do
+  "event manager applet IRIS-"; do
   case "$RUNNING" in *"$artifact"*) forbidden="${forbidden}${forbidden:+, }$artifact" ;; esac
 done
+# Only config_cleanup removes these, and force mode skips config_cleanup by
+# design -- router-install.sh puts them on EVERY router, so scanning for them
+# after a forced teardown fails 100% of the time, and fails AFTER the
+# destructive work but BEFORE the config is saved, so a reload undoes it.
+if [ "$FORCE_AGENT_ONLY" != "1" ]; then
+  for artifact in \
+    "logging discriminator IRISQ" \
+    "logging buffered discriminator IRISQ" \
+    "logging console discriminator IRISQ" \
+    "logging monitor discriminator IRISQ" \
+    "crypto pki trustpoint IRIS" \
+    "ip http client secure-trustpoint IRIS"; do
+    case "$RUNNING" in *"$artifact"*) forbidden="${forbidden}${forbidden:+, }$artifact" ;; esac
+  done
+fi
 case "$APP_STATE" in *guestshell*) forbidden="${forbidden}${forbidden:+, }guestshell" ;; esac
 case "$FILES" in
   *"Directory of bootflash:/guest-share/iris"*)
@@ -363,7 +378,7 @@ for name in bootstrap.sh iris-agent.conf rpc-secret bundle.tgz iris-catalog.pem;
   case "$FILES" in *"$name"*) forbidden="${forbidden}${forbidden:+, }$IOS_ROOT/$name" ;; esac
 done
 
-if [ "$NETWORK_ATTACHMENT" = "router-nat" ]; then
+if [ "$NETWORK_ATTACHMENT" = "router-nat" ] && [ "$FORCE_AGENT_ONLY" != "1" ]; then
   for artifact in \
     "ip access-list standard IRIS-NAT-$VPG_NUMBER" \
     "ip nat inside source list IRIS-NAT-$VPG_NUMBER interface $NAT_INTERFACE overload" \

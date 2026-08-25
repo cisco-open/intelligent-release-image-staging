@@ -5638,3 +5638,34 @@ def test_help_guide_pages_exist_and_header_help_control_wired():
     assert 'id="help-btn"' in html
     assert 'href="/help-device.html"' in html
     assert 'href="/help-server.html"' in html
+
+
+def test_force_undeploy_delivers_the_force_flag_to_the_recipe(tmp_path):
+    """A forced undeploy must reach the teardown recipe with
+    IRIS_FORCE_AGENT_ONLY=1.
+
+    env_extra is the ONLY channel into the recipe, and the undeploy branch is
+    the only place the flag is ever set. Dropping env_extra for that action
+    silently downgrades a forced teardown to the full receipted one: on Guest
+    Shell and IOx that removes Vlan$VLAN, the IRISQ discriminators and the PKI
+    trustpoint using inventory values no receipt has proven -- precisely the
+    harm the flag exists to prevent -- while the audit trail records that the
+    operator's network was left untouched."""
+    seen = {}
+
+    def run_fn(p, e, on):
+        seen.update(e)
+        return 0
+
+    host, port, stop = _serve_inband(tmp_path, run_fn)
+    try:
+        ck, csrf = _auth(host, port)
+        st, _, b = _req(host, port, "POST", "/api/devices/edge/undeploy",
+                        {"force": True},
+                        headers={"Cookie": ck, "X-CSRF-Token": csrf})
+        assert st == 200, b
+        _wait_onboard_job(host, port, ck, json.loads(b)["job_id"])
+        assert seen.get("IRIS_FORCE_AGENT_ONLY") == "1", (
+            "forced undeploy reached the recipe without the force flag")
+    finally:
+        stop()

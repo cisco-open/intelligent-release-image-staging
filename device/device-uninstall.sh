@@ -107,14 +107,18 @@ fi
 
 : "${DEVICE_IP:?set DEVICE_IP}"; : "${DEVICE_USER:?set DEVICE_USER}"
 : "${DEVICE_PASS:?set DEVICE_PASS}"
-[ -n "$VLAN_IN" ] || { echo "ERROR: VLAN not set (the deployment receipt is" \
-  "missing its vlan); refusing to guess — set the vlan on the device and retry" >&2; exit 1; }
 if [ "$FORCE_AGENT_ONLY" = "1" ]; then
   echo "===== FORCE: agent-footprint-only teardown (no receipt) ====="
   echo "  Removing: IRIS EEM applets, Guest Shell, and $IOS_ROOT."
   echo "  NOT touching Vlan$VLAN/SVI, IRISQ, or the PKI trustpoint: without a"
   echo "  receipt there is no proof IRIS created them, so they are left"
   echo "  exactly as they are."
+else
+  # Only a receipted teardown removes Vlan$VLAN, so only it needs the number.
+  # Demanding one in force mode re-strands the receipt-less device this mode
+  # exists to rescue -- a bare fleet row carries no vlan at all.
+  [ -n "$VLAN_IN" ] || { echo "ERROR: VLAN not set (the deployment receipt is" \
+    "missing its vlan); refusing to guess — set the vlan on the device and retry" >&2; exit 1; }
 fi
 RUN="$HERE/../lab/device-run.sh"
 

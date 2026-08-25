@@ -239,6 +239,20 @@ case "$cmds" in
           echo "interface VirtualPortGroup3"
           echo " ip address 192.168.254.1 255.255.255.252"
         fi
+        # What router-install.sh leaves on EVERY router it onboards and only
+        # config_cleanup removes -- which force mode skips by design.
+        if [ "${FAKE_RUNNING_AGENT_CONFIG:-no}" = "yes" ]; then
+          echo "logging discriminator IRISQ mnemonics drops IOX_INST_WARN"
+          echo "logging buffered discriminator IRISQ"
+          echo "logging console discriminator IRISQ"
+          echo "logging monitor discriminator IRISQ"
+          echo "crypto pki trustpoint IRIS"
+          echo "ip http client secure-trustpoint IRIS"
+        fi
+        if [ "${FAKE_RUNNING_NAT:-no}" = "yes" ]; then
+          echo "ip access-list standard IRIS-NAT-5"
+          echo "ip nat inside source list IRIS-NAT-5 interface GigabitEthernet1 overload"
+        fi
         echo "!"
         echo "end"
       fi
@@ -428,4 +442,40 @@ PY2
   FAKE_UNINSTALL_LEAVE_RESIDUE=yes run _router_uninstall_run_live_forced
   [[ "$output" == *"artifacts still present"* ]] || return 1
   [ "$status" -ne 0 ]
+}
+
+@test "forced live teardown ignores the IRIS config force mode deliberately leaves" {
+  # router-install.sh configures the IRISQ discriminators and the IRIS
+  # trustpoint on EVERY router (lines 132-135, 163-177) and only
+  # config_cleanup removes them -- which force mode skips entirely. Scanning
+  # for them after a forced teardown therefore fails on every real router,
+  # and it fails AFTER the destructive work but BEFORE the config is saved,
+  # so a reload undoes the teardown that did succeed.
+  _router_uninstall_stub_setup
+  FAKE_RUNNING_AGENT_CONFIG=yes run _router_uninstall_run_live_forced
+  [[ "$output" != *"artifacts still present"* ]] || return 1
+  [[ "$output" == *"is clean and persisted"* ]] || return 1
+  [ "$status" -eq 0 ]
+}
+
+@test "forced live teardown on router-nat ignores the NAT config it preserves" {
+  # Force skips the NAT teardown by design, so the NAT rules are still there
+  # -- and with no receipt VPG_NUMBER is empty, so the ACL pattern collapses
+  # to the bare prefix "ip access-list standard IRIS-NAT-" and matches any
+  # other VPG's ACL too.
+  _router_uninstall_stub_setup
+  NETWORK_ATTACHMENT=router-nat NAT_INTERFACE=GigabitEthernet1 APP_IP=10.8.0.2 \
+    FAKE_RUNNING_NAT=yes run _router_uninstall_run_live_forced
+  [[ "$output" != *"artifacts still present"* ]] || return 1
+  [ "$status" -eq 0 ]
+}
+
+@test "forced teardown does not demand NAT values it will never use" {
+  # router-nat comes from the inventory row, but force never touches NAT, so
+  # requiring receipt-derived NAT values re-strands the device.
+  unset NAT_INTERFACE APP_IP
+  NETWORK_ATTACHMENT=router-nat IRIS_FORCE_AGENT_ONLY=1 \
+    run bash "$UNINSTALL" --dry-run
+  [[ "$output" != *"missing NAT_INTERFACE or APP_IP"* ]] || return 1
+  [ "$status" -eq 0 ]
 }

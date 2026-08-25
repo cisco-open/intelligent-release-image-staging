@@ -2294,6 +2294,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                              "TELEMETRY_STREAM": "on" if s_on else "off"}
                 env_extra["IRIS_TELEMETRY"] = env_extra["TELEMETRY"]
                 env_extra["IRIS_TELEMETRY_STREAM"] = env_extra["TELEMETRY_STREAM"]
+                # Undeploy carries its own env: the telemetry flags above are
+                # onboard-only, but the force flag below MUST reach the
+                # teardown recipe. env_extra is the only channel into it.
+                undeploy_env = None
                 if act == "onboard":
                     # With a receipt store (always in production via main()), an
                     # onboard resolves an immutable plan and records a receipt.
@@ -2391,7 +2395,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             # so the recipe must leave the operator's network
                             # exactly as it is and strip only what is named
                             # IRIS. Recorded distinctly in the audit trail.
-                            env_extra["IRIS_FORCE_AGENT_ONLY"] = "1"
+                            undeploy_env = {"IRIS_FORCE_AGENT_ONLY": "1"}
                             try:
                                 degraded_plan = self._plan(
                                     did, fleet.get_device(did))
@@ -2426,7 +2430,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     jid = onboard.start(
                         did, action=act, resolved=resolved, prepare=prepare,
                         pre_apply=pre_apply,
-                        env_extra=env_extra if act == "onboard" else None)
+                        env_extra=(env_extra if act == "onboard"
+                                   else undeploy_env))
                 except ValueError as exc:
                     if receipt_ref.get("id") and act == "onboard":
                         receipts.transition(receipt_ref["id"], "needs-reconcile")

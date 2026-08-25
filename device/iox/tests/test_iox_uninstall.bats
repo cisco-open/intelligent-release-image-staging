@@ -176,3 +176,44 @@ setup() {
   [[ "$output" == *"delete flash:iris-arm64.tar"* ]] && \
   [[ "$output" == *"delete /force /recursive sdflash:guest-share/iris"* ]]
 }
+
+
+# --- receipt-less force rescue: the VLAN guard must not gate it -------------
+# Force mode never uses VLAN -- config_cleanup returns before any Vlan$VLAN
+# line and the verify filter drops every VLAN term -- yet its absence aborted
+# the rescue before the script reached the device.
+
+_iox_uninstall_stub_setup() {
+  STUBDIR="$BATS_TEST_TMPDIR/stub"
+  mkdir -p "$STUBDIR/lab" "$STUBDIR/device/iox"
+  cat > "$STUBDIR/lab/device-run.sh" <<'STUB'
+#!/usr/bin/env bash
+cat > /dev/null
+# No app-hosting entry, no matching config: the device reads as already clean,
+# so both poll loops exit on their first pass and nothing sleeps.
+echo "[OK]"
+STUB
+  chmod +x "$STUBDIR/lab/device-run.sh"
+  ln -sf "$UNINSTALL" "$STUBDIR/device/iox/uninstall.sh"
+}
+
+@test "forced teardown does not demand a VLAN it will never use" {
+  # A bare legacy_routed fleet row carries no vlan at all, so this closed the
+  # only exit a receipt-less device had: the force banner even says Vlan$VLAN
+  # is NOT touched.
+  _iox_uninstall_stub_setup
+  run env -u VLAN -u INBAND_VLAN DEVICE_IP=192.0.2.10 DEVICE_USER=u \
+    DEVICE_PASS=p IRIS_FORCE_AGENT_ONLY=1 \
+    bash "$STUBDIR/device/iox/uninstall.sh"
+  [[ "$output" != *"VLAN not set"* ]] || return 1
+  [ "$status" -eq 0 ]
+}
+
+@test "non-forced teardown still refuses to guess a missing VLAN" {
+  # The guard is correct for a receipted teardown -- it must keep firing there.
+  _iox_uninstall_stub_setup
+  run env -u VLAN -u INBAND_VLAN DEVICE_IP=192.0.2.10 DEVICE_USER=u \
+    DEVICE_PASS=p bash "$STUBDIR/device/iox/uninstall.sh"
+  [[ "$output" == *"VLAN not set"* ]] || return 1
+  [ "$status" -ne 0 ]
+}
