@@ -5766,3 +5766,42 @@ def test_deploy_logs_paging_graph_search_and_side_drawer():
     # the drawer slides in from the right, and respects reduce-motion
     assert "#dl-drawer" in css
     assert "prefers-reduced-motion" in css
+
+
+def test_first_run_setup_is_a_wizard_not_a_linking_checklist():
+    """Setup was four cards that reported status and sent the operator off to
+    Settings > General / > Telemetry to actually do anything. First run is a
+    flow, so it becomes a stepped wizard that hosts the forms in place.
+
+    Three steps -- telemetry, stage host, device packages -- with admin shown
+    as already complete, because first-run just created it. Every step can be
+    skipped and the wizard resumes at the first incomplete one, because the
+    packages step can NEVER complete in-console (no Docker socket), so a
+    wizard that insisted on completion could never be finished."""
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    with open(os.path.join(gui_server.WEBROOT, "login.js")) as f:
+        login = f.read()
+
+    # a top-level view, not a settings sub-pane
+    assert 'id="view-setup"' in html
+    assert "'setup'" in js.split("var VIEWS =", 1)[1].split("]", 1)[0]
+
+    wiz = html.split('id="view-setup"', 1)[1].split("</section>", 1)[0]
+    # the two form steps mount the SHARED templates rather than copying them
+    assert 'id="wz-td-mount"' in wiz and 'id="wz-sh-mount"' in wiz
+    assert "mountSettingsForm('td', 'wz-td-mount')" in js
+    assert "mountSettingsForm('sh', 'wz-sh-mount')" in js
+    # packages is detect-and-instruct, never a form
+    assert 'id="wz-pkg-recheck"' in wiz
+    assert "<form" not in wiz.split('id="wz-step-packages"', 1)[1]
+    # skippable, resumable, and it reports where you are
+    assert 'id="wz-skip"' in wiz and 'id="wz-next"' in wiz and 'id="wz-back"' in wiz
+    assert "wizardFirstIncompleteStep" in js
+    # the nudge that brings an operator back
+    assert 'id="setup-nudge"' in html
+    # first-run hands off to the wizard, not to the old checklist
+    assert "'/#setup'" in login or '"/#setup"' in login
+    assert "#settings/setup" not in login

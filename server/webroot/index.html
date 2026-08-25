@@ -52,6 +52,11 @@
       </div>
     </nav>
     <main class="main">
+      <div id="setup-nudge" class="nudge" hidden>
+        <span id="setup-nudge-text"></span>
+        <a class="btn ghost" href="#setup" id="setup-nudge-open">Finish setup</a>
+        <button class="linkish" id="setup-nudge-dismiss">dismiss</button>
+      </div>
       <section id="view-overview" hidden>
         <h2>Network Overview <span id="telemetry-health" class="badge badge-queued" hidden></span></h2>
         <div class="cards" id="ov-cards"></div>
@@ -254,6 +259,56 @@
         <iframe id="swarm-frame" class="swarm-frame" title="Live swarm map"></iframe>
         <p><a class="btn ghost" id="swarm-open" target="_blank" rel="noopener">Open the swarm map full-screen ↗</a></p>
       </section>
+      <section id="view-setup" hidden>
+        <h2>Finish setting up this server</h2>
+        <p class="muted" id="wz-progress"></p>
+
+        <div class="wz-done" id="wz-admin">
+          <h3>Admin account <span id="wz-admin-chip"></span></h3>
+          <p class="muted">Created during first-run sign-in. Change the password
+            any time from Settings &rsaquo; General.</p>
+        </div>
+
+        <div class="wz-step" id="wz-step-telemetry" hidden>
+          <h3>1. Telemetry destination <span id="wz-td-chip"></span></h3>
+          <p class="muted">Where swarm progress, device reports and export health
+            are published. With no destination configured, none of it leaves this
+            server.</p>
+          <div class="form-mount" id="wz-td-mount"></div>
+        </div>
+
+        <div class="wz-step" id="wz-step-stagehost" hidden>
+          <h3>2. Stage host <span id="wz-sh-chip"></span></h3>
+          <p class="muted">Credentials IRIS uses to reach the Docker host that
+            builds and serves device onboarding material. Without them, onboarding
+            a device over the Docker path cannot start.</p>
+          <div class="form-mount" id="wz-sh-mount"></div>
+        </div>
+
+        <div class="wz-step" id="wz-step-packages" hidden>
+          <h3>3. Device packages <span id="wz-pkg-chip"></span></h3>
+          <p class="muted">Devices that run the agent as an IOx app (IE-3x00, and
+            C9300 with app-hosting) install a package that pins this server's
+            certificate at build time. If that certificate changes, existing
+            packages can no longer authenticate &mdash; the app installs and reports
+            RUNNING, but the device never checks in. Guest Shell platforms re-fetch
+            the certificate on every onboard and are not affected.</p>
+          <p class="muted"><strong>This step cannot be completed from the console.</strong>
+            The console container has no Docker socket, so it can detect a stale
+            package but never rebuild one. Run the command below on the Docker host,
+            then re-check.</p>
+          <table class="tbl" id="wz-pkg-table"><tbody></tbody></table>
+          <p class="mono" id="wz-pkg-remedy"></p>
+          <p><button class="btn ghost" id="wz-pkg-recheck">Re-check</button></p>
+        </div>
+
+        <div class="toolbar" id="wz-nav">
+          <button class="btn ghost" id="wz-back">&lsaquo; Back</button>
+          <button class="btn ghost" id="wz-skip">Skip for now</button>
+          <button class="btn" id="wz-next">Next &rsaquo;</button>
+          <span class="muted push" id="wz-msg"></span>
+        </div>
+      </section>
       <section id="view-settings" hidden>
         <h2>Settings</h2>
         <div id="settings-pane-setup" hidden>
@@ -271,13 +326,13 @@
             reports and export health reach the dashboards. Without a
             destination configured, none of it is published anywhere.</p>
           <p class="muted" id="setup-td-note"></p>
-          <p><a href="#settings/telemetry" class="btn ghost">Configure</a></p>
+          <p><a href="#setup" class="btn ghost">Configure in setup</a></p>
 
           <h3>Stage host (Docker onboarding) <span id="setup-sh-chip"></span></h3>
           <p class="muted">Credentials IRIS uses to reach the Docker host that
             builds and serves device onboarding material. Without them,
             onboarding a device over the Docker path cannot start.</p>
-          <p><a href="#settings/general" class="btn ghost">Configure</a></p>
+          <p><a href="#setup" class="btn ghost">Configure in setup</a></p>
 
           <h3>Device packages <span id="setup-pkg-chip"></span></h3>
           <p class="muted">Devices that run the agent as an IOx app (IE-3x00, and

@@ -1435,6 +1435,134 @@
     document.getElementById('setup-pkg-remedy').textContent = '';
   }
 
+  // ---- First-run setup wizard -------------------------------------------
+  // A flow, not a checklist: the operator finishes setup here instead of being
+  // sent back and forth to Settings pages. The two form steps mount the SAME
+  // templates Settings uses, so there is one implementation of each form.
+  //
+  // Every step is skippable and the wizard resumes at the first incomplete one.
+  // That is forced, not a convenience: the packages step can never complete
+  // in-console (the container has no Docker socket), so a wizard that insisted
+  // on completion could never be finished.
+  var WIZARD_STEPS = [
+    { id: 'telemetry',  pane: 'wz-step-telemetry',  key: 'telemetry',   chip: 'wz-td-chip' },
+    { id: 'stagehost',  pane: 'wz-step-stagehost',  key: 'stage_host',  chip: 'wz-sh-chip' },
+    { id: 'packages',   pane: 'wz-step-packages',   key: 'packages',    chip: 'wz-pkg-chip' }
+  ];
+  var wizardStep = 0;
+  var wizardStatus = null;
+
+  function wizardFirstIncompleteStep(status) {
+    if (!status) return 0;
+    for (var i = 0; i < WIZARD_STEPS.length; i++) {
+      var st = (status[WIZARD_STEPS[i].key] || {}).state;
+      if (st !== 'ok') return i;
+    }
+    return WIZARD_STEPS.length - 1;   // all done: rest on the last step
+  }
+
+  function showWizardStep(i) {
+    wizardStep = Math.max(0, Math.min(WIZARD_STEPS.length - 1, i));
+    WIZARD_STEPS.forEach(function (st, n) {
+      document.getElementById(st.pane).hidden = n !== wizardStep;
+    });
+    // Mount the shared form for whichever step is showing. Settings reclaims
+    // it on its way back in, so only one clone is ever live.
+    if (WIZARD_STEPS[wizardStep].id === 'telemetry') {
+      mountSettingsForm('td', 'wz-td-mount');
+      refreshSettings();
+    } else if (WIZARD_STEPS[wizardStep].id === 'stagehost') {
+      mountSettingsForm('sh', 'wz-sh-mount');
+      refreshSettings();
+    }
+    document.getElementById('wz-progress').textContent =
+      'Step ' + (wizardStep + 1) + ' of ' + WIZARD_STEPS.length;
+    document.getElementById('wz-back').disabled = wizardStep === 0;
+    document.getElementById('wz-next').textContent =
+      wizardStep === WIZARD_STEPS.length - 1 ? 'Done' : 'Next \u203a';
+  }
+
+  function renderWizardPackages(pkg) {
+    var body = document.querySelector('#wz-pkg-table tbody');
+    if (!body) return;
+    body.innerHTML = ((pkg && pkg.items) || []).map(function (i) {
+      return '<tr><td class="mono">' + esc(i.name || '') + '</td><td>' +
+        setupChip(i.state) + '</td><td class="muted">built ' +
+        esc(i.built_at || 'unknown') + '</td></tr>';
+    }).join('');
+    document.getElementById('wz-pkg-remedy').textContent = setupPkgRemedyText(pkg || {});
+  }
+
+  async function refreshSetupWizard() {
+    var s = null;
+    try {
+      var r = await fetch('/api/settings/setup-status');
+      if (r.ok) s = await r.json();
+    } catch (e) { /* leave s null -- never report green on missing evidence */ }
+    wizardStatus = s;
+    function chip(id, state) {
+      var el = document.getElementById(id);
+      if (el) el.innerHTML = setupChip(state);
+    }
+    chip('wz-admin-chip', s ? (s.admin || {}).state : 'unknown');
+    WIZARD_STEPS.forEach(function (st) {
+      chip(st.chip, s ? (s[st.key] || {}).state : 'unknown');
+    });
+    renderWizardPackages(s ? s.packages : null);
+    updateSetupNudge(s);
+    return s;
+  }
+
+  // The nudge is what brings an operator back to an unfinished setup. It
+  // dismisses for the SESSION, not for good: a package that goes stale later
+  // is a silent regression, and a permanently dismissed banner would hide
+  // exactly the failure this feature exists to catch.
+  function setupIncompleteCount(s) {
+    if (!s) return 0;
+    return WIZARD_STEPS.filter(function (st) {
+      return (s[st.key] || {}).state !== 'ok';
+    }).length;
+  }
+  function updateSetupNudge(s) {
+    var el = document.getElementById('setup-nudge');
+    if (!el) return;
+    var n = setupIncompleteCount(s);
+    if (!n || window.sessionStorage.getItem('iris_setup_nudge_dismissed')) {
+      el.hidden = true; return;
+    }
+    document.getElementById('setup-nudge-text').textContent =
+      n + ' setup step' + (n === 1 ? '' : 's') + ' still ' +
+      (n === 1 ? 'needs' : 'need') + ' attention.';
+    el.hidden = false;
+  }
+
+  async function enterSetupWizard() {
+    var s = await refreshSetupWizard();
+    showWizardStep(wizardFirstIncompleteStep(s));
+  }
+
+  document.getElementById('wz-back').addEventListener('click', function () {
+    showWizardStep(wizardStep - 1);
+  });
+  document.getElementById('wz-skip').addEventListener('click', function () {
+    if (wizardStep === WIZARD_STEPS.length - 1) { location.hash = '#overview'; return; }
+    showWizardStep(wizardStep + 1);
+  });
+  document.getElementById('wz-next').addEventListener('click', async function () {
+    await refreshSetupWizard();
+    if (wizardStep === WIZARD_STEPS.length - 1) { location.hash = '#overview'; return; }
+    showWizardStep(wizardStep + 1);
+  });
+  document.getElementById('wz-pkg-recheck').addEventListener('click', function () {
+    var msg = document.getElementById('wz-msg');
+    msg.textContent = 'Re-checking\u2026';
+    refreshSetupWizard().then(function () { msg.textContent = ''; });
+  });
+  document.getElementById('setup-nudge-dismiss').addEventListener('click', function () {
+    window.sessionStorage.setItem('iris_setup_nudge_dismissed', '1');
+    document.getElementById('setup-nudge').hidden = true;
+  });
+
   async function refreshSetup() {
     var s;
     try {
@@ -2675,7 +2803,7 @@
   });
 
   // ---- hash router ----
-  var VIEWS = ['overview', 'images', 'devices', 'swarm', 'settings', 'monitoring'];
+  var VIEWS = ['overview', 'images', 'devices', 'swarm', 'settings', 'monitoring', 'setup'];
 
   // Periodic refresh of whatever view is on screen. Without this the console
   // only updated on navigation or after an explicit action, so device state
@@ -2740,6 +2868,7 @@
     else if (view === 'swarm') { refreshSwarm(); poll = refreshSwarm; }
     else if (view === 'settings') { refreshSettings(); refreshSetup(); }
     else if (view === 'monitoring') { refreshMonitoring(); poll = refreshMonitoring; }
+    else if (view === 'setup') enterSetupWizard();
     startViewPoll(poll);
   }
   function current() { return (location.hash || '#overview').slice(1); }

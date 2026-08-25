@@ -231,3 +231,14 @@ body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-
 @media (prefers-reduced-motion: reduce) {
   #dl-drawer { transition:none; }
 }
+
+/* First-run setup wizard + the nudge that brings an operator back to it. */
+.nudge { display:flex; align-items:center; gap:10px; margin:0 0 12px;
+  padding:8px 12px; border:1px solid #e2c98a; background:#fdf6e3;
+  border-radius:4px; }
+.nudge .btn { margin-left:auto; }
+#view-setup .wz-step, #view-setup .wz-done { padding:12px 14px; margin:12px 0;
+  border:1px solid var(--line, #d7dee8); border-radius:4px; }
+#view-setup .wz-done { opacity:.75; }
+#view-setup .form-mount { margin-top:10px; }
+#wz-nav { margin-top:16px; }
