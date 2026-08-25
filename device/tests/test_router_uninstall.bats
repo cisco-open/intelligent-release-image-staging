@@ -479,3 +479,18 @@ PY2
   [[ "$output" != *"missing NAT_INTERFACE or APP_IP"* ]] || return 1
   [ "$status" -eq 0 ]
 }
+
+@test "forced teardown still removes the app-hosting stanza it owns" {
+  # router-install.sh writes `app-hosting appid guestshell` on EVERY router
+  # (line 121) and config_cleanup is the ONLY place the removal is emitted --
+  # but force skips config_cleanup entirely. The block therefore survived a
+  # forced teardown while the residue scan still flagged it, failing every
+  # forced router undeploy after the destructive work and before the save.
+  # It is IRIS's own artifact, identifiable by name, so force must remove it:
+  # device-uninstall.sh's force branch does exactly this.
+  IRIS_FORCE_AGENT_ONLY=1 run bash "$UNINSTALL" --dry-run
+  [[ "$output" == *"no app-hosting appid guestshell"* ]] || return 1
+  # ...and still must NOT touch the operator network it cannot prove it owns
+  [[ "$output" != *"no interface VirtualPortGroup"* ]] || return 1
+  [ "$status" -eq 0 ]
+}

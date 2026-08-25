@@ -107,6 +107,16 @@ no event manager applet IRIS-RECLAIM-BUNDLE
 EOF
 }
 
+# Force mode skips config_cleanup, but the app-hosting stanza router-install.sh
+# writes is IRIS's own artifact, identifiable by name -- the same thing
+# device-uninstall.sh removes in its force branch. Leaving it behind both fails
+# the residue scan and keeps preflight refusing a re-onboard.
+config_cleanup_force() {
+cat <<EOF
+no app-hosting appid guestshell
+EOF
+}
+
 config_cleanup() {
 cat <<EOF
 no app-hosting appid guestshell
@@ -139,7 +149,8 @@ if [ "$DRY" -eq 1 ]; then
   echo "===== [1/5] EEM applets removed FIRST ====="; config_teardown
   echo "===== [2/5] guestshell disable  [3/5] guestshell destroy ====="
   if [ "$FORCE_AGENT_ONLY" = "1" ]; then
-    echo "===== [4/5] SKIPPED: no receipt, so VPG/NAT ownership is unproven ====="
+    echo "===== [4/5] FORCE: IRIS app-hosting stanza removed; VPG/NAT SKIPPED (force) - ownership unproven ====="
+    config_cleanup_force
   else
   echo "===== [4/5] receipt-owned config removal ====="
   if [ "$NETWORK_ATTACHMENT" = "router-nat" ]; then
@@ -184,7 +195,8 @@ done
 [ -z "$st" ] || { echo "ERROR: guestshell still present after destroy: $st" >&2; exit 1; }
 
 if [ "$FORCE_AGENT_ONLY" = "1" ]; then
-  echo "[4/5] SKIPPED (force): VPG/NAT left untouched - no receipt proves IRIS created them"
+  echo "[4/5] FORCE: IRIS app-hosting stanza removed; VPG/NAT SKIPPED (force) - no receipt proves IRIS created them"
+  { echo "configure terminal"; config_cleanup_force; echo "end"; } | "$RUN" "$DEVICE_IP" >/dev/null
 else
 echo "[4/5] remove receipt-owned VPG and NAT footprint"
 # IOS refuses to unconfigure a dynamic NAT mapping while translations still
