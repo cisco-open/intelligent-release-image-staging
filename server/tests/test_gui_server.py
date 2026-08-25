@@ -5805,3 +5805,82 @@ def test_first_run_setup_is_a_wizard_not_a_linking_checklist():
     # first-run hands off to the wizard, not to the old checklist
     assert "'/#setup'" in login or '"/#setup"' in login
     assert "#settings/setup" not in login
+
+
+def test_every_hidden_toggled_element_survives_its_display_rule():
+    """`el.hidden = true` only hides an element if no CSS rule outranks the UA
+    stylesheet's `[hidden] { display: none }`. A class or id selector setting
+    `display:` beats it, so the element stays on screen while the code believes
+    it is gone.
+
+    This bit the setup nudge: `.nudge { display:flex }` meant the banner could
+    never hide, and because updateSetupNudge() returns early once the count is
+    zero, it sat there showing a stale "1 setup step still needs attention"
+    over a fully configured server."""
+    with open(os.path.join(gui_server.WEBROOT, "styles.css")) as f:
+        css = f.read()
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    # Every element that can be hidden -- i.e. carries a `hidden` attribute in
+    # the markup -- contributes its id and its classes. Keying off the markup
+    # rather than off `getElementById(x).hidden` is deliberate: the nudge is
+    # hidden through a local variable, which a call-site scan misses entirely.
+    toggled = set()
+    for tag in re.findall(r"<[a-zA-Z][^>]*\shidden[\s/>]", html):
+        m = re.search(r'id="([\w-]+)"', tag)
+        if m:
+            toggled.add(m.group(1))
+        m = re.search(r'class="([^"]+)"', tag)
+        if m:
+            toggled.update(m.group(1).split())
+
+    offenders = []
+    for sel_group, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
+        if not re.search(r"display\s*:\s*(?!none)[a-z-]+", body):
+            continue
+        for sel in sel_group.split(","):
+            sel = sel.strip()
+            if not sel:
+                continue
+            # `.x:not([hidden]) { display:flex }` is the other correct pattern --
+            # the rule simply stops applying once the attribute is set.
+            if ":not([hidden])" in sel or "[hidden]" in sel:
+                continue
+            # Only the LAST compound is what the rule targets: in
+            # `.menu label { display:block }` the target is the label, not .menu.
+            target = re.split(r"[\s>+~]+", sel)[-1]
+            for token in re.findall(r"[.#]([\w-]+)", target):
+                if token not in toggled:
+                    continue
+                guard = re.search(
+                    r"[.#]" + re.escape(token) +
+                    r"(?::not\(\[hidden\]\)|\[hidden\])[^{}]*\{[^{}]*display",
+                    css)
+                if not guard:
+                    offenders.append(token)
+    assert not offenders, (
+        "these elements are toggled with .hidden but a display rule outranks "
+        "[hidden], so they never actually hide: %s" % sorted(set(offenders)))
+
+
+def test_setup_wizard_shows_every_step_even_when_already_complete():
+    """The wizard renders one step at a time and opens on the first incomplete
+    one. On a server whose telemetry destination already comes from the
+    deployment environment (IRIS_OTLP_ENDPOINT), telemetry resolves to 'ok',
+    so the wizard opened on stage host and the telemetry step was never
+    visible at all -- it looked missing.
+
+    Every step must therefore be listed and reachable, whatever its state."""
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    wiz = html.split('id="view-setup"', 1)[1].split("</section>", 1)[0]
+    assert 'id="wz-steplist"' in wiz, "no step list: completed steps stay invisible"
+    # the list is built from the same step table the wizard navigates
+    assert "renderWizardStepList" in js
+    # and any step can be opened directly, not just the first incomplete one
+    assert "wz-steplist-item" in js

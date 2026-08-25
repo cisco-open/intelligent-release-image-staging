@@ -1445,9 +1445,9 @@
   // in-console (the container has no Docker socket), so a wizard that insisted
   // on completion could never be finished.
   var WIZARD_STEPS = [
-    { id: 'telemetry',  pane: 'wz-step-telemetry',  key: 'telemetry',   chip: 'wz-td-chip' },
-    { id: 'stagehost',  pane: 'wz-step-stagehost',  key: 'stage_host',  chip: 'wz-sh-chip' },
-    { id: 'packages',   pane: 'wz-step-packages',   key: 'packages',    chip: 'wz-pkg-chip' }
+    { id: 'telemetry', pane: 'wz-step-telemetry', key: 'telemetry',  chip: 'wz-td-chip',  label: 'Telemetry destination' },
+    { id: 'stagehost', pane: 'wz-step-stagehost', key: 'stage_host', chip: 'wz-sh-chip',  label: 'Stage host' },
+    { id: 'packages',  pane: 'wz-step-packages',  key: 'packages',   chip: 'wz-pkg-chip', label: 'Device packages' }
   ];
   var wizardStep = 0;
   var wizardStatus = null;
@@ -1459,6 +1459,31 @@
       if (st !== 'ok') return i;
     }
     return WIZARD_STEPS.length - 1;   // all done: rest on the last step
+  }
+
+  // Every step is listed with its current state, whatever that state is, and
+  // any of them can be opened directly. Without this the wizard opened on the
+  // first INCOMPLETE step and rendered only that one, so a step already
+  // satisfied by the deployment environment -- telemetry, when
+  // IRIS_OTLP_ENDPOINT is set in the compose env -- was never visible at all
+  // and read as missing.
+  function renderWizardStepList() {
+    var host = document.getElementById('wz-steplist');
+    if (!host) return;
+    host.innerHTML = WIZARD_STEPS.map(function (st, n) {
+      var state = wizardStatus ? ((wizardStatus[st.key] || {}).state || 'unknown')
+                               : 'unknown';
+      return '<button type="button" role="listitem" class="wz-steplist-item' +
+        (n === wizardStep ? ' current' : '') + '" data-step="' + n + '">' +
+        '<span class="wz-steplist-n">' + (n + 1) + '</span>' +
+        '<span class="wz-steplist-label">' + esc(st.label) + '</span>' +
+        setupChip(state) + '</button>';
+    }).join('');
+    host.querySelectorAll('.wz-steplist-item').forEach(function (b) {
+      b.addEventListener('click', function () {
+        showWizardStep(parseInt(b.getAttribute('data-step'), 10));
+      });
+    });
   }
 
   function showWizardStep(i) {
@@ -1480,6 +1505,7 @@
     document.getElementById('wz-back').disabled = wizardStep === 0;
     document.getElementById('wz-next').textContent =
       wizardStep === WIZARD_STEPS.length - 1 ? 'Done' : 'Next \u203a';
+    renderWizardStepList();
   }
 
   function renderWizardPackages(pkg) {
@@ -1509,6 +1535,7 @@
       chip(st.chip, s ? (s[st.key] || {}).state : 'unknown');
     });
     renderWizardPackages(s ? s.packages : null);
+    renderWizardStepList();
     updateSetupNudge(s);
     return s;
   }
