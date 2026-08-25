@@ -80,9 +80,9 @@ body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-
 .swarm-frame { width:100%; height:clamp(680px,78vh,980px); border:1px solid #243049; border-radius:10px; background:#0b0f17; }
 #settings-info td:first-child { width:160px; }
 #audit-timeline { margin:4px 0 16px; }
-#audit-histogram { width:100%; height:64px; display:block; margin:6px 0; }
-#audit-histogram .axis { stroke:var(--line); stroke-width:1; }
-#audit-histogram .bar { fill:#9fc0f0; cursor:pointer; transition:fill .12s ease; }
+#audit-histogram, #dl-histogram { width:100%; height:64px; display:block; margin:6px 0; }
+#audit-histogram .axis, #dl-histogram .axis { stroke:var(--line); stroke-width:1; }
+#audit-histogram .bar, #dl-histogram .bar { fill:#9fc0f0; cursor:pointer; transition:fill .12s ease; }
 #audit-histogram .bar:hover { fill:var(--blue); }
 /* time brush: selection overlay lives in its own pointer-events-free layer;
    all hit-testing is numeric on the svg itself */
@@ -228,8 +228,6 @@ body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-
 .dl-drawer-head { display:flex; align-items:center; justify-content:space-between;
   gap:10px; padding:10px 12px; border-bottom:1px solid var(--line, #d7dee8); }
 #dl-drawer .log { flex:1; margin:0; overflow:auto; border:0; border-radius:0; }
-#dl-graph { min-height:56px; margin:8px 0 4px; }
-#dl-graph .bar { fill:#9fc0f0; }
 
 @media (prefers-reduced-motion: reduce) {
   #dl-drawer { transition:none; }

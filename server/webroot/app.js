@@ -2490,7 +2490,7 @@
 
   async function refreshMonitoring() {
     await Promise.all([refreshHistogram(), refreshAuditTable(),
-                       refreshDeployLogs()]);
+                       refreshDeployLogsAll()]);
   }
 
   // ---- Monitoring: persistent deployment logs pane ----
@@ -2545,42 +2545,203 @@
     return true;
   }
 
-  // Counts per bucket across the span the logs actually cover. Drawn as an
-  // inline SVG because CSP forbids inline style attributes.
-  function renderDeployGraph(logs) {
-    var host = document.getElementById('dl-graph');
-    if (!host) return;
-    var stamps = logs.map(function (l) { return l.finished_at; })
-      .filter(function (t) { return typeof t === 'number' && t > 0; });
-    if (stamps.length < 2) { host.innerHTML = ''; return; }
-    var min = Math.min.apply(null, stamps), max = Math.max.apply(null, stamps);
-    if (max <= min) { host.innerHTML = ''; return; }
-    var N = 32, counts = new Array(N).fill(0);
-    stamps.forEach(function (t) {
-      var i = Math.min(N - 1, Math.floor((t - min) / (max - min) * N));
-      counts[i]++;
-    });
-    var peak = Math.max.apply(null, counts) || 1;
-    var W = 100, H = 48, bw = W / N;
-    var bars = counts.map(function (c, i) {
-      var h = c ? Math.max(1.5, c / peak * (H - 6)) : 0;
-      if (!h) return '';
-      return '<rect class="bar" x="' + (i * bw + bw * 0.15).toFixed(2) + '" y="' +
-        (H - h).toFixed(2) + '" width="' + (bw * 0.7).toFixed(2) + '" height="' +
-        h.toFixed(2) + '"><title>' + c + ' deployment' + (c === 1 ? '' : 's') +
-        '</title></rect>';
-    }).join('');
-    host.innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" ' +
-      'width="100%" height="56" role="img">' + bars + '</svg>' +
-      '<div class="muted" style="display:flex;justify-content:space-between;font-size:11px">' +
-      '<span>' + esc(fmtDate(min)) + '</span><span>' + esc(fmtDate(max)) + '</span></div>';
+  // ---- Deployment logs: time filter (the audit timeline's feature) --------
+  // Chips pick the outer window, the server bins into buckets, and dragging a
+  // brush selects a range that is fed back into the LIST query -- the graph
+  // filters, it is not decoration.
+  //
+  // NOTE: this deliberately does NOT share code with the audit timeline yet.
+  // That machinery has no behavioural test coverage (only source assertions
+  // that ids and function names exist) and cannot be rendered here, so
+  // extracting it would be an unverifiable refactor of a working feature.
+  // Audit is left untouched; the shared component is a follow-up.
+  var DL_RANGES = {
+    '24h': { window: 86400,   buckets: 24 },
+    '7d':  { window: 604800,  buckets: 28 },
+    '30d': { window: 2592000, buckets: 30 },
+    '90d': { window: 7776000, buckets: 45 },
+    'all': { window: 7776000, buckets: 45 }
+  };
+  var dlRange = '7d';
+  var dlSel = null;            // {start,end} epoch secs, or null
+  var dlDomain = null;         // {since,until} the histogram currently displays
+  var dlBucketSecs = 0;
+  var DL_W = 600, DL_H = 64, DL_HANDLE_VB = 4, DL_HANDLE_HIT_PX = 8;
+  var DL_CLICK_SLOP_PX = 3, DL_MIN_SEL_SECONDS = 60;
+  var dlSvg = document.getElementById('dl-histogram');
+  var dlBarsG = document.getElementById('dl-bars');
+  var dlBrushG = document.getElementById('dl-brush');
+
+  function dlEpochToVb(t) {
+    return (t - dlDomain.since) / (dlDomain.until - dlDomain.since) * DL_W;
   }
+  function dlClientXToEpoch(clientX) {
+    var r = dlSvg.getBoundingClientRect();
+    return dlDomain.since + ((clientX - r.left) / r.width) *
+      (dlDomain.until - dlDomain.since);
+  }
+  function dlEpochToClientX(t) {
+    var r = dlSvg.getBoundingClientRect();
+    return r.left + (t - dlDomain.since) / (dlDomain.until - dlDomain.since) * r.width;
+  }
+  function dlOuterBounds() {
+    var cfg = DL_RANGES[dlRange] || DL_RANGES['7d'];
+    var now = Date.now() / 1000;
+    return { since: now - cfg.window, until: now };
+  }
+  function dlClampSel(a, b) {
+    var ob = dlOuterBounds();
+    var st = Math.max(ob.since, Math.min(a, b));
+    var en = Math.min(ob.until, Math.max(a, b));
+    if (en - st < DL_MIN_SEL_SECONDS) {
+      en = Math.min(ob.until, st + DL_MIN_SEL_SECONDS);
+      st = en - DL_MIN_SEL_SECONDS;
+    }
+    return { start: Math.floor(st), end: Math.ceil(en) };
+  }
+  function dlPickBucketCount(spanSecs) {
+    return Math.min(90, Math.max(1, Math.floor(spanSecs / 60)));
+  }
+
+  function dlRenderBars(buckets) {
+    var maxCount = buckets.reduce(function (m, b) { return Math.max(m, b.count); }, 0);
+    var n = buckets.length || 1, barW = DL_W / n;
+    var parts = ['<line x1="0" y1="' + (DL_H - 1) + '" x2="' + DL_W +
+                 '" y2="' + (DL_H - 1) + '" class="axis"/>'];
+    buckets.forEach(function (b, i) {
+      var h = b.count > 0
+        ? Math.max(1, Math.round((b.count / (maxCount || 1)) * (DL_H - 4))) : 0;
+      if (!h) return;
+      parts.push('<rect class="bar" x="' + (i * barW + 1) + '" y="' + (DL_H - h) +
+        '" width="' + Math.max(1, barW - 2) + '" height="' + h + '"><title>' +
+        esc(fmtDate(b.start)) + '–' + esc(fmtDate(b.start + dlBucketSecs)) + ': ' +
+        esc(b.count) + ' deployment' + (b.count === 1 ? '' : 's') + '</title></rect>');
+    });
+    dlBarsG.innerHTML = parts.join('');   // bars layer only; brush layer persists
+  }
+  function dlRenderBrush(sel) {
+    if (!sel || !dlDomain) { dlBrushG.innerHTML = ''; return; }
+    var x0 = dlEpochToVb(sel.start), x1 = dlEpochToVb(sel.end);
+    var hL = Math.max(0, Math.min(x0 - DL_HANDLE_VB / 2, DL_W - DL_HANDLE_VB));
+    var hR = Math.max(0, Math.min(x1 - DL_HANDLE_VB / 2, DL_W - DL_HANDLE_VB));
+    dlBrushG.innerHTML =
+      '<rect class="brush-sel" x="' + x0 + '" y="0" width="' + Math.max(0, x1 - x0) +
+      '" height="' + DL_H + '"/>' +
+      '<rect class="brush-handle" x="' + hL + '" y="0" width="' + DL_HANDLE_VB + '" height="' + DL_H + '"/>' +
+      '<rect class="brush-handle" x="' + hR + '" y="0" width="' + DL_HANDLE_VB + '" height="' + DL_H + '"/>';
+  }
+  function dlRenderWindowLabel(startOverride, endOverride) {
+    var label = document.getElementById('dl-window-label');
+    var clear = document.getElementById('dl-clear-selection');
+    if (startOverride != null) {
+      label.textContent = fmtDate(startOverride) + ' – ' + fmtDate(endOverride);
+      return;
+    }
+    if (dlSel) {
+      label.textContent = fmtDate(dlSel.start) + ' – ' + fmtDate(dlSel.end);
+      clear.hidden = false;
+    } else {
+      var ob = dlOuterBounds();
+      label.textContent = fmtDate(ob.since) + ' – now';
+      clear.hidden = true;
+    }
+  }
+
+  async function refreshDeployHistogram() {
+    var url, domain;
+    if (dlSel) {
+      var span = dlSel.end - dlSel.start;
+      url = '/api/deploy-logs/histogram?since_ts=' + encodeURIComponent(dlSel.start) +
+        '&until_ts=' + encodeURIComponent(dlSel.end) +
+        '&buckets=' + dlPickBucketCount(span);
+      domain = { since: dlSel.start, until: dlSel.end };
+    } else {
+      var cfg = DL_RANGES[dlRange] || DL_RANGES['7d'];
+      url = '/api/deploy-logs/histogram?window=' + cfg.window + '&buckets=' + cfg.buckets;
+      domain = null;
+    }
+    var r = null;
+    try { r = await fetch(url); } catch (e) { }
+    if (!r || !r.ok) return;
+    var body = await r.json();
+    var buckets = body.buckets || [];
+    var now = body.now || Math.floor(Date.now() / 1000);
+    if (!domain) {
+      var w = (DL_RANGES[dlRange] || DL_RANGES['7d']).window;
+      domain = { since: now - w, until: now };
+    }
+    dlDomain = domain;
+    dlBucketSecs = (domain.until - domain.since) / (buckets.length || 1);
+    dlRenderBars(buckets);
+    dlRenderBrush(dlSel);
+    dlRenderWindowLabel();
+  }
+
+  function dlCommitSelection(a, b) { dlSel = dlClampSel(a, b); refreshDeployLogsAll(); }
+  function dlClearSelection() { if (!dlSel) return; dlSel = null; refreshDeployLogsAll(); }
+
+  // -- brush pointer state machine (mirrors the audit one) --
+  var dlDrag = null;
+  function dlHitTest(clientX) {
+    if (dlSel) {
+      var pxL = dlEpochToClientX(dlSel.start), pxR = dlEpochToClientX(dlSel.end);
+      if (Math.abs(clientX - pxL) <= DL_HANDLE_HIT_PX) return 'left';
+      if (Math.abs(clientX - pxR) <= DL_HANDLE_HIT_PX) return 'right';
+      if (clientX > pxL && clientX < pxR) return 'pan';
+    }
+    return 'new';
+  }
+  if (dlSvg) {
+    dlSvg.addEventListener('pointerdown', function (e) {
+      if (e.button !== 0 || !e.isPrimary || dlDrag || !dlDomain) return;
+      dlDrag = { mode: dlHitTest(e.clientX), downX: e.clientX,
+                 anchor: dlClientXToEpoch(e.clientX), orig: dlSel, moved: false,
+                 pending: null };
+      dlSvg.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+    dlSvg.addEventListener('pointermove', function (e) {
+      if (!dlDrag) return;
+      if (Math.abs(e.clientX - dlDrag.downX) > DL_CLICK_SLOP_PX) dlDrag.moved = true;
+      if (!dlDrag.moved) return;
+      var at = dlClientXToEpoch(e.clientX), sel;
+      if (dlDrag.mode === 'left')       sel = dlClampSel(at, dlDrag.orig.end);
+      else if (dlDrag.mode === 'right') sel = dlClampSel(dlDrag.orig.start, at);
+      else if (dlDrag.mode === 'pan') {
+        var shift = at - dlDrag.anchor;
+        sel = dlClampSel(dlDrag.orig.start + shift, dlDrag.orig.end + shift);
+      } else sel = dlClampSel(dlDrag.anchor, at);
+      dlDrag.pending = sel;
+      dlRenderBrush(sel);
+      dlRenderWindowLabel(sel.start, sel.end);
+    });
+    dlSvg.addEventListener('pointerup', function (e) {
+      if (!dlDrag) return;
+      var d = dlDrag; dlDrag = null;
+      try { dlSvg.releasePointerCapture(e.pointerId); } catch (err) { }
+      if (!d.moved) { dlClearSelection(); return; }   // a click clears, as in audit
+      if (d.pending) dlCommitSelection(d.pending.start, d.pending.end);
+    });
+  }
+  document.querySelectorAll('#dl-range-chips .chip').forEach(function (c) {
+    c.addEventListener('click', function () {
+      document.querySelectorAll('#dl-range-chips .chip').forEach(function (o) {
+        o.classList.toggle('active', o === c);
+      });
+      dlRange = c.getAttribute('data-range');
+      dlSel = null;                       // a new outer window drops the selection
+      refreshDeployLogsAll();
+    });
+  });
+  (function () {
+    var b = document.getElementById('dl-clear-selection');
+    if (b) b.addEventListener('click', dlClearSelection);
+  })();
 
   function renderDeployLogs() {
     var tbody = document.getElementById('dl-rows');
     var f = dlFilterState();
     var rows = dlAll.filter(function (l) { return deployLogMatches(l, f); });
-    renderDeployGraph(rows);
     var pages = Math.max(1, Math.ceil(rows.length / DL_PAGE_SIZE));
     if (dlPage >= pages) dlPage = pages - 1;
     if (dlPage < 0) dlPage = 0;
@@ -2618,10 +2779,30 @@
     document.getElementById('dl-drawer').hidden = true;
   }
 
+  function dlListUrl() {
+    // The brush selection narrows the list; with no selection the chip window
+    // bounds it, so the table always shows the span the timeline is showing.
+    var params = [];
+    if (dlSel) {
+      params.push('after_ts=' + dlSel.start, 'before_ts=' + dlSel.end);
+    } else {
+      var ob = dlOuterBounds();
+      params.push('after_ts=' + Math.floor(ob.since));
+    }
+    return '/api/deploy-logs' + (params.length ? '?' + params.join('&') : '');
+  }
+
+  // Timeline and table are one view of one query: refresh them together, or a
+  // selection would move the bars while the rows below still showed the old
+  // range.
+  async function refreshDeployLogsAll() {
+    await Promise.all([refreshDeployHistogram(), refreshDeployLogs()]);
+  }
+
   async function refreshDeployLogs() {
     var tbody = document.getElementById('dl-rows');
     var r = null;
-    try { r = await fetch('/api/deploy-logs'); } catch (e) { }
+    try { r = await fetch(dlListUrl()); } catch (e) { }
     if (!r || !r.ok) {
       tbody.innerHTML = '<tr><td colspan="6" class="muted">Deployment logs unavailable' +
         (r ? ' (' + r.status + ')' : '') + '.</td></tr>';
@@ -2629,15 +2810,14 @@
     }
     dlAll = (await r.json()).logs || [];
     if (!dlAll.length) {
-      document.getElementById('dl-graph').innerHTML = '';
-      tbody.innerHTML = '<tr><td colspan="6" class="muted">No deployment logs yet.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="6" class="muted">No deployment logs in this range.</td></tr>';
       document.getElementById('dl-count').textContent = '';
       document.getElementById('dl-page').textContent = '';
       return;
     }
     renderDeployLogs();
   }
-  document.getElementById('dl-refresh').addEventListener('click', refreshDeployLogs);
+  document.getElementById('dl-refresh').addEventListener('click', refreshDeployLogsAll);
   ['dl-search', 'dl-action', 'dl-result'].forEach(function (id) {
     var el = document.getElementById(id);
     if (!el) return;

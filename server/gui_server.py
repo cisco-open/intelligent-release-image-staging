@@ -227,7 +227,26 @@ def _int_or_none(raw):
         return None
 
 
-def _list_deploy_logs(log_dir, device_id=None):
+def _deploy_log_histogram(log_dir, since_ts, until_ts, buckets, device_id=None):
+    """Bin deploy logs into evenly-spaced buckets over [since_ts, until_ts),
+    oldest-first, including empty buckets -- the deploy-log counterpart of
+    audit.histogram, so the two timelines behave identically. Never raises; an
+    unreadable directory yields all-zero buckets."""
+    n = max(1, min(int(buckets), 200))
+    span = until_ts - since_ts
+    width = span / n if span > 0 else 0
+    starts = [since_ts + i * width for i in range(n)]
+    counts = [0] * n
+    for entry in _list_deploy_logs(log_dir, device_id=device_id):
+        ts = entry.get("finished_at")
+        if not isinstance(ts, int) or ts < since_ts or ts >= until_ts:
+            continue
+        idx = int((ts - since_ts) / width) if width else 0
+        counts[min(max(idx, 0), n - 1)] += 1
+    return [{"start": int(starts[i]), "count": counts[i]} for i in range(n)]
+
+
+def _list_deploy_logs(log_dir, device_id=None, after_ts=None, before_ts=None):
     """Metadata for every parseable *.log under log_dir, newest first:
     {"file","device_id","action","state","rc","finished_at","size"}. The
     header line wins; a file with a missing/garbled header falls back to the
@@ -261,6 +280,13 @@ def _list_deploy_logs(log_dir, device_id=None):
                      "action": parts[-2], "state": None, "rc": None,
                      "finished_at": int(parts[0]), "size": size}
         if device_id is not None and entry["device_id"] != device_id:
+            continue
+        # Inclusive at both ends: a brush selection must contain the entries
+        # sitting exactly on the edges the operator dragged to.
+        ts = entry.get("finished_at")
+        if after_ts is not None and (ts is None or ts < after_ts):
+            continue
+        if before_ts is not None and (ts is None or ts > before_ts):
             continue
         out.append(entry)
     out.sort(key=lambda e: (e["finished_at"] or 0, e["file"]), reverse=True)
@@ -1134,9 +1160,55 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     self._json(401, {"error": "unauthorized"}); return
                 qs = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
                 device_id = (qs.get("device_id") or [None])[0]
+                def _ts(name):
+                    if not qs.get(name):
+                        return None
+                    try:
+                        return int(float(qs[name][0]))
+                    except ValueError:
+                        return None
                 log_dir = getattr(onboard, "log_dir", None) if onboard else None
                 self._json(200, {"logs": _list_deploy_logs(
-                    log_dir, device_id=device_id)})
+                    log_dir, device_id=device_id,
+                    after_ts=_ts("after_ts"), before_ts=_ts("before_ts"))})
+                return
+            if path == "/api/deploy-logs/histogram":
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                qs = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                device_id = (qs.get("device_id") or [None])[0]
+                try:
+                    buckets = int((qs.get("buckets") or [30])[0])
+                except ValueError:
+                    buckets = 30
+                buckets = max(1, min(buckets, 200))
+                now = time.time()
+                since = until = None
+                for name in ("since_ts", "until_ts"):
+                    if qs.get(name):
+                        try:
+                            val = float(qs[name][0])
+                        except ValueError:
+                            val = None
+                        if name == "since_ts":
+                            since = val
+                        else:
+                            until = val
+                if since is not None and until is not None:
+                    if until <= since:
+                        self._json(400, {"error": "until_ts must be greater "
+                                                  "than since_ts"}); return
+                else:
+                    try:
+                        window = float((qs.get("window") or [604800])[0])
+                    except ValueError:
+                        window = 604800.0
+                    window = max(60.0, window)
+                    since, until = now - window, now
+                log_dir = getattr(onboard, "log_dir", None) if onboard else None
+                self._json(200, {"buckets": _deploy_log_histogram(
+                    log_dir, since, until, buckets, device_id=device_id),
+                    "now": int(now)})
                 return
             if path.startswith("/api/deploy-logs/"):
                 if app.session_info(self._sid()) is None:

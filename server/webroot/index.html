@@ -511,10 +511,27 @@
         </div>
         <div id="monitoring-pane-deploylogs" hidden>
           <h3>Deployment logs</h3>
-          <p class="muted">Per-job onboard and undeploy logs kept on the server
-            (newest 200) — they survive console reloads and session changes.
-            The graph covers exactly those logs, not all history.</p>
-          <div id="dl-graph" aria-label="Deployments over time"></div>
+          <p class="muted">Per-job onboard and undeploy logs kept on the server —
+            they survive console reloads and session changes. Pick a window
+            below, or drag across the graph to select a range; the table follows
+            the selection.</p>
+          <div id="dl-timeline">
+            <div class="toolbar" id="dl-range-chips">
+              <button class="chip" data-range="24h">24h</button>
+              <button class="chip active" data-range="7d">7d</button>
+              <button class="chip" data-range="30d">30d</button>
+              <button class="chip" data-range="90d">90d</button>
+              <button class="chip" data-range="all">All</button>
+            </div>
+            <svg id="dl-histogram" viewBox="0 0 600 64" preserveAspectRatio="none">
+              <g id="dl-bars"></g>
+              <g id="dl-brush"></g>
+            </svg>
+            <p class="muted">
+              <span id="dl-window-label"></span>
+              <button class="linkish" id="dl-clear-selection" hidden>× clear</button>
+            </p>
+          </div>
           <div class="toolbar">
             <span class="joined">
               <input id="dl-search" placeholder="Search device, action or result" spellcheck="false">

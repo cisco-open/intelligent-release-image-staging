@@ -5755,7 +5755,14 @@ def test_deploy_logs_paging_graph_search_and_side_drawer():
     with open(os.path.join(gui_server.WEBROOT, "styles.css")) as f:
         css = f.read()
     pane = html.split('id="monitoring-pane-deploylogs"', 1)[1].split("</div>\n      </section>", 1)[0]
-    for control in ("dl-search", "dl-action", "dl-result", "dl-graph",
+    # the timeline is the audit timeline's FEATURE -- chips pick a window, a
+    # brush selects a range, and the selection filters the table. A static
+    # sparkline is not the same thing.
+    for control in ("dl-range-chips", "dl-histogram", "dl-bars", "dl-brush",
+                    "dl-window-label", "dl-clear-selection"):
+        assert 'id="%s"' % control in pane, "missing timeline control: %s" % control
+    assert "dlCommitSelection" in js and "after_ts=" in js
+    for control in ("dl-search", "dl-action", "dl-result",
                     "dl-prev", "dl-next", "dl-page", "dl-drawer", "dl-drawer-close"):
         assert 'id="%s"' % control in pane, "missing deploy-log control: %s" % control
     # the log body lives in the drawer now, not loose under the table
@@ -5910,3 +5917,59 @@ def test_onboard_category_chip_does_not_read_as_the_sentence_subject():
     assert 'value="onboard"' in html
     # and the label an operator reads is no longer the bare subsystem name
     assert ">onboard</option>" not in html
+
+
+def _write_deploy_log(log_dir, finished_at, device, action="onboard",
+                      state="done", rc=0, job="abc123"):
+    """Synthesise a persisted deploy log with a controlled finished_at, so a
+    histogram can be tested without running jobs at real timestamps."""
+    os.makedirs(log_dir, exist_ok=True)
+    name = "%d-%s-%s-%s.log" % (finished_at, device, action, job)
+    header = ("# job=%s device=%s action=%s state=%s rc=%s queued_at=%d "
+              "started_at=%d finished_at=%d platform=guestshell\n"
+              % (job, device, action, state, rc, finished_at - 2,
+                 finished_at - 1, finished_at))
+    with open(os.path.join(log_dir, name), "w") as f:
+        f.write(header + "line one\n")
+    return name
+
+
+def test_deploy_log_histogram_bins_and_the_list_takes_a_time_window(tmp_path):
+    """The deployment-logs timeline must be the audit timeline's feature, not a
+    lookalike: the server bins into buckets over a window, and the list route
+    accepts the brush's range so a selection actually filters the table."""
+    log_dir = str(tmp_path / "deploy-logs")
+    base = 1_700_000_000
+    for i, dev in enumerate(("d1", "d2", "d3")):
+        _write_deploy_log(log_dir, base + i * 3600, dev, job="job%d" % i)
+    _write_deploy_log(log_dir, base + 50 * 3600, "d4", action="undeploy",
+                      job="jobfar")
+
+    host, port, stop = _serve_onboard(tmp_path, lambda p, e, on: 0,
+                                      log_dir=log_dir)
+    try:
+        assert _req(host, port, "GET", "/api/deploy-logs/histogram")[0] == 401
+        ck, _ = _auth(host, port)
+
+        st, _, b = _req(host, port, "GET",
+                        "/api/deploy-logs/histogram?since_ts=%d&until_ts=%d&buckets=4"
+                        % (base, base + 4 * 3600), headers={"Cookie": ck})
+        assert st == 200, b
+        buckets = json.loads(b)["buckets"]
+        assert len(buckets) == 4
+        assert sum(x["count"] for x in buckets) == 3      # the far one is outside
+        assert all("start" in x for x in buckets)
+
+        # the brush range narrows the LIST too
+        _, _, b = _req(host, port, "GET",
+                       "/api/deploy-logs?after_ts=%d&before_ts=%d"
+                       % (base, base + 3600), headers={"Cookie": ck})
+        got = json.loads(b)["logs"]
+        assert [l["device_id"] for l in got] == ["d2", "d1"]   # newest first
+
+        # a nonsense window is refused, exactly as the audit route refuses it
+        assert _req(host, port, "GET",
+                    "/api/deploy-logs/histogram?since_ts=200&until_ts=100",
+                    headers={"Cookie": ck})[0] == 400
+    finally:
+        stop()
