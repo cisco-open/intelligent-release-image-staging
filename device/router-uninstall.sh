@@ -65,8 +65,15 @@ if [ "$DRY" -eq 0 ]; then
     | sed -nE 's/^cisco[[:space:]]+([^[:space:]]+)[[:space:]]+\(.*/\1/p' | head -1)"
   LIVE_IDENTITY="$(printf '%s\n' "$VERSION_OUT" \
     | sed -nE 's/^[Pp]rocessor board ID[[:space:]]+([^[:space:]]+).*/\1/p' | head -1)"
-  [ -n "$LIVE_IDENTITY" ] && [ "$LIVE_IDENTITY" = "$EXPECTED_DEVICE_IDENTITY" ] \
-    || { echo "ERROR: device identity mismatch; refusing to modify $DEVICE_IP" >&2; exit 1; }
+  # Force mode is the receipt-less rescue path, so there is no expected
+  # identity to compare a live board ID against. Demanding one anyway made
+  # every forced undeploy abort here, which permanently stranded the routers
+  # this mode exists to rescue. The operator named DEVICE_IP explicitly and
+  # force only removes artifacts identifiable as IRIS's own by name.
+  if [ "$FORCE_AGENT_ONLY" != "1" ]; then
+    [ -n "$LIVE_IDENTITY" ] && [ "$LIVE_IDENTITY" = "$EXPECTED_DEVICE_IDENTITY" ] \
+      || { echo "ERROR: device identity mismatch; refusing to modify $DEVICE_IP" >&2; exit 1; }
+  fi
   MODEL="$LIVE_MODEL"
 fi
 case "$(printf '%s' "$MODEL" | tr 'a-z' 'A-Z')" in
@@ -326,8 +333,17 @@ FILES_RAW="$(printf '%s' "$VERIFY_OUT" | verify_section FILES)" \
 FILES="$(printf '%s' "$FILES_RAW" | grep -v '#' || true)"
 
 forbidden=""
+# Only a receipt proves IRIS created the VirtualPortGroup, and only a receipt
+# supplies its number. Force mode deliberately preserves it, so scanning for a
+# bare "interface VirtualPortGroup" prefix would flag the operator's own group
+# and fail a teardown that actually succeeded.
+if [ "$FORCE_AGENT_ONLY" != "1" ]; then
+  case "$RUNNING" in
+    *"interface VirtualPortGroup$VPG_NUMBER"*)
+      forbidden="interface VirtualPortGroup$VPG_NUMBER" ;;
+  esac
+fi
 for artifact in \
-  "interface VirtualPortGroup$VPG_NUMBER" \
   "app-hosting appid guestshell" \
   "event manager applet IRIS-" \
   "logging discriminator IRISQ" \

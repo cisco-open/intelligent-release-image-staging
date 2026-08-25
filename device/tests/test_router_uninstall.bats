@@ -235,6 +235,10 @@ case "$cmds" in
         echo "app-hosting appid guestshell"
       else
         echo "hostname iris8kv-1"
+        if [ "${FAKE_RUNNING_OPERATOR_VPG:-no}" = "yes" ]; then
+          echo "interface VirtualPortGroup3"
+          echo " ip address 192.168.254.1 255.255.255.252"
+        fi
         echo "!"
         echo "end"
       fi
@@ -280,6 +284,17 @@ _router_uninstall_run_live() {
   env DEVICE_IP=192.0.2.10 DEVICE_USER=test DEVICE_PASS=test \
     EXPECTED_DEVICE_IDENTITY=FOC1234TEST ROUTER_RESOURCES_OWNED=1 \
     NAT_REMOVE_SETTLE=1 \
+    bash "$STUBDIR/device/router-uninstall.sh"
+}
+
+_router_uninstall_run_live_forced() {
+  # The receipt-less rescue path: no EXPECTED_DEVICE_IDENTITY, no proven
+  # resource ownership and no VPG number, because there is no receipt to
+  # supply any of them. This is exactly what gui_server.py sets when it
+  # forces a teardown.
+  env -u EXPECTED_DEVICE_IDENTITY -u ROUTER_RESOURCES_OWNED -u VPG_NUMBER \
+    DEVICE_IP=192.0.2.10 DEVICE_USER=test DEVICE_PASS=test \
+    IRIS_FORCE_AGENT_ONLY=1 NAT_REMOVE_SETTLE=1 \
     bash "$STUBDIR/device/router-uninstall.sh"
 }
 
@@ -380,4 +395,37 @@ PY2
     'guestshell destroy' 'no app-hosting appid guestshell' 'show app-hosting list')"
   [ "$disable_calls" -ge 2 ]
   [ "$destroy_calls" -ge 2 ]
+}
+
+@test "forced live teardown does not demand an identity it cannot have" {
+  # Force mode exists for a router with NO receipt, so there is no
+  # EXPECTED_DEVICE_IDENTITY to compare a live processor board ID against.
+  # Comparing anyway fails every real forced undeploy before it touches the
+  # device, stranding the exact router this mode exists to rescue.
+  # NOTE: `|| return 1` is load-bearing -- under bash 3.2 a bare failing
+  # `[[ ]]` mid-body does NOT fail a bats test.
+  _router_uninstall_stub_setup
+  run _router_uninstall_run_live_forced
+  [[ "$output" != *"device identity mismatch"* ]] || return 1
+  [[ "$output" == *"SKIPPED (force)"* ]] || return 1
+  [ "$status" -eq 0 ]
+}
+
+@test "forced live teardown does not report the operator VirtualPortGroup as residue" {
+  # Force deliberately preserves the VPG. With no receipt VPG_NUMBER is empty,
+  # so scanning for a bare "interface VirtualPortGroup" matches the operator's
+  # own group and fails an undeploy that in fact succeeded.
+  _router_uninstall_stub_setup
+  FAKE_RUNNING_OPERATOR_VPG=yes run _router_uninstall_run_live_forced
+  [[ "$output" != *"artifacts still present"* ]] || return 1
+  [ "$status" -eq 0 ]
+}
+
+@test "forced live teardown still fails when the agent footprint really remains" {
+  # The relaxed scan must not become a blanket pass: guestshell left behind is
+  # still IRIS's own artifact and must still fail the undeploy.
+  _router_uninstall_stub_setup
+  FAKE_UNINSTALL_LEAVE_RESIDUE=yes run _router_uninstall_run_live_forced
+  [[ "$output" == *"artifacts still present"* ]] || return 1
+  [ "$status" -ne 0 ]
 }
