@@ -52,7 +52,7 @@ the guest-share root, over a `copy https://` that the PKI trustpoint step
 | --- | --- | --- |
 | staged as `iris-agent-<DEVICE_ID>-<CAP>.conf` | `iris-agent.conf` | catalog URL, device id, and an empty `rpc_secret` — the agent fetches the real secret on its first token refresh |
 | staged as `rpc-secret-<CAP>` | `rpc-secret` | seeds aria2c's RPC secret; bootstrap.sh reconciles it against the conf on every tick |
-| `iris-agent.tgz` | `bundle.tgz` | the agent Python, `bootstrap.sh`, `guestshell-start.sh`, `rotate-logs.sh`, and an architecture-matched `aria2c`, packed by `tools/make-agent-bundle.sh` |
+| `iris-agent.tgz` | `bundle.tgz` | the agent Python, `bootstrap.sh`, `guestshell-start.sh`, `rotate-logs.sh`, `agent/peer-receipt-hook.sh` (aria2's `--on-bt-download-complete` program), and an architecture-matched `aria2c`, packed by `tools/make-agent-bundle.sh` |
 | the bare server cert | `iris-catalog.pem` | pinned TLS trust anchor for the agent's catalog calls |
 | — | `bootstrap.sh` | the EEM entry point itself |
 

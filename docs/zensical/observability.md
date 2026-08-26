@@ -181,6 +181,11 @@ are contract:
 | `iris_peer_enforcement_applied_revision` | `iris.peer.enforcement.applied_revision` | `1` | — |
 | `iris_peer_enforcement_desired_ips` | `iris.peer.enforcement.desired_ips` | `{ip}` | — |
 | `iris_peer_enforcement_health` | `iris.peer.enforcement.health` | `1` | — |
+| `iris_origin_sent_bytes_total` | — (Prometheus only) | `By` | `image`, `info_hash` |
+| `iris_peer_attributed_bytes_total` | — (Prometheus only) | `By` | `image`, `info_hash` |
+| `iris_peer_unattributed_bytes_total` | — (Prometheus only) | `By` | `image`, `info_hash` |
+| `iris_swarm_peers_attributed` | — (Prometheus only) | `{peer}` | `image`, `info_hash` |
+| `iris_swarm_peers_saturated` | — (Prometheus only) | `1` | `image`, `info_hash` |
 
 Throughput and progress are **omitted** for an image with no currently fresh
 device rather than published as a zero, and the freshness age is exported so the
@@ -212,11 +217,12 @@ records, where it does not multiply metric cardinality.
 ### Log attributes (operator contract)
 
 Terminal per-device reports, tracker lifecycle events, peer-policy operations and
-measured peer rates flow as OTLP logs with OpenTelemetry semantic-convention
+measured peer rates and byte totals flow as OTLP logs with OpenTelemetry semantic-convention
 names. Event identity is the top-level `eventName` field:
 `iris.device.transfer.report` (v2 reports), `iris.device.report` (legacy v1
-reports), `iris.tracker.peer` (tracker lifecycle), `iris.peer.policy`, and
-`iris.swarm.peer_rate`.
+reports), `iris.tracker.peer` (tracker lifecycle), `iris.peer.policy`,
+`iris.swarm.peer_rate`, `iris.swarm.peer_bytes` (origin-side traced bytes)
+and `iris.device.peer_receipt` (device-side exact per-peer bytes).
 
 Key attributes per event. `iris.device.transfer.report`: `device.id`,
 `iris.image.id`, `iris.transfer.id`, `iris.report.event`,
@@ -237,12 +243,70 @@ Key attributes per event. `iris.device.transfer.report`: `device.id`,
 The attributes `device.model.identifier`, `iris.link.tier`,
 `iris.transfer.throughput_avg`, `network.transport` and the structured
 `iris.transfer.peers` list were retired in this release; per-peer detail now
-lives in `iris.swarm.peer_rate` records. `iris.transfer.peers_total` still
+lives in `iris.swarm.peer_rate` and the byte records described below. `iris.transfer.peers_total` still
 carries the exact distinct peer count, saturating at the device's 512-IP
-tracking cap; rows beyond the named cap are counted there, not listed. Per-peer
-byte counts are deliberately absent: aria2 (the on-device client) exposes only
-instantaneous per-peer rates, so any per-peer byte figure would be derived
-rather than measured. Exact byte totals are transfer-level.
+tracking cap; rows beyond the named cap are counted there, not listed.
+
+### Per-peer bytes (and what they do not cover)
+
+Earlier releases said per-peer byte counts were impossible, because aria2 1.37
+exposed only instantaneous per-peer rates and any byte figure built from them
+would be derived rather than measured. That is no longer the client we ship:
+aria2-next 2.5.6 keeps a **cumulative per-peer session counter** of its own
+(`aria2.getPeers` → `downloaded` / `uploaded`), so a byte total can now be read
+rather than integrated. Two records carry it, and they measure different things
+— never sum them together.
+
+`iris.device.peer_receipt` is the exact one, emitted once per peer per completed
+device transfer. An `--on-bt-download-complete` hook on the device reads the
+counters at the instant the last piece lands, before aria2 flips the download to
+seed-only and the connections drain. Attributes: `device.id` (the *receiving*
+device), `iris.image.id`, `iris.transfer.id`, `network.peer.address`,
+`network.peer.port`, `iris.transfer.session_bytes_from_peer` /
+`iris.transfer.session_bytes_to_peer`, `iris.peer.attribution`,
+`iris.peer.device.id`, `iris.peer.has_complete_file` and
+`iris.receipt.capture_complete`.
+
+`iris.peer.attribution` is the attribute that makes the number mean anything.
+The origin seeder is an ordinary BitTorrent peer of every device, so it appears
+in the device's own peer list like any other sender; the device cannot tell it
+apart and does not try. The server classifies each row at ingest against the
+tracker's `service:seeder` principal and its own device-address map, into
+`origin`, `device`, or `unknown` — an address that resolves to neither is
+reported as unknown, never folded into the device figure. The per-transfer
+rollups on `iris.device.transfer.report` follow the same split:
+`iris.transfer.bytes_from_all_senders_total` is the device's own honest total
+**including the origin**, and `iris.transfer.bytes_from_origin_total`,
+`iris.transfer.bytes_from_devices_total` and
+`iris.transfer.bytes_from_unknown_total` are the classified parts. A peer-assist
+ratio is `bytes_from_devices_total ÷ completed_content_bytes` — using
+`bytes_from_all_senders_total` there would report every rollout as ~100%
+peer-delivered.
+
+`iris.swarm.peer_bytes` is the origin-side counterpart, and it is an estimate.
+The origin polls `aria2.getPeers` on an interval and banks each edge's growth in
+a durable ledger, because that counter is per *connection* and vanishes with the
+connection. On a 7-router pull a 3-second poll traced 73.3% of the bytes to a device the
+origin actually sent, a 2-second poll 88.1%; the residue is connections that
+opened and closed between two polls. It is kept as its own quantity
+(`iris_peer_unattributed_bytes_total`) and never spread across the peers — an
+even split would be arithmetic presented as observation.
+
+!!! warning "The receipt is a floor, not a census"
+    The hook reads only the peers aria2 still has a live connection to.
+    `DefaultPeerStorage` erases a peer from `usedPeers_` the moment it
+    disconnects, so a peer that fed the device 400 MB and then dropped before
+    the last piece landed leaves **no row and no bytes** — its contribution is
+    silently absent from every figure above, not counted as zero.
+    `iris.transfer.bytes_from_all_senders_total` is therefore a lower bound on
+    what the device received, and it will not reconcile with
+    `iris.transfer.completed_content_bytes`. Rows the device or the server
+    dropped at a cap *are* accounted for, in
+    `iris.transfer.peer_receipts.rows_omitted` and
+    `iris.transfer.bytes_from_all_senders_omitted`;
+    `iris.transfer.peer_receipts.capture_complete` goes false when the capture
+    itself was lossy. A transfer with no usable snapshot carries no peer-receipt
+    attributes at all rather than a zeroed set.
 
 ### Sizing
 

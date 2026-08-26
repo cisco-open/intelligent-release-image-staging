@@ -11,6 +11,251 @@ top-level `VERSION` file.
 
 ## [Unreleased]
 
+## [2026.08.26]
+
+### Added
+- **Per-peer byte counts are measured again — by reading a counter, not by
+  integrating a rate.** Release 2026.08.20 removed the per-peer `rx_bytes` /
+  `tx_bytes` / `avg_bps` row fields because they were fabricated, and that
+  ruling stands: under aria2 1.37 the client exposed nothing but an
+  *instantaneous* per-peer rate, so the agent had to integrate that rate across
+  its sampling interval to get a byte total, and on a transfer that finished
+  inside a tick the result degenerated to an even split of the transfer across
+  whichever peers happened to be connected. None of that machinery comes back
+  here. What changed is the client underneath it: the device now runs
+  aria2-next 2.5.6, which keeps a **cumulative per-peer session counter** for
+  the life of the download (`peer->getSessionDownloadLength()` /
+  `getSessionUploadLength()`, surfaced by `aria2.getPeers` as `downloaded` /
+  `uploaded`). What ships is the client's own tally, read once. Per-peer bytes
+  are back because the measurement now exists, not because the bar for calling
+  something measured was lowered.
+- **A completion hook on the device captures those counters at the one instant
+  they are complete.** `device/agent/peer-receipt-hook.sh` is registered as
+  aria2's `--on-bt-download-complete`, deliberately not the generic
+  `--on-download-complete`. The BitTorrent hook fires the moment the last piece
+  lands, immediately before aria2 flips the group to seed-only, so the peers
+  that just fed the device are all still connected; the generic hook fires from
+  the stop path, after seeding has *ended*, when those connections are long
+  gone and their counters with them. The hook is POSIX `sh` and `curl` only —
+  starting a Python interpreter would widen the race against peers hanging up —
+  parses no JSON, embeds the RPC response verbatim into a sidecar next to the
+  staged image, and exits 0 silently on every failure, because in daemon mode
+  aria2 discards its hooks' output and an absent snapshot is an ordinary
+  outcome. The next agent tick folds the sidecar into the terminal report and
+  deletes it.
+- **The v2 device report carries a `peer_receipts` block.** Each row is one
+  peer still connected at completion: `ip`, `port`,
+  `session_bytes_from_peer` / `session_bytes_to_peer`, and a
+  `has_complete_file` flag (aria2's `isSeeder()` — it means the peer holds the
+  whole file, and in a wave every device that finishes early sets it, so it
+  identifies complete peers and never the origin). The totals are named
+  `bytes_from_all_senders_total` / `_omitted` rather than "from peers" because
+  that is what the device can honestly claim: the origin seeder is an ordinary
+  BitTorrent peer of every device, it appears in the device's own peer list,
+  and its bytes are inside that sum. Rows and bytes discarded at any cap are
+  counted and summed into `rows_omitted` / `bytes_from_all_senders_omitted`
+  instead of vanishing, and `complete` records whether the capture itself was
+  lossy.
+- **The server decides which sender was the origin, because only the server
+  can.** Every receipt row is classified at ingest against the tracker's
+  `service:seeder` principal and the server's device-address map into exactly
+  one of `origin`, `device` or `unknown`; an address that matches neither — or
+  that somehow matches both — is reported as unknown and is never folded into
+  the peer figure. The classified totals ride the report record as
+  `iris.transfer.bytes_from_origin_total`,
+  `iris.transfer.bytes_from_devices_total` and
+  `iris.transfer.bytes_from_unknown_total` alongside the device's own
+  `iris.transfer.bytes_from_all_senders_total`. A peer-assist ratio computed
+  from the all-senders total would have reported very nearly every rollout as
+  100% peer-delivered.
+- **The exact measurement now reaches an operator.** A new OTLP log record
+  `iris.device.peer_receipt` carries one row per peer per completed transfer,
+  with `iris.peer.attribution` (`origin` | `device` | `unknown`, always
+  present) and `iris.peer.device.id` when the sender resolves to a known
+  device. It is a distinct log name from the origin-side
+  `iris.swarm.peer_bytes` on purpose: one is exact and one is sampled, and a
+  backend must not be able to sum them into a single series by accident.
+- **A durable peer ledger and its aggregate counters on `:9101`.** Tracing a
+  byte to the device that received it has to happen *as it is observed*, and be
+  persisted, because
+  aria2's per-peer counter is per connection and disappears when the connection
+  does — a counter nobody read before the peer hung up no longer exists. The
+  ledger banks each edge's growth at every poll and exposes three counters and
+  two gauges per torrent: `iris_origin_sent_bytes_total`,
+  `iris_peer_attributed_bytes_total`, `iris_peer_unattributed_bytes_total`,
+  `iris_swarm_peers_attributed` and `iris_swarm_peers_saturated`. The residue
+  is kept as its own quantity rather than divided among the peers — measured
+  against the origin's own `uploadLength` on a 7-router pull, a 3-second poll
+  traced 73.3% of the bytes actually sent to a device and a 2-second poll
+  88.1%, and spreading the remainder evenly would be arithmetic presented as
+  observation.
+  The saturation gauge exists so the residue stays readable once the ledger's
+  per-torrent peer cap starts refusing peers.
+  All five families are labelled `{image, info_hash}` and nothing finer: a
+  per-peer label set would have made the cardinality of the origin's metrics a
+  function of the size of the fleet. The three byte families are counters and
+  not gauges on purpose — a rollout that finished an hour ago has to keep its
+  history, and a board built on `increase()` over a counter still reports what
+  a swarm did after the swarm has gone quiet, where a gauge would fall to zero
+  the moment the last device stopped and blank every panel that had just
+  proved the transfer worked. On a cold four-router pull of a 928 MiB image the
+  ledger reconciled exactly: 3,492,982,720 bytes sent by the origin =
+  3,227,913,693 traced to named devices (92.4%) + 265,069,027 untraced (7.6%),
+  with no third bucket and nothing rounded to make the two sides meet. Operator
+  wording throughout the boards and docs is *traced to a device* and *untraced*
+  rather than *attributed* / *unattributed*, which said nothing to anyone who
+  had not written the code; the metric and attribute names are unchanged, so
+  `iris_peer_attributed_bytes_total` is still the traced total and
+  `iris_peer_unattributed_bytes_total` still the untraced residue.
+- **The dashboards that read these metrics ship with the code that emits
+  them.** `docs/dashboards/grafana-iris-swarm.json` and
+  `docs/dashboards/splunk-iris-swarm.xml` are reference boards for the swarm
+  counters, kept in the repository beside `server/metrics.py` so that renaming a
+  family is a change to one commit rather than a discovery an operator makes
+  weeks later in front of a panel that has quietly read zero ever since. Both
+  are built on the aggregate families alone, so neither depends on per-peer
+  cardinality the origin does not publish. Every panel states in its own
+  description whether the number behind it is measured, derived or estimated,
+  and a panel whose input the server does not emit yet reads *No data* rather
+  than falling back to a constant — a fleet total priced at a hardcoded 928 MiB
+  is wrong the moment a differently sized image is selected.
+- **An image can be assigned to the whole selection.** Assignment was per-row
+  only, which does not scale past a handful of devices — and the filter bar
+  exists precisely so an operator can act on a subset. An *image for selected*
+  picker joins the credential one, drawing on the same catalog the per-row
+  dropdowns use and running under the same selected-action lock, so a delete
+  cannot fire mid-assignment. Unassigning is its own explicit choice rather
+  than what an untouched picker does.
+- **Every state the Status column can show can now be filtered for.** The
+  filter derived its own status from a three-branch copy of the cell's logic,
+  which knew `deployed`, `enrolled` and `not enrolled` and nothing else. The
+  cell renders eleven states: a device reading `onboarding…`, `undeploying…`,
+  `waiting for heartbeat`, `onboard failed`, `undeploy failed`, `placement
+  failed`, `copying to bootflash:` or a raw staging state could not be selected
+  at all, and asking for `enrolled` silently swept several of them in — with a
+  comment above the copy claiming the two could never disagree. There is now
+  one derivation, returning the key, the label and the badge class together,
+  and the Status options are generated from the same list, so a state cannot be
+  renderable but unfilterable. `offline` stays a separate choice, being a
+  modifier on top of the cell rather than one of its branches.
+- **Deployment details open in a drawer beside the table, not below it.** The
+  ⓘ panel was appended under the devices table, so on a fleet of any size
+  opening it put the content off-screen and made the operator scroll away from
+  the row they had just clicked to read the answer. It now slides in from the
+  right like the deployment-log drawer, closes on Escape or ✕, and honours
+  `prefers-reduced-motion`.
+
+### Fixed
+- **A device deleted and added back under the same id could be neither
+  onboarded nor undeployed.** Deleting a device purges every per-device store
+  the console owns — the image assignment, the heartbeat record, the telemetry
+  ring, the pending pull directive, the seen-report ledger — and revokes the
+  device's credentials. It never touched the deployment receipts, and there was
+  no API on the receipt store to touch them with. A receipt is matched to a
+  device by `device_id` alone, so the next device registered under that id
+  inherited its predecessor's deployment. That is not a cosmetic leak: onboard
+  refuses while a recoverable receipt exists (`router already has a
+  needs-reconcile deployment receipt; undeploy it before onboarding again`),
+  and the undeploy it names refuses the box, because the receipt records the
+  board ID of the machine that is gone (`device identity mismatch; refusing to
+  modify …`) — a rebuilt VM keeps its id and its address but not its identity.
+  Onboard pointed at undeploy, undeploy pointed at hardware that no longer
+  existed, and delete cleared neither. Deleting a device now marks its receipts
+  `abandoned`, a new terminal state that is deliberately neither `removed`
+  (which asserts IRIS tore the deployment down) nor `superseded` (which asserts
+  a newer receipt replaced it). The rows are kept, not dropped — a receipt is
+  the only list of what IRIS built on that box, the VirtualPortGroup, the NAT
+  stanza, the app address, and an operator who deleted a still-configured
+  device is exactly the person who needs it — but they no longer authorise a
+  teardown or block an onboard. The delete audit line names the outcome the way
+  it already named the revoked secrets and the retained endpoints, and the
+  console's delete confirmation says so before the fact.
+- **A hung onboard job kept its own device busy until the deadline expired.**
+  The reaper that fails a job past `IRIS_ONBOARD_JOB_TIMEOUT` ran *after* the
+  busy guard in `start()`, past every path that returns or raises — so it could
+  only ever fire during a start for some other device, never the one actually
+  stuck. The device it was stuck on stayed refused for the full two-hour window
+  with no console action able to clear it. The reap now runs first. It also
+  goes through the ordinary finish path instead of half-writing the record
+  itself: it used to set an `rc` key that no reader looks at (they all read
+  `returncode`), leave the installer handle in the process table, write no
+  persisted log, and emit no `*_finished` audit event — a job could fail with
+  nothing anywhere saying so.
+- **Deleting a device left its in-flight jobs running.** A job record is keyed
+  on the bare device id, the same way receipts were, so one left behind kept
+  the busy guard armed against the *next* device registered under that name:
+  the opposite action was refused, and the same action silently joined the dead
+  job, which reads as a click that did nothing. Delete now cancels the device's
+  queued jobs and signals a running installer, and says how many it stopped in
+  the audit line.
+- **Deployment logs from a deleted device were shown as its replacement's own
+  history.** Persisted logs are keyed on the device id and deliberately outlive
+  a delete — they are the record of what actually ran, and dropping them to fix
+  an attribution problem would be the wrong trade. A device row now carries
+  `registered_at`, stamped once when the id is first registered and carried
+  across edits and CSV re-imports, and `GET /api/deploy-logs?device_id=…` flags
+  every entry that finished before it. The console labels those runs *previous
+  device* rather than hiding them: the run happened, it just happened to a
+  different machine. A device registered before the stamp existed has none, and
+  nothing is flagged for it — guessing would be worse than saying nothing.
+- **A forced undeploy was refused in the one situation it exists for.** `force`
+  was consulted in a single expression, `if receipt is None and not force`, so
+  it applied only when there was no receipt at all. A device whose receipt no
+  longer matched the box — the case above — has a receipt, so the flag was read
+  and then dropped, the full receipt-driven teardown ran, and the recipe's
+  identity guard refused it. The rescue path was unreachable from the state it
+  was built to rescue, and the checkbox that offered it was labelled for the
+  other case. `force` is now decided before the receipt is read at all, which
+  also makes it the way out of `multiple recoverable receipts for device …` —
+  a state that refused onboard, undeploy and adopt alike, that a controller
+  restart could create, and that nothing in the product could resolve. Once the
+  forced teardown succeeds, every receipt the device still held is abandoned,
+  so the next onboard is not refused on the receipt the force was run to get
+  past; on failure they are left alone, because failing to reach a device is
+  not proof that its receipt is wrong. The checkbox is relabelled *Force (no
+  usable deployment receipt)* and its note describes both cases.
+- **`device identity mismatch` named no way forward.** Refusing to tear down a
+  box that is not the one the receipt was written for is correct. Saying only
+  that, to an operator whose onboard had just told them to undeploy, was not.
+  The message now reports both board IDs and names the two ways out: undeploy
+  again with Force, or delete and re-add the device.
+- **Retrying a failed undeploy answered with nothing at all.** The 409 path for
+  a receipt that cannot authorise teardown marks that receipt `needs-reconcile`
+  on its way out — including when it is already `needs-reconcile`, which is not
+  a legal transition. Raised from inside an `except` handler with no blanket
+  handler above it, that escaped the request entirely: the first attempt
+  explained itself and every attempt after it dropped the connection. Both that
+  handler and the matching one on the full-work-queue path are now best-effort.
+
+### Known limitations
+- **A peer-receipt total is a floor, not a census.** The hook can only read
+  peers aria2 still holds a live connection to, and `DefaultPeerStorage` erases
+  a peer from `usedPeers_` the instant it disconnects. A peer that delivered
+  several hundred megabytes and then dropped before the final piece landed
+  leaves no row and contributes no bytes — its share is silently absent, not
+  recorded as zero — so the receipt totals will not reconcile with
+  `content.completed_content_bytes`. Bytes lost to a *cap* are reported; bytes lost to a
+  disconnect cannot be.
+- **Tracing a byte to a device is sampled, and sampling misses bytes.**
+  `aria2.getPeers` answers with the connections that are live at the instant it
+  is called, so a peer that connected, took its bytes and hung up between two
+  polls was never visible to the ledger at all. Measured against the origin's
+  own `uploadLength` on a seven-router pull, a 3-second poll traced 73.3% of
+  the bytes the origin actually sent and a 2-second poll 88.1%. The untraced
+  remainder is published as `iris_peer_unattributed_bytes_total` instead of
+  being smoothed away, because it is a real quantity — bytes that certainly
+  went to somebody —
+  and dividing it among the peers that happen to still be connected would print
+  arithmetic where the panel promises an observation. A shorter poll interval
+  leaves less untraced; nothing closes the gap.
+- **`iris_image_size_bytes` is specified but not emitted yet.** The shipped
+  dashboards ask for it by name to turn delivered bytes into a share of the
+  image, and until `server/metrics.py` publishes it those panels read *No data*.
+  That is deliberate rather than an oversight in the boards: the alternative — a
+  textbox default or an `or vector(...)` fallback — would render a confident
+  progress figure computed from a number nobody measured. The fleet-delivery
+  totals are defined so that they never depend on it.
+
 ## [2026.08.25]
 
 ### Added

@@ -8,6 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 
 IRIS, Intelligent Release and Image Staging, stages Cisco IOS-XE images across a network before an operator performs any install or reload activity. It combines a private BitTorrent swarm, a signed catalog, per-device policies, and a small on-device agent so large images can move efficiently without giving up device-side verification.
 
+IRIS also measures that distribution rather than only performing it. Every rollout accounts for how many bytes the devices served to each other and how many came from the origin seeder, and each device reports the peers it actually took its image from — see [Telemetry Export](telemetry-export.md).
+
 !!! warning "Stage-only invariant"
     IRIS distributes, verifies, and stages images. It never installs, activates, reloads, changes boot variables, or mutates the running software state of a device.
 
@@ -25,7 +27,8 @@ IRIS, Intelligent Release and Image Staging, stages Cisco IOS-XE images across a
 | Catalyst 8000 router | Guest Shell through VirtualPortGroup, staging to `bootflash:`. Designed for the Catalyst 8000 family; routed and NAT modes are lab-tested on Catalyst 8000V through verified staging and receipt-backed undeploy. |
 | IOx app | The same agent model as an IOx Docker app: IE-3400 (arm64, stages to `sdflash:`) and SSD-equipped Catalyst 9300 (amd64, stages to bootflash through the SSD share). |
 | Network tools | CSV-driven inventory, per-device installers, assignments, and release packaging. |
-| Observability | Swarm map, health endpoint, metrics (Prometheus exposition format), optional OTLP export, and structured audit trail. |
+| Measured distribution | Per-image accounting of origin-served versus peer-served bytes, plus per-device peer receipts naming which peers supplied the image. The portion the origin-side sampler could not trace to a device is published as its own counter -- untraced bytes did leave the origin, only the recipient is unknown -- rather than folded into the totals. |
+| Observability | Swarm map, health endpoint, metrics (Prometheus exposition format), optional OTLP export, peer-distribution counters, and structured audit trail. |
 
 ## Release model
 
@@ -52,6 +55,7 @@ flowchart LR
 | Understand the trust boundaries before touching production | [Architecture](architecture.md), then [Security Model](security.md) |
 | Decide how a device attaches to the network | [Management Type and VLAN Ownership](network-attachment.md) |
 | Run a rollout across many devices | [Web Console](console.md), then [Network Workflows](fleet-workflows.md) |
+| Find out how much of a rollout the peers carried | [Telemetry Export](telemetry-export.md) |
 | Find a day-two command or an env var | [Operations](operations.md), [Reference](reference.md) |
 
 ## Documentation map
@@ -97,6 +101,7 @@ Read these before connecting production devices.
 | [Network Workflows](fleet-workflows.md) | CSV inventory, assignments, and batch operations. |
 | [Operations](operations.md) | Day-two commands, backups, scaling, and cleanup. |
 | [Observability](observability.md) | Metrics, swarm map, OTLP export, and dashboards. |
+| [Telemetry Export](telemetry-export.md) | Peer-distribution accounting: the metric families, the device peer receipts, and what each figure does and does not measure. |
 
 ### Reference and development
 

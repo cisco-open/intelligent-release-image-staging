@@ -1,0 +1,704 @@
+<form theme="dark" version="1.1">
+  <label>IRIS — Peer-to-Peer Distribution (measured peer tracing)</label>
+  <description>Does P2P actually carry load, how much, and among whom. Byte totals come from the durable peer ledger, so a finished transfer keeps its history and no panel goes blank when the swarm goes idle. Every derived number says so in its own title.</description>
+
+  <!--
+    Splunk is external to IRIS (spec §14): this board is a supported import
+    for sites that already run Splunk, not a component IRIS installs or needs.
+    See docs/zensical/dashboards/README.md for the import procedure.
+
+    WHY THIS BOARD EXISTS SEPARATELY FROM iris-telemetry-dashboard.xml:
+    that board answers "is the pipeline alive and is the fleet busy". This one
+    answers the distribution question, and only that. Overlap is one liveness
+    tile, kept so an empty board reads as IDLE rather than BROKEN.
+
+    ==== THE TWO INDEXES, AND WHY PANELS LOOK SO DIFFERENT ====
+      index=iris_metrics   METRIC index, sourcetype otel:metrics  -> | mstats
+      index=iris_logs      EVENT  index, sourcetype otel:logs     -> search + spath fields
+    You cannot `stats` a metric index and you cannot `mstats` an event index.
+    Aggregate byte counters live in the metric index; per-peer / per-device
+    detail lives in the event index, because Prometheus must never carry
+    per-peer labels (server/metrics.py:14-18).
+
+    ==== WHICH METRIC-NAME LEG ====
+    The collector feeds iris_metrics twice: dotted names via the OTLP push leg
+    (iris.transfer.throughput, dimension iris.image.id) and underscored names
+    via the prometheus/iris9101 scrape leg (iris_transfer_throughput_...,
+    dimension image). The swarm byte counters this board is built on exist ONLY
+    in server/metrics.py, i.e. ONLY on the scrape leg. Every mstats panel here
+    is therefore underscored and groups BY image / info_hash. HARD DEPENDENCY:
+    if metrics/iris9101 is ever removed from the collector, this whole board
+    goes dark — the OTLP leg cannot replace it.
+
+    ==== _total SUFFIX IS UNVERIFIED ====
+    The OTel prometheus receiver may or may not trim the _total suffix before
+    the splunk_hec exporter sees it. Rather than guess, every counter is matched
+    with BOTH spellings and folded back with replace(...,"_total$",""). Confirm
+    once against real data and the IN() lists can be halved:
+      | mcatalog values(metric_name) WHERE index=iris_metrics metric_name="iris_*bytes*"
+
+    ==== WIRE QUIRK: OTLP ints ARRIVE AS STRINGS ====
+    OTLP/JSON encodes int64 as a JSON string (server/otlp.py:47-48), so
+    iris.transfer.peer_sent_bytes, .peer_sent_delta_bytes and
+    .completed_content_bytes land in Splunk as STRINGS. Lexical "9" > "10".
+    Every event panel below coerces with tonumber() before aggregating. Omit
+    that and the numbers are silently wrong, not empty.
+
+    ==== SPL QUOTING RULE (silently returns zero rows if wrong) ====
+    Dotted field names need DOUBLE quotes in stats/timechart/rename/BY, and
+    SINGLE quotes in eval. Underscored ones need neither.
+
+    ==== network.peer.address IS A SCALAR HERE ====
+    On iris.device.transfer.report it is an ARRAY of participation IPs; on
+    iris.swarm.peer_bytes and iris.swarm.peer_rate it is a single IP. Grouping
+    BY it is correct on this board and wrong on the report record.
+
+    ==== NO dedup ON PEER_BYTES ====
+    iris.swarm.peer_bytes mints a fresh event.id per emission (peer_rate style),
+    so there is nothing to dedupe and `| dedup` would only cost time. Device
+    reports DO carry a stable event.id (= report_id, retained across retry), so
+    those panels dedupe.
+  -->
+
+  <fieldset submitButton="false" autoRun="true">
+    <input type="time" token="tr" searchWhenChanged="true">
+      <label>Window (drives EVERY panel — see the provenance panel before quoting a number)</label>
+      <default><earliest>-24h</earliest><latest>now</latest></default>
+    </input>
+    <input type="dropdown" token="img" searchWhenChanged="true">
+      <label>Image</label>
+      <default>*</default>
+      <choice value="*">All images</choice>
+      <fieldForLabel>image</fieldForLabel>
+      <fieldForValue>image</fieldForValue>
+      <!-- mcatalog against the metric index; the underscored leg's dimension is
+           `image`, whose values are aria2 file BASENAMES. That matches the
+           iris.image.id on iris.swarm.peer_bytes / iris.swarm.peer_rate, but NOT
+           the iris.image.id on iris.device.transfer.report, which carries the
+           catalog id with .SPA.bin/.bin stripped. A panel filtering device
+           reports by this token must strip the suffix in-query; nothing may
+           join the two forms of iris.image.id. -->
+      <search>
+        <query>| mcatalog values(image) AS image WHERE index=iris_metrics metric_name IN ("iris_origin_sent_bytes_total","iris_origin_sent_bytes","iris_peer_attributed_bytes_total","iris_peer_attributed_bytes") | mvexpand image | fields image</query>
+        <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
+      </search>
+    </input>
+  </fieldset>
+
+  <!-- Shared base for every row-1 tile: one mstats call.
+       The ledger counters are read as their ALL-TIME CUMULATIVE VALUE
+       (`latest`), never as a delta over the window. The boards exist to keep
+       the history of a transfer after the swarm goes idle, and a window delta
+       reads 0 for a finished transfer while making the headline depend on where
+       the operator dragged the time picker. The old window-delta guard over
+       earliest/latest is retired outright: it reported an entire cumulative
+       value as if it had accrued inside the window whenever a counter stepped
+       down. -->
+  <search id="mbase">
+    <query>| mstats latest(_value) AS v WHERE index=iris_metrics metric_name IN ("iris_origin_sent_bytes_total","iris_origin_sent_bytes","iris_peer_attributed_bytes_total","iris_peer_attributed_bytes","iris_peer_unattributed_bytes_total","iris_peer_unattributed_bytes","iris_swarm_peers_attributed","iris_swarm_peers_saturated") AND image="$img$" BY metric_name, image, info_hash | eval fam=replace(metric_name,"_total$","")</query>
+    <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
+  </search>
+
+  <!-- iris_seeder_rpc_up is a FLAT gauge with no image/info_hash labels, so it
+       cannot ride mbase: an mstats filter on a dimension a series does not
+       carry silently drops that series. Own search, no dimension filter. -->
+  <search id="livebase">
+    <query>| mstats latest(_value) AS v WHERE index=iris_metrics metric_name="iris_seeder_rpc_up"</query>
+    <earliest>-15m</earliest><latest>now</latest>
+  </search>
+
+  <!-- ===================== ROW 1 — how much, and how much of it do we trust ===================== -->
+  <row>
+    <panel>
+      <title>Origin sent (measured)</title>
+      <single>
+        <search base="mbase">
+          <query>| where fam=="iris_origin_sent_bytes" | stats sum(v) AS b | eval MiB=round(b/1048576,1) | fields MiB</query>
+        </search>
+        <option name="underLabel">MiB, all-time cumulative — the origin seeder's own aria2 upload counter, banked monotonically by the peer ledger. Not a window delta: it does not move when you drag the time picker. Wire bytes, so re-sends of hashfailed pieces count.</option>
+        <option name="numberPrecision">0.0</option>
+      </single>
+      <!-- No series in range renders blank. `stats sum` over zero rows emits no
+           row, which is the intended "no data"; never fillnull it to 0. -->
+    </panel>
+    <panel>
+      <title>Traced to a device (measured)</title>
+      <single>
+        <search base="mbase">
+          <query>| where fam=="iris_peer_attributed_bytes" | stats sum(v) AS b | eval MiB=round(b/1048576,1) | fields MiB</query>
+        </search>
+        <option name="underLabel">MiB, all-time cumulative — origin bytes the ledger pinned to a specific peer IP, summed over every (info_hash, peer) edge. Measured per connection from aria2's own counters.</option>
+        <option name="numberPrecision">0.0</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Untraced residue (measured)</title>
+      <single>
+        <search base="mbase">
+          <query>| where fam=="iris_peer_unattributed_bytes" | stats sum(v) AS b | eval MiB=round(b/1048576,1) | fields MiB</query>
+        </search>
+        <option name="underLabel">MiB, all-time cumulative value — origin bytes that went out but could not be traced to a device: connections that opened and closed between two polls, plus peers refused at the ledger cap. This is NOT a rate. The series can step DOWN, because it is a difference of two counters and late tracing retires residue; a step down is not a counter reset.</option>
+        <option name="numberPrecision">0.0</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Over-tracing excess (derived)</title>
+      <single>
+        <search base="mbase">
+          <query>| stats sum(eval(if(fam=="iris_peer_attributed_bytes",v,null()))) AS a, sum(eval(if(fam=="iris_origin_sent_bytes",v,null()))) AS o | eval excess=if(isnull(a) OR isnull(o),null(),max(0,a-o)) | eval MiB=if(isnull(excess),null(),round(excess/1048576,1)) | fields MiB</query>
+        </search>
+        <option name="underLabel">MiB = max(0, traced − origin sent). The ledger floors the residue at 0, so bytes traced to peers beyond what the origin measured sending would otherwise show up as the comfortable "residue 0 / coverage 100%". Anything above 0 means something double-banked: treat coverage as an upper bound and the per-peer edge table as suspect for that torrent until it returns to 0.</option>
+        <option name="rangeColors">["0x118832","0xd41f1f"]</option>
+        <option name="rangeValues">[0]</option>
+        <option name="useColors">1</option>
+        <option name="numberPrecision">0.0</option>
+      </single>
+      <!-- Either input missing renders blank, never 0: an absent origin counter
+           must not read as "no excess", nor as "everything is excess". -->
+    </panel>
+  </row>
+
+  <!-- ===================== ROW 1b — is the tracing trustworthy ===================== -->
+  <row>
+    <panel>
+      <title>Tracing coverage (derived, % of origin bytes)</title>
+      <single>
+        <search base="mbase">
+          <query>| stats sum(eval(if(fam=="iris_peer_attributed_bytes",v,null()))) AS a, sum(eval(if(fam=="iris_origin_sent_bytes",v,null()))) AS o | eval pct=if(isnull(a) OR isnull(o) OR o&lt;=0,null(),round(100*a/o,1)) | fields pct</query>
+        </search>
+        <option name="underLabel">traced ÷ origin-sent, as a percentage. 100% = every origin byte could be traced to a device. Below 100% is the untraced residue — bytes that certainly went out, recipient unknown. Above 100% is not good news — it means more bytes were traced to peers than the origin measured sending; see "Over-tracing excess (derived)".</option>
+        <option name="rangeColors">["0x118832","0xd41f1f"]</option>
+        <option name="rangeValues">[100]</option>
+        <option name="useColors">1</option>
+        <option name="numberPrecision">0.0</option>
+        <option name="unit">%</option>
+      </single>
+      <!-- Denominator is the independently measured origin counter, NOT
+           (traced + untraced): untraced is defined as
+           max(0, origin - traced), so that form is algebraically pinned to
+           <=100% and prints a reassuring 100% in exactly the double-counting
+           failure this tile exists to expose. No clamp on the denominator
+           either — a missing or zero origin reads "no data", by design. -->
+    </panel>
+    <panel>
+      <title>Peers with bytes traced to them</title>
+      <single>
+        <search base="mbase">
+          <query>| where fam=="iris_swarm_peers_attributed" | stats sum(v) AS n | fields n</query>
+        </search>
+        <option name="underLabel">distinct peers holding a nonzero ledger total, summed across every {image, info_hash} series — a peer that took two torrents of the same image counts twice. NOT comparable to the tracker's announce-derived Peers: different population, different source.</option>
+        <option name="numberPrecision">0</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Peer ledger cap saturated</title>
+      <single>
+        <search base="mbase">
+          <query>| where fam=="iris_swarm_peers_saturated" | stats max(v) AS saturated | fields saturated</query>
+        </search>
+        <option name="underLabel">1 when the per-torrent peer cap refused new peers, so part of the untraced residue is refused peers rather than short-lived connections. Blank means the flag was not exported — that is not proof of "not saturated".</option>
+        <option name="rangeColors">["0x118832","0xd41f1f"]</option>
+        <option name="rangeValues">[0.5]</option>
+        <option name="useColors">1</option>
+        <option name="numberPrecision">0</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Seeder RPC</title>
+      <single>
+        <search base="livebase">
+          <query>| stats max(v) AS v | fields v</query>
+        </search>
+        <option name="underLabel">liveness — 0 here means the board is blind, not that the swarm is idle</option>
+        <option name="rangeColors">["0xd41f1f","0x118832"]</option>
+        <option name="rangeValues">[0.5]</option>
+        <option name="useColors">1</option>
+        <option name="numberPrecision">0</option>
+      </single>
+    </panel>
+  </row>
+
+  <!-- ===================== ROW 2 — did P2P carry load ===================== -->
+  <row>
+    <panel>
+      <title>Delivered to the fleet (measured, device-reported)</title>
+      <single>
+        <search>
+          <query>search index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.device.transfer.report" "iris.report.event" IN ("staging-complete","seeding-only","pull") | eval img_cat=replace("$img$","\.SPA\.bin$|\.bin$","") | where "iris.image.id"==img_cat OR "$img$"=="*" | eval got=tonumber('iris.transfer.completed_content_bytes') | stats max(got) AS got BY "device.id" | stats sum(got) AS delivered, dc("device.id") AS devices | eval MiB=if(isnull(delivered),null(),round(delivered/1048576,1)) | fields MiB</query>
+          <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="unit">MiB</option>
+        <option name="underLabel">sum over devices of max(completed_content_bytes)</option>
+        <!-- Q8. The fleet-delivery term is the DEVICE-REPORTED
+             iris.transfer.completed_content_bytes, not completions x image
+             size: it is measured on the device, per device, needs no image-size
+             metric, and completions x size goes wrong the moment the image
+             selector spans differently sized images.
+             Aggregation is max PER DEVICE, then sum. A device files more than
+             one report (staging-complete, seeding-only, pull) and dedup on
+             event.id only removes re-exports, so a bare sum over report records
+             multi-counts the flavours; max per device also keeps a device whose
+             terminal report was lost but whose earlier report was delivered.
+             The image filter derives the CATALOG id from the selected basename
+             with the same suffix strip as publish.derive_id (.SPA.bin / .bin):
+             the report's iris.image.id and the peer records' iris.image.id are
+             different fields with different values and are never equated.
+             No reports in range means no data — a device that never reported is
+             absent from the sum, not a zero. Counts only devices that reported
+             inside the range, so this is a FLOOR on fleet delivery; aria2
+             counts wire bytes, so hashfailed and duplicate pieces can push a
+             device above the image size. The report carries no info_hash, so
+             no per-torrent breakdown is possible. -->
+      </single>
+    </panel>
+    <panel>
+      <title>Delivered peer to peer (derived)</title>
+      <chart>
+        <search>
+          <query>| mstats latest(_value) AS v WHERE index=iris_metrics metric_name IN ("iris_origin_sent_bytes_total","iris_origin_sent_bytes") AND image="$img$" BY image, info_hash | stats sum(v) AS origin | appendcols [ search index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.device.transfer.report" "iris.report.event" IN ("staging-complete","seeding-only","pull") | eval img_cat=replace("$img$","\.SPA\.bin$|\.bin$","") | where "iris.image.id"==img_cat OR "$img$"=="*" | eval got=tonumber('iris.transfer.completed_content_bytes') | stats max(got) AS got BY "device.id" | stats sum(got) AS delivered ] | eval peers=if(isnull(origin) OR isnull(delivered), null(), delivered-origin) | eval "Origin (measured)"=if(isnull(peers),null(),round(origin/1048576,1)), "From peers (derived)"=if(isnull(peers),null(),round(max(peers,0)/1048576,1)) | fields "Origin (measured)", "From peers (derived)" | transpose 0 column_name=Source | rename "row 1" AS MiB</query>
+          <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">pie</option>
+        <option name="charting.legend.placement">right</option>
+        <!-- Q9 = Q8 - Q1: everything the fleet received that the origin did not
+             send. DERIVED, not observed. The origin term is the ALL-TIME
+             cumulative counter value (mstats latest), never a window delta, so
+             the slice survives an idle swarm and does not move with the time
+             picker; the SPL window-delta guard d=if(l>=e,l-e,l) is gone,
+             because it reported a whole cumulative counter as if it had accrued
+             inside the window whenever the counter stepped down.
+             If either input is missing the quantity is null and the pie is not
+             drawn at all: the old coalesce(origin,0) / coalesce(delivered,0)
+             pair printed "Origin (measured) 0 MiB" and credited 100% of
+             delivery to peers whenever the origin metric was absent. The clamp
+             at zero applies only to the drawn slice, never to the inputs.
+             Being a residual, it absorbs re-sends, hashfail waste and any clock
+             skew between the two sources; if the over-tracing excess tile
+             is nonzero this figure is suspect. Lab reference (7x C8000V,
+             928 MiB image): origin 4618.5 MiB, peers 1877.5 MiB of
+             6496.0 MiB delivered. -->
+      </chart>
+    </panel>
+    <panel>
+      <title>Peer share of delivery (derived, %)</title>
+      <single>
+        <search>
+          <query>| mstats latest(_value) AS v WHERE index=iris_metrics metric_name IN ("iris_origin_sent_bytes_total","iris_origin_sent_bytes") AND image="$img$" BY image, info_hash | stats sum(v) AS origin | appendcols [ search index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.device.transfer.report" "iris.report.event" IN ("staging-complete","seeding-only","pull") | eval img_cat=replace("$img$","\.SPA\.bin$|\.bin$","") | where "iris.image.id"==img_cat OR "$img$"=="*" | eval got=tonumber('iris.transfer.completed_content_bytes') | stats max(got) AS got BY "device.id" | stats sum(got) AS delivered ] | eval peers=if(isnull(origin) OR isnull(delivered), null(), delivered-origin) | eval pct=if(isnull(peers) OR isnull(delivered) OR delivered&lt;=0, null(), round(100*peers/delivered,1)) | fields pct</query>
+          <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="unit">%</option>
+        <option name="underLabel">100 x (delivered - origin) / delivered</option>
+        <!-- Q10 = 100 x Q9 / Q8, DERIVED. It inherits every caveat of the two
+             tiles beside it: a floor on fleet delivery in the numerator's
+             denominator, an all-time origin counter, and a residual that
+             absorbs re-sends and hashfail waste. Missing input reads no data,
+             never 0%. Lab reference 28.9%. -->
+      </single>
+    </panel>
+    <panel>
+      <title>Cumulative bytes — durable ledger staircase (survives a finished transfer; filldown means idle reads flat, never blank)</title>
+      <chart>
+        <search>
+          <query>| mstats latest(_value) AS v WHERE index=iris_metrics metric_name IN ("iris_origin_sent_bytes_total","iris_origin_sent_bytes","iris_peer_attributed_bytes_total","iris_peer_attributed_bytes","iris_peer_unattributed_bytes_total","iris_peer_unattributed_bytes") AND image="$img$" span=60s BY metric_name, image, info_hash | eval fam=replace(metric_name,"_total$","") | stats sum(v) AS v BY _time, fam | eval MiB=round(v/1048576,2) | timechart span=60s max(MiB) BY fam | filldown | rename iris_origin_sent_bytes AS "Origin sent (measured)", iris_peer_attributed_bytes AS "Traced to a device (measured)", iris_peer_unattributed_bytes AS "Untraced residue (measured)"</query>
+          <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.axisTitleY.text">MiB cumulative</option>
+        <option name="charting.legend.placement">bottom</option>
+        <!-- filldown, not nullValueMode=zero: a gap in scrape coverage must
+             carry the last known total forward, not drop the staircase to 0.
+             Values only — no rate/increase/delta anywhere on these three
+             counters. The residue line can step DOWN when late tracing
+             retires residue; that is a real reading, not a counter reset.
+             `BY metric_name, image, info_hash` then `sum BY _time, fam` is the
+             canonical grouping: collapsing info_hash inside mstats would plot
+             one torrent's ledger instead of the sum across them. -->
+      </chart>
+    </panel>
+  </row>
+
+  <!-- ===================== ROW 2b — the two rates, side by side ===================== -->
+  <row>
+    <panel>
+      <title>Origin upload rate (measured)</title>
+      <description>Bytes/s leaving the origin seeder, from iris_seeder_torrent_upload_bytes_per_second (the origin's own aria2 RPC poll), per torrent. Origin to swarm only: it is a LOWER BOUND on total swarm throughput, because device-to-device reseed traffic is invisible from the origin. No samples in range renders "no data", never 0.</description>
+      <chart>
+        <search>
+          <query>| mstats avg(_value) AS bps WHERE index=iris_metrics metric_name="iris_seeder_torrent_upload_bytes_per_second" AND image="$img$" span=60s BY image | timechart span=60s avg(bps) BY image</query>
+          <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">area</option>
+        <option name="charting.chart.stackMode">stacked</option>
+        <option name="charting.axisTitleY.text">bytes/s leaving the origin</option>
+        <option name="charting.chart.nullValueMode">gaps</option>
+        <option name="charting.legend.placement">bottom</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Traced origin to peer delivery, per torrent (MEASURED ledger deltas, MiB/min)</title>
+      <chart>
+        <search>
+          <query>index=iris_logs "otel.log.name"="iris.swarm.peer_bytes" ("iris.image.id"=$img$ OR $img$="*") | eval d=tonumber('iris.transfer.peer_sent_delta_bytes')/1048576 | timechart span=60s sum(d) BY "iris.image.id"</query>
+          <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">area</option>
+        <option name="charting.chart.stackMode">stacked</option>
+        <option name="charting.axisTitleY.text">MiB/min traced to a device</option>
+        <option name="charting.chart.nullValueMode">zero</option>
+        <option name="charting.legend.placement">bottom</option>
+        <!-- The gap between this and the panel to its left is the residue,
+             rendered as a rate rather than as a total. They will not match, and
+             they are not supposed to. -->
+      </chart>
+    </panel>
+  </row>
+
+  <!-- ===================== ROW 3 — trust over time, and load over time ===================== -->
+  <row>
+    <panel>
+      <title>Tracing coverage (derived, % of origin bytes) — over time</title>
+      <chart>
+        <search>
+          <query>| mstats latest(_value) AS v WHERE index=iris_metrics metric_name IN ("iris_peer_attributed_bytes_total","iris_peer_attributed_bytes","iris_origin_sent_bytes_total","iris_origin_sent_bytes") AND image="$img$" span=300s BY metric_name, image, info_hash | eval fam=replace(metric_name,"_total$","") | stats sum(v) AS v BY _time, fam | timechart span=300s max(v) BY fam | filldown | eval Coverage=if(isnull(iris_peer_attributed_bytes) OR isnull(iris_origin_sent_bytes) OR iris_origin_sent_bytes&lt;=0,null(),round(100*iris_peer_attributed_bytes/iris_origin_sent_bytes,1)) | fields _time, Coverage</query>
+          <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.axisTitleY.text">% of origin bytes traced to a device</option>
+        <option name="charting.chart.nullValueMode">gaps</option>
+        <option name="charting.legend.placement">bottom</option>
+        <!-- traced / origin-sent, both read as cumulative values. The
+             (traced + untraced) form is retired: untraced is
+             max(0, origin - traced), so that ratio is algebraically pinned
+             to at most 100% and cannot show over-tracing. This one can rise
+             above 100%, and when it does the over-tracing excess tile is
+             the panel to read. No denominator clamp: a missing origin plots a
+             gap, not a number. -->
+      </chart>
+    </panel>
+    <panel>
+      <title>Origin to peer send rate (measured)</title>
+      <chart>
+        <search>
+          <query>search index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.swarm.peer_rate" ("iris.image.id"=$img$ OR $img$="*") | eval bps=tonumber('iris.transfer.peer_send_bps') | timechart span=60s avg(bps) BY "network.peer.address"</query>
+          <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.axisTitleY.text">bytes/s to each peer (aria2 peer_send_bps)</option>
+        <option name="charting.chart.nullValueMode">gaps</option>
+        <option name="charting.legend.placement">bottom</option>
+        <!-- Q14. iris.transfer.peer_send_bps on iris.swarm.peer_rate is an
+             instantaneous per-connection reading, averaged over each bucket.
+             tonumber() is mandatory: OTLP numeric attributes arrive as strings.
+             It is a sample, not an integral — do NOT sum it into bytes; the
+             cumulative ledger panels are the byte totals. Gaps are gaps, not
+             zero rate: a peer whose connection died between samples simply
+             stops appearing, and nullValueMode is "gaps" so an absent sample
+             never draws a measured-looking zero. Origin to peer only, so this
+             is a lower bound on swarm throughput: device-to-device traffic is
+             invisible from the origin's RPC. -->
+      </chart>
+    </panel>
+  </row>
+
+  <!-- ===================== ROW 3b — per-torrent state ===================== -->
+  <row>
+    <panel>
+      <title>Torrents</title>
+      <table>
+        <search>
+          <query>| mstats latest(_value) AS v WHERE index=iris_metrics metric_name IN ("iris_swarm_peers","iris_swarm_seeders","iris_swarm_leechers","iris_swarm_bytes_remaining","iris_transfer_devices","iris_transfer_freshness_age_seconds","iris_swarm_peers_attributed","iris_origin_sent_bytes_total","iris_origin_sent_bytes","iris_peer_attributed_bytes_total","iris_peer_attributed_bytes","iris_peer_unattributed_bytes_total","iris_peer_unattributed_bytes") AND image="$img$" BY metric_name, image | eval metric_name=replace(metric_name,"_total$","") | xyseries image metric_name v | eval "Origin MiB"=round(iris_origin_sent_bytes/1048576,1), "Traced MiB"=round(iris_peer_attributed_bytes/1048576,1), "Residue MiB"=round(iris_peer_unattributed_bytes/1048576,1), "Remaining GiB"=round(iris_swarm_bytes_remaining/1073741824,2) | rename image AS Image, iris_swarm_peers AS Peers, iris_swarm_seeders AS Seeders, iris_swarm_leechers AS Leechers, iris_transfer_devices AS Devices, iris_swarm_peers_attributed AS "Traced peers", iris_transfer_freshness_age_seconds AS "Age (s)" | fields Image, Peers, Seeders, Leechers, Devices, "Traced peers", "Origin MiB", "Traced MiB", "Residue MiB", "Remaining GiB", "Age (s)" | sort Image</query>
+          <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="count">20</option>
+        <!-- xyseries is the pivot that turns `mstats ... BY metric_name, image`
+             into one row per image. Traced peers and Peers are two
+             different populations (ledger-credited peer-torrent pairs vs the
+             tracker's announce-derived count) and comparing them says nothing
+             about the ledger cap; read the measured "Peer ledger cap saturated"
+             tile for that. -->
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Swarm population (measured)</title>
+      <description>iris_swarm_peers / iris_swarm_seeders / iris_swarm_leechers, announce-derived per {image, info_hash} (a seeder is a device that announced left==0). This is a DIFFERENT population from "Peers with bytes traced to them", which counts ledger edges: the two must never be differenced or plotted as a coverage ratio. No announces in range renders "no data", never 0.</description>
+      <chart>
+        <search>
+          <query>| mstats latest(_value) AS v WHERE index=iris_metrics metric_name IN ("iris_swarm_seeders","iris_swarm_leechers","iris_swarm_peers") AND image="$img$" span=60s BY metric_name, image | timechart span=60s max(v) BY metric_name</query>
+          <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.axisTitleY.text">peers announced</option>
+        <option name="charting.chart.nullValueMode">gaps</option>
+        <option name="charting.legend.placement">bottom</option>
+        <!-- Seeder count rising during a rollout is the mechanism behind the
+             per-device spread in row 5: late devices find more seeders. -->
+      </chart>
+    </panel>
+    <panel>
+      <title>Bytes remaining in the swarm (measured)</title>
+      <description>iris_swarm_bytes_remaining: the sum of `left` across leechers at announce time, per torrent. It falls to 0 for an idle swarm with no leechers — that 0 is a MEASURED zero (nobody is announcing a remainder), not proof of completion, and a device that stops announcing silently leaves the total. No series in range renders "no data".</description>
+      <chart>
+        <search>
+          <query>| mstats latest(_value) AS v WHERE index=iris_metrics metric_name="iris_swarm_bytes_remaining" AND image="$img$" span=60s BY image | timechart span=60s max(v) BY image</query>
+          <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.axisTitleY.text">bytes left across leechers</option>
+        <option name="charting.chart.nullValueMode">gaps</option>
+        <option name="charting.legend.placement">bottom</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Fleet receive rate, per torrent</title>
+      <chart>
+        <search>
+          <query>| mstats avg(_value) AS bps WHERE index=iris_metrics metric_name="iris_transfer_throughput_bytes_per_second" AND direction="receive" AND image="$img$" span=60s BY image | eval MiBs=round(bps/1048576,3) | timechart span=60s avg(MiBs) BY image</query>
+          <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.axisTitleY.text">MiB/s received by devices</option>
+        <option name="charting.legend.placement">bottom</option>
+        <!-- server/metrics.py skips this family entirely for a stale row, which
+             is why iris_transfer_freshness_age_seconds is always emitted: the
+             absence is explainable. `direction`, not `network.io.direction` —
+             that dotted spelling belongs to the OTLP push leg. -->
+      </chart>
+    </panel>
+  </row>
+
+  <!-- ===================== ROW 3b — swarm state, image size, and whether the
+       telemetry that feeds the log-derived byte panels below is actually
+       arriving ===================== -->
+  <row>
+    <panel>
+      <title>Devices that completed the image (measured)</title>
+      <description>iris_swarm_completed_total, the tracker's completion counter, summed across every {image, info_hash}. In-memory with a 24 h TTL and process-lifetime scope, so a tracker restart resets it. This count must NEVER be multiplied by an image size to produce a byte figure — fleet delivery is measured from device reports instead. No counter in range renders "no data", never 0.</description>
+      <single>
+        <search>
+          <query>| mstats latest(_value) AS v WHERE index=iris_metrics metric_name IN ("iris_swarm_completed_total","iris_swarm_completed") AND image="$img$" BY image, info_hash | stats sum(v) AS completed | fields completed</query>
+          <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
+        </search>
+        <option name="underLabel">devices reported complete by the tracker</option>
+        <option name="numberPrecision">0</option>
+      </single>
+      <!-- `stats sum` over zero rows emits no row: that blank is the intended
+           "no data". Never fillnull it to 0. -->
+    </panel>
+    <panel>
+      <title>Image size (measured)</title>
+      <description>iris_image_size_bytes{image,info_hash}, sourced from the catalog entry's own `size` field. REQUIRED NEW SERVER EMISSION: until server/metrics.py render() emits this gauge alongside the swarm gauges, this panel and every progress figure derived from it read "no data". There is no hardcoded constant, no textbox fallback and no substitute — the retired image_size_bytes textbox input was deleted for exactly that reason. Informational and progress-only: the fleet-delivery totals on this board are defined so they never depend on it.</description>
+      <table>
+        <search>
+          <query>| mstats latest(_value) AS v WHERE index=iris_metrics metric_name="iris_image_size_bytes" AND image="$img$" BY image, info_hash</query>
+          <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
+        </search>
+        <option name="count">10</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Telemetry export health (measured)</title>
+      <description>iris_telemetry_export_dropped_total, iris_telemetry_export_failures_total and iris_telemetry_export_last_success_seconds, per signal. This panel is the honesty gate for every log-derived byte quantity on this board ("Delivered to the fleet", "Delivered peer to peer", "Peer share of delivery, per device", and both per-peer origin-byte panels): those totals are read out of exported OTLP log records, so a NONZERO drop or failure count means they are FLOORS, not totals, and a stale last-success timestamp means they stopped moving for a reason that has nothing to do with the swarm. No export metrics ingested renders "no data" — which is itself unknown health, not good health.</description>
+      <table>
+        <search>
+          <query>| mstats latest(_value) AS v WHERE index=iris_metrics metric_name IN ("iris_telemetry_export_dropped_total","iris_telemetry_export_failures_total","iris_telemetry_export_last_success_seconds") BY metric_name, signal</query>
+          <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+
+  <!-- KNOWN GAP — "Peer ledger evictions" is deliberately absent. An eviction
+       (PeerLedger.stats() torrents_evicted, _TORRENT_CAP=256) deletes a whole
+       torrent's origin total, edges and residue, so this board can lose an
+       entire transfer's history with no visible cause. Neither a metric nor a
+       log record exists today, so the panel is OMITTED rather than faked: no
+       placeholder, no zero tile. Add it once the server emits the counter
+       iris_peer_ledger_torrents_evicted_total. Until then this board is NOT
+       complete on that point. -->
+
+  <!-- ===================== ROW 4 — among whom ===================== -->
+  <row>
+    <panel>
+      <title>Origin bytes to this peer (measured, cumulative)</title>
+      <table>
+        <search>
+          <query>search index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.swarm.peer_bytes" ("iris.image.id"=$img$ OR $img$="*") | eval sent=tonumber('iris.transfer.peer_sent_bytes') | eval dev=if(isnull('iris.device.id') OR 'iris.device.id'=="","unresolved",'iris.device.id') | stats max(sent) AS edge, latest("iris.peer.role") AS role BY "network.peer.address", "iris.torrent.info_hash", dev | stats sum(edge) AS bytes, latest(role) AS role BY "network.peer.address", dev | rename "network.peer.address" AS Peer, dev AS Device, role AS Role | eval "MiB from origin"=round(bytes/1048576,1) | fields Peer, Device, Role, "MiB from origin" | sort - "MiB from origin" | appendpipe [ stats count AS n | where n==0 | eval Peer="— no peer_bytes records in this window (no transfer ran, or the ledger has not emitted yet) —" | fields Peer ]</query>
+          <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="count">20</option>
+        <!-- Q12. iris.transfer.peer_sent_bytes is the ledger's accumulated
+             total for one edge, banked as observed. Canonical grouping: max
+             within an edge — the edge is (iris.torrent.info_hash,
+             network.peer.address) — then sum across edges per peer. Dropping
+             info_hash from the inner max would report the largest torrent
+             instead of the sum; dropping the outer sum would report one
+             torrent only. iris.peer.role is per sample, not per edge (a peer
+             that flips leecher to seeder mid-transfer emits both values), so it
+             is carried as a display column and never as a grouping key.
+             tonumber() is mandatory: the attribute arrives on the wire as a
+             string, and an un-coerced attribute aggregates to nothing.
+             Peers the ip -> device_id map could not resolve are shown by their
+             address under Device "unresolved": their bytes are real and are
+             neither dropped nor collapsed into a blank bucket.
+             Origin to peer only — peer to peer traffic is invisible from the
+             origin and is not in this table. A peer with no record is absent,
+             not 0. Sorted by bytes, 20 rows per page. -->
+      </table>
+    </panel>
+    <panel>
+      <title>Origin bytes to this peer, in range (derived)</title>
+      <table>
+        <search>
+          <query>search index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.swarm.peer_bytes" ("iris.image.id"=$img$ OR $img$="*") | eval sent=tonumber('iris.transfer.peer_sent_bytes') | eval dev=if(isnull('iris.device.id') OR 'iris.device.id'=="","unresolved",'iris.device.id') | stats max(sent) AS hi, min(sent) AS lo BY "network.peer.address", "iris.torrent.info_hash", dev | eval edge=hi-lo | stats sum(edge) AS bytes BY dev | rename dev AS Device | eval "MiB in range"=round(bytes/1048576,1) | fields Device, "MiB in range" | sort - "MiB in range" | appendpipe [ stats count AS n | where n==0 | eval Device="— no peer_bytes records in this window —" | fields Device ]</query>
+          <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="count">20</option>
+        <!-- Q13. Range total = max - min of the cumulative attribute per edge,
+             then summed per device. NOT a sum of
+             iris.transfer.peer_sent_delta_bytes: the delta sum under-reports
+             silently whenever the LogQueue (max 1000, drop-oldest, flushed on
+             the 15 s pass) overflows between flushes, while max - min heals
+             itself across any record dropped in the middle of the range.
+             An edge with a single sample in range yields max - min = 0, which
+             is a MEASURED zero (that edge gained nothing in the range) and is
+             printed as 0; a device with no records at all is absent, not 0.
+             An edge whose first sample lands inside the range starts from its
+             banked total rather than from zero, so the first bucket
+             under-reports — hence "in range", not "total". Read it beside the
+             telemetry export-health panel: every log-derived byte total on this
+             board is a floor. -->
+      </table>
+    </panel>
+    <panel>
+      <title>Role split — bytes to seeders vs leechers (role is MEASURED, from aria2 isSeeder)</title>
+      <table>
+        <search>
+          <query>index=iris_logs "otel.log.name"="iris.swarm.peer_bytes" ("iris.image.id"=$img$ OR $img$="*") | eval sent=tonumber('iris.transfer.peer_sent_bytes') | stats max(sent) AS edge, latest("iris.peer.role") AS role BY "network.peer.address", "iris.torrent.info_hash" | stats sum(edge) AS bytes, dc("network.peer.address") AS Peers BY role | eval MiB=round(bytes/1048576,1) | rename role AS Role | fields Role, Peers, MiB | sort - MiB | appendpipe [ stats count AS n | where n==0 | eval Role="— no peer_bytes records in this window —" | fields Role ]</query>
+          <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <!-- Bytes sent to a peer that is already a seeder are the ones that go
+             on to be reseeded; this is the closest thing on the board to a
+             direct "P2P amplification is happening" observation. -->
+      </table>
+    </panel>
+  </row>
+
+  <!-- ===================== ROW 5 — the per-device split that kills the even-split estimate ===================== -->
+  <row>
+    <panel>
+      <title>Peer share of delivery, per device (derived, %)</title>
+      <table>
+        <search>
+          <query>search index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.swarm.peer_bytes" ("iris.image.id"=$img$ OR $img$="*") "iris.device.id"=* | eval sent=tonumber('iris.transfer.peer_sent_bytes') | stats max(sent) AS edge BY "network.peer.address", "iris.torrent.info_hash", "iris.device.id" | stats sum(edge) AS origin_to_dev BY "iris.device.id" | rename "iris.device.id" AS "device.id" | append [ search index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.device.transfer.report" "iris.report.event" IN ("staging-complete","seeding-only","pull") | eval img_cat=replace("$img$","\.SPA\.bin$|\.bin$","") | where "iris.image.id"==img_cat OR "$img$"=="*" | eval got=tonumber('iris.transfer.completed_content_bytes') | stats max(got) AS got BY "device.id" ] | stats max(origin_to_dev) AS origin_to_dev, max(got) AS got BY "device.id" | eval pct=if(isnull(origin_to_dev) OR isnull(got) OR got&lt;=0, null(), round(100*(got-origin_to_dev)/got,1)) | eval "MiB from origin (measured)"=if(isnull(origin_to_dev),null(),round(origin_to_dev/1048576,1)), "MiB delivered (measured)"=if(isnull(got),null(),round(got/1048576,1)), "MiB from peers (derived)"=if(isnull(origin_to_dev) OR isnull(got),null(),round((got-origin_to_dev)/1048576,1)) | rename "device.id" AS Device, pct AS "Peer share % (derived)" | fields Device, "MiB from origin (measured)", "MiB delivered (measured)", "MiB from peers (derived)", "Peer share % (derived)" | sort - "Peer share % (derived)" | appendpipe [ stats count AS n | where n==0 | eval Device="— no peer_bytes edges and no device reports in this window —" | fields Device ]</query>
+          <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="count">30</option>
+        <!-- Q11. Per device: 100 x (delivered - origin_to_device) / delivered,
+             where delivered is max(iris.transfer.completed_content_bytes) for
+             that device.id and origin_to_device is the sum over edges of
+             max(iris.transfer.peer_sent_bytes) for that iris.device.id.
+             The two record families are reconciled ON DEVICE ID ONLY
+             (iris.device.id <-> device.id): their iris.image.id fields carry
+             two different values (aria2 basename vs catalog id) and equating
+             them matches nothing, so each side filters by its own form of the
+             selected image instead. append + stats (not join) keeps a device
+             that appears in only one source: its missing cell reads blank, not
+             0 and not 100%. Peer edges with no iris.device.id cannot be keyed
+             to a device at all and are absent here by construction — they are
+             carried in "Origin bytes to this peer (measured, cumulative)"
+             under the label "unresolved".
+             A device with no traced origin edge reads as 100% peer-served,
+             which is a tracing artefact, not a fact: read the tracing
+             coverage and ledger-cap tiles next to this table. Lab reference:
+             per-device peer share ranged 18.7% to 55.9% across seven identical
+             devices pulling one 928 MiB image. -->
+      </table>
+    </panel>
+  </row>
+
+  <!-- ===================== ROW 5b — raw records, so any number above can be traced ===================== -->
+  <row>
+    <panel>
+      <title>Raw iris.swarm.peer_bytes records</title>
+      <table>
+        <search>
+          <query>index=iris_logs "otel.log.name"="iris.swarm.peer_bytes" ("iris.image.id"=$img$ OR $img$="*") | eval "Sent MiB"=round(tonumber('iris.transfer.peer_sent_bytes')/1048576,2), "Delta MiB"=round(tonumber('iris.transfer.peer_sent_delta_bytes')/1048576,3) | rename "iris.image.id" AS Image, "network.peer.address" AS Peer, "iris.device.id" AS Device, "iris.peer.role" AS Role, "iris.torrent.info_hash" AS "Info hash" | table _time, Image, Peer, Device, Role, "Sent MiB", "Delta MiB", "Info hash" | sort - _time | head 50 | appendpipe [ stats count AS n | where n==0 | eval Image="— no peer_bytes records in this window —" | fields Image ]</query>
+          <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="count">25</option>
+        <!-- _time is the SERVER's receipt clock, not the device's. Sent MiB is
+             cumulative for that (info_hash, ip) edge; Delta MiB is what the one
+             observation added. -->
+      </table>
+    </panel>
+  </row>
+
+  <!-- ===================== ROW 6 — read this before quoting a number ===================== -->
+  <row>
+    <panel>
+      <title>Provenance — what is measured, what is arithmetic, and what is missing</title>
+      <html>
+        <div style="line-height:1.5">
+          <p><b>Measured.</b> Per-peer bytes come from aria2-next 2.5.6's
+          <code>getPeers</code>, which exposes a per-connection cumulative
+          <code>uploaded</code> counter. IRIS samples it and accumulates the
+          result into a durable ledger, so the totals here are observations,
+          not estimates. Peer <b>role</b> is aria2's own <code>isSeeder</code>.</p>
+
+          <p><b>Ephemeral source, hence the untraced residue.</b> The origin
+          knows <i>exactly</i> how many bytes it uploaded; what needs a live
+          connection is naming <i>which device</i> received them.
+          <code>getPeers</code> only returns <i>live</i> connections, so a peer
+          that connects, takes bytes and leaves between two samples takes its
+          counter with it: those bytes certainly went out, but no recipient can
+          be named for them. Measured
+          origin-side capture: <b>73.3%</b> at 3&#8239;s sampling,
+          <b>88.1%</b> at 2&#8239;s. The shortfall is published as
+          <code>iris_peer_unattributed_bytes_total</code> and shown on this
+          board rather than being folded silently into someone's total.
+          <b>Traced + untraced = the origin's own upload counter.</b></p>
+
+          <p><b>Derived, and labelled as such.</b> Every "from peers" figure on
+          this board is <i>device-reported delivered bytes minus the measured
+          origin contribution</i> — arithmetic on two measured quantities, not
+          an observation of peer-to-peer traffic. IRIS cannot see device-to-device
+          transfers directly; the origin is structurally blind to them. Treat it
+          as a floor.</p>
+
+          <p><b>Window sensitivity.</b> The ledger tiles do <i>not</i> depend on
+          the window: they report the all-time cumulative counter value, so a
+          finished transfer keeps its history however the time picker is dragged.
+          The event-side panels still depend on which reports land in-window, and
+          a device's terminal report arrives at completion, so a window that
+          clips the end of a transfer understates the peer share. For a rollout,
+          pick a window that fully contains it.</p>
+
+          <p><b>Peer cap.</b> The ledger caps distinct peers per torrent. When
+          that cap is reached the excess peers stop being tracked individually
+          and their bytes fall into the untraced residue. This is measured
+          directly: <i>Peer ledger cap saturated</i> reads 1 while the cap is
+          refusing peers, which is the only way to tell refused peers apart from
+          missed short-lived connections inside the residue.</p>
+
+          <p><b>Idle is not broken.</b> Counters keep their last value, so a
+          finished transfer stays on screen. If <i>Seeder RPC</i> reads 0, the
+          board is blind and every other panel on it is stale.</p>
+        </div>
+      </html>
+    </panel>
+  </row>
+</form>

@@ -41,6 +41,7 @@ Start at the [documentation overview](docs/zensical/index.md), or jump to a sect
 - [Network workflows](docs/zensical/fleet-workflows.md) — CSV inventory, assignments, batch operations
 - [Operations](docs/zensical/operations.md) — day-two commands, backups, cleanup
 - [Observability](docs/zensical/observability.md) — metrics, swarm map, OTLP export
+- [Telemetry export](docs/zensical/telemetry-export.md) — peer-distribution accounting: origin versus peer bytes, per-device peer receipts, and the limits of each figure
 
 **Reference and development**
 
@@ -192,7 +193,7 @@ manifests.
 | 8000 | Artifact server | Bootstrap, agent bundle, pinned certificate, and staged install assets. |
 | 6881 | Seeder data | Image pieces from the server seeder. |
 | 8080 | Web console | Admin browser interface. |
-| 9101 | Telemetry | Health, swarm state, and optional Prometheus metrics. |
+| 9101 | Telemetry | Health, swarm state, peer-distribution counters, and optional Prometheus metrics. |
 | 6800 | aria2 RPC | Local-only inside the container. |
 
 ## Documentation Development

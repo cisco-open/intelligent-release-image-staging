@@ -41,6 +41,7 @@ nav = [
   ] },
   { "Reference and development" = [
     { "Reference" = "reference.md" },
+    { "Telemetry Export" = "telemetry-export.md" },
     { "Validation" = "validation.md" },
     { "Development" = "development.md" },
   ] },

@@ -171,20 +171,46 @@ audited, no-change recording of current ownership) before undeploying it. Router
 be adopted — re-onboard instead. For preflight and receipt ownership see
 [Deployment plans and applied receipts](network-attachment.md#deployment-plans-and-applied-receipts).
 
-Each device row's **ⓘ Deployment details** control opens a read-only panel
-under the table showing what the deployment holds: the receipt state
-(`active`, `removed`, `superseded`, `needs-reconcile`) and receipt id, the
+Each device row's **ⓘ Deployment details** control opens a read-only drawer
+beside the table — it slides in from the right, closes on **Esc** or **✕**, and
+leaves the row you opened it from where it was — showing what the deployment
+holds: the receipt state (`active`, `removed`, `superseded`, `needs-reconcile`,
+`abandoned`) and receipt id, the
 preflight result, and the resolved configuration the onboard applied — the
 attachment type, the owned management VLAN or VPG, SVI and app addressing,
 NAT interface, swarm port, and the recorded model, platform, and device
 identity. A device with no receipt says so, naming adopt or re-onboard as the
-fix. The panel ends with that device's persisted deployment logs
-([Deployment logs](#deployment-logs)), each viewable in place.
+fix. The drawer ends with that device's persisted deployment logs
+([Deployment logs](#deployment-logs)), each viewable in place. A run that
+finished before the current device was registered under this name is labelled
+**previous device**. Logs are keyed on the device id and deliberately survive a
+delete — they are the record of what actually ran — so a rebuilt or replaced box
+added back under the same name inherits its predecessor's runs. They are kept
+and shown, never presented as this device's own history. Devices registered
+before IRIS started stamping registration time carry no stamp, and nothing is
+labelled for them.
+
+An `abandoned` receipt is one that no longer describes a device IRIS manages:
+the device was deleted from the inventory, or a forced teardown stripped the
+agent without using the receipt as authority. It is kept as the record of what
+IRIS built on that box, but it never authorises a teardown and never blocks an
+onboard again.
 
 ## Bulk device actions
 
 The Devices toolbar acts on every checked row, so a CSV import can be finished
-without touching each device:
+without touching each device.
+
+Above it, the filter bar narrows what is rendered — free text across device, IP
+and model, plus management type, platform, credential, telemetry, peer policy
+and status. Only matching rows are drawn, so filtering and then **select all**
+is how you act on a subset instead of hand-picking rows out of the whole fleet.
+The **Status** choices are generated from the same derivation the Status column
+renders, so every state a row can show can be filtered for: `onboarding`,
+`undeploying`, `waiting for heartbeat`, `onboard failed`, `undeploy failed`,
+`deployed`, `placement failed`, `copying to IOS storage`, `staging (other)`,
+`enrolled`, `not enrolled`, and `offline` — the last being a modifier, since a
+device can read `deployed` and still have gone quiet.
 
 | Control | What it does | Confirms first |
 | --- | --- | --- |
@@ -194,6 +220,7 @@ without touching each device:
 | Adopt selected | Records the ownership receipt for each device. | Yes — a dialog listing the selected devices |
 | Delete selected | Removes the inventory rows only. | Yes — a dialog listing the devices and warning that deletion is not an undeploy |
 | *credential for selected* + **Apply** | Assigns one credential profile to every checked device. Leaving the picker on either blank entry clears the credential instead. | No |
+| *image for selected* + **Apply** | Assigns one catalog image to every checked device — the bulk form of the per-row **Assigned image** picker, and the reason the filter bar exists: filter to a platform or model, select all, assign. Choosing *— unassign —* clears the assignment instead; an untouched picker does nothing. | No |
 
 The **Adopt** dialog names the whole selection. It warns that you should only
 adopt a device whose inventory row matches what is really on the box, points at
@@ -202,8 +229,15 @@ routers cannot be adopted, and sends the acknowledgement the server requires —
 an adopt that omits it is refused.
 
 The **Undeploy** dialog's **Force** checkbox covers a device stranded with no
-deployment receipt at all — typically an onboard that enabled the agent but
-died before its receipt was written. Forcing removes every artifact that
+*usable* deployment receipt. That is either no receipt at all — typically an
+onboard that enabled the agent but died before its receipt was written — or a
+receipt that no longer describes the box in front of it. The second case is a
+device that was rebuilt or replaced: it keeps its device id and its address but
+reports a new board ID, so the teardown recipe refuses it with `device identity
+mismatch`, while onboard refuses too and names that same teardown as the fix.
+Force is read before the receipt is, so neither a mismatched receipt nor two
+conflicting recoverable receipts can keep you from it. Forcing removes every
+artifact that
 carries IRIS's own name — the EEM applets, Guest Shell or the IOx app and its
 app-hosting stanza, the IRISQ logging discriminator and its
 buffered/console/monitor bindings, `crypto pki trustpoint IRIS` and `ip http
@@ -216,6 +250,11 @@ has no other way to clear a receipt-less agent — it cannot be adopted, and
 its preflight refuses to re-onboard over an already-enabled Guest Shell.
 Recorded in Audit as `undeploy_forced`.
 
+Once a forced teardown succeeds, every receipt the device still held is marked
+`abandoned` — only on success, because failing to reach a device is not proof
+that its receipt is wrong. Without that step the next onboard would be refused
+on the very receipt the force was run to get past.
+
 Bulk operations report per-device refusals rather than failing the whole batch:
 the status line shows how many devices succeeded and names the ones that did
 not, with the server's reason. Adopting a router, for example, comes back as a
@@ -226,9 +265,20 @@ immediately, so a device imported before any profile existed becomes assignable
 at once instead of after the next ten-second poll.
 
 !!! warning "Deleting inventory is not an undeploy"
-    Delete removes the Console record and nothing else. An onboarded device
-    keeps its agent and its staged image, with no inventory entry left to manage
-    it. Undeploy first if that is what you meant. The deletion cannot be undone.
+    Delete removes the Console record — it does not touch the box. An onboarded
+    device keeps its agent and its staged image, with no inventory entry left to
+    manage it. Undeploy first if that is what you meant. The deletion cannot be
+    undone.
+
+    Delete *is* terminal for the device id, though. Alongside the inventory row
+    it revokes the device's credentials, clears its image assignment, heartbeat,
+    telemetry history, pending pull and seen-report ledger, marks its
+    deployment receipts `abandoned`, and cancels any onboard or undeploy still
+    queued or running for it. Re-adding the same device id afterwards starts
+    from scratch: nothing the previous device left behind can block or
+    authorise anything for its replacement. Peer endpoint rows are the one
+    deliberate exception — they are retained until they age out, so the revoked
+    principal keeps deriving a deny.
 
 ## Onboarding from the console
 
