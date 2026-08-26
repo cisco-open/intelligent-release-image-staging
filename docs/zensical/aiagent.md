@@ -108,6 +108,12 @@ At the end of every step, state the next action required from me.
    startup-config`; a failed or partial lifecycle is not saved.
 8. **Assign and observe.** Assign the published image, then use the Swarm and
    Monitoring areas to verify downloading, verification, staging, and seeding.
+   For the proof-of-value figure, show how the bytes actually travelled: the
+   hub traces origin-to-device bytes and each device reports which peers
+   supplied its image, so a rollout can state how much of the load the devices
+   carried for each other versus what came from the server. See
+   [Telemetry export](telemetry-export.md) and the importable Grafana and
+   Splunk boards under `docs/zensical/dashboards/`.
 9. **Stop at staged.** Handoff installation, activation, reload, and boot
    management to the normal device-management process. They are outside IRIS.
 

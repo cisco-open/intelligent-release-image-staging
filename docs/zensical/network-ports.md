@@ -32,7 +32,7 @@ Console-to-stage-host SSH hop.
 | 6881 | TCP | Device -> server seeder | BitTorrent | Initial image pieces from the origin seeder. |
 | 6881-6999 | TCP | Device <-> device | BitTorrent | Peer-to-peer fetch and reseed traffic. Router NAT uses static TCP PAT for 6881. |
 | 8080 | TCP | Operator browser -> Console | HTTPS | Console UI and API. The host port can be changed with `IRIS_GUI_PUBLISH`. |
-| 9101 | TCP | Prometheus or operator tooling -> server telemetry | HTTP | `/healthz` and optional `/metrics`. `/swarm` answers only loopback peers unless `IRIS_SWARM_PUBLIC=1`. |
+| 9101 | TCP | Prometheus or operator tooling -> server telemetry | HTTP | `/healthz` and optional `/metrics` (swarm state, image sizes, and the peer-distribution counters). `/swarm` answers only loopback peers unless `IRIS_SWARM_PUBLIC=1`. |
 | 22 | TCP | IOx agent -> its own IOS SVI | SSH/SCP | IOx SSH-to-self control; SCP image transfer before IOS `copy /verify` on IE-3400, or on a Catalyst 9300 falling back from the SSD share. |
 
 External telemetry is opt-in, and the 9101 listener runs either way: `/healthz`

@@ -61,7 +61,7 @@ The public website source is in [docs/](docs/index.html). The GitHub Pages workf
 | `kubernetes/` | Optional single-replica seed-server deployment with persistent storage. |
 | `fleet/` | CSV templates for device inventory and image assignments. |
 | `tools/` | Operator helpers for agent bundles, per-device installers, assignments, torrents, and releases. |
-| `docs/` | Dynamic public website and Zensical documentation source. |
+| `docs/` | Dynamic public website, Zensical documentation source, and importable Grafana and Splunk dashboards. |
 
 ## Platform support
 

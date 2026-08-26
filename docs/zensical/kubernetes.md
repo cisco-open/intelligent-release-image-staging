@@ -129,6 +129,10 @@ that must remain available for seeding.
 ## Health and operation
 
 Startup, readiness, and liveness probes use `http://<pod>:9101/healthz`. The
+same port serves the swarm and peer-distribution counters at `/metrics` when
+`IRIS_OBSERVABILITY=1` is set in the ConfigMap ([Telemetry
+export](telemetry-export.md)); the peer ledger they are read from lives under
+`IRIS_STATE` on the PVC, so the totals survive a pod restart. The
 external Service publishes ports 6969, 8443, 8000, 6881, 8080, and 9101. Port
 6800 remains pod-local. Remote `/swarm` through the Service answers `403` by
 default — swarm data is console-gated; set `IRIS_SWARM_PUBLIC=1` in the pod
