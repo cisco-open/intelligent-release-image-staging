@@ -107,8 +107,8 @@ def _peers_rpc(active_gid, peers_by_gid, session_id="s0"):
     """A _fake_rpc-style double for the truth-model peer path. `active_gid` is
     a callable returning the tellActive(gid+infoHash+uploadLength) list, so a
     test can mutate uploadLength between samples; `peers_by_gid[gid]` is the
-    rate-only getPeers() list. Asserts the exact filtered key sets the truth
-    model must send (never bitfield)."""
+    getPeers() list. Asserts the exact filtered key sets the truth model must
+    send (never bitfield)."""
     def rpc(method, params=None):
         if method == "aria2.getSessionInfo":
             return {"sessionId": session_id}
@@ -116,31 +116,44 @@ def _peers_rpc(active_gid, peers_by_gid, session_id="s0"):
             assert params and params[0] == ["gid", "infoHash", "uploadLength"]
             return active_gid()
         if method == "aria2.getPeers":
-            assert params[1] == ["ip", "port", "uploadSpeed"]
+            assert params[1] == telemetry._PEER_KEYS
             return peers_by_gid.get(params[0], [])
         raise AssertionError(method)
     return rpc
 
 
 def test_poll_seeder_peers_uses_filtered_keys_and_reports_session():
-    # The rate path fetches ONLY ip+uploadSpeed (never bitfield / cumulative),
+    # The poll fetches ip+port+uploadSpeed plus aria2-next's per-connection
+    # cumulative `uploaded` and the measured `seeder` flag (never bitfield),
     # tellActive fetches only gid+infoHash+uploadLength, and the session id
     # comes from aria2.getSessionInfo so the caller can detect a counter epoch.
     def active_gid():
         return [{"gid": "g1", "infoHash": "abc", "uploadLength": "12345"}]
-    peers = {"g1": [{"ip": "10.0.0.2", "port": "6882", "uploadSpeed": "500000"},
-                    {"ip": "10.0.0.3", "port": "6883", "uploadSpeed": "0"}]}
-    pu, upload_lengths, session_id = telemetry.poll_seeder_peers(
+    peers = {"g1": [{"ip": "10.0.0.2", "port": "6882", "uploadSpeed": "500000",
+                     "uploaded": "900", "seeder": "false"},
+                    {"ip": "10.0.0.3", "port": "6883", "uploadSpeed": "0",
+                     "uploaded": "12", "seeder": "true"}]}
+    pu, upload_lengths, session_id, peer_bytes = telemetry.poll_seeder_peers(
         _peers_rpc(active_gid, peers, session_id="sess-1"))
     assert pu == {"abc": {("10.0.0.2", 6882): 500000,
                            ("10.0.0.3", 6883): 0}}
     assert upload_lengths == {"abc": 12345}
     assert session_id == "sess-1"
+    # aria2 renders JSON-RPC booleans as strings; the flag is decoded, not
+    # left as the truthy string "false".
+    assert peer_bytes == {"abc": {
+        ("10.0.0.2", 6882): {"uploaded": 900, "seeder": False},
+        ("10.0.0.3", 6883): {"uploaded": 12, "seeder": True}}}
 
 
-def test_poll_seeder_peers_session_absent_is_empty_string():
-    # getSessionInfo may be unavailable (old aria2 / RPC blip) -> best-effort
-    # empty session id, and the rest of the peer view still works.
+def test_poll_seeder_peers_session_absent_is_unknown_not_empty():
+    # getSessionInfo may be unavailable (old aria2 / RPC blip). It used to
+    # report that as "", which is a VALUE: the ledger compares session ids to
+    # detect an aria2 restart, so an unlucky blip read as a new counter epoch,
+    # banked every connection baseline, and made the next sample re-count each
+    # live connection's full cumulative counter. Unknown must be None, which
+    # the ledger leaves alone -- see
+    # test_unknown_aria2_session_does_not_rebank_totals for the effect.
     def active_gid():
         return [{"gid": "g1", "infoHash": "abc", "uploadLength": "10"}]
 
@@ -152,10 +165,25 @@ def test_poll_seeder_peers_session_absent_is_empty_string():
         if method == "aria2.getPeers":
             return [{"ip": "10.0.0.2", "port": "6882", "uploadSpeed": "7"}]
         raise AssertionError(method)
-    pu, upload_lengths, session_id = telemetry.poll_seeder_peers(rpc)
+    pu, upload_lengths, session_id, peer_bytes = \
+        telemetry.poll_seeder_peers(rpc)
     assert pu == {"abc": {("10.0.0.2", 6882): 7}}
     assert upload_lengths == {"abc": 10}
-    assert session_id == ""
+    assert session_id is None
+    # An aria2 that answers getPeers without the byte keys is not an error;
+    # it simply attributes nothing, and the residue says so.
+    assert peer_bytes == {"abc": {("10.0.0.2", 6882): {"uploaded": 0,
+                                                       "seeder": False}}}
+
+
+def test_poll_seeder_peers_failed_control_state_poll_returns_nothing():
+    # A failed tellActive must not let a caller present retained state as a
+    # current observation: everything but the session id comes back None.
+    def rpc(method, params=None):
+        if method == "aria2.getSessionInfo":
+            return {"sessionId": "s9"}
+        raise OSError("rpc down")
+    assert telemetry.poll_seeder_peers(rpc) == (None, None, "s9", None)
 
 
 def test_swarm_snapshot_surfaces_measured_peer_rate_no_inferred_bytes():
@@ -181,7 +209,7 @@ def test_swarm_snapshot_surfaces_measured_peer_rate_no_inferred_bytes():
         if method == "aria2.getSessionInfo":
             return {"sessionId": "s0"}
         if method == "aria2.getPeers":
-            assert params[1] == ["ip", "port", "uploadSpeed"]
+            assert params[1] == telemetry._PEER_KEYS
             return peers.get(params[0], [])
         raise AssertionError(method)
 
@@ -2151,3 +2179,504 @@ def test_seeder_torrent_upload_rate_is_exported_and_measured():
     # low cardinality preserved: no device or peer label ever
     assert not any(k.startswith("device.") or "peer" in k
                    for k in rate["attrs"])
+
+
+# --- durable origin -> peer attribution (peer ledger wiring) ---
+
+def _swarm_hub(tmp_path, peers, torrent, session=None, devices=None):
+    """A hub with a durable peer ledger whose aria2 double reads the MUTABLE
+    `peers` (the getPeers reply) and `torrent` ({"uploadLength": n}) so a test
+    can move the swarm between samples the way a real transfer does."""
+    import peer_ledger
+    session = session if session is not None else {"id": "s0"}
+
+    def rpc(method, params=None):
+        if method == "aria2.getGlobalStat":
+            return {"uploadSpeed": "0", "downloadSpeed": "0", "numActive": "1"}
+        if method == "aria2.tellActive":
+            keys = params[0] if params else []
+            if "files" in keys:
+                return [{"connections": str(len(peers)), "infoHash": "abc",
+                         "totalLength": "1000",
+                         "files": [{"path": "/img/cat9k.bin"}]}]
+            return [{"gid": "g1", "infoHash": "abc",
+                     "uploadLength": str(torrent["uploadLength"])}]
+        if method == "aria2.getSessionInfo":
+            return {"sessionId": session["id"]}
+        if method == "aria2.getPeers":
+            return [dict(row) for row in peers]
+        raise AssertionError(method)
+    return telemetry.Telemetry(
+        PeerRegistry(), rpc=rpc, interval=10,
+        peer_ledger=peer_ledger.PeerLedger(str(tmp_path)),
+        device_info=(lambda: devices) if devices is not None else None)
+
+
+def _peer(ip, port, uploaded, seeder="false"):
+    return {"ip": ip, "port": port, "uploadSpeed": "1000",
+            "uploaded": str(uploaded), "seeder": seeder}
+
+
+def test_sampler_accumulates_per_peer_bytes_across_samples(tmp_path):
+    """aria2's per-peer counter is per CONNECTION and disappears with the
+    connection, so it has to be banked as observed. Two samples of a growing
+    counter must leave the cumulative total, not the last reading."""
+    peers = [_peer("10.0.0.2", "51422", 400)]
+    torrent = {"uploadLength": 400}
+    hub = _swarm_hub(tmp_path, peers, torrent)
+    hub.sample()
+    peers[0] = _peer("10.0.0.2", "51422", 900)
+    torrent["uploadLength"] = 900
+    hub.sample()
+    assert hub.peer_ledger.totals("abc") == {"abc": {"10.0.0.2": 900}}
+    totals = hub.peer_ledger_totals()["abc"]
+    assert totals["origin_total"] == 900
+    assert totals["attributed"] == 900
+    assert totals["unattributed"] == 0
+    assert totals["image_id"] == "cat9k.bin"
+
+
+def test_bytes_sent_to_a_vanished_peer_become_visible_residue(tmp_path):
+    """The measured capture rate is 88.1% at 2s sampling: the rest went to
+    connections that opened and closed between two samples. Those bytes must
+    surface as an explicit residue -- never be dropped, and never be spread
+    across the peers we did see."""
+    peers = [_peer("10.0.0.2", "51422", 400)]
+    torrent = {"uploadLength": 400}
+    hub = _swarm_hub(tmp_path, peers, torrent)
+    hub.sample()
+    peers[:] = []                       # peer hung up; its counter is gone
+    torrent["uploadLength"] = 1000      # but the origin's total kept climbing
+    hub.sample()
+    totals = hub.peer_ledger_totals()["abc"]
+    assert totals["attributed"] == 400  # what we watched, kept
+    assert totals["origin_total"] == 1000
+    assert totals["unattributed"] == 600
+    assert hub.peer_ledger.unattributed("abc") == 600
+
+
+def test_completed_transfer_keeps_totals_after_the_swarm_goes_idle(tmp_path):
+    """The operator requirement: panels must not blank when nothing is
+    transferring. The ledger is durable, so the totals outlive both the swarm
+    and the hub that observed it."""
+    import peer_ledger
+    peers = [_peer("10.0.0.2", "51422", 900)]
+    torrent = {"uploadLength": 900}
+    hub = _swarm_hub(tmp_path, peers, torrent)
+    hub.sample()
+    peers[:] = []
+    hub.sample()
+    reread = peer_ledger.PeerLedger(str(tmp_path)).torrent_totals()
+    assert reread["abc"]["attributed"] == 900
+    assert reread["abc"]["peers_attributed"] == 1
+
+
+def test_peer_bytes_record_names_the_device_and_the_measured_role(tmp_path):
+    """End to end: an attributed edge produces one peer_bytes record carrying
+    the running total, the delta that produced it, the device resolved through
+    the heartbeat IP join, and the role aria2 MEASURED (isSeeder) -- not a role
+    guessed from progress."""
+    peers = [_peer("10.0.0.2", "51422", 400, seeder="true")]
+    torrent = {"uploadLength": 400}
+    hub = _swarm_hub(tmp_path, peers, torrent,
+                     devices={"rtr-04": {"swarm_ip": "10.0.0.2"}})
+    hub.sample()
+    emitted = []
+    hub.log_queue.emit = lambda rec: emitted.append(rec)
+    peers[0] = _peer("10.0.0.2", "51422", 700, seeder="true")
+    torrent["uploadLength"] = 700
+    hub.sample()
+    rows = [r for r in emitted
+            if r.get("eventName") == "iris.swarm.peer_bytes"]
+    assert len(rows) == 1, emitted
+    a = {x["key"]: list(x["value"].values())[0] for x in rows[0]["attributes"]}
+    assert a["network.peer.address"] == "10.0.0.2"
+    assert a["iris.device.id"] == "rtr-04"
+    assert a["iris.image.id"] == "cat9k.bin"
+    assert a["iris.peer.role"] == "seeder"
+    assert int(a["iris.transfer.peer_sent_bytes"]) == 700
+    assert int(a["iris.transfer.peer_sent_delta_bytes"]) == 300
+
+
+def test_no_record_is_emitted_for_a_peer_that_gained_nothing(tmp_path):
+    """A cumulative value that has not moved says nothing new; re-emitting it
+    every 2s would only inflate the log stream."""
+    peers = [_peer("10.0.0.2", "51422", 400)]
+    hub = _swarm_hub(tmp_path, peers, {"uploadLength": 400})
+    hub.sample()
+    emitted = []
+    hub.log_queue.emit = lambda rec: emitted.append(rec)
+    hub.sample()                        # same counter, same sample
+    assert [r for r in emitted
+            if r.get("eventName") == "iris.swarm.peer_bytes"] == []
+
+
+def test_an_aria2_restart_keeps_the_totals_it_already_banked(tmp_path):
+    """A new session id invalidates every baseline, not the history: the
+    counters restart at zero and are counted in full from there, while what
+    was already attributed stays attributed."""
+    peers = [_peer("10.0.0.2", "51422", 500)]
+    torrent, session = {"uploadLength": 500}, {"id": "s0"}
+    hub = _swarm_hub(tmp_path, peers, torrent, session=session)
+    hub.sample()
+    session["id"] = "s1"                # aria2 restarted
+    peers[0] = _peer("10.0.0.2", "51422", 120)
+    torrent["uploadLength"] = 120
+    hub.sample()
+    assert hub.peer_ledger.totals("abc") == {"abc": {"10.0.0.2": 620}}
+    assert hub.peer_ledger_totals()["abc"]["origin_total"] == 620
+
+
+def test_a_failed_control_state_poll_attributes_nothing(tmp_path):
+    """A poll that failed is not an observation of zero; nothing may be banked
+    from it."""
+    import peer_ledger
+
+    def rpc(method, params=None):
+        if method == "aria2.getSessionInfo":
+            return {"sessionId": "s0"}
+        if method == "aria2.getGlobalStat":
+            return {"uploadSpeed": "0", "downloadSpeed": "0", "numActive": "0"}
+        raise OSError("rpc down")
+    hub = telemetry.Telemetry(
+        PeerRegistry(), rpc=rpc, interval=10,
+        peer_ledger=peer_ledger.PeerLedger(str(tmp_path)))
+    hub.sample()
+    assert hub.peer_ledger_totals() == {}
+
+
+def test_hub_without_a_ledger_still_samples(tmp_path):
+    """Tests and standalone runs wire no ledger; the poll must not care."""
+    hub = _swarm_hub(tmp_path, [_peer("10.0.0.2", "51422", 5)],
+                     {"uploadLength": 5})
+    hub.peer_ledger = None
+    hub.sample()
+    assert hub.peer_ledger_totals() == {}
+    assert hub._peer_up == {"abc": {("10.0.0.2", 51422): 1000}}
+
+
+def test_sample_interval_is_fast_only_while_a_connection_is_live(tmp_path):
+    """The sample rate IS the attribution rate (73.3% at 3s, 88.1% at 2s), so
+    poll fast while anything is connected -- and stop spinning when the swarm
+    is idle and there is nothing left to miss."""
+    peers = [_peer("10.0.0.2", "51422", 5)]
+    hub = _swarm_hub(tmp_path, peers, {"uploadLength": 5})
+    assert hub._sample_interval() == 10         # nothing polled yet
+    hub.sample()
+    assert hub._sample_interval() == telemetry.ACTIVE_INTERVAL
+    peers[:] = []
+    hub.sample()
+    assert hub._sample_interval() == 10
+
+
+def test_active_cadence_never_slows_a_faster_configured_interval(tmp_path):
+    """ACTIVE_INTERVAL is a ceiling on laziness, not a floor: an operator who
+    configured a 1s interval keeps it."""
+    hub = _swarm_hub(tmp_path, [_peer("10.0.0.2", "51422", 5)],
+                     {"uploadLength": 5})
+    hub.interval = 1
+    hub.sample()
+    assert hub._sample_interval() == 1
+
+
+def test_fast_pass_polls_aria2_without_re_running_the_export_stages(tmp_path):
+    """Only the aria2 poll runs on the fast cadence. Export cadence is
+    deliberately unchanged: the collector should not see 7x the pushes just
+    because the per-connection counters need watching."""
+    peers = [_peer("10.0.0.2", "51422", 400)]
+    hub = _swarm_hub(tmp_path, peers, {"uploadLength": 400})
+    exports = []
+    hub.metrics_exporter = type("E", (), {
+        "export": lambda _self, points: exports.append(points) or True})()
+    hub.sample_seeder()
+    assert exports == []
+    assert hub.peer_ledger.totals("abc") == {"abc": {"10.0.0.2": 400}}
+    hub.sample()
+    assert len(exports) == 1
+
+
+# --- regressions the first cut of this feature shipped with -----------------
+
+def test_metrics_endpoint_exports_the_ledger_families(tmp_path):
+    """The four aggregate families must reach /metrics, not merely exist in
+    render().
+
+    They did not. metrics_text() called metrics.render() without swarm_bytes=,
+    so the entire ledger block was dead at runtime and every aggregate panel on
+    both dashboards was empty -- including the template-variable dropdowns that
+    gate the rest of the board. It passed CI because test_metrics.py calls
+    render() directly with a hand-built argument, and nothing exercised the
+    endpoint. This test does."""
+    peers = [_peer("10.0.0.2", 6881, 900)]
+    torrent = {"uploadLength": "1500"}
+    hub = _swarm_hub(tmp_path, peers, torrent)
+    hub.sample()
+
+    text = hub.metrics_text()
+
+    for family in ("iris_origin_sent_bytes_total",
+                   "iris_peer_attributed_bytes_total",
+                   "iris_peer_unattributed_bytes_total",
+                   "iris_swarm_peers_attributed"):
+        assert family in text, "%s never reaches /metrics" % family
+    # and it carries the real value, not just the HELP line
+    assert "iris_peer_attributed_bytes_total{" in text
+    assert "900" in text
+
+
+def test_unknown_aria2_session_does_not_rebank_totals(tmp_path):
+    """A getSessionInfo failure must not read as an aria2 restart.
+
+    poll_seeder_peers used to swallow the exception and return session_id="",
+    and the ledger treats ANY change of session id as a new counter epoch: it
+    banks every connection baseline, so the next sample counts each live
+    connection's full cumulative value again. One transient RPC hiccup
+    therefore inflated every peer's durable total. Sampling an UNCHANGED
+    connection across a probe failure must leave the total exactly where it
+    was."""
+    peers = [_peer("10.0.0.2", 6881, 1000)]
+    torrent = {"uploadLength": "1000"}
+    session = {"id": "sessA"}
+    hub = _swarm_hub(tmp_path, peers, torrent, session=session)
+
+    hub.sample()                       # first sight: banks 1000
+    hub.sample()                       # unchanged: banks nothing
+    session["id"] = None               # the probe fails -> unknown epoch
+    hub.sample()
+    session["id"] = "sessA"            # probe recovers, same aria2
+    hub.sample()
+
+    assert hub.peer_ledger.totals("abc") == {"abc": {"10.0.0.2": 1000}}, \
+        "a transient session probe failure re-banked the connection"
+
+
+# ---------------------------------------------------------------------------
+# peer_receipts attribution: WHO sent the measured bytes
+#
+# The device measures exact bytes per BitTorrent peer and makes no claim about
+# which peer was the origin -- it cannot: the origin seeder is an ordinary peer
+# of every device and sits in aria2.getPeers like any other. Only the server
+# knows, from the authenticated service:seeder principal. These tests pin that
+# split, because getting it wrong reports a wave that was 28.9% peer-delivered
+# as ~100%.
+# ---------------------------------------------------------------------------
+
+_ORIGIN_IP = "100.90.168.20"
+
+
+def _receipt_row(ip, got, **extra):
+    row = {"ip": ip, "session_bytes_from_peer": got,
+           "session_bytes_to_peer": 0}
+    row.update(extra)
+    return row
+
+
+def _receipt_block(rows, rows_omitted=0, bytes_omitted=0, complete=True):
+    return {"source": "aria2_session_counters", "captured_at": 100.0,
+            "complete": complete, "rows": list(rows),
+            "rows_total": len(rows) + rows_omitted,
+            "rows_omitted": rows_omitted,
+            "bytes_from_all_senders_total": bytes_omitted + sum(
+                r["session_bytes_from_peer"] for r in rows),
+            "bytes_from_all_senders_omitted": bytes_omitted}
+
+
+def test_origin_bytes_are_not_counted_as_peer_bytes():
+    """The blocker this split exists for: the origin's row is in the device's
+    own receipts, so the device-side total includes it. Reporting that total as
+    'from peers' turned a 28.9% peer-delivered wave into ~100%."""
+    block = _receipt_block([_receipt_row(_ORIGIN_IP, 7110),
+                            _receipt_row("10.0.0.7", 2890)])
+    split = telemetry.classify_peer_receipts(
+        block, {_ORIGIN_IP}, {"10.0.0.7": "rtr-07"})
+    assert split["origin_rows"] == 1 and split["origin_bytes"] == 7110
+    assert split["device_rows"] == 1 and split["device_bytes"] == 2890
+    assert split["unknown_rows"] == 0 and split["unknown_bytes"] == 0
+    # The device-side total is all senders together, origin included; the
+    # peer-delivered figure is device_bytes and nothing else.
+    assert split["bytes_from_all_senders_total"] == 10000
+    assert split["device_bytes"] != split["bytes_from_all_senders_total"]
+
+
+def test_a_device_that_became_a_seeder_is_still_a_device():
+    """aria2's has_complete_file is true for ANY peer holding the whole file,
+    so in a wave every device that finishes early raises it. Identity decides
+    the class, never the flag."""
+    block = _receipt_block([
+        _receipt_row("10.0.0.7", 500, has_complete_file=True),
+        _receipt_row(_ORIGIN_IP, 100, has_complete_file=True)])
+    split = telemetry.classify_peer_receipts(
+        block, {_ORIGIN_IP}, {"10.0.0.7": "rtr-07"})
+    assert split["device_bytes"] == 500 and split["device_rows"] == 1
+    assert split["origin_bytes"] == 100
+    assert telemetry.receipt_source_class(
+        "10.0.0.7", {_ORIGIN_IP}, {"10.0.0.7": "rtr-07"}) == "device"
+
+
+def test_an_unresolvable_address_is_unknown_not_a_peer():
+    """A third bucket, always. An address that is neither the origin nor a
+    known device is UNKNOWN; folding it into either side would invent the
+    attribution."""
+    block = _receipt_block([_receipt_row("198.51.100.9", 4096)])
+    split = telemetry.classify_peer_receipts(block, {_ORIGIN_IP}, {})
+    assert split["unknown_rows"] == 1 and split["unknown_bytes"] == 4096
+    assert split["device_bytes"] == 0 and split["origin_bytes"] == 0
+
+
+def test_no_known_origin_leaves_rows_unknown_rather_than_peer_delivered():
+    """An unreadable/empty registry must not promote the origin's bytes to
+    peer-delivered: with no origin address known, an unjoinable row is
+    unknown."""
+    split = telemetry.classify_peer_receipts(
+        _receipt_block([_receipt_row(_ORIGIN_IP, 9000)]), set(), {})
+    assert split["unknown_bytes"] == 9000 and split["device_bytes"] == 0
+
+
+def test_an_address_claimed_by_both_origin_and_device_is_unknown():
+    """Two identity claims on one address cannot both be the sender, so we
+    assert neither."""
+    assert telemetry.receipt_source_class(
+        _ORIGIN_IP, {_ORIGIN_IP}, {_ORIGIN_IP: "rtr-07"}) == "unknown"
+
+
+def test_omitted_mass_is_reported_apart_and_never_redistributed():
+    """Bytes from rows a cap dropped are real and measured, but no address
+    survives to classify them. They get their own figure -- spreading them
+    across the named buckets pro rata is the even-split fabrication that was
+    removed in 2026.08.20."""
+    block = _receipt_block([_receipt_row("10.0.0.7", 1000)],
+                           rows_omitted=3, bytes_omitted=750)
+    split = telemetry.classify_peer_receipts(
+        block, {_ORIGIN_IP}, {"10.0.0.7": "rtr-07"})
+    assert split["unattributed_omitted_rows"] == 3
+    assert split["unattributed_omitted_bytes"] == 750
+    assert split["device_bytes"] == 1000
+    assert (split["origin_bytes"] + split["device_bytes"]
+            + split["unknown_bytes"] + split["unattributed_omitted_bytes"]
+            == split["bytes_from_all_senders_total"] == 1750)
+
+
+def test_a_partial_capture_is_flagged_so_no_share_is_computed_blind():
+    block = _receipt_block([_receipt_row("10.0.0.7", 10)], complete=False)
+    split = telemetry.classify_peer_receipts(block, set(), {})
+    assert split["capture_complete"] is False
+
+
+def test_no_receipts_block_classifies_to_nothing_not_to_zero():
+    """Absent means NOT MEASURED. An all-zero split would read as 'no peer
+    bytes', which is a different, false claim."""
+    assert telemetry.classify_peer_receipts(None, {_ORIGIN_IP}, {}) is None
+    assert telemetry.classify_peer_receipts(7, {_ORIGIN_IP}, {}) is None
+
+
+def test_origin_addresses_come_from_the_service_seeder_principal():
+    """Identity, not an address list: the origin is whoever announced as the
+    typed service:seeder principal. A device sharing the literal peer name
+    'seeder' is a different principal and must not be mistaken for it."""
+    import auth
+    reg = PeerRegistry()
+    reg.announce("abc", "seeder", _ORIGIN_IP, 6881, left=0,
+                 principal=auth.Principal("service", "seeder"))
+    reg.announce("abc", "p2", "10.0.0.7", 6881, left=0,
+                 principal=auth.Principal("device", "seeder"))
+    hub = telemetry.Telemetry(reg)
+    assert hub._origin_swarm_ips() == {_ORIGIN_IP}
+
+
+def test_an_unreadable_registry_yields_no_origin_rather_than_a_guess():
+    class Boom:
+        def snapshot(self, now=None):
+            raise RuntimeError("registry down")
+    hub = telemetry.Telemetry(PeerRegistry())
+    hub._registry = Boom()
+    assert hub._origin_swarm_ips() == set()
+
+
+def test_export_attaches_attribution_to_the_report_that_carries_it(monkeypatch):
+    """The split rides with the report it describes: a later report with no
+    receipts must not inherit the previous report's attribution."""
+    import auth
+    reg = PeerRegistry()
+    reg.announce("abc", "seeder", _ORIGIN_IP, 6881, left=0,
+                 principal=auth.Principal("service", "seeder"))
+    with_receipts = {"schema": "v2", "report_id": "r1", "received_at": 1,
+                     "peer_receipts": _receipt_block(
+                         [_receipt_row(_ORIGIN_IP, 700),
+                          _receipt_row("10.0.0.7", 300)])}
+    without = {"schema": "v2", "report_id": "r2", "received_at": 2}
+    hub = telemetry.Telemetry(
+        reg,
+        device_info=lambda: {"rtr-07": {"swarm_ip": "10.0.0.7"}},
+        reports_info=lambda: {"rtr-07": [with_receipts, without]})
+    seen = []
+    real = otlp.build_report_record
+
+    def spy(report, device_id, enrich=None):
+        seen.append((report.get("report_id"), enrich))
+        return real(report, device_id, enrich=enrich)
+
+    monkeypatch.setattr(telemetry.otlp, "build_report_record", spy)
+    hub._export_new_reports()
+    by_id = dict(seen)
+    # peer_origin_ips used to ride along here and was read by nobody -- the
+    # tell that the per-peer fanout had never been wired. The origin addresses
+    # are bound into the classify callback at the emit site instead; what the
+    # report record carries is the SPLIT, asserted below.
+    assert "peer_origin_ips" not in by_id["r1"]
+    assert by_id["r1"]["peer_receipt_attribution"]["origin_bytes"] == 700
+    assert by_id["r1"]["peer_receipt_attribution"]["device_bytes"] == 300
+    assert "peer_receipt_attribution" not in by_id["r2"]
+
+
+def test_peer_receipts_reach_the_log_queue_not_just_the_catalog():
+    """The exact device-side measurement must LEAVE the server.
+
+    build_peer_receipt_records existed in otlp.py and nothing called it: the
+    export pipeline emitted only the report record, so iris.device.peer_receipt
+    did not exist at runtime and the per-peer rows stopped in the catalog --
+    while the LOSSY sampled estimate (iris.swarm.peer_bytes) was exported
+    happily. The better number was the hidden one. Test the pipeline, not the
+    builder: an otlp.py unit test passes either way."""
+    report = _stored_report()
+    report["peer_receipts"] = {
+        "source": "aria2_session_counters", "captured_at": 150.0,
+        "complete": True, "rows_total": 2, "rows_omitted": 0,
+        "bytes_from_all_senders_total": 300,
+        "bytes_from_all_senders_omitted": 0,
+        "rows": [
+            # the origin seeder -- must NOT be presented as a peer
+            {"ip": "10.9.9.9", "port": 6881, "session_bytes_from_peer": 200,
+             "session_bytes_to_peer": 0, "has_complete_file": True},
+            # another device
+            {"ip": "10.0.0.7", "port": 6881, "session_bytes_from_peer": 100,
+             "session_bytes_to_peer": 0, "has_complete_file": False},
+        ]}
+    hub = telemetry.Telemetry(
+        PeerRegistry(), reports_info=lambda: {"d1": [report]},
+        # swarm_ip, not device_ip: _device_by_ip deliberately refuses to join
+        # a peer on the management address ("matched on something weaker")
+        device_info=lambda: {"d7": {"swarm_ip": "10.0.0.7"}})
+    hub._origin_swarm_ips = lambda: {"10.9.9.9"}
+
+    hub._export_new_reports()
+
+    def log_name(record):
+        for attr in record.get("attributes") or []:
+            if attr.get("key") == "otel.log.name":
+                return attr["value"].get("stringValue")
+        return None
+
+    names = [log_name(r) for r in hub.log_queue.snapshot()]
+    assert "iris.device.peer_receipt" in names, \
+        "the exact per-peer measurement never left the server"
+    assert names.count("iris.device.peer_receipt") == 2, names
+
+    # and each row carries its sender class, with the origin called the origin
+    classes = {}
+    for record in hub.log_queue.snapshot():
+        if log_name(record) != "iris.device.peer_receipt":
+            continue
+        attrs = {a["key"]: a["value"] for a in record["attributes"]}
+        ip = attrs["network.peer.address"]["stringValue"]
+        classes[ip] = attrs["iris.peer.attribution"]["stringValue"]
+    assert classes == {"10.9.9.9": "origin", "10.0.0.7": "device"}, classes

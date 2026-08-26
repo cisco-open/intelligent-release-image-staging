@@ -480,3 +480,397 @@ class TestTrustStoreWiring:
                                ssl.SSLError("boom")))
         with pytest.raises(RuntimeError, match="OTLP POST to"):
             otlp._http_post("https://collector.local/v1/logs", b"{}")
+
+
+def test_peer_bytes_record_carries_the_attributed_edge():
+    """Per-peer CUMULATIVE bytes reach the backend as a LOG record, for the
+    same reason the rate does: peer- and device-labelled history must not
+    multiply metric cardinality. The record has to name the edge, the image,
+    the running total AND the delta that produced it, so a backend can chart
+    either without re-deriving one from the other."""
+    rec = otlp.build_peer_bytes_record({
+        "info_hash": "abc", "image_id": "cat9k_iosxe.26.01.01",
+        "ip": "100.92.100.2", "device_id": "rtr-04", "role": "seeder",
+        "peer_sent_bytes": 429_496_729, "peer_sent_delta_bytes": 1_048_576,
+        "ts": 1787000000.0, "event_id": "e7"})
+    attrs = {k: list(v.values())[0] for k, v in _attrs(rec).items()}
+    assert rec["eventName"] == "iris.swarm.peer_bytes"
+    assert rec["timeUnixNano"] == "1787000000000000000"
+    assert attrs["otel.log.name"] == "iris.swarm.peer_bytes"
+    assert attrs["iris.torrent.info_hash"] == "abc"
+    assert attrs["iris.image.id"] == "cat9k_iosxe.26.01.01"
+    # a single address, as on peer_rate -- never an array like the report
+    # records use, so a backend groups by one string.
+    assert attrs["network.peer.address"] == "100.92.100.2"
+    assert attrs["iris.device.id"] == "rtr-04"
+    assert attrs["iris.peer.role"] == "seeder"
+    assert attrs["event.id"] == "e7"
+    # int64 rides the OTLP/JSON wire as a STRING; a query that sums these has
+    # to coerce first.
+    assert _attrs(rec)["iris.transfer.peer_sent_bytes"] == \
+        {"intValue": "429496729"}
+    assert _attrs(rec)["iris.transfer.peer_sent_delta_bytes"] == \
+        {"intValue": "1048576"}
+
+
+def test_peer_bytes_record_omits_what_it_does_not_know():
+    """A peer IP with no heartbeat cannot be joined to a device. Omit the
+    attribute rather than emit a placeholder that a dashboard would happily
+    group by."""
+    rec = otlp.build_peer_bytes_record({
+        "info_hash": "abc", "ip": "10.0.0.9",
+        "peer_sent_bytes": 10, "peer_sent_delta_bytes": 10, "ts": 1.0})
+    keys = set(_attrs(rec))
+    assert "iris.device.id" not in keys
+    assert "iris.peer.role" not in keys
+    assert "iris.image.id" not in keys
+    assert keys >= {"iris.torrent.info_hash", "network.peer.address",
+                    "iris.transfer.peer_sent_bytes"}
+
+
+def test_peer_bytes_record_tolerates_garbage():
+    """Telemetry is never on the critical path: a non-dict row must produce a
+    well-formed (if empty) record rather than raise into the sampler."""
+    rec = otlp.build_peer_bytes_record(None)
+    assert rec["eventName"] == "iris.swarm.peer_bytes"
+    assert rec["timeUnixNano"] == "0"
+
+
+# ---------------------------------------------------------------------------
+# iris.device.peer_receipt -- the EXACT device-side measurement
+#
+# The sampled origin-side estimate has always been exported; the exact
+# device-side one was stored in the catalog and went no further, so the worse
+# number was the only one an operator could see. These tests hold the exact one
+# reachable, and hold it apart from the estimate.
+# ---------------------------------------------------------------------------
+
+
+def _receipt_report(rows, **block):
+    b = {"source": "aria2_session_counters", "captured_at": 1787000000.0,
+         "complete": True, "rows": rows, "rows_total": len(rows),
+         "rows_omitted": 0, "bytes_from_all_senders_total":
+         sum(r.get("session_bytes_from_peer", 0) for r in rows),
+         "bytes_from_all_senders_omitted": 0}
+    b.update(block)
+    return {"schema": "v2", "report_id": "r1", "image_id": "cat9k.26.01.01",
+            "transfer_id": "t1", "received_at": 1787000100.0,
+            "peer_receipts": b}
+
+
+def test_peer_receipt_record_is_a_separate_name_from_the_sampled_estimate():
+    """iris.swarm.peer_bytes carries the origin-side SAMPLED estimate, which
+    loses 26.7% at 3s. These are the same bytes counted exactly. If both landed
+    under one log name a backend sum() would silently mix an exact number with
+    a lossy one and double-count the transfer, so the names are disjoint by
+    construction."""
+    rec = otlp.build_peer_receipt_record({
+        "ip": "100.92.100.2", "session_bytes_from_peer": 429_496_729,
+        "captured_at": 1787000000.0})
+    assert rec["eventName"] == "iris.device.peer_receipt"
+    assert rec["eventName"] != "iris.swarm.peer_bytes"
+    assert _attrs(rec)["otel.log.name"] == \
+        {"stringValue": "iris.device.peer_receipt"}
+    # event time is the hook's capture instant, not server ingest time.
+    assert rec["timeUnixNano"] == "1787000000000000000"
+
+
+def test_peer_receipt_record_carries_the_measured_edge():
+    rec = otlp.build_peer_receipt_record({
+        "device_id": "rtr-04", "image_id": "cat9k.26.01.01",
+        "transfer_id": "t1", "ip": "100.92.100.7", "port": 6881,
+        "peer_device_id": "rtr-07", "peer_attribution": "device",
+        "has_complete_file": True, "session_bytes_from_peer": 281_474_976,
+        "session_bytes_to_peer": 1_048_576, "captured_at": 1787000000.0,
+        "source": "aria2_session_counters", "capture_complete": True,
+        "event_id": "r1:100.92.100.7"})
+    attrs = _attrs(rec)
+    flat = {k: list(v.values())[0] for k, v in attrs.items()}
+    assert flat["device.id"] == "rtr-04"          # the RECEIVING device
+    assert flat["iris.peer.device.id"] == "rtr-07"
+    assert flat["iris.peer.attribution"] == "device"
+    assert flat["network.peer.address"] == "100.92.100.7"
+    assert flat["iris.receipt.source"] == "aria2_session_counters"
+    assert flat["event.id"] == "r1:100.92.100.7"
+    assert attrs["network.peer.port"] == {"intValue": "6881"}
+    assert attrs["iris.receipt.capture_complete"] == {"boolValue": True}
+    # int64 rides the OTLP/JSON wire as a STRING, as on peer_bytes.
+    assert attrs["iris.transfer.session_bytes_from_peer"] == \
+        {"intValue": "281474976"}
+    assert attrs["iris.transfer.session_bytes_to_peer"] == \
+        {"intValue": "1048576"}
+
+
+def test_peer_receipt_record_never_calls_an_unclassified_peer_a_device():
+    """The origin seeder is an ordinary BitTorrent peer of every device, so it
+    sits in the device's own peer list like any other. Only the server can tell
+    the two apart; a row it did not classify is 'unknown', never folded into
+    'device' -- that fold is what would report a wave as ~100% peer-delivered
+    when the origin fed most of it."""
+    rec = otlp.build_peer_receipt_record({
+        "ip": "100.90.168.20", "session_bytes_from_peer": 9})
+    assert _attrs(rec)["iris.peer.attribution"] == {"stringValue": "unknown"}
+    # no resolution, no name -- but the bytes are still exported.
+    assert "iris.peer.device.id" not in _attrs(rec)
+    assert _attrs(rec)["iris.transfer.session_bytes_from_peer"] == \
+        {"intValue": "9"}
+    for bogus in ("peer", "", None, "DEVICE", "origin_maybe", 1):
+        rec = otlp.build_peer_receipt_record({"ip": "10.0.0.1",
+                                              "peer_attribution": bogus})
+        assert _attrs(rec)["iris.peer.attribution"] == \
+            {"stringValue": "unknown"}
+
+
+def test_peer_receipt_record_marks_the_origin_as_origin():
+    """The origin's bytes are exported, and exported as the origin's -- they
+    are the figure the peer share is measured AGAINST, so they must be
+    separable at query time rather than absent."""
+    rec = otlp.build_peer_receipt_record({
+        "ip": "100.90.168.20", "peer_attribution": "origin",
+        "session_bytes_from_peer": 691_167_232})
+    assert _attrs(rec)["iris.peer.attribution"] == {"stringValue": "origin"}
+    assert _attrs(rec)["iris.transfer.session_bytes_from_peer"] == \
+        {"intValue": "691167232"}
+
+
+def test_peer_receipt_seeder_flag_is_not_an_origin_flag():
+    """aria2's isSeeder() is true for ANY peer holding the complete file --
+    every device that finished early in a wave. The attribute is named for what
+    it measures so no dashboard mistakes it for the origin."""
+    rec = otlp.build_peer_receipt_record({
+        "ip": "10.0.0.2", "has_complete_file": True,
+        "peer_attribution": "device"})
+    attrs = _attrs(rec)
+    assert attrs["iris.peer.has_complete_file"] == {"boolValue": True}
+    assert "iris.peer.seeder" not in attrs
+    assert "iris.peer.origin" not in attrs
+    # false is a measurement, not an absence: it must survive the None-skip.
+    rec = otlp.build_peer_receipt_record({"ip": "10.0.0.2",
+                                          "has_complete_file": False})
+    assert _attrs(rec)["iris.peer.has_complete_file"] == {"boolValue": False}
+
+
+def test_peer_receipt_record_keeps_a_measured_zero():
+    """A peer that connected and delivered nothing is a measurement. Absence of
+    a record is what means 'not measured'."""
+    rec = otlp.build_peer_receipt_record({
+        "ip": "10.0.0.3", "session_bytes_from_peer": 0,
+        "session_bytes_to_peer": 0})
+    assert _attrs(rec)["iris.transfer.session_bytes_from_peer"] == \
+        {"intValue": "0"}
+    assert _attrs(rec)["iris.transfer.session_bytes_to_peer"] == \
+        {"intValue": "0"}
+
+
+def test_peer_receipt_record_omits_what_it_does_not_know():
+    rec = otlp.build_peer_receipt_record({"ip": "10.0.0.4"})
+    keys = set(_attrs(rec))
+    assert "network.peer.port" not in keys          # absent, not 0
+    assert "iris.peer.has_complete_file" not in keys  # absent, not false
+    assert "iris.receipt.capture_complete" not in keys
+    assert "iris.transfer.session_bytes_from_peer" not in keys
+
+
+def test_peer_receipt_record_tolerates_garbage():
+    """Telemetry is never on the critical path."""
+    rec = otlp.build_peer_receipt_record(None)
+    assert rec["eventName"] == "iris.device.peer_receipt"
+    assert rec["timeUnixNano"] == "0"
+    assert _attrs(rec)["iris.peer.attribution"] == {"stringValue": "unknown"}
+
+
+def test_peer_receipt_records_fan_out_one_record_per_row():
+    report = _receipt_report([
+        {"ip": "100.92.100.7", "session_bytes_from_peer": 200,
+         "session_bytes_to_peer": 0, "peer_attribution": "device",
+         "peer_device_id": "rtr-07"},
+        {"ip": "100.90.168.20", "session_bytes_from_peer": 800,
+         "session_bytes_to_peer": 0, "peer_attribution": "origin"},
+    ])
+    recs = otlp.build_peer_receipt_records(report, "rtr-04")
+    assert len(recs) == 2
+    for rec in recs:
+        attrs = {k: list(v.values())[0] for k, v in _attrs(rec).items()}
+        # per-row context is filled from the report and the block, so a single
+        # record stands on its own in the logs pipeline.
+        assert attrs["device.id"] == "rtr-04"
+        assert attrs["iris.image.id"] == "cat9k.26.01.01"
+        assert attrs["iris.transfer.id"] == "t1"
+        assert attrs["iris.receipt.source"] == "aria2_session_counters"
+        assert rec["timeUnixNano"] == "1787000000000000000"
+    # ids are stable per row and unique within the report, so a retry of the
+    # same report does not look like new bytes.
+    ids = [{k: list(v.values())[0] for k, v in _attrs(r).items()}["event.id"]
+           for r in recs]
+    assert ids == ["r1:100.92.100.7", "r1:100.90.168.20"]
+    assert otlp.build_peer_receipt_records(report, "rtr-04")[0][
+        "attributes"] == recs[0]["attributes"]
+    # the origin/device split survives the fan-out
+    attribution = sorted(
+        {k: list(v.values())[0] for k, v in _attrs(r).items()}[
+            "iris.peer.attribution"] for r in recs)
+    assert attribution == ["device", "origin"]
+
+
+def test_peer_receipt_records_take_the_sender_class_from_the_server():
+    """The classification is telemetry.receipt_source_class's answer, injected.
+    otlp does not re-implement the origin/device join: a second copy of an
+    identity rule drifts, and the copy that drifts is the one a peer share gets
+    read off."""
+    report = _receipt_report([
+        {"ip": "100.90.168.20", "session_bytes_from_peer": 700,
+         "session_bytes_to_peer": 0},
+        {"ip": "100.92.100.7", "session_bytes_from_peer": 289,
+         "session_bytes_to_peer": 0},
+        {"ip": "192.0.2.9", "session_bytes_from_peer": 11,
+         "session_bytes_to_peer": 0},
+    ])
+    classes = {"100.90.168.20": "origin", "100.92.100.7": "device"}
+    enrich = {"peer_devices": {"100.92.100.7": "rtr-07",
+                               "100.90.168.20": "rtr-20"}}
+    recs = otlp.build_peer_receipt_records(
+        report, "rtr-04", enrich=enrich,
+        classify=lambda ip: classes.get(ip, "unknown"))
+    got = [{k: list(v.values())[0] for k, v in _attrs(r).items()}
+           for r in recs]
+    assert [g["iris.peer.attribution"] for g in got] == \
+        ["origin", "device", "unknown"]
+    assert [g["iris.transfer.session_bytes_from_peer"] for g in got] == \
+        ["700", "289", "11"]
+    # only the row the server called a device gets a device name; a stale
+    # heartbeat map must not name the origin, and an unknown stays unnamed.
+    assert [g.get("iris.peer.device.id") for g in got] == \
+        [None, "rtr-07", None]
+
+
+def test_peer_receipt_records_treat_a_failed_classification_as_unknown():
+    """A join that raised has told us nothing, which is exactly 'unknown'. It
+    must not take the export down with it -- telemetry is never on the critical
+    path -- and it must not silently become 'device'."""
+    def boom(ip):
+        raise KeyError(ip)
+    report = _receipt_report([{"ip": "10.0.0.8", "session_bytes_from_peer": 5,
+                               "session_bytes_to_peer": 0}])
+    recs = otlp.build_peer_receipt_records(
+        report, "rtr-04", enrich={"peer_devices": {"10.0.0.8": "rtr-08"}},
+        classify=boom)
+    attrs = _attrs(recs[0])
+    assert attrs["iris.peer.attribution"] == {"stringValue": "unknown"}
+    assert "iris.peer.device.id" not in attrs
+    assert attrs["iris.transfer.session_bytes_from_peer"] == {"intValue": "5"}
+
+
+def test_peer_receipt_records_emit_nothing_when_nothing_was_measured():
+    """Absent block means NOT MEASURED. An empty list is how that stays
+    distinguishable from a measured zero (which is a row)."""
+    assert otlp.build_peer_receipt_records({"report_id": "r1"}, "d1") == []
+    assert otlp.build_peer_receipt_records(None, "d1") == []
+    assert otlp.build_peer_receipt_records({"peer_receipts": 7}, "d1") == []
+    assert otlp.build_peer_receipt_records(
+        {"peer_receipts": {"rows": "nope"}}, "d1") == []
+    assert otlp.build_peer_receipt_records(
+        {"peer_receipts": {"rows": [None, 3]}}, "d1") == []
+
+
+def test_report_record_summarises_receipts_without_claiming_a_peer_share():
+    """The device's total includes the ORIGIN's bytes -- the origin is an
+    ordinary BitTorrent peer of every device -- so the attribute keeps the
+    device's honest name, all_senders. Nothing on this record may read as
+    "bytes the peers delivered, server excluded"; that split is a server
+    classification and appears only once the server has made it."""
+    report = _receipt_report(
+        [{"ip": "10.0.0.5", "session_bytes_from_peer": 1000,
+          "session_bytes_to_peer": 0}],
+        rows_total=3, rows_omitted=2, bytes_from_all_senders_total=1500,
+        bytes_from_all_senders_omitted=500, rows_dropped_by_server=1,
+        complete=False)
+    report["peers_rows_dropped"] = 6
+    attrs = _attrs(otlp.build_report_record(report, "rtr-04"))
+    assert attrs["iris.transfer.bytes_from_all_senders_total"] == \
+        {"intValue": "1500"}
+    assert attrs["iris.transfer.bytes_from_all_senders_omitted"] == \
+        {"intValue": "500"}
+    assert attrs["iris.transfer.peer_receipts.rows_total"] == {"intValue": "3"}
+    assert attrs["iris.transfer.peer_receipts.rows_omitted"] == \
+        {"intValue": "2"}
+    assert attrs["iris.transfer.peer_receipts.rows_dropped_by_server"] == \
+        {"intValue": "1"}
+    assert attrs["iris.transfer.peer_receipts.capture_complete"] == \
+        {"boolValue": False}
+    assert attrs["iris.transfer.peers_rows_dropped"] == {"intValue": "6"}
+    assert not [k for k in attrs if "bytes_from_peers" in k]
+    # unclassified: no origin/device figures invented, not even zeroed ones
+    assert "iris.transfer.bytes_from_origin_total" not in attrs
+    assert "iris.transfer.bytes_from_devices_total" not in attrs
+    assert "iris.transfer.bytes_from_unknown_total" not in attrs
+
+
+def test_report_record_exports_the_four_way_split_when_the_server_made_it():
+    """telemetry.classify_peer_receipts rides in on `enrich`. Its four figures
+    go out as four: only bytes_from_devices_total is peer-to-peer delivery, and
+    the bytes a row cap dropped are reported rather than spread across the
+    named buckets (that even-split fabrication was removed in 2026.08.20)."""
+    report = _receipt_report(
+        [{"ip": "10.0.0.5", "session_bytes_from_peer": 1000,
+          "session_bytes_to_peer": 0}],
+        bytes_from_all_senders_total=1500, bytes_from_all_senders_omitted=500,
+        rows_total=2, rows_omitted=1)
+    enrich = {"model": "C9300-48P", "free_flash_bytes": 1,
+              "peer_receipt_attribution": {
+                  "origin_bytes": 700, "origin_rows": 1,
+                  "device_bytes": 289, "device_rows": 2,
+                  "unknown_bytes": 11, "unknown_rows": 1,
+                  "unattributed_omitted_bytes": 500,
+                  "unattributed_omitted_rows": 1,
+                  "bytes_from_all_senders_total": 1500,
+                  "capture_complete": True}}
+    attrs = _attrs(otlp.build_report_record(report, "rtr-04", enrich=enrich))
+    assert attrs["iris.transfer.bytes_from_origin_total"] == \
+        {"intValue": "700"}
+    assert attrs["iris.transfer.bytes_from_devices_total"] == \
+        {"intValue": "289"}
+    assert attrs["iris.transfer.bytes_from_unknown_total"] == \
+        {"intValue": "11"}
+    assert attrs["iris.transfer.bytes_unattributed_omitted"] == \
+        {"intValue": "500"}
+    assert attrs["iris.transfer.peer_receipts.origin_rows"] == \
+        {"intValue": "1"}
+    assert attrs["iris.transfer.peer_receipts.device_rows"] == \
+        {"intValue": "2"}
+    assert attrs["iris.transfer.peer_receipts.unknown_rows"] == \
+        {"intValue": "1"}
+    # the four sum to the device's own total, so the split can be checked
+    # rather than trusted
+    assert 700 + 289 + 11 + 500 == 1500
+    # the rest of enrich stays out of the canonical report event
+    assert "model" not in attrs and "iris.device.model" not in attrs
+
+
+def test_report_record_ignores_a_split_that_is_not_a_split():
+    for enrich in (None, {}, {"peer_receipt_attribution": None},
+                   {"peer_receipt_attribution": "origin"}, "nope"):
+        attrs = _attrs(otlp.build_report_record(
+            _receipt_report([]), "rtr-04", enrich=enrich))
+        assert not [k for k in attrs if "bytes_from_origin" in k
+                    or "bytes_from_devices" in k]
+
+
+def test_report_record_without_receipts_adds_no_receipt_attributes():
+    attrs = _attrs(otlp.build_report_record(
+        {"schema": "v2", "report_id": "r3", "received_at": 1.0}, "rtr-04"))
+    assert not [k for k in attrs if "receipt" in k
+                or "all_senders" in k]
+
+
+def test_peer_receipt_records_ride_the_logs_payload_unchanged():
+    """Pre-built records are passed through build_logs_payload untouched (they
+    are recognised by timeUnixNano); a second trip through build_log_record
+    would silently empty them."""
+    report = _receipt_report([{"ip": "10.0.0.6",
+                               "session_bytes_from_peer": 5,
+                               "session_bytes_to_peer": 0}])
+    recs = otlp.build_peer_receipt_records(report, "rtr-04")
+    payload = otlp.build_logs_payload(recs, {"service.name": "iris-tracker"})
+    sent = payload["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
+    assert sent == recs
+    assert json.loads(json.dumps(payload))  # serialises as-is

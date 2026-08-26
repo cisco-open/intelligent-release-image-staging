@@ -105,6 +105,53 @@ def _enrich_int(value):
 
 _SCHEMA_ATTR = "iris.telemetry.schema.version"
 
+# Who sent the bytes in one receipt row, mirroring
+# telemetry.RECEIPT_SOURCE_CLASSES:
+#   origin  -- the authenticated service:seeder.
+#   device  -- a device whose heartbeat claims that swarm address.
+#   unknown -- neither, or nobody classified the row at all.
+# Only the server can answer this, and an unclassified row stays unknown --
+# folding it into "device" is how a wave the origin fed 71% of gets reported as
+# ~100% peer-delivered.
+_PEER_ATTRIBUTIONS = ("origin", "device", "unknown")
+
+
+def _peer_attribution(value):
+    return value if value in _PEER_ATTRIBUTIONS else "unknown"
+
+
+def _receipt_split_pairs(enrich):
+    """Attribute pairs for ``telemetry.classify_peer_receipts``'s four figures,
+    or [] when the block was never classified.
+
+    The four are exported as four. ``bytes_from_devices_total`` is the only one
+    an operator may read as peer-to-peer delivery; the origin's bytes and the
+    bytes whose sender is unknown are named as what they are, and the mass
+    belonging to rows a cap dropped is reported rather than redistributed.
+    Deriving a peer share from anything less than all four is how the origin
+    ends up counted as a peer."""
+    if not isinstance(enrich, dict):
+        return []
+    split = enrich.get("peer_receipt_attribution")
+    if not isinstance(split, dict):
+        return []
+    return [
+        ("iris.transfer.bytes_from_origin_total",
+         _enrich_int(split.get("origin_bytes"))),
+        ("iris.transfer.bytes_from_devices_total",
+         _enrich_int(split.get("device_bytes"))),
+        ("iris.transfer.bytes_from_unknown_total",
+         _enrich_int(split.get("unknown_bytes"))),
+        ("iris.transfer.bytes_unattributed_omitted",
+         _enrich_int(split.get("unattributed_omitted_bytes"))),
+        ("iris.transfer.peer_receipts.origin_rows",
+         _enrich_int(split.get("origin_rows"))),
+        ("iris.transfer.peer_receipts.device_rows",
+         _enrich_int(split.get("device_rows"))),
+        ("iris.transfer.peer_receipts.unknown_rows",
+         _enrich_int(split.get("unknown_rows"))),
+    ]
+
 
 def _record(name, ts_nano, attrs, event_id=None, body=None):
     """Assemble one OTLP LogRecord with the canonical envelope. ``event.id`` is
@@ -129,7 +176,7 @@ def _ts_nano(value):
         return "0"
 
 
-def _build_v2_report_record(report, device_id):
+def _build_v2_report_record(report, device_id, enrich=None):
     """v2 terminal report -> ``iris.device.transfer.report`` (design §10.8).
     OTLP event time = server ``received_at`` (device ``observed_at`` rides as an
     attribute). ``event.id`` = the stable random ``report_id``. Typed content
@@ -140,6 +187,8 @@ def _build_v2_report_record(report, device_id):
         report.get("content_sha256"), dict) else {}
     ios = report.get("ios_copy_verify") if isinstance(
         report.get("ios_copy_verify"), dict) else {}
+    receipts = report.get("peer_receipts") if isinstance(
+        report.get("peer_receipts"), dict) else {}
     pairs = [
         ("otel.log.name", "iris.device.transfer.report"),
         (_SCHEMA_ATTR, 2),
@@ -152,7 +201,38 @@ def _build_v2_report_record(report, device_id):
         ("iris.transfer.completed_content_bytes",
          _enrich_int(content.get("completed_content_bytes"))),
         ("iris.transfer.peers_total", _enrich_int(report.get("peers_total"))),
+        # Summary of the device-measured receipts block; the per-peer detail is
+        # its own event (build_peer_receipt_records). All None-skipped, so a
+        # report that carries no receipts adds nothing -- absent means NOT
+        # MEASURED, and a zero here would claim a measurement nobody made.
+        ("iris.transfer.peer_receipts.capture_complete",
+         receipts.get("complete")),
+        ("iris.transfer.peer_receipts.rows_total",
+         _enrich_int(receipts.get("rows_total"))),
+        ("iris.transfer.peer_receipts.rows_omitted",
+         _enrich_int(receipts.get("rows_omitted"))),
+        ("iris.transfer.peer_receipts.rows_dropped_by_server",
+         _enrich_int(receipts.get("rows_dropped_by_server"))),
+        # Keeps the device's own name: this total counts EVERY sender the
+        # device received from, the origin seeder included, because the origin
+        # is an ordinary BitTorrent peer of every device. Nothing in this
+        # record may call it bytes "from peers".
+        ("iris.transfer.bytes_from_all_senders_total",
+         _enrich_int(receipts.get("bytes_from_all_senders_total"))),
+        ("iris.transfer.bytes_from_all_senders_omitted",
+         _enrich_int(receipts.get("bytes_from_all_senders_omitted"))),
+        # A cap the SERVER applied to the participation table. It used to be
+        # invisible (the stored report kept the device's own truncation flag),
+        # and an invisible trim reads as a complete list.
+        ("iris.transfer.peers_rows_dropped",
+         _enrich_int(report.get("peers_rows_dropped"))),
     ]
+    # The origin/device/unknown split of that total, when the sampler has run
+    # telemetry.classify_peer_receipts over the block. It is the ONLY thing
+    # taken out of `enrich`: everything else there is high-cardinality device
+    # detail that was deliberately dropped from this event. The four figures
+    # stay four -- an absent split adds nothing rather than zeroing a bucket.
+    pairs.extend(_receipt_split_pairs(enrich))
     attrs = [_attr(k, v) for k, v in pairs if v is not None]
     window = report.get("window") if isinstance(report.get("window"), dict) \
         else {}
@@ -207,14 +287,15 @@ def build_report_record(report, device_id, enrich=None):
     on report schema: a v2 report (``report_id`` present, or ``schema=="v2"``)
     exports the typed ``iris.device.transfer.report``; anything else is treated
     as a legacy v1 projection under ``iris.device.report`` with a safe subset.
-    ``enrich`` is accepted for call-site compatibility but is no longer folded
-    into the record (high-cardinality model/flash/stage detail is out of the
-    canonical report event). Garbage-tolerant throughout."""
+    Of ``enrich`` only ``peer_receipt_attribution`` is folded in (the
+    origin/device/unknown split of the receipts block, which the record cannot
+    compute for itself); the high-cardinality model/flash/stage detail stays
+    out of the canonical report event. Garbage-tolerant throughout."""
     if not isinstance(report, dict):
         report = {}
     is_v2 = report.get("schema") == "v2" or report.get("report_id") is not None
     if is_v2:
-        return _build_v2_report_record(report, device_id)
+        return _build_v2_report_record(report, device_id, enrich)
     return _build_v1_report_record(report, device_id)
 
 
@@ -292,6 +373,180 @@ def build_peer_rate_record(row):
     attrs = [_attr(k, v) for k, v in pairs if v is not None]
     return _record("iris.swarm.peer_rate", _ts_nano(row.get("ts")), attrs,
                    event_id=row.get("event_id"), body="measured peer rate")
+
+
+def build_peer_bytes_record(row):
+    """Durably attributed origin -> peer bytes -> ``iris.swarm.peer_bytes``.
+
+    One record per edge that gained bytes since the previous sample, built
+    from ``peer_ledger.PeerLedger.observe`` rows. Unlike ``peer_rate`` (an
+    instantaneous reading that is worthless once the sample passes), the
+    cumulative value here is the ledger's accumulated total: aria2's per-peer
+    counter is per CONNECTION and disappears with the connection, so what is
+    exported is what was banked as it was observed, never a scrape-time read.
+
+    A LOG record, not a metric, for the reason at metrics.py:14-18 — per-peer
+    and per-device labels belong in the logs pipeline. The aggregate
+    counterparts (origin total, attributed sum, and the honest unattributed
+    residue) are the Prometheus series.
+
+    Both byte attributes are int64 and therefore ride the OTLP/JSON wire as
+    STRINGS (see ``_any_value``); a backend query that sums them must coerce.
+    """
+    if not isinstance(row, dict):
+        row = {}
+    pairs = [
+        ("otel.log.name", "iris.swarm.peer_bytes"),
+        (_SCHEMA_ATTR, 2),
+        ("iris.torrent.info_hash", _enrich_str(row.get("info_hash"))),
+        ("iris.image.id", _enrich_str(row.get("image_id"))),
+        ("network.peer.address", _enrich_str(row.get("ip"))),
+        ("iris.device.id", _enrich_str(row.get("device_id"))),
+        ("iris.transfer.peer_sent_bytes",
+         _enrich_int(row.get("peer_sent_bytes"))),
+        ("iris.transfer.peer_sent_delta_bytes",
+         _enrich_int(row.get("peer_sent_delta_bytes"))),
+        ("iris.peer.role", _enrich_str(row.get("role"))),
+    ]
+    attrs = [_attr(k, v) for k, v in pairs if v is not None]
+    return _record("iris.swarm.peer_bytes", _ts_nano(row.get("ts")), attrs,
+                   event_id=row.get("event_id"), body="attributed peer bytes")
+
+
+def build_peer_receipt_record(row):
+    """Device-MEASURED per-peer received bytes -> ``iris.device.peer_receipt``.
+
+    One record per row of a v2 report's ``peer_receipts`` block. The value is
+    aria2-next's own cumulative per-peer session counter
+    (``peer->getSessionDownloadLength()``), read ONCE by the
+    ``--on-bt-download-complete`` hook at the instant the last piece landed and
+    before ``enableSeedOnly()`` — the client's own tally, not a rate integrated
+    over samples.
+
+    Deliberately a DIFFERENT log name from ``iris.swarm.peer_bytes``, which
+    carries the origin-side SAMPLED estimate of the same bytes and is measured
+    to lose 26.7% (3s) / 11.9% (2s) of the origin's real ``uploadLength``.
+    Summing the two names together counts one transfer twice, once exactly and
+    once badly; a query picks one, and this is the exact one.
+
+    ``iris.peer.attribution`` is what keeps the record honest. A receipt row is
+    bytes from A PEER — not evidence that the bytes came from a peer DEVICE.
+    The origin seeder is an ordinary peer of every device, so its bytes sit in
+    this list like any other peer's, and only the server can tell them apart
+    (it holds the ``service:seeder`` principal and the device address map). The
+    split therefore rides as ``origin`` | ``device`` | ``unknown``, and a row
+    the server did not resolve stays ``unknown`` rather than being folded into
+    ``device``. ``unknown`` is a normal outcome (a peer that has not
+    heartbeated, a NAT address, a non-IRIS seeder), not an error — the bytes
+    are still exported, the peer is just not named.
+
+    ``iris.peer.has_complete_file`` is aria2's ``seeder`` flag and does NOT
+    identify the origin: ``RpcMethodImpl.cc:1166`` reports it for any peer
+    holding the complete file, which in a 7-router wave is every device that
+    finished early. It answers "complete vs partial", a different question, and
+    is named for the answer it gives.
+
+    Absence of a record is NOT zero: a device that reported no receipts emits
+    nothing here, while a measured zero appears as an explicit 0. Both byte
+    attributes are int64 and so ride the OTLP/JSON wire as STRINGS (see
+    ``_any_value``); a backend that sums them must coerce.
+    """
+    if not isinstance(row, dict):
+        row = {}
+    pairs = [
+        ("otel.log.name", "iris.device.peer_receipt"),
+        (_SCHEMA_ATTR, 2),
+        # The RECEIVING device -- the one that measured these bytes.
+        ("device.id", _enrich_str(row.get("device_id"))),
+        ("iris.image.id", _enrich_str(row.get("image_id"))),
+        ("iris.transfer.id", _enrich_str(row.get("transfer_id"))),
+        ("network.peer.address", _enrich_str(row.get("ip"))),
+        ("network.peer.port", _enrich_int(row.get("port"))),
+        # Omitted when the join did not resolve; the attribution still says so.
+        ("iris.peer.device.id", _enrich_str(row.get("peer_device_id"))),
+        ("iris.peer.attribution",
+         _peer_attribution(row.get("peer_attribution"))),
+        ("iris.peer.has_complete_file", row.get("has_complete_file")),
+        ("iris.transfer.session_bytes_from_peer",
+         _enrich_int(row.get("session_bytes_from_peer"))),
+        ("iris.transfer.session_bytes_to_peer",
+         _enrich_int(row.get("session_bytes_to_peer"))),
+        ("iris.receipt.source", _enrich_str(row.get("source"))),
+        # About the CAPTURE, not this row: False means a peer disconnected
+        # before the snapshot, so the block is a floor. The row itself is exact
+        # either way.
+        ("iris.receipt.capture_complete", row.get("capture_complete")),
+    ]
+    attrs = [_attr(k, v) for k, v in pairs if v is not None]
+    return _record("iris.device.peer_receipt",
+                   _ts_nano(row.get("captured_at")), attrs,
+                   event_id=row.get("event_id"), body="device peer receipt")
+
+
+def build_peer_receipt_records(report, device_id=None, enrich=None,
+                               classify=None):
+    """Fan a stored report's ``peer_receipts`` block out into one
+    ``iris.device.peer_receipt`` record per row, so the exact measurement
+    reaches a collector instead of stopping in the catalog.
+
+    Returns [] for any report without a receipts block. The sanitizer never
+    synthesizes an empty block, so "no block" means NOT MEASURED and an empty
+    list is how that stays distinguishable from a measured zero.
+
+    ``classify(ip) -> "origin"|"device"|"unknown"`` supplies the sender class;
+    pass ``telemetry.receipt_source_class`` bound to the current origin
+    addresses and swarm-IP join. Without it every row goes out ``unknown``:
+    this module does not re-implement that identity rule, because a second copy
+    of it drifts and the copy that drifts is the one an operator reads a peer
+    share off. ``enrich["peer_devices"]`` names the device behind an address,
+    and the name is attached only where the class already says ``device`` --
+    naming a peer we did not classify would assert the join twice over.
+
+    Event time is the hook's own ``captured_at`` (the instant the counters were
+    read), not the server's ingest time minutes later on the next EEM tick.
+    ``event.id`` joins the report id to the peer address: stable across a retry
+    of the same report (design §10.8 requires ids to survive retry) and unique
+    per row within it.
+    """
+    if not isinstance(report, dict):
+        return []
+    block = report.get("peer_receipts")
+    if not isinstance(block, dict):
+        return []
+    rows = block.get("rows")
+    if not isinstance(rows, list):
+        return []
+    peer_devices = {}
+    if isinstance(enrich, dict) and isinstance(enrich.get("peer_devices"),
+                                               dict):
+        peer_devices = enrich["peer_devices"]
+    report_id = report.get("report_id")
+    records = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        ip = row.get("ip")
+        ctx = dict(row)
+        ctx["device_id"] = device_id
+        ctx["image_id"] = report.get("image_id")
+        ctx["transfer_id"] = report.get("transfer_id")
+        ctx["source"] = block.get("source")
+        ctx["captured_at"] = block.get("captured_at")
+        ctx["capture_complete"] = block.get("complete")
+        if classify is not None:
+            try:
+                ctx["peer_attribution"] = classify(ip)
+            except Exception:
+                # Telemetry is never on the critical path, and a join that
+                # raised has told us nothing -- which is exactly "unknown".
+                ctx["peer_attribution"] = "unknown"
+        ctx["peer_device_id"] = peer_devices.get(str(ip)) \
+            if _peer_attribution(ctx.get("peer_attribution")) == "device" \
+            else None
+        if report_id is not None and ip is not None:
+            ctx["event_id"] = "%s:%s" % (report_id, ip)
+        records.append(build_peer_receipt_record(ctx))
+    return records
 
 
 def build_logs_payload(events, resource_attrs):

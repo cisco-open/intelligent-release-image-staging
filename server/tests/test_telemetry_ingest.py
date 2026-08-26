@@ -20,7 +20,7 @@ class _Store:
         self.heartbeats.append((device_id, data))
 
     def get_policy(self, device_id):
-        return {"approved_image_id": self.approved, "install_allowed": False}
+        return {"approved_image_id": self.approved}
 
     def pending_report(self, device_id, now):
         return None

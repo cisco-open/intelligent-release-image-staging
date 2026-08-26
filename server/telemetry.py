@@ -28,11 +28,27 @@ import live_samples
 import metrics
 import otlp
 import peer_enforcement as _peer_enforcement
+import peer_ledger as _peer_ledger
 import peer_policy as _peer_policy
 import telemetry_destination
 from peer_registry import PeerRegistry
 
 DEFAULT_INTERVAL = 15
+# Sampling cadence while any connection is live. aria2's per-peer counters are
+# per-connection and vanish with the connection, so the sample rate IS the
+# attribution rate: measured against the origin's own uploadLength on the
+# 7-router pull, 3 s sampling attributed 73.3 % of the bytes actually sent and
+# 2 s sampling 88.1 %. 2 s is where that curve stops paying for its RPC cost;
+# what is still missed is surfaced as residue rather than spread around. An
+# idle swarm has nothing to miss, so the pass falls back to `interval` there.
+ACTIVE_INTERVAL = 2
+# How long the peer ledger keeps a torrent. These are cumulative counters and a
+# pruned torrent restarts from zero, so retention sits well past the window any
+# dashboard charts.
+PEER_LEDGER_RETENTION = 30 * 86400
+# Pruning takes the store lock and rewrites the file; hourly is far more often
+# than a 30-day window needs.
+PEER_LEDGER_PRUNE_INTERVAL = 3600
 DEFAULT_METRICS_PORT = 9101
 DEFAULT_RPC_URL = "http://127.0.0.1:6800/jsonrpc"
 DEFAULT_RPC_SECRET_FILE = "/etc/iris/rpc-secret"
@@ -115,44 +131,79 @@ def poll_seeder(rpc):
     }, names, totals
 
 
-def poll_seeder_peers(rpc):
-    """The server seeder's per-peer CURRENT send rate plus the per-torrent
-    control-state uploadLength gauge, tagged with aria2's session id so the
-    caller can detect a counter epoch (session change / decrease).
+def _flag(value):
+    """aria2's JSON-RPC renders booleans as the strings "true"/"false"."""
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() == "true"
 
-    Returns (peer_up, upload_lengths, session_id):
-      * peer_up: {info_hash: {(ip, port): upload_bps}} — exact aria endpoint
-        INSTANTANEOUSLY sending to each connected device, from
-        getPeers(gid, ["ip","port","uploadSpeed"]) (rate-only; never bitfield, never
-        cumulative per-peer counters — aria2 has no cross-connection per-peer
-        total, and inferring one from the torrent-wide counter was division,
-        not measurement).
+
+# getPeers keys the origin poll asks for. ``uploaded`` is aria2-next 2.5.6's
+# per-connection cumulative counter (peer->getSessionUploadLength());
+# ``seeder`` is peer->isSeeder(). Never ``bitfield``: per-piece state is large, changes
+# every sample and answers no question this telemetry asks.
+_PEER_KEYS = ["ip", "port", "uploadSpeed", "uploaded", "seeder"]
+
+
+def poll_seeder_peers(rpc):
+    """The server seeder's per-peer CURRENT send rate and per-CONNECTION
+    cumulative bytes sent, plus the per-torrent control-state uploadLength
+    gauge, tagged with aria2's session id so the caller can detect a counter
+    epoch (session change / decrease).
+
+    Returns (peer_up, upload_lengths, session_id, peer_bytes):
+      * peer_up: {info_hash: {(ip, port): upload_bps}} — what the aria endpoint
+        is INSTANTANEOUSLY sending to each connected device.
       * upload_lengths: {info_hash: bytes} — aria2's BitTorrent piece-payload
         uploadLength for that torrent over its control-state lifetime. It is a
         GAUGE: it can exceed the image size (re-sends/multiple leechers) and
         can decrease on control-state loss. It is never split across peers.
       * session_id: aria2.getSessionInfo's session id ("" when unavailable),
-        identifying the counter epoch."""
-    peer_up, upload_lengths = {}, {}
+        identifying the counter epoch.
+      * peer_bytes: {info_hash: {(ip, port): {"uploaded", "seeder"}}} — the
+        cumulative bytes this origin has sent over that CONNECTION, and the
+        peer's measured role. aria2 1.37 had no such counter, which is why this
+        poll was rate-only for so long; aria2-next 2.5.6 (the build IRIS ships,
+        pinned in tools/aria2c.sha256) does. It remains a per-CONNECTION
+        counter — there is still no cross-connection per-peer total, and the
+        torrent-wide counter is still never divided across peers. The caller
+        accumulates these readings into peer_ledger instead, because the
+        counter is EPHEMERAL: getPeers returns only LIVE connections, so a
+        connection that opens and closes between two samples is never seen and
+        its bytes stay in the unattributed residue.
+
+    A failed control-state poll yields (None, None, session_id, None) — a
+    caller must not present a retained view as a current observation."""
+    peer_up, upload_lengths, peer_bytes = {}, {}, {}
     try:
         session = rpc("aria2.getSessionInfo", [])
-        session_id = str((session or {}).get("sessionId") or "")
+        # An ABSENT sessionId is unknown too, not a new epoch. Both a failed
+        # probe and a reply without the field collapse to the same "we do not
+        # know" -- only a real, non-empty id is allowed to signal a restart.
+        session_id = str((session or {}).get("sessionId") or "") or None
     except Exception:
-        session_id = ""
+        # UNKNOWN, not "". An empty string is a value, and the ledger reads a
+        # changed value as an aria2 restart: it banks every connection
+        # baseline, so the next sample re-counts each live connection's full
+        # cumulative counter. One transient RPC hiccup would inflate every
+        # peer's total. None says "no epoch information", which the ledger
+        # leaves alone.
+        session_id = None
     try:
         active = rpc("aria2.tellActive", [["gid", "infoHash", "uploadLength"]])
     except Exception:
-        return None, None, session_id
+        return None, None, session_id, None
     for d in active:
         ih, gid = d.get("infoHash"), d.get("gid")
         if not ih or not gid:
             continue
         upload_lengths[ih] = _int(d.get("uploadLength"))
         try:
-            peers = rpc("aria2.getPeers", [gid, ["ip", "port", "uploadSpeed"]])
+            peers = rpc("aria2.getPeers", [gid, _PEER_KEYS])
         except Exception:
             continue
         m = peer_up.setdefault(ih, {})
+        sent = peer_bytes.setdefault(ih, {})
         for p in peers:
             ip = p.get("ip")
             port = p.get("port")
@@ -160,9 +211,21 @@ def poll_seeder_peers(rpc):
                 port = int(port)
             except (TypeError, ValueError):
                 port = None
-            if ip and port and 0 < port <= 65535:
-                m[(ip, port)] = m.get((ip, port), 0) + _int(p.get("uploadSpeed"))
-    return peer_up, upload_lengths, session_id
+            if not (ip and port and 0 < port <= 65535):
+                continue
+            m[(ip, port)] = m.get((ip, port), 0) + _int(p.get("uploadSpeed"))
+            seen = sent.get((ip, port))
+            if seen is None:
+                sent[(ip, port)] = {"uploaded": _int(p.get("uploaded")),
+                                    "seeder": _flag(p.get("seeder"))}
+            else:
+                # One endpoint is one connection, so a repeated (ip, port) in a
+                # single reply is two views of the same counter, not two
+                # connections to add up. Rates do add; a counter does not.
+                got = _int(p.get("uploaded"))
+                seen["uploaded"] = max(seen["uploaded"], got)
+                seen["seeder"] = seen["seeder"] or _flag(p.get("seeder"))
+    return peer_up, upload_lengths, session_id, peer_bytes
 
 
 def build_swarm(reg_stats, names):
@@ -381,6 +444,89 @@ def _metric_points(rows, extras, now, export_signals=None, peer_status=None,
     return pts
 
 
+RECEIPT_SOURCE_CLASSES = ("origin", "device", "unknown")
+
+
+def receipt_source_class(ip, origin_ips, device_by_ip):
+    """Who sent the bytes in one ``peer_receipts`` row: ``"origin"`` (the
+    authenticated ``service:seeder``), ``"device"`` (a device whose heartbeat
+    claims that swarm address), or ``"unknown"``.
+
+    THREE answers, never two. The origin seeder is an ordinary BitTorrent peer
+    of every device, so it owns a receipt row like anyone else; an address that
+    resolves to neither the origin nor a known device is UNKNOWN and stays
+    unknown -- folding it into either side would be inventing the very
+    attribution this function exists to establish. (Unknown is normal, not a
+    bug: a device announcing from an address it never heartbeats, a peer that
+    left the swarm before the report arrived, or a registry we could not read.)
+
+    The row's own ``has_complete_file`` flag is deliberately NOT consulted:
+    aria2 raises it for any peer holding the whole file, so in a multi-device
+    wave every device that finishes early looks like a seeder by that test. Only
+    the server can answer this, and only from authenticated identity."""
+    key = str(ip)
+    is_origin = key in (origin_ips or ())
+    is_device = key in (device_by_ip or {})
+    if is_origin and is_device:
+        # One address claimed by both the origin and a device heartbeat: the
+        # two claims cannot both be the sender, so we assert neither.
+        return "unknown"
+    if is_origin:
+        return "origin"
+    if is_device:
+        return "device"
+    return "unknown"
+
+
+def classify_peer_receipts(block, origin_ips, device_by_ip):
+    """Aggregate one stored ``peer_receipts`` block by sender class, or None
+    when there is no block to classify (NOT MEASURED -- never a zeroed answer).
+
+    The device measured exact bytes per BitTorrent peer and, correctly, made no
+    claim about which peer was the origin: ``bytes_from_all_senders_total``
+    includes the origin's bytes. This is where that total is split, using the
+    two things only the server has -- the ``service:seeder`` principal's
+    addresses and the swarm-IP -> device_id join.
+
+    Four figures come back, and they are kept apart on purpose:
+      * ``origin_bytes``      -- measured, from the origin seeder.
+      * ``device_bytes``      -- measured, from other devices. THIS is the
+        peer-to-peer number an operator means by "bytes from peers"; nothing
+        else in this pipeline may carry that name.
+      * ``unknown_bytes``     -- measured bytes whose sender we cannot name.
+      * ``unattributed_omitted_bytes`` -- bytes real and measured, but belonging
+        to rows a row cap dropped, so no address survives to classify them.
+        Reported, never redistributed: spreading them across the named buckets
+        pro rata is exactly the even-split fabrication removed in 2026.08.20.
+
+    The four sum to ``bytes_from_all_senders_total`` -- restated here so a
+    reader can check the split rather than trust it."""
+    if not isinstance(block, dict):
+        return None
+    rows = block.get("rows")
+    rows = rows if isinstance(rows, list) else []
+    out = {"origin_rows": 0, "origin_bytes": 0,
+           "device_rows": 0, "device_bytes": 0,
+           "unknown_rows": 0, "unknown_bytes": 0}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        cls = receipt_source_class(row.get("ip"), origin_ips, device_by_ip)
+        got = _int(row.get("session_bytes_from_peer"))
+        out[cls + "_rows"] += 1
+        out[cls + "_bytes"] += got
+    out["unattributed_omitted_rows"] = _int(block.get("rows_omitted"))
+    out["unattributed_omitted_bytes"] = _int(
+        block.get("bytes_from_all_senders_omitted"))
+    out["bytes_from_all_senders_total"] = _int(
+        block.get("bytes_from_all_senders_total"))
+    # complete=False means the capture itself missed peers, so every figure
+    # above is a floor. Carried alongside so no consumer computes a percentage
+    # out of a partial capture without seeing it.
+    out["capture_complete"] = bool(block.get("complete"))
+    return out
+
+
 class Telemetry:
     """Owns the live state behind /metrics and drives event export."""
 
@@ -390,7 +536,7 @@ class Telemetry:
                  metrics_exporter=None, export_health=None,
                  device_metrics=False, dest_settings=None,
                  env_endpoint="", env_enabled=False, headers=None,
-                 policy_info=None, enforcement_info=None):
+                 policy_info=None, enforcement_info=None, peer_ledger=None):
         self.exporter = exporter
         self._seen_report_event_ids = set()
         # Task 22: the OTLP log queue is a STABLE object owned by the hub for
@@ -482,6 +628,10 @@ class Telemetry:
         self._torrent_upload_bps = {}       # info_hash -> aria2 current uploadSpeed
         self._torrent_observed_at = 0.0     # last successful control-state poll
         self._session_id = None             # aria2 session id bound to _upload_len; a change is a new epoch
+        # Durable origin->peer attribution (peer_ledger.PeerLedger). None in
+        # tests/standalone -> the poll still runs, nothing is accumulated.
+        self.peer_ledger = peer_ledger
+        self._ledger_pruned_at = 0.0
         self._counters = {"announces_total": 0}
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -564,6 +714,12 @@ class Telemetry:
                                extras=extras,
                                otlp_health=self.export_health.as_dict(),
                                peer_status=self._peer_status_numbers(),
+                               # Without this the whole ledger block in
+                               # metrics.render() is dead at runtime and every
+                               # aggregate panel on both dashboards is empty.
+                               # render() was covered directly by tests, so
+                               # nothing caught it -- test the ENDPOINT.
+                               swarm_bytes=self.peer_ledger_totals(),
                                seeder_torrents=self._seeder_torrent_metrics(
                                    time.time()))
 
@@ -695,57 +851,145 @@ class Telemetry:
             self.export_health.record(delivered > 0, "logs", now)
         return delivered
 
+    def sample_seeder(self, now=None):
+        """The aria2 half of a pass: poll the origin, refresh the control-state
+        view, accumulate per-edge attribution and queue the measured peer
+        records. Split out of sample() because it runs on its OWN, faster
+        cadence (see ACTIVE_INTERVAL) — the per-connection counters it reads
+        are ephemeral, while report export, log flush and the metrics push it
+        deliberately leaves behind are unaffected by how often we look."""
+        if self.rpc is None:
+            return
+        now = time.time() if now is None else now
+        seeder, names, totals = poll_seeder(self.rpc)
+        self._seeder = seeder
+        peer_up, upload_lengths, session_id, peer_bytes = \
+            poll_seeder_peers(self.rpc)
+        polls_ok = seeder.get("rpc_up") and upload_lengths is not None
+        if polls_ok:
+            # A successful tellActive is a complete replacement snapshot:
+            # vanished torrents are no longer current control state.
+            self._names = names
+            self._totals = totals
+            self._torrent_upload_bps = seeder.get("torrent_upload_bps", {})
+        # Per-peer CURRENT send rate (measured) + the per-torrent control-state
+        # uploadLength gauge, tagged with aria2's session id. The gauge is
+        # surfaced as-is on an unchanged session (increases and image-size
+        # overshoot are legitimate), and RE-BASELINED — never bridged — on a
+        # changed session id OR an observed decrease without a session change
+        # (both mean a new counter epoch / control-state loss). The DURABLE
+        # per-edge attribution built alongside it survives that reset: the
+        # ledger banks each observed delta as it happens, so an epoch that
+        # invalidates every baseline costs the bytes of one sample interval,
+        # not the accumulated history.
+        if polls_ok:
+            self._peer_up = peer_up
+            self._upload_len = {}
+            self._torrent_observed_at = now
+            # Peer-labelled history belongs in the OTLP LOG stream, not in
+            # metrics: one record per measured edge, per sample, so a
+            # backend can chart origin -> peer speed over time without the
+            # cardinality a per-peer metric label would create.
+            self._emit_peer_rates(peer_up, now)
+            self._observe_peer_bytes(peer_bytes, upload_lengths, session_id,
+                                     now)
+        else:
+            # Do not present retained gauges/rates as a current observation
+            # after a failed control-state poll.
+            self._peer_up = {}
+            self._upload_len = {}
+            self._torrent_upload_bps = {}
+            self._torrent_observed_at = 0.0
+            self._seeder = {"rpc_up": False}
+        new_epoch = (self._session_id is not None
+                     and session_id != self._session_id)
+        self._session_id = session_id
+        for info_hash, now_len in (upload_lengths or {}).items():
+            last = self._upload_len.get(info_hash)
+            # On a new session epoch, or a decrease within the same epoch,
+            # report the current counter verbatim (re-baseline). Otherwise
+            # the gauge simply tracks the counter.
+            self._upload_len[info_hash] = now_len
+            if not new_epoch and last is not None and now_len < last:
+                continue            # decrease: rebaseline, do not bridge
+
+    def _observe_peer_bytes(self, peer_bytes, upload_lengths, session_id, now):
+        """Bank this sample's per-connection counters and queue one
+        ``iris.swarm.peer_bytes`` record per edge that gained bytes.
+
+        The ledger is the record of truth here, not the log stream: it is
+        written before anything is queued, so a dropped or undelivered record
+        costs a data point on a chart, never an accounting of where the load
+        went. The origin's torrent-wide total is banked first — it is the
+        ground truth the edges are reconciled against, and reading it after
+        the edges would let a sample credit bytes the total does not yet
+        admit to."""
+        ledger = self.peer_ledger
+        if ledger is None:
+            return
+        devices = self._device_by_ip(self._read_device_info())
+        for info_hash in sorted(set(upload_lengths or {})
+                                | set(peer_bytes or {})):
+            image_id = self._names.get(info_hash)
+            conns = (peer_bytes or {}).get(info_hash) or {}
+            try:
+                if info_hash in (upload_lengths or {}):
+                    ledger.record_origin_total(info_hash, image_id,
+                                               upload_lengths[info_hash])
+                if not conns:
+                    continue        # nothing observed; no epoch state to move
+                rows = ledger.observe(
+                    info_hash, image_id,
+                    {key: obs["uploaded"] for key, obs in conns.items()},
+                    session_id, now=now)
+            except Exception:
+                continue        # telemetry is never on the critical path
+            # The ledger accumulates per IP; the role is per connection. A peer
+            # seeding on any of its connections is a seeder.
+            roles = {}
+            for (ip, _port), obs in conns.items():
+                roles[ip] = roles.get(ip, False) or bool(obs["seeder"])
+            for row in rows:
+                record = dict(row, ts=now, event_id=secrets.token_hex(16))
+                device_id = devices.get(row["ip"])
+                if device_id:
+                    record["device_id"] = device_id
+                role = roles.get(row["ip"])
+                if role is not None:
+                    record["role"] = "seeder" if role else "leecher"
+                try:
+                    self.log_queue.emit(otlp.build_peer_bytes_record(record))
+                except Exception:
+                    pass
+        self._prune_peer_ledger(now)
+
+    def _prune_peer_ledger(self, now):
+        """Drop torrents nobody has observed inside the retention window."""
+        if self.peer_ledger is None or \
+                now - self._ledger_pruned_at < PEER_LEDGER_PRUNE_INTERVAL:
+            return
+        self._ledger_pruned_at = now
+        try:
+            self.peer_ledger.prune(now - PEER_LEDGER_RETENTION)
+        except Exception:
+            pass
+
+    def peer_ledger_totals(self):
+        """Per-torrent origin/attributed/unattributed byte totals for the
+        aggregate metric series, or {} when no ledger is wired. Cumulative and
+        durable, so a completed transfer keeps its history after the swarm
+        goes idle — the panels do not blank out."""
+        if self.peer_ledger is None:
+            return {}
+        try:
+            return self.peer_ledger.torrent_totals()
+        except Exception:
+            return {}
+
     def sample(self, now=None):
         now = time.time() if now is None else now
         self._refresh_exporters()
-        if self.rpc is not None:
-            seeder, names, totals = poll_seeder(self.rpc)
-            self._seeder = seeder
-            peer_up, upload_lengths, session_id = poll_seeder_peers(self.rpc)
-            polls_ok = seeder.get("rpc_up") and upload_lengths is not None
-            if polls_ok:
-                # A successful tellActive is a complete replacement snapshot:
-                # vanished torrents are no longer current control state.
-                self._names = names
-                self._totals = totals
-                self._torrent_upload_bps = seeder.get("torrent_upload_bps", {})
-            # Per-peer CURRENT send rate (measured) + the per-torrent
-            # control-state uploadLength gauge, tagged with aria2's session id.
-            # No per-peer cumulative bytes are inferred: the gauge is surfaced
-            # as-is on an unchanged session (increases and image-size overshoot
-            # are legitimate), and RE-BASELINED — never bridged — on a changed
-            # session id OR an observed decrease without a session change (both
-            # mean a new counter epoch / control-state loss). Because nothing is
-            # integrated into a per-peer allocation, an epoch reset loses no
-            # attributed bytes: there is simply nothing to carry.
-            if polls_ok:
-                self._peer_up = peer_up
-                self._upload_len = {}
-                self._torrent_observed_at = now
-                # Peer-labelled history belongs in the OTLP LOG stream, not in
-                # metrics: one record per measured edge, per sample, so a
-                # backend can chart origin -> peer speed over time without the
-                # cardinality a per-peer metric label would create.
-                self._emit_peer_rates(peer_up, now)
-            else:
-                # Do not present retained gauges/rates as a current observation
-                # after a failed control-state poll.
-                self._peer_up = {}
-                self._upload_len = {}
-                self._torrent_upload_bps = {}
-                self._torrent_observed_at = 0.0
-                self._seeder = {"rpc_up": False}
-            new_epoch = (self._session_id is not None
-                         and session_id != self._session_id)
-            self._session_id = session_id
-            for info_hash, now_len in (upload_lengths or {}).items():
-                last = self._upload_len.get(info_hash)
-                # On a new session epoch, or a decrease within the same epoch,
-                # report the current counter verbatim (re-baseline). Otherwise
-                # the gauge simply tracks the counter.
-                self._upload_len[info_hash] = now_len
-                if not new_epoch and last is not None and now_len < last:
-                    continue                # decrease: rebaseline, do not bridge
+        self.sample_seeder(now)
         if self._live_info is not None:
             try:
                 self._transfers, self._extras = aggregate_transfers(
@@ -783,15 +1027,9 @@ class Telemetry:
         Each record is enriched from the device's last heartbeat (model,
         flash, stage state — capped/coerced inside build_report_record) plus
         the swarm IP->device_id join for peer-row resolution (spec 7.6)."""
-        devices = {}
-        if self._device_info is not None:
-            try:
-                devices = self._device_info() or {}
-            except Exception:
-                devices = {}
-        device_by_ip = {rec.get("swarm_ip"): str(did)
-                        for did, rec in devices.items()
-                        if isinstance(rec, dict) and rec.get("swarm_ip")}
+        devices = self._read_device_info()
+        device_by_ip = self._device_by_ip(devices)
+        origin_ips = self._origin_swarm_ips()
         reports = self._reports_info() or {}
         candidates = []
         ring_event_ids = set()
@@ -807,6 +1045,14 @@ class Telemetry:
             for rep in ring:
                 if not isinstance(rep, dict):
                     continue
+                # peer_receipts is per REPORT, not per device, so its
+                # origin/device/unknown split rides with the report it
+                # describes. Absent block -> absent key: not measured is not
+                # zero, and an all-zero split would read as "no peer bytes".
+                split = classify_peer_receipts(
+                    rep.get("peer_receipts"), origin_ips, device_by_ip)
+                rep_enrich = enrich if split is None else dict(
+                    enrich, peer_receipt_attribution=split)
                 event_id, record = _report_event_id(rep, str(device_id))
                 ring_event_ids.add(event_id)
                 try:
@@ -814,7 +1060,7 @@ class Telemetry:
                 except (TypeError, ValueError):
                     received_at = 0.0
                 candidates.append((received_at, event_id, str(device_id),
-                                   record, enrich))
+                                   record, rep_enrich))
         # Delivered report IDs need only cover the current durable ring. Queued
         # records are independently deduped by LogQueue, so forgetting an ID
         # that has left the ring cannot cause a scan-time re-enqueue.
@@ -825,6 +1071,65 @@ class Telemetry:
                     and not self.log_queue.contains(event_id)):
                 self.log_queue.emit(otlp.build_report_record(
                     report, device_id, enrich=enrich))
+                # Fan the receipt block out into one record per peer. Without
+                # this the exact device-side measurement stops in the catalog
+                # and only the per-transfer rollups leave the server -- the
+                # lossy sampled estimate (iris.swarm.peer_bytes) would be the
+                # only per-edge data a backend ever saw, which is the wrong way
+                # round. classify is bound here, not inside otlp: a second copy
+                # of the origin/device identity rule would drift, and the copy
+                # that drifts is the one an operator reads a peer share off.
+                for peer_record in otlp.build_peer_receipt_records(
+                        report, device_id, enrich=enrich,
+                        classify=lambda ip: receipt_source_class(
+                            ip, origin_ips, device_by_ip)):
+                    self.log_queue.emit(peer_record)
+
+    def _read_device_info(self):
+        """The catalog's {device_id: heartbeat record}, or {} when unwired or
+        unreadable. Read fresh per use (cheap JSON file)."""
+        if self._device_info is None:
+            return {}
+        try:
+            devices = self._device_info() or {}
+        except Exception:
+            return {}
+        return devices if isinstance(devices, dict) else {}
+
+    def _origin_swarm_ips(self):
+        """The addresses the origin is currently announcing from -- the typed
+        ``service:seeder`` principal's registry rows, the same identity source
+        _seeder_torrent_metrics uses.
+
+        Identity comes from the authenticated principal, never from an address
+        list or a peer's own seeder flag. Never breaks: an unreadable registry
+        yields an empty set, which sends every receipt row to ``unknown``
+        rather than quietly promoting the origin's bytes to peer-delivered."""
+        ips = set()
+        try:
+            snapshot = self._registry.snapshot()
+        except Exception:
+            return ips
+        for peers in snapshot.values():
+            if not isinstance(peers, list):
+                continue
+            for peer in peers:
+                if not isinstance(peer, dict):
+                    continue
+                if peer.get("principal_type") == "service" \
+                        and peer.get("principal_id") == "seeder" \
+                        and peer.get("ip"):
+                    ips.add(str(peer["ip"]))
+        return ips
+
+    @staticmethod
+    def _device_by_ip(devices):
+        """The swarm IP -> device_id join (spec 7.6). A heartbeat with no
+        swarm_ip cannot be joined to a peer and is left out rather than
+        matched on something weaker."""
+        return {rec.get("swarm_ip"): str(did)
+                for did, rec in devices.items()
+                if isinstance(rec, dict) and rec.get("swarm_ip")}
 
     def _reports_delivered(self, event_ids):
         self._seen_report_event_ids.update(event_ids)
@@ -1041,10 +1346,29 @@ class Telemetry:
                 out["health"] = health
         return out or None
 
+    def _sample_interval(self):
+        """Seconds until the next pass. Fast while any connection is live —
+        the per-connection counters are ephemeral, so a slow tick is bytes
+        nobody can ever attribute — and back to the configured interval when
+        the swarm is idle and there is nothing to catch."""
+        if any(self._peer_up.values()):
+            return min(ACTIVE_INTERVAL, self.interval)
+        return self.interval
+
     def run_forever(self):
-        while not self._stop.wait(self.interval):
+        next_full = 0.0
+        while not self._stop.wait(self._sample_interval()):
             try:
-                self.sample()
+                now = time.time()
+                if now >= next_full:
+                    next_full = now + self.interval
+                    self.sample(now)
+                else:
+                    # Between full passes only the aria2 poll runs. Export
+                    # cadence is unchanged: the records it queues wait on the
+                    # bounded LogQueue for the next flush, and the ledger they
+                    # came from is already durable if that queue overflows.
+                    self.sample_seeder(now)
             except Exception:
                 pass                        # never let the sampler die
 
@@ -1113,6 +1437,12 @@ def from_env(env=None):
     enforcement_info = lambda: _peer_enforcement.read_status(enforcement_path)
     dest = telemetry_destination.DestinationSettings(
         telemetry_destination.settings_path(state_dir))
+    # Durable origin->peer attribution. An unwritable state dir is not fatal:
+    # the rest of the telemetry keeps working, minus per-edge accumulation.
+    try:
+        ledger = _peer_ledger.PeerLedger(state_dir)
+    except OSError:
+        ledger = None
     hub = Telemetry(rpc=rpc, interval=interval,
                     device_info=device_info, reports_info=reports_info,
                     live_info=live_info, images_info=images_info,
@@ -1123,7 +1453,8 @@ def from_env(env=None):
                     env_enabled=observability_enabled(env),
                     headers=headers,
                     policy_info=policy_info,
-                    enforcement_info=enforcement_info)
+                    enforcement_info=enforcement_info,
+                    peer_ledger=ledger)
     # Build the initial exporters NOW (not on the first pass) so swarm events
     # from the announce path are captured from process start, exactly as the
     # construction-time exporters were before the destination became editable.
