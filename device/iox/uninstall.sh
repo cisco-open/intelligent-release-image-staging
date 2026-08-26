@@ -7,7 +7,10 @@
 # Undeploy IRIS from a Cisco IOx app-hosting device — the inverse of
 # device/iox/install.sh. IRIS runs there as an architecture-matched IOx Docker
 # app (not Guest Shell), so teardown is app-hosting, not guestshell:
-#   - stop -> deactivate -> uninstall the 'iris' app (frees its persist-disk)
+#   - stop -> deactivate -> uninstall the 'iris' app (frees its persist-disk,
+#     and with it $CAF_APP_PERSISTENT_DIR/iris where aria2 stages images and
+#     the --on-bt-download-complete hook leaves its <image>.peers.json
+#     snapshots; the hook program itself lives in the app image)
 #   - remove the app-hosting appid + the IRIS VLAN/SVI
 #   - remove any IRIS-COPYROOT / IRIS-AGENT EEM applet the agent created at
 #     runtime for its copy /verify (no-op if absent — IOx has no 60s timer)

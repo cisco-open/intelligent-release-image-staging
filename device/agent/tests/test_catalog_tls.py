@@ -43,7 +43,7 @@ class _Stub(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b'{}')
             return
-        b = b'{"approved_image_id":"img1","install_allowed":false}'
+        b = b'{"approved_image_id":"img1"}'
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(b)))
@@ -75,8 +75,7 @@ def test_matching_cafile_verifies_and_call_succeeds(https_stub):
     assert ctx.check_hostname is True
     assert warned == []          # pinned -> no legacy warning
     client = catalog_client.CatalogClient(base, "tok", context=ctx)
-    assert client.get_policy("sw1") == {"approved_image_id": "img1",
-                                        "install_allowed": False}
+    assert client.get_policy("sw1") == {"approved_image_id": "img1"}
 
 
 def test_wrong_cafile_rejects(https_stub, tmp_path):
@@ -99,8 +98,7 @@ def test_absent_catalog_ca_warns_and_stays_unverified(https_stub):
     assert ctx.verify_mode == ssl.CERT_NONE
     assert len(warned) == 1 and "NOT verified" in warned[0]
     client = catalog_client.CatalogClient(base, "tok", context=ctx)
-    assert client.get_policy("sw1") == {"approved_image_id": "img1",
-                                        "install_allowed": False}
+    assert client.get_policy("sw1") == {"approved_image_id": "img1"}
 
 
 def test_empty_string_catalog_ca_is_treated_as_absent(https_stub):

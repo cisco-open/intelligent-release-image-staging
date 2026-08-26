@@ -24,10 +24,19 @@ MAX_PEERS="${IRIS_MAX_PEERS:-10}"
 TARGET_FS="${IRIS_TARGET_FS:-}"
 ARIA2="/opt/iris/bin/aria2c"
 AGENT="/opt/iris/agent/iris_agent.py"
+# --on-bt-download-complete: the per-peer receipt hook. Baked into the image by
+# the Dockerfile (already executable), so unlike the Guest Shell launcher there
+# is no copy-to-an-exec-capable-filesystem dance here. Checked once: an image
+# built before this existed simply runs without it, and aria2c must not be
+# handed an empty option value (Aria2 Next rejects those outright).
+HOOK="/opt/iris/agent/peer-receipt-hook.sh"
+[ -x "$HOOK" ] || HOOK=""
 
 export IRIS_STAGE_DIR="$STAGE_DIR"
 export IRIS_AGENT_CONF="$CONF"
 export IRIS_AGENT_STATE="$STATE"
+# The hook resolves its RPC endpoint from these; same netns, so 127.0.0.1.
+export IRIS_RPC_PORT="$RPC_PORT"
 
 # Image hand-off to IOS: on C9k the app-hosting SSD share is bind-mounted in
 # (IRIS_SHARE_DIR, run-opts -v) and the agent lands its scratch there at disk
@@ -121,11 +130,24 @@ start_aria2c() {
   secret="$1"
   pkill -f 'aria2c.*enable-rpc' 2>/dev/null || true
   sleep 1
+  # Hand the hook the secret this daemon is being started with, by inheritance
+  # through aria2c's fork. Deliberately not re-read from $CONF: the agent
+  # rewrites that file on every token refresh, and a hook reading a secret the
+  # running daemon has already moved off is precisely the file-vs-daemon skew
+  # of the 2026-08-20 incident. This supervisor relaunches aria2c whenever the
+  # secret changes, so the exported value tracks the daemon by construction.
+  IRIS_RPC_SECRET="$secret"; export IRIS_RPC_SECRET
+  # Positional args carry the optional hook flag: aria2c must never be handed
+  # --on-bt-download-complete= with an empty value. "$secret" is already saved
+  # above, so reusing $@ here is safe.
+  set --
+  case "${HOOK:-}" in ?*) set -- "--on-bt-download-complete=$HOOK" ;; esac
   "$ARIA2" \
     --daemon=true --enable-rpc=true --rpc-listen-all=false \
     --rpc-listen-port="$RPC_PORT" --rpc-secret="$secret" \
     --enable-dht=false --enable-peer-exchange=false --bt-enable-lpd=false \
     --bt-max-peers="$MAX_PEERS" --bt-seed-unverified=true --seed-ratio=0.0 \
+    "$@" \
     --file-allocation=none --dir="$STAGE_DIR" \
     --log-level=warn --summary-interval=0 \
     && echo "IRIS-ENTRYPOINT: aria2c (re)started on :$RPC_PORT"

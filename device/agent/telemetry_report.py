@@ -21,7 +21,13 @@ keys: a bump clears 'copied' flags and forces a fleet-wide ~1.2 GB re-copy):
       'report_sent_ts', 'event'}
 ('other' and 'last_sample_ts' are legacy byte-integration keys — new code
 removes them on sight; see observe_peers.)
+
+tele['peer_receipts'] holds the one exact per-peer byte measurement (folded in
+from the aria2 --on-bt-download-complete hook's sidecar; see
+parse_receipt_snapshot). It is a counter read once, never a sampled rate.
 """
+import ipaddress
+import json
 import os
 import re
 import secrets
@@ -48,6 +54,21 @@ LIVE_PEER_ROWS_MAX = 32     # peer_connections[] cap in a v2 observation envelop
 _HEX32 = re.compile(r"^[a-f0-9]{32}$")
 CONTENT_SHA256_STATES = ("verified", "mismatch", "not_checked")
 IOS_COPY_VERIFY_STATES = ("ok", "failed", "not_run", "unsupported")
+
+# --- exact per-peer received bytes (peer_receipts) -------------------------
+# Produced by device/agent/peer-receipt-hook.sh, aria2's
+# --on-bt-download-complete hook: aria2-next's own cumulative per-peer session
+# counters, READ ONCE at the instant the last piece landed. Not a rate
+# integrated over samples — see observe_peers() for the machinery this is NOT.
+RECEIPT_SOURCE = "aria2_session_counters"   # the only provenance we will emit
+RECEIPT_SCHEMA = 1                          # sidecar document version
+RECEIPT_SIDECAR_SUFFIX = ".peers.json"      # written next to the staged file
+RECEIPT_ROWS_CAP = 32       # named receipt rows per report (rest -> *_omitted)
+HOOK_PEER_ROWS_HARD_CAP = 256   # peer entries read from one snapshot
+RECEIPT_MAX_BYTES = 1 << 20     # refuse to read a sidecar larger than this
+RECEIPT_MAX_AGE_S = 86400.0     # staleness bound when no started_ts is known
+RECEIPT_FUTURE_SKEW_S = 300.0   # tolerated clock skew ahead of the ingest tick
+_RECEIPT_BYTE_CAP = 1 << 50     # per-field sanity bound (1 PiB)
 
 
 def content_sha256_state(state, img_id):
@@ -271,13 +292,31 @@ def sampling_class_of(state, avg_bps):
 
 def observe_peers(tele, peers, now=None):
     """Record one aria2 getPeers sample as participation observation, in
-    place. Per-peer BYTE counts are deliberately not tracked: aria2 1.37
-    exposes only instantaneous per-peer speeds, and integrating those over
-    the sparse one-shot tick cadence fabricates data (the even-split
-    fallback fired on every multi-peer lab transfer — see CHANGELOG). What
-    IS measured: which peer IPs were connected at the sample instants, in
-    observation order, with a per-ip sample count for dedup. New IPs beyond
-    STATE_PEER_SET_CAP are dropped (size valve; peers_total saturates).
+    place. THIS SAMPLED PATH TRACKS NO BYTES, and that stays true.
+
+    Why it never will: aria2 1.37 — the client IRIS shipped when the
+    per-peer rx_bytes/tx_bytes/avg_bps fields were removed in release
+    2026.08.20 — exposed only instantaneous per-peer SPEEDS, and integrating
+    those over the sparse one-shot tick cadence fabricates data (the
+    even-split fallback fired on every multi-peer lab transfer — see
+    CHANGELOG). That ruling was about the METHOD, not the subject: any
+    number derived by integrating rates across ticks is invented, whatever
+    client produces the rates.
+
+    What changed since, and where the exact bytes live now: IRIS ships
+    aria2-next 2.5.6, which exposes CUMULATIVE per-peer session counters the
+    client keeps itself (getSessionDownloadLength/getSessionUploadLength).
+    Those are read ONCE — not here, and not on this cadence — by the
+    --on-bt-download-complete hook at the instant the last piece lands, and
+    arrive as `tele['peer_receipts']` (parse_receipt_snapshot). Sampling
+    still cannot produce them: a peer that connects and drops between two
+    60 s ticks is invisible to this function no matter what keys it asks
+    for, which is exactly why the measurement moved to the hook.
+
+    So: what IS measured here is which peer IPs were connected at the sample
+    instants, in observation order, with a per-ip sample count for dedup.
+    New IPs beyond STATE_PEER_SET_CAP are dropped (size valve; peers_total
+    saturates).
 
     When `now` is provided, ALSO maintains the v2 rich form `tele['peers_v2']`
     = {ip: {first_observed, last_observed, observations}} in parallel with the
@@ -326,10 +365,14 @@ def build_report(cfg, state, img_id, event, now):
         stage_state = "flash_full_seeding_only"
     else:
         stage_state = "staging"
-    # Participation only: per-peer BYTES are not measured (aria2 exposes
-    # only instantaneous rates), so rows carry just the observed peer IPs in
-    # observation order. peers_total = distinct IPs observed (saturates at
+    # Participation only: rows carry just the observed peer IPs in observation
+    # order. peers_total = distinct IPs observed (saturates at
     # STATE_PEER_SET_CAP); rows beyond PEER_CAP are counted, not named.
+    # Per-peer BYTES exist now -- aria2-next 2.5.6 keeps a cumulative per-peer
+    # session counter and the completion hook reads it (parse_receipt_snapshot)
+    # -- but they are a v2-only block. v1 has no place to put them and no
+    # server-side classifier to tell the origin's bytes from a peer's, so this
+    # path stays participation-only rather than shipping an unattributed total.
     # Keys-only read: also safe on legacy {ip: [rx, tx]} state (pull-before-
     # first-observe), where values are ignored anyway.
     observed = tele.get("peers") or {}
@@ -375,6 +418,332 @@ def _report_peer_rows_v2(tele):
     return rows, total, total > PEER_CAP, total >= STATE_PEER_SET_CAP
 
 
+def receipt_sidecar_path(stage_path):
+    """Where peer-receipt-hook.sh leaves its snapshot for `stage_path`.
+
+    Derived, never configured: aria2 hands the hook the staged file as argv[3]
+    (util.cc:2409-2426) and the hook appends this suffix, so the launcher and
+    the agent cannot drift apart over a path. The suffix is also outside the
+    agent's stale-artifact sweep, which only removes .bin/.torrent/.aria2."""
+    return str(stage_path) + RECEIPT_SIDECAR_SUFFIX
+
+
+def _receipt_int(value, cap=_RECEIPT_BYTE_CAP):
+    """One aria2 RPC numeric field as an int, or None for UNKNOWN.
+
+    aria2 serialises every numeric peer field as a decimal string
+    (util::itos), so both forms are accepted. None means the value could not
+    be read and is NEVER coerced to 0 — a measured zero and an unreadable
+    field are different facts, and only one of them may be reported."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        n = value
+    elif isinstance(value, str):
+        s = value.strip()
+        if not s or not s.isdigit():    # rejects '', '-1', '1.5', '1e3', 'nan'
+            return None
+        n = int(s)
+    else:
+        return None
+    return n if 0 <= n <= cap else None
+
+
+def _receipt_bool(value):
+    """aria2's VLB_TRUE/VLB_FALSE ('true'/'false' strings) as a bool, or None
+    when the key was absent or unrecognised (omit, never guess False)."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v == "true":
+            return True
+        if v == "false":
+            return False
+    return None
+
+
+def _receipt_rpc_result(doc):
+    """The aria2.getPeers result list out of the hook's verbatim `rpc` body.
+
+    The hook parses no JSON — it embeds exactly what aria2 answered, so all
+    interpretation happens here where it is unit-testable off-box. Accepts the
+    batch array the hook sends (the response with id 'peers'), a lone JSON-RPC
+    response object, or a bare peer list. A JSON-RPC error object has no
+    'result' and therefore yields None -> no block at all."""
+    rpc = doc.get("rpc")
+    if isinstance(rpc, list):
+        for entry in rpc:
+            if isinstance(entry, dict) and entry.get("id") == "peers":
+                res = entry.get("result")
+                return res if isinstance(res, list) else None
+        if rpc and all(isinstance(e, dict) and "ip" in e for e in rpc):
+            return rpc
+        return None
+    if isinstance(rpc, dict):
+        res = rpc.get("result")
+        return res if isinstance(res, list) else None
+    return None
+
+
+def parse_receipt_snapshot(raw):
+    """One hook sidecar document -> the report's `peer_receipts` block, or None
+    when it is not a usable measurement.
+
+    THE NUMBERS: `session_bytes_from_peer` is aria2-next's own
+    peer->getSessionDownloadLength(), a counter the BitTorrent client
+    incremented per wire message for the life of the download and that the hook
+    READ ONCE at the complete-knowledge instant. It is not integrated from
+    rates over sparse ticks — that is the discredited machinery removed in
+    2026.08.20 (see observe_peers), and the name deliberately shares no
+    substring with the retired rx_bytes/tx_bytes so no reader ever has to ask
+    which kind of number they are holding.
+
+    THE NAME: `bytes_from_all_senders_total` is the sum over EVERY BitTorrent
+    peer that fed this device — the origin seeder included. The origin is an
+    ordinary peer of every device and shows up in aria2.getPeers like any
+    other, so a device-side total can never mean "bytes from other devices".
+    The `has_complete_file` row flag does not rescue it either: aria2 sets it
+    for any peer holding the whole file (RpcMethodImpl.cc:1166 emits
+    peer->isSeeder()), so in a multi-device wave every device that finishes
+    early raises it. Which sender was the ORIGIN is a question only the server
+    can answer, from the authenticated service:seeder principal; the device
+    reports what it measured and names it accordingly.
+
+    `complete` is about the CAPTURE, not the transport: False means some peer
+    entry could not be read, so `bytes_from_all_senders_total` is a FLOOR and
+    no origin-share percentage may be derived from it. Note the capture has a hard
+    upper bound on completeness even at True — DefaultPeerStorage erases a peer
+    from usedPeers_ when it disconnects, so peers that dropped mid-download are
+    gone, counters and all. What the block asserts is: exact for the peers
+    still connected at completion, silent about the rest.
+
+    Two connections from one address are collapsed into one row with their
+    bytes summed (the row key is the ip, matching the server's uniqueness
+    rule); a port is asserted only when the collapsed connections agree.
+    Rows are sorted by received bytes DESCENDING before the RECEIPT_ROWS_CAP
+    truncation — the opposite policy from the participation table's observation
+    order, and deliberate: what survives is what matters, and what is dropped
+    has its count and its mass stated in
+    rows_omitted/bytes_from_all_senders_omitted rather than vanishing. The same
+    rule now governs HOOK_PEER_ROWS_HARD_CAP: entries past the cap are still
+    weighed before they are let go (see the scan below)."""
+    try:
+        text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+        doc = json.loads(text)
+    except Exception:
+        return None
+    if not isinstance(doc, dict):
+        return None
+    if doc.get("schema") != RECEIPT_SCHEMA or doc.get("source") != RECEIPT_SOURCE:
+        return None
+    captured_at = doc.get("captured_at")
+    if isinstance(captured_at, bool) or not isinstance(captured_at, (int, float)):
+        return None
+    captured_at = float(captured_at)
+    # finite and positive: reject nan/inf/0 rather than store an impossible
+    # instant the server would have to reject the whole report over.
+    if not (captured_at > 0) or captured_at == float("inf"):
+        return None
+    peers = _receipt_rpc_result(doc)
+    if peers is None:
+        return None
+
+    complete = True
+    # The hard cap bounds how many entries become ROWS, not how much of the
+    # answer we are willing to know. Everything past it is still weighed --
+    # counted and summed -- before it is let go, so its mass lands in
+    # rows_omitted/bytes_from_all_senders_omitted like every other cap on this
+    # path. Slicing it away unweighed (the pre-fix behaviour) left the dropped
+    # bytes out of the total as well, which is the one failure mode this whole
+    # block exists to prevent: a total that silently understates itself.
+    overflow = peers[HOOK_PEER_ROWS_HARD_CAP:]
+    peers = peers[:HOOK_PEER_ROWS_HARD_CAP]
+    merged = {}
+    for entry in peers:
+        if not isinstance(entry, dict):
+            complete = False
+            continue
+        ip = entry.get("ip")
+        if not isinstance(ip, str) or not ip or len(ip) > 64:
+            complete = False
+            continue
+        try:
+            # The server rejects an unparseable address, and it rejects the
+            # WHOLE report over one -- so a row aria2 reports in a form we
+            # cannot vouch for (a scoped IPv6 literal, say) is dropped here and
+            # counted as an incomplete capture instead of costing the entire
+            # terminal report.
+            ipaddress.ip_address(ip)
+        except ValueError:
+            complete = False
+            continue
+        got = _receipt_int(entry.get("downloaded"))
+        sent = _receipt_int(entry.get("uploaded"))
+        if got is None or sent is None:
+            # Bytes unreadable -> this peer's contribution is UNKNOWN. Dropping
+            # the row makes the total a floor and complete=False says so;
+            # keeping it as 0 would assert a measured zero we never measured.
+            complete = False
+            continue
+        port = _receipt_int(entry.get("port"), 65535)
+        seeder = _receipt_bool(entry.get("seeder"))
+        row = merged.get(ip)
+        if row is None:
+            merged[ip] = {"from": got, "to": sent, "port": port,
+                          "seeder": seeder}
+            continue
+        row["from"] += got
+        row["to"] += sent
+        if row["port"] != port:
+            row["port"] = None          # ambiguous -> assert nothing
+        if seeder is not None:
+            row["seeder"] = bool(row["seeder"]) or seeder
+
+    rows = []
+    for ip in merged:
+        rec = merged[ip]
+        clean = {"ip": ip,
+                 "session_bytes_from_peer": rec["from"],
+                 "session_bytes_to_peer": rec["to"]}
+        if rec["port"]:
+            clean["port"] = rec["port"]
+        if rec["seeder"] is not None:
+            # aria2's "seeder" means "holds the complete file", NOT "is the
+            # origin": in a multi-device wave every device that finishes early
+            # sets it. Named for what it measures so no reader mistakes it for
+            # an origin marker -- that classification is the server's.
+            clean["has_complete_file"] = bool(rec["seeder"])
+        rows.append(clean)
+
+    capped_rows, capped_bytes, capped_readable = _weigh_dropped_entries(overflow)
+    if not capped_readable:
+        # Bytes we could not read are bytes we cannot report: the total is a
+        # floor again, exactly as for an unreadable entry below the cap.
+        complete = False
+    # Totals are summed over EVERY entry the hook handed us -- merged rows plus
+    # the weighed overflow -- before the sort and the row cap, so no truncation
+    # on this path can change them.
+    total_from = sum(r["session_bytes_from_peer"] for r in rows) + capped_bytes
+    rows.sort(key=lambda r: (-r["session_bytes_from_peer"], r["ip"]))
+    named, dropped = rows[:RECEIPT_ROWS_CAP], rows[RECEIPT_ROWS_CAP:]
+    dropped_bytes = sum(r["session_bytes_from_peer"] for r in dropped)
+    return {"source": RECEIPT_SOURCE,
+            "captured_at": captured_at,
+            "complete": bool(complete),
+            "rows": named,
+            "rows_total": len(rows) + capped_rows,
+            "rows_omitted": len(dropped) + capped_rows,
+            "bytes_from_all_senders_total": total_from,
+            "bytes_from_all_senders_omitted": dropped_bytes + capped_bytes}
+
+
+def _weigh_dropped_entries(entries):
+    """Count and sum entries dropped by HOOK_PEER_ROWS_HARD_CAP.
+    Returns (rows, bytes, readable): how many were dropped, how many bytes they
+    account for, and whether every one of them could be read.
+
+    Weighing is deliberately cheaper than merging: no per-ip collapse, no port
+    or completeness bookkeeping, nothing retained. That is what keeps the cap a
+    cap -- the memory it bounds is the row table, and two connections from one
+    address out here are counted as two dropped rows rather than one, because
+    collapsing them would mean keeping the very list the cap exists to bound.
+    The BYTE mass is exact either way, and it is the byte mass the totals and
+    every derived share depend on."""
+    rows = 0
+    total = 0
+    readable = True
+    for entry in entries:
+        rows += 1
+        got = _receipt_int(entry.get("downloaded")) \
+            if isinstance(entry, dict) else None
+        if got is None:
+            readable = False
+            continue
+        total += got
+    return rows, total, readable
+
+
+def fold_peer_receipts(tele, block, now=None):
+    """Fold a parsed snapshot into tele['peer_receipts'] in place. Returns True
+    when it was accepted. Refuses in four cases, each one a specific false
+    number this feature exists to prevent:
+
+    1. ALL-ZERO. aria2 fires this hook a second time when an already-complete
+       file is re-added with --bt-seed-unverified (RequestGroup.cc:606-619 via
+       bt-enable-hook-after-hash-check), with no peers connected. A torrent
+       that truly received nothing from anyone did not happen, so a zero total
+       is a spurious fire, not a measurement: discard it, and never let it
+       overwrite a real snapshot. Absent means "not measured".
+    2. CAPTURED BEFORE THIS TRANSFER STARTED. The sidecar is keyed by staged
+       filename, so a re-download of the same image could find its
+       predecessor's snapshot; attributing those bytes to this transfer is
+       exactly the class of false data being ended here. With no started_ts to
+       compare against, RECEIPT_MAX_AGE_S bounds it instead.
+    3. CAPTURED AFTER THE INGEST TICK (beyond RECEIPT_FUTURE_SKEW_S) — it
+       cannot be a measurement of a download that has already finished.
+    4. OLDER THAN THE STORED SNAPSHOT — a later fold never rewinds an earlier,
+       richer capture."""
+    if not isinstance(block, dict) or not isinstance(tele, dict):
+        return False
+    captured_at = block.get("captured_at")
+    if not isinstance(captured_at, float):
+        return False
+    if int(block.get("bytes_from_all_senders_total", 0) or 0) <= 0:
+        return False
+    started = tele.get("started_ts")
+    if isinstance(started, (int, float)) and not isinstance(started, bool):
+        if captured_at < float(started):
+            return False
+    elif now is not None and float(now) - captured_at > RECEIPT_MAX_AGE_S:
+        return False
+    if now is not None and captured_at > float(now) + RECEIPT_FUTURE_SKEW_S:
+        return False
+    stored = tele.get("peer_receipts")
+    if isinstance(stored, dict):
+        prev = stored.get("captured_at")
+        if isinstance(prev, (int, float)) and float(prev) >= captured_at:
+            return False
+    tele["peer_receipts"] = block
+    return True
+
+
+def report_peer_receipts(tele, window_start=None, created=None):
+    """The `peer_receipts` block for a v2 report, or None when nothing was
+    measured. ABSENT IS NOT ZERO — no block means the hook did not run or
+    produced nothing usable (agent predating this feature, a runtime with no
+    hook wired, a transfer that completed before the feature shipped, a
+    seeding-only report whose complete-knowledge instant had already passed).
+    Consumers must render "not measured", never 0.
+
+    `window_start`/`created` place the capture inside the report that carries
+    it. A captured_at outside [window.start, report_created_at] is an
+    impossible instant and the server rejects the WHOLE report over one, so a
+    measurement that cannot be placed in the window is dropped here instead of
+    costing the terminal report. That is reachable without any bug: a transfer
+    whose started_ts was never recorded (agent state lost while the staged file
+    survived) collapses window.start onto done_ts, which is strictly after the
+    hook fired. Dropping is also the honest outcome — the alternative,
+    stretching window.start back to captured_at, would misstate the transfer
+    window to save a byte count."""
+    block = (tele or {}).get("peer_receipts")
+    if not isinstance(block, dict) or block.get("source") != RECEIPT_SOURCE:
+        return None
+    rows = block.get("rows")
+    if not isinstance(rows, list):
+        return None
+    captured = block.get("captured_at")
+    if not isinstance(captured, (int, float)) or isinstance(captured, bool):
+        return None
+    if window_start is not None and float(captured) < float(window_start):
+        return None
+    if created is not None and float(captured) > float(created):
+        return None
+    out = dict(block)
+    out["rows"] = [dict(r) for r in rows if isinstance(r, dict)]
+    return out
+
+
 def build_report_v2(cfg, state, img_id, event, now, transfer_id, report_id,
                     report_request_id=None, window_start=None,
                     window_complete=True):
@@ -383,7 +752,16 @@ def build_report_v2(cfg, state, img_id, event, now, transfer_id, report_id,
     Verification is TWO independent persisted facts read verbatim
     (content_sha256_state / ios_copy_verify_state); avg_bps / sha_ok / the
     generic 'tier' are retired. Peers carry first/last/count participation only.
-    `report_request_id` is set only for pull reports (null otherwise)."""
+    `report_request_id` is set only for pull reports (null otherwise).
+
+    `peer_receipts` — the hook-measured exact per-peer received bytes — is a
+    separate OPTIONAL top-level block, emitted only when one was folded in. It
+    sits APART from peers[] and is joined by ip at read time: peers[] is what
+    the 60 s sampler happened to catch, peer_receipts.rows[] is what the client
+    itself knew at the one instant knowledge was complete. Merging them would
+    produce rows where some fields are sampled and some exact — the very
+    ambiguity 2026.08.20 was fought over — and would let a peers[] cap eviction
+    silently carry away the bytes of a peer that fed us most of the image."""
     st = state.get(img_id) or {}
     tele = st.get("tele") or {}
     link = state.get("link") or {}
@@ -409,7 +787,7 @@ def build_report_v2(cfg, state, img_id, event, now, transfer_id, report_id,
     start = window_start
     if start is None:
         start = float(tele.get("started_ts", end) or end)
-    return {
+    report = {
         "v": 2,
         "report_id": report_id,
         "transfer_id": transfer_id,
@@ -437,6 +815,12 @@ def build_report_v2(cfg, state, img_id, event, now, transfer_id, report_id,
         "agent": {"version": cfg.get("agent_version", "unknown"),
                   "runtime_mode": runtime_mode},
     }
+    receipts = report_peer_receipts(tele, window_start=start, created=now)
+    if receipts is not None:
+        # Optional by construction: the key is absent, not zeroed, when nothing
+        # was measured (report_peer_receipts explains what absence means).
+        report["peer_receipts"] = receipts
+    return report
 
 
 def freeze_report(state, img_id, report):

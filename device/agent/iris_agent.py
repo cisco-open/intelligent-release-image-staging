@@ -418,6 +418,12 @@ def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now,
                         tele, deps.aria_peers(stage), now)
                 except Exception:
                     pass
+            # Fold in the hook's exact per-peer byte snapshot BEFORE done_ts,
+            # which is the point the terminal report freezes. This is the one
+            # measurement the sampler above structurally cannot make: a peer
+            # that connected and dropped between two 60 s ticks is invisible
+            # to it, whatever keys it asks for.
+            _ingest_peer_receipts(deps, tele, stage, now)
             tele["done_ts"] = now
             stats = deps.aria_stats(stage)
             if stats:
@@ -950,6 +956,10 @@ def run_once(cfg, deps, state):
         # the device never heartbeats and is invisible exactly while broken.
         # OSError covers the whole family (URLError subclasses it). Degrade to
         # an error heartbeat; the next tick retries after bootstrap relaunches.
+        # A fresh download of this image starts here: drop any peer-receipt
+        # snapshot left by a PREVIOUS transfer of the same file, which is the
+        # only thing that shares its sidecar name.
+        _discard_peer_receipts(stage)
         try:
             deps.aria_remove(image["filename"])
             deps.aria_add(torrent, stage_dir)
@@ -1145,6 +1155,75 @@ def _find_aria_gid(rpc, stage_path):
         if fname in names:
             return gid
     return None
+
+
+def _take_peer_receipt_sidecar(path):
+    """Read AND remove the hook's peer-receipt snapshot at `path`; returns the
+    raw bytes, or None when there is nothing usable there. NEVER raises.
+
+    Removal is unconditional, including when the document turns out to be
+    garbage: this agent is one-shot, so a snapshot that cannot be used now
+    never becomes usable later, and a leftover file keyed by staged FILENAME
+    would be a candidate for folding into the next transfer of the same image.
+    Bounded by RECEIPT_MAX_BYTES — the hook writes a few hundred bytes per
+    peer, so anything larger is not a snapshot and is not worth reading into a
+    CPU-capped Guest Shell."""
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return None                 # absent is the ordinary case: no hook ran
+    raw = None
+    try:
+        if size <= telemetry_report.RECEIPT_MAX_BYTES:
+            with open(path, "rb") as f:
+                raw = f.read(telemetry_report.RECEIPT_MAX_BYTES)
+    except OSError:
+        raw = None
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    return raw
+
+
+def _discard_peer_receipts(stage_path):
+    """Drop any snapshot left next to `stage_path` before a NEW download of the
+    same image starts. The sidecar is keyed by staged filename, so this is what
+    keeps a previous transfer's receipts from ever being in a position to be
+    attributed to this one (telemetry_report.fold_peer_receipts' started_ts
+    check is the second, independent line of defence). Never raises."""
+    try:
+        os.remove(telemetry_report.receipt_sidecar_path(stage_path))
+    except OSError:
+        pass
+
+
+def _ingest_peer_receipts(deps, tele, stage_path, now):
+    """Fold the hook's exact per-peer byte snapshot into `tele`, then delete it.
+
+    Called once per transfer, at the completion tick, BEFORE done_ts freezes
+    the terminal report — the hook fired minutes earlier (aria2 invoked it, not
+    EEM), which is the whole point: nothing of ours lives between one-shot
+    ticks, so the measurement had to be taken by the process that was there.
+    Best-effort in every direction: an absent snapshot is the ordinary outcome
+    for a device with no hook wired, and a broken hook is SILENT by design
+    (daemon-mode stderr is /dev/null), so this must never be able to fail a
+    tick. Returns True only when a snapshot was accepted."""
+    try:
+        raw = _take_peer_receipt_sidecar(
+            telemetry_report.receipt_sidecar_path(stage_path))
+        if raw is None:
+            return False
+        block = telemetry_report.parse_receipt_snapshot(raw)
+        if not telemetry_report.fold_peer_receipts(tele, block, now):
+            return False
+        deps.emit("TELEMETRY",
+                  "peer receipts: %d peers, %d bytes from peers (measured)"
+                  % (block.get("rows_total", 0),
+                     block.get("bytes_from_all_senders_total", 0)))
+        return True
+    except Exception:
+        return False
 
 
 def _aria_session_impl(rpc):
@@ -1736,12 +1815,16 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
                 _aria_drop(_rpc, gid)
         # 2. delete stale staged image artifacts (never the agent's own files)
         import glob
-        keep = {keep_filename, keep_filename + ".aria2", keep_id + ".torrent"}
+        keep = {keep_filename, keep_filename + ".aria2", keep_id + ".torrent",
+                # this image's own peer-receipt snapshot: it may be sitting
+                # here waiting for the completion tick to fold it in
+                keep_filename + telemetry_report.RECEIPT_SIDECAR_SUFFIX}
         for path in glob.glob(os.path.join(cfg["stage_dir"], "*")):
             base = os.path.basename(path)
             if base in keep:
                 continue
-            if base.endswith((".bin", ".torrent", ".aria2")):
+            if base.endswith((".bin", ".torrent", ".aria2",
+                              telemetry_report.RECEIPT_SIDECAR_SUFFIX)):
                 try:
                     os.remove(path)
                 except OSError:
