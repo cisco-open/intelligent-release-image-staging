@@ -731,3 +731,65 @@ STUB
   # must fail BEFORE staging -- [pre] sits ahead of [2/7]
   [ "$(find "$ARTDIR" -name 'iris-agent-100.92.9.3-*.conf' | wc -l)" -eq 0 ]
 }
+
+# --- artifact preflight: retry, and say WHICH fault it was ------------------
+# One 5s attempt with no retry was the most fragile step in a fleet onboard --
+# the artifact server's latency degrades under concurrent load, and this check
+# runs at exactly that moment. A transient miss strands the device
+# half-installed, because the trustpoint is pushed just before it.
+#
+# These drive the FUNCTION rather than the whole installer: the behaviour under
+# test is entirely inside artifact_preflight, and running 700 lines of installer
+# to reach it makes the test slow and couples it to every unrelated step.
+
+_load_preflight() {   # $1 = curl exit script; extracts the function under test
+  PFDIR="$BATS_TEST_TMPDIR/pf"; mkdir -p "$PFDIR/bin"
+  sed -n '/^artifact_preflight()/,/^}/p' "$BATS_TEST_DIRNAME/../device-install.sh" \
+    > "$PFDIR/fn.sh"
+  [ -s "$PFDIR/fn.sh" ]          # the function must still exist to extract
+  printf '%s\n' '#!/usr/bin/env bash' "$1" > "$PFDIR/bin/curl"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$PFDIR/bin/sleep"   # no real backoff
+  chmod +x "$PFDIR/bin/curl" "$PFDIR/bin/sleep"
+  cat > "$PFDIR/run.sh" <<'RUN'
+set -uo pipefail
+STAGE_HOST=stage.example; IRIS_CRT_FILE=/dev/null
+. "$PFDIR/fn.sh"
+artifact_preflight
+RUN
+}
+
+@test "artifact preflight retries a transient failure instead of giving up at once" {
+  _load_preflight 'n="$PFDIR/calls"; c=$(( $(cat "$n" 2>/dev/null || echo 0) + 1 )); echo "$c" > "$n"
+[ "$c" -lt 3 ] && exit 28
+exit 0'
+  PFDIR="$PFDIR" PATH="$PFDIR/bin:$PATH" run bash "$PFDIR/run.sh"
+  [ "$status" -eq 0 ]                          # third attempt succeeds
+  [ "$(cat "$PFDIR/calls")" -eq 3 ]            # and it really did retry
+  [[ "$output" == *"attempt 1 failed (curl rc=28)"* ]]
+  [[ "$output" != *"ERROR: artifact preflight failed"* ]]
+}
+
+@test "artifact preflight names a TLS failure as TLS, not as unreachable" {
+  _load_preflight 'exit 60'
+  PFDIR="$PFDIR" PATH="$PFDIR/bin:$PATH" run bash "$PFDIR/run.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"TLS verification failed"* ]]
+  # the old message blamed reachability AND trust for every fault, which sent a
+  # real investigation chasing certificate drift while the certs were identical
+  [[ "$output" != *"is not reachable / not trusted"* ]]
+}
+
+@test "artifact preflight names a connect failure as connect" {
+  _load_preflight 'exit 7'
+  PFDIR="$PFDIR" PATH="$PFDIR/bin:$PATH" run bash "$PFDIR/run.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"cannot connect"* ]]
+}
+
+@test "artifact preflight names a timeout as a timeout and points at fleet load" {
+  _load_preflight 'exit 28'
+  PFDIR="$PFDIR" PATH="$PFDIR/bin:$PATH" run bash "$PFDIR/run.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"timed out"* ]]
+  [[ "$output" == *"fleet onboard"* ]]
+}

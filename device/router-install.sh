@@ -272,9 +272,44 @@ done
 echo "[5/7] install trustpoint and copy agent artifacts over verified HTTPS"
 { echo "configure terminal"; trustpoint_block; echo "end"; } \
   | "$HERE/../lab/device-run.sh" "$DEVICE_IP" >/dev/null
-if ! curl -sf -o /dev/null --max-time 5 --cacert "$IRIS_CRT_FILE" \
-    "https://$STAGE_HOST:8000/bootstrap.sh"; then
-  echo "ERROR: artifact server is unreachable or untrusted" >&2; exit 1
+
+# Preflight the artifact server before handing the device over to the automatic
+# path. Retried, because one 5s attempt was the most fragile step in a fleet
+# onboard: the artifact server's latency degrades under concurrent load (a 75x
+# spike was measured with 30 simultaneous bundle fetches) and this check runs at
+# exactly that moment. A transient miss strands the device half-installed -- the
+# trustpoint above is already pushed -- which is a far worse outcome than waiting.
+#
+# The exit code is reported because "unreachable or untrusted" conflates three
+# faults with three different fixes, and naming trust as a likely cause once sent
+# an investigation chasing certificate drift while the certificates were identical.
+artifact_preflight() {
+  _url="https://$STAGE_HOST:8000/bootstrap.sh"
+  _attempt=1
+  while [ "$_attempt" -le 3 ]; do
+    _rc=0
+    _err="$(curl -sS -f -o /dev/null --max-time 5 --cacert "$IRIS_CRT_FILE" "$_url" 2>&1)" || _rc=$?
+    [ "$_rc" -eq 0 ] && return 0
+    if [ "$_attempt" -lt 3 ]; then
+      echo "  artifact preflight attempt $_attempt failed (curl rc=$_rc); retrying in $((_attempt * 5))s" >&2
+      sleep $((_attempt * 5))
+    fi
+    _attempt=$((_attempt + 1))
+  done
+  case "$_rc" in
+    7)  _why="cannot connect -- is the artifact server up and :8000 reachable from here?" ;;
+    22) _why="server returned an HTTP error -- is bootstrap.sh present in the artifacts dir?" ;;
+    28) _why="timed out (5s x3) -- the server answers but is slow; a large fleet onboard can saturate it" ;;
+    35|60) _why="TLS verification failed -- IRIS_CRT_FILE is not the cert this server presents" ;;
+    *)  _why="curl exit $_rc" ;;
+  esac
+  echo "  ERROR: artifact preflight failed for $_url: $_why" >&2
+  [ -n "$_err" ] && echo "  curl: $_err" >&2
+  return 1
+}
+
+if ! artifact_preflight; then
+  exit 1
 fi
 printf 'delete /force /recursive %s\n' "$IOS_STAGE" \
   | "$HERE/../lab/device-run.sh" "$DEVICE_IP" >/dev/null 2>&1 || true
