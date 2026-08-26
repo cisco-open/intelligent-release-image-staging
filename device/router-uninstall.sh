@@ -16,19 +16,42 @@ NAT_INTERFACE="${NAT_INTERFACE:-}"
 BT_LISTEN_PORT="${BT_LISTEN_PORT:-6881}"
 NAT_OUTSIDE_OWNED="${NAT_OUTSIDE_OWNED:-0}"
 ROUTER_RESOURCES_OWNED="${ROUTER_RESOURCES_OWNED:-0}"
+# Force teardown for a device stranded WITHOUT a receipt: an onboard that died
+# after enabling Guest Shell but before its receipt was written leaves a router
+# that cannot be undeployed (no receipt), cannot be adopted (routers never can)
+# and cannot be re-onboarded (preflight refuses an existing Guest Shell).
+# Force mode removes only the AGENT footprint, which is identifiable by name.
+# It must never touch the VPG/NAT: with no receipt there is no proof IRIS
+# created them, and removing an operator's network would be exactly the harm
+# the receipt design exists to prevent.
+FORCE_AGENT_ONLY="${IRIS_FORCE_AGENT_ONLY:-0}"
 APP_IP="${APP_IP:-}"
 IOS_ROOT="bootflash:guest-share"
+# Everything under IRIS_DIR goes recursively; guest-share itself is a
+# preserved platform directory where only the named files below are removed.
+# The peer-receipt hook adds nothing to that root: its staged source lives at
+# iris/agent/peer-receipt-hook.sh, its snapshots at iris/<image>.peers.json,
+# and its exec-capable copy inside the guest at /home/guestshell (which goes
+# with `guestshell destroy`). Keep it that way -- a stray name at this root is
+# exactly what the collision preflight refuses on the next onboard.
 IRIS_DIR="$IOS_ROOT/iris"
 
 case "$NETWORK_ATTACHMENT" in
   router-routed) ;;
-  router-nat) [ -n "$NAT_INTERFACE" ] && [ -n "$APP_IP" ] \
-    || { echo "ERROR: router-nat receipt is missing NAT_INTERFACE or APP_IP" >&2; exit 1; } ;;
+  router-nat)
+    # Force skips the NAT teardown entirely, so requiring receipt-derived NAT
+    # values would re-strand the device this mode exists to rescue.
+    if [ "${IRIS_FORCE_AGENT_ONLY:-0}" != "1" ]; then
+      [ -n "$NAT_INTERFACE" ] && [ -n "$APP_IP" ] \
+        || { echo "ERROR: router-nat receipt is missing NAT_INTERFACE or APP_IP" >&2; exit 1; }
+    fi ;;
   *) echo "ERROR: NETWORK_ATTACHMENT must be router-routed or router-nat" >&2; exit 1 ;;
 esac
-[[ "$VPG_NUMBER" =~ ^[0-9]+$ ]] && [ "$VPG_NUMBER" -ge 0 ] \
-  && [ "$VPG_NUMBER" -le 31 ] \
-  || { echo "ERROR: receipt is missing a valid VPG_NUMBER" >&2; exit 1; }
+if [ "$FORCE_AGENT_ONLY" != "1" ]; then
+  [[ "$VPG_NUMBER" =~ ^[0-9]+$ ]] && [ "$VPG_NUMBER" -ge 0 ] \
+    && [ "$VPG_NUMBER" -le 31 ] \
+    || { echo "ERROR: receipt is missing a valid VPG_NUMBER" >&2; exit 1; }
+fi
 if [ -n "$NAT_INTERFACE" ] && ! [[ "$NAT_INTERFACE" =~ ^[A-Za-z][A-Za-z0-9./_-]{0,63}$ ]]; then
   echo "ERROR: NAT_INTERFACE contains unsupported characters" >&2; exit 1
 fi
@@ -38,17 +61,43 @@ EXPECTED_DEVICE_IDENTITY="${EXPECTED_DEVICE_IDENTITY:-}"
 if [ "$DRY" -eq 0 ]; then
   : "${DEVICE_IP:?set DEVICE_IP}"; : "${DEVICE_USER:?set DEVICE_USER}"
   : "${DEVICE_PASS:?set DEVICE_PASS}"
-  : "${EXPECTED_DEVICE_IDENTITY:?set EXPECTED_DEVICE_IDENTITY from the deployment receipt}"
-  [ "$ROUTER_RESOURCES_OWNED" = "1" ] \
-    || { echo "ERROR: receipt does not prove ownership of router resources" >&2; exit 1; }
+  if [ "$FORCE_AGENT_ONLY" = "1" ]; then
+    echo "===== FORCE: agent-footprint-only teardown (no receipt) ====="
+    echo "  Removing: IRIS EEM applets, Guest Shell, and $IRIS_DIR."
+    echo "  NOT touching VirtualPortGroup/NAT: without a receipt there is no"
+    echo "  proof IRIS created them, so they are left exactly as they are."
+  else
+    : "${EXPECTED_DEVICE_IDENTITY:?set EXPECTED_DEVICE_IDENTITY from the deployment receipt}"
+    [ "$ROUTER_RESOURCES_OWNED" = "1" ] \
+      || { echo "ERROR: receipt does not prove ownership of router resources" >&2; exit 1; }
+  fi
   VERSION_OUT="$(printf 'show version\n' \
     | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>/dev/null)"
   LIVE_MODEL="$(printf '%s\n' "$VERSION_OUT" \
     | sed -nE 's/^cisco[[:space:]]+([^[:space:]]+)[[:space:]]+\(.*/\1/p' | head -1)"
   LIVE_IDENTITY="$(printf '%s\n' "$VERSION_OUT" \
     | sed -nE 's/^[Pp]rocessor board ID[[:space:]]+([^[:space:]]+).*/\1/p' | head -1)"
-  [ -n "$LIVE_IDENTITY" ] && [ "$LIVE_IDENTITY" = "$EXPECTED_DEVICE_IDENTITY" ] \
-    || { echo "ERROR: device identity mismatch; refusing to modify $DEVICE_IP" >&2; exit 1; }
+  # Force mode is the receipt-less rescue path, so there is no expected
+  # identity to compare a live board ID against. Demanding one anyway made
+  # every forced undeploy abort here, which permanently stranded the routers
+  # this mode exists to rescue. The operator named DEVICE_IP explicitly and
+  # force only removes artifacts identifiable as IRIS's own by name.
+  if [ "$FORCE_AGENT_ONLY" != "1" ]; then
+    if [ -z "$LIVE_IDENTITY" ] || [ "$LIVE_IDENTITY" != "$EXPECTED_DEVICE_IDENTITY" ]; then
+      # Name the way out. This fires whenever the box answering at DEVICE_IP is
+      # not the one the receipt was written for -- overwhelmingly because it was
+      # rebuilt or replaced, which keeps the address and the device id but gets
+      # a fresh board ID. Refusing is right; refusing without saying what to do
+      # next left the operator with an undeploy that would not run and an
+      # onboard that told them to run it.
+      echo "ERROR: device identity mismatch; refusing to modify $DEVICE_IP" >&2
+      echo "  receipt expects board ID '$EXPECTED_DEVICE_IDENTITY', device reports '${LIVE_IDENTITY:-none}'" >&2
+      echo "  If this device was rebuilt or replaced, undeploy it again with Force" >&2
+      echo "  (removes the IRIS agent footprint only, leaving VirtualPortGroup and" >&2
+      echo "  NAT untouched), or delete and re-add it in the Console." >&2
+      exit 1
+    fi
+  fi
   MODEL="$LIVE_MODEL"
 fi
 case "$(printf '%s' "$MODEL" | tr 'a-z' 'A-Z')" in
@@ -57,7 +106,7 @@ case "$(printf '%s' "$MODEL" | tr 'a-z' 'A-Z')" in
      exit 1 ;;
 esac
 
-if [ "$NETWORK_ATTACHMENT" = "router-nat" ]; then
+if [ "$NETWORK_ATTACHMENT" = "router-nat" ] && [ "$FORCE_AGENT_ONLY" != "1" ]; then
   python3 - "$APP_IP" <<'PY'
 import ipaddress
 import sys
@@ -74,6 +123,27 @@ no event manager applet IRIS-AGENT
 no event manager applet IRIS-COPYROOT
 no event manager applet IRIS-RECLAIM
 no event manager applet IRIS-RECLAIM-BUNDLE
+EOF
+}
+
+# Force mode skips config_cleanup, which owns the removal of everything IRIS
+# configured. What it must NOT remove is the operator's network -- the
+# VirtualPortGroup and the NAT rules -- because with no receipt there is no
+# proof IRIS created those. Everything else here is IRIS-named and
+# unambiguously ours, and router preflight refuses a re-onboard while ANY of
+# it is present (see the collisions list in gui_onboard.py). Leaving it behind
+# left the device exactly as stranded as before the teardown ran, which is the
+# one thing force mode exists to prevent.
+config_cleanup_force() {
+cat <<EOF
+no app-hosting appid guestshell
+no logging buffered discriminator IRISQ
+no logging console discriminator IRISQ
+no logging monitor discriminator IRISQ
+no logging discriminator IRISQ
+no ip http client secure-trustpoint IRIS
+no crypto pki trustpoint IRIS
+yes
 EOF
 }
 
@@ -108,6 +178,10 @@ EOF
 if [ "$DRY" -eq 1 ]; then
   echo "===== [1/5] EEM applets removed FIRST ====="; config_teardown
   echo "===== [2/5] guestshell disable  [3/5] guestshell destroy ====="
+  if [ "$FORCE_AGENT_ONLY" = "1" ]; then
+    echo "===== [4/5] FORCE: IRIS app-hosting stanza removed; VPG/NAT SKIPPED (force) - ownership unproven ====="
+    config_cleanup_force
+  else
   echo "===== [4/5] receipt-owned config removal ====="
   if [ "$NETWORK_ATTACHMENT" = "router-nat" ]; then
     echo "no ip nat inside source static tcp $APP_IP $BT_LISTEN_PORT interface $NAT_INTERFACE $BT_LISTEN_PORT"
@@ -117,6 +191,7 @@ if [ "$DRY" -eq 1 ]; then
     echo "verify overload mapping is absent before removing IRIS-NAT-$VPG_NUMBER"
   fi
   config_cleanup
+  fi
   echo "===== [5/5] remove only IRIS files under $IOS_ROOT (preserve directory) ====="
   echo "delete /force /recursive $IRIS_DIR"
   for name in bootstrap.sh iris-agent.conf rpc-secret bundle.tgz iris-catalog.pem; do
@@ -149,6 +224,10 @@ for _ in $(seq 1 30); do
 done
 [ -z "$st" ] || { echo "ERROR: guestshell still present after destroy: $st" >&2; exit 1; }
 
+if [ "$FORCE_AGENT_ONLY" = "1" ]; then
+  echo "[4/5] FORCE: IRIS app-hosting stanza removed; VPG/NAT SKIPPED (force) - no receipt proves IRIS created them"
+  { echo "configure terminal"; config_cleanup_force; echo "end"; } | "$RUN" "$DEVICE_IP" >/dev/null
+else
 echo "[4/5] remove receipt-owned VPG and NAT footprint"
 # IOS refuses to unconfigure a dynamic NAT mapping while translations still
 # reference it. Remove the static rule, clear only translations whose inside
@@ -241,6 +320,8 @@ for line in sys.stdin:
 fi
 { echo "configure terminal"; config_cleanup; echo "end"; } | "$RUN" "$DEVICE_IP" >/dev/null
 
+fi
+
 echo "[5/5] remove IRIS files under $IOS_ROOT (preserve the platform directory)"
 {
   printf 'delete /force /recursive %s\n' "$IRIS_DIR"
@@ -249,8 +330,41 @@ echo "[5/5] remove IRIS files under $IOS_ROOT (preserve the platform directory)"
   done
 } | "$RUN" "$DEVICE_IP" >/dev/null 2>&1 || true
 
-RUNNING="$(printf 'terminal width 512\nshow running-config\n' \
-  | "$RUN" "$DEVICE_IP" | grep -v '#' || true)"
+# One SSH login for all three read-only verify checks instead of three --
+# same consolidation as _default_router_preflight in server/gui_onboard.py.
+# IOS XE echoes these markers verbatim; a missing marker is a hard error,
+# never treated as empty/safe output. Treating a dropped section as empty
+# here would be actively dangerous: the forbidden-artifact scan below reads
+# "nothing found" as "nothing left to remove," so a truncated response must
+# fail the undeploy, not silently pass it as clean.
+VERIFY_MARKER="__IRIS_VERIFY_"
+verify_request() {
+cat <<EOF
+terminal width 512
+echo ${VERIFY_MARKER}RUNNING__
+show running-config
+echo ${VERIFY_MARKER}APPS__
+show app-hosting list
+echo ${VERIFY_MARKER}FILES__
+dir bootflash:guest-share
+dir bootflash:guest-share/iris
+EOF
+}
+verify_section() {
+  python3 -c 'import re, sys
+marker = "__IRIS_VERIFY_"
+name = sys.argv[1]
+text = sys.stdin.read()
+start = marker + name + "__"
+match = re.search(re.escape(start) + r"\r?\n?(.*?)(?=" + re.escape(marker) + r"[A-Z_]+__|\Z)", text, re.DOTALL)
+if not match:
+    sys.exit(1)
+sys.stdout.write(match.group(1))' "$1"
+}
+VERIFY_OUT="$(verify_request | "$RUN" "$DEVICE_IP" || true)"
+RUNNING_RAW="$(printf '%s' "$VERIFY_OUT" | verify_section RUNNING)" \
+  || { echo "ERROR: undeploy verify did not return running-config; refusing to declare the device clean" >&2; exit 1; }
+RUNNING="$(printf '%s' "$RUNNING_RAW" | grep -v '#' || true)"
 config_block() {
   python3 -c 'import re,sys
 name = re.escape(sys.argv[1])
@@ -258,16 +372,34 @@ text = sys.stdin.read()
 match = re.search(r"(?ms)^interface %s\s*$\n(.*?)(?=^!\s*$|^interface |^end\s*$|\Z)" % name, text)
 print(match.group(0) if match else "")' "$1"
 }
-APP_STATE="$(printf 'show app-hosting list\n' \
-  | "$RUN" "$DEVICE_IP" | grep -v '#' || true)"
-FILES="$(printf 'dir bootflash:guest-share\ndir bootflash:guest-share/iris\n' \
-  | "$RUN" "$DEVICE_IP" | grep -v '#' || true)"
+APPS_RAW="$(printf '%s' "$VERIFY_OUT" | verify_section APPS)" \
+  || { echo "ERROR: undeploy verify did not return app-hosting state; refusing to declare the device clean" >&2; exit 1; }
+APP_STATE="$(printf '%s' "$APPS_RAW" | grep -v '#' || true)"
+FILES_RAW="$(printf '%s' "$VERIFY_OUT" | verify_section FILES)" \
+  || { echo "ERROR: undeploy verify did not return guest-share file listing; refusing to declare the device clean" >&2; exit 1; }
+FILES="$(printf '%s' "$FILES_RAW" | grep -v '#' || true)"
 
 forbidden=""
+# Only a receipt proves IRIS created the VirtualPortGroup, and only a receipt
+# supplies its number. Force mode deliberately preserves it, so scanning for a
+# bare "interface VirtualPortGroup" prefix would flag the operator's own group
+# and fail a teardown that actually succeeded.
+if [ "$FORCE_AGENT_ONLY" != "1" ]; then
+  case "$RUNNING" in
+    *"interface VirtualPortGroup$VPG_NUMBER"*)
+      forbidden="interface VirtualPortGroup$VPG_NUMBER" ;;
+  esac
+fi
+# The agent footprint every teardown removes, forced or not.
 for artifact in \
-  "interface VirtualPortGroup$VPG_NUMBER" \
   "app-hosting appid guestshell" \
-  "event manager applet IRIS-" \
+  "event manager applet IRIS-"; do
+  case "$RUNNING" in *"$artifact"*) forbidden="${forbidden}${forbidden:+, }$artifact" ;; esac
+done
+# Scanned in BOTH modes: force removes these too, because preflight refuses a
+# re-onboard while any of them is present and force exists to clear exactly
+# that condition.
+for artifact in \
   "logging discriminator IRISQ" \
   "logging buffered discriminator IRISQ" \
   "logging console discriminator IRISQ" \
@@ -285,7 +417,7 @@ for name in bootstrap.sh iris-agent.conf rpc-secret bundle.tgz iris-catalog.pem;
   case "$FILES" in *"$name"*) forbidden="${forbidden}${forbidden:+, }$IOS_ROOT/$name" ;; esac
 done
 
-if [ "$NETWORK_ATTACHMENT" = "router-nat" ]; then
+if [ "$NETWORK_ATTACHMENT" = "router-nat" ] && [ "$FORCE_AGENT_ONLY" != "1" ]; then
   for artifact in \
     "ip access-list standard IRIS-NAT-$VPG_NUMBER" \
     "ip nat inside source list IRIS-NAT-$VPG_NUMBER interface $NAT_INTERFACE overload" \

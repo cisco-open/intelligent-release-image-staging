@@ -4,6 +4,8 @@ IRIS stages Cisco IOS-XE images across a network before an operator performs any
 
 > IRIS distributes, verifies, and stages images. It never installs, activates, reloads, changes boot variables, or mutates the running software state of a device.
 
+> Bringing the server up is a command-line task. After that the [web console](docs/zensical/console.md) covers the everyday workflow — publishing images, assigning them, onboarding devices, and watching progress — so the commands below are one way to drive IRIS, not the only one.
+
 ## Documentation
 
 The detailed manual now lives in the Zensical documentation tree:
@@ -39,6 +41,7 @@ Start at the [documentation overview](docs/zensical/index.md), or jump to a sect
 - [Network workflows](docs/zensical/fleet-workflows.md) — CSV inventory, assignments, batch operations
 - [Operations](docs/zensical/operations.md) — day-two commands, backups, cleanup
 - [Observability](docs/zensical/observability.md) — metrics, swarm map, OTLP export
+- [Telemetry export](docs/zensical/telemetry-export.md) — peer-distribution accounting: origin versus peer bytes, per-device peer receipts, and the limits of each figure
 
 **Reference and development**
 
@@ -58,7 +61,7 @@ The public website source is in [docs/](docs/index.html). The GitHub Pages workf
 | `kubernetes/` | Optional single-replica seed-server deployment with persistent storage. |
 | `fleet/` | CSV templates for device inventory and image assignments. |
 | `tools/` | Operator helpers for agent bundles, per-device installers, assignments, torrents, and releases. |
-| `docs/` | Dynamic public website and Zensical documentation source. |
+| `docs/` | Dynamic public website, Zensical documentation source, and importable Grafana and Splunk dashboards. |
 
 ## Platform support
 
@@ -109,7 +112,7 @@ credential or from the CLI, both covered in
 docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin
 ```
 
-Publish an image mounted under `/opt/images`:
+Publish an image mounted under `/opt/images` — or upload it, or import it in place, from the console's Images page:
 
 ```bash
 docker compose -f server/docker-compose.yml exec iris \
@@ -124,7 +127,8 @@ cp fleet/assignments.csv.example fleet/assignments.csv
 ```
 
 Fill in `fleet/devices.csv` and import it from the console's Devices page. Then
-apply the assignments:
+apply the assignments — the console's Assignments page does the same thing one
+device at a time:
 
 ```bash
 tools/apply-assignments.sh fleet/assignments.csv
@@ -189,7 +193,7 @@ manifests.
 | 8000 | Artifact server | Bootstrap, agent bundle, pinned certificate, and staged install assets. |
 | 6881 | Seeder data | Image pieces from the server seeder. |
 | 8080 | Web console | Admin browser interface. |
-| 9101 | Telemetry | Health, swarm state, and optional Prometheus metrics. |
+| 9101 | Telemetry | Health, swarm state, peer-distribution counters, and optional Prometheus metrics. |
 | 6800 | aria2 RPC | Local-only inside the container. |
 
 ## Documentation Development

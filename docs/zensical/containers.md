@@ -57,10 +57,8 @@ docker build --platform linux/amd64 \
   -t iris:latest .
 ```
 
-The root `.dockerignore` prevents local credentials, firmware, generated
-artifacts, and network files from entering the build context. The image exposes
-all device-facing services, includes a `/healthz` Docker health check, and keeps
-aria2 RPC on loopback only.
+The image exposes all device-facing services, includes a `/healthz` Docker
+health check, and keeps aria2 RPC on loopback only.
 
 Docker Compose mounts operator images read-only from `IRIS_IMAGE_ROOT` (default
 `/opt/images`) and served artifacts from `IRIS_ARTIFACTS_HOST_DIR`, which

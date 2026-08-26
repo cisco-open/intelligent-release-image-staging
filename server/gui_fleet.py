@@ -9,6 +9,7 @@ import json
 import os
 import re
 import tempfile
+import time
 
 import secrets_store
 
@@ -106,6 +107,7 @@ def validate_record(record, allow_legacy=False):
     did = result.get("device_id", "")
     if not _ID_RE.fullmatch(did):
         raise ValueError("device_id must contain only letters, numbers, dot, underscore, or hyphen")
+    secrets_store.validate_device_id(did)
     result["device_ip"] = _ipv4(result.get("device_ip"), "device_ip")
     attachment = result.get("management_type", "")
     if attachment == "legacy_routed" and allow_legacy:
@@ -178,6 +180,7 @@ def _legacy_record(row):
     result = {key: _text(value) for key, value in result.items() if value is not None}
     if not _ID_RE.fullmatch(result.get("device_id", "")):
         raise ValueError("legacy row has invalid device_id")
+    secrets_store.validate_device_id(result["device_id"])
     result["device_ip"] = _ipv4(result.get("device_ip"), "device_ip")
     result["management_type"] = "legacy_routed"
     return result
@@ -194,15 +197,37 @@ def _legacy_like(record):
     if not _ID_RE.fullmatch(result.get("device_id", "")):
         raise ValueError("device_id must contain only letters, numbers, dot, "
                          "underscore, or hyphen")
+    secrets_store.validate_device_id(result["device_id"])
     result["device_ip"] = _ipv4(result.get("device_ip"), "device_ip")
     result["management_type"] = "legacy_routed"
     return result
 
 
 class FleetStore:
-    def __init__(self, state_dir):
+    def __init__(self, state_dir, now_fn=time.time):
         os.makedirs(state_dir, exist_ok=True)
         self.path = os.path.join(state_dir, "fleet.json")
+        self._now = now_fn
+
+    def _registration_stamp(self, previous):
+        """When this device id was registered, or ``None`` when unknown.
+
+        A device that is deleted and added back is a DIFFERENT device wearing a
+        familiar name -- routinely a rebuilt or replaced box. Everything else
+        keyed on the bare id was made to stop outliving the device it described;
+        persisted deployment logs cannot be, because they are the forensic
+        record. So they stay, and this stamp is what lets a reader tell which
+        registration each one belongs to: a log that finished before this device
+        was registered was written about its predecessor."""
+        if previous is None:
+            return int(self._now())
+        if not isinstance(previous, dict) or not previous:
+            raise ValueError("existing fleet record must be a non-empty object")
+        prior = previous.get("registered_at")
+        try:
+            return int(prior) if prior is not None else None
+        except (TypeError, ValueError):
+            raise ValueError("registered_at must be an integer or null")
 
     def _read(self):
         try:
@@ -237,18 +262,19 @@ class FleetStore:
         did = _text(record.get("device_id"))
         with secrets_store.store_lock(self.path):
             data = self._read()
-            previous = data["devices"].get(did, {})
-            merged = dict(previous)
+            previous = data["devices"].get(did)
+            previous_record = previous if isinstance(previous, dict) else {}
+            merged = dict(previous_record)
             incoming_attachment = record.get(
                 "management_type", record.get("network_attachment"))
             if incoming_attachment is not None:
                 incoming_attachment = _text(incoming_attachment)
-            if incoming_attachment and incoming_attachment != previous.get(
-                    "management_type", previous.get("network_attachment")):
+            if incoming_attachment and incoming_attachment != previous_record.get(
+                    "management_type", previous_record.get("network_attachment")):
                 # Attachment-specific fields are mutually exclusive. A partial
                 # upsert changing type must not retain stale values from the old
                 # family and then fail validation (or, worse, retarget a plan).
-                old_router = previous.get("management_type") in _ROUTER_TYPES
+                old_router = previous_record.get("management_type") in _ROUTER_TYPES
                 new_router = incoming_attachment in _ROUTER_TYPES
                 if old_router and new_router:
                     # VPG and app addressing are shared by both router modes;
@@ -277,6 +303,7 @@ class FleetStore:
             else:
                 raise ValueError("management_type must be routed, inband, router-routed, "
                                  "router-nat, or legacy_routed")
+            normalized["registered_at"] = self._registration_stamp(previous)
             data["devices"][did] = normalized
             data["revision"] += 1
             _atomic_write_json(self.path, data)
@@ -337,10 +364,15 @@ class FleetStore:
         with secrets_store.store_lock(self.path):
             data = self._read()
             for record in records:
-                if record["device_id"] in data["devices"]:
+                previous = data["devices"].get(record["device_id"])
+                if previous is not None:
                     updated += 1
                 else:
                     new += 1
+                # A re-import REPLACES the row wholesale, so carry the
+                # registration stamp across explicitly or every CSV import
+                # would look like a fresh registration of the whole fleet.
+                record["registered_at"] = self._registration_stamp(previous)
                 data["devices"][record["device_id"]] = record
             if records:
                 data["revision"] += 1

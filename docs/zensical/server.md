@@ -31,15 +31,18 @@ artifacts, and test output from the build context.
 
 ## Network surfaces
 
-| Port | Protocol | Service | Purpose |
-| --- | --- | --- | --- |
-| 6969 | HTTP | Tracker | Private BitTorrent announces with an announce key. |
-| 8443 | HTTPS | Catalog | Image metadata, device assignments, token refresh, and reports. |
-| 8000 | HTTPS | Artifact server | Bootstrap, agent bundle, pinned certificate, and staged install assets. |
-| 6881 | BitTorrent | Seeder data | Initial image pieces from the server seeder. |
-| 8080 | HTTPS | Web console | Admin browser interface. |
-| 9101 | HTTP | Telemetry | Health and optional metrics (Prometheus exposition format); the swarm view is loopback/console-gated. |
-| 6800 | HTTP | aria2 RPC | Local-only inside the container; not published by Compose. |
+| Port | Transport | Protocol | Service | Purpose |
+| --- | --- | --- | --- | --- |
+| 6969 | TCP | HTTP | Tracker | Private BitTorrent announces with an announce key. |
+| 8443 | TCP | HTTPS | Catalog | Image metadata, device assignments, token refresh, and reports. |
+| 8000 | TCP | HTTPS | Artifact server | Bootstrap, agent bundle, pinned certificate, and staged install assets. |
+| 6881 | TCP | BitTorrent | Seeder data | Initial image pieces from the server seeder. |
+| 8080 | TCP | HTTPS | Web console | Admin browser interface. |
+| 9101 | TCP | HTTP | Telemetry | Health and optional metrics (Prometheus exposition format); the swarm view is loopback/console-gated. |
+| 6800 | TCP | HTTP | aria2 RPC | Local-only inside the container; not published by Compose. |
+
+Every listener is TCP; IRIS opens no UDP port. See
+[Network ports and flows](network-ports.md#firewall-rules).
 
 ## Runtime identity
 

@@ -22,11 +22,18 @@ import os
 import queue
 import re
 import secrets
+import signal
 import subprocess
 import threading
 import time
 
 _JOB_TTL = 3600  # seconds a terminal onboard job is retained before eviction
+# Wall-clock bound on a RUNNING job. Without one, a recipe whose output pipe
+# never EOFs hangs forever: the job never becomes terminal, so it is never
+# evicted, so the device stays permanently "busy" and every later onboard AND
+# undeploy for it is refused. Comfortably above the slowest real recipe (the
+# router guestshell wait plus copy retries, ~7-10 min).
+_JOB_DEADLINE = int(os.environ.get("IRIS_ONBOARD_JOB_TIMEOUT") or 7200)
 _TERMINAL = ("done", "error", "cancelled")
 _DEFAULT_CONCURRENCY = 25  # simultaneous installer runs (env IRIS_ONBOARD_CONCURRENCY)
 # A fleet action may legitimately be large, but a request storm must not retain
@@ -169,9 +176,14 @@ def _default_runner(install_path, env, on_line, on_proc=None):
     """Run device-install.sh, calling on_line(line) for each stdout/stderr line.
     Returns the process exit code. on_proc(proc), when given, receives the live
     Popen so the caller can terminate it (abort)."""
+    # start_new_session puts the recipe in its OWN process group. Without it,
+    # terminating "bash" leaves the ssh -tt it spawned holding the stdout pipe,
+    # so the read loop below never sees EOF and the job hangs forever instead of
+    # failing -- which is how a device ends up mutated with no finish, no log
+    # and no reapable job record.
     proc = subprocess.Popen(["bash", install_path], env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, bufsize=1)
+                            text=True, bufsize=1, start_new_session=True)
     if on_proc is not None:
         on_proc(proc)
     try:
@@ -214,19 +226,115 @@ def _default_probe(dev, env, repo_root):
     return m.group(1) if m else None
 
 
+# Collisions that mean the same thing on EVERY platform: each carries IRIS's
+# own name, so its presence says a previous deployment is still on the device.
+# Preflight used to check these for routers only, so the identical device was
+# refused as a router and silently accepted as Guest Shell or IOx.
+_IRIS_NAMED_COLLISIONS = (
+    (r"(?m)^event manager applet IRIS-(?:AGENT|COPYROOT|RECLAIM|RECLAIM-BUNDLE)(?:\s|$)",
+     "an IRIS EEM applet"),
+    (r"(?m)^logging discriminator IRISQ(?:\s|$)", "logging discriminator IRISQ"),
+    (r"(?m)^logging (?:buffered|console|monitor) discriminator IRISQ\s*$",
+     "an IRISQ logging binding"),
+    (r"(?m)^crypto pki trustpoint IRIS\s*$", "crypto pki trustpoint IRIS"),
+    (r"(?m)^ip http client secure-trustpoint IRIS\s*$",
+     "the IRIS HTTP client trustpoint binding"),
+)
+
+
+def _check_iris_named_collisions(running, extra=()):
+    """Raise on any IRIS-named artifact still present. ``extra`` carries the
+    platform's own app-hosting stanza, which differs per platform."""
+    for pattern, description in tuple(extra) + _IRIS_NAMED_COLLISIONS:
+        if re.search(pattern, running):
+            raise ValueError("%s already exists" % description)
+
+
+def _probe_sections(runner, env, commands, label):
+    """Run every command in ONE ssh login and split the output on echoed
+    markers. One login per device is what makes a large fleet submission
+    viable -- see the note in the router preflight."""
+    marker = "__IRIS_PREFLIGHT_"
+    request = "\n".join(
+        "echo %s%s__\n%s" % (marker, name.upper(), command)
+        for name, command in commands) + "\n"
+    out = subprocess.run(["bash", runner, env["DEVICE_IP"]], input=request,
+                         capture_output=True, text=True, env=env, timeout=60)
+    if out.returncode != 0:
+        raise ValueError("%s preflight could not run" % label)
+    sections = {}
+    for name, _command in commands:
+        start = "%s%s__" % (marker, name.upper())
+        match = re.search(re.escape(start) + r"\r?\n?(.*?)(?=" +
+                          re.escape(marker) + r"[A-Z_]+__|\Z)",
+                          out.stdout or "", re.DOTALL)
+        if not match:
+            raise ValueError("%s preflight did not return %s" % (label, name))
+        sections[name] = match.group(1)
+    return sections
+
+
+def _default_guestshell_preflight(dev, env, resolved, repo_root):
+    """Read-only collision check for a Guest Shell deployment -- the same
+    checks the router flow has always run, minus the VPG/NAT specifics that
+    only exist on a router."""
+    runner = os.path.join(repo_root, "lab", "device-run.sh")
+    sections = _probe_sections(runner, env, (
+        ("version", "show version"),
+        ("running", "show running-config"),
+        ("apps", "show app-hosting list"),
+        ("files", "dir bootflash:guest-share"),
+    ), "guestshell")
+    model, device_identity = _parse_show_version(sections["version"])
+    if not device_identity:
+        raise ValueError("could not determine the device's processor board ID")
+    _check_iris_named_collisions(sections["running"], extra=(
+        (r"(?m)^app-hosting appid guestshell\s*$", "guestshell app-hosting config"),))
+    if re.search(r"(?im)^\s*(?:app id\s*:\s*)?guestshell(?:\s|$)", sections["apps"]):
+        raise ValueError("guestshell is already enabled")
+    files = sections["files"]
+    if re.search(r"(?im)Directory of\s+bootflash:/?guest-share/?", files) \
+            and not re.search(r"(?im)^No files in directory\s*$", files):
+        raise ValueError("bootflash:guest-share is not empty")
+    evidence = {"status": "passed", "device_identity": device_identity}
+    if model:
+        evidence["detected_model"] = model
+    return evidence
+
+
 def _default_router_preflight(dev, env, resolved, repo_root):
     """Read-only collision check for a Catalyst 8000 VPG deployment."""
     runner = os.path.join(repo_root, "lab", "device-run.sh")
+    commands = [
+        ("version", "show version"),
+        ("running", "show running-config"),
+        ("apps", "show app-hosting list"),
+        ("guest_share", "dir bootflash:guest-share"),
+    ]
+    if resolved.get("attachment") == "router-nat":
+        commands.append(("interfaces", "show interfaces %s" % resolved["nat_interface"]))
+    # One SSH login per router is essential for large fleet submissions. IOS XE
+    # echoes these markers verbatim, letting the same fail-closed checks consume
+    # each command's output without paying a connection setup per check.
+    marker = "__IRIS_PREFLIGHT_"
+    request = "\n".join(
+        "echo %s%s__\n%s" % (marker, name.upper(), command)
+        for name, command in commands) + "\n"
+    out = subprocess.run(["bash", runner, env["DEVICE_IP"]], input=request,
+                         capture_output=True, text=True, env=env, timeout=60)
+    if out.returncode != 0:
+        raise ValueError("router preflight could not run")
+    sections = {}
+    for name, _command in commands:
+        start = "%s%s__" % (marker, name.upper())
+        match = re.search(re.escape(start) + r"\r?\n?(.*?)(?=" +
+                          re.escape(marker) + r"[A-Z_]+__|\Z)",
+                          out.stdout or "", re.DOTALL)
+        if not match:
+            raise ValueError("router preflight did not return %s" % name)
+        sections[name] = match.group(1)
 
-    def show(command):
-        out = subprocess.run(["bash", runner, env["DEVICE_IP"]],
-                             input=command + "\n", capture_output=True,
-                             text=True, env=env, timeout=60)
-        if out.returncode != 0:
-            raise ValueError("router preflight could not run %r" % command)
-        return out.stdout or ""
-
-    version = show("show version")
+    version = sections["version"]
     model, device_identity = _parse_show_version(version)
     if not re.match(r"^C8[0-9]{3}", model, re.IGNORECASE):
         raise ValueError("router modes support the Catalyst 8000 family only; %s is not yet supported"
@@ -234,7 +342,7 @@ def _default_router_preflight(dev, env, resolved, repo_root):
     if not device_identity:
         raise ValueError("could not determine the router's processor board ID")
 
-    running = show("show running-config")
+    running = sections["running"]
     vpg = str(resolved.get("vpg_number", ""))
     if re.search(r"(?m)^interface VirtualPortGroup%s\s*$" % re.escape(vpg), running):
         raise ValueError("VirtualPortGroup%s already exists" % vpg)
@@ -252,24 +360,12 @@ def _default_router_preflight(dev, env, resolved, repo_root):
         if candidate.overlaps(configured):
             raise ValueError("router app subnet %s is already configured" % candidate)
 
-    apps = show("show app-hosting list")
+    apps = sections["apps"]
     if re.search(r"(?im)^\s*(?:app id\s*:\s*)?guestshell(?:\s|$)", apps):
         raise ValueError("guestshell is already enabled")
-    collisions = (
-        (r"(?m)^app-hosting appid guestshell\s*$", "guestshell app-hosting config"),
-        (r"(?m)^event manager applet IRIS-(?:AGENT|COPYROOT|RECLAIM|RECLAIM-BUNDLE)(?:\s|$)",
-         "an IRIS EEM applet"),
-        (r"(?m)^logging discriminator IRISQ(?:\s|$)", "logging discriminator IRISQ"),
-        (r"(?m)^logging (?:buffered|console|monitor) discriminator IRISQ\s*$",
-         "an IRISQ logging binding"),
-        (r"(?m)^crypto pki trustpoint IRIS\s*$", "crypto pki trustpoint IRIS"),
-        (r"(?m)^ip http client secure-trustpoint IRIS\s*$",
-         "the IRIS HTTP client trustpoint binding"),
-    )
-    for pattern, description in collisions:
-        if re.search(pattern, running):
-            raise ValueError("%s already exists" % description)
-    guest_share = show("dir bootflash:guest-share")
+    _check_iris_named_collisions(running, extra=(
+        (r"(?m)^app-hosting appid guestshell\s*$", "guestshell app-hosting config"),))
+    guest_share = sections["guest_share"]
     if re.search(r"(?im)Directory of\s+bootflash:/?guest-share/?", guest_share) \
             and not re.search(r"(?im)^No files in directory\s*$", guest_share):
         raise ValueError("bootflash:guest-share is not empty")
@@ -284,7 +380,7 @@ def _default_router_preflight(dev, env, resolved, repo_root):
         return evidence
 
     requested_outside = resolved["nat_interface"]
-    interfaces = show("show interfaces %s" % requested_outside)
+    interfaces = sections["interfaces"]
     interface_match = re.search(
         r"(?m)^([A-Za-z][A-Za-z0-9./_-]{0,63}) is ", interfaces)
     if not interface_match:
@@ -357,24 +453,28 @@ def apply_router_preflight(resolved, evidence):
 
 
 def _default_iox_preflight(dev, env, resolved, repo_root):
-    """Read-only 'show version' probe that resolves an IOx device's live
-    processor board ID (and model) over the same lab/device-run.sh channel
-    the router preflight uses. device/iox/install.sh hard-requires
-    EXPECTED_DEVICE_IDENTITY (and MODEL) so a typo'd DEVICE_IP can't tear
-    down the app on the wrong switch -- but the console has no other source
-    for the live identity, so IOx gets its own single-purpose probe instead
-    of the router's fuller collision-check preflight. Raises ValueError
-    (fail-closed) when the identity can't be parsed; never proceeds with an
-    empty value."""
+    """Read-only preflight for an IOx deployment: the live processor board ID
+    (device/iox/install.sh hard-requires EXPECTED_DEVICE_IDENTITY so a typo'd
+    DEVICE_IP cannot reconfigure the wrong switch) AND the same IRIS-named
+    collision checks every other platform runs.
+
+    It used to resolve identity and nothing else, which is why a device still
+    carrying IRIS config was refused as a router and accepted as IOx. Raises
+    ValueError (fail-closed) on an unparseable identity; never proceeds with
+    an empty value."""
     runner = os.path.join(repo_root, "lab", "device-run.sh")
-    out = subprocess.run(["bash", runner, env["DEVICE_IP"]],
-                         input="show version\n", capture_output=True,
-                         text=True, env=env, timeout=60)
-    if out.returncode != 0:
-        raise ValueError("iox preflight could not run 'show version'")
-    model, device_identity = _parse_show_version(out.stdout or "")
+    appid = str((resolved or {}).get("iox_appid") or "iris")
+    sections = _probe_sections(runner, env, (
+        ("version", "show version"),
+        ("running", "show running-config"),
+        ("apps", "show app-hosting list"),
+    ), "iox")
+    model, device_identity = _parse_show_version(sections["version"])
     if not device_identity:
         raise ValueError("could not determine the device's processor board ID")
+    _check_iris_named_collisions(sections["running"], extra=(
+        (r"(?m)^app-hosting appid %s\s*$" % re.escape(appid),
+         "the %s app-hosting config" % appid),))
     evidence = {"status": "passed", "device_identity": device_identity}
     if model:
         evidence["detected_model"] = model
@@ -409,7 +509,8 @@ class OnboardService:
                  mint_fn=None, run_fn=_default_runner, now_fn=time.time,
                  probe_fn=None, artifacts_dir=None, audit_fn=None,
                  max_concurrent=None, clear_state_fn=None, receipts=None,
-                 preflight_fn=None, iox_preflight_fn=None, log_dir=None):
+                 preflight_fn=None, iox_preflight_fn=None, log_dir=None,
+                 guestshell_preflight_fn=None):
         self.fleet = fleet
         self.creds = creds
         self.server_dir = server_dir or os.path.dirname(os.path.abspath(__file__))
@@ -431,6 +532,9 @@ class OnboardService:
         self._probe = probe_fn or (lambda dev, env: _default_probe(dev, env, self.repo_root))
         self._router_preflight = preflight_fn or (
             lambda dev, env, resolved: _default_router_preflight(
+                dev, env, resolved, self.repo_root))
+        self._guestshell_preflight = guestshell_preflight_fn or (
+            lambda dev, env, resolved: _default_guestshell_preflight(
                 dev, env, resolved, self.repo_root))
         self._iox_preflight = iox_preflight_fn or (
             lambda dev, env, resolved: _default_iox_preflight(
@@ -569,11 +673,20 @@ class OnboardService:
         return resolved_dev, env
 
     def preflight(self, device_id, resolved):
-        """Run a router deployment's read-only checks before token minting."""
+        """Run a deployment's read-only checks before token minting.
+
+        Every platform runs one. Returning "not-required" for anything that
+        was not a router meant the same device was refused as a router and
+        silently accepted as Guest Shell or IOx."""
         dev, env = self._build_env(device_id, mint=False, resolved=resolved)
-        if resolved.get("platform") != "router":
-            return {"status": "not-required"}
-        return self._router_preflight(dev, env, resolved)
+        platform = resolved.get("platform")
+        if platform == "router":
+            return self._router_preflight(dev, env, resolved)
+        if platform == "iox":
+            return self._iox_preflight(dev, env, resolved)
+        if platform == "guestshell":
+            return self._guestshell_preflight(dev, env, resolved)
+        return {"status": "not-required"}
 
     def _resolve(self, device_id, dev, env, action="onboard"):
         """Resolve (platform, script) for a device, using the live probe (if
@@ -631,7 +744,7 @@ class OnboardService:
             return False
 
     def start(self, device_id, action="onboard", resolved=None, prepare=None,
-              pre_apply=None, env_extra=None):
+              pre_apply=None, env_extra=None, on_success=None):
         """Create a job and run the action's script on a daemon thread.
         Returns the job id immediately. action is "onboard"
         (the platform's install recipe: device-install.sh, device/iox/install.sh
@@ -640,6 +753,12 @@ class OnboardService:
         device/router-uninstall.sh). At most max_concurrent
         installers run at once; beyond that a job stays in a bounded work queue
         until a worker is free or cancel_queued() flips it to "cancelled".
+
+        on_success() (optional) is called once the script exits 0, for caller
+        bookkeeping that must not happen until the box is actually clean. Its
+        exceptions are swallowed: the job already succeeded, and a bookkeeping
+        failure must not restate that as a failure. Like prepare(), it is never
+        registered when this start joins an already-active same-action job.
 
         prepare() (optional) is called EXACTLY ONCE, under the job lock, only
         when a genuinely new job is registered — never when this start joins an
@@ -660,6 +779,13 @@ class OnboardService:
                 "queued_at": int(self._now()),
                 "started_at": None, "finished_at": None, "receipt_id": None,
                 "resolved": resolved, "env_extra": env_extra}
+        # Reap BEFORE the busy guard, not after it. The reaper used to run
+        # further down, past every path that returns or raises — so it could
+        # only ever fire on a start() for some OTHER device, and never for the
+        # one actually stuck. A device whose job hung was refused for the whole
+        # _JOB_DEADLINE window with no way to clear it, which is exactly the
+        # strand the reaper exists to prevent.
+        self.reap_overdue_jobs()
         with self._lock:
             # Never run two scripts against the same device at once: the same
             # action again (double-click, overlapping batches) joins the
@@ -689,30 +815,32 @@ class OnboardService:
                 j["started_at"] = int(self._now())
             try:
                 # Build credentials and resolve the recipe without minting. A
-                # queued router job must repeat ownership-sensitive preflight at
-                # execution time, immediately before its receipt becomes
-                # applying and before an enrollment token is created.
+                # Router preflight runs only here, in the bounded worker pool,
+                # immediately before its receipt becomes applying and before an
+                # enrollment token is created. Batch submissions therefore do
+                # not block their HTTP requests on individual routers' SSH.
                 dev, env = self._build_env(device_id, mint=False,
                                            resolved=j.get("resolved"),
                                            env_extra=j.get("env_extra"))
                 platform, script = self._resolve(device_id, dev, env, action)
                 if action == "onboard" and platform == "guestshell":
-                    # Job-start reachability gate. Router deployments already
-                    # get a REAL, live preflight -- at HTTP submit time (see
-                    # gui_server's preflight()) and again just below, before
-                    # minting -- and IOx onboard runs its own live identity
-                    # preflight a few lines down, so both platforms already
-                    # fail loud (existing error path + audit) on an
-                    # unreachable device. Guest Shell has no live check at
-                    # all before the installer runs, so a mistyped device_ip
-                    # would otherwise sail straight into device-install.sh
-                    # and only surface (if at all) as an opaque SSH timeout
-                    # deep in its output. Probe first and fail clearly.
+                    # The reachability probe stays AHEAD of the collision
+                    # preflight: an unreachable device is far more common than
+                    # a collision, and "preflight could not run" tells an
+                    # operator nothing about which of the two to go and check.
                     if not self._probe(dev, env):
                         raise ValueError(
                             "cannot reach device %s — ping/SSH probe "
                             "failed; check the device IP and credentials"
                             % env.get("DEVICE_IP", device_id))
+                    # Guest Shell used to stop there, so a device still
+                    # carrying IRIS config was refused as a router and
+                    # silently accepted here.
+                    try:
+                        self._guestshell_preflight(
+                            dev, env, j.get("resolved") or dev)
+                    except Exception as exc:
+                        raise ValueError("preflight failed: %s" % exc)
                 if action == "onboard" and platform == "router":
                     try:
                         evidence = self._router_preflight(
@@ -839,6 +967,17 @@ class OnboardService:
                     self._clear_state(device_id)
                 except Exception:
                     pass   # a bookkeeping failure must never fail the job
+            # Same contract for the caller's own success bookkeeping. A forced
+            # teardown retires its receipts here rather than at submit time:
+            # force means "that receipt does not describe this box", but a
+            # transient failure to reach the device is not proof of that, and
+            # voiding a healthy deployment's receipt on a network blip would
+            # strand it exactly the way this whole path exists to prevent.
+            if rc == 0 and on_success is not None:
+                try:
+                    on_success()
+                except Exception:
+                    pass   # as above: never fail a job that already succeeded
             if rc != 0:
                 self._transition_or_note(job_id, receipt_id, "needs-reconcile")
             elif action == "onboard":
@@ -920,7 +1059,12 @@ class OnboardService:
                 return True
             self._append_locked(j, "[abort requested by operator]")
         try:
-            proc.terminate()
+            # Signal the whole group: the recipe's ssh child is what holds the
+            # pipe, so terminating only the shell leaves the job hung.
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except (OSError, AttributeError, ProcessLookupError):
+                proc.terminate()
         except Exception:
             return False
         return True
@@ -1083,6 +1227,88 @@ class OnboardService:
             if not self._transition_or_note(jid, receipt_id, "removed"):
                 self._append(jid, "cancelled job receipt could not be retired")
         return n
+
+    def reap_overdue_jobs(self):
+        """Fail every job past its deadline, with the SAME bookkeeping an
+        ordinary finish gets.
+
+        The old inline version wrote a ``rc`` key that no reader looks at (they
+        all read ``returncode``), never went through _finish, and so left the
+        installer handle in self._procs, wrote no persisted log, and emitted no
+        ``*_finished`` audit event — a job could fail with nothing anywhere
+        saying so. Going through _finish fixes all four.
+
+        Takes the lock itself and does the log/audit I/O outside it, so start()
+        can call this before its busy guard.
+
+        A genuinely hung worker may still return later and finish the job a
+        second time. That is deliberate and predates this: the second finish
+        records the real outcome, and recording it twice beats a job that stays
+        non-terminal forever."""
+        with self._lock:
+            overdue = self._reap_overdue(self._now())
+            for jid in overdue:
+                # Claim it while still holding the lock: _reap_overdue only
+                # considers jobs with no finished_at, so stamping one here stops
+                # a concurrent reap from failing the same job twice. _finish
+                # overwrites this with the real stamp a moment later.
+                self._jobs[jid]["finished_at"] = int(self._now())
+                self._append_locked(
+                    self._jobs[jid],
+                    "[job exceeded %ds deadline; marked failed so the device is "
+                    "not left permanently busy]" % _JOB_DEADLINE)
+        for jid in overdue:
+            self._finish(jid, "error", -1)
+        return overdue
+
+    def cancel_device(self, device_id):
+        """Stop everything in flight for *device_id*: queued jobs are
+        cancelled, a running installer is signalled. Returns
+        {"cancelled": n, "aborted": n}.
+
+        Called when the device leaves the fleet. A job record outlives the
+        device — it is keyed on the id alone — so without this a job left
+        behind by a deleted device keeps the busy guard armed against the NEXT
+        device registered under that id: the opposite action is refused 409 and
+        the same action silently joins the dead job, which reads as a click
+        that did nothing. It self-healed only after _JOB_DEADLINE.
+
+        Queued jobs are cancelled through the same path the console's cancel
+        uses, so their receipts are retired too."""
+        with self._lock:
+            queued = [jid for jid, j in self._jobs.items()
+                      if j.get("device_id") == device_id
+                      and j["state"] == "queued"]
+            running = [jid for jid, j in self._jobs.items()
+                       if j.get("device_id") == device_id
+                       and j["state"] == "running"]
+        cancelled = self.cancel_queued(job_ids=set(queued)) if queued else 0
+        aborted = 0
+        for jid in running:
+            # Best effort: a legacy runner that never reports its process
+            # cannot be signalled, and the job then ages out on the deadline.
+            try:
+                if self.abort(jid):
+                    aborted += 1
+            except Exception:
+                pass
+        return {"cancelled": cancelled, "aborted": aborted}
+
+    def _reap_overdue(self, now):
+        """Fail any job that has been running past the deadline.
+
+        A hung recipe is indistinguishable from a slow one from here, so the
+        bound is deliberately generous. What matters is that the job becomes
+        TERMINAL: that releases the busy guard, lets the record be evicted, and
+        leaves the receipt in a state teardown can read -- turning a permanent
+        strand into an ordinary failure. Caller must hold self._lock."""
+        overdue = []
+        for jid, j in self._jobs.items():
+            if j.get("state") not in _TERMINAL and j.get("finished_at") is None:
+                started = j.get("started_at") or j.get("queued_at")
+                if started is not None and now - started > _JOB_DEADLINE:
+                    overdue.append(jid)
+        return overdue
 
     def _evict_old(self, now):
         """Drop terminal (done/error/cancelled) jobs finished more than

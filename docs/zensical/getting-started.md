@@ -8,6 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 
 This path brings up the IRIS server, publishes an IOS-XE image, generates device installers, and assigns an image to a device. Docker Compose is the server runtime.
 
+It uses the command line throughout because it starts from an empty host. Once the server is running, everything after bring-up can also be done in the browser — see [Web Console](console.md).
+
 ## Prerequisites
 
 | Requirement | Notes |

@@ -27,7 +27,7 @@ class _Stub(BaseHTTPRequestHandler):
         if not self._auth():
             return self._send(401, b'{"error":"unauthorized"}')
         if self.path == "/v1/devices/sw1/policy":
-            self._send(200, b'{"approved_image_id":"img1","install_allowed":false}')
+            self._send(200, b'{"approved_image_id":"img1"}')
         elif self.path == "/v1/images/img1":
             self._send(200, b'{"id":"img1","filename":"img1.bin","size":5,'
                             b'"sha256":"abc","info_hash_hex":"dd"}')
@@ -99,8 +99,7 @@ def tele_client():
 
 
 def test_get_policy(client):
-    assert client.get_policy("sw1") == {"approved_image_id": "img1",
-                                        "install_allowed": False}
+    assert client.get_policy("sw1") == {"approved_image_id": "img1"}
 
 
 def test_get_image_and_404(client):

@@ -274,3 +274,140 @@ def test_recoverable_refuses_to_guess_between_two_candidates(tmp_path):
         assert False, "expected ValueError"
     except ValueError as exc:
         assert "edge-01" in str(exc)
+
+
+def test_an_applying_receipt_authorizes_teardown(tmp_path):
+    """An onboard that dies mid-run leaves its receipt in `applying`. That
+    receipt already carries the ownership proof teardown validates, and it is
+    the ONLY durable record that IRIS mutated the device -- so teardown must be
+    able to read it.
+
+    Before this, `applying` became readable only via recover_interrupted(),
+    which runs once at process start. With no restart the marker was written,
+    never read, and never would be: the device could not be undeployed (no
+    readable receipt), could not be adopted (routers never can) and could not be
+    re-onboarded (preflight refuses the live Guest Shell). That is exactly how
+    100.90.168.116 was stranded in the lab.
+    """
+    store = deployment_receipts.ReceiptStore(str(tmp_path))
+    store.create(_receipt(receipt_id="r-applying", device_id="dev-1"))
+    store.transition("r-applying", "applying")
+    got = store.recoverable_for_device("dev-1")
+    assert got is not None, "an applying receipt must authorize teardown"
+    assert got["receipt_id"] == "r-applying"
+    assert got["state"] == "applying"
+
+
+def test_applying_can_still_be_closed_out_as_removed(tmp_path):
+    """Teardown closes the receipt with `removed`; that edge must already exist
+    so the rescue path does not dead-end."""
+    store = deployment_receipts.ReceiptStore(str(tmp_path))
+    store.create(_receipt(receipt_id="r-close", device_id="dev-2"))
+    store.transition("r-close", "applying")
+    store.transition("r-close", "removed")
+    assert store.recoverable_for_device("dev-2") is None
+
+
+# ---------------------------------------------------------------------------
+# retire_device: a receipt must not outlive the device it describes
+# ---------------------------------------------------------------------------
+
+def test_retire_device_abandons_a_recoverable_receipt(tmp_path):
+    """A receipt left in a recoverable state is what onboard refuses on and
+    what undeploy renders teardown from. Once the device is gone from the
+    fleet it describes nothing IRIS manages, so it must stop doing both --
+    otherwise the next device registered under that id inherits it."""
+    store = deployment_receipts.ReceiptStore(str(tmp_path))
+    rid = store.create(_receipt())["receipt_id"]
+    store.transition(rid, "applying")
+    store.transition(rid, "needs-reconcile")
+    assert store.recoverable_for_device("edge-01") is not None
+
+    assert store.retire_device("edge-01", "device deleted from the fleet") == [rid]
+
+    assert store.recoverable_for_device("edge-01") is None
+    retired = store.get(rid)
+    assert retired["state"] == "abandoned"
+    assert retired["evidence"] == {"status": "abandoned",
+                                   "reason": "device deleted from the fleet"}
+    assert retired["timestamps"]["finished_at"] > 0
+
+
+def test_retire_device_keeps_the_record(tmp_path):
+    """Abandoned, not deleted: the receipt is the only list of what IRIS built
+    on that box (the VirtualPortGroup, the NAT stanza, the app address), and an
+    operator who deleted a still-configured device is the one who needs it."""
+    store = deployment_receipts.ReceiptStore(str(tmp_path))
+    rid = store.create(_receipt())["receipt_id"]
+    store.retire_device("edge-01", "device deleted from the fleet")
+    kept = store.get(rid)
+    assert kept is not None
+    assert kept["resources"] == [{"kind": "guestshell", "ownership": "iris-created"}]
+    assert kept["resolved"]["attachment"] == "inband"
+    assert store.list("edge-01") == [kept]
+
+
+def test_retire_device_leaves_terminal_receipts_untouched(tmp_path):
+    """A receipt that already told its story keeps it. Restamping a 'removed'
+    receipt as abandoned would claim IRIS never tore that deployment down."""
+    store = deployment_receipts.ReceiptStore(str(tmp_path))
+    done = store.create(_receipt())["receipt_id"]
+    store.transition(done, "applying")
+    store.transition(done, "removed")
+    live = store.create(_receipt())["receipt_id"]
+
+    assert store.retire_device("edge-01", "device deleted from the fleet") == [live]
+    assert store.get(done)["state"] == "removed"
+    assert store.get(live)["state"] == "abandoned"
+
+
+def test_retire_device_only_touches_the_named_device(tmp_path):
+    store = deployment_receipts.ReceiptStore(str(tmp_path))
+    mine = store.create(_receipt())["receipt_id"]
+    theirs = store.create(_receipt(device_id="edge-02"))["receipt_id"]
+
+    assert store.retire_device("edge-01", "device deleted from the fleet") == [mine]
+    assert store.get(theirs)["state"] == "planned"
+
+
+def test_retire_device_resolves_multiple_recoverable_receipts(tmp_path):
+    """Two recoverable receipts refuse onboard, undeploy AND adopt, and nothing
+    else in the product resolves them. Retiring the device clears all of them
+    at once, which is the only exit from that state."""
+    store = deployment_receipts.ReceiptStore(str(tmp_path))
+    first = store.create(_receipt())["receipt_id"]
+    store.transition(first, "applying")
+    second = store.create(_receipt())["receipt_id"]
+    store.transition(second, "applying")
+    with pytest.raises(ValueError, match="multiple recoverable receipts"):
+        store.recoverable_for_device("edge-01")
+
+    assert sorted(store.retire_device("edge-01", "forced teardown")) == sorted(
+        [first, second])
+    assert store.recoverable_for_device("edge-01") is None
+
+
+def test_retire_device_is_a_no_op_for_an_unknown_device(tmp_path):
+    store = deployment_receipts.ReceiptStore(str(tmp_path))
+    assert store.retire_device("never-existed", "device deleted from the fleet") == []
+
+
+def test_abandoned_is_terminal(tmp_path):
+    """Nothing follows abandonment: the receipt can never become teardown
+    authority again, which is the whole point of the state."""
+    store = deployment_receipts.ReceiptStore(str(tmp_path))
+    rid = store.create(_receipt())["receipt_id"]
+    store.retire_device("edge-01", "device deleted from the fleet")
+    for state in ("applying", "active", "needs-reconcile", "removed", "planned"):
+        with pytest.raises(ValueError, match="invalid receipt transition"):
+            store.transition(rid, state)
+
+
+def test_abandoned_receipt_never_blocks_or_authorises(tmp_path):
+    store = deployment_receipts.ReceiptStore(str(tmp_path))
+    rid = store.create(_receipt())["receipt_id"]
+    store.transition(rid, "applying")
+    store.transition(rid, "active")
+    store.retire_device("edge-01", "device deleted from the fleet")
+    assert store.active_for_device("edge-01") is None
+    assert store.recoverable_for_device("edge-01") is None

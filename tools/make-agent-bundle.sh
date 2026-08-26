@@ -58,6 +58,7 @@ missing=0
 for f in "$DEVICE/agent/iris_agent.py" "$DEVICE/agent/catalog_client.py" \
          "$DEVICE/agent/flashcheck.py" "$DEVICE/agent/flash_target.py" \
          "$DEVICE/agent/agent_config.py" \
+         "$DEVICE/agent/peer-receipt-hook.sh" \
          "$DEVICE/verify_image.py" \
          "$DEVICE/bootstrap.sh" \
          "$DEVICE/guestshell-start.sh" "$DEVICE/rotate-logs.sh"; do

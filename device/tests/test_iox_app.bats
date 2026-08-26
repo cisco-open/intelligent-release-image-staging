@@ -274,6 +274,12 @@ _appid_block_output() {
 }
 
 @test "IOx Dockerfile uses a multi-architecture Python base" {
-  grep -q '^FROM python:3.12-slim-bookworm$' "$IOX_DIR/Dockerfile"
-  ! grep -q '^FROM arm64v8/' "$IOX_DIR/Dockerfile"
+  # The app is built for BOTH aarch64 (IE3x00) and x86_64 (Catalyst 9000)
+  # from one Dockerfile, so the base must be an official multi-arch
+  # python:3.12-slim-* image and never an arch-pinned namespace. The Debian
+  # suite is deliberately not asserted here — that belongs to the base-image
+  # bump check in server/tests/test_dockerfile_base_image.py, which also
+  # holds this file in lockstep with server/Dockerfile.
+  grep -qE '^FROM python:3\.12-slim-[a-z]+$' "$IOX_DIR/Dockerfile"
+  ! grep -qE '^FROM (arm64v8|amd64|i386|arm32v7)/' "$IOX_DIR/Dockerfile"
 }

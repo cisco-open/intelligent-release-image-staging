@@ -13,8 +13,9 @@
   <div class="top">
     <span>◈ Intelligent Release &amp; Image Staging <span class="tag">IRIS</span></span>
     <span class="spacer"></span>
+    <span class="who" id="who"></span>
     <div class="menu-wrap">
-      <button class="btn ghost" id="help-btn" aria-expanded="false" aria-label="Help" title="Help">?</button>
+      <button class="btn ghost icon" id="help-btn" aria-expanded="false" aria-label="Help" title="Help">?</button>
       <div class="menu right" id="help-pop" hidden>
         <div class="help-row muted" id="help-version"></div>
         <div class="help-row muted">Deployment id
@@ -26,7 +27,6 @@
         <a class="menu-item menu-close" id="help-server-guide" href="/help-server.html" target="_blank" rel="noopener">Server-side setup &amp; troubleshooting ↗</a>
       </div>
     </div>
-    <span class="who" id="who"></span>
     <button class="btn ghost" id="logout">Sign out</button>
   </div>
   <div class="stripe"></div>
@@ -39,6 +39,7 @@
       <div class="nav-group">System</div>
       <a href="#settings" class="nav sub" id="nav-settings">Settings</a>
       <div id="settings-submenu" hidden>
+        <a href="#settings/setup" class="nav subsub" id="nav-settings-setup">Setup</a>
         <a href="#settings/general" class="nav subsub" id="nav-settings-general">General</a>
         <a href="#settings/tls" class="nav subsub" id="nav-settings-tls">TLS &amp; trust</a>
         <a href="#settings/telemetry" class="nav subsub" id="nav-settings-telemetry">Telemetry</a>
@@ -51,8 +52,13 @@
       </div>
     </nav>
     <main class="main">
+      <div id="setup-nudge" class="nudge" hidden>
+        <span id="setup-nudge-text"></span>
+        <a class="btn ghost" href="#setup" id="setup-nudge-open">Finish setup</a>
+        <button class="linkish" id="setup-nudge-dismiss">dismiss</button>
+      </div>
       <section id="view-overview" hidden>
-        <h2>Network Overview</h2>
+        <h2>Network Overview <span id="telemetry-health" class="badge badge-queued" hidden></span></h2>
         <div class="cards" id="ov-cards"></div>
         <h3>Rollout</h3>
         <table class="tbl" id="ov-rollout">
@@ -69,6 +75,11 @@
           <div class="progress" id="prog" hidden><div class="bar" id="bar"></div></div>
           <p class="muted" id="status"></p>
         </div>
+        <p class="muted">Images copied onto the server under
+          <span class="mono">/opt/images</span> — for example
+          <span class="mono">/opt/images/iosxe/c9300/</span> — are offered for
+          import below without uploading. Set <span class="mono">IMAGES_ROOT</span>
+          to scan a different directory.</p>
         <div id="import-panel" hidden>
           <h3>Import from disk</h3>
           <p class="muted">Images already present on this server that are not in the
@@ -101,6 +112,45 @@
           <span class="muted push" id="dev-count"></span>
           <span class="muted" id="dev-status"></span>
         </div>
+        <div class="toolbar" id="dev-filters">
+          <input id="dev-filter-q" placeholder="Filter devices, IP, model…" aria-label="Filter by device, IP or model">
+          <select id="dev-filter-attachment" aria-label="Filter by management type">
+            <option value="">Management type: any</option>
+            <option value="routed">routed</option>
+            <option value="inband">inband</option>
+            <option value="router-routed">router-routed</option>
+            <option value="router-nat">router-nat</option>
+            <option value="legacy">legacy</option>
+          </select>
+          <select id="dev-filter-platform" aria-label="Filter by platform">
+            <option value="">Platform: any</option>
+            <option value="guestshell">Guest Shell</option>
+            <option value="iox">IOx</option>
+            <option value="router">Router</option>
+            <option value="__none">— unset —</option>
+          </select>
+          <select id="dev-filter-cred" aria-label="Filter by credential profile">
+            <option value="">Credential: any</option>
+            <option value="__none">— none —</option>
+          </select>
+          <select id="dev-filter-telemetry" aria-label="Filter by telemetry state">
+            <option value="">Telemetry: any</option>
+            <option value="on">on</option>
+            <option value="off">off</option>
+          </select>
+          <select id="dev-filter-peer" aria-label="Filter by peer policy">
+            <option value="">Peer policy: any</option>
+            <option value="quarantined">quarantined</option>
+            <option value="not-quarantined">not quarantined</option>
+          </select>
+          <!-- Options are generated in app.js from DEVICE_STATUS_OPTIONS, the
+               same list the Status cell derives from. -->
+          <select id="dev-filter-status" aria-label="Filter by status">
+            <option value="">Status: any</option>
+          </select>
+          <button class="linkish" id="dev-filter-clear">clear filters</button>
+          <span class="muted push" id="dev-filter-count"></span>
+        </div>
         <div class="selbar" id="sel-bar" hidden>
           <span class="sel-count" id="sel-count"></span>
           <button class="linkish" id="sel-clear">clear</button>
@@ -113,12 +163,34 @@
               <button class="btn menu-close" id="onboard-selected">Start onboard</button>
             </div>
           </div>
-          <button class="btn ghost" id="undeploy-selected">Undeploy</button>
+          <div class="menu-wrap">
+            <button class="btn ghost" id="undeploy-menu-btn" aria-expanded="false">Undeploy ▾</button>
+            <div class="menu" id="undeploy-pop" hidden>
+              <label class="muted"><input type="checkbox" id="undeploy-force"> Force (no usable deployment receipt)</label>
+              <div class="help-row muted menu-note">
+                Use when a device is stranded — an onboard that died before its
+                receipt was written, or a box that was rebuilt or replaced, so the
+                receipt names hardware that is no longer there and the teardown
+                refuses it on an identity mismatch. Force skips the receipt
+                entirely and removes the IRIS agent footprint only: the
+                VirtualPortGroup and NAT are left untouched, because nothing here
+                proves IRIS created them. Any receipt for the device is abandoned
+                once the teardown succeeds, so it can be onboarded again.
+              </div>
+              <button class="btn menu-close" id="undeploy-selected">Start undeploy</button>
+            </div>
+          </div>
           <button class="btn ghost" id="adopt-selected">Adopt</button>
+          <button class="btn ghost" id="quarantine-selected">Quarantine</button>
+          <button class="btn ghost" id="release-selected">Release</button>
           <span class="sep"></span>
           <span class="joined">
             <select id="cred-selected"><option value="">— credential for selected —</option></select>
             <button class="btn ghost" id="apply-cred-selected">Apply</button>
+          </span>
+          <span class="joined">
+            <select id="image-selected"><option value="">— image for selected —</option></select>
+            <button class="btn ghost" id="apply-image-selected">Apply</button>
           </span>
           <button class="btn danger push" id="delete-selected">Delete…</button>
         </div>
@@ -159,20 +231,28 @@
           </form>
         </div>
         <table class="tbl" id="devices">
-          <thead><tr><th><input type="checkbox" id="mark-all"></th><th>Device</th><th>IP</th><th>Model</th><th>Management type</th><th>Platform</th><th>Credential</th><th>Assigned image</th><th>Telemetry</th><th>Status</th></tr></thead>
+          <thead><tr><th><input type="checkbox" id="mark-all"></th><th>Device</th><th>IP</th><th>Model</th><th>Management type</th><th>Platform</th><th>Credential</th><th>Assigned image</th><th>Telemetry</th><th>Peer policy</th><th>Status</th></tr></thead>
           <tbody id="dev-rows"></tbody>
         </table>
-        <div id="deploy-info-panel" hidden>
-          <h3>Deployment details <span id="di-dev" class="muted"></span></h3>
-          <p class="muted" id="di-note"></p>
-          <table class="tbl" id="di-tbl"><tbody id="di-rows"></tbody></table>
-          <h3>Deployment logs</h3>
-          <table class="tbl" id="di-log-tbl">
-            <thead><tr><th>Finished</th><th>Action</th><th>Result</th><th>Size</th><th></th></tr></thead>
-            <tbody id="di-log-rows"></tbody>
-          </table>
-          <pre class="log" id="di-log-text" hidden></pre>
-          <p><button class="btn ghost" id="di-close">Close</button></p>
+        <!-- Slides in from the RIGHT, like the deployment-log drawer. It used
+             to be appended below the devices table, so opening it on a fleet of
+             any size pushed the details off-screen and made the operator scroll
+             away from the row they had just clicked. -->
+        <div id="deploy-info-panel" class="drawer" hidden aria-label="Deployment details">
+          <div class="drawer-head">
+            <span>Deployment details <span id="di-dev" class="mono"></span></span>
+            <button class="btn ghost" id="di-close" aria-label="Close deployment details">✕</button>
+          </div>
+          <div class="drawer-body">
+            <p class="muted" id="di-note"></p>
+            <table class="tbl" id="di-tbl"><tbody id="di-rows"></tbody></table>
+            <h3>Deployment logs</h3>
+            <table class="tbl" id="di-log-tbl">
+              <thead><tr><th>Finished</th><th>Action</th><th>Result</th><th>Size</th><th></th></tr></thead>
+              <tbody id="di-log-rows"></tbody>
+            </table>
+            <pre class="log" id="di-log-text" hidden></pre>
+          </div>
         </div>
         <div id="batch-panel" hidden>
           <h3>Onboarding batch <span id="batch-summary" class="muted"></span></h3>
@@ -188,11 +268,96 @@
       <section id="view-swarm" hidden>
         <h2>Swarm</h2>
         <p class="muted" id="swarm-summary"></p>
+        <p class="legacy-warning" id="legacy-peer-warning" hidden></p>
         <iframe id="swarm-frame" class="swarm-frame" title="Live swarm map"></iframe>
         <p><a class="btn ghost" id="swarm-open" target="_blank" rel="noopener">Open the swarm map full-screen ↗</a></p>
       </section>
+      <section id="view-setup" hidden>
+        <h2>Finish setting up this server</h2>
+        <p class="muted" id="wz-progress"></p>
+        <div id="wz-steplist" role="list"></div>
+
+        <div class="wz-done" id="wz-admin">
+          <h3>Admin account <span id="wz-admin-chip"></span></h3>
+          <p class="muted">Created during first-run sign-in. Change the password
+            any time from Settings &rsaquo; General.</p>
+        </div>
+
+        <div class="wz-step" id="wz-step-telemetry" hidden>
+          <h3>1. Telemetry destination <span id="wz-td-chip"></span></h3>
+          <p class="muted">Where swarm progress, device reports and export health
+            are published. With no destination configured, none of it leaves this
+            server.</p>
+          <div class="form-mount" id="wz-td-mount"></div>
+        </div>
+
+        <div class="wz-step" id="wz-step-stagehost" hidden>
+          <h3>2. Stage host <span id="wz-sh-chip"></span></h3>
+          <p class="muted">Credentials IRIS uses to reach the Docker host that
+            builds and serves device onboarding material. Without them, onboarding
+            a device over the Docker path cannot start.</p>
+          <div class="form-mount" id="wz-sh-mount"></div>
+        </div>
+
+        <div class="wz-step" id="wz-step-packages" hidden>
+          <h3>3. Device packages <span id="wz-pkg-chip"></span></h3>
+          <p class="muted">Devices that run the agent as an IOx app (IE-3x00, and
+            C9300 with app-hosting) install a package that pins this server's
+            certificate at build time. If that certificate changes, existing
+            packages can no longer authenticate &mdash; the app installs and reports
+            RUNNING, but the device never checks in. Guest Shell platforms re-fetch
+            the certificate on every onboard and are not affected.</p>
+          <p class="muted"><strong>This step cannot be completed from the console.</strong>
+            The console container has no Docker socket, so it can detect a stale
+            package but never rebuild one. Run the command below on the Docker host,
+            then re-check.</p>
+          <table class="tbl" id="wz-pkg-table"><tbody></tbody></table>
+          <p class="mono" id="wz-pkg-remedy"></p>
+          <p><button class="btn ghost" id="wz-pkg-recheck">Re-check</button></p>
+        </div>
+
+        <div class="toolbar" id="wz-nav">
+          <button class="btn ghost" id="wz-back">&lsaquo; Back</button>
+          <button class="btn ghost" id="wz-skip">Skip for now</button>
+          <button class="btn" id="wz-next">Next &rsaquo;</button>
+          <span class="muted push" id="wz-msg"></span>
+        </div>
+      </section>
       <section id="view-settings" hidden>
         <h2>Settings</h2>
+        <div id="settings-pane-setup" hidden>
+          <p class="muted">Four things to complete after installing a server.
+            They can be done in any order, and this page keeps reporting their
+            state so you can come back and check.</p>
+
+          <h3>Admin account <span id="setup-admin-chip"></span></h3>
+          <p class="muted">The single account that signs in to this console.
+            It was created during first-run setup.</p>
+          <p><a href="#settings/general" class="btn ghost">Change password</a></p>
+
+          <h3>Telemetry destination <span id="setup-td-chip"></span></h3>
+          <p class="muted">Telemetry export is how swarm progress, device
+            reports and export health reach the dashboards. Without a
+            destination configured, none of it is published anywhere.</p>
+          <p class="muted" id="setup-td-note"></p>
+          <p><a href="#setup" class="btn ghost">Configure in setup</a></p>
+
+          <h3>Stage host (Docker onboarding) <span id="setup-sh-chip"></span></h3>
+          <p class="muted">Credentials IRIS uses to reach the Docker host that
+            builds and serves device onboarding material. Without them,
+            onboarding a device over the Docker path cannot start.</p>
+          <p><a href="#setup" class="btn ghost">Configure in setup</a></p>
+
+          <h3>Device packages <span id="setup-pkg-chip"></span></h3>
+          <p class="muted">Devices that run the agent as an IOx app (IE-3x00, and
+            C9300 with app-hosting) install a package that pins this server's
+            certificate at build time. If that certificate changes, existing
+            packages can no longer authenticate — the app installs and reports
+            RUNNING, but the device never checks in. Guest Shell platforms
+            re-fetch the certificate on every onboard and are not affected.</p>
+          <table class="tbl" id="setup-pkg-table"><tbody></tbody></table>
+          <p class="muted" id="setup-pkg-remedy"></p>
+        </div>
         <div id="settings-pane-general">
           <h3>Server &amp; build</h3>
           <table class="tbl" id="settings-info"><tbody></tbody></table>
@@ -205,6 +370,8 @@
             <span class="err" id="pw-msg"></span>
           </form>
           <h3>Stage host (Docker onboarding)</h3>
+          <div class="form-mount" id="sh-mount"></div>
+          <template id="tpl-sh-form">
           <p class="muted" id="sh-status"></p>
           <form class="inline-form" id="sh-form">
             <input id="sh-user" placeholder="Stage host username" autocomplete="username">
@@ -214,6 +381,7 @@
             <button class="btn ghost" type="button" id="sh-clear">Clear</button>
             <span class="err" id="sh-msg"></span>
           </form>
+          </template>
           <h3>Sessions</h3>
           <p class="muted" id="sessions-info"></p>
           <p>
@@ -279,6 +447,8 @@
         </div>
         <div id="settings-pane-telemetry" hidden>
           <h3>Telemetry destination</h3>
+          <div class="form-mount" id="td-mount"></div>
+          <template id="tpl-td-form">
           <p class="muted" id="td-status"></p>
           <form class="inline-form" id="td-form">
             <input id="td-endpoint" placeholder="OTLP endpoint (https://collector:4318)">
@@ -287,6 +457,7 @@
             <button class="linkish danger-link" type="button" id="td-revert" hidden>Revert to deployment default</button>
             <span class="err" id="td-msg"></span>
           </form>
+          </template>
         </div>
         <div id="settings-pane-audit" hidden>
           <h3>Audit export</h3>
@@ -310,7 +481,7 @@
         </div>
       </section>
       <section id="view-monitoring" hidden>
-        <h2>Monitoring <span id="telemetry-health" class="badge badge-queued" hidden></span></h2>
+        <h2>Monitoring</h2>
         <div id="monitoring-pane-audit">
         <h3>Audit trail (90-day circular)</h3>
         <div class="toolbar">
@@ -320,7 +491,7 @@
               <option value="auth">auth</option>
               <option value="device">device</option>
               <option value="image">image</option>
-              <option value="onboard">onboard</option>
+              <option value="onboard">deployment</option>
               <option value="settings">settings</option>
               <option value="telemetry">telemetry</option>
               <option value="token">token</option>
@@ -353,19 +524,61 @@
         </div>
         <div id="monitoring-pane-deploylogs" hidden>
           <h3>Deployment logs</h3>
-          <p class="muted">Per-job onboard and undeploy logs kept on the server
-            (newest 200) — they survive console reloads and session changes.</p>
+          <p class="muted">Per-job onboard and undeploy logs kept on the server —
+            they survive console reloads and session changes. Pick a window
+            below, or drag across the graph to select a range; the table follows
+            the selection.</p>
+          <div id="dl-timeline">
+            <div class="toolbar" id="dl-range-chips">
+              <button class="chip" data-range="24h">24h</button>
+              <button class="chip active" data-range="7d">7d</button>
+              <button class="chip" data-range="30d">30d</button>
+              <button class="chip" data-range="90d">90d</button>
+              <button class="chip" data-range="all">All</button>
+            </div>
+            <svg id="dl-histogram" viewBox="0 0 600 64" preserveAspectRatio="none">
+              <g id="dl-bars"></g>
+              <g id="dl-brush"></g>
+            </svg>
+            <p class="muted">
+              <span id="dl-window-label"></span>
+              <button class="linkish" id="dl-clear-selection" hidden>× clear</button>
+            </p>
+          </div>
           <div class="toolbar">
             <span class="joined">
-              <input id="dl-filter" placeholder="Filter by device id" spellcheck="false">
+              <input id="dl-search" placeholder="Search device, action or result" spellcheck="false">
+              <select id="dl-action" aria-label="Filter by action">
+                <option value="">Action: any</option>
+                <option value="onboard">deployment</option>
+                <option value="undeploy">undeploy</option>
+              </select>
+              <select id="dl-result" aria-label="Filter by result">
+                <option value="">Result: any</option>
+                <option value="done">done</option>
+                <option value="error">error</option>
+                <option value="cancelled">cancelled</option>
+              </select>
               <button class="btn ghost" id="dl-refresh">Refresh</button>
             </span>
+            <span class="muted push" id="dl-count"></span>
           </div>
           <table class="tbl" id="dl-tbl">
             <thead><tr><th>Finished</th><th>Device</th><th>Action</th><th>Result</th><th>Size</th><th></th></tr></thead>
             <tbody id="dl-rows"></tbody>
           </table>
-          <pre class="log" id="dl-text" hidden></pre>
+          <div class="toolbar" id="dl-pager">
+            <button class="btn ghost" id="dl-prev">‹ Newer</button>
+            <span class="muted" id="dl-page"></span>
+            <button class="btn ghost" id="dl-next">Older ›</button>
+          </div>
+        </div>
+        <div id="dl-drawer" hidden aria-label="Deployment log">
+          <div class="dl-drawer-head">
+            <span class="mono" id="dl-drawer-title"></span>
+            <button class="btn ghost" id="dl-drawer-close" aria-label="Close log">✕</button>
+          </div>
+          <pre class="log" id="dl-text"></pre>
         </div>
       </section>
     </main>

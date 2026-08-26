@@ -272,9 +272,44 @@ done
 echo "[5/7] install trustpoint and copy agent artifacts over verified HTTPS"
 { echo "configure terminal"; trustpoint_block; echo "end"; } \
   | "$HERE/../lab/device-run.sh" "$DEVICE_IP" >/dev/null
-if ! curl -sf -o /dev/null --max-time 5 --cacert "$IRIS_CRT_FILE" \
-    "https://$STAGE_HOST:8000/bootstrap.sh"; then
-  echo "ERROR: artifact server is unreachable or untrusted" >&2; exit 1
+
+# Preflight the artifact server before handing the device over to the automatic
+# path. Retried, because one 5s attempt was the most fragile step in a fleet
+# onboard: the artifact server's latency degrades under concurrent load (a 75x
+# spike was measured with 30 simultaneous bundle fetches) and this check runs at
+# exactly that moment. A transient miss strands the device half-installed -- the
+# trustpoint above is already pushed -- which is a far worse outcome than waiting.
+#
+# The exit code is reported because "unreachable or untrusted" conflates three
+# faults with three different fixes, and naming trust as a likely cause once sent
+# an investigation chasing certificate drift while the certificates were identical.
+artifact_preflight() {
+  _url="https://$STAGE_HOST:8000/bootstrap.sh"
+  _attempt=1
+  while [ "$_attempt" -le 3 ]; do
+    _rc=0
+    _err="$(curl -sS -f -o /dev/null --max-time 5 --cacert "$IRIS_CRT_FILE" "$_url" 2>&1)" || _rc=$?
+    [ "$_rc" -eq 0 ] && return 0
+    if [ "$_attempt" -lt 3 ]; then
+      echo "  artifact preflight attempt $_attempt failed (curl rc=$_rc); retrying in $((_attempt * 5))s" >&2
+      sleep $((_attempt * 5))
+    fi
+    _attempt=$((_attempt + 1))
+  done
+  case "$_rc" in
+    7)  _why="cannot connect -- is the artifact server up and :8000 reachable from here?" ;;
+    22) _why="server returned an HTTP error -- is bootstrap.sh present in the artifacts dir?" ;;
+    28) _why="timed out (5s x3) -- the server answers but is slow; a large fleet onboard can saturate it" ;;
+    35|60) _why="TLS verification failed -- IRIS_CRT_FILE is not the cert this server presents" ;;
+    *)  _why="curl exit $_rc" ;;
+  esac
+  echo "  ERROR: artifact preflight failed for $_url: $_why" >&2
+  [ -n "$_err" ] && echo "  curl: $_err" >&2
+  return 1
+}
+
+if ! artifact_preflight; then
+  exit 1
 fi
 printf 'delete /force /recursive %s\n' "$IOS_STAGE" \
   | "$HERE/../lab/device-run.sh" "$DEVICE_IP" >/dev/null 2>&1 || true
@@ -295,8 +330,39 @@ done
 
 echo "[6/7] verify applied config and persist to startup-config"
 RUN="$HERE/../lab/device-run.sh"
-RUNNING="$(printf 'terminal width 512\nshow running-config\n' \
-  | "$RUN" "$DEVICE_IP" | grep -v '#' || true)"
+# One SSH login for all three read-only verify checks instead of three --
+# same consolidation as _default_router_preflight in server/gui_onboard.py.
+# IOS XE echoes these markers verbatim; a missing marker is a hard error,
+# never treated as empty/safe output (an empty section here could otherwise
+# read as "nothing to verify" instead of "the check didn't run").
+VERIFY_MARKER="__IRIS_VERIFY_"
+verify_request() {
+cat <<EOF
+terminal width 512
+echo ${VERIFY_MARKER}RUNNING__
+show running-config
+echo ${VERIFY_MARKER}APPS__
+show app-hosting list
+echo ${VERIFY_MARKER}FILES__
+dir bootflash:guest-share
+dir bootflash:guest-share/iris
+EOF
+}
+verify_section() {
+  python3 -c 'import re, sys
+marker = "__IRIS_VERIFY_"
+name = sys.argv[1]
+text = sys.stdin.read()
+start = marker + name + "__"
+match = re.search(re.escape(start) + r"\r?\n?(.*?)(?=" + re.escape(marker) + r"[A-Z_]+__|\Z)", text, re.DOTALL)
+if not match:
+    sys.exit(1)
+sys.stdout.write(match.group(1))' "$1"
+}
+VERIFY_OUT="$(verify_request | "$RUN" "$DEVICE_IP" || true)"
+RUNNING_RAW="$(printf '%s' "$VERIFY_OUT" | verify_section RUNNING)" \
+  || { echo "ERROR: router verify did not return running-config" >&2; exit 1; }
+RUNNING="$(printf '%s' "$RUNNING_RAW" | grep -v '#' || true)"
 config_block() {
   python3 -c 'import re,sys
 name = re.escape(sys.argv[1])
@@ -305,10 +371,12 @@ match = re.search(r"(?ms)^interface %s\s*$\n(.*?)(?=^!\s*$|^interface |^end\s*$|
 print(match.group(0) if match else "")' "$1"
 }
 VPG_RUNNING="$(printf '%s\n' "$RUNNING" | config_block "VirtualPortGroup$VPG_NUMBER")"
-APP_STATE="$(printf 'show app-hosting list\n' \
-  | "$RUN" "$DEVICE_IP" | grep -v '#' || true)"
-FILES="$(printf 'dir bootflash:guest-share\ndir bootflash:guest-share/iris\n' \
-  | "$RUN" "$DEVICE_IP" | grep -v '#' || true)"
+APPS_RAW="$(printf '%s' "$VERIFY_OUT" | verify_section APPS)" \
+  || { echo "ERROR: router verify did not return app-hosting state" >&2; exit 1; }
+APP_STATE="$(printf '%s' "$APPS_RAW" | grep -v '#' || true)"
+FILES_RAW="$(printf '%s' "$VERIFY_OUT" | verify_section FILES)" \
+  || { echo "ERROR: router verify did not return guest-share file listing" >&2; exit 1; }
+FILES="$(printf '%s' "$FILES_RAW" | grep -v '#' || true)"
 
 require_text() {
   local text="$1" expected="$2" description="$3"

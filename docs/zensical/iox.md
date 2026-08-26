@@ -147,6 +147,13 @@ Rebuild both packages after rotating the server certificate, because each
 package contains the pinned catalog certificate. The helper only builds and
 places artifacts; it never contacts or changes a device.
 
+To check whether a served package is already stale — including after a
+catalog certificate change nobody triggered locally, such as a rebuilt server
+or a fresh volume — run the read-only `tools/check-package-freshness.sh`
+(`--rebuild` fixes what it finds), or check the console's Settings → Setup
+page, which surfaces the same drift per package. See
+[TLS rotation and IOx packages](operations.md#tls-rotation-and-iox-packages).
+
 ## Artifact handling
 
 `iris-arm64.tar` and `iris-amd64.tar` are operator-built artifacts and belong under

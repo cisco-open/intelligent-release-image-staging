@@ -241,7 +241,47 @@ ssh_host() {                       # run a command on STAGE_HOST
 }
 
 echo "[1/7] flash pre-check on $DEVICE_IP"
-printf 'dir flash: | include bytes free\n' | "$HERE/../lab/device-run.sh" "$DEVICE_IP" | grep -i 'bytes free' || true
+# One SSH login for all three read-only pre-checks (flash free space, ip
+# routing, device clock) instead of up to three -- same consolidation as
+# _default_router_preflight in server/gui_onboard.py. IOS XE echoes these
+# markers verbatim. The flash pre-check and clock check stay best-effort /
+# informational, exactly as before a missing section there is silently
+# skipped, never fatal. ip routing keeps its HARD fail-closed semantics: a
+# missing ROUTING section (the session never echoed anything back) is a
+# TRANSPORT failure and must not masquerade as, or be silently read as, a
+# routing problem -- see the PREREQ checks below.
+PRECHECK_MARKER="__IRIS_PRECHECK_"
+precheck_request() {
+cat <<EOF
+echo ${PRECHECK_MARKER}FLASH__
+dir flash: | include bytes free
+EOF
+if [ "$NETWORK_ATTACHMENT" = "routed" ]; then
+cat <<EOF
+echo ${PRECHECK_MARKER}ROUTING__
+show running-config | include no ip routing
+show ip route | include Gateway|Default gateway
+EOF
+fi
+cat <<EOF
+echo ${PRECHECK_MARKER}CLOCK__
+show clock
+EOF
+}
+precheck_section() {
+  python3 -c 'import re, sys
+marker = "__IRIS_PRECHECK_"
+name = sys.argv[1]
+text = sys.stdin.read()
+start = marker + name + "__"
+match = re.search(re.escape(start) + r"\r?\n?(.*?)(?=" + re.escape(marker) + r"[A-Z_]+__|\Z)", text, re.DOTALL)
+if not match:
+    sys.exit(1)
+sys.stdout.write(match.group(1))' "$1"
+}
+PRECHECK_OUT="$(precheck_request | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>/dev/null || true)"
+FLASH_RAW="$(printf '%s' "$PRECHECK_OUT" | precheck_section FLASH)" || true
+printf '%s\n' "$FLASH_RAW" | grep -i 'bytes free' || true
 
 echo "[pre] prerequisite checks (ip routing, device clock)"
 # 2026-08-20 incident: an IE-3400 lost `ip routing` on re-image; onboarding still
@@ -257,24 +297,21 @@ if [ "$NETWORK_ATTACHMENT" = "routed" ]; then
   # the positive line false-fails a healthy switch. Decide from authoritative
   # signals instead: an explicit `no ip routing` line, or the route table
   # answering in host mode (`Default gateway ...`), means disabled — while a
-  # session that never echoes the command back is a TRANSPORT failure and
-  # must not masquerade as a routing problem.
-  routing_out="$(printf 'show running-config | include no ip routing\nshow ip route | include Gateway|Default gateway\n' \
-    | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>/dev/null || true)"
-  if ! printf '%s\n' "$routing_out" | grep -q 'show running-config'; then
-    echo "PREREQ: could not verify ip routing on $DEVICE_IP — the device session failed (check reachability and device credentials)" >&2
-    exit 1
-  fi
-  if printf '%s\n' "$routing_out" | grep -qE '^no ip routing[[:space:]]*$' \
-     || printf '%s\n' "$routing_out" | grep -qE '^Default gateway'; then
+  # ROUTING section missing from the response entirely is a TRANSPORT failure
+  # (the session never echoed anything back) and must not masquerade as a
+  # routing problem.
+  ROUTING_RAW="$(printf '%s' "$PRECHECK_OUT" | precheck_section ROUTING)" \
+    || { echo "PREREQ: could not verify ip routing on $DEVICE_IP — the device session failed (check reachability and device credentials)" >&2; exit 1; }
+  if printf '%s\n' "$ROUTING_RAW" | grep -qE '^no ip routing[[:space:]]*$' \
+     || printf '%s\n' "$ROUTING_RAW" | grep -qE '^Default gateway'; then
     echo "PREREQ: ip routing is disabled on this switch — the app network (VLAN $VLAN -> SVI $SVI_IP) cannot reach $STAGE_HOST. Enable it first:  configure terminal ; ip routing ; end ; write" >&2
     exit 1
   fi
 fi
-clock_out="$(printf 'show clock\n' | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>/dev/null || true)"
+CLOCK_RAW="$(printf '%s' "$PRECHECK_OUT" | precheck_section CLOCK)" || true
 # no four-digit year (odd format, probe hiccup) leaves clock_year empty and
 # skips the warning — the grep must not be fatal under pipefail
-clock_year="$(printf '%s' "$clock_out" | grep -oE '[0-9]{4}' | tail -1 || true)"
+clock_year="$(printf '%s' "$CLOCK_RAW" | grep -oE '[0-9]{4}' | tail -1 || true)"
 if [ -n "$clock_year" ] && [ "$clock_year" -lt 2024 ]; then
   echo "PREREQ WARNING: device clock is $clock_year — TLS certificate validation may fail; set the clock or NTP"
 fi
@@ -346,8 +383,43 @@ echo "[5/7] push PKI trustpoint over SSH (FIRST), then drop files over verified 
 # bootstrap.sh, which unpacks the bundle, starts aria2c, and runs the agent.
 # preflight over VERIFIED https: is the artifact server serving, and does its cert
 # validate against the SAME bare crt.pem we just trusted?
-if ! curl -sf -o /dev/null --max-time 5 --cacert "$IRIS_CRT_FILE" "https://$STAGE_HOST:8000/bootstrap.sh"; then
-  echo "  ERROR: https://$STAGE_HOST:8000/bootstrap.sh is not reachable / not trusted." >&2
+
+# Preflight the artifact server before handing the device over to the automatic
+# path. Retried, because one 5s attempt was the most fragile step in a fleet
+# onboard: the artifact server's latency degrades under concurrent load (a 75x
+# spike was measured with 30 simultaneous bundle fetches) and this check runs at
+# exactly that moment. A transient miss strands the device half-installed -- the
+# trustpoint above is already pushed -- which is a far worse outcome than waiting.
+#
+# The exit code is reported because "unreachable or untrusted" conflates three
+# faults with three different fixes, and naming trust as a likely cause once sent
+# an investigation chasing certificate drift while the certificates were identical.
+artifact_preflight() {
+  _url="https://$STAGE_HOST:8000/bootstrap.sh"
+  _attempt=1
+  while [ "$_attempt" -le 3 ]; do
+    _rc=0
+    _err="$(curl -sS -f -o /dev/null --max-time 5 --cacert "$IRIS_CRT_FILE" "$_url" 2>&1)" || _rc=$?
+    [ "$_rc" -eq 0 ] && return 0
+    if [ "$_attempt" -lt 3 ]; then
+      echo "  artifact preflight attempt $_attempt failed (curl rc=$_rc); retrying in $((_attempt * 5))s" >&2
+      sleep $((_attempt * 5))
+    fi
+    _attempt=$((_attempt + 1))
+  done
+  case "$_rc" in
+    7)  _why="cannot connect -- is the artifact server up and :8000 reachable from here?" ;;
+    22) _why="server returned an HTTP error -- is bootstrap.sh present in the artifacts dir?" ;;
+    28) _why="timed out (5s x3) -- the server answers but is slow; a large fleet onboard can saturate it" ;;
+    35|60) _why="TLS verification failed -- IRIS_CRT_FILE is not the cert this server presents" ;;
+    *)  _why="curl exit $_rc" ;;
+  esac
+  echo "  ERROR: artifact preflight failed for $_url: $_why" >&2
+  [ -n "$_err" ] && echo "  curl: $_err" >&2
+  return 1
+}
+
+if ! artifact_preflight; then
   echo "  Is the server container up, did you run tools/make-agent-bundle.sh, and is IRIS_CRT_FILE the server's crt.pem?" >&2
   exit 1
 fi

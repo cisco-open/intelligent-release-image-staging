@@ -61,9 +61,8 @@ def test_store_heartbeat_and_policy(tmp_path):
     s.record_heartbeat("sw-1", {"current_image_id": "img1",
                                 "free_flash_bytes": 9, "version": "17.18"}, now=222)
     assert s.get_device("sw-1")["last_seen"] == 222
-    s.set_policy("sw-1", approved_image_id="img1", install_allowed=True)
-    assert s.get_policy("sw-1") == {"approved_image_id": "img1",
-                                    "install_allowed": True}
+    s.set_policy("sw-1", approved_image_id="img1")
+    assert s.get_policy("sw-1") == {"approved_image_id": "img1"}
 
 
 def test_set_policy_serializes_with_image_deletion_across_processes(tmp_path):
@@ -119,17 +118,16 @@ def test_purge_device_clears_all_state(tmp_path):
     s = _store(tmp_path)
     s.record_heartbeat("sw-1", {"current_image_id": "img1",
                                 "stage_state": "ready"}, now=222)
-    s.set_policy("sw-1", approved_image_id="img1", install_allowed=True)
+    s.set_policy("sw-1", approved_image_id="img1")
     s.record_telemetry("sw-1", {"event": "staging-complete"})
     s.request_report("sw-1", now=1000)
     assert s.purge_device("sw-1") is True
     # deleted-and-re-added devices must come back unassigned: EVERY
     # per-device store is emptied, unlike forget_device()
     assert s.get_device("sw-1") is None
-    assert s.get_policy("sw-1") == {"approved_image_id": None,
-                                    "install_allowed": False}
+    assert s.get_policy("sw-1") == {"approved_image_id": None}
     assert s.get_telemetry("sw-1") == []
-    assert s.pending_report("sw-1", now=1001) is False
+    assert s.pending_report("sw-1", now=1001) is None
     # idempotent on a purged / never-seen device
     assert s.purge_device("sw-1") is False
     assert s.purge_device("never-seen") is False
@@ -283,13 +281,18 @@ def test_list_and_get_image(tmp_path):
         srv.shutdown()
 
 
-def test_torrent_download_bytes(tmp_path):
+def test_torrent_download_device_without_announce_fails_closed(tmp_path):
+    # A device catalog principal with NO announce credential must fail CLOSED
+    # (spec §6) — never a canonical/seeder-token fallback. The _store fixture's
+    # device (from _serve) has no announce_token minted.
     srv, port = _serve(tmp_path, "tok")
     try:
         status, ctype, body = _req(
             port, "GET", "/v1/torrents/img1.torrent", token="tok")
-        assert status == 200 and ctype == "application/x-bittorrent"
-        assert body == b"d4:infod}fakeee"
+        assert status == 500
+        # No token, announce URL, or query string leaks into the error body.
+        assert b"tok" not in body
+        assert b"announce_token" not in body
     finally:
         srv.shutdown()
 
@@ -1235,7 +1238,9 @@ def _post(port, path, token, body, gzip_body=False):
 def test_sanitize_report_whitelists_and_trims():
     """Unknown top-level keys dropped; peers re-trimmed to 64 rows of exactly
     {ip[:64]} — legacy byte fields are never stored; every other string
-    capped at 128."""
+    capped at 128.  The trim is REPORTED, not silent: peers_rows_dropped
+    counts the rows the server dropped and peers_total keeps the real count
+    of rows the device sent."""
     data = _report()
     data["evil_key"] = "drop me"
     data["install"] = True                       # never store install intents
@@ -1249,8 +1254,10 @@ def test_sanitize_report_whitelists_and_trims():
     data.pop("peers_total", None)                # absent -> floored at rows
     out = catalog._sanitize_report(data)
     assert set(out) <= {"ts", "image_id", "event", "transfer", "link",
-                        "peers", "peers_total", "agent"}
+                        "peers", "peers_total", "peers_rows_dropped",
+                        "agent", "schema"}
     assert "evil_key" not in out and "install" not in out
+    assert out["schema"] == "v1"
     assert out["image_id"] == "A" * 128
     assert out["link"]["tier"] == "B" * 128
     # peers: exactly 64 rows of exactly {ip}, ip capped at 64 chars
@@ -1258,8 +1265,11 @@ def test_sanitize_report_whitelists_and_trims():
     assert all(set(row) == {"ip"} for row in out["peers"])
     assert out["peers"][0]["ip"] == "C" * 64
     assert out["peers"][1] == {"ip": "10.0.0.1"}
-    # absent peers_total floors at the named-row count (invariant: >= rows)
-    assert out["peers_total"] == 64
+    # absent peers_total floors at the rows the device SENT (70 dict rows,
+    # the junk row is not one), not at the 64 that survived our trim — the
+    # stored record must never assert a smaller swarm than was reported.
+    assert out["peers_total"] == 70
+    assert out["peers_rows_dropped"] == 6
     assert out["ts"] == 1783000000
     assert out["transfer"]["sha_ok"] is True
 
@@ -1294,6 +1304,19 @@ def test_sanitize_report_peers_total_coerced_and_floored():
     # OTLP intValue encoding
     out = catalog._sanitize_report(_report(peers=[], peers_total=10**300))
     assert out["peers_total"] == 2**31 - 1
+
+
+def test_sanitize_report_v1_trim_is_visible():
+    """A v1 report trimmed by the server says so in a number: the drop count
+    is explicit and peers_total still reflects what the device sent."""
+    data = _report(peers=[{"ip": "10.1.%d.%d" % (i // 250, i % 250)}
+                          for i in range(100)], peers_total=100)
+    out = catalog._sanitize_report(data)
+    assert len(out["peers"]) == 64
+    assert out["peers_rows_dropped"] == 36
+    assert out["peers_total"] == 100
+    # nothing dropped -> an explicit zero, not a missing key
+    assert catalog._sanitize_report(_report())["peers_rows_dropped"] == 0
 
 
 def test_sanitize_report_coerces_link_numeric_fields():
@@ -1384,14 +1407,14 @@ def test_pull_directive_lifecycle_with_ttl(tmp_path):
     s = catalog.CatalogStore(str(tmp_path))
     now = 1000.0
     assert catalog.CatalogStore.PULL_TTL == 600
-    assert s.pending_report("dev-1", now) is False
+    assert s.pending_report("dev-1", now) is None
     # request -> pending
     assert s.request_report("dev-1", now) is True
-    assert s.pending_report("dev-1", now + 1) is True
+    assert s.pending_report("dev-1", now + 1)["report_requested"] is True
     # one pending per device: duplicate refused while unexpired
     assert s.request_report("dev-1", now + 10) is False
     # TTL expiry: at now + PULL_TTL the directive is expired...
-    assert s.pending_report("dev-1", now + 600) is False
+    assert s.pending_report("dev-1", now + 600) is None
     # ...and was lazily deleted from pull_requests.json
     with open(str(tmp_path / "pull_requests.json")) as f:
         assert "dev-1" not in json.load(f)
@@ -1399,7 +1422,7 @@ def test_pull_directive_lifecycle_with_ttl(tmp_path):
     assert s.request_report("dev-1", now + 600) is True
     # explicit clear
     s.clear_report_request("dev-1")
-    assert s.pending_report("dev-1", now + 601) is False
+    assert s.pending_report("dev-1", now + 601) is None
 
 
 def test_record_telemetry_clears_pull_request(tmp_path):
@@ -1408,11 +1431,11 @@ def test_record_telemetry_clears_pull_request(tmp_path):
     s = catalog.CatalogStore(str(tmp_path))
     assert s.request_report("dev-1", 1000.0) is True
     assert s.request_report("dev-2", 1000.0) is True
-    assert s.pending_report("dev-1", 1001.0) is True
+    assert s.pending_report("dev-1", 1001.0)["report_requested"] is True
     s.record_telemetry("dev-1", _report(event="pull"))
-    assert s.pending_report("dev-1", 1002.0) is False
+    assert s.pending_report("dev-1", 1002.0) is None
     # dev-2's directive is untouched
-    assert s.pending_report("dev-2", 1002.0) is True
+    assert s.pending_report("dev-2", 1002.0)["report_requested"] is True
 
 
 # --- HTTP path: route, auth binding, body caps, gzip ------------------------
@@ -1622,3 +1645,449 @@ def test_heartbeat_response_report_requested_roundtrip(tmp_path):
         assert "report_requested" not in json.loads(body)
     finally:
         srv.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Task 7 — typed personalized torrent serving (spec §6)
+# ---------------------------------------------------------------------------
+
+import bencode  # noqa: E402
+import torrent_personalize  # noqa: E402
+
+
+def _valid_torrent_bytes(announce=b"http://old:6969/announce"):
+    info = bencode.encode({"name": "img.bin", "piece length": 16384,
+                           "pieces": b"\x00" * 20, "length": 100})
+    return (b"d8:announce" + bencode.encode(announce)
+            + b"4:info" + info + b"e")
+
+
+def _serve_torrent(tmp_path, device_id="dev-t", catalog_tok="ctok",
+                   announce_val="annVAL", host_ip="10.0.0.1"):
+    """Start a catalog server whose device has a catalog_token AND an
+    announce_token, with a VALID canonical torrent for img1 on disk."""
+    sp = _secrets_path(tmp_path)
+    now = time.time()
+    store = secrets_store.load(sp)
+    dev = store["devices"].setdefault(device_id, {})
+    dev["catalog_token"] = {"value": catalog_tok, "created_at": now,
+                            "expires_at": now + 3600, "revoked": False}
+    if announce_val is not None:
+        dev["announce_token"] = {"value": announce_val, "created_at": now,
+                                 "expires_at": 0, "revoked": False}
+    secrets_store.save(store, sp)
+    s = catalog.CatalogStore(str(tmp_path))
+    (tmp_path / "torrents").mkdir(exist_ok=True)
+    (tmp_path / "torrents" / "img1.torrent").write_bytes(_valid_torrent_bytes())
+    s.save_image({"id": "img1", "filename": "img1.bin", "size": 5,
+                  "sha256": "ab" * 32, "cisco_signature_verified": False,
+                  "info_hash_hex": "cc" * 20, "published_at": 111})
+    os.environ["IRIS_HOST_IP"] = host_ip
+    srv = catalog.make_server("127.0.0.1", 0, s, sp)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, srv.server_address[1]
+
+
+def _req_headers(port, path, token):
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    c.request("GET", path, headers={"Authorization": "Bearer " + token})
+    r = c.getresponse()
+    body = r.read()
+    return r.status, dict(r.getheaders()), body
+
+
+def test_device_gets_personalized_torrent_with_its_announce(tmp_path):
+    srv, port = _serve_torrent(tmp_path, announce_val="ANNTOKEN")
+    try:
+        status, headers, body = _req_headers(
+            port, "/v1/torrents/img1.torrent", "ctok")
+        assert status == 200
+        meta = bencode.decode(body)
+        assert b"announce_token=ANNTOKEN" in meta[b"announce"]
+        assert b"announce-list" not in meta
+        # info hash unchanged vs canonical
+        canon = _valid_torrent_bytes()
+        canon_info = bencode.decode(canon)[b"info"]
+        assert bencode.encode(meta[b"info"]) == bencode.encode(canon_info)
+    finally:
+        srv.shutdown()
+
+
+def test_personalized_response_cache_headers(tmp_path):
+    srv, port = _serve_torrent(tmp_path)
+    try:
+        status, headers, body = _req_headers(
+            port, "/v1/torrents/img1.torrent", "ctok")
+        assert status == 200
+        assert headers.get("Cache-Control") == "private, no-store"
+        assert headers.get("Vary") == "Authorization"
+    finally:
+        srv.shutdown()
+
+
+def test_device_missing_announce_fails_closed_no_leak(tmp_path):
+    srv, port = _serve_torrent(tmp_path, announce_val=None)
+    try:
+        status, headers, body = _req_headers(
+            port, "/v1/torrents/img1.torrent", "ctok")
+        assert status == 500
+        # No token, announce URL, or query string leaks (the generic word
+        # "announce" in a message is fine; a secret/URL is not).
+        assert b"ctok" not in body
+        assert b"announce_token=" not in body
+        assert b"http://" not in body
+        assert b"?" not in body
+    finally:
+        srv.shutdown()
+
+
+def test_canonical_disk_bytes_unchanged_after_personalized_get(tmp_path):
+    srv, port = _serve_torrent(tmp_path, announce_val="ANNX")
+    disk = tmp_path / "torrents" / "img1.torrent"
+    before = disk.read_bytes()
+    try:
+        status, _, body = _req_headers(
+            port, "/v1/torrents/img1.torrent", "ctok")
+        assert status == 200
+        assert body != before  # personalized in memory
+        assert disk.read_bytes() == before  # canonical on disk untouched
+    finally:
+        srv.shutdown()
+
+
+def test_torrent_personalization_failure_is_500_no_leak(tmp_path):
+    # Corrupt canonical torrent -> personalize raises -> 500, no token leak.
+    srv, port = _serve_torrent(tmp_path, announce_val="ANNZ")
+    (tmp_path / "torrents" / "img1.torrent").write_bytes(b"d4:infod}fakeee")
+    try:
+        status, _, body = _req_headers(
+            port, "/v1/torrents/img1.torrent", "ctok")
+        assert status == 500
+        assert b"ANNZ" not in body
+    finally:
+        srv.shutdown()
+
+
+def test_service_principal_receives_canonical_bytes(tmp_path):
+    # A non-device (service/internal) principal receives canonical bytes with
+    # no personalization. Exercised at the route level with a synthetic typed
+    # AuthContext (Day-1 mints no service catalog credential).
+    import auth
+    s = catalog.CatalogStore(str(tmp_path))
+    (tmp_path / "torrents").mkdir(exist_ok=True)
+    canon = _valid_torrent_bytes()
+    (tmp_path / "torrents" / "img1.torrent").write_bytes(canon)
+    s.save_image({"id": "img1", "filename": "img1.bin", "size": 5,
+                  "sha256": "ab" * 32, "cisco_signature_verified": False,
+                  "info_hash_hex": "cc" * 20, "published_at": 111})
+    cat = catalog.Catalog(s, str(tmp_path / "secrets.json"))
+    ctx = auth.AuthContext(
+        principal=auth.Principal("service", "seeder"),
+        secret_name="catalog_token", scope="catalog")
+    result = cat.route_get("/v1/torrents/img1.torrent",
+                           auth_ctx=ctx, store_dict={})
+    status, ctype, body = result[0], result[1], result[2]
+    assert status == 200 and ctype == "application/x-bittorrent"
+    assert body == canon  # canonical, unmodified
+
+
+# ---------------------------------------------------------------------------
+# v2 peer_receipts: exact device-measured per-peer received bytes
+#
+# These are aria2-next session counters read ONCE by the
+# --on-bt-download-complete hook, not the rates-integrated rx_bytes/tx_bytes
+# retired in 2026.08.20.  The tests below pin the three properties that make
+# them trustworthy: absent is not zero, the server's own truncation loses no
+# bytes and states its own mass, and a malformed block is rejected loudly.
+# ---------------------------------------------------------------------------
+
+def _v2(**over):
+    """A minimal valid v2 terminal report (spec §10.2)."""
+    rep = {"v": 2, "report_id": "7c1f0b9a2d3e4f5061728394a5b6c7d8",
+           "transfer_id": "3f0a9c1d8e2b4a6f9017c3d5e7b1a2c4",
+           "report_request_id": None, "report_created_at": 100.0,
+           "image_id": "img1", "event": "staging-complete",
+           "window": {"start": 1.0, "end": 90.0, "complete": True},
+           "content": {"completed_content_bytes": 10,
+                       "total_content_bytes": 10},
+           "content_sha256": {"state": "verified", "algo": "sha256"},
+           "ios_copy_verify": {"state": "ok"},
+           "sampling": {"sampling_class": "good"},
+           "stage_state": "ready", "peers": [], "peers_total": 0,
+           "peers_truncated": False, "peers_saturated": False,
+           "agent": {"version": "x", "runtime_mode": "guestshell"}}
+    rep.update(over)
+    return rep
+
+
+def _receipts(rows=None, **over):
+    rows = [{"ip": "10.0.0.7", "port": 6881,
+             "session_bytes_from_peer": 41943040,
+             "session_bytes_to_peer": 1048576, "has_complete_file": True}] \
+        if rows is None else rows
+    named = [r for r in rows if isinstance(r, dict)] \
+        if isinstance(rows, list) else []
+    block = {"source": "aria2_session_counters", "captured_at": 50.0,
+             "complete": True, "rows": rows, "rows_total": len(named),
+             "rows_omitted": 0,
+             "bytes_from_all_senders_total": sum(
+                 r.get("session_bytes_from_peer") or 0 for r in named),
+             "bytes_from_all_senders_omitted": 0}
+    block.update(over)
+    return block
+
+
+def test_peer_receipts_total_includes_the_origin_and_says_so():
+    """The origin seeder is an ordinary BitTorrent peer of the device, so its
+    row is in the receipts and its bytes are in the total. The field is named
+    bytes_from_all_senders_total for exactly that reason: a "from peers" total
+    here would have read as peer-delivered. Splitting origin from device is
+    telemetry.classify_peer_receipts's job, off the authenticated
+    service:seeder principal -- the sanitizer stores the measurement as made
+    and adds no attribution of its own."""
+    rows = [{"ip": "100.90.168.20", "session_bytes_from_peer": 7110,
+             "session_bytes_to_peer": 0, "has_complete_file": True},
+            {"ip": "10.0.0.7", "session_bytes_from_peer": 2890,
+             "session_bytes_to_peer": 0, "has_complete_file": True}]
+    block = catalog._sanitize_report(
+        _v2(peer_receipts=_receipts(rows=rows)))["peer_receipts"]
+    assert block["bytes_from_all_senders_total"] == 10000
+    assert {r["ip"] for r in block["rows"]} == {"100.90.168.20", "10.0.0.7"}
+    # has_complete_file is aria2's isSeeder(): "holds the whole file", true for
+    # both rows here. It never marks the origin, and nothing stored claims it
+    # does -- no origin/peer key is invented at ingest.
+    assert all(r["has_complete_file"] is True for r in block["rows"])
+    assert not any(k.startswith(("origin", "peer_bytes")) for k in block)
+
+
+def test_peer_receipts_absent_stays_absent():
+    """Absent means NOT MEASURED — the sanitizer must not invent an empty
+    block or a zero total, because 0 bytes from peers is a real, different
+    answer (origin served everything)."""
+    out = catalog._sanitize_report(_v2())
+    assert "peer_receipts" not in out
+    # ... and a measured zero survives as a measured zero
+    zero = _receipts(rows=[{"ip": "10.0.0.7", "session_bytes_from_peer": 0,
+                            "session_bytes_to_peer": 0}])
+    out = catalog._sanitize_report(_v2(peer_receipts=zero))
+    assert out["peer_receipts"]["rows"][0]["session_bytes_from_peer"] == 0
+    assert out["peer_receipts"]["bytes_from_all_senders_total"] == 0
+
+
+def test_peer_receipts_round_trip_whitelisted():
+    """Rows are rebuilt from a whitelist: the exact byte counters, ip, and the
+    optional port/has_complete_file survive; anything else the device sends is dropped."""
+    rows = [{"ip": "10.0.0.7", "port": 6881, "session_bytes_from_peer": 41943040,
+             "session_bytes_to_peer": 1048576, "has_complete_file": True,
+             "rx_bytes": 999, "peerClientName": "<script>"}]
+    out = catalog._sanitize_report(_v2(peer_receipts=_receipts(rows=rows)))
+    block = out["peer_receipts"]
+    assert block["source"] == "aria2_session_counters"
+    assert block["captured_at"] == 50.0
+    assert block["complete"] is True
+    assert block["rows"] == [{"ip": "10.0.0.7", "port": 6881,
+                              "session_bytes_from_peer": 41943040,
+                              "session_bytes_to_peer": 1048576,
+                              "has_complete_file": True}]
+    assert block["rows_total"] == 1 and block["rows_omitted"] == 0
+    assert block["rows_dropped_by_server"] == 0
+    assert block["bytes_from_all_senders_total"] == 41943040
+    assert block["bytes_from_all_senders_omitted"] == 0
+    # the participation table is untouched by all of this — the two sets sit
+    # apart and are joined by ip at read time
+    assert out["peers"] == []
+
+
+def test_peer_receipts_optional_row_fields_stay_absent():
+    """port/has_complete_file absent must not materialize as 0/False — an unknown port is
+    not port 0 and an unknown role is not "leecher"."""
+    rows = [{"ip": "10.0.0.7", "session_bytes_from_peer": 5,
+             "session_bytes_to_peer": 0}]
+    block = catalog._sanitize_report(
+        _v2(peer_receipts=_receipts(rows=rows)))["peer_receipts"]
+    assert block["rows"][0] == {"ip": "10.0.0.7", "session_bytes_from_peer": 5,
+                                "session_bytes_to_peer": 0}
+
+
+def test_peer_receipts_device_omission_preserved():
+    """The device's own cap already omitted rows: their count AND their byte
+    mass arrive as numbers, and the server stores both verbatim."""
+    rows = [{"ip": "10.0.0.7", "session_bytes_from_peer": 100,
+             "session_bytes_to_peer": 0}]
+    block = catalog._sanitize_report(_v2(peer_receipts=_receipts(
+        rows=rows, rows_total=9, rows_omitted=8,
+        bytes_from_all_senders_total=1100,
+        bytes_from_all_senders_omitted=1000)))["peer_receipts"]
+    assert block["rows_total"] == 9 and block["rows_omitted"] == 8
+    assert block["bytes_from_all_senders_total"] == 1100
+    assert block["bytes_from_all_senders_omitted"] == 1000
+    assert block["rows_dropped_by_server"] == 0
+
+
+def test_peer_receipts_server_truncation_is_lossless_and_counted():
+    """The server's own 32-row cap keeps the LARGEST contributors, moves the
+    dropped tail into the omitted counters (never discarding its bytes), and
+    reports its own drop as an explicit count."""
+    rows = [{"ip": "10.0.1.%d" % i, "session_bytes_from_peer": (i + 1) * 1000,
+             "session_bytes_to_peer": 0} for i in range(50)]
+    total = sum(r["session_bytes_from_peer"] for r in rows)
+    block = catalog._sanitize_report(
+        _v2(peer_receipts=_receipts(rows=rows)))["peer_receipts"]
+    assert len(block["rows"]) == 32
+    assert block["rows_dropped_by_server"] == 18
+    # kept rows are the biggest, sorted descending — what is lost is the tail
+    kept = [r["session_bytes_from_peer"] for r in block["rows"]]
+    assert kept == sorted(kept, reverse=True)
+    assert kept[0] == 50000 and kept[-1] == 19000
+    # the totals are unchanged by our trim and the identity still holds
+    assert block["bytes_from_all_senders_total"] == total
+    assert sum(kept) + block["bytes_from_all_senders_omitted"] == total
+    assert block["rows_omitted"] == 18
+    assert block["rows_total"] == len(block["rows"]) + block["rows_omitted"]
+
+
+def test_peer_receipts_server_truncation_adds_to_device_omission():
+    """Device-omitted and server-omitted mass accumulate in the same counters
+    rather than either one overwriting the other."""
+    rows = [{"ip": "10.0.1.%d" % i, "session_bytes_from_peer": 1000,
+             "session_bytes_to_peer": 0} for i in range(40)]
+    block = catalog._sanitize_report(_v2(peer_receipts=_receipts(
+        rows=rows, rows_total=45, rows_omitted=5,
+        bytes_from_all_senders_total=40000 + 77,
+        bytes_from_all_senders_omitted=77)))["peer_receipts"]
+    assert block["rows_omitted"] == 5 + 8
+    assert block["bytes_from_all_senders_omitted"] == 77 + 8000
+    assert block["rows_dropped_by_server"] == 8
+    assert (sum(r["session_bytes_from_peer"] for r in block["rows"])
+            + block["bytes_from_all_senders_omitted"]
+            == block["bytes_from_all_senders_total"] == 40077)
+
+
+def test_peer_receipts_incomplete_capture_is_carried_not_repaired():
+    """complete:false says the hook could not read the whole peer list, so the
+    total is a floor.  The server stores that fact; it never patches it up."""
+    block = catalog._sanitize_report(_v2(peer_receipts=_receipts(
+        complete=False)))["peer_receipts"]
+    assert block["complete"] is False
+    assert block["bytes_from_all_senders_total"] == 41943040
+
+
+def test_peer_receipts_bytes_may_exceed_content_bytes():
+    """aria2 counts WIRE bytes, so hashfailed/duplicate pieces can push the
+    peer sum above the content length.  Rejecting the report over that would
+    throw away the whole measurement — it is explicitly allowed."""
+    rows = [{"ip": "10.0.0.7", "session_bytes_from_peer": 10 ** 6,
+             "session_bytes_to_peer": 0}]
+    out = catalog._sanitize_report(_v2(peer_receipts=_receipts(rows=rows)))
+    assert out["content"]["completed_content_bytes"] == 10
+    assert out["peer_receipts"]["bytes_from_all_senders_total"] == 10 ** 6
+
+
+def test_peer_receipts_rejects_malformed_block():
+    """A malformed block is a device bug and must raise, never be dropped —
+    a silently missing block would be indistinguishable from "not measured"."""
+    bad = [
+        _receipts(source="guesswork"),                     # unknown provenance
+        _receipts(source=None),
+        {"captured_at": 50.0, "complete": True, "rows": []},   # no source
+        _receipts(complete="true"),                        # not a strict bool
+        _receipts(captured_at="50"),
+        _receipts(captured_at=float("inf")),
+        _receipts(captured_at=0.5),        # before window.start
+        _receipts(captured_at=101.0),      # after report_created_at
+        _receipts(rows="nope"),
+        _receipts(rows=[{"ip": "not-an-ip", "session_bytes_from_peer": 1,
+                         "session_bytes_to_peer": 0}]),
+        _receipts(rows=["junk"]),
+        _receipts(rows=[{"session_bytes_from_peer": 1,
+                         "session_bytes_to_peer": 0}]),     # no ip
+        _receipts(rows=[{"ip": "10.0.0.7", "session_bytes_from_peer": -1,
+                         "session_bytes_to_peer": 0}]),
+        _receipts(rows=[{"ip": "10.0.0.7", "session_bytes_from_peer": True,
+                         "session_bytes_to_peer": 0}]),     # bool is not a count
+        _receipts(rows=[{"ip": "10.0.0.7", "session_bytes_from_peer": 2 ** 53 + 1,
+                         "session_bytes_to_peer": 0}]),
+        _receipts(rows=[{"ip": "10.0.0.7", "session_bytes_from_peer": 1,
+                         "session_bytes_to_peer": 0, "port": 70000}]),
+        _receipts(rows=[{"ip": "10.0.0.7", "session_bytes_from_peer": 1,
+                         "session_bytes_to_peer": 0, "has_complete_file": 1}]),
+    ]
+    for block in bad:
+        with pytest.raises(ValueError):
+            catalog._sanitize_report(_v2(peer_receipts=block))
+    for block in ("nope", 5, ["rows"]):
+        with pytest.raises(ValueError):
+            catalog._sanitize_report(_v2(peer_receipts=block))
+
+
+def test_peer_receipts_rejects_duplicate_peer_ip():
+    """Two receipts for one peer have no defined meaning: summing them would
+    invent bytes, choosing one would discard measured bytes."""
+    rows = [{"ip": "10.0.0.7", "session_bytes_from_peer": 5,
+             "session_bytes_to_peer": 0},
+            {"ip": "10.0.0.7", "session_bytes_from_peer": 7,
+             "session_bytes_to_peer": 0}]
+    with pytest.raises(ValueError):
+        catalog._sanitize_report(_v2(peer_receipts=_receipts(rows=rows)))
+
+
+def test_peer_receipts_rejects_broken_arithmetic():
+    """The aggregate identities are the whole point: a total that does not
+    account for its rows is not a measurement."""
+    rows = [{"ip": "10.0.0.7", "session_bytes_from_peer": 100,
+             "session_bytes_to_peer": 0}]
+    with pytest.raises(ValueError):        # bytes do not add up
+        catalog._sanitize_report(_v2(peer_receipts=_receipts(
+            rows=rows, bytes_from_all_senders_total=999,
+            bytes_from_all_senders_omitted=0)))
+    with pytest.raises(ValueError):        # rows do not add up
+        catalog._sanitize_report(_v2(peer_receipts=_receipts(
+            rows=rows, rows_total=9, rows_omitted=0)))
+    with pytest.raises(ValueError):        # rows_total below named rows
+        catalog._sanitize_report(_v2(peer_receipts=_receipts(
+            rows=rows, rows_total=0, rows_omitted=0)))
+
+
+def test_v2_peer_rows_dropped_is_reported():
+    """The v2 path used to trim 70 rows to 64 and still store
+    peers_truncated:false — the drop left no trace.  Now the count is stored
+    and the truncated flag is raised by the server's own trim."""
+    rows = [{"ip": "10.0.2.%d" % i, "first_observed": 1.0,
+             "last_observed": 2.0, "observations": 1} for i in range(70)]
+    out = catalog._sanitize_report(_v2(peers=rows, peers_total=70))
+    assert len(out["peers"]) == 64
+    assert out["peers_rows_dropped"] == 6
+    assert out["peers_truncated"] is True
+    # untrimmed report: an explicit zero and the device's own flag preserved
+    out = catalog._sanitize_report(_v2())
+    assert out["peers_rows_dropped"] == 0 and out["peers_truncated"] is False
+    out = catalog._sanitize_report(_v2(peers_truncated=True))
+    assert out["peers_truncated"] is True
+
+
+def test_v2_peers_total_checked_before_truncation():
+    """peers_total is compared against the rows SENT, so over-sending rows can
+    no longer shrink the declared distinct-peer count."""
+    rows = [{"ip": "10.0.2.%d" % i, "first_observed": 1.0,
+             "last_observed": 2.0, "observations": 1} for i in range(70)]
+    with pytest.raises(ValueError):
+        catalog._sanitize_report(_v2(peers=rows, peers_total=64))
+
+
+def test_peer_receipts_survives_the_store_bound(tmp_path):
+    """A full report — 64 participation rows plus 32 receipt rows — still fits
+    the per-report store bound, and is stored and read back intact."""
+    peers = [{"ip": "10.0.3.%d" % i, "first_observed": 1.0,
+              "last_observed": 2.0, "observations": 3} for i in range(64)]
+    rows = [{"ip": "10.0.4.%d" % i, "port": 6881,
+             "session_bytes_from_peer": (i + 1) * 4096,
+             "session_bytes_to_peer": 512, "has_complete_file": bool(i % 2)}
+            for i in range(32)]
+    rep = _v2(peers=peers, peers_total=64, peer_receipts=_receipts(rows=rows))
+    s = catalog.CatalogStore(str(tmp_path))
+    s.record_telemetry("d1", catalog._sanitize_report(rep))
+    stored = s.get_telemetry("d1")[0]
+    assert len(stored["peers"]) == 64
+    assert len(stored["peer_receipts"]["rows"]) == 32
+    assert stored["peer_receipts"]["bytes_from_all_senders_total"] == sum(
+        r["session_bytes_from_peer"] for r in rows)

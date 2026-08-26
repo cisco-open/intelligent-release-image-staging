@@ -31,8 +31,11 @@ import gui_auth
 import gui_onboard
 import gui_tls
 import live_samples
+import peer_policy
+import peer_enforcement
 import secretfs
 import secrets_store
+import setup_status
 import telemetry
 import telemetry_destination
 import trust
@@ -63,6 +66,18 @@ def _map_cfg_line():
                       .replace("&", "\\u0026"))
     return ('window.IRIS_MAP_CFG = {"swarmUrl":"/api/swarm","pull":true,'
             '"eventsUrlTemplate":%s};' % payload)
+def _telemetry_status_args():
+    """(override_endpoint, override_enabled, env_endpoint, env_enabled) for
+    setup_status.build_status's telemetry card -- the exact same resolution
+    _settings_info uses for telemetry_destination (console override file,
+    else IRIS_OTLP_ENDPOINT / IRIS_OBSERVABILITY), read fresh at request time
+    so the setup checklist never disagrees with the Telemetry settings pane."""
+    state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
+    dest = telemetry_destination.read(
+        telemetry_destination.settings_path(state_dir))
+    return (dest["endpoint"], dest["enabled"],
+            os.environ.get("IRIS_OTLP_ENDPOINT", "").strip(),
+            telemetry.observability_enabled())
 _CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".js": "application/javascript",
@@ -144,6 +159,28 @@ def _claim_admin(app, supplied_grant, username, password):
         return "ok"
 
 
+def _revoke_device_secrets(app, device_id):
+    """Durably revoke every secret for *device_id*, durable-copy-FIRST, under the
+    secrets-store flock (spec §7 retirement step 1).
+
+    Returns ``"ok"`` on a persisted revoke, ``"absent"`` if the device owns no
+    secret records (nothing to revoke — the caller may still clean fleet/catalog
+    state), or raises on a persist failure so the caller ABORTS the delete with
+    no fleet/catalog/policy change. Uses the same lock + durable-first discipline
+    as iris-revoke, so a concurrent rotation cannot re-arm the device and a
+    durable-write failure never leaves a phantom (unpersisted) revoke.
+    """
+    with secrets_store.store_lock(app.secrets_path):
+        store = secrets_store.load(app.secrets_path)
+        if device_id not in store.get("devices", {}):
+            return "absent"
+        secrets_store.revoke(store, device_id)
+        secretfs.persist_store(store, app.secrets_path,
+                               recipients_csv=app.recipients_csv,
+                               enc_path=app.secrets_enc)
+    return "ok"
+
+
 def _fmt_bytes(n):
     """Human-readable byte count for audit details: '1.2 GiB' / '340 MiB' /
     '12 KiB' (1024-based, 1 decimal, trailing .0 dropped). Non-numeric or
@@ -190,12 +227,41 @@ def _int_or_none(raw):
         return None
 
 
-def _list_deploy_logs(log_dir, device_id=None):
+def _deploy_log_histogram(log_dir, since_ts, until_ts, buckets, device_id=None):
+    """Bin deploy logs into evenly-spaced buckets over [since_ts, until_ts),
+    oldest-first, including empty buckets -- the deploy-log counterpart of
+    audit.histogram, so the two timelines behave identically. Never raises; an
+    unreadable directory yields all-zero buckets."""
+    n = max(1, min(int(buckets), 200))
+    span = until_ts - since_ts
+    width = span / n if span > 0 else 0
+    starts = [since_ts + i * width for i in range(n)]
+    counts = [0] * n
+    for entry in _list_deploy_logs(log_dir, device_id=device_id):
+        ts = entry.get("finished_at")
+        if not isinstance(ts, int) or ts < since_ts or ts >= until_ts:
+            continue
+        idx = int((ts - since_ts) / width) if width else 0
+        counts[min(max(idx, 0), n - 1)] += 1
+    return [{"start": int(starts[i]), "count": counts[i]} for i in range(n)]
+
+
+def _list_deploy_logs(log_dir, device_id=None, after_ts=None, before_ts=None,
+                      registered_at=None):
     """Metadata for every parseable *.log under log_dir, newest first:
     {"file","device_id","action","state","rc","finished_at","size"}. The
     header line wins; a file with a missing/garbled header falls back to the
     filename fields (state/rc unknown); anything unparseable either way is
-    skipped. The device_id filter compares the RAW id from the header."""
+    skipped. The device_id filter compares the RAW id from the header.
+
+    *registered_at* is when the device currently holding this id was registered.
+    Logs are keyed on the bare id and deliberately outlive a delete (they are
+    the forensic record of what ran), so after a device is deleted and added
+    back — a rebuilt or replaced box — its predecessor's runs would otherwise be
+    read as this device's own history. Entries finishing before that stamp are
+    flagged ``previous_registration`` rather than hidden: the run happened, it
+    just happened to a different machine. Omit the stamp and nothing is
+    flagged, which is what pre-existing devices (no stamp) get."""
     if not log_dir or not os.path.isdir(log_dir):
         return []
     out = []
@@ -224,6 +290,16 @@ def _list_deploy_logs(log_dir, device_id=None):
                      "action": parts[-2], "state": None, "rc": None,
                      "finished_at": int(parts[0]), "size": size}
         if device_id is not None and entry["device_id"] != device_id:
+            continue
+        if registered_at is not None:
+            entry["previous_registration"] = (
+                entry.get("finished_at") or 0) < registered_at
+        # Inclusive at both ends: a brush selection must contain the entries
+        # sitting exactly on the edges the operator dragged to.
+        ts = entry.get("finished_at")
+        if after_ts is not None and (ts is None or ts < after_ts):
+            continue
+        if before_ts is not None and (ts is None or ts > before_ts):
             continue
         out.append(entry)
     out.sort(key=lambda e: (e["finished_at"] or 0, e["file"]), reverse=True)
@@ -522,6 +598,61 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                  onboard=None, swarm_fetch=None, certfile=None, audit_path=None,
                  receipts=None, now_fn=time.time):
     login_limiter = gui_auth.LoginRateLimiter()
+
+    def policy_state_dir():
+        return (catalog.state_dir if catalog is not None
+                else os.environ.get("IRIS_STATE", "/var/lib/iris"))
+
+    def policy_paths():
+        state_dir = policy_state_dir()
+        return (os.path.join(state_dir, "peer-policy.json"),
+                os.path.join(state_dir, "peer-policy.lkg.json"),
+                os.path.join(state_dir, "peer-enforcement.json"))
+
+    def policy_view():
+        """Return the GUI-safe, count-only policy and tracker-status view."""
+        auth_path, lkg_path, enforcement_path = policy_paths()
+        result = peer_policy.load_policy(auth_path, lkg_path)
+        doc = result.document
+        status = peer_enforcement.read_status(enforcement_path) or {}
+        conflicts = status.get("conflicts")
+        if not isinstance(conflicts, list):
+            conflicts = []
+        types = sorted({str(c.get("reason")) for c in conflicts
+                        if isinstance(c, dict) and isinstance(c.get("reason"), str)})
+        effect = status.get("last_effect")
+        # Reconciler effects are aggregate counters. Do not pass through an
+        # arbitrary tracker document (which could accidentally grow an address).
+        safe_effect = ({k: v for k, v in effect.items()
+                        if k in ("disconnected_peers", "removed_peers")
+                        and isinstance(v, int) and not isinstance(v, bool)}
+                       if isinstance(effect, dict) else None)
+        enforcement = {
+            "state": status.get("state") if status.get("state") in peer_enforcement.STATES else None,
+            "desired_ip_count": status.get("desired_ip_count")
+                if isinstance(status.get("desired_ip_count"), int)
+                and not isinstance(status.get("desired_ip_count"), bool) else 0,
+            "applied_revision": status.get("applied_revision")
+                if isinstance(status.get("applied_revision"), int)
+                and not isinstance(status.get("applied_revision"), bool) else None,
+            "last_reconciled_at": status.get("last_reconciled_at")
+                if isinstance(status.get("last_reconciled_at"), (int, float)) else None,
+            "conflict_count": len(conflicts), "conflict_types": types,
+            "last_effect": safe_effect,
+            "last_error": status.get("last_error")
+                if isinstance(status.get("last_error"), str) else None,
+            "last_operation_exported_revision": status.get("last_operation_exported_revision")
+                if isinstance(status.get("last_operation_exported_revision"), int)
+                and not isinstance(status.get("last_operation_exported_revision"), bool) else 0,
+        }
+        return {"schema": doc.get("schema"), "revision": doc.get("revision"),
+                "degraded": result.degraded, "fail_closed": result.fail_closed,
+                "quarantine": {"reserved": True,
+                               "description": "reserved: fully isolate an assigned device"},
+                "quarantine_assignments": sorted(
+                    device_id for device_id, acl in doc.get("assignments", {}).items()
+                    if acl == peer_policy.RESERVED_QUARANTINE),
+                "enforcement": enforcement}
 
     class Handler(BaseHTTPRequestHandler):
         timeout = 60  # socket inactivity timeout (s): a stalled upload frees its thread
@@ -835,6 +966,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
 
         def do_GET(self):
             path = self.path.split("?", 1)[0]
+            if path == "/api/peer-policy":
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                self._json(200, policy_view()); return
             if path == "/api/audit":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
@@ -981,6 +1116,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 did = unquote(path[len("/api/devices/"):-len("/reports")])
                 if not did.strip():
                     self._json(400, {"error": "bad device id"}); return
+                if fleet is None or fleet.get_device(did) is None:
+                    self._json(422, {"error": "device is not in fleet"}); return
                 reports = catalog.get_telemetry(did) if catalog else []
                 self._json(200, {"reports": reports}); return
             if path.startswith("/api/devices/") and path.endswith("/deployment"):
@@ -1036,9 +1173,67 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     self._json(401, {"error": "unauthorized"}); return
                 qs = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
                 device_id = (qs.get("device_id") or [None])[0]
+                def _ts(name):
+                    if not qs.get(name):
+                        return None
+                    try:
+                        return int(float(qs[name][0]))
+                    except ValueError:
+                        return None
                 log_dir = getattr(onboard, "log_dir", None) if onboard else None
+                # Only meaningful for a single device's history; the unfiltered
+                # list spans the whole fleet, where one device's stamp says
+                # nothing about another's rows.
+                registered_at = None
+                if device_id and fleet is not None:
+                    try:
+                        registered_at = int(
+                            (fleet.get_device(device_id) or {}).get(
+                                "registered_at") or 0) or None
+                    except (TypeError, ValueError):
+                        registered_at = None
                 self._json(200, {"logs": _list_deploy_logs(
-                    log_dir, device_id=device_id)})
+                    log_dir, device_id=device_id,
+                    after_ts=_ts("after_ts"), before_ts=_ts("before_ts"),
+                    registered_at=registered_at)})
+                return
+            if path == "/api/deploy-logs/histogram":
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                qs = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                device_id = (qs.get("device_id") or [None])[0]
+                try:
+                    buckets = int((qs.get("buckets") or [30])[0])
+                except ValueError:
+                    buckets = 30
+                buckets = max(1, min(buckets, 200))
+                now = time.time()
+                since = until = None
+                for name in ("since_ts", "until_ts"):
+                    if qs.get(name):
+                        try:
+                            val = float(qs[name][0])
+                        except ValueError:
+                            val = None
+                        if name == "since_ts":
+                            since = val
+                        else:
+                            until = val
+                if since is not None and until is not None:
+                    if until <= since:
+                        self._json(400, {"error": "until_ts must be greater "
+                                                  "than since_ts"}); return
+                else:
+                    try:
+                        window = float((qs.get("window") or [604800])[0])
+                    except ValueError:
+                        window = 604800.0
+                    window = max(60.0, window)
+                    since, until = now - window, now
+                log_dir = getattr(onboard, "log_dir", None) if onboard else None
+                self._json(200, {"buckets": _deploy_log_histogram(
+                    log_dir, since, until, buckets, device_id=device_id),
+                    "now": int(now)})
                 return
             if path.startswith("/api/deploy-logs/"):
                 if app.session_info(self._sid()) is None:
@@ -1095,6 +1290,20 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     path[len("/api/settings/audit-export/run/"):])
                 self._json(200, job) if job else self._json(
                     404, {"error": "no such job"})
+                return
+            if path == "/api/settings/setup-status":
+                info = app.session_info(self._sid())
+                if info is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                artifacts_dir = os.environ.get(
+                    "IRIS_ARTIFACTS_DIR", "/srv/artifacts")
+                self._json(200, setup_status.build_status(
+                    artifacts_dir,
+                    os.environ.get("IRIS_CERT", _IRIS_CERT_DEFAULT),
+                    os.path.join(artifacts_dir, "iris-catalog.pem"),
+                    info["username"],
+                    creds.get_stage_host() if creds is not None else None,
+                    *_telemetry_status_args()))
                 return
             if path == "/api/settings":
                 info = app.session_info(self._sid())
@@ -1332,6 +1541,65 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
 
         def do_PUT(self):
             path = self.path.split("?", 1)[0]
+            quarantine_prefix = "/api/peer-policy/quarantine/"
+            if path.startswith(quarantine_prefix):
+                info = self._require_session_csrf()
+                if info is None:
+                    return
+                encoded_id = path[len(quarantine_prefix):]
+                device_id = unquote(encoded_id)
+                # This is one URL segment, not a generic policy target. Reject
+                # encoded path separators and let FleetStore remain authoritative.
+                if not device_id or "/" in device_id or fleet is None or \
+                        fleet.get_device(device_id) is None:
+                    self._json(422, {"error": "unknown device"}); return
+                try:
+                    length = int(self.headers.get("Content-Length", "0") or 0)
+                except ValueError:
+                    self._json(400, {"error": "bad content-length"}); return
+                if length < 0 or length > _MAX_BODY:
+                    self._json(413, {"error": "payload too large"}); return
+                raw = self.rfile.read(length) if length else b""
+                body = self._json_body(raw)
+                if body is None:
+                    return
+                if set(body) != {"quarantined", "if_revision"} or \
+                        type(body.get("quarantined")) is not bool or \
+                        type(body.get("if_revision")) is not int or \
+                        body["if_revision"] < 1:
+                    self._json(400, {"error": "bad peer-policy request"}); return
+                view = policy_view()
+                if view["fail_closed"]:
+                    self._json(503, {"error": "policy_fail_closed"}); return
+                if view["degraded"]:
+                    self._json(422, {"error": "policy_error"}); return
+                auth_path, lkg_path, enforcement_path = policy_paths()
+                status = peer_enforcement.read_status(enforcement_path) or {}
+                acked = status.get("last_operation_exported_revision", 0)
+                if type(acked) is not int or acked < 0:
+                    acked = 0
+                quarantined = body["quarantined"]
+                def mutate(candidate):
+                    if quarantined:
+                        candidate["assignments"][device_id] = peer_policy.RESERVED_QUARANTINE
+                    else:
+                        candidate["assignments"].pop(device_id, None)
+                try:
+                    committed = peer_policy.commit_mutation(
+                        auth_path, lkg_path,
+                        action="assign" if quarantined else "unassign",
+                        target=device_id, actor="console:" + info["username"],
+                        now=now_fn(), mutate=mutate, acked_revision=acked,
+                        expected_revision=body["if_revision"])
+                except peer_policy.RevisionConflict as exc:
+                    self._json(409, {"error": "revision_conflict",
+                                     "revision": exc.revision}); return
+                except peer_policy.OperationBacklogFull:
+                    self._json(503, {"error": "operation_backlog_full"}); return
+                except peer_policy.PolicyError:
+                    self._json(422, {"error": "policy_error"}); return
+                self._json(200, {"ok": True, "revision": committed["revision"],
+                                 "quarantined": quarantined}); return
             prefix = "/api/images/upload/"
             if not path.startswith(prefix) or images is None:
                 self._json(404, {"error": "not found"})
@@ -1931,7 +2199,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if entry is None:
                     self._json(400, {"error": "no such image"}); return
                 old = catalog.get_policy(did).get("approved_image_id")
-                catalog.set_policy(did, approved_image_id=image_id)  # install_allowed stays False (stage-only)
+                catalog.set_policy(did, approved_image_id=image_id)  # approval is the whole policy: IRIS stages, never installs
                 detail = "assigned %s (%s) id=%s" % (
                     entry.get("filename"), _fmt_bytes(entry.get("size")), image_id)
                 if old and old != image_id:
@@ -1995,6 +2263,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 did = unquote(path[len("/api/devices/"):-len("/request-report")])
                 if not did.strip():
                     self._json(400, {"error": "bad device id"}); return
+                if fleet is None or fleet.get_device(did) is None:
+                    self._json(422, {"error": "device is not in fleet"}); return
                 if catalog is None:
                     self._json(404, {"error": "not found"}); return
                 now = time.time()
@@ -2103,18 +2373,29 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 receipt_ref = {}
                 prepare = None
                 pre_apply = None
+                on_success = None
                 # Telemetry flags from the onboard form (spec 8.1): reports
                 # default on, streaming default off — both installer-style and
                 # IOx-style env names so every platform recipe picks them up.
                 body_flags = self._json_body(raw)
                 if body_flags is None:
                     return
+                # Force teardown: an onboard that died after enabling the
+                # agent but before its receipt was written leaves a router that
+                # cannot be undeployed (no receipt), cannot be adopted (routers
+                # never can) and cannot be re-onboarded (preflight refuses the
+                # existing Guest Shell). Force removes ONLY the agent footprint.
+                force = body_flags.get("force", False) is True
                 t_on = body_flags.get("telemetry", True) is not False
                 s_on = body_flags.get("telemetry_stream", False) is True
                 env_extra = {"TELEMETRY": "on" if t_on else "off",
                              "TELEMETRY_STREAM": "on" if s_on else "off"}
                 env_extra["IRIS_TELEMETRY"] = env_extra["TELEMETRY"]
                 env_extra["IRIS_TELEMETRY_STREAM"] = env_extra["TELEMETRY_STREAM"]
+                # Undeploy carries its own env: the telemetry flags above are
+                # onboard-only, but the force flag below MUST reach the
+                # teardown recipe. env_extra is the only channel into it.
+                undeploy_env = None
                 if act == "onboard":
                     # With a receipt store (always in production via main()), an
                     # onboard resolves an immutable plan and records a receipt.
@@ -2125,10 +2406,6 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             plan = self._plan(did, device)
                         except ValueError as exc:
                             _reject(409, str(exc)); return
-                        try:
-                            preflight = onboard.preflight(did, plan["resolved"])
-                        except (ValueError, OSError) as exc:
-                            _reject(409, "preflight failed: %s" % exc); return
                         if plan["resolved"].get("platform") == "router":
                             try:
                                 # Any receipt IRIS already applied blocks a
@@ -2142,12 +2419,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             if existing is not None:
                                 _reject(409, "router already has a %s "
                                         "deployment receipt; undeploy it before "
-                                        "onboarding again"
+                                        "onboarding again — if this device was "
+                                        "replaced, undeploy with force, or "
+                                        "delete and re-add it"
                                         % existing.get("state", "recorded")); return
-                            try:
-                                plan = self._apply_router_preflight(plan, preflight)
-                            except ValueError as exc:
-                                _reject(409, "preflight failed: %s" % exc); return
                         resolved = plan["resolved"]
 
                         def prepare():
@@ -2157,7 +2432,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             rid = receipts.create({"controller_id": "iris",
                                 "device_id": did, "inventory_revision": fleet.revision(),
                                 "plan_hash": plan["plan_hash"], "resolved": plan["resolved"],
-                                "preflight": preflight,
+                                # Router preflight runs in the bounded worker pool,
+                                # not synchronously in this HTTP request. This lets a
+                                # large selected batch show queued progress immediately.
+                                "preflight": ({"status": "pending"}
+                                              if resolved.get("platform") == "router"
+                                              else {"status": "not-required"}),
                                 "resources": self._owned_resources(plan["resolved"])})["receipt_id"]
                             receipt_ref["id"] = rid
                             return rid
@@ -2191,32 +2471,87 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     # post-deploy inventory edit cannot retarget cleanup. Without
                     # a receipt store, fall back to legacy fleet-driven teardown.
                     if receipts is not None:
-                        try:
-                            # Not just the ACTIVE receipt: a controller restart
-                            # during an onboard leaves the receipt "unknown"
-                            # while the device is already configured, and that
-                            # receipt still records what IRIS created. Teardown
-                            # must accept it, or the device is stranded — a
-                            # router cannot be adopted and its preflight refuses
-                            # a re-onboard.
-                            receipt = receipts.recoverable_for_device(did)
-                        except ValueError as exc:
-                            # duplicate actives should be impossible (activation
-                            # supersedes siblings; startup collapses legacy dupes)
-                            # — but surface the reason instead of a 500 if not.
-                            _reject(409, str(exc)); return
-                        if receipt is None:
-                            _reject(409, "no deployment receipt for this "
-                                    "device; adopt it first, then undeploy"); return
-                        try:
-                            resolved = self._router_teardown_resolved(receipt)
-                        except ValueError as exc:
-                            receipts.transition(receipt["receipt_id"], "needs-reconcile")
-                            _reject(409, str(exc)); return
+                        # FORCE is decided BEFORE the receipt is read, because a
+                        # forced teardown never uses a receipt as authority: it
+                        # strips only what is identifiably IRIS's by name and
+                        # leaves the operator's network exactly as it is. Force
+                        # used to be consulted only on the no-receipt branch,
+                        # which defeated the one case it exists for — a receipt
+                        # that describes a device no longer there. A rebuilt VM
+                        # keeps its id and address but gets a new board ID, so
+                        # the teardown recipe's identity guard refused it every
+                        # time, while onboard kept naming that same teardown as
+                        # the fix. Force could not be reached from either end.
+                        if force:
+                            try:
+                                degraded_plan = self._plan(
+                                    did, fleet.get_device(did))
+                            except ValueError as exc:
+                                _reject(409, str(exc)); return
+                            resolved = degraded_plan["resolved"]
+                            undeploy_env = {"IRIS_FORCE_AGENT_ONLY": "1"}
 
-                        def prepare():
-                            receipt_ref["id"] = receipt["receipt_id"]
-                            return receipt["receipt_id"]
+                            # Retired only once the box is actually clean (see
+                            # OnboardService.start's on_success). EVERY
+                            # non-terminal receipt goes, which is also the only
+                            # exit from "multiple recoverable receipts" — that
+                            # state refuses onboard, undeploy and adopt alike,
+                            # and nothing else in the product resolves it.
+                            def on_success(_did=did):
+                                receipts.retire_device(
+                                    _did, "forced agent-only teardown; the "
+                                    "receipt no longer describes this device")
+
+                            self._audit("undeploy_forced", "onboard",
+                                        action="start", target=did,
+                                        actor=actor, result="ok",
+                                        detail="forced agent-footprint teardown;"
+                                               " VPG/NAT left untouched, any "
+                                               "deployment receipt abandoned "
+                                               "once the teardown succeeds")
+                        else:
+                            try:
+                                # Not just the ACTIVE receipt: a controller
+                                # restart during an onboard leaves the receipt
+                                # "unknown" while the device is already
+                                # configured, and that receipt still records
+                                # what IRIS created. Teardown must accept it, or
+                                # the device is stranded — a router cannot be
+                                # adopted and its preflight refuses a re-onboard.
+                                receipt = receipts.recoverable_for_device(did)
+                            except ValueError as exc:
+                                # duplicate actives should be impossible
+                                # (activation supersedes siblings; startup
+                                # collapses legacy dupes) — but surface the
+                                # reason instead of a 500 if not, and name the
+                                # way out rather than leaving the operator with
+                                # a state the console cannot resolve.
+                                _reject(409, "%s; retry with force to remove "
+                                        "the agent footprint only" % exc); return
+                            if receipt is None:
+                                _reject(409, "no deployment receipt for this "
+                                        "device; adopt it first, then undeploy, "
+                                        "or retry with force to remove the "
+                                        "agent footprint only"); return
+                            try:
+                                resolved = self._router_teardown_resolved(receipt)
+                            except ValueError as exc:
+                                # Best effort: the receipt may already BE
+                                # needs-reconcile, from an earlier attempt at
+                                # this same broken teardown, and that self-edge
+                                # is not a legal transition. Letting it raise
+                                # turned every retry after the first into an
+                                # unhandled 500 with no JSON body to explain it.
+                                try:
+                                    receipts.transition(receipt["receipt_id"],
+                                                        "needs-reconcile")
+                                except ValueError:
+                                    pass
+                                _reject(409, str(exc)); return
+
+                            def prepare():
+                                receipt_ref["id"] = receipt["receipt_id"]
+                                return receipt["receipt_id"]
                     else:
                         try:
                             degraded_plan = self._plan(did, fleet.get_device(did))
@@ -2228,11 +2563,23 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 try:
                     jid = onboard.start(
                         did, action=act, resolved=resolved, prepare=prepare,
-                        pre_apply=pre_apply,
-                        env_extra=env_extra if act == "onboard" else None)
+                        pre_apply=pre_apply, on_success=on_success,
+                        env_extra=(env_extra if act == "onboard"
+                                   else undeploy_env))
                 except ValueError as exc:
                     if receipt_ref.get("id") and act == "onboard":
-                        receipts.transition(receipt_ref["id"], "needs-reconcile")
+                        # Best effort, for the same reason as the teardown-
+                        # resolve handler above: start() retires the receipt
+                        # itself when the work queue is full, so this would be
+                        # removed -> needs-reconcile, which is not a legal edge.
+                        # An illegal transition raised from inside an except
+                        # handler escapes do_POST entirely — the operator gets a
+                        # dropped request instead of the 409 that explains why.
+                        try:
+                            receipts.transition(receipt_ref["id"],
+                                                "needs-reconcile")
+                        except ValueError:
+                            pass
                     # the device is busy with the OPPOSITE action
                     _reject(409, str(exc)); return
                 # Emitted AFTER start() so the job id correlates this start with
@@ -2369,21 +2716,109 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             if path.startswith("/api/devices/") and fleet is not None:
                 did = unquote(path[len("/api/devices/"):])
                 prev = fleet.get_device(did)
+                # Spec §7 retirement: durably REVOKE the device's secrets FIRST.
+                # If that persist fails, ABORT — no fleet/catalog/policy change,
+                # HTTP reports failure, audit stays non-secret. Endpoint rows are
+                # deliberately RETAINED (never removed here); the now-revoked
+                # principal is derived-denied via its still-fresh endpoint
+                # regardless of policy, so cleanup order can never re-permit it.
+                try:
+                    revoke_state = _revoke_device_secrets(app, did)
+                except Exception:
+                    # Token-free: the exception (which could embed a path or
+                    # secret) is dropped, only a generic failure is audited.
+                    self._audit("device_delete", "device", action="delete",
+                               target=did, actor=actor, result="fail",
+                               detail="secret revoke failed; delete aborted, "
+                                      "no state changed")
+                    self._json(500, {"deleted": False,
+                                     "error": "secret revoke failed"})
+                    return
+                # Revoke succeeded (or the device had no secrets). Now tidy
+                # policy + fleet + catalog state. Any failure here is
+                # partial/degraded but CANNOT permit the device.
+                degraded = []
+                # Peer-policy lives in the shared IRIS state dir. Prefer the
+                # catalog's own state_dir (single source of truth, and what the
+                # tracker reconciler reads) so console + tracker agree; fall back
+                # to IRIS_STATE only when no catalog is wired.
+                state_dir = (catalog.state_dir if catalog is not None
+                             else os.environ.get("IRIS_STATE", "/var/lib/iris"))
+                try:
+                    peer_policy.unassign_device(
+                        os.path.join(state_dir, "peer-policy.json"),
+                        os.path.join(state_dir, "peer-policy.lkg.json"),
+                        did, actor=actor, now=time.time())
+                except Exception:
+                    degraded.append("policy")
                 deleted = fleet.delete(did)
                 # Purge catalog-side state (assignment, heartbeat record,
-                # telemetry history, pending pull) even when the fleet row was
-                # already gone — a deleted-and-re-added device must come back
-                # unassigned, never resurrect a stale assignment.
-                purged = catalog.purge_device(did) if catalog is not None else False
-                self._audit("device_delete", "device", action="delete", target=did,
-                           actor=actor, result="ok" if deleted else "fail",
-                           detail=("removed (ip %s, model %s)%s"
-                                   % ((prev or {}).get("device_ip"),
-                                      (prev or {}).get("model") or "-",
-                                      ", assignment and state purged"
-                                      if purged else ""))
-                                  if deleted else "no such device")
-                self._json(200, {"deleted": deleted})
+                # telemetry history, seen-report ledger, pending pull) even when
+                # the fleet row was already gone — a deleted-and-re-added device
+                # must come back unassigned. Endpoints are NOT purged (retained
+                # to TTL); re-onboard clears them before new credentials mint.
+                try:
+                    purged = (catalog.purge_device(did)
+                              if catalog is not None else False)
+                except Exception:
+                    purged = False
+                    degraded.append("catalog")
+                # Retire the deployment receipts for the same reason the catalog
+                # state goes: a receipt outlives the fleet row, and the NEXT
+                # device registered under this id inherits it. That strands the
+                # device rather than merely confusing it — onboard refuses while
+                # a recoverable receipt exists and names undeploy as the fix,
+                # while that teardown refuses the (replaced) box on an identity
+                # mismatch. Abandoned, not dropped: the receipt stays the record
+                # of what IRIS built there, which an operator who deleted a
+                # still-configured device is the one person who needs.
+                retired = []
+                try:
+                    if receipts is not None:
+                        retired = receipts.retire_device(
+                            did, "device deleted from the fleet")
+                except Exception:
+                    degraded.append("receipts")
+                # Work in flight outlives the device for the same reason: a job
+                # record is keyed on the device id alone, so one left behind
+                # keeps the busy guard armed against the NEXT device registered
+                # under this name -- refusing the opposite action outright and
+                # silently joining the dead job for the same one.
+                stopped = 0
+                try:
+                    if onboard is not None:
+                        halted = onboard.cancel_device(did)
+                        stopped = halted["cancelled"] + halted["aborted"]
+                except Exception:
+                    degraded.append("jobs")
+                result = "ok" if deleted and not degraded else (
+                    "fail" if not deleted else "degraded")
+                if deleted:
+                    suffix = (", secrets revoked" if revoke_state == "ok"
+                              else "")
+                    suffix += ", endpoints retained"
+                    suffix += (", %d deployment receipt%s abandoned"
+                               % (len(retired), "" if len(retired) == 1 else "s")
+                               if retired else ", no deployment receipt")
+                    if stopped:
+                        suffix += (", %d in-flight job%s stopped"
+                                   % (stopped, "" if stopped == 1 else "s"))
+                    if degraded:
+                        suffix += ", partial cleanup: %s" % ",".join(degraded)
+                    detail = ("removed (ip %s, model %s)%s"
+                              % ((prev or {}).get("device_ip"),
+                                 (prev or {}).get("model") or "-", suffix))
+                elif revoke_state == "ok" or purged or retired:
+                    # No fleet row, but the device had durable secrets/state we
+                    # revoked/purged — a real retirement, not a no-op.
+                    detail = "no fleet row; secrets revoked, state purged"
+                else:
+                    detail = "no such device"
+                self._audit("device_delete", "device", action="delete",
+                           target=did, actor=actor, result=result,
+                           detail=detail)
+                self._json(200 if not degraded else 207,
+                           {"deleted": deleted, "degraded": degraded})
                 return
             if path.startswith("/api/credentials/") and creds is not None:
                 cid = unquote(path[len("/api/credentials/"):])

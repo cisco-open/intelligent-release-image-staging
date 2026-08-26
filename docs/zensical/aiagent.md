@@ -10,9 +10,7 @@ Use this guide for a first proof-of-concept or proof-of-value deployment. It is
 not a production runbook: it does not cover high availability, scale hardening,
 or change control.
 
-IRIS distributes, verifies, and stages IOS-XE images. It never installs,
-activates, reloads, changes boot variables, or otherwise changes a device's
-running software state.
+IRIS is stage-only — see [Guardrails](security.md#guardrails).
 
 ## Before you start
 
@@ -83,7 +81,13 @@ At the end of every step, state the next action required from me.
 3. **Create the Console admin.** Accept the self-signed certificate warning only
    for the expected server, sign in with the default first-run credential
    `iris` / `irisisgreat!`, and create the initial admin account. The default
-   credential works only before an admin account exists.
+   credential works only before an admin account exists. The next sign-in opens
+   the first-run setup wizard at `#setup`: telemetry destination, stage host,
+   and device packages. Any step can be skipped and resumed later — a banner
+   keeps offering the unfinished ones, and Settings › Setup reports their state.
+   The device-packages step is the same check as step 6 below; it cannot be
+   completed from the console, because the console container has no Docker
+   socket.
 4. **Publish an image.** Upload through the Console, import a file that is
    already on the server from the Console **Import from disk** panel, or use
    `iris-publish` from inside the server container. Publishing creates catalog
@@ -104,6 +108,12 @@ At the end of every step, state the next action required from me.
    startup-config`; a failed or partial lifecycle is not saved.
 8. **Assign and observe.** Assign the published image, then use the Swarm and
    Monitoring areas to verify downloading, verification, staging, and seeding.
+   For the proof-of-value figure, show how the bytes actually travelled: the
+   hub traces origin-to-device bytes and each device reports which peers
+   supplied its image, so a rollout can state how much of the load the devices
+   carried for each other versus what came from the server. See
+   [Telemetry export](telemetry-export.md) and the importable Grafana and
+   Splunk boards under `docs/zensical/dashboards/`.
 9. **Stop at staged.** Handoff installation, activation, reload, and boot
    management to the normal device-management process. They are outside IRIS.
 

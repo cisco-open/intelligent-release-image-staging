@@ -4,9 +4,21 @@
 
 """Swarm state with peer lifecycle. Each peer carries (ip, port, last_seen,
 left). `left=0` means a seeder. Peers are pruned when silent for >2*INTERVAL or
-on event=stopped. `downloaded` (completed count) is tracked per swarm for scrape."""
+on event=stopped. `downloaded` (completed count) is tracked per swarm for scrape.
+
+Identity (spec §0a/§6). Each peer is keyed by its typed principal AND peer_id:
+the registry identity key is ``(principal.type, principal.id, peer_id)``. A
+device literally named ``seeder`` (``device:seeder``) is therefore distinct from
+the service seeder (``service:seeder``), and two principals that happen to share
+a peer_id are isolated. Callers that pass no principal (the current tracker path,
+pending typed integration) default to a single ``legacy:''`` principal, so their
+behaviour is unchanged (same peer_id still collides/replaces as before).
+"""
+import secrets
 import threading
 import time
+
+import auth
 
 INTERVAL = 30          # client re-announce interval (seconds)
 NUMWANT_CAP = 200      # never hand back more than this many peers
@@ -17,6 +29,31 @@ DOWNLOADED_TTL = 24 * 60 * 60
 # Even inside the TTL, cap inactive/active completion records. Ten thousand is
 # far above a realistic IRIS catalog while keeping memory deterministic.
 MAX_DOWNLOADED_SWARMS = 10000
+
+# Default principal for principal-less (bare) announce callers. Using a single
+# constant legacy principal preserves the pre-typed behaviour where two
+# announces sharing a peer_id map to one registry slot.
+_DEFAULT_PRINCIPAL = auth.Principal("legacy", "")
+
+# Map principal type -> participant class surfaced in snapshots/events.
+_PARTICIPANT_CLASS = {
+    "device": "device",
+    "service": "seeder",
+    "legacy": "legacy_unattributed",
+}
+
+
+def _participant_class(principal):
+    return _PARTICIPANT_CLASS.get(principal.type, "legacy_unattributed")
+
+
+def _public_principal_id(principal):
+    """The public principal_id. The legacy id is only an internal dedupe key and
+    MAY be omitted from public output (spec §0a); we omit an empty legacy id and
+    surface a nonsecret endpoint-derived one when present."""
+    if principal.type == "legacy" and not principal.id:
+        return None
+    return principal.id
 
 
 class PeerRegistry:
@@ -35,33 +72,44 @@ class PeerRegistry:
         # slow or failing I/O in the hook never holds up other threads.
         self._lock = threading.Lock()
 
-    def _emit(self, event, info_hash, peer_id, ip, port, left, now):
+    def _emit(self, event, info_hash, peer_id, ip, port, left, now,
+              principal=_DEFAULT_PRINCIPAL):
         if self._on_event is None:
             return
         try:
             self._on_event({"event": event, "info_hash": info_hash,
                             "peer_id": peer_id, "ip": ip, "port": port,
-                            "left": left, "ts": now})
+                            "left": left, "ts": now,
+                            "principal_type": principal.type,
+                            "principal_id": _public_principal_id(principal),
+                            "participant_class": _participant_class(principal),
+                            # Random in-process lifecycle id (spec §5/§10.8):
+                            # kept only in this queue — NOT a durable audit id.
+                            "event_id": secrets.token_hex(16)})
         except Exception:
             pass  # telemetry is observational, never on the critical path
 
     def announce(self, info_hash, peer_id, ip, port, event=None,
-                 left=None, now=None):
+                 left=None, now=None, principal=None):
         now = time.time() if now is None else now
+        principal = _DEFAULT_PRINCIPAL if principal is None else principal
+        key = (principal.type, principal.id, peer_id)
         # Collect telemetry events to fire AFTER releasing the lock so that
         # slow callbacks never hold up other announcing threads.
         pending = []
         with self._lock:
             swarm = self._swarms.setdefault(info_hash, {})
             if event == "stopped":
-                if swarm.pop(peer_id, None) is not None:
-                    pending.append(("stop", info_hash, peer_id, ip, port, left, now))
+                if swarm.pop(key, None) is not None:
+                    pending.append(("stop", info_hash, peer_id, ip, port, left,
+                                    now, principal))
                 if not swarm:
                     self._swarms.pop(info_hash, None)
             else:
-                prev = swarm.get(peer_id)
+                prev = swarm.get(key)
                 if prev is None:
-                    pending.append(("join", info_hash, peer_id, ip, port, left, now))
+                    pending.append(("join", info_hash, peer_id, ip, port, left,
+                                    now, principal))
                 # joined_at / completed_at track this peer's CURRENT download cycle:
                 #   * joined_at = when this cycle started (first announce, or the
                 #     moment `left` transitions from 0 back up to >0 — a re-download).
@@ -94,20 +142,23 @@ class PeerRegistry:
                         "count": completed["count"] + 1, "last_seen": now}
                     if len(self._downloaded) > MAX_DOWNLOADED_SWARMS:
                         oldest = min(self._downloaded,
-                                     key=lambda key: self._downloaded[key]["last_seen"])
+                                     key=lambda k: self._downloaded[k]["last_seen"])
                         if oldest != info_hash or len(self._downloaded) > 1:
                             self._downloaded.pop(oldest, None)
                     pending.append(
-                        ("complete", info_hash, peer_id, ip, port, left, now))
+                        ("complete", info_hash, peer_id, ip, port, left, now,
+                         principal))
                     if completed_at is None:
                         completed_at = now
-                swarm[peer_id] = {
+                swarm[key] = {
                     "ip": ip,
                     "port": int(port),
                     "last_seen": now,
                     "left": None if left is None else int(left),
                     "joined_at": joined_at,
                     "completed_at": completed_at,
+                    "peer_id": peer_id,
+                    "principal": principal,
                 }
         for args in pending:
             self._emit(*args)
@@ -116,12 +167,13 @@ class PeerRegistry:
         """Remove stale peers from *swarm* (caller must hold self._lock).
         Returns a list of telemetry event arg-tuples to fire after releasing."""
         cutoff = now - 2 * self._interval
-        stale_pids = [p for p, r in swarm.items() if r["last_seen"] < cutoff]
+        stale_keys = [k for k, r in swarm.items() if r["last_seen"] < cutoff]
         pending = []
-        for pid in stale_pids:
-            r = swarm.pop(pid)
+        for k in stale_keys:
+            r = swarm.pop(k)
             pending.append(
-                ("stale", info_hash, pid, r["ip"], r["port"], r["left"], now))
+                ("stale", info_hash, r["peer_id"], r["ip"], r["port"],
+                 r["left"], now, r["principal"]))
         return pending
 
     def _cleanup_empty(self, info_hash, swarm, now):
@@ -141,8 +193,47 @@ class PeerRegistry:
             self._cleanup_empty(info_hash, swarm, now)
             limit = min(max(0, numwant), NUMWANT_CAP)
             out = []
-            for pid, r in swarm.items():
-                if pid == peer_id:
+            for r in swarm.values():
+                if r["peer_id"] == peer_id:
+                    continue
+                out.append({"ip": r["ip"], "port": r["port"]})
+                if len(out) >= limit:
+                    break
+        for args in pending:
+            self._emit(*args)
+        return out
+
+    def select_peers(self, info_hash, peer_id, requester_principal,
+                     requester_ip, predicate=None, numwant=50, now=None):
+        """Return candidate peers for a requester, filtered by *predicate*.
+
+        The predicate — when given — receives BOTH complete identities on each
+        side: ``predicate(requester_principal, requester_ip, candidate_principal,
+        candidate_ip)`` and returns True to permit the candidate. This is the
+        mutual-ACL seam (spec §7); the tracker HTTP integration and the concrete
+        policy live in a later task. With no predicate, every other peer is
+        returned (implicit permit-all discovery).
+        """
+        now = time.time() if now is None else now
+        # Exclude the requester's OWN record by its FULL identity key
+        # (principal.type, principal.id, peer_id), not by bare peer_id: a
+        # different typed principal that happens to reuse this peer_id is a
+        # distinct peer and must stay discoverable (spec §0a/§6).
+        req = _DEFAULT_PRINCIPAL if requester_principal is None \
+            else requester_principal
+        self_key = (req.type, req.id, peer_id)
+        with self._lock:
+            swarm = self._swarms.get(info_hash, {})
+            pending = self._prune(info_hash, swarm, now)
+            self._cleanup_empty(info_hash, swarm, now)
+            limit = min(max(0, numwant), NUMWANT_CAP)
+            out = []
+            for key, r in swarm.items():
+                if key == self_key:
+                    continue
+                if predicate is not None and not predicate(
+                        requester_principal, requester_ip,
+                        r["principal"], r["ip"]):
                     continue
                 out.append({"ip": r["ip"], "port": r["port"]})
                 if len(out) >= limit:
@@ -227,6 +318,9 @@ class PeerRegistry:
                       "last_seen": r["last_seen"], "is_seeder": r["left"] == 0,
                       "joined_at": r["joined_at"],
                       "completed_at": r.get("completed_at"),
+                      "principal_type": r["principal"].type,
+                      "principal_id": _public_principal_id(r["principal"]),
+                      "participant_class": _participant_class(r["principal"]),
                       "download_seconds": (
                           (r["completed_at"] - r["joined_at"])
                           if r.get("completed_at") is not None else None)}

@@ -23,6 +23,149 @@
   // Telemetry posture as the DEVICE last reported it (not what onboarding
   // asked for). Tri-state: an agent that predates the flag reports nothing,
   // which is "unknown" — never shown as "off", since off is a real choice.
+  // ---- Devices: column filters -------------------------------------------
+  // Every bulk action operates on the checked rows, and only FILTERED rows are
+  // rendered, so filtering then "select all" is how an operator acts on a
+  // subset without hand-picking. Filter state lives in the DOM controls, not
+  // in the row data, so the periodic re-render never clears it.
+  var LAST_DEVICES = [];
+  var LAST_DEV_NOW = 0;
+
+  function deviceFilterState() {
+    function val(id) {
+      var el = document.getElementById(id);
+      return el ? el.value : '';
+    }
+    return {
+      q: val('dev-filter-q').trim().toLowerCase(),
+      attachment: val('dev-filter-attachment'),
+      platform: val('dev-filter-platform'),
+      cred: val('dev-filter-cred'),
+      telemetry: val('dev-filter-telemetry'),
+      peer: val('dev-filter-peer'),
+      status: val('dev-filter-status')
+    };
+  }
+
+  // ONE derivation of the Status cell, read by the row renderer AND by the
+  // filter. It used to be written twice, and the filter's copy knew only three
+  // of the eleven states the cell can actually show: a device reading
+  // "onboarding…", "placement failed" or "copying to bootflash:" could not be
+  // picked from the Status filter at all, and asking for "enrolled" silently
+  // swept them in. Returning the label and the class from the same place is
+  // what makes the two structurally unable to disagree.
+  //
+  // Order matters and mirrors the cell exactly: job-aware states come FIRST,
+  // because right after an onboard the agent needs minutes to bootstrap before
+  // its first heartbeat, and without them the row reads "not enrolled" and
+  // looks like the onboard did nothing.
+  var DEVICE_STATUS_OPTIONS = [
+    ['onboarding', 'onboarding'],
+    ['undeploying', 'undeploying'],
+    ['waiting-heartbeat', 'waiting for heartbeat'],
+    ['onboard-failed', 'onboard failed'],
+    ['undeploy-failed', 'undeploy failed'],
+    ['deployed', 'deployed'],
+    ['placement-failed', 'placement failed'],
+    ['copying', 'copying to IOS storage'],
+    ['staging', 'staging (other)'],
+    ['enrolled', 'enrolled'],
+    ['not-enrolled', 'not enrolled'],
+    ['offline', 'offline (no recent heartbeat)']
+  ];
+  function deviceStatus(d, devNow) {
+    // "no heartbeat since the job finished" — the job outcome is the freshest
+    // truth we have about this device
+    var jobFresh = d.onboard_finished_at &&
+      (!d.last_seen || d.last_seen < d.onboard_finished_at);
+    if (d.onboard_state === 'queued' || d.onboard_state === 'running') {
+      return d.onboard_action === 'undeploy'
+        ? { key: 'undeploying', label: 'undeploying…', cls: 'badge badge-running' }
+        : { key: 'onboarding', label: 'onboarding…', cls: 'badge badge-running' };
+    }
+    if (d.onboard_state === 'done' && d.onboard_action === 'onboard' && jobFresh) {
+      return { key: 'waiting-heartbeat', label: 'waiting for heartbeat',
+               cls: 'badge badge-queued' };
+    }
+    if (d.onboard_state === 'error' && jobFresh) {
+      return d.onboard_action === 'undeploy'
+        ? { key: 'undeploy-failed', label: 'undeploy failed', cls: 'badge badge-fail' }
+        : { key: 'onboard-failed', label: 'onboard failed', cls: 'badge badge-fail' };
+    }
+    // "deployed" = the assigned image is staged and verified on the box.
+    if (d.stage_state === 'ready' && d.current_image_id &&
+        d.current_image_id === d.assigned_image_id) {
+      return { key: 'deployed', label: 'deployed', cls: 'badge badge-ok' };
+    }
+    if (d.stage_error) {
+      return { key: 'placement-failed', label: 'placement failed',
+               cls: 'badge badge-fail', detail: d.stage_error };
+    }
+    if (d.stage_state === 'transferring_to_ios') {
+      return { key: 'copying', label: 'copying to ' + (d.target_fs || 'IOS storage'),
+               cls: 'badge badge-running' };
+    }
+    if (d.stage_state) {
+      return { key: 'staging', label: d.stage_state, cls: 'badge badge-running' };
+    }
+    if (d.last_seen) {
+      return { key: 'enrolled', label: 'enrolled', cls: 'badge badge-queued' };
+    }
+    return { key: 'not-enrolled', label: 'not enrolled', cls: 'muted' };
+  }
+  function deviceStatusHtml(d, devNow) {
+    var st = deviceStatus(d, devNow);
+    var title = st.detail ? ' title="' + esc(st.detail) + '"' : '';
+    var html = '<span class="' + st.cls + '"' + title + '>' + esc(st.label) + '</span>';
+    if (st.detail) {
+      html += ' <span class="muted"' + title + '>' + esc(st.detail) + '</span>';
+    }
+    if (deviceIsOffline(d, devNow)) {
+      html += ' <span class="muted" style="font-size:10px">offline</span>';
+    }
+    return html;
+  }
+  function deviceIsOffline(d, devNow) {
+    return !!(d.last_seen && (devNow - d.last_seen) >= 600);
+  }
+
+  function deviceMatchesFilters(d, f, devNow) {
+    if (f.q) {
+      var hay = [d.device_id, d.device_ip, d.model, d.heartbeat_model]
+        .filter(Boolean).join(' ').toLowerCase();
+      if (hay.indexOf(f.q) === -1) return false;
+    }
+    if (f.attachment &&
+        (d.management_type || d.network_attachment || 'legacy') !== f.attachment) return false;
+    if (f.platform) {
+      var plat = d.platform || '';
+      if (f.platform === '__none' ? plat !== '' : plat !== f.platform) return false;
+    }
+    if (f.cred) {
+      var cred = d.credential_profile_id || '';
+      if (f.cred === '__none' ? cred !== '' : cred !== f.cred) return false;
+    }
+    if (f.telemetry) {
+      var tel = d.telemetry_enabled === false ? 'off' : 'on';
+      if (tel !== f.telemetry) return false;
+    }
+    if (f.peer) {
+      var q = peerPolicyAssigned(d.device_id) ? 'quarantined' : 'not-quarantined';
+      if (q !== f.peer) return false;
+    }
+    if (f.status) {
+      // "offline" is a modifier on top of whatever the cell says (a device can
+      // read "deployed" and still be stale), so it stays its own choice.
+      if (f.status === 'offline') { if (!deviceIsOffline(d, devNow)) return false; }
+      else if (deviceStatus(d, devNow).key !== f.status) return false;
+    }
+    return true;
+  }
+
+  // Re-render from the devices already in hand -- filtering must not wait on
+  // (or fire) a network round trip.
+  function applyDeviceFilters() { renderDevices(LAST_DEVICES, LAST_DEV_NOW); }
+
   function telemetryCell(d) {
     if (d.telemetry_enabled === false) {
       return '<span class="badge badge-off" title="the agent sends no telemetry">off</span>';
@@ -225,6 +368,61 @@
   var devStatus = document.getElementById('dev-status');
   var imageIds = [];
   var credOpts = [];
+  var peerPolicy = { revision: null, quarantine_assignments: [], enforcement: {} };
+  var peerPolicyBusy = {};
+  function peerPolicyAssigned(deviceId) {
+    return (peerPolicy.quarantine_assignments || []).indexOf(deviceId) !== -1;
+  }
+  function peerPolicyStatus() {
+    var e = peerPolicy.enforcement || {};
+    var state = ['pending', 'enforced', 'degraded', 'rpc_unavailable', 'fail_closed'].indexOf(e.state) !== -1
+      ? e.state : 'pending';
+    var details = 'Last tracker enforcement: ' + state + '; desired peers: ' +
+      (typeof e.desired_ip_count === 'number' ? e.desired_ip_count : 0);
+    if (e.conflict_count) details += '; conflicts: ' + (e.conflict_types || []).join(', ');
+    return '<span class="badge ' + (state === 'enforced' ? 'badge-ok' :
+      (state === 'degraded' || state === 'fail_closed' ? 'badge-fail' : 'badge-queued')) +
+      '" title="' + esc(details) + '">' + esc(state) + '</span>';
+  }
+  var devicesRefreshGeneration = 0, devicesRefreshController = null;
+  async function setQuarantine(btn) {
+    var id = btn.closest('tr').getAttribute('data-id');
+    var quarantined = !peerPolicyAssigned(id);
+    var action = quarantined ? 'Quarantine' : 'Release';
+    if (!confirm(action + ' ' + id + '?\n\nThis changes peer discovery and the server seeder across all torrents. ' +
+        'It may not terminate existing device-to-device sessions immediately. It never installs or reloads a device.')) return;
+    btn.disabled = true;
+    peerPolicyBusy[id] = true;
+    try {
+      var r = await fetch('/api/peer-policy/quarantine/' + encodeURIComponent(id), {
+        method: 'PUT', headers: csrfHdr({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ quarantined: quarantined, if_revision: peerPolicy.revision })
+      });
+      var body = await r.json().catch(function () { return {}; });
+      if (r.ok) {
+        peerPolicy.revision = body.revision;
+        peerPolicy.quarantine_assignments = (peerPolicy.quarantine_assignments || []).filter(function (x) { return x !== id; });
+        if (body.quarantined) peerPolicy.quarantine_assignments.push(id);
+        devStatus.textContent = action + ' intent saved for ' + id + '.';
+        // The mutation is already committed. A follow-up read failure may leave
+        // the view stale, but must never turn a truthful success into "failed".
+        refreshDevices().catch(function () {});
+      } else if (r.status === 409) {
+        devStatus.textContent = 'Peer policy changed elsewhere. Review the current policy and retry; no change was made.';
+        // Refresh best-effort without masking the accurate conflict outcome.
+        refreshDevices().catch(function () {});
+      } else if (r.status === 503 && body.error === 'operation_backlog_full') {
+        devStatus.textContent = 'Peer-policy operation backlog is full; retry later.';
+      } else {
+        devStatus.textContent = 'Peer-policy update failed: ' + (body.error || r.status) + '.';
+      }
+    } catch (e) {
+      devStatus.textContent = 'Peer-policy update failed; retry later.';
+    } finally {
+      delete peerPolicyBusy[id];
+      if (btn.isConnected) btn.disabled = false;
+    }
+  }
   // Live status: the devices table previously refreshed only on tab switches
   // and after actions, so stage_state changes (staging -> transferring ->
   // ready) sat stale until the operator clicked something. Poll every 10s —
@@ -245,14 +443,58 @@
   }
   scheduleDevices();
   async function refreshDevices() {
-    var [dr, ir, cr] = await Promise.all([fetch('/api/devices'), fetch('/api/images'), fetch('/api/credentials')]);
-    if (!dr.ok) return;
+    var mine = ++devicesRefreshGeneration;
+    if (devicesRefreshController) devicesRefreshController.abort();
+    devicesRefreshController = new AbortController();
+    var signal = devicesRefreshController.signal;
+    var results;
+    try {
+      results = await Promise.all([fetch('/api/devices', { signal: signal }), fetch('/api/images', { signal: signal }), fetch('/api/credentials', { signal: signal }), fetch('/api/peer-policy', { signal: signal })]);
+    } catch (e) {
+      // Superseding a refresh is expected; callers must not see an unhandled
+      // AbortError. Other failures still reach their caller/status handling.
+      if (e && e.name === 'AbortError') return;
+      throw e;
+    }
+    var dr = results[0], ir = results[1], cr = results[2], pr = results[3];
+    if (!dr.ok || mine !== devicesRefreshGeneration) return;
+    var nextPolicy = pr.ok ? await pr.json() : peerPolicy;
     var dbody = await dr.json();
+    if (mine !== devicesRefreshGeneration) return;
+    peerPolicy = nextPolicy;
     var devs = dbody.devices || [];
     var devNow = dbody.now || Date.now() / 1000;   // server clock for last_seen freshness
     imageIds = ir.ok ? ((await ir.json()).images || []).map(function (i) { return i.id; }) : [];
     credOpts = cr.ok ? ((await cr.json()).profiles || []) : [];
+    if (mine !== devicesRefreshGeneration) return;
     syncCredSelected();
+    syncImageSelected();
+    LAST_DEVICES = devs;
+    LAST_DEV_NOW = devNow;
+    syncDeviceFilterOptions();
+    renderDevices(devs, devNow);
+  }
+
+  // Populate the credential filter from the profiles that actually exist,
+  // preserving the operator's current choice even if it is momentarily absent
+  // from a slow /api/credentials response.
+  function syncDeviceFilterOptions() {
+    var sel = document.getElementById('dev-filter-cred');
+    if (!sel) return;
+    var keep = sel.value;
+    sel.innerHTML = ['<option value="">Credential: any</option>',
+                     '<option value="__none">— none —</option>']
+      .concat(credOpts.map(function (c) {
+        return '<option value="' + esc(c.id) + '">' + esc(c.id) + '</option>';
+      })).join('');
+    sel.value = keep;
+    if (sel.value !== keep) sel.value = '';
+  }
+
+  function renderDevices(devs, devNow) {
+    var filters = deviceFilterState();
+    var total = devs.length;
+    devs = devs.filter(function (d) { return deviceMatchesFilters(d, filters, devNow); });
     // keep batch checkbox selections across the periodic re-render
     var marked = {};
     document.querySelectorAll('#dev-rows .mark:checked').forEach(function (cb) {
@@ -272,39 +514,7 @@
       ].map(function (o) {
         return '<option value="' + esc(o[0]) + '"' + (o[0] === platVal ? ' selected' : '') + '>' + esc(o[1]) + '</option>';
       }).join('');
-      // "deployed" = the assigned image is staged and verified on the box;
-      // anything else shows the raw stage_state, or enrollment/liveness.
-      // Job-aware states come FIRST: right after an onboard the agent needs
-      // minutes to bootstrap before its first heartbeat — without these the
-      // row reads "not enrolled" and looks like the onboard did nothing.
-      var fresh = d.last_seen && (devNow - d.last_seen) < 600;
-      // "no heartbeat since the job finished" — the job outcome is the
-      // freshest truth we have about this device
-      var jobFresh = d.onboard_finished_at && (!d.last_seen || d.last_seen < d.onboard_finished_at);
-      var status;
-      if (d.onboard_state === 'queued' || d.onboard_state === 'running') {
-        status = '<span class="badge badge-running">' +
-          (d.onboard_action === 'undeploy' ? 'undeploying…' : 'onboarding…') + '</span>';
-      } else if (d.onboard_state === 'done' && d.onboard_action === 'onboard' && jobFresh) {
-        status = '<span class="badge badge-queued">waiting for heartbeat</span>';
-      } else if (d.onboard_state === 'error' && jobFresh) {
-        status = '<span class="badge badge-fail">' +
-          (d.onboard_action === 'undeploy' ? 'undeploy' : 'onboard') + ' failed</span>';
-      } else if (d.stage_state === 'ready' && d.current_image_id && d.current_image_id === d.assigned_image_id) {
-        status = '<span class="badge badge-ok">deployed</span>';
-      } else if (d.stage_error) {
-        status = '<span class="badge badge-fail" title="' + esc(d.stage_error) + '">placement failed</span>' +
-          ' <span class="muted" title="' + esc(d.stage_error) + '">' + esc(d.stage_error) + '</span>';
-      } else if (d.stage_state === 'transferring_to_ios') {
-        status = '<span class="badge badge-running">copying to ' + esc(d.target_fs || 'IOS storage') + '</span>';
-      } else if (d.stage_state) {
-        status = '<span class="badge badge-running">' + esc(d.stage_state) + '</span>';
-      } else if (d.last_seen) {
-        status = '<span class="badge badge-queued">enrolled</span>';
-      } else {
-        status = '<span class="muted">not enrolled</span>';
-      }
-      if (d.last_seen && !fresh) status += ' <span class="muted" style="font-size:10px">offline</span>';
+      var status = deviceStatusHtml(d, devNow);
       var attachment = d.management_type || d.network_attachment || 'legacy';
       var attachmentDetail = attachment.indexOf('router-') === 0
         ? (' / VPG' + (d.vpg_number == null ? '' : d.vpg_number))
@@ -319,6 +529,12 @@
         '<td><select class="cred">' + credSel + '</select></td>' +
         '<td><select class="assign">' + opts + '</select></td>' +
         '<td>' + telemetryCell(d) + '</td>' +
+        '<td><span class="peer-intent">' + (peerPolicyAssigned(d.device_id) ? 'Quarantined intent' : 'Not quarantined') +
+        '</span> ' + peerPolicyStatus() + ' <button type="button" class="linkish peer-quarantine" ' +
+        'title="' + (peerPolicyAssigned(d.device_id) ? 'Release device from quarantine' : 'Quarantine device') + '" aria-label="' +
+        (peerPolicyAssigned(d.device_id) ? 'Release ' : 'Quarantine ') + esc(d.device_id) + '"' +
+        (peerPolicyBusy[d.device_id] ? ' disabled' : '') + '>' +
+        (peerPolicyAssigned(d.device_id) ? 'Release' : 'Quarantine') + '</button></td>' +
         '<td>' + status +
         ' <button class="linkish dinfo" title="Deployment details">ⓘ</button></td></tr>';
     }).join('');
@@ -356,9 +572,17 @@
         openDeployInfo(btn.closest('tr').getAttribute('data-id'));
       });
     });
+    document.querySelectorAll('#dev-rows .peer-quarantine').forEach(function (btn) {
+      btn.addEventListener('click', function () { setQuarantine(btn); });
+    });
     document.getElementById('mark-all').checked = false;
     document.getElementById('dev-count').textContent =
-      devs.length + ' device' + (devs.length === 1 ? '' : 's');
+      total + ' device' + (total === 1 ? '' : 's');
+    var fc = document.getElementById('dev-filter-count');
+    if (fc) {
+      fc.textContent = devs.length === total ? ''
+        : ('showing ' + devs.length + ' of ' + total);
+    }
     updateSelBar();
   }
   // ---- Device deployment details (per-row ⓘ) ----
@@ -453,8 +677,18 @@
       return;
     }
     tbody.innerHTML = logs.map(function (l) {
+      // Deployment logs deliberately outlive a delete — they are the record of
+      // what actually ran. So a device deleted and added back under the same
+      // name inherits its predecessor's runs, and without this they read as its
+      // own history. The run is kept and shown; it is just never presented as
+      // belonging to the device currently holding the name.
+      var prev = l.previous_registration
+        ? ' <span class="badge badge-off" title="This run finished before the' +
+          ' current device was registered under this name, so it belongs to a' +
+          ' previous device.">previous device</span>'
+        : '';
       return '<tr data-file="' + esc(l.file) + '"><td>' + esc(fmtDate(l.finished_at)) +
-        '</td><td>' + esc(l.action || '') + '</td><td>' + deployLogResult(l) +
+        prev + '</td><td>' + esc(l.action || '') + '</td><td>' + deployLogResult(l) +
         '</td><td>' + esc(fmtSize(l.size)) + '</td>' +
         '<td><button class="linkish dlog-view">view</button></td></tr>';
     }).join('');
@@ -465,9 +699,16 @@
       });
     });
   }
-  document.getElementById('di-close').addEventListener('click', function () {
+  function closeDeployInfo() {
     deployInfoDev = null;
     document.getElementById('deploy-info-panel').hidden = true;
+  }
+  document.getElementById('di-close').addEventListener('click', closeDeployInfo);
+  // Escape closes it, the same as the deployment-log drawer: a drawer that
+  // covers part of the table needs a way out that is not aiming for the ✕.
+  document.addEventListener('keydown', function (e) {
+    var panel = document.getElementById('deploy-info-panel');
+    if (e.key === 'Escape' && panel && !panel.hidden) closeDeployInfo();
   });
   // ---- Per-job onboard log panels ----
   // One panel PER JOB in #onboard-logs — its own <pre>, its own EventSource,
@@ -593,6 +834,7 @@
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && openMenuPanel) closeMenus(); });
   wireMenu('csv-menu-btn', 'csv-menu');
   wireMenu('onboard-menu-btn', 'onboard-pop');
+  wireMenu('undeploy-menu-btn', 'undeploy-pop');
   wireMenu('help-btn', 'help-pop');
   function updateSelBar() {
     var n = document.querySelectorAll('#dev-rows .mark:checked').length;
@@ -734,10 +976,13 @@
   async function startBatch(action) {
     var ids = claimSelection();
     if (!ids) return;
+    var forceEl = document.getElementById('undeploy-force');
+    var forced = action === 'undeploy' && forceEl && forceEl.checked;
     if (action === 'undeploy' &&
-        !confirm('Undeploy ' + ids.length + ' device(s)?\n\nThis removes the device agent ' +
-                  '(Guest Shell or IOx app) and only receipt-owned resources. Inband deployments preserve their existing network; router NAT preserves a pre-existing outside marking. Staged images at ' +
-                 'the filesystem root are left in place. Running jobs are never interrupted.')) {
+        !confirm('Undeploy ' + ids.length + ' device(s)?' + (forced
+          ? '\n\nFORCE is on. For any device with no deployment receipt this removes the IRIS agent footprint only — EEM applets, Guest Shell and the IRIS guest-share files. The VirtualPortGroup and NAT are NOT removed, because without a receipt there is no proof IRIS created them; clean those up yourself if IRIS did.'
+          : '\n\nThis removes the device agent (Guest Shell or IOx app) and only receipt-owned resources. Inband deployments preserve their existing network; router NAT preserves a pre-existing outside marking.') +
+                 '\n\nStaged images at the filesystem root are left in place. Running jobs are never interrupted.')) {
       setBulkBusy(false); return;
     }
     var gen = ++batchGen;
@@ -751,7 +996,8 @@
       await Promise.all(ids.map(async function (id) {
         try {
           var r = await jpost('/api/devices/' + encodeURIComponent(id) + '/' + action,
-                              action === 'onboard' ? telemetryFlags() : {});
+                              action === 'onboard' ? telemetryFlags()
+                                : (forced ? { force: true } : {}));
           if (r.ok) { batchJobs[(await r.json()).job_id] = id; } else {
             // surface WHY it was refused — a bare id reads as a mystery
             var reason = '';
@@ -779,7 +1025,9 @@
   // an onboard batch is still starting, removing inventory out from under a
   // running job — onboard/undeploy previously guarded only each other.
   var BULK_BTNS = ['onboard-selected', 'undeploy-selected', 'adopt-selected',
-                   'delete-selected', 'apply-cred-selected'];
+                   'delete-selected', 'apply-cred-selected',
+                   'apply-image-selected',
+                   'quarantine-selected', 'release-selected'];
   var bulkBusy = false;
   function setBulkBusy(busy) {
     bulkBusy = busy;
@@ -811,6 +1059,23 @@
       }).join('');
     if (keep) sel.value = keep;
   }
+  // The bulk image picker is populated from the same imageIds the per-row
+  // "Assigned image" dropdowns use, so the two can never offer different
+  // catalogs. Assigning by selection is how an operator stages a filtered
+  // subset -- doing it row by row was the only way before, which does not
+  // scale past a handful of devices.
+  function syncImageSelected() {
+    var sel = document.getElementById('image-selected');
+    if (!sel) return;
+    var keep = sel.value;
+    sel.innerHTML = '<option value="">— image for selected —</option>' +
+      '<option value="__unassign">— unassign —</option>' +
+      imageIds.map(function (id) {
+        return '<option value="' + esc(id) + '">' + esc(id) + '</option>';
+      }).join('');
+    if (keep) sel.value = keep;
+    if (sel.value !== keep) sel.value = '';   // the kept image is gone
+  }
   function delWarning(ids) {
     // Removing inventory does NOT undeploy: an onboarded device keeps running
     // its agent with no Console record of it, so say so before it happens.
@@ -818,6 +1083,9 @@
       ids.join(', ') + '\n\nThis removes the Console record only — it does NOT ' +
       'undeploy. An onboarded device keeps its agent and staged image with no ' +
       'inventory entry left to manage it. Undeploy first if that is what you want.' +
+      '\n\nAny deployment receipt is abandoned: it is kept as the record of what ' +
+      'IRIS built on the box, but it stops authorising a teardown, so re-adding ' +
+      'this device id later starts from scratch.' +
       '\n\nThis cannot be undone.';
   }
   // Run *fn* for each selected id, reporting per-device refusals rather than
@@ -851,6 +1119,93 @@
                    { method: 'DELETE', headers: csrfHdr() });
     });
   });
+  // ---- Devices: filter wiring ----
+  // The Status options are generated from the same list the cell derives from,
+  // so a state can never be renderable but unfilterable.
+  (function () {
+    var sel = document.getElementById('dev-filter-status');
+    if (!sel) return;
+    sel.innerHTML = '<option value="">Status: any</option>' +
+      DEVICE_STATUS_OPTIONS.map(function (o) {
+        return '<option value="' + esc(o[0]) + '">' + esc(o[1]) + '</option>';
+      }).join('');
+  })();
+  ['dev-filter-q', 'dev-filter-attachment', 'dev-filter-platform',
+   'dev-filter-cred', 'dev-filter-telemetry', 'dev-filter-peer',
+   'dev-filter-status'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input',
+                        applyDeviceFilters);
+  });
+  (function () {
+    var clear = document.getElementById('dev-filter-clear');
+    if (!clear) return;
+    clear.addEventListener('click', function () {
+      ['dev-filter-q', 'dev-filter-attachment', 'dev-filter-platform',
+       'dev-filter-cred', 'dev-filter-telemetry', 'dev-filter-peer',
+       'dev-filter-status'].forEach(function (id) {
+        var el = document.getElementById(id);
+        if (el) el.value = '';
+      });
+      applyDeviceFilters();
+    });
+  })();
+
+  // Quarantine/release the whole selection. The peer-policy API is one device
+  // per call and carries a revision, so these run in sequence and carry the
+  // revision forward; a losing race re-reads the policy once rather than
+  // stamping a stale revision over someone else's change.
+  async function bulkQuarantine(quarantined) {
+    var ids = selectedIds();
+    if (!ids.length || bulkBusy) return;
+    var verb = quarantined ? 'Quarantine' : 'Release';
+    if (!confirm(verb + ' ' + ids.length + ' device' + (ids.length === 1 ? '' : 's') +
+        '?\n\nThis changes peer discovery and the server seeder across all torrents. ' +
+        'It may not terminate existing device-to-device sessions immediately. ' +
+        'It never installs or reloads a device.')) return;
+    setBulkBusy(true);
+    var ok = 0, failed = [];
+    try {
+      for (var i = 0; i < ids.length; i++) {
+        var id = ids[i];
+        var done = false;
+        for (var attempt = 0; attempt < 2 && !done; attempt++) {
+          var r = await fetch('/api/peer-policy/quarantine/' + encodeURIComponent(id), {
+            method: 'PUT', headers: csrfHdr({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify({ quarantined: quarantined, if_revision: peerPolicy.revision })
+          });
+          var body = await r.json().catch(function () { return {}; });
+          if (r.ok) {
+            peerPolicy.revision = body.revision;
+            peerPolicy.quarantine_assignments =
+              (peerPolicy.quarantine_assignments || []).filter(function (x) { return x !== id; });
+            if (body.quarantined) peerPolicy.quarantine_assignments.push(id);
+            ok++; done = true;
+          } else if (r.status === 409 && attempt === 0) {
+            // someone else moved the policy on: re-read and try this one again
+            var pr = await fetch('/api/peer-policy');
+            if (pr.ok) peerPolicy = await pr.json();
+          } else {
+            failed.push(id); done = true;
+          }
+        }
+      }
+      devStatus.textContent = verb + ' intent saved for ' + ok + ' device' +
+        (ok === 1 ? '' : 's') +
+        (failed.length ? ('; ' + failed.length + ' failed: ' + failed.join(', ')) : '.');
+    } finally {
+      setBulkBusy(false);
+      refreshDevices().catch(function () {});
+    }
+  }
+  document.getElementById('quarantine-selected').addEventListener('click', function () {
+    bulkQuarantine(true);
+  });
+  document.getElementById('release-selected').addEventListener('click', function () {
+    bulkQuarantine(false);
+  });
+
   document.getElementById('adopt-selected').addEventListener('click', async function () {
     var ids = claimSelection();
     if (!ids) return;
@@ -864,6 +1219,20 @@
       return jpost('/api/devices/' + encodeURIComponent(id) + '/adopt',
                    { acknowledge_adopt: true });
     });
+  });
+  document.getElementById('apply-image-selected').addEventListener('click', async function () {
+    var raw = document.getElementById('image-selected').value;
+    if (!raw) { devStatus.textContent = 'Pick an image for the selection first.'; return; }
+    var ids = claimSelection();
+    if (!ids) return;
+    // "— unassign —" is a distinct choice, not the empty placeholder: clearing
+    // an assignment is a real action and must not be what an unset picker does.
+    var imageId = raw === '__unassign' ? '' : raw;
+    await forSelected(imageId ? 'Assigned ' + imageId + ' to' : 'Unassigned', ids,
+      function (id) {
+        return jpost('/api/devices/' + encodeURIComponent(id) + '/assign',
+                     { image_id: imageId });
+      });
   });
   document.getElementById('apply-cred-selected').addEventListener('click', async function () {
     var ids = claimSelection();
@@ -1046,6 +1415,10 @@
 
   // ---- Overview ----
   async function refreshOverview() {
+    // Telemetry export health is dashboard state, so it rides the Overview
+    // refresh. Deliberately not awaited with the overview fetch: a slow or
+    // unreachable collector must not delay the cards.
+    refreshTelemetryHealth();
     var r = await fetch('/api/overview'); if (!r.ok) return;
     var ov = await r.json();
     var cards = [['Images', ov.images], ['Devices', ov.devices],
@@ -1080,6 +1453,14 @@
     var peers = (sw.images || []).reduce(function (n, im) {
       return n + ((im.peers || []).length);
     }, 0);
+    var legacyPeers = (sw.images || []).reduce(function (n, im) {
+      return n + (im.peers || []).filter(function (p) {
+        return p && p.tracker && p.tracker.participant_class === 'legacy_unattributed';
+      }).length;
+    }, 0);
+    var legacyWarning = document.getElementById('legacy-peer-warning');
+    legacyWarning.hidden = legacyPeers === 0;
+    legacyWarning.textContent = legacyPeers ? legacyPeers + ' legacy participant(s) cannot be attributed or individually quarantined until personalized torrent refresh.' : '';
     s.textContent = peers + ' peer(s) in the swarm. Open the full map for the live view.';
   }
 
@@ -1089,6 +1470,261 @@
   // means "no override" (server default), "mozilla" is this curated URL,
   // anything else is "custom" and shows the raw input.
   var CA_MOZILLA_URL = 'https://curl.se/ca/cacert.pem';
+
+  // ---- Settings: post-install setup checklist ----
+  // Chip classes reuse the existing badge-* palette (see the telemetry
+  // health badge above) rather than the bare ok/warn/muted classes, which
+  // don't exist as standalone selectors in styles.css.
+  function setupChip(state) {
+    var label = {ok: 'done', unset: 'not configured', stale: 'needs rebuild',
+                 absent: 'not built', unknown: 'cannot determine'}[state] || state;
+    var cls = state === 'ok' ? 'badge-ok'
+      : (state === 'unset' || state === 'stale') ? 'badge-cancelled' : 'badge-queued';
+    return '<span class="badge ' + cls + '">' + esc(label) + '</span>';
+  }
+
+  // packages.reason (present only in some non-ok states) needs its own
+  // guidance -- the plain rebuild remedy is actively WRONG for a
+  // served-vs-distributed mismatch, since new onboards are broken too and
+  // rebuilding packages would not fix it.
+  var SETUP_PKG_REASON_TEXT = {
+    'served-vs-distributed-mismatch':
+      'The certificate this server currently serves does not match the ' +
+      'copy handed to devices during onboarding. New onboards are ' +
+      'affected as well as existing ones, and rebuilding packages alone ' +
+      'will not resolve this.',
+    'distributed-cert-unavailable':
+      'The copy of the certificate handed to devices could not be read, ' +
+      'so package state cannot be confirmed.'
+  };
+
+  function setupPkgRemedyText(pkg) {
+    if (pkg.state === 'ok') return '';
+    var parts = [];
+    var reasonText = SETUP_PKG_REASON_TEXT[pkg.reason];
+    if (reasonText) parts.push(reasonText);
+    // The rebuild remedy only applies once a package is confirmed stale --
+    // and never for a served-vs-distributed mismatch, where rebuilding
+    // packages would not fix anything.
+    if (pkg.state === 'stale' && pkg.reason !== 'served-vs-distributed-mismatch') {
+      parts.push('Rebuild on the Docker host, then re-onboard affected devices: '
+        + pkg.remedy);
+    }
+    return parts.join(' ');
+  }
+
+  // telemetry.source distinguishes an explicit console override from the
+  // deployment default (whatever the compose/env file happens to set) --
+  // meaningfully different to an operator, so this note names which one is
+  // in effect rather than just showing the chip.
+  function setupTelemetryNote(t) {
+    var scope = t.source === 'override' ? 'console override' : 'deployment default';
+    if (t.state === 'ok') return 'Exporting to ' + t.endpoint + ' (' + scope + ').';
+    if (!t.enabled) return 'Export is disabled (' + scope + ').';
+    return 'No endpoint is set (' + scope + ').';
+  }
+
+  // A failed or thrown fetch must never leave a PREVIOUS render on screen --
+  // that would be evidence-free chips still claiming "done" (spec:
+  // error handling must show "cannot determine" per card and never silently
+  // render a stale/empty checklist as if it were healthy).
+  function setupShowUnknown() {
+    document.getElementById('setup-admin-chip').innerHTML = setupChip('unknown');
+    document.getElementById('setup-td-chip').innerHTML = setupChip('unknown');
+    document.getElementById('setup-td-note').textContent = '';
+    document.getElementById('setup-sh-chip').innerHTML = setupChip('unknown');
+    document.getElementById('setup-pkg-chip').innerHTML = setupChip('unknown');
+    document.querySelector('#setup-pkg-table tbody').innerHTML = '';
+    document.getElementById('setup-pkg-remedy').textContent = '';
+  }
+
+  // ---- First-run setup wizard -------------------------------------------
+  // A flow, not a checklist: the operator finishes setup here instead of being
+  // sent back and forth to Settings pages. The two form steps mount the SAME
+  // templates Settings uses, so there is one implementation of each form.
+  //
+  // Every step is skippable and the wizard resumes at the first incomplete one.
+  // That is forced, not a convenience: the packages step can never complete
+  // in-console (the container has no Docker socket), so a wizard that insisted
+  // on completion could never be finished.
+  var WIZARD_STEPS = [
+    { id: 'telemetry', pane: 'wz-step-telemetry', key: 'telemetry',  chip: 'wz-td-chip',  label: 'Telemetry destination' },
+    { id: 'stagehost', pane: 'wz-step-stagehost', key: 'stage_host', chip: 'wz-sh-chip',  label: 'Stage host' },
+    { id: 'packages',  pane: 'wz-step-packages',  key: 'packages',   chip: 'wz-pkg-chip', label: 'Device packages' }
+  ];
+  var wizardStep = 0;
+  var wizardStatus = null;
+
+  function wizardFirstIncompleteStep(status) {
+    if (!status) return 0;
+    for (var i = 0; i < WIZARD_STEPS.length; i++) {
+      var st = (status[WIZARD_STEPS[i].key] || {}).state;
+      if (st !== 'ok') return i;
+    }
+    return WIZARD_STEPS.length - 1;   // all done: rest on the last step
+  }
+
+  // Every step is listed with its current state, whatever that state is, and
+  // any of them can be opened directly. Without this the wizard opened on the
+  // first INCOMPLETE step and rendered only that one, so a step already
+  // satisfied by the deployment environment -- telemetry, when
+  // IRIS_OTLP_ENDPOINT is set in the compose env -- was never visible at all
+  // and read as missing.
+  function renderWizardStepList() {
+    var host = document.getElementById('wz-steplist');
+    if (!host) return;
+    host.innerHTML = WIZARD_STEPS.map(function (st, n) {
+      var state = wizardStatus ? ((wizardStatus[st.key] || {}).state || 'unknown')
+                               : 'unknown';
+      return '<button type="button" role="listitem" class="wz-steplist-item' +
+        (n === wizardStep ? ' current' : '') + '" data-step="' + n + '">' +
+        '<span class="wz-steplist-n">' + (n + 1) + '</span>' +
+        '<span class="wz-steplist-label">' + esc(st.label) + '</span>' +
+        setupChip(state) + '</button>';
+    }).join('');
+    host.querySelectorAll('.wz-steplist-item').forEach(function (b) {
+      b.addEventListener('click', function () {
+        showWizardStep(parseInt(b.getAttribute('data-step'), 10));
+      });
+    });
+  }
+
+  function showWizardStep(i) {
+    wizardStep = Math.max(0, Math.min(WIZARD_STEPS.length - 1, i));
+    WIZARD_STEPS.forEach(function (st, n) {
+      document.getElementById(st.pane).hidden = n !== wizardStep;
+    });
+    // Mount the shared form for whichever step is showing. Settings reclaims
+    // it on its way back in, so only one clone is ever live.
+    if (WIZARD_STEPS[wizardStep].id === 'telemetry') {
+      mountSettingsForm('td', 'wz-td-mount');
+      refreshSettings();
+    } else if (WIZARD_STEPS[wizardStep].id === 'stagehost') {
+      mountSettingsForm('sh', 'wz-sh-mount');
+      refreshSettings();
+    }
+    document.getElementById('wz-progress').textContent =
+      'Step ' + (wizardStep + 1) + ' of ' + WIZARD_STEPS.length;
+    document.getElementById('wz-back').disabled = wizardStep === 0;
+    document.getElementById('wz-next').textContent =
+      wizardStep === WIZARD_STEPS.length - 1 ? 'Done' : 'Next \u203a';
+    renderWizardStepList();
+  }
+
+  function renderWizardPackages(pkg) {
+    var body = document.querySelector('#wz-pkg-table tbody');
+    if (!body) return;
+    body.innerHTML = ((pkg && pkg.items) || []).map(function (i) {
+      return '<tr><td class="mono">' + esc(i.name || '') + '</td><td>' +
+        setupChip(i.state) + '</td><td class="muted">built ' +
+        esc(i.built_at || 'unknown') + '</td></tr>';
+    }).join('');
+    document.getElementById('wz-pkg-remedy').textContent = setupPkgRemedyText(pkg || {});
+  }
+
+  async function refreshSetupWizard() {
+    var s = null;
+    try {
+      var r = await fetch('/api/settings/setup-status');
+      if (r.ok) s = await r.json();
+    } catch (e) { /* leave s null -- never report green on missing evidence */ }
+    wizardStatus = s;
+    function chip(id, state) {
+      var el = document.getElementById(id);
+      if (el) el.innerHTML = setupChip(state);
+    }
+    chip('wz-admin-chip', s ? (s.admin || {}).state : 'unknown');
+    WIZARD_STEPS.forEach(function (st) {
+      chip(st.chip, s ? (s[st.key] || {}).state : 'unknown');
+    });
+    renderWizardPackages(s ? s.packages : null);
+    renderWizardStepList();
+    updateSetupNudge(s);
+    return s;
+  }
+
+  // The nudge is what brings an operator back to an unfinished setup. It
+  // dismisses for the SESSION, not for good: a package that goes stale later
+  // is a silent regression, and a permanently dismissed banner would hide
+  // exactly the failure this feature exists to catch.
+  function setupIncompleteCount(s) {
+    if (!s) return 0;
+    return WIZARD_STEPS.filter(function (st) {
+      return (s[st.key] || {}).state !== 'ok';
+    }).length;
+  }
+  function updateSetupNudge(s) {
+    var el = document.getElementById('setup-nudge');
+    if (!el) return;
+    var n = setupIncompleteCount(s);
+    if (!n || window.sessionStorage.getItem('iris_setup_nudge_dismissed')) {
+      el.hidden = true; return;
+    }
+    document.getElementById('setup-nudge-text').textContent =
+      n + ' setup step' + (n === 1 ? '' : 's') + ' still ' +
+      (n === 1 ? 'needs' : 'need') + ' attention.';
+    el.hidden = false;
+  }
+
+  async function enterSetupWizard() {
+    var s = await refreshSetupWizard();
+    showWizardStep(wizardFirstIncompleteStep(s));
+  }
+
+  document.getElementById('wz-back').addEventListener('click', function () {
+    showWizardStep(wizardStep - 1);
+  });
+  document.getElementById('wz-skip').addEventListener('click', function () {
+    if (wizardStep === WIZARD_STEPS.length - 1) { location.hash = '#overview'; return; }
+    showWizardStep(wizardStep + 1);
+  });
+  document.getElementById('wz-next').addEventListener('click', async function () {
+    await refreshSetupWizard();
+    if (wizardStep === WIZARD_STEPS.length - 1) { location.hash = '#overview'; return; }
+    showWizardStep(wizardStep + 1);
+  });
+  document.getElementById('wz-pkg-recheck').addEventListener('click', function () {
+    var msg = document.getElementById('wz-msg');
+    msg.textContent = 'Re-checking\u2026';
+    refreshSetupWizard().then(function () { msg.textContent = ''; });
+  });
+  document.getElementById('setup-nudge-dismiss').addEventListener('click', function () {
+    window.sessionStorage.setItem('iris_setup_nudge_dismissed', '1');
+    document.getElementById('setup-nudge').hidden = true;
+  });
+
+  async function refreshSetup() {
+    var s;
+    try {
+      var r = await fetch('/api/settings/setup-status');
+      if (!r.ok) { setupShowUnknown(); return; }
+      s = await r.json();
+    } catch (e) {
+      setupShowUnknown();
+      return;
+    }
+    document.getElementById('setup-admin-chip').innerHTML =
+      setupChip(s.admin.state);
+    document.getElementById('setup-td-chip').innerHTML =
+      setupChip(s.telemetry.state);
+    document.getElementById('setup-td-note').textContent =
+      setupTelemetryNote(s.telemetry);
+    document.getElementById('setup-sh-chip').innerHTML =
+      setupChip(s.stage_host.state);
+    document.getElementById('setup-pkg-chip').innerHTML =
+      setupChip(s.packages.state);
+    document.querySelector('#setup-pkg-table tbody').innerHTML =
+      s.packages.items.map(function (i) {
+        var when = i.built_at
+          ? new Date(i.built_at * 1000).toLocaleString() : '—';
+        return '<tr><td class="muted">' + esc(i.name) + '</td><td>' +
+               setupChip(i.state) + '</td><td class="muted">built ' +
+               esc(when) + '</td></tr>';
+      }).join('');
+    document.getElementById('setup-pkg-remedy').textContent =
+      setupPkgRemedyText(s.packages);
+  }
+
   async function refreshSettings() {
     var r = await fetch('/api/settings'); if (!r.ok) return;
     var s = await r.json();
@@ -1107,8 +1743,12 @@
       s.sessions.active + ' active session(s); idle timeout ' +
       s.sessions.idle_ttl_minutes + ' min.';
     var sh = s.stage_host || {};
-    document.getElementById('sh-user').value = sh.username || '';
-    document.getElementById('sh-status').textContent = sh.configured
+    // These live in a template and are only present while mounted, so every
+    // write guards -- refreshSettings also runs for surfaces that host neither.
+    var shUser = document.getElementById('sh-user');
+    if (shUser) shUser.value = sh.username || '';
+    var shStatus = document.getElementById('sh-status');
+    if (shStatus) shStatus.textContent = sh.configured
       ? ('Configured — onboarding will ssh to the stage host as "' + sh.username +
          '". To change it, edit the username and/or re-enter the password below and Save.')
       : 'Not configured — needed when the Console runs in Docker, so the onboard ' +
@@ -1179,7 +1819,8 @@
     // --- Telemetry destination (replaces the old read-only Observability row) ---
     var td = s.telemetry_destination || {};
     var obs = s.observability || {};
-    document.getElementById('td-status').innerHTML =
+    var tdStatus = document.getElementById('td-status');
+    if (tdStatus) tdStatus.innerHTML =
       (td.source === 'override'
         ? '<span class="badge badge-running">console override</span> '
         : '<span class="badge badge-queued">deployment default</span> ') +
@@ -1188,9 +1829,12 @@
         : 'export off') +
       (obs.metrics_url
         ? ' · Prometheus scrape ' + esc(obs.metrics_url) : '');
-    document.getElementById('td-endpoint').value = td.effective_endpoint || '';
-    document.getElementById('td-enabled').checked = !!td.effective_enabled;
-    document.getElementById('td-revert').hidden = td.source !== 'override';
+    var tdEndpoint = document.getElementById('td-endpoint');
+    if (tdEndpoint) tdEndpoint.value = td.effective_endpoint || '';
+    var tdEnabled = document.getElementById('td-enabled');
+    if (tdEnabled) tdEnabled.checked = !!td.effective_enabled;
+    var tdRevert = document.getElementById('td-revert');
+    if (tdRevert) tdRevert.hidden = td.source !== 'override';
     // --- Audit export (the settings echo never carries the password) ---
     var ae = s.audit_export || {};
     document.getElementById('ae-host').value = ae.host || '';
@@ -1242,6 +1886,38 @@
     m.textContent = 'Signed out ' + (await r.json()).revoked + ' other session(s).';
     refreshSettings();
   });
+  // ---- Shared settings forms: one markup source, mounted where it is needed
+  // The telemetry and stage-host forms live in a <template> in the settings
+  // pane and are cloned into whichever surface is showing -- Settings, or a
+  // step of the first-run wizard. Cloning rather than duplicating the markup
+  // keeps a single source of truth, and only ever ONE clone is mounted, so the
+  // ids inside stay unique. Handlers bind per mount, which is why they live in
+  // wire*Form() rather than running once at startup.
+  var FORM_MOUNTS = {
+    td: { tpl: 'tpl-td-form', wire: function () { wireTelemetryForm(); } },
+    sh: { tpl: 'tpl-sh-form', wire: function () { wireStageHostForm(); } }
+  };
+  var formMountedAt = { td: null, sh: null };
+
+  function mountSettingsForm(which, hostId) {
+    var spec = FORM_MOUNTS[which];
+    var host = document.getElementById(hostId);
+    var tpl = document.getElementById(spec.tpl);
+    if (!host || !tpl) return false;
+    if (formMountedAt[which] === hostId && host.firstChild) return true;
+    // tear the previous clone down first -- two live clones would duplicate ids
+    if (formMountedAt[which] && formMountedAt[which] !== hostId) {
+      var prev = document.getElementById(formMountedAt[which]);
+      if (prev) prev.innerHTML = '';
+    }
+    host.innerHTML = '';
+    host.appendChild(tpl.content.cloneNode(true));
+    formMountedAt[which] = hostId;
+    spec.wire();
+    return true;
+  }
+
+  function wireStageHostForm() {
   document.getElementById('sh-form').addEventListener('submit', async function (e) {
     e.preventDefault();
     var msg = document.getElementById('sh-msg'); msg.textContent = ''; msg.classList.remove('ok');
@@ -1264,6 +1940,8 @@
     msg.textContent = 'Stage host credentials cleared.'; msg.classList.add('ok');
     refreshSettings();
   });
+  }
+
 
   // ---- Settings: certificate / trust store / telemetry destination ----
 
@@ -1478,6 +2156,7 @@
     msg.textContent = 'Downloading…';
     pollCaRefresh((await r.json()).job);
   });
+  function wireTelemetryForm() {
   document.getElementById('td-form').addEventListener('submit', async function (e) {
     e.preventDefault();
     var msg = document.getElementById('td-msg'); msg.textContent = ''; msg.classList.remove('ok');
@@ -1504,6 +2183,8 @@
     msg.textContent = 'Reverted to the deployment default.'; msg.classList.add('ok');
     refreshSettings();
   });
+  }
+
 
   // ---- Settings: audit export (SCP + age) ----
   document.getElementById('ae-form').addEventListener('submit', async function (e) {
@@ -1594,12 +2275,20 @@
   // separately so the original trio stays a literal for the source guard
   // that pins it.
   SETTINGS_SUBS.push('audit');
+  // The setup pane rides the same pane/nav id pattern; appended for the
+  // same reason (keeps the original trio a literal for the source guard).
+  SETTINGS_SUBS.push('setup');
   function showSettingsSub(sub) {
     if (SETTINGS_SUBS.indexOf(sub) < 0) sub = 'general';
     SETTINGS_SUBS.forEach(function (t) {
       document.getElementById('settings-pane-' + t).hidden = t !== sub;
       document.getElementById('nav-settings-' + t).classList.toggle('active', t === sub);
     });
+    // Claim the shared forms back from the wizard, then repopulate them --
+    // a freshly cloned form is empty until refreshSettings writes to it.
+    if (sub === 'general') mountSettingsForm('sh', 'sh-mount');
+    if (sub === 'telemetry') mountSettingsForm('td', 'td-mount');
+    refreshSettings();
   }
   // Monitoring uses the same sidebar sub-menu pattern (audit | deploylogs):
   // when a view hosts multiple features, each gets its own sub-page instead
@@ -1758,13 +2447,21 @@
     return '<span class="badge ' + (result === 'ok' ? 'badge-ok' : 'badge-fail') +
       '">' + esc(result) + '</span>';
   }
+  // The chip labels the SUBSYSTEM, but it sits immediately before the verb
+  // phrase, so it reads as the sentence's subject: one service runs both
+  // onboard and undeploy jobs, which rendered as "onboard started undeploying
+  // <device>". The stored category stays "onboard" -- it is persisted in
+  // audit.jsonl and drives the category filter -- only the label changes.
+  var AUDIT_CAT_LABELS = { onboard: 'deployment' };
+
   function auditRowHtml(e) {
     var category = e.category || AUDIT_LEGACY_CATS[e.event] || 'system';
+    var catLabel = AUDIT_CAT_LABELS[category] || category;
     var target = e.target || e.device_id || '';
     var actor = e.actor || (e.device_id ? 'device:' + e.device_id : 'system');
     var detail = e.detail ||
       (e.secret_name ? e.secret_name + ' ' + (e.old_id || '?') + ' -> ' + (e.new_id || '?') : '');
-    var msg = '<span class="cat-tag cat-' + esc(category) + '">' + esc(category) + '</span> ' +
+    var msg = '<span class="cat-tag cat-' + esc(category) + '">' + esc(catLabel) + '</span> ' +
       auditVerb(e, target) +
       (detail ? ' <span class="detail">— ' + esc(detail) + '</span>' : '') +
       (e.src_ip && category === 'auth' ? ' <span class="muted">(from ' + esc(e.src_ip) + ')</span>' : '');
@@ -1896,7 +2593,7 @@
 
   async function refreshMonitoring() {
     await Promise.all([refreshHistogram(), refreshAuditTable(),
-                       refreshTelemetryHealth(), refreshDeployLogs()]);
+                       refreshDeployLogsAll()]);
   }
 
   // ---- Monitoring: persistent deployment logs pane ----
@@ -1924,38 +2621,325 @@
     if (gen !== deployLogGen) return;
     pre.textContent = text;
   }
-  async function refreshDeployLogs() {
-    var tbody = document.getElementById('dl-rows');
-    var dev = document.getElementById('dl-filter').value.trim();
-    var url = '/api/deploy-logs' + (dev ? '?device_id=' + encodeURIComponent(dev) : '');
+  // The API returns the newest 200; search, action/result pickers, the graph
+  // and paging all work over exactly that set, which is what the pane says it
+  // shows. Filtering client-side keeps typing responsive and avoids a refetch
+  // per keystroke.
+  var DL_PAGE_SIZE = 25;
+  var dlAll = [];
+  var dlPage = 0;
+
+  function dlFilterState() {
+    function val(id) { var el = document.getElementById(id); return el ? el.value : ''; }
+    return {
+      q: val('dl-search').trim().toLowerCase(),
+      action: val('dl-action'),
+      result: val('dl-result')
+    };
+  }
+  function deployLogMatches(l, f) {
+    if (f.action && (l.action || '') !== f.action) return false;
+    if (f.result && (l.state || 'done') !== f.result) return false;
+    if (f.q) {
+      var hay = [l.device_id, l.action, l.state, l.rc == null ? '' : ('rc=' + l.rc)]
+        .filter(Boolean).join(' ').toLowerCase();
+      if (hay.indexOf(f.q) === -1) return false;
+    }
+    return true;
+  }
+
+  // ---- Deployment logs: time filter (the audit timeline's feature) --------
+  // Chips pick the outer window, the server bins into buckets, and dragging a
+  // brush selects a range that is fed back into the LIST query -- the graph
+  // filters, it is not decoration.
+  //
+  // NOTE: this deliberately does NOT share code with the audit timeline yet.
+  // That machinery has no behavioural test coverage (only source assertions
+  // that ids and function names exist) and cannot be rendered here, so
+  // extracting it would be an unverifiable refactor of a working feature.
+  // Audit is left untouched; the shared component is a follow-up.
+  var DL_RANGES = {
+    '24h': { window: 86400,   buckets: 24 },
+    '7d':  { window: 604800,  buckets: 28 },
+    '30d': { window: 2592000, buckets: 30 },
+    '90d': { window: 7776000, buckets: 45 },
+    'all': { window: 7776000, buckets: 45 }
+  };
+  var dlRange = '7d';
+  var dlSel = null;            // {start,end} epoch secs, or null
+  var dlDomain = null;         // {since,until} the histogram currently displays
+  var dlBucketSecs = 0;
+  var DL_W = 600, DL_H = 64, DL_HANDLE_VB = 4, DL_HANDLE_HIT_PX = 8;
+  var DL_CLICK_SLOP_PX = 3, DL_MIN_SEL_SECONDS = 60;
+  var dlSvg = document.getElementById('dl-histogram');
+  var dlBarsG = document.getElementById('dl-bars');
+  var dlBrushG = document.getElementById('dl-brush');
+
+  function dlEpochToVb(t) {
+    return (t - dlDomain.since) / (dlDomain.until - dlDomain.since) * DL_W;
+  }
+  function dlClientXToEpoch(clientX) {
+    var r = dlSvg.getBoundingClientRect();
+    return dlDomain.since + ((clientX - r.left) / r.width) *
+      (dlDomain.until - dlDomain.since);
+  }
+  function dlEpochToClientX(t) {
+    var r = dlSvg.getBoundingClientRect();
+    return r.left + (t - dlDomain.since) / (dlDomain.until - dlDomain.since) * r.width;
+  }
+  function dlOuterBounds() {
+    var cfg = DL_RANGES[dlRange] || DL_RANGES['7d'];
+    var now = Date.now() / 1000;
+    return { since: now - cfg.window, until: now };
+  }
+  function dlClampSel(a, b) {
+    var ob = dlOuterBounds();
+    var st = Math.max(ob.since, Math.min(a, b));
+    var en = Math.min(ob.until, Math.max(a, b));
+    if (en - st < DL_MIN_SEL_SECONDS) {
+      en = Math.min(ob.until, st + DL_MIN_SEL_SECONDS);
+      st = en - DL_MIN_SEL_SECONDS;
+    }
+    return { start: Math.floor(st), end: Math.ceil(en) };
+  }
+  function dlPickBucketCount(spanSecs) {
+    return Math.min(90, Math.max(1, Math.floor(spanSecs / 60)));
+  }
+
+  function dlRenderBars(buckets) {
+    var maxCount = buckets.reduce(function (m, b) { return Math.max(m, b.count); }, 0);
+    var n = buckets.length || 1, barW = DL_W / n;
+    var parts = ['<line x1="0" y1="' + (DL_H - 1) + '" x2="' + DL_W +
+                 '" y2="' + (DL_H - 1) + '" class="axis"/>'];
+    buckets.forEach(function (b, i) {
+      var h = b.count > 0
+        ? Math.max(1, Math.round((b.count / (maxCount || 1)) * (DL_H - 4))) : 0;
+      if (!h) return;
+      parts.push('<rect class="bar" x="' + (i * barW + 1) + '" y="' + (DL_H - h) +
+        '" width="' + Math.max(1, barW - 2) + '" height="' + h + '"><title>' +
+        esc(fmtDate(b.start)) + '–' + esc(fmtDate(b.start + dlBucketSecs)) + ': ' +
+        esc(b.count) + ' deployment' + (b.count === 1 ? '' : 's') + '</title></rect>');
+    });
+    dlBarsG.innerHTML = parts.join('');   // bars layer only; brush layer persists
+  }
+  function dlRenderBrush(sel) {
+    if (!sel || !dlDomain) { dlBrushG.innerHTML = ''; return; }
+    var x0 = dlEpochToVb(sel.start), x1 = dlEpochToVb(sel.end);
+    var hL = Math.max(0, Math.min(x0 - DL_HANDLE_VB / 2, DL_W - DL_HANDLE_VB));
+    var hR = Math.max(0, Math.min(x1 - DL_HANDLE_VB / 2, DL_W - DL_HANDLE_VB));
+    dlBrushG.innerHTML =
+      '<rect class="brush-sel" x="' + x0 + '" y="0" width="' + Math.max(0, x1 - x0) +
+      '" height="' + DL_H + '"/>' +
+      '<rect class="brush-handle" x="' + hL + '" y="0" width="' + DL_HANDLE_VB + '" height="' + DL_H + '"/>' +
+      '<rect class="brush-handle" x="' + hR + '" y="0" width="' + DL_HANDLE_VB + '" height="' + DL_H + '"/>';
+  }
+  function dlRenderWindowLabel(startOverride, endOverride) {
+    var label = document.getElementById('dl-window-label');
+    var clear = document.getElementById('dl-clear-selection');
+    if (startOverride != null) {
+      label.textContent = fmtDate(startOverride) + ' – ' + fmtDate(endOverride);
+      return;
+    }
+    if (dlSel) {
+      label.textContent = fmtDate(dlSel.start) + ' – ' + fmtDate(dlSel.end);
+      clear.hidden = false;
+    } else {
+      var ob = dlOuterBounds();
+      label.textContent = fmtDate(ob.since) + ' – now';
+      clear.hidden = true;
+    }
+  }
+
+  async function refreshDeployHistogram() {
+    var url, domain;
+    if (dlSel) {
+      var span = dlSel.end - dlSel.start;
+      url = '/api/deploy-logs/histogram?since_ts=' + encodeURIComponent(dlSel.start) +
+        '&until_ts=' + encodeURIComponent(dlSel.end) +
+        '&buckets=' + dlPickBucketCount(span);
+      domain = { since: dlSel.start, until: dlSel.end };
+    } else {
+      var cfg = DL_RANGES[dlRange] || DL_RANGES['7d'];
+      url = '/api/deploy-logs/histogram?window=' + cfg.window + '&buckets=' + cfg.buckets;
+      domain = null;
+    }
     var r = null;
     try { r = await fetch(url); } catch (e) { }
+    if (!r || !r.ok) return;
+    var body = await r.json();
+    var buckets = body.buckets || [];
+    var now = body.now || Math.floor(Date.now() / 1000);
+    if (!domain) {
+      var w = (DL_RANGES[dlRange] || DL_RANGES['7d']).window;
+      domain = { since: now - w, until: now };
+    }
+    dlDomain = domain;
+    dlBucketSecs = (domain.until - domain.since) / (buckets.length || 1);
+    dlRenderBars(buckets);
+    dlRenderBrush(dlSel);
+    dlRenderWindowLabel();
+  }
+
+  function dlCommitSelection(a, b) { dlSel = dlClampSel(a, b); refreshDeployLogsAll(); }
+  function dlClearSelection() { if (!dlSel) return; dlSel = null; refreshDeployLogsAll(); }
+
+  // -- brush pointer state machine (mirrors the audit one) --
+  var dlDrag = null;
+  function dlHitTest(clientX) {
+    if (dlSel) {
+      var pxL = dlEpochToClientX(dlSel.start), pxR = dlEpochToClientX(dlSel.end);
+      if (Math.abs(clientX - pxL) <= DL_HANDLE_HIT_PX) return 'left';
+      if (Math.abs(clientX - pxR) <= DL_HANDLE_HIT_PX) return 'right';
+      if (clientX > pxL && clientX < pxR) return 'pan';
+    }
+    return 'new';
+  }
+  if (dlSvg) {
+    dlSvg.addEventListener('pointerdown', function (e) {
+      if (e.button !== 0 || !e.isPrimary || dlDrag || !dlDomain) return;
+      dlDrag = { mode: dlHitTest(e.clientX), downX: e.clientX,
+                 anchor: dlClientXToEpoch(e.clientX), orig: dlSel, moved: false,
+                 pending: null };
+      dlSvg.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+    dlSvg.addEventListener('pointermove', function (e) {
+      if (!dlDrag) return;
+      if (Math.abs(e.clientX - dlDrag.downX) > DL_CLICK_SLOP_PX) dlDrag.moved = true;
+      if (!dlDrag.moved) return;
+      var at = dlClientXToEpoch(e.clientX), sel;
+      if (dlDrag.mode === 'left')       sel = dlClampSel(at, dlDrag.orig.end);
+      else if (dlDrag.mode === 'right') sel = dlClampSel(dlDrag.orig.start, at);
+      else if (dlDrag.mode === 'pan') {
+        var shift = at - dlDrag.anchor;
+        sel = dlClampSel(dlDrag.orig.start + shift, dlDrag.orig.end + shift);
+      } else sel = dlClampSel(dlDrag.anchor, at);
+      dlDrag.pending = sel;
+      dlRenderBrush(sel);
+      dlRenderWindowLabel(sel.start, sel.end);
+    });
+    dlSvg.addEventListener('pointerup', function (e) {
+      if (!dlDrag) return;
+      var d = dlDrag; dlDrag = null;
+      try { dlSvg.releasePointerCapture(e.pointerId); } catch (err) { }
+      if (!d.moved) { dlClearSelection(); return; }   // a click clears, as in audit
+      if (d.pending) dlCommitSelection(d.pending.start, d.pending.end);
+    });
+  }
+  document.querySelectorAll('#dl-range-chips .chip').forEach(function (c) {
+    c.addEventListener('click', function () {
+      document.querySelectorAll('#dl-range-chips .chip').forEach(function (o) {
+        o.classList.toggle('active', o === c);
+      });
+      dlRange = c.getAttribute('data-range');
+      dlSel = null;                       // a new outer window drops the selection
+      refreshDeployLogsAll();
+    });
+  });
+  (function () {
+    var b = document.getElementById('dl-clear-selection');
+    if (b) b.addEventListener('click', dlClearSelection);
+  })();
+
+  function renderDeployLogs() {
+    var tbody = document.getElementById('dl-rows');
+    var f = dlFilterState();
+    var rows = dlAll.filter(function (l) { return deployLogMatches(l, f); });
+    var pages = Math.max(1, Math.ceil(rows.length / DL_PAGE_SIZE));
+    if (dlPage >= pages) dlPage = pages - 1;
+    if (dlPage < 0) dlPage = 0;
+    var page = rows.slice(dlPage * DL_PAGE_SIZE, (dlPage + 1) * DL_PAGE_SIZE);
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="muted">No deployment logs match.</td></tr>';
+    } else {
+      tbody.innerHTML = page.map(function (l) {
+        return '<tr data-file="' + esc(l.file) + '"><td>' + esc(fmtDate(l.finished_at)) +
+          '</td><td>' + esc(l.device_id || '') + '</td><td>' + esc(l.action || '') +
+          '</td><td>' + deployLogResult(l) + '</td><td>' + esc(fmtSize(l.size)) + '</td>' +
+          '<td><button class="linkish dlog-view">view</button></td></tr>';
+      }).join('');
+      document.querySelectorAll('#dl-rows .dlog-view').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          openDeployLogDrawer(btn.closest('tr').getAttribute('data-file'));
+        });
+      });
+    }
+    document.getElementById('dl-count').textContent =
+      rows.length + ' log' + (rows.length === 1 ? '' : 's') +
+      (rows.length === dlAll.length ? '' : ' of ' + dlAll.length);
+    document.getElementById('dl-page').textContent = 'page ' + (dlPage + 1) + ' of ' + pages;
+    document.getElementById('dl-prev').disabled = dlPage === 0;
+    document.getElementById('dl-next').disabled = dlPage >= pages - 1;
+  }
+
+  function openDeployLogDrawer(file) {
+    var drawer = document.getElementById('dl-drawer');
+    document.getElementById('dl-drawer-title').textContent = file;
+    drawer.hidden = false;
+    showDeployLog(file, document.getElementById('dl-text'));
+  }
+  function closeDeployLogDrawer() {
+    document.getElementById('dl-drawer').hidden = true;
+  }
+
+  function dlListUrl() {
+    // The brush selection narrows the list; with no selection the chip window
+    // bounds it, so the table always shows the span the timeline is showing.
+    var params = [];
+    if (dlSel) {
+      params.push('after_ts=' + dlSel.start, 'before_ts=' + dlSel.end);
+    } else {
+      var ob = dlOuterBounds();
+      params.push('after_ts=' + Math.floor(ob.since));
+    }
+    return '/api/deploy-logs' + (params.length ? '?' + params.join('&') : '');
+  }
+
+  // Timeline and table are one view of one query: refresh them together, or a
+  // selection would move the bars while the rows below still showed the old
+  // range.
+  async function refreshDeployLogsAll() {
+    await Promise.all([refreshDeployHistogram(), refreshDeployLogs()]);
+  }
+
+  async function refreshDeployLogs() {
+    var tbody = document.getElementById('dl-rows');
+    var r = null;
+    try { r = await fetch(dlListUrl()); } catch (e) { }
     if (!r || !r.ok) {
       tbody.innerHTML = '<tr><td colspan="6" class="muted">Deployment logs unavailable' +
         (r ? ' (' + r.status + ')' : '') + '.</td></tr>';
       return;
     }
-    var logs = (await r.json()).logs || [];
-    if (!logs.length) {
-      tbody.innerHTML = '<tr><td colspan="6" class="muted">No deployment logs' +
-        (dev ? ' for ' + esc(dev) : '') + ' yet.</td></tr>';
+    dlAll = (await r.json()).logs || [];
+    if (!dlAll.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="muted">No deployment logs in this range.</td></tr>';
+      document.getElementById('dl-count').textContent = '';
+      document.getElementById('dl-page').textContent = '';
       return;
     }
-    tbody.innerHTML = logs.map(function (l) {
-      return '<tr data-file="' + esc(l.file) + '"><td>' + esc(fmtDate(l.finished_at)) +
-        '</td><td>' + esc(l.device_id || '') + '</td><td>' + esc(l.action || '') +
-        '</td><td>' + deployLogResult(l) + '</td><td>' + esc(fmtSize(l.size)) + '</td>' +
-        '<td><button class="linkish dlog-view">view</button></td></tr>';
-    }).join('');
-    document.querySelectorAll('#dl-rows .dlog-view').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        showDeployLog(btn.closest('tr').getAttribute('data-file'),
-                      document.getElementById('dl-text'));
-      });
-    });
+    renderDeployLogs();
   }
-  document.getElementById('dl-refresh').addEventListener('click', refreshDeployLogs);
-  document.getElementById('dl-filter').addEventListener('change', refreshDeployLogs);
+  document.getElementById('dl-refresh').addEventListener('click', refreshDeployLogsAll);
+  ['dl-search', 'dl-action', 'dl-result'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', function () {
+      dlPage = 0; renderDeployLogs();
+    });
+  });
+  document.getElementById('dl-prev').addEventListener('click', function () {
+    if (dlPage > 0) { dlPage--; renderDeployLogs(); }
+  });
+  document.getElementById('dl-next').addEventListener('click', function () {
+    dlPage++; renderDeployLogs();
+  });
+  document.getElementById('dl-drawer-close').addEventListener('click', closeDeployLogDrawer);
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !document.getElementById('dl-drawer').hidden) {
+      closeDeployLogDrawer();
+    }
+  });
 
   // OTLP export health badge (spec 8.3), via the console's session-gated
   // proxy — never the unauthenticated :9101 directly.
@@ -1963,10 +2947,21 @@
     var el = document.getElementById('telemetry-health');
     if (!el) return;
     var state = 'unknown';
+    el.title = '';
     try {
       var r = await fetch('/api/telemetry/health');
       var d = await r.json();
-      if (d && d.otlp_export && d.otlp_export.state) state = d.otlp_export.state;
+      if (d && d.otlp_export && d.otlp_export.signals) {
+        var signals = d.otlp_export.signals;
+        state = d.otlp_export.state || 'unknown';
+        var detail = ['logs', 'metrics'].map(function (name) {
+          var signal = signals[name] || {};
+          var text = name + ': ' + (signal.state || 'unknown');
+          if (name === 'logs') text += ', queued ' + (signal.queued || 0) + ', dropped ' + (signal.dropped_total || 0);
+          return text;
+        }).join('; ');
+        el.title = detail;
+      } else if (d && d.otlp_export && d.otlp_export.state) state = d.otlp_export.state;
       else if (d && d.ok === false) state = 'unknown';
       else state = 'off';
     } catch (e) { state = 'unknown'; }
@@ -2126,7 +3121,39 @@
   });
 
   // ---- hash router ----
-  var VIEWS = ['overview', 'images', 'devices', 'swarm', 'settings', 'monitoring'];
+  var VIEWS = ['overview', 'images', 'devices', 'swarm', 'settings', 'monitoring', 'setup'];
+
+  // Periodic refresh of whatever view is on screen. Without this the console
+  // only updated on navigation or after an explicit action, so device state
+  // that changes server-side -- heartbeats, staging progress, deployment
+  // state -- stayed invisible until the operator navigated away and back.
+  // refreshDevices() already preserves batch checkbox selections across a
+  // re-render, so a poll does not cost the operator their selection.
+  var VIEW_POLL_MS = 10000;
+  var viewPollTimer = null;
+  var viewPollFn = null;
+  function stopViewPoll() {
+    if (viewPollTimer !== null) { clearInterval(viewPollTimer); viewPollTimer = null; }
+  }
+  function startViewPoll(fn) {
+    stopViewPoll();
+    viewPollFn = fn;
+    if (!fn) return;
+    viewPollTimer = setInterval(function () {
+      // A backgrounded tab must not keep hitting the server. The
+      // visibilitychange handler restarts the poll when the tab returns.
+      if (document.hidden) return;
+      try { fn(); } catch (e) { /* a failed refresh must not kill the poll */ }
+    }, VIEW_POLL_MS);
+  }
+  document.addEventListener('visibilitychange', function () {
+    // Refresh immediately on return so the operator never reads stale state
+    // while waiting out the rest of an interval.
+    if (!document.hidden && viewPollFn) {
+      try { viewPollFn(); } catch (e) { /* ignore */ }
+    }
+  });
+
   function show(view) {
     // "#settings/tls" style hashes: the part before the slash picks the view,
     // the rest picks the view's sub-page (showSettingsSub / showMonitoringSub
@@ -2139,16 +3166,28 @@
       var nav = document.getElementById('nav-' + v);
       if (nav) nav.classList.toggle('active', v === view);
     });
+    var swarmFrame = document.getElementById('swarm-frame');
+    if (swarmFrame && swarmFrame.contentWindow) {
+      swarmFrame.contentWindow.postMessage(view === 'swarm' ? 'MAP_RESUME' : 'MAP_PAUSE', location.origin);
+    }
     document.getElementById('settings-submenu').hidden = view !== 'settings';
     if (view === 'settings') showSettingsSub(sub || 'general');
     document.getElementById('monitoring-submenu').hidden = view !== 'monitoring';
     if (view === 'monitoring') showMonitoringSub(sub || 'audit');
-    if (view === 'overview') refreshOverview();
-    else if (view === 'images') { refreshImages(); refreshImportable(); }
-    else if (view === 'devices') refreshDevices();
-    else if (view === 'swarm') refreshSwarm();
-    else if (view === 'settings') refreshSettings();
-    else if (view === 'monitoring') refreshMonitoring();
+    // Each view names the refresh the poll should repeat. Settings is
+    // deliberately excluded: it is a set of forms, and re-rendering them
+    // under the operator's cursor would discard half-typed input.
+    var poll = null;
+    if (view === 'overview') { refreshOverview(); poll = refreshOverview; }
+    else if (view === 'images') {
+      refreshImages(); refreshImportable();
+      poll = function () { refreshImages(); refreshImportable(); };
+    } else if (view === 'devices') { refreshDevices(); poll = refreshDevices; }
+    else if (view === 'swarm') { refreshSwarm(); poll = refreshSwarm; }
+    else if (view === 'settings') { refreshSettings(); refreshSetup(); }
+    else if (view === 'monitoring') { refreshMonitoring(); poll = refreshMonitoring; }
+    else if (view === 'setup') enterSetupWizard();
+    startViewPoll(poll);
   }
   function current() { return (location.hash || '#overview').slice(1); }
   window.addEventListener('hashchange', function () { show(current()); });

@@ -6,7 +6,7 @@
 :root { --navy:#0b2545; --navy2:#12395f; --blue:#0b5cd6; --bg:#f5f7fa; --line:#e5e9f0; }
 * { box-sizing:border-box; }
 body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; color:#1a2b45; background:var(--bg); }
-.top { background:linear-gradient(90deg,var(--navy),var(--navy2)); color:#fff; height:48px; display:flex; align-items:center; padding:0 18px; font-weight:600; }
+.top { background:linear-gradient(90deg,var(--navy),var(--navy2)); color:#fff; height:48px; display:flex; align-items:center; padding:0 18px; gap:10px; font-weight:600; }
 .top .spacer { flex:1; }
 .top .who { font-size:13px; font-weight:400; opacity:.9; }
 .top .tag { font-size:11px; font-weight:400; opacity:.7; border:1px solid rgba(255,255,255,.4); border-radius:4px; padding:1px 6px; margin-left:6px; vertical-align:1px; }
@@ -25,6 +25,11 @@ body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-
 .btn.ghost:hover { background:#f2f7ff; border-color:var(--blue); }
 .btn.ghost:active { transform:translateY(1px); box-shadow:inset 0 1px 2px rgba(11,37,69,.12); }
 .btn.ghost:focus-visible { outline:none; box-shadow:0 0 0 3px rgba(11,92,214,.35); }
+/* Single-glyph button (the ? help trigger): the default .btn padding turns one
+   character into a wide pill, so give it an equal-sided round shape instead. */
+.btn.icon { width:30px; height:30px; padding:0; border-radius:999px;
+  display:inline-flex; align-items:center; justify-content:center;
+  font-size:15px; line-height:1; font-weight:700; }
 .chip { background:#fff; color:#334; border:1px solid #c7d0e0; border-radius:999px; padding:6px 14px; font-size:13px;
   cursor:pointer; transition:background .12s ease, box-shadow .12s ease, transform .06s ease, border-color .12s ease; }
 .chip:hover { background:#f2f7ff; border-color:var(--blue); }
@@ -75,9 +80,9 @@ body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-
 .swarm-frame { width:100%; height:clamp(680px,78vh,980px); border:1px solid #243049; border-radius:10px; background:#0b0f17; }
 #settings-info td:first-child { width:160px; }
 #audit-timeline { margin:4px 0 16px; }
-#audit-histogram { width:100%; height:64px; display:block; margin:6px 0; }
-#audit-histogram .axis { stroke:var(--line); stroke-width:1; }
-#audit-histogram .bar { fill:#9fc0f0; cursor:pointer; transition:fill .12s ease; }
+#audit-histogram, #dl-histogram { width:100%; height:64px; display:block; margin:6px 0; }
+#audit-histogram .axis, #dl-histogram .axis { stroke:var(--line); stroke-width:1; }
+#audit-histogram .bar, #dl-histogram .bar { fill:#9fc0f0; cursor:pointer; transition:fill .12s ease; }
 #audit-histogram .bar:hover { fill:var(--blue); }
 /* time brush: selection overlay lives in its own pointer-events-free layer;
    all hit-testing is numeric on the svg itself */
@@ -91,12 +96,17 @@ body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-
 #audit-tbl td.nowrap { white-space:nowrap; }
 #audit-tbl .detail { color:#67728a; }
 .badge { display:inline-block; font-size:11px; font-weight:600; border-radius:4px; padding:1px 7px; line-height:1.5; }
+/* same trap: #telemetry-health starts hidden and would otherwise render as an
+   empty pill until its first refresh. */
+.badge[hidden] { display:none; }
 .badge-ok { background:#e3f4e8; color:#1a7f43; }
 .badge-fail { background:#fbe9e7; color:#c0362c; }
 /* batch-onboard job states (done/error reuse badge-ok/badge-fail) */
 .badge-queued { background:#eef1f6; color:#67728a; }
 .badge-running { background:#e3edfb; color:#0b5cd6; }
 .badge-cancelled { background:#f7efdc; color:#8a6d1a; }
+.legacy-warning { background:#fdf3e2; border:1px solid #ecc987; border-left:4px solid #d97706;
+  border-radius:6px; color:#6c4a07; font-size:13px; margin:0 0 16px; padding:8px 10px; }
 #batch-panel td.out { color:#67728a; max-width:420px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .cat-tag { display:inline-block; font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.3px;
   border-radius:4px; padding:1px 6px; margin-right:4px; background:#eef1f6; color:#556; }
@@ -160,6 +170,9 @@ body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-
 .menu.right { left:auto; right:0; }
 .menu a.menu-item { text-decoration:none; }
 .help-row { padding:4px 8px; white-space:nowrap; }
+/* Explanatory note inside a popover: unlike the one-line rows above it
+   wraps, so a caveat can be stated in full where the action is taken. */
+.menu-note { max-width:320px; white-space:normal; }
 #help-pop { min-width:250px; }
 /* per-file upload rows: each upload owns its bar and state text */
 #uploads { max-width:560px; margin:0 auto; text-align:left; }
@@ -201,3 +214,68 @@ body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-
 .doc .warn { background:#fdf3e2; border:1px solid #ecc987; border-left:4px solid #d97706;
   border-radius:8px; padding:12px 14px; margin:18px 0; }
 .doc .warn strong { color:#8a4b06; }
+
+
+/* Right-hand drawers. Both the deployment-log viewer and the per-device
+   deployment details open beside the list they were opened from, rather than
+   below it: a panel appended under a long table puts its content off-screen,
+   and the operator has to scroll away from the row they clicked to read it. */
+.drawer { position:fixed; top:0; right:0; bottom:0; width:min(720px, 92vw);
+  z-index:60; display:flex; flex-direction:column; background:var(--panel, #fff);
+  border-left:1px solid var(--line, #d7dee8); box-shadow:-8px 0 24px rgba(11,37,69,.18);
+  transform:translateX(100%); transition:transform .18s ease; }
+.drawer:not([hidden]) { transform:translateX(0); }
+/* A class selector outranks the UA stylesheet's [hidden]{display:none}. */
+.drawer[hidden] { display:none; }
+.drawer-head { display:flex; align-items:center; justify-content:space-between;
+  gap:10px; padding:10px 12px; border-bottom:1px solid var(--line, #d7dee8);
+  font-weight:600; }
+.drawer-body { flex:1; overflow:auto; padding:12px 14px; }
+.drawer-body h3:first-child { margin-top:0; }
+.drawer-body .log { max-height:45vh; overflow:auto; }
+
+@media (prefers-reduced-motion: reduce) {
+  .drawer { transition:none; }
+}
+
+/* Deployment-log drawer: slides in from the RIGHT so the list it was opened
+   from stays where the operator left it, instead of being pushed off screen
+   by a panel appended below the table. */
+#dl-drawer { position:fixed; top:0; right:0; bottom:0; width:min(720px, 92vw);
+  z-index:60; display:flex; flex-direction:column; background:var(--panel, #fff);
+  border-left:1px solid var(--line, #d7dee8); box-shadow:-8px 0 24px rgba(11,37,69,.18);
+  transform:translateX(100%); transition:transform .18s ease; }
+#dl-drawer:not([hidden]) { transform:translateX(0); }
+#dl-drawer[hidden] { display:none; }
+.dl-drawer-head { display:flex; align-items:center; justify-content:space-between;
+  gap:10px; padding:10px 12px; border-bottom:1px solid var(--line, #d7dee8); }
+#dl-drawer .log { flex:1; margin:0; overflow:auto; border:0; border-radius:0; }
+
+@media (prefers-reduced-motion: reduce) {
+  #dl-drawer { transition:none; }
+}
+
+/* First-run setup wizard + the nudge that brings an operator back to it. */
+.nudge { display:flex; align-items:center; gap:10px; margin:0 0 12px;
+  padding:8px 12px; border:1px solid #e2c98a; background:#fdf6e3;
+  border-radius:4px; }
+/* A class selector outranks the UA stylesheet's [hidden]{display:none}, so
+   without this `el.hidden = true` sets the attribute and changes nothing. */
+.nudge[hidden] { display:none; }
+.nudge .btn { margin-left:auto; }
+#view-setup .wz-step, #view-setup .wz-done { padding:12px 14px; margin:12px 0;
+  border:1px solid var(--line, #d7dee8); border-radius:4px; }
+#view-setup .wz-done { opacity:.75; }
+#view-setup .form-mount { margin-top:10px; }
+#wz-nav { margin-top:16px; }
+
+/* Wizard step list: every step visible with its state, any of them openable. */
+#wz-steplist { display:flex; flex-wrap:wrap; gap:8px; margin:10px 0 4px; }
+.wz-steplist-item { display:flex; align-items:center; gap:8px; cursor:pointer;
+  padding:6px 10px; font:inherit; color:inherit; background:#fff;
+  border:1px solid var(--line, #d7dee8); border-radius:999px; }
+.wz-steplist-item.current { border-color:var(--blue, #2f6fdb); background:#eef4ff; }
+.wz-steplist-n { display:inline-flex; align-items:center; justify-content:center;
+  width:18px; height:18px; border-radius:50%; background:#eef1f6;
+  font-size:11px; font-weight:600; }
+.wz-steplist-item.current .wz-steplist-n { background:var(--blue, #2f6fdb); color:#fff; }

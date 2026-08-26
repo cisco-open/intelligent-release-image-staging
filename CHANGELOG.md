@@ -9,6 +9,942 @@ This project uses **Calendar Versioning (CalVer)**: `YYYY.0M.0D` with an optiona
 `2026.06.11.1`). Releases are tagged `vYYYY.0M.0D`. The current version is in the
 top-level `VERSION` file.
 
+## [Unreleased]
+
+## [2026.08.26]
+
+### Added
+- **Per-peer byte counts are measured again — by reading a counter, not by
+  integrating a rate.** Release 2026.08.20 removed the per-peer `rx_bytes` /
+  `tx_bytes` / `avg_bps` row fields because they were fabricated, and that
+  ruling stands: under aria2 1.37 the client exposed nothing but an
+  *instantaneous* per-peer rate, so the agent had to integrate that rate across
+  its sampling interval to get a byte total, and on a transfer that finished
+  inside a tick the result degenerated to an even split of the transfer across
+  whichever peers happened to be connected. None of that machinery comes back
+  here. What changed is the client underneath it: the device now runs
+  aria2-next 2.5.6, which keeps a **cumulative per-peer session counter** for
+  the life of the download (`peer->getSessionDownloadLength()` /
+  `getSessionUploadLength()`, surfaced by `aria2.getPeers` as `downloaded` /
+  `uploaded`). What ships is the client's own tally, read once. Per-peer bytes
+  are back because the measurement now exists, not because the bar for calling
+  something measured was lowered.
+- **A completion hook on the device captures those counters at the one instant
+  they are complete.** `device/agent/peer-receipt-hook.sh` is registered as
+  aria2's `--on-bt-download-complete`, deliberately not the generic
+  `--on-download-complete`. The BitTorrent hook fires the moment the last piece
+  lands, immediately before aria2 flips the group to seed-only, so the peers
+  that just fed the device are all still connected; the generic hook fires from
+  the stop path, after seeding has *ended*, when those connections are long
+  gone and their counters with them. The hook is POSIX `sh` and `curl` only —
+  starting a Python interpreter would widen the race against peers hanging up —
+  parses no JSON, embeds the RPC response verbatim into a sidecar next to the
+  staged image, and exits 0 silently on every failure, because in daemon mode
+  aria2 discards its hooks' output and an absent snapshot is an ordinary
+  outcome. The next agent tick folds the sidecar into the terminal report and
+  deletes it.
+- **The v2 device report carries a `peer_receipts` block.** Each row is one
+  peer still connected at completion: `ip`, `port`,
+  `session_bytes_from_peer` / `session_bytes_to_peer`, and a
+  `has_complete_file` flag (aria2's `isSeeder()` — it means the peer holds the
+  whole file, and in a wave every device that finishes early sets it, so it
+  identifies complete peers and never the origin). The totals are named
+  `bytes_from_all_senders_total` / `_omitted` rather than "from peers" because
+  that is what the device can honestly claim: the origin seeder is an ordinary
+  BitTorrent peer of every device, it appears in the device's own peer list,
+  and its bytes are inside that sum. Rows and bytes discarded at any cap are
+  counted and summed into `rows_omitted` / `bytes_from_all_senders_omitted`
+  instead of vanishing, and `complete` records whether the capture itself was
+  lossy.
+- **The server decides which sender was the origin, because only the server
+  can.** Every receipt row is classified at ingest against the tracker's
+  `service:seeder` principal and the server's device-address map into exactly
+  one of `origin`, `device` or `unknown`; an address that matches neither — or
+  that somehow matches both — is reported as unknown and is never folded into
+  the peer figure. The classified totals ride the report record as
+  `iris.transfer.bytes_from_origin_total`,
+  `iris.transfer.bytes_from_devices_total` and
+  `iris.transfer.bytes_from_unknown_total` alongside the device's own
+  `iris.transfer.bytes_from_all_senders_total`. A peer-assist ratio computed
+  from the all-senders total would have reported very nearly every rollout as
+  100% peer-delivered.
+- **The exact measurement now reaches an operator.** A new OTLP log record
+  `iris.device.peer_receipt` carries one row per peer per completed transfer,
+  with `iris.peer.attribution` (`origin` | `device` | `unknown`, always
+  present) and `iris.peer.device.id` when the sender resolves to a known
+  device. It is a distinct log name from the origin-side
+  `iris.swarm.peer_bytes` on purpose: one is exact and one is sampled, and a
+  backend must not be able to sum them into a single series by accident.
+- **A durable peer ledger and its aggregate counters on `:9101`.** Tracing a
+  byte to the device that received it has to happen *as it is observed*, and be
+  persisted, because
+  aria2's per-peer counter is per connection and disappears when the connection
+  does — a counter nobody read before the peer hung up no longer exists. The
+  ledger banks each edge's growth at every poll and exposes three counters and
+  two gauges per torrent: `iris_origin_sent_bytes_total`,
+  `iris_peer_attributed_bytes_total`, `iris_peer_unattributed_bytes_total`,
+  `iris_swarm_peers_attributed` and `iris_swarm_peers_saturated`. The residue
+  is kept as its own quantity rather than divided among the peers — measured
+  against the origin's own `uploadLength` on a 7-router pull, a 3-second poll
+  traced 73.3% of the bytes actually sent to a device and a 2-second poll
+  88.1%, and spreading the remainder evenly would be arithmetic presented as
+  observation.
+  The saturation gauge exists so the residue stays readable once the ledger's
+  per-torrent peer cap starts refusing peers.
+  All five families are labelled `{image, info_hash}` and nothing finer: a
+  per-peer label set would have made the cardinality of the origin's metrics a
+  function of the size of the fleet. The three byte families are counters and
+  not gauges on purpose — a rollout that finished an hour ago has to keep its
+  history, and a board built on `increase()` over a counter still reports what
+  a swarm did after the swarm has gone quiet, where a gauge would fall to zero
+  the moment the last device stopped and blank every panel that had just
+  proved the transfer worked. On a cold four-router pull of a 928 MiB image the
+  ledger reconciled exactly: 3,492,982,720 bytes sent by the origin =
+  3,227,913,693 traced to named devices (92.4%) + 265,069,027 untraced (7.6%),
+  with no third bucket and nothing rounded to make the two sides meet. Operator
+  wording throughout the boards and docs is *traced to a device* and *untraced*
+  rather than *attributed* / *unattributed*, which said nothing to anyone who
+  had not written the code; the metric and attribute names are unchanged, so
+  `iris_peer_attributed_bytes_total` is still the traced total and
+  `iris_peer_unattributed_bytes_total` still the untraced residue.
+- **The dashboards that read these metrics ship with the code that emits
+  them.** `docs/dashboards/grafana-iris-swarm.json` and
+  `docs/dashboards/splunk-iris-swarm.xml` are reference boards for the swarm
+  counters, kept in the repository beside `server/metrics.py` so that renaming a
+  family is a change to one commit rather than a discovery an operator makes
+  weeks later in front of a panel that has quietly read zero ever since. Both
+  are built on the aggregate families alone, so neither depends on per-peer
+  cardinality the origin does not publish. Every panel states in its own
+  description whether the number behind it is measured, derived or estimated,
+  and a panel whose input the server does not emit yet reads *No data* rather
+  than falling back to a constant — a fleet total priced at a hardcoded 928 MiB
+  is wrong the moment a differently sized image is selected.
+- **An image can be assigned to the whole selection.** Assignment was per-row
+  only, which does not scale past a handful of devices — and the filter bar
+  exists precisely so an operator can act on a subset. An *image for selected*
+  picker joins the credential one, drawing on the same catalog the per-row
+  dropdowns use and running under the same selected-action lock, so a delete
+  cannot fire mid-assignment. Unassigning is its own explicit choice rather
+  than what an untouched picker does.
+- **Every state the Status column can show can now be filtered for.** The
+  filter derived its own status from a three-branch copy of the cell's logic,
+  which knew `deployed`, `enrolled` and `not enrolled` and nothing else. The
+  cell renders eleven states: a device reading `onboarding…`, `undeploying…`,
+  `waiting for heartbeat`, `onboard failed`, `undeploy failed`, `placement
+  failed`, `copying to bootflash:` or a raw staging state could not be selected
+  at all, and asking for `enrolled` silently swept several of them in — with a
+  comment above the copy claiming the two could never disagree. There is now
+  one derivation, returning the key, the label and the badge class together,
+  and the Status options are generated from the same list, so a state cannot be
+  renderable but unfilterable. `offline` stays a separate choice, being a
+  modifier on top of the cell rather than one of its branches.
+- **Deployment details open in a drawer beside the table, not below it.** The
+  ⓘ panel was appended under the devices table, so on a fleet of any size
+  opening it put the content off-screen and made the operator scroll away from
+  the row they had just clicked to read the answer. It now slides in from the
+  right like the deployment-log drawer, closes on Escape or ✕, and honours
+  `prefers-reduced-motion`.
+
+### Fixed
+- **A device deleted and added back under the same id could be neither
+  onboarded nor undeployed.** Deleting a device purges every per-device store
+  the console owns — the image assignment, the heartbeat record, the telemetry
+  ring, the pending pull directive, the seen-report ledger — and revokes the
+  device's credentials. It never touched the deployment receipts, and there was
+  no API on the receipt store to touch them with. A receipt is matched to a
+  device by `device_id` alone, so the next device registered under that id
+  inherited its predecessor's deployment. That is not a cosmetic leak: onboard
+  refuses while a recoverable receipt exists (`router already has a
+  needs-reconcile deployment receipt; undeploy it before onboarding again`),
+  and the undeploy it names refuses the box, because the receipt records the
+  board ID of the machine that is gone (`device identity mismatch; refusing to
+  modify …`) — a rebuilt VM keeps its id and its address but not its identity.
+  Onboard pointed at undeploy, undeploy pointed at hardware that no longer
+  existed, and delete cleared neither. Deleting a device now marks its receipts
+  `abandoned`, a new terminal state that is deliberately neither `removed`
+  (which asserts IRIS tore the deployment down) nor `superseded` (which asserts
+  a newer receipt replaced it). The rows are kept, not dropped — a receipt is
+  the only list of what IRIS built on that box, the VirtualPortGroup, the NAT
+  stanza, the app address, and an operator who deleted a still-configured
+  device is exactly the person who needs it — but they no longer authorise a
+  teardown or block an onboard. The delete audit line names the outcome the way
+  it already named the revoked secrets and the retained endpoints, and the
+  console's delete confirmation says so before the fact.
+- **A hung onboard job kept its own device busy until the deadline expired.**
+  The reaper that fails a job past `IRIS_ONBOARD_JOB_TIMEOUT` ran *after* the
+  busy guard in `start()`, past every path that returns or raises — so it could
+  only ever fire during a start for some other device, never the one actually
+  stuck. The device it was stuck on stayed refused for the full two-hour window
+  with no console action able to clear it. The reap now runs first. It also
+  goes through the ordinary finish path instead of half-writing the record
+  itself: it used to set an `rc` key that no reader looks at (they all read
+  `returncode`), leave the installer handle in the process table, write no
+  persisted log, and emit no `*_finished` audit event — a job could fail with
+  nothing anywhere saying so.
+- **Deleting a device left its in-flight jobs running.** A job record is keyed
+  on the bare device id, the same way receipts were, so one left behind kept
+  the busy guard armed against the *next* device registered under that name:
+  the opposite action was refused, and the same action silently joined the dead
+  job, which reads as a click that did nothing. Delete now cancels the device's
+  queued jobs and signals a running installer, and says how many it stopped in
+  the audit line.
+- **Deployment logs from a deleted device were shown as its replacement's own
+  history.** Persisted logs are keyed on the device id and deliberately outlive
+  a delete — they are the record of what actually ran, and dropping them to fix
+  an attribution problem would be the wrong trade. A device row now carries
+  `registered_at`, stamped once when the id is first registered and carried
+  across edits and CSV re-imports, and `GET /api/deploy-logs?device_id=…` flags
+  every entry that finished before it. The console labels those runs *previous
+  device* rather than hiding them: the run happened, it just happened to a
+  different machine. A device registered before the stamp existed has none, and
+  nothing is flagged for it — guessing would be worse than saying nothing.
+- **A forced undeploy was refused in the one situation it exists for.** `force`
+  was consulted in a single expression, `if receipt is None and not force`, so
+  it applied only when there was no receipt at all. A device whose receipt no
+  longer matched the box — the case above — has a receipt, so the flag was read
+  and then dropped, the full receipt-driven teardown ran, and the recipe's
+  identity guard refused it. The rescue path was unreachable from the state it
+  was built to rescue, and the checkbox that offered it was labelled for the
+  other case. `force` is now decided before the receipt is read at all, which
+  also makes it the way out of `multiple recoverable receipts for device …` —
+  a state that refused onboard, undeploy and adopt alike, that a controller
+  restart could create, and that nothing in the product could resolve. Once the
+  forced teardown succeeds, every receipt the device still held is abandoned,
+  so the next onboard is not refused on the receipt the force was run to get
+  past; on failure they are left alone, because failing to reach a device is
+  not proof that its receipt is wrong. The checkbox is relabelled *Force (no
+  usable deployment receipt)* and its note describes both cases.
+- **`device identity mismatch` named no way forward.** Refusing to tear down a
+  box that is not the one the receipt was written for is correct. Saying only
+  that, to an operator whose onboard had just told them to undeploy, was not.
+  The message now reports both board IDs and names the two ways out: undeploy
+  again with Force, or delete and re-add the device.
+- **Retrying a failed undeploy answered with nothing at all.** The 409 path for
+  a receipt that cannot authorise teardown marks that receipt `needs-reconcile`
+  on its way out — including when it is already `needs-reconcile`, which is not
+  a legal transition. Raised from inside an `except` handler with no blanket
+  handler above it, that escaped the request entirely: the first attempt
+  explained itself and every attempt after it dropped the connection. Both that
+  handler and the matching one on the full-work-queue path are now best-effort.
+
+### Known limitations
+- **A peer-receipt total is a floor, not a census.** The hook can only read
+  peers aria2 still holds a live connection to, and `DefaultPeerStorage` erases
+  a peer from `usedPeers_` the instant it disconnects. A peer that delivered
+  several hundred megabytes and then dropped before the final piece landed
+  leaves no row and contributes no bytes — its share is silently absent, not
+  recorded as zero — so the receipt totals will not reconcile with
+  `content.completed_content_bytes`. Bytes lost to a *cap* are reported; bytes lost to a
+  disconnect cannot be.
+- **Tracing a byte to a device is sampled, and sampling misses bytes.**
+  `aria2.getPeers` answers with the connections that are live at the instant it
+  is called, so a peer that connected, took its bytes and hung up between two
+  polls was never visible to the ledger at all. Measured against the origin's
+  own `uploadLength` on a seven-router pull, a 3-second poll traced 73.3% of
+  the bytes the origin actually sent and a 2-second poll 88.1%. The untraced
+  remainder is published as `iris_peer_unattributed_bytes_total` instead of
+  being smoothed away, because it is a real quantity — bytes that certainly
+  went to somebody —
+  and dividing it among the peers that happen to still be connected would print
+  arithmetic where the panel promises an observation. A shorter poll interval
+  leaves less untraced; nothing closes the gap.
+- **`iris_image_size_bytes` is published from the catalog.** The shipped
+  dashboards ask for it by name to turn delivered bytes into a share of the
+  image, and it now republishes the catalog entry's own `size` field — exact,
+  recorded from the file itself at publish time, never inferred from traffic.
+  It was briefly specified-but-unemitted; in that state the boards read *No
+  data* deliberately rather than falling back to a textbox default or an `or
+  vector(...)` — a confident progress figure computed from a number nobody
+  measured is worse than an empty panel. An image with no published catalog
+  entry still reads *No data* today, for the same reason.
+- **First-run setup is a guided flow, and Settings > Setup keeps reporting the
+  same state afterwards.** A stepped wizard at its own top-level view walks
+  telemetry destination, stage host and device packages, with the admin
+  account shown as already complete because first-run has just created it.
+  The forms are hosted in the flow rather than linked to, so completing setup
+  no longer bounces the operator between Settings pages; a step list shows
+  every step's state and any step can be opened directly, which matters
+  because a step already satisfied by the deployment environment (a telemetry
+  destination from `IRIS_OTLP_ENDPOINT`) would otherwise be skipped past and
+  read as missing. Every step can be skipped and the wizard resumes at the
+  first incomplete one — necessarily, since the device-packages step can never
+  be completed from the console at all: the container has no Docker socket, so
+  it can detect a stale package but not rebuild one, and that step is shaped as
+  detect-and-instruct rather than as a form whose submit button would be a lie.
+  A banner brings the operator back while anything is unfinished, dismissed for
+  the session only, because a package that goes stale later is a silent
+  regression and a permanently dismissed banner would hide exactly the failure
+  this catches. The telemetry and stage-host forms live in one template cloned
+  into whichever surface is showing, so there is a single implementation of
+  each. First-run sign-in hands off to the flow. Settings > Setup survives as
+  the status panel — four cards, admin included — and its actions now enter the
+  flow. The package card catches a certificate-drift
+  failure mode with no other symptom: `GET /api/settings/setup-status`
+  (session-gated) is backed by `server/setup_status.py`, which fingerprints
+  the certificate this server currently serves (`IRIS_CERT`, reading only
+  the leading certificate block so the combined cert+key file parses), the
+  certificate handed to devices at onboard time (`iris-catalog.pem` in the
+  artifacts directory), and the certificate baked into each served IOx
+  package (`iris-amd64.tar`, `iris-arm64.tar`) at build time — streaming the
+  ~60 MB package's inner archive instead of unpacking it. This matters
+  because an IOx package pins the catalog certificate at *build* time: if
+  the certificate later changes, a device installed from that package still
+  installs, its app still reports RUNNING, and it silently never checks in
+  again — the only evidence is a `TOKEN-REFRESH-FAIL` line in the device's
+  own syslog, with nothing server-side to distinguish "never onboarded" from
+  "onboarded but rejecting our certificate." Guest Shell platforms are
+  unaffected, since their artifacts (including the certificate) are
+  regenerated at every container start. Each package's state
+  (ok/stale/absent/unknown) rolls up worst-of, so a stale package is never
+  masked by a merely unknown sibling; the top-level state is separately
+  demoted to unknown — without masking a worse stale finding underneath —
+  when the served and distributed certificates disagree or the distributed
+  copy can't be read, and a mismatch gets its own console guidance rather
+  than the rebuild remedy, since rebuilding packages does not fix a
+  disagreement between what this server serves and what it told devices to
+  trust. A failed or thrown status fetch repaints every chip to "cannot
+  determine" instead of leaving a stale "done" on screen.
+- **`tools/check-package-freshness.sh` puts the same certificate-drift check
+  on the command line.** Read-only: it fingerprints the certificate the
+  catalog currently serves, the certificate handed to Guest Shell devices at
+  onboard time, and the certificate pinned inside each built IOx package,
+  and reports any package whose pinned certificate no longer matches,
+  exiting 1 on drift. `--rebuild` re-runs `tools/provision-iox-packages.sh`
+  and re-checks. It never touches a device.
+
+### Changed
+- **Every platform now runs the same collision preflight.** It used to run for
+  routers only: `preflight()` returned "not-required" for anything else, IOx
+  resolved a device identity and nothing more, and Guest Shell did no more than
+  a reachability ping. The same device still carrying IRIS configuration was
+  therefore refused as a router and silently accepted as the other two. The
+  IRIS-named collisions — the EEM applets, the IRISQ discriminator and its
+  logging bindings, `crypto pki trustpoint IRIS`, `ip http client
+  secure-trustpoint IRIS` — move into one shared set that every platform
+  checks, and each keeps what is genuinely its own: the router its Catalyst
+  8000 gate, VirtualPortGroup collision, app-subnet overlap and NAT interface
+  check; Guest Shell the guest-share emptiness check; and each its own
+  app-hosting stanza, `guestshell` on one and `iris` on the other. IOx
+  consequently probes running-config and the app list alongside `show version`,
+  over the single-login marker channel the router already used; what it reports
+  about identity is unchanged. On Guest Shell the reachability probe stays
+  ahead of the collision check deliberately — an unreachable device is far
+  commoner than a collision, and "preflight could not run" tells an operator
+  nothing about which of the two to go and look at. Paired with the teardown
+  change above, undeploy now clears exactly what preflight refuses.
+- **Telemetry export health moved from Monitoring to the Overview dashboard.**
+  Monitoring is the audit trail and the deployment logs; a telemetry-export
+  badge in its heading described something that page has nothing to do with.
+  It refreshes with the Overview, and is deliberately not awaited alongside the
+  overview fetch so an unreachable collector cannot hold up the cards.
+- **The devices table can be filtered, and bulk actions act on the filter.**
+  Every meaningful column gets a filter — free text across device, IP and
+  model, plus management type, platform, credential, telemetry, peer policy and
+  status — and only matching rows are rendered, so filtering and then "select
+  all" is how an operator acts on a subset instead of hand-picking rows out of
+  the whole fleet. The filter predicate reuses the same derivations the row
+  renderer uses, so a filter can never disagree with the cell being read.
+  Quarantine and release join the other bulk actions under the same
+  selected-action lock; because the peer-policy API is one device per call and
+  carries a revision, they run in sequence carrying it forward, and a losing
+  race re-reads the policy once rather than stamping a stale revision over
+  someone else's change.
+- **The deployment logs get the audit page's time filter, not a picture of
+  one.** `GET /api/deploy-logs/histogram` bins logs into buckets over a window,
+  mirroring the audit histogram's semantics including the `since_ts`/`until_ts`
+  brush window, and `GET /api/deploy-logs` now accepts `after_ts`/`before_ts`
+  so a selection narrows the list. The console gains range chips, a
+  server-binned histogram and a brush with edge handles, panning and
+  click-to-clear; the timeline and the table refresh together, or a selection
+  would move the bars while the rows below still showed the old range. Search
+  covers device, action and result with action and result pickers, results are
+  paged, and a log opens in a right-hand drawer — closed on Escape, its slide
+  dropped entirely under `prefers-reduced-motion` — so the list stays where the
+  operator left it instead of being pushed off screen.
+- **Router preflight for `POST /api/devices/<id>/onboard` now runs once, in
+  the bounded worker pool, instead of twice.** It used to run synchronously
+  before the HTTP request returned, and then again inside the queued job
+  right before minting — necessary because a delayed job can still be
+  invalidated by a change made after the first check ran — so a large batch
+  submission sat through serial SSH round-trips to every selected router
+  before any job ID came back, while the blocking check at submit time
+  changed nothing about whether the worker's own check still had to run.
+  The route now records the preflight as pending and returns immediately, so
+  a batch shows queued progress right away, and a preflight failure is
+  reported as that individual job's own error with an actionable log line
+  instead of rejecting the request or blocking unrelated routers behind it.
+  Preflight itself is also cheaper to run: its four commands (five when NAT
+  attachment adds an outside-interface check) now travel in one
+  `lab/device-run.sh` session instead of one SSH login per command, using
+  IOS XE's own command echo as a marker to split the single response back
+  into sections.
+- **The read-only pre-check and verify passes in the install/uninstall
+  recipes now cost one device login instead of several.** The flash/routing
+  /clock pre-checks in `device/device-install.sh`, the `show iox` readiness
+  check in `device/iox/install.sh`, and the running-config/app-hosting/
+  file-listing verify block in both `device/router-install.sh` and
+  `device/router-uninstall.sh` each used to open a separate SSH session per
+  command; every command in a group now travels in one session, split back
+  into sections on IOS XE's own command echo. A missing section is still
+  treated as a hard transport failure, never read as an empty, safe result.
+  State-gated polling and retry loops — for example the IOx readiness poll,
+  which still re-observes live state on every iteration — are unchanged:
+  only the repeated read *within* a single observation was collapsed, never
+  the polling itself.
+
+### Fixed
+- **The console never refreshed a view on its own.** `setInterval` appeared
+  nowhere, and the only live mechanism was a per-job `EventSource`, so a view
+  updated on navigation or after an explicit action and at no other time —
+  device state that changes server-side (heartbeats, staging progress,
+  deployment state) stayed invisible until the operator navigated away and came
+  back. `refreshDevices()` had even been written to preserve batch checkbox
+  selections "across the periodic re-render" that never existed. Each view now
+  names the refresh its poll repeats; Settings is excluded, being a set of
+  forms that re-rendering under the cursor would clear, and a hidden tab skips
+  its tick and refreshes on return.
+- **The setup nudge could never hide.** `.nudge { display:flex }` is a class
+  selector and outranks the user-agent stylesheet's `[hidden] { display:none }`,
+  so setting `hidden` changed nothing on screen; because the code returns before
+  rewriting the text once the outstanding count reaches zero, a fully configured
+  server kept displaying a stale "1 setup step still needs attention". `.badge`
+  had the same shape, leaving the telemetry-health badge as an empty pill until
+  its first refresh. Both are now pinned back to `display:none` when hidden.
+- **An audit row read "onboard started undeploying &lt;device&gt;".** The
+  category chip labels the subsystem, but it sits immediately before the verb
+  phrase, where a sentence's subject goes — and one service runs both onboard
+  and undeploy jobs, so the category legitimately is `onboard`. The stored value
+  is unchanged, being persisted in the audit trail and driving the category
+  filter; only the label an operator reads becomes "deployment", which is true
+  of both actions.
+- **An outbox ack watermark above the policy document's own revision is now
+  treated as impossible and ignored, instead of being honored.**
+  `last_operation_exported_revision` is persisted in the enforcement status
+  file, separately from the policy document itself, so a document restored
+  or reset after a lower-revisioned backup can sit below a watermark that
+  was written for an older, higher-revisioned document. Honoring that
+  watermark was doubly destructive: `pending_exports` selects
+  `revision > acked`, so it suppressed every export outright, and the next
+  commit's pruning step then silently discarded every unacknowledged outbox
+  entry. `server/peer_policy.py` now sanitizes the watermark against the
+  document it is applied to and falls back to 0 — nothing counts as
+  acknowledged, and the entries re-export — whenever the watermark exceeds
+  the document's own revision, is not a non-negative integer, or the
+  document itself carries no usable revision.
+- **A live telemetry withdrawal now records the reason the server actually
+  has, instead of flattening every cause to `not_active`.** The heartbeat
+  handler in `server/catalog.py` called the live table's withdrawal with no
+  reason on every policy-driven withdrawal, so the `disabled` and `paused`
+  states a device genuinely reports for its own master toggle or a stream
+  pause could never appear in a live sample or in `/api/swarm` — every
+  withdrawal read as `not_active` regardless of cause. The reason is now
+  derived from the server's own flags, in the same precedence the agent
+  itself uses (master toggle first, then stream-off or a global pause, then
+  `not_active` for a device that lost its assignment), and never from the
+  device's own claimed `obs_state` — a device claiming `observed` while the
+  server has it disabled is still recorded as `disabled`.
+- **A forced undeploy now works at all, on every platform.** It is the only
+  exit for a device that cannot be undeployed (no receipt), cannot be adopted
+  (routers never are) and cannot be re-onboarded (preflight refuses the live
+  agent) — and it had never once run end to end. The flag never left the
+  server: `OnboardService.start()` received the console's extra environment
+  only for the *onboard* action, while `IRIS_FORCE_AGENT_ONLY` is set only in
+  the *undeploy* branch, so no teardown recipe ever saw it. On Guest Shell and
+  IOx that was not a failed rescue but a destructive one — the full teardown
+  ran, removing `Vlan$VLAN` and the VLAN itself from an inventory row no
+  receipt has proven, while the audit trail recorded that the operator's
+  network had been left untouched. Undeploy now carries its own environment,
+  so the telemetry flags stay onboard-only and the force flag reaches the
+  recipe.
+
+  On routers the recipe then refused to run: the processor-board identity
+  guard sat outside the force branch and compared a live board ID against the
+  empty `EXPECTED_DEVICE_IDENTITY` that force mode deliberately does not
+  require, aborting every time before touching the device. Two residue scans
+  then failed a teardown that had already succeeded — one flagging the IRISQ
+  discriminator and PKI trustpoint that only `config_cleanup` removes, the
+  other the NAT rules force preserves, whose ACL pattern collapsed to the bare
+  prefix `ip access-list standard IRIS-NAT-` and matched any other group's ACL
+  once no receipt supplied a VPG number. Both failed *after* the destructive
+  work and *before* `copy running-config startup-config`, leaving a reload to
+  undo whatever had succeeded.
+
+- **What a teardown removes is now decided by name, not by mode.** Every
+  IRIS-named artifact — the EEM applets, the IRISQ discriminator and its
+  logging bindings, `crypto pki trustpoint IRIS`, `ip http client
+  secure-trustpoint IRIS`, the app-hosting stanza and the staged files — is
+  removed in every mode, including force and inband. Previously those were
+  preserved whenever the mode was inband or forced, on the reasoning that a
+  receipt cannot prove such globals remain uniquely IRIS-owned; that does not
+  survive contact with the names, and it left a "clean" device refusing its
+  next onboard on artifacts IRIS had put there itself. What the modes protect
+  is the operator's *network* — the VLAN and its SVI, the VirtualPortGroup,
+  the NAT rules — which IRIS merely configured and no receipt proves it
+  created. That distinction is preserved exactly, and the verify scans follow
+  the same rule: what is removed in every mode is checked in every mode.
+
+### Documentation
+- The public site's copy now speaks to Cisco images and patches generally
+  instead of IOS-XE alone, describes Guest Shell and IOx staging in
+  platform-neutral terms ("device storage" rather than naming `flash:` /
+  `sdflash:`), renames the platform tabs to "Catalyst 9000" and "Industrial
+  Ethernet," adds a "Catalyst 8000" tab for router Guest Shell over a
+  VirtualPortGroup, and drops the standalone ports table and its filter
+  buttons.
+
+## [2026.08.22]
+
+### Added
+- **Every tracker and catalog credential resolves to a typed principal.** An
+  identity is a `(type, id)` pair — `device:<id>`, `service:seeder` or
+  `legacy` — so a device registered under the name `seeder` and the seeder
+  service are distinct identities instead of one colliding key. The swarm
+  registry keys peers by `(principal type, principal id, peer_id)` and
+  excludes a requester from its own results by that full key; swarm
+  snapshots and telemetry events carry `principal_type` /
+  `participant_class` alongside the existing peer fields.
+- **The tracker takes its credential from a dedicated `announce_token=`
+  query parameter, and the existing `key=` value keeps working.** A single
+  valid legacy `key=` is still accepted, so devices holding an older torrent
+  keep announcing. This upgrade migrates nothing and revokes nothing: old
+  and new credentials are both valid, and retiring one is a separate
+  operator decision. A rotated-out seeder token announces as an unattributed
+  `legacy` participant — it is not recorded as an endpoint and cannot be
+  quarantined individually. Two `announce_token=` parameters, or two
+  different valid `key=` values, are ambiguous and refused with a 403 whose
+  body carries no token, URL or query string.
+- **`GET /v1/torrents/<image>.torrent` returns a per-device torrent.** For a
+  device principal the catalog builds the response in memory with an outer
+  announce carrying only that device's announce token, copies the raw `info`
+  byte span verbatim so the info hash does not move, and marks the response
+  `Cache-Control: private, no-store` with `Vary: Authorization`. A device
+  with no valid announce credential gets a 500 and no torrent — it is not
+  handed the shared seeder token as a fallback. Service principals still
+  receive the canonical file unmodified.
+- **A deployment gate for a first identity-compatible rollout.**
+  `IRIS_REQUIRE_IDENTITY_GATE=1` makes the catalog answer 503 to every
+  personalized (device-principal) torrent request until the checkpoint file
+  `<IRIS_STATE>/identity-compatible-ready` exists — the file a proven seeder
+  rotation writes and `--recover` removes. The checkpoint is read per
+  request, so opening or closing the gate needs no restart, and the
+  canonical (service) torrent path is unaffected. The variable is off by
+  default; a deployment that does not set it serves personalized torrents as
+  before.
+- **Peer policy decides which peers the tracker will introduce to each
+  other.** ACLs and per-device assignments live in
+  `<IRIS_STATE>/peer-policy.json` with a last-known-good copy beside it. A
+  candidate peer is returned only on a mutual permit — each side's assigned
+  ACL is evaluated against the other peer's principal and address. With
+  neither file present the tracker materializes a validated base document
+  and discovery stays open, so an existing deployment behaves as it did
+  until an operator assigns something. A corrupt authoritative file falls
+  back to the last-known-good copy and reports `degraded`; with both files
+  corrupt the tracker fails closed, which here means it returns no candidate
+  peers at all.
+- **The tracker is the only process that writes the aria2 peer blocklist,
+  and its status file carries counts only.** A single serialized reconcile
+  loop recomputes the denied set each pass from durable policy, the endpoint
+  map (`<IRIS_STATE>/peer-endpoints.json`, written on an authenticated
+  announce from an attributable principal, TTL via `IRIS_ENDPOINT_TTL`), the
+  live registry and the credential-revocation view, then full-replaces the
+  blocklist over aria2 JSON-RPC. Status is written to
+  `<IRIS_STATE>/peer-enforcement.json` as a denied-address *count* — the
+  addresses themselves are neither stored nor exposed, so this file cannot
+  tell you whether one particular peer is blocked. An `enforced` state is
+  written only when both a current aria2 session id and a desired-set hash
+  are present.
+- **Quarantine a device from the console.** The devices table gains a *Peer
+  policy* column showing the per-device quarantine intent and the tracker's
+  last enforcement state, backed by `GET /api/peer-policy` and
+  `PUT /api/peer-policy/quarantine/<device>`. Because enforcement status is
+  count-only, the column reports intent plus the tracker's overall state,
+  not per-address proof that a given peer is blocked. The mutation is
+  optimistic: it carries the policy revision it saw and returns 409 with the
+  current revision if policy changed elsewhere, so a concurrent edit is
+  reported rather than overwritten. The confirmation dialog states what the
+  action does and does not do — it changes peer discovery and the server
+  seeder across all torrents, may not tear down sessions already
+  established, and installs or reloads nothing on the device. The swarm view
+  warns when legacy unattributable participants are present, since those
+  cannot be quarantined individually.
+- **Policy mutations are recorded in a bounded outbox the tracker drains.**
+  Each committed mutation appends a stable outbox entry carrying the revision
+  it produced, and the tracker reports how far it has consumed through
+  `last_operation_exported_revision` in the enforcement status file; entries
+  at or below that watermark are pruned on the next commit. The outbox is
+  capped at 256 unacknowledged entries and the cap is checked *before any
+  write*, so a stalled consumer blocks new operations with a 503
+  `operation_backlog_full` rather than silently discarding them. The same
+  route separates its other refusals: 409 `revision_conflict` carrying the
+  current revision, 422 `policy_error` for a degraded policy, and 503
+  `policy_fail_closed` when policy itself is fail-closed.
+- **`rotate-seeder-announce`: one supported command for rotating the seeder
+  announce credential.** `server/rotate_seeder_announce.py` ships executable
+  in the server image and performs the whole rotation. It takes
+  `--maintenance-frozen` (required — it acknowledges a maintenance freeze
+  the operator has already put in place; the command never creates one),
+  `--state`, `--secrets` and `--manifest`. Preflight reads the catalog,
+  binds every published image's canonical torrent to exactly one active
+  aria2 GID, and refuses before touching anything if an image has no
+  canonical torrent, is not uniquely active, the announce base is not a
+  private HTTP URL, durable encrypted-secrets configuration is missing, or a
+  recovery manifest from an earlier run is still on disk. The new credential
+  is persisted encrypted-at-rest before any torrent byte changes; each
+  replacement rewrites only the outer announce and keeps the `info` byte
+  span SHA-1 identical, so info hashes do not move. Credential values are
+  never accepted on the command line and never printed — a failure reports
+  an exception class only. Rotation keeps the previous credential valid and
+  does not revoke it; at most two valid previous records are allowed and a
+  rotation that would exceed that is refused. Revoking a previous record is
+  library-level support in this release — no shipped command performs it.
+- **A rotation is reported complete only when the tracker independently
+  proves the new identity is serving.** After every canonical torrent has
+  been re-added, the command polls the tracker's loopback `/swarm` (up to
+  three attempts, 2 s timeout each) and requires the current typed
+  `service:seeder` principal to be observed for every expected info hash,
+  each with an announce strictly later than the post-add boundary; the
+  origin's own observation must show aria2 RPC up with exactly those
+  torrents in control state, and no legacy or unattributed seeder row for
+  them. A completed device peer does not stand in for that proof. Anything
+  else — transport error, timeout, or a document that does not prove it —
+  fails closed, which here means serving is not claimed, the maintenance
+  freeze stands, the recovery manifest is preserved, the command exits 1,
+  and no previous credential is revoked.
+- **Byte-safe failure handling with a per-torrent damage report.** Every
+  rotation writes a nonsecret recovery manifest before it starts
+  (`<state>/seeder-rotation-recovery.json`, with exact pre-rotation torrent
+  copies and SHA-256 digests under `<state>/seeder-rotation-recovery/`) and
+  updates its phase per torrent. If an add fails, the exact old bytes are
+  restored and the old torrent is re-added. If that re-add also fails, or if
+  a remove fails and the live state is therefore unknown, the run enters a
+  hard no-go: old bytes are restored for every torrent already rotated in
+  this run, the remaining torrents are abandoned, maintenance stays frozen,
+  and the run does not claim the image is still being served. A hard no-go
+  can leave an image not being served and needing manual repair — the result
+  lists every disturbed torrent with `restore_readd_ok`, and a `false` there
+  means serving repair is still required for that image. Rollback removes
+  the live GID aria2 returned for the new torrent, and an add that returns
+  no GID counts as a failure rather than a success.
+- **`--recover` restores the exact pre-rotation state from the manifest.**
+  It rejects a manifest that is not version 2, is already terminal, points
+  at backup or canonical paths outside their own directories, carries a
+  digest or info hash that does not match its backup bytes, or names an
+  image directory that disagrees with the current catalog — all before any
+  file or aria2 call. It then clears the identity checkpoint, restores the
+  original bytes, force-removes any active GID for that info hash, re-adds
+  the original torrent and checks the result through `aria2.tellStatus`.
+  Recovery leaves maintenance frozen and keeps the manifest as evidence in
+  either outcome; if any step fails the manifest is marked `repair_needed`
+  with the unrestored torrents flagged and the command exits 1.
+- **Durable, identified device transfer reports.** Every acquisition cycle
+  carries a random `transfer_id` and every terminal report a random
+  `report_id`. The agent freezes the complete report body in its state file
+  and checkpoints it (tmp + fsync + rename) *before* the first POST, so a
+  retry after a crash sends the byte-identical report and the server stores
+  it once; identity and sequence facts are persisted the same way before a
+  heartbeat that carries them, and if that write fails the agent skips only
+  that piece of telemetry — the heartbeat still goes out and staging is
+  untouched. The report replaces the old `avg_bps` / `sha_ok` fields with
+  two independent verification facts recorded at the moment each decision is
+  made — `content_sha256` (`verified` | `mismatch` | `not_checked`) and
+  `ios_copy_verify` (`ok` | `failed` | `not_run` | `unsupported`) — plus
+  content bytes at end of window, split heartbeat/report failure streaks,
+  catalog RTT and a bounded participation peer list carrying first seen,
+  last seen and observation count per address. Neither verification state is
+  inferred from "done" or from absence: an unchecked hash is reported as
+  `not_checked`, not as a failure.
+- **Live transfer observations carry an explicit state.** The v1 `sample`
+  embedded in the heartbeat is superseded by a `telemetry_observation`
+  envelope whose `obs_state` is one of `observed`, `not_due`, `paused`,
+  `disabled`, `not_active` or `rpc_unavailable`. Only `observed` carries
+  aria2 counters, per-connection peer rows and a sampling class; a
+  state-only envelope carries no transfer numbers at all, so "we are not
+  measuring right now" is distinguishable from "the rate is zero".
+  Per-connection rows carry the measured send/receive rate, port, client
+  name and progress, and a value aria2 does not report is omitted instead of
+  being sent as a measured zero.
+- **Pull requests are identified, and repeat reports are recognised.** A
+  console-requested report mints a `request_id` that rides in the heartbeat
+  response and is echoed by the device; clearing the pending request is
+  match-gated, so a stale or superseded report cannot clear a newer request.
+  On the server a bounded per-device ledger (`report_ledger.json`, 256 ids
+  per device, oldest purged first) backs the five-report ring, so a retry of
+  a report that has already aged out of the ring is still recognised as a
+  duplicate. The ledger is deleted with the device.
+- **New Prometheus and OTLP families.** Per-torrent seeder control state
+  (`iris_seeder_torrent_upload_length_bytes` /
+  `iris.seeder.torrent.upload_length`), a rollout-progress gauge
+  (`iris_legacy_announce_participants`, the number of legacy unattributed
+  announcers currently seen), numeric peer-policy and enforcement gauges
+  (revision, applied revision, denied-address count and a single health
+  gauge), and per-signal export accounting —
+  `iris_telemetry_export_failures_total`,
+  `iris_telemetry_export_dropped_total` and
+  `iris_telemetry_export_last_success_seconds`, each labelled by `signal`.
+  None of the new families carry a device, peer or report label.
+- **The Images screen says where to put images for server-side import.** A note
+  above the import table names the import root — `/opt/images` by default, or
+  wherever `IMAGES_ROOT` points — and gives `/opt/images/iosxe/c9300/` as an
+  example. It is always visible, because the import table itself is hidden when
+  nothing is importable, which is exactly the moment an operator needs to know
+  where files belong.
+
+### Changed
+- **`/swarm` is now a typed, source-grouped document, and consumers of the
+  old flat shape will break.** Every value sits under a named source with
+  its own observation time: `server` carries the origin's own observation
+  (RPC state, global rates, per-torrent control-state upload gauge and
+  current upload rate, aria2 session id, and the tracker's typed view of the
+  service seeder with a per-info-hash last seen), and each
+  `images[].peers[]` row carries `tracker` (principal type/id, role, left,
+  last seen, progress) plus, when known, `device_observation`,
+  `latest_report`, a measured `server_observation.peer` send rate,
+  `peer_policy` and `peer_enforcement`. Device attribution joins on the
+  authenticated device principal id only — never on the announce source IP —
+  so a row on a legacy credential is marked `legacy_unattributed`, gets no
+  device identity and no per-device quarantine control. The current
+  non-legacy service seeder is deduped out of the peer rings and appears
+  only as `server`. The former top-level `host` / `seeder` objects and the
+  IP-joined peer fields are gone.
+- **The live transfer metric families were reworked, and the ambiguous ones
+  retired.** `iris_transfer_active`, `iris_transfer_stalled`,
+  `iris_transfer_down_bps_sum`, `iris_transfer_up_bps_sum` and
+  `iris_transfer_tier` are gone. In their place: `iris_transfer_devices`,
+  `iris_transfer_throughput_bytes_per_second` (with a `direction` label),
+  `iris_transfer_zero_receive_devices`, `iris_transfer_freshness_age_seconds`
+  and `iris_stream_devices` labelled by `sampling_class`;
+  `iris_transfer_samples_rejected_total` is now
+  `iris_telemetry_samples_rejected_total`. The OTLP metric names move the
+  same way. Throughput and progress are **omitted** for an image with no
+  currently fresh device rather than published as a zero, and the freshness
+  age is exported so the omission is explainable. Dashboards and alerts
+  built on the old names need updating.
+- **Server and IOx agent images move from Debian bookworm to trixie**
+  (`python:3.12-slim-trixie`), taking OpenSSL from the 3.0 branch — upstream
+  EOL **2026-09-07** — to **3.5 LTS**, supported upstream to 2030-04 (Debian
+  tracks security support for each suite on its own schedule; the point is to
+  stop running on an upstream-EOL crypto branch). This is a security boundary
+  rather than housekeeping: `server/trust.py` shells out to the base image's
+  `openssl` to parse the TLS trust store and verify CMS integrity for
+  downloaded CA bundles (PKCS#7/CMS). This is CA-bundle/trust-store processing
+  only — IOS image authenticity is enforced device-side by IOS `copy /verify`,
+  not by the server. Python stays 3.12.14 and both Dockerfiles are bumped in
+  lockstep. Addresses the first action item of the third-party EOL audit
+  (#13); the aria2c side of that audit already moved to OpenSSL 3.5.7 LTS
+  with the Aria2 Next hand-in in 2026.08.21.
+- **The console swarm map was rebuilt on that document.** The graph draws
+  the origin hub plus one node per tracker participant, labelled by device
+  identity (or "Legacy unattributed peer"), and marks an edge as measured
+  only when a measured server-to-peer rate was observed within the last 120
+  seconds. Each participant carries a status line — device observation
+  fresh, stale or unavailable, quarantine intent, enforcement state and
+  whether it is blocked — searchable from a peer table beside the graph and
+  filterable to participants needing attention. Graph nodes are keyboard
+  operable, and the detail drawer keeps focus and closes on Escape; it shows
+  tracker presence, server observation, device observation, latest report,
+  policy intent, enforcement and the on-demand report pull, and prints "not
+  directly reported" where the document says nothing rather than implying a
+  value. Polling pauses when the console leaves the swarm view or the tab is
+  hidden, backs off to 30 s while `/swarm` is unreachable, and the header
+  states whether the view is live, paused, retrying, or showing tracker
+  peers while the origin's RPC is unavailable.
+- **Deleting a device revokes its credentials before anything else.**
+  `DELETE /api/devices/<id>` durably revokes every secret the device owns
+  under the secrets-store lock first; if that write fails the delete is
+  aborted with a 500 and no fleet, catalog or policy state is touched. Once
+  the revoke is durable, policy assignment and catalog state are cleaned up
+  best-effort, and a partial cleanup returns 207 with the failed areas named
+  in the response and in the audit entry. Endpoint rows are deliberately
+  kept until they age out: a revoked device is denied through its still-fresh
+  endpoint regardless of policy, so cleanup order cannot re-permit it.
+  `iris-revoke` follows the same order and exits nonzero if the policy
+  tidy-up fails while the revoke stands; `iris-mint-enrollment` clears a
+  device's old endpoint rows before minting, and aborts without minting if
+  that clear fails.
+- **Per-peer sent-byte figures are no longer derived from the per-torrent
+  counter.** The seeder previously split aria2's exact per-torrent
+  `uploadLength` delta across connected peers in proportion to their
+  instantaneous upload rate, which is division rather than measurement. The
+  server now reports what aria2 actually measures: a current per-peer send
+  rate, plus the per-torrent `upload_length_bytes` control-state value
+  surfaced as a gauge (it can exceed the image size and it can decrease),
+  re-baselined on an aria2 session change or an observed decrease.
+- **Freshness is decided by the server's own receipt clock.** A live value
+  counts as current only while it is within 120 s of the receipt of the
+  `observed` envelope that set it; `not_due` does not extend that window,
+  and `paused` / `disabled` / `not_active` / `rpc_unavailable` withdraw the
+  value immediately. An out-of-order sample sequence for a known transfer
+  cannot replace a newer observation. Rows are retained for display for a
+  cadence-scaled interval capped at 900 s.
+- **Per-device OTLP gauges are retired; `IRIS_OTLP_DEVICE_METRICS` no longer
+  has an effect.** Device- and peer-labelled history now lives only in the
+  OTLP log records, where it does not multiply metric cardinality. The
+  environment variable is still accepted so existing deployments start, but
+  setting it exports nothing extra.
+- **OTLP log records use canonical event names and a stable event id.**
+  Tracker lifecycle events export as `iris.tracker.peer`, v2 device reports
+  as `iris.device.transfer.report`, legacy reports as `iris.device.report`
+  with a safe subset only, and peer-policy operations as `iris.peer.policy`.
+  Log record timestamps are the server receipt time, with the device's own
+  observation time carried as an attribute. Legacy v1 fields are not
+  re-labelled as v2 measurements, and each record is tagged with its schema
+  version.
+- **Export health is tracked per signal.** Logs and metrics are now
+  independent signals, each `off` / `ok` / `degraded`, with the aggregate
+  taken as the worse of the two — a successful metrics push no longer masks
+  failing log delivery. The `/healthz` `otlp_export` block and the console
+  badge gain the per-signal breakdown, including queue depth and overflow
+  drops for logs. Disabling the destination sets both signals to `off` while
+  keeping the historic last-success timestamp, and the degraded/recovered
+  audit entry fires once per aggregate transition.
+- **Queued log events survive a destination change.** The log queue is owned
+  for the process lifetime and only the destination transport is rebuilt
+  when the OTLP destination is changed, disabled or re-enabled, so events
+  queued under the previous destination are delivered to the new one instead
+  of being dropped. The queue stays bounded: when it is full the oldest
+  event is dropped and counted.
+- **Report export is keyed by report identity instead of a timestamp
+  watermark.** Reports sharing a server receipt timestamp are all exported
+  rather than shadowing one another, and a hub restart replays the stored
+  ring with the same ids so the backend can deduplicate. The in-process set
+  of delivered ids is trimmed to the ids currently in the ring, so it does
+  not grow without bound on a long-running server.
+- **Seeder gauges are published only while the aria2 RPC poll is
+  succeeding.** A failed or vanished poll clears the cached control state
+  instead of republishing the last-known values, so `iris_seeder_*` and the
+  per-torrent upload lengths disappear rather than freezing at a stale
+  number. `iris_seeder_rpc_up` still reports the poll outcome.
+- **An idle tracker no longer talks to aria2 every two seconds.** The
+  reconcile loop still runs on a local wake, an external change to the
+  durable policy or endpoint files, outstanding pending writes, an unhealthy
+  RPC or session, and a bounded maintenance deadline derived from the
+  endpoint TTL. A steady-state poll with none of those conditions performs
+  no reconcile pass, no `getSessionInfo` and no blocklist apply.
+- **Device report endpoints reject devices that are not in the fleet.**
+  `GET /api/devices/<id>/reports` and
+  `POST /api/devices/<id>/request-report` now answer 422 `device is not in
+  fleet` instead of returning an empty report ring or queueing a pull for an
+  id the fleet does not know.
+
+### Fixed
+- **Mutual peer ACL evaluation applied each ACL to the wrong side.** Both
+  halves of the check looked up the ACL assigned to the peer being judged
+  and then judged that same peer with it, so a rule written to control what
+  one device may see was evaluated against the other device's own
+  assignment. Each side's assigned ACL is now evaluated against the *other*
+  peer's principal and address, which is what makes a quarantine assignment
+  isolate the assigned device in both directions.
+- **A corrupt or unreadable endpoint map is treated as fail-closed instead
+  of empty.** A parse failure previously produced an empty map, which
+  silently emptied the derived deny set. The reconciler now writes a
+  `fail_closed` enforcement status and leaves existing blocks in place. The
+  pending-write queue is also locked for cross-thread use, and a retry
+  removes only the exact tuple it successfully wrote, so a newer endpoint
+  queued during the retry is not dropped.
+- **A policy mutation on corrupt state no longer resets policy to the base
+  document.** When the authoritative file existed but failed validation, the
+  commit path treated it as a fresh install and wrote a new base document
+  over it, discarding assignments. It now refuses the mutation and reports a
+  degraded policy so the operator can repair the file.
+- **Re-enrolling a device with expired or revoked credentials now renews
+  them.** `iris-mint-enrollment` minted an announce token or RPC secret only
+  when the key was absent, so a device whose records existed but were no
+  longer valid was re-enrolled with dead credentials. The check now tests
+  the record's shape and validity, not just its presence.
+- **A shared-address policy conflict no longer reports a device as
+  blocked.** `peer_enforcement.blocked` on a `/swarm` peer row is asserted
+  only when it is directly known — the tracker is in its fail-closed state,
+  or the device appears in a typed conflict whose global block was actually
+  applied. A permit/deny conflict that was surfaced but not globally applied
+  is still shown as a conflict, with `blocked` false.
+- **A live value no longer sticks after a device is unassigned.** Withdrawal
+  driven by policy — telemetry flags off, a global stream pause, or the
+  device no longer having an approved image — now runs before the
+  approved-image check in the heartbeat route. Previously an observation
+  naming the now-removed image was treated as malformed, counted as a
+  rejected sample and skipped the withdrawal, leaving the console showing a
+  stale rate. A policy withdrawal no longer touches the rejected-sample
+  counter; a genuinely malformed observation from a still-assigned device
+  still rejects and leaves the prior good data in place. The heartbeat
+  itself continues to return 200 in both cases.
+- **The origin's observation no longer presents retained values as
+  current.** After a failed control-state poll the per-torrent upload gauges
+  and per-peer send rates are dropped instead of carried forward,
+  `observed_at` reports the last successful poll rather than the moment the
+  snapshot was rendered, and a torrent that has vanished from aria2 no
+  longer lingers in the map's totals. Consumers gate on that timestamp, so a
+  stale sample greys out instead of reading as a fresh zero.
+- **v2 reports are strictly re-validated at ingest.** The server
+  independently re-checks types, enums, ids, timestamp ordering (window
+  start before end, peer first seen before last seen), that completed bytes
+  do not exceed total, that peer addresses parse as IP addresses, that a
+  checked content hash names `sha256` and an unchecked one names no
+  algorithm, and that the stated peer total is not below the rows supplied.
+  A report is also rejected unless its `image_id` matches the image the
+  server has assigned to that device. Rejection means a 400 and nothing
+  stored — the device retries with the same frozen report. Observation
+  envelopes are size-bounded (8 KB) and rejected whole rather than partially
+  parsed, and peer rows beyond the configured cap (at most 32) are truncated
+  rather than causing a rejection.
+- **`event.id` now reaches the collector.** It was written as a top-level
+  log-record field, which the OTLP JSON schema does not define, so the id
+  never arrived as an attribute; it is now emitted as a real attribute
+  alongside the record. Delivery accounting was corrected in the same pass:
+  events evicted from a full queue while a successful send was in flight
+  were counted as drops even though they had been delivered.
+- **A crash between storing a report and clearing its pull request no longer
+  leaves the request pending.** A repeat of a report that is already stored
+  is still a storage no-op, but it now also clears the matching pending
+  request, so the retry finishes the job the interrupted delivery started.
+  The clear stays match-gated and cannot clear a newer request.
+- **Log emission no longer waits on an in-flight export.** A batch stays
+  logically queued during the network call, so producers do not block on a
+  slow or hanging collector and the queue bound stays enforced; concurrent
+  flushes are serialised so delivery order is preserved. A queue configured
+  with zero capacity now counts drops instead of raising.
+- **Server-side per-peer send rates are keyed by address *and* port.** Two
+  connections from the same address are no longer summed into one row, and
+  the rate is attached to the swarm view only while the seeder poll behind
+  it is recent, with the observation time carried alongside the value.
+- **Console refreshes can no longer be overwritten by a slower earlier
+  request.** Device, image, credential and peer-policy refreshes are
+  superseded and aborted when a newer refresh starts, late responses are
+  discarded, and an aborted refresh no longer surfaces to the caller as an
+  unhandled error.
+- **The console header's help button rendered as a wide pill wedged before the
+  username.** A single `?` glyph inherited the standard button padding, so it
+  stretched to roughly the width of *Sign out*, and the top bar declared no gap,
+  leaving it flush against the username it sat in front of. It is now a round
+  icon button, grouped with *Sign out* after the username, and the bar spaces its
+  controls.
+
+### Security
+- **Duplicate credential ownership fails closed instead of resolving to
+  whichever record loaded last.** The announce and catalog authorization
+  indexes are built strictly: if two records share a credential value they
+  raise a token-free error and every request in that lane is refused — a
+  tracker 403 or a catalog auth failure — rather than silently overwriting a
+  map key and mis-attributing a principal. No error message carries the
+  offending value.
+- **A device whose every credential is revoked is denied regardless of
+  policy.** The tracker rebuilds this view from the durable secrets store on
+  each pass, so a revoke takes effect without a restart, and a read or parse
+  failure keeps the last known revoked set rather than shrinking it. A
+  device with an expired-but-not-revoked token is not treated as retired, so
+  ordinary token expiry does not produce a deny.
+- **The device id `seeder` is reserved, and minting will not reissue an
+  existing credential value.** Console fleet validation and
+  `iris-mint-enrollment` reject the id `seeder`, keeping it in the service
+  namespace. Minting checks the candidate value against the current index
+  and the rotated-out seeder announce records, retrying and finally erroring
+  out rather than issuing a value that already belongs to another record.
+- **An aria2 RPC error can no longer surface in enforcement status.** The
+  session probe swallows the exception, which may embed the RPC secret,
+  instead of recording its message; the reconciler records the exception
+  type only. The outbox acknowledgement watermark is also read from one
+  place, so a status write cannot move it below an already-acknowledged
+  revision.
+
 ## [2026.08.21]
 
 ### Added

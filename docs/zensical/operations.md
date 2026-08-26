@@ -68,6 +68,86 @@ counts the successes and names the devices that refused. The controls and their
 individual effects are documented in
 [Bulk device actions](console.md#bulk-device-actions).
 
+## Onboarding at scale
+
+A batch onboard no longer blocks its HTTP request on a router's live SSH
+session. `POST /api/devices/<id>/onboard` resolves the plan, checks for a
+conflicting deployment receipt, and returns a job id immediately; router
+preflight — the read-only collision, identity, and NAT checks in
+[Router preflight and ownership](network-attachment.md#router-preflight-and-ownership)
+— runs afterward, in the bounded onboarding worker pool, right before that
+job mints its enrollment token. Selecting a large batch of routers therefore
+shows queued and running progress at once instead of the page hanging while
+each router is probed in turn, and a preflight failure fails only that job,
+with its own log, rather than blocking the routers behind it in the batch.
+Every ownership, collision, identity, NAT, and Guest Shell reachability check
+still completes before any token is minted or any device configuration is
+applied — only when it runs moved.
+
+Worker concurrency is bounded and configurable with `IRIS_ONBOARD_CONCURRENCY`
+(default 25); `GET /api/onboard/jobs` reports the current limit as
+`max_concurrent`.
+
+The generated installers and Console recipes also cut down on device logins:
+the read-only pre-checks before an install and the verification checks after
+an install or undeploy each now run over a single device session instead of
+one login per command. State-gated poll and retry loops — waiting for
+`guestshell destroy`, IOx readiness, or app-hosting state — are unchanged,
+because each iteration has to re-observe live device state.
+
+## Peer-policy operations and their backlog
+
+Every policy mutation — a quarantine assignment from the console, or its removal
+— is committed under a single lock and appends a stable entry to an **outbox**
+that the tracker drains. The tracker reports how far it has consumed through
+`last_operation_exported_revision` in the enforcement status file, and entries at
+or below that watermark are pruned on the next commit.
+
+The outbox is capped at **256** unacknowledged entries, and the cap is checked
+*before any write*. A mutation that would exceed it is refused with
+`503 operation_backlog_full`, so a stalled consumer blocks new operations instead
+of silently discarding them. A 503 here means the tracker is not draining — check
+that it is running and reconciling before retrying the mutation.
+
+The same route separates its other refusals, and they mean different things:
+
+| Response | Meaning |
+| --- | --- |
+| `409 revision_conflict` | Policy changed elsewhere; the current revision is returned so the caller can retry against it. |
+| `422 policy_error` | Policy is degraded — running on the last-known-good copy. Repair the authoritative file. |
+| `503 policy_fail_closed` | Policy is fail-closed; mutations are refused entirely. |
+| `503 operation_backlog_full` | 256 operations are unacknowledged. The tracker is not draining. |
+
+## Endpoint writes that fail
+
+An authenticated announce from an attributable principal records the peer's
+address in `peer-endpoints.json` under `IRIS_STATE`, aged out by
+`IRIS_ENDPOINT_TTL`. If that durable write fails, the entry is queued in memory
+and retried on the following reconcile passes rather than being dropped — the
+device keeps participating in the swarm meanwhile, but the reported enforcement
+status degrades until the write lands, because the derived deny set is computed
+from durable state.
+
+A corrupt or unreadable `peer-endpoints.json` is treated as fail-closed rather
+than empty: the reconcile pass stops before deriving or applying anything,
+existing blocks stay in place, and the recorded state is forced to `fail_closed`.
+Peer discovery is unaffected — the announce path reads the policy files
+independently.
+
+## Retiring a device
+
+Deleting a device revokes its credentials first. The revoke is written durably
+under the secrets-store lock before anything else is touched; if that write
+fails, the delete is aborted and no fleet, catalog, or policy state changes. Once
+the revoke is durable, the remaining cleanup is best-effort and a partial cleanup
+is reported rather than hidden.
+
+Endpoint rows are deliberately **retained** until they age out. A revoked device
+is denied through its still-fresh retained endpoint regardless of policy, so the
+order of cleanup cannot accidentally re-permit it. Re-onboarding clears the
+device's old endpoint rows before the fresh credential becomes usable, and aborts
+without minting if that clear fails.
+
 ## Backups
 
 Back up the Docker volumes that hold `/var/lib/iris` and `/etc/iris`, plus the offline age identity (the host key file `IRIS_AGE_KEY_FILE_HOST` points at) required to decrypt secrets, plus the `iris-images` uploads volume — console-uploaded images live there, and a restore without it loses them. Image binaries under the read-only import root and generated artifacts stay in their normal external storage path.
@@ -114,18 +194,30 @@ Use `device/device-uninstall.sh` (Guest Shell devices), `device/router-uninstall
 
 Undeploy is driven by the device's applied **receipt**, not its editable
 inventory row, so a later inventory edit cannot retarget cleanup. An
-**inband** device's teardown removes only the app footprint and preserves the
-operator-owned VLAN/SVI/routes/VRF. A device deployed before receipts existed
+**inband** device's teardown removes the app footprint and every other
+IRIS-named artifact — the EEM applets, the IRISQ discriminator and its logging
+bindings, and the IRIS PKI trustpoint and HTTP-client binding — and preserves
+the operator-owned VLAN/SVI/routes/VRF. A device deployed before receipts
+existed
 has no active receipt and must be **adopted** (an explicit, audited, no-change
-recording of ownership) before it can be undeployed — except a Catalyst 8000
-router, which cannot be adopted and must be re-onboarded to record live
-ownership evidence. A missing, drifted, or
-uncertain receipt stops cleanup in `needs-reconcile` rather than guessing. See
+recording of ownership) before it can be undeployed, or undeployed with
+**Force** to strip only the agent footprint when there is no receipt at all —
+see [Bulk device actions](console.md#bulk-device-actions). A Catalyst 8000
+router cannot be adopted, and preflight refuses an onboard over a live agent, so
+a receipt-less router's only path is Force. Force behaves identically on every
+platform: it removes every artifact identifiable by name as IRIS — the IRIS EEM
+applets, the IRISQ logging discriminator and its buffered/console/monitor
+bindings, `crypto pki trustpoint IRIS` and `ip http client secure-trustpoint
+IRIS`, the app-hosting stanza, and the staged IRIS files — and leaves only the
+operator's network exactly as it is: the VLAN/SVI, the VirtualPortGroup, and the
+NAT rules, which no receipt proves IRIS created. Undeploy therefore clears
+exactly what preflight refuses, so a forced teardown leaves the device able to be
+onboarded again. A missing, drifted, or uncertain receipt otherwise stops cleanup
+in `needs-reconcile` rather than guessing. See
 [Management Type and VLAN Ownership](network-attachment.md).
 
-Deleting an inventory row is not an undeploy. It removes the console record only,
-and an onboarded device keeps its agent and its staged image with no inventory
-entry left to manage it, so undeploy before deleting anything still deployed.
+Deleting an inventory row is not an undeploy — undeploy before deleting anything
+still deployed. See [Bulk device actions](console.md#bulk-device-actions).
 
 ## Rebuilding the catalog from images already on disk
 
@@ -157,15 +249,83 @@ including the fallback for entries published before that field existed.
 
 Rotating or regenerating the server's TLS certificate invalidates IOx packages
 that were already built: each `iris-arm64.tar` / `iris-amd64.tar` bakes the
-catalog CA in at build time, and the server only refreshes the *served*
-`iris-catalog.pem` on start — it does not rebuild the tars.
+catalog's certificate in at **build** time, and the server only refreshes the
+*served* `iris-catalog.pem` on container start — it does not rebuild the
+tars. A rebuilt server, a fresh volume, or a deliberate certificate rotation
+all silently break every package that was built before the change.
 
-Symptom: the IOx app runs and its TCP connection to the catalog succeeds, but
-the device never heartbeats, because the pinned certificate is rejected.
+Symptom: the device installs cleanly and its IOx app reports RUNNING, and its
+TCP connection to the catalog even succeeds, but it can never authenticate and
+so never checks in. The only evidence is a `TOKEN-REFRESH-FAIL` line in the
+**device's own syslog** — nothing on the server distinguishes "never
+onboarded" from "onboarded but rejecting our certificate". Guest Shell
+devices are immune: their served artifacts, including `iris-catalog.pem`, are
+regenerated on every container start, and the installer always fetches
+whatever is current.
+
+Two ways to catch this before it reaches a device:
+
+- Console **Settings → Setup** carries a *device packages* card showing each
+  package's build time and state (`ok`, `stale`, `absent`, `unknown`) against
+  the server's live certificate — see [Setup](console.md#setup).
+- `tools/check-package-freshness.sh` is the read-only, scriptable equivalent.
+  It compares the certificate the catalog actually serves, the copy handed to
+  Guest Shell devices, and the certificate pinned inside each served IOx
+  package, and exits non-zero if any package is stale:
+
+  ```bash
+  tools/check-package-freshness.sh              # report only
+  tools/check-package-freshness.sh --rebuild    # report, then rebuild if stale
+  ```
+
+  Run it after any catalog certificate change.
 
 Remedy: re-run `tools/provision-iox-packages.sh`, then re-onboard the affected
-IOx devices. Guest Shell devices need no such fix — the installer pushes the
-current certificate on every run, so they heal on re-onboard automatically.
+IOx devices. If instead the certificate the server currently serves disagrees
+with the copy already handed to devices, rebuilding packages alone will not
+fix it — new onboards are affected too — so reconcile the certificate first.
+
+## Rotating the seeder announce credential
+
+`rotate-seeder-announce` is the one supported way to rotate the seeder's announce
+credential. It requires `--maintenance-frozen`, which acknowledges a freeze the
+operator has already put in place — the command never creates one. Preflight
+binds every published image's canonical torrent to exactly one active aria2 GID
+and refuses before touching anything if an image has no canonical torrent, is not
+uniquely active, the announce base is not a private HTTP URL, durable encrypted
+secrets are missing, or a recovery manifest from an earlier run is still on disk.
+
+Each replacement rewrites only the outer announce and keeps the `info` byte span
+identical, so info hashes do not move. Credential values are never accepted on
+the command line and never printed.
+
+**The rotation is only reported complete when the tracker independently proves
+the new identity is serving.** After every canonical torrent is re-added, the
+command polls the tracker's loopback `/swarm` and requires the current typed
+`service:seeder` principal to be observed for every expected info hash, each with
+an announce later than the post-add boundary. A completed device peer does not
+stand in for that proof, and there is no registry shortcut or IP-based guess.
+Anything else — transport error, timeout, or a document that does not prove it —
+fails closed: serving is not claimed, the freeze stands, the recovery manifest is
+preserved, and the command exits non-zero.
+
+Every run writes a non-secret recovery manifest with the exact pre-rotation
+torrent bytes and their digests before it starts. If an add fails, the old bytes
+are restored and the old torrent re-added. If that re-add also fails, or a remove
+fails and live state is therefore unknown, the run becomes a **hard no-go**: old
+bytes are restored for every torrent already rotated, the remaining torrents are
+abandoned, and maintenance stays frozen.
+
+!!! warning "A hard no-go can leave an image not being served"
+    The run does not claim the image is still being served, and it may not be.
+    The result lists every disturbed torrent — a `false` restore result means
+    serving repair is still required for that image before the freeze is lifted.
+
+`--recover` restores the exact pre-rotation state from the manifest. It validates
+the manifest — version, terminal state, path containment, digest and info-hash
+agreement, and that the named image directory matches the current catalog —
+before any file or aria2 call. Recovery leaves maintenance frozen and keeps the
+manifest as evidence in either outcome.
 
 ## Recovery checklist
 

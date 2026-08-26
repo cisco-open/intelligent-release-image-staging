@@ -254,25 +254,38 @@ setup_stage_local() {
   # FAKE_CLOCK_LINE defaults to a recent year so every pre-existing test below
   # still sails past [pre] unmodified; only the dedicated PREREQ tests further
   # down override those.
+  #
+  # [1/7]+[pre] now ride ONE combined SSH session (marker __IRIS_PRECHECK_)
+  # instead of up to three — see device-install.sh. The stub recognizes that
+  # single request by the marker prefix and answers all of its sections
+  # (FLASH always, ROUTING only when the request actually asked for it, i.e.
+  # NETWORK_ATTACHMENT=routed, CLOCK always) in one reply. Real sessions echo
+  # commands back; FAKE_DEVICE_DOWN=yes simulates a dead session that echoes
+  # nothing at all — no markers either — which is exactly what a missing
+  # section looks like to the installer's fail-closed ROUTING parse.
   STUBDIR="$BATS_TEST_TMPDIR/stub"
   mkdir -p "$STUBDIR/lab"
   cat > "$STUBDIR/lab/device-run.sh" <<'STUB'
 #!/usr/bin/env bash
 cmds="$(cat)"   # drain stdin (the CLI commands piped to the "device")
 case "$cmds" in
-  *"show running-config"*)
-    # Real sessions echo the commands back; the installer's transport check
-    # keys on that echo. FAKE_DEVICE_DOWN=yes simulates a dead session.
+  *"__IRIS_PRECHECK_"*)
     [ "${FAKE_DEVICE_DOWN:-no}" = "yes" ] && exit 0
-    echo "show running-config | include no ip routing"
-    if [ "${FAKE_IP_ROUTING:-yes}" = "yes" ]; then
-      echo "Gateway of last resort is 100.90.168.1 to network 0.0.0.0"
-    else
-      echo "no ip routing"
-      echo "Default gateway is not set"
-    fi
-    ;;
-  *"show clock"*)
+    echo "__IRIS_PRECHECK_FLASH__"
+    echo "bytes free stub"
+    case "$cmds" in
+      *"__IRIS_PRECHECK_ROUTING__"*)
+        echo "__IRIS_PRECHECK_ROUTING__"
+        echo "show running-config | include no ip routing"
+        if [ "${FAKE_IP_ROUTING:-yes}" = "yes" ]; then
+          echo "Gateway of last resort is 100.90.168.1 to network 0.0.0.0"
+        else
+          echo "no ip routing"
+          echo "Default gateway is not set"
+        fi
+        ;;
+    esac
+    echo "__IRIS_PRECHECK_CLOCK__"
     echo "${FAKE_CLOCK_LINE:-14:23:07.512 UTC Thu Aug 20 2026}"
     ;;
   *)
@@ -598,6 +611,16 @@ EOF
 cmds="\$(cat)"
 printf '%s\n' "\$cmds" >> '$BATS_TEST_TMPDIR/device-commands'
 case "\$cmds" in
+  *'__IRIS_PRECHECK_'*)
+    # [1/7]+[pre] ride ONE combined session now (marker __IRIS_PRECHECK_) --
+    # answer all three sections so the real run sails past the PREREQ gate.
+    echo '__IRIS_PRECHECK_FLASH__'
+    echo 'bytes free stub'
+    echo '__IRIS_PRECHECK_ROUTING__'
+    echo 'show running-config | include no ip routing'
+    echo 'Gateway of last resort is 100.90.168.1 to network 0.0.0.0'
+    echo '__IRIS_PRECHECK_CLOCK__'
+    echo '14:23:07.512 UTC Thu Aug 20 2026' ;;
   *'show running-config | include ^ip routing'*) echo 'ip routing' ;;
   *'show clock'*) echo '14:23:07.512 UTC Thu Aug 20 2026' ;;
   *'show app-hosting list'*) echo 'guestshell RUNNING' ;;
@@ -623,4 +646,150 @@ EOF
   [ -f "$ARTDIR/staging/rpc-secret-$cap" ]
   grep -qF "staging/iris-agent-100.92.9.3-$cap.conf" "$BATS_TEST_TMPDIR/device-commands"
   grep -qF "staging/rpc-secret-$cap" "$BATS_TEST_TMPDIR/device-commands"
+}
+
+# --- SSH session consolidation ([1/7] flash pre-check + [pre] ip routing +
+# [pre] device clock, formerly up to three separate lab/device-run.sh logins,
+# now one combined session keyed by the __IRIS_PRECHECK_ marker -- same
+# pattern as _default_router_preflight in server/gui_onboard.py). ---
+
+@test "[1/7]+[pre] pre-checks issue exactly ONE device-run.sh session, not up to three" {
+  setup_stage_local
+  unset HOST_USER HOST_PASS
+  CALLLOG="$BATS_TEST_TMPDIR/precheck-calls"
+  : > "$CALLLOG"
+  cat > "$STUBDIR/lab/device-run.sh" <<STUB
+#!/usr/bin/env bash
+cmds="\$(cat)"
+case "\$cmds" in
+  *"__IRIS_PRECHECK_"*) printf 'PRECHECK\n' >> '$CALLLOG' ;;
+esac
+case "\$cmds" in
+  *"__IRIS_PRECHECK_"*)
+    echo "__IRIS_PRECHECK_FLASH__"
+    echo "bytes free stub"
+    echo "__IRIS_PRECHECK_ROUTING__"
+    echo "show running-config | include no ip routing"
+    echo "Gateway of last resort is 100.90.168.1 to network 0.0.0.0"
+    echo "__IRIS_PRECHECK_CLOCK__"
+    echo "14:23:07.512 UTC Thu Aug 20 2026"
+    ;;
+  *"show app-hosting list"*) echo "guestshell RUNNING" ;;
+  *) echo "bytes free stub" ;;
+esac
+STUB
+  chmod +x "$STUBDIR/lab/device-run.sh"
+
+  run_with_timeout 5 env IRIS_STAGE_LOCAL=1 IRIS_ARTIFACTS_DIR="$ARTDIR" \
+    DEVICE_IP=100.92.9.3 VLAN=666 SVI_IP=100.92.9.125 SVI_MASK=255.255.255.252 \
+    GUEST_IP=100.92.9.126 CATALOG_URL=https://100.90.168.20:8443 \
+    CATALOG_TOKEN=deadbeef DEVICE_ID=100.92.9.3 STAGE_HOST=100.90.168.20 \
+    IRIS_CRT_FILE="$CRTFILE" \
+    bash "$STUBDIR/device/device-install.sh"
+
+  # got past [2/7] (staging succeeded), i.e. past the whole pre-check block
+  [ "$(find "$ARTDIR/staging" -name 'iris-agent-100.92.9.3-*.conf' | wc -l)" -eq 1 ]
+  # exactly one device-run.sh invocation carried the precheck marker -- were
+  # this the old code, flash/routing/clock would show up as THREE
+  [ "$(wc -l < "$CALLLOG" | tr -d ' ')" -eq 1 ]
+}
+
+@test "PRECHECK: a response missing the ROUTING marker section fails closed, not silently as empty/safe" {
+  setup_stage_local
+  unset HOST_USER HOST_PASS
+  # Simulate a device that echoes FLASH and CLOCK back but, for whatever
+  # reason (a truncated/garbled session), never echoes the ROUTING marker at
+  # all. A correct fail-closed parser must treat that as "could not verify",
+  # never as "no routing problem found" -- an empty ROUTING section would be
+  # the wrong, unsafe reading (it could just as easily mean routing IS
+  # disabled and the disabled-detecting lines were dropped in transit).
+  cat > "$STUBDIR/lab/device-run.sh" <<'STUB'
+#!/usr/bin/env bash
+cmds="$(cat)"
+case "$cmds" in
+  *"__IRIS_PRECHECK_"*)
+    echo "__IRIS_PRECHECK_FLASH__"
+    echo "bytes free stub"
+    echo "__IRIS_PRECHECK_CLOCK__"
+    echo "14:23:07.512 UTC Thu Aug 20 2026"
+    ;;
+  *) echo "bytes free stub" ;;
+esac
+STUB
+  chmod +x "$STUBDIR/lab/device-run.sh"
+
+  run_with_timeout 5 env IRIS_STAGE_LOCAL=1 IRIS_ARTIFACTS_DIR="$ARTDIR" \
+    DEVICE_IP=100.92.9.3 VLAN=666 SVI_IP=100.92.9.125 SVI_MASK=255.255.255.252 \
+    GUEST_IP=100.92.9.126 CATALOG_URL=https://100.90.168.20:8443 \
+    CATALOG_TOKEN=deadbeef DEVICE_ID=100.92.9.3 STAGE_HOST=100.90.168.20 \
+    IRIS_CRT_FILE="$CRTFILE" \
+    bash "$STUBDIR/device/device-install.sh"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"PREREQ: could not verify ip routing"* ]]
+  [[ "$output" != *"PREREQ: ip routing is disabled"* ]]
+  # must fail BEFORE staging -- [pre] sits ahead of [2/7]
+  [ "$(find "$ARTDIR" -name 'iris-agent-100.92.9.3-*.conf' | wc -l)" -eq 0 ]
+}
+
+# --- artifact preflight: retry, and say WHICH fault it was ------------------
+# One 5s attempt with no retry was the most fragile step in a fleet onboard --
+# the artifact server's latency degrades under concurrent load, and this check
+# runs at exactly that moment. A transient miss strands the device
+# half-installed, because the trustpoint is pushed just before it.
+#
+# These drive the FUNCTION rather than the whole installer: the behaviour under
+# test is entirely inside artifact_preflight, and running 700 lines of installer
+# to reach it makes the test slow and couples it to every unrelated step.
+
+_load_preflight() {   # $1 = curl exit script; extracts the function under test
+  PFDIR="$BATS_TEST_TMPDIR/pf"; mkdir -p "$PFDIR/bin"
+  sed -n '/^artifact_preflight()/,/^}/p' "$BATS_TEST_DIRNAME/../device-install.sh" \
+    > "$PFDIR/fn.sh"
+  [ -s "$PFDIR/fn.sh" ]          # the function must still exist to extract
+  printf '%s\n' '#!/usr/bin/env bash' "$1" > "$PFDIR/bin/curl"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$PFDIR/bin/sleep"   # no real backoff
+  chmod +x "$PFDIR/bin/curl" "$PFDIR/bin/sleep"
+  cat > "$PFDIR/run.sh" <<'RUN'
+set -uo pipefail
+STAGE_HOST=stage.example; IRIS_CRT_FILE=/dev/null
+. "$PFDIR/fn.sh"
+artifact_preflight
+RUN
+}
+
+@test "artifact preflight retries a transient failure instead of giving up at once" {
+  _load_preflight 'n="$PFDIR/calls"; c=$(( $(cat "$n" 2>/dev/null || echo 0) + 1 )); echo "$c" > "$n"
+[ "$c" -lt 3 ] && exit 28
+exit 0'
+  PFDIR="$PFDIR" PATH="$PFDIR/bin:$PATH" run bash "$PFDIR/run.sh"
+  [ "$status" -eq 0 ]                          # third attempt succeeds
+  [ "$(cat "$PFDIR/calls")" -eq 3 ]            # and it really did retry
+  [[ "$output" == *"attempt 1 failed (curl rc=28)"* ]]
+  [[ "$output" != *"ERROR: artifact preflight failed"* ]]
+}
+
+@test "artifact preflight names a TLS failure as TLS, not as unreachable" {
+  _load_preflight 'exit 60'
+  PFDIR="$PFDIR" PATH="$PFDIR/bin:$PATH" run bash "$PFDIR/run.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"TLS verification failed"* ]]
+  # the old message blamed reachability AND trust for every fault, which sent a
+  # real investigation chasing certificate drift while the certs were identical
+  [[ "$output" != *"is not reachable / not trusted"* ]]
+}
+
+@test "artifact preflight names a connect failure as connect" {
+  _load_preflight 'exit 7'
+  PFDIR="$PFDIR" PATH="$PFDIR/bin:$PATH" run bash "$PFDIR/run.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"cannot connect"* ]]
+}
+
+@test "artifact preflight names a timeout as a timeout and points at fleet load" {
+  _load_preflight 'exit 28'
+  PFDIR="$PFDIR" PATH="$PFDIR/bin:$PATH" run bash "$PFDIR/run.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"timed out"* ]]
+  [[ "$output" == *"fleet onboard"* ]]
 }

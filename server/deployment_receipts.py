@@ -14,27 +14,49 @@ import secrets_store
 
 
 _STATES = frozenset(("planned", "applying", "active", "unknown", "drifted",
-                     "needs-reconcile", "removed", "superseded"))
+                     "needs-reconcile", "removed", "superseded", "abandoned"))
 _NONTERMINAL = frozenset(("planned", "applying"))
 # States that are not active but still describe a deployment IRIS applied, so a
 # teardown may be authorized from them (see recoverable_for_device).
-_RECOVERABLE = frozenset(("unknown", "drifted", "needs-reconcile"))
+#
+# "applying" is here because it is the durable marker written BEFORE the device
+# is touched: an onboard that dies mid-run leaves it, and it already carries the
+# resolved plan and owned resources teardown validates. Without it the marker
+# was readable only after recover_interrupted() ran at process start, so with no
+# restart a device stayed stranded forever -- not undeployable (no readable
+# receipt), not adoptable (routers never are), not re-onboardable (preflight
+# refuses the live Guest Shell). A genuinely in-flight onboard is NOT at risk:
+# its job is still non-terminal, so the busy guard in gui_onboard refuses the
+# undeploy before teardown is ever rendered.
+_RECOVERABLE = frozenset(("unknown", "drifted", "needs-reconcile", "applying"))
+# States from which nothing further can happen: the receipt is history.
+_TERMINAL = frozenset(("removed", "superseded", "abandoned"))
+# Every non-terminal state can also be ABANDONED. That edge is reached when the
+# device leaves the fleet (console delete) or when a forced teardown strips only
+# the agent footprint: the receipt then stops describing anything IRIS manages,
+# so it must stop being teardown authority and must stop blocking a re-onboard.
+# It is deliberately NOT "removed" (which asserts IRIS tore the deployment down)
+# and NOT "superseded" (which asserts a newer receipt replaced it) -- the record
+# is kept because it is the only list of resources IRIS created on that box.
 _TRANSITIONS = {
-    "planned": frozenset(("applying", "unknown", "needs-reconcile", "removed")),
-    "applying": frozenset(("active", "unknown", "needs-reconcile", "removed")),
+    "planned": frozenset(("applying", "unknown", "needs-reconcile", "removed",
+                          "abandoned")),
+    "applying": frozenset(("active", "unknown", "needs-reconcile", "removed",
+                           "abandoned")),
     "active": frozenset(("drifted", "needs-reconcile", "applying", "removed",
-                         "superseded")),
+                         "superseded", "abandoned")),
     # unknown/drifted/needs-reconcile must all still reach "applying", because
     # reconciling a deployment IS tearing it down. Without that edge a receipt
     # interrupted by a controller restart became a permanent dead end: the
     # device is already configured, so a re-onboard fails preflight, a router
     # cannot be adopted, and undeploy had no receipt to authorize it — leaving
     # no Console path to the device at all.
-    "unknown": frozenset(("applying", "drifted", "needs-reconcile")),
-    "drifted": frozenset(("applying", "needs-reconcile")),
-    "needs-reconcile": frozenset(("applying",)),
+    "unknown": frozenset(("applying", "drifted", "needs-reconcile", "abandoned")),
+    "drifted": frozenset(("applying", "needs-reconcile", "abandoned")),
+    "needs-reconcile": frozenset(("applying", "abandoned")),
     "removed": frozenset(),
     "superseded": frozenset(),
+    "abandoned": frozenset(),
 }
 _REQUIRED = ("controller_id", "device_id", "inventory_revision", "plan_hash",
              "resolved", "preflight", "resources")
@@ -258,6 +280,41 @@ class ReceiptStore:
             if changed:
                 _atomic_write_json(self.path, data)
         return changed
+
+    def retire_device(self, device_id, reason):
+        """Abandon every receipt of *device_id* that is not already terminal.
+
+        Called when the device leaves the fleet (console delete) and after a
+        forced agent-only teardown. Both leave a receipt that no longer
+        describes a device IRIS manages, and a receipt in a recoverable state
+        is what onboard refuses on and what undeploy renders teardown from --
+        so leaving one behind hands the NEXT device registered under this id a
+        dead predecessor's deployment. That is not hypothetical: it strands the
+        device outright, because onboard says "undeploy it first" while the
+        teardown it names refuses the box on an identity mismatch.
+
+        The rows are kept, not dropped: a receipt is the only record of the
+        resources IRIS created on that box (the VirtualPortGroup, the NAT
+        stanza, the app address), and an operator who deletes a device that is
+        still configured needs that list. *reason* is recorded as non-secret
+        evidence so the trail says which of the two paths retired it.
+
+        Returns the ids of the receipts retired, newest first."""
+        retired = []
+        with secrets_store.store_lock(self.path):
+            data = self._read()
+            timestamp = int(self._now())
+            for receipt in data["receipts"].values():
+                if (receipt.get("device_id") != device_id
+                        or receipt.get("state") in _TERMINAL):
+                    continue
+                receipt["state"] = "abandoned"
+                receipt["evidence"] = {"status": "abandoned", "reason": reason}
+                receipt.setdefault("timestamps", {})["finished_at"] = timestamp
+                retired.append(receipt["receipt_id"])
+            if retired:
+                _atomic_write_json(self.path, data)
+        return sorted(retired, reverse=True)
 
     def active_for_device(self, device_id):
         active = [receipt for receipt in self.list(device_id)

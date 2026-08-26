@@ -77,7 +77,7 @@ def test_devices_toolbar_regrouped():
     devices_thead = html.split('id="devices"')[1].split('</thead>')[0]
     # '<th' alone also matches the '<thead>' tag itself; use '<th>' to count
     # only real header cells.
-    assert devices_thead.count('<th>') == 10, "row action-links column removed"
+    assert devices_thead.count('<th>') == 11, "peer-policy column added without row action links"
 
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
@@ -86,6 +86,35 @@ def test_devices_toolbar_regrouped():
         and "#dev-rows .del'" not in js, "per-row action links must be gone"
     assert "function startOnboard(" not in js, "dead single-row path removed"
     assert "onclick=" not in js and "onclick=" not in html
+
+
+def test_peer_policy_console_controls_are_typed_and_safe():
+    """Device inventory gets one CSRF-protected quarantine/release action; it
+    exposes intent separately from count-only tracker enforcement, never a
+    generic ACL/seeder editor or IP-derived legacy identity."""
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    assert '<th>Peer policy</th>' in html
+    assert 'id="legacy-peer-warning" hidden' in html
+
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    # refreshDevices owns the policy snapshot, so an older peer-policy request
+    # cannot overwrite the generation that rendered the device table.
+    assert "function refreshPeerPolicy()" not in js
+    assert "fetch('/api/peer-policy', { signal: signal })" in js
+    assert "'/api/peer-policy/quarantine/' + encodeURIComponent(id)" in js
+    assert "method: 'PUT', headers: csrfHdr" in js
+    assert "if_revision: peerPolicy.revision" in js
+    assert "r.status === 409" in js and "operation_backlog_full" in js
+    assert "may not terminate existing device-to-device sessions immediately" in js
+    assert "never installs or reloads a device" in js
+    assert "Quarantined intent" in js and "desired_ip_count" in js and "conflict_types" in js
+    assert "participant_class === 'legacy_unattributed'" in js
+    assert "p.tracker" in js and "device_ip" not in js.split("function refreshSwarm()")[1].split("// ---- Settings ----")[0]
+    assert "otlp_export.signals" in js and "dropped_total" in js
+    policy_area = js.split("function setQuarantine(")[1].split("async function refreshDevices")[0]
+    assert "method: 'DELETE'" not in policy_area and "acl" not in policy_area.lower()
 
 
 def test_import_from_disk_panel_wired():
@@ -155,12 +184,20 @@ def test_all_selected_actions_share_one_busy_lock():
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
     assert "var BULK_BTNS = [" in js
+    block = js.split("var BULK_BTNS = [")[1].split("]")[0]
+    actions = re.findall(r"'([a-z-]+)'", block)
     for el in ("onboard-selected", "undeploy-selected", "adopt-selected",
-               "delete-selected", "apply-cred-selected"):
-        block = js.split("var BULK_BTNS = [")[1].split("]")[0]
-        assert el in block, "%s is not covered by the bulk busy lock" % el
-    # every action claims the lock rather than reading another button's state
-    assert js.count("claimSelection()") == 5
+               "delete-selected", "apply-cred-selected", "apply-image-selected"):
+        assert el in actions, "%s is not covered by the bulk busy lock" % el
+    # Every action claims the lock rather than reading another button's state.
+    # Counted against BULK_BTNS itself rather than a fixed number, so a new bulk
+    # action cannot be added without also claiming the lock -- quarantine and
+    # release are the two exceptions, guarded inside bulkQuarantine instead.
+    claimers = [a for a in actions
+                if a not in ("quarantine-selected", "release-selected")]
+    assert js.count("claimSelection()") == len(claimers), (
+        "%d actions but %d claim the lock"
+        % (len(claimers), js.count("claimSelection()")))
     assert "onBtn.disabled" not in js and "unBtn.disabled" not in js
     # a declined confirmation must release the lock, not wedge the toolbar
     assert js.count("setBulkBusy(false); return;") >= 2
@@ -212,22 +249,6 @@ def test_undeploy_and_status_ui_wired():
     assert "waiting for heartbeat" in js
     assert "onboarding…" in js and "undeploying…" in js
     assert "Waiting for heartbeat" in js         # overview card
-
-
-def test_swarmmap_peer_resolution_wired():
-    """Source guards for the swarm-map fixes: (1) peers deduped by ip so a
-    re-announce or multi-image device can't render twice, (2) stored-report
-    peer rows resolve device identity through the FLEET too (guest ips of
-    devices that left the swarm), (3) the seed host row is labeled."""
-    with open(gui_server.SWARMMAP_PATH) as f:
-        src = f.read()
-    assert "dedupePeers" in src
-    assert "/api/devices" in src
-    assert "seed server" in src
-    assert "avg download" in src           # renamed from the ambiguous "avg throughput"
-    # per-peer byte columns (↓ received / ↑ sent) and their legend were
-    # removed by design -- see test_swarmmap_per_peer_table_is_participation_only
-    # in test_telemetry.py for the participation-only replacement.
 
 
 def test_monitoring_timeline_wired():
@@ -1037,6 +1058,7 @@ def test_upload_rejects_truncated_body(tmp_path):
 import gui_fleet
 import gui_creds
 import catalog as catalog_mod
+import peer_enforcement
 
 
 def _serve_full(tmp_path):
@@ -1067,6 +1089,87 @@ def _auth(host, port):
     s, h, b = _req(host, port, "POST", "/api/login",
                    {"username": "admin", "password": "pw"})
     return h["Set-Cookie"].split(";")[0], json.loads(b)["csrf"]
+
+
+def _policy_device(fleet, device_id="d1"):
+    return fleet.upsert({"device_id": device_id, "device_ip": "10.0.0.1",
+                         "vlan": "666", "svi_ip": "10.0.0.2",
+                         "svi_mask": "255.255.255.0", "guest_ip": "10.0.0.3",
+                         "model": "C9300", "platform": "c9300"})
+
+
+def test_peer_policy_get_and_durable_quarantine_operation(tmp_path):
+    host, port, (_, fleet, _, cat), stop = _serve_full(tmp_path)
+    try:
+        _policy_device(fleet)
+        assert _req(host, port, "GET", "/api/peer-policy")[0] == 401
+        cookie, csrf = _auth(host, port)
+        headers = {"Cookie": cookie, "X-CSRF-Token": csrf}
+        status, _, raw = _req(host, port, "GET", "/api/peer-policy",
+                              headers={"Cookie": cookie})
+        assert status == 200
+        view = json.loads(raw)
+        assert view["revision"] == 1
+        assert view["quarantine_assignments"] == []
+        assert "rules" not in view["quarantine"]
+        assert "aria_session_id" not in view["enforcement"]
+        status, _, raw = _req(host, port, "PUT", "/api/peer-policy/quarantine/d1",
+                              {"quarantined": True, "if_revision": 1}, headers)
+        assert status == 200
+        assert json.loads(raw) == {"ok": True, "revision": 2, "quarantined": True}
+        with open(os.path.join(cat.state_dir, "peer-policy.json")) as f:
+            doc = json.load(f)
+        assert doc["assignments"] == {"d1": "quarantine"}
+        event = doc["operation_outbox"][-1]
+        assert set(event) == {"event_id", "revision", "action", "target", "actor", "created_at"}
+        assert event["action"] == "assign" and event["target"] == "d1"
+        assert event["actor"] == "console:admin"
+        tracker_status = peer_enforcement.build_status(
+            "pending", None, None, 1, 3, 10,
+            last_operation_exported_revision=2,
+            conflicts=[{"reason": "shared_permit_deny", "ipv4": "10.0.0.99"}],
+            last_effect={"disconnected_peers": 1})
+        # A GUI reader must not blindly expose future/untrusted status fields.
+        tracker_status["raw_ips"] = ["10.0.0.99"]
+        peer_enforcement.write_status(
+            os.path.join(cat.state_dir, "peer-enforcement.json"), tracker_status)
+        status, _, raw = _req(host, port, "GET", "/api/peer-policy",
+                              headers={"Cookie": cookie})
+        observed = json.loads(raw)["enforcement"]
+        assert status == 200 and observed["conflict_count"] == 1
+        assert observed["conflict_types"] == ["shared_permit_deny"]
+        assert "10.0.0.99" not in raw.decode()
+        # The tracker acknowledgement is consumed only by the next durable
+        # mutation, which prunes the acknowledged operation from the outbox.
+        status, _, _ = _req(host, port, "PUT", "/api/peer-policy/quarantine/d1",
+                            {"quarantined": False, "if_revision": 2}, headers)
+        assert status == 200
+        with open(os.path.join(cat.state_dir, "peer-policy.json")) as f:
+            assert [e["revision"] for e in json.load(f)["operation_outbox"]] == [3]
+        status, _, raw = _req(host, port, "PUT", "/api/peer-policy/quarantine/d1",
+                              {"quarantined": False, "if_revision": 2}, headers)
+        assert status == 409
+        assert json.loads(raw)["revision"] == 3
+    finally:
+        stop()
+
+
+def test_peer_policy_rejects_unknown_device_and_bad_csrf(tmp_path):
+    host, port, (_, fleet, _, _), stop = _serve_full(tmp_path)
+    try:
+        _policy_device(fleet)
+        cookie, csrf = _auth(host, port)
+        assert _req(host, port, "PUT", "/api/peer-policy/quarantine/d1",
+                    {"quarantined": True, "if_revision": 1},
+                    {"Cookie": cookie})[0] == 403
+        assert _req(host, port, "PUT", "/api/peer-policy/quarantine/missing",
+                    {"quarantined": True, "if_revision": 1},
+                    {"Cookie": cookie, "X-CSRF-Token": csrf})[0] == 422
+        # There is no DELETE policy API.
+        assert _req(host, port, "DELETE", "/api/peer-policy/quarantine/d1",
+                    headers={"Cookie": cookie, "X-CSRF-Token": csrf})[0] == 404
+    finally:
+        stop()
 
 
 def test_devices_crud_and_list_requires_auth(tmp_path):
@@ -1104,13 +1207,12 @@ def test_device_delete_purges_catalog_state(tmp_path):
                "guest_ip": "10.0.0.3"}
         st, _, _ = _req(host, port, "POST", "/api/devices", dev, headers=hh)
         assert st == 200
-        cat.set_policy("d1", approved_image_id="img1", install_allowed=True)
+        cat.set_policy("d1", approved_image_id="img1")
         cat.record_heartbeat("d1", {"current_image_id": "img1"}, now=1)
         cat.record_telemetry("d1", {"event": "staging-complete"})
         st, _, b = _req(host, port, "DELETE", "/api/devices/d1", headers=hh)
         assert st == 200 and json.loads(b)["deleted"] is True
-        assert cat.get_policy("d1") == {"approved_image_id": None,
-                                        "install_allowed": False}
+        assert cat.get_policy("d1") == {"approved_image_id": None}
         assert cat.get_device("d1") is None
         assert cat.get_telemetry("d1") == []
         st, _, _ = _req(host, port, "POST", "/api/devices", dev, headers=hh)
@@ -1214,8 +1316,12 @@ def test_assign_image_sets_policy(tmp_path):
         st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
                         {"image_id": "img1"}, headers=hh)
         assert st == 200
-        assert cat.get_policy("d1")["approved_image_id"] == "img1"
-        assert cat.get_policy("d1")["install_allowed"] is False   # stage-only
+        pol = cat.get_policy("d1")
+        assert pol["approved_image_id"] == "img1"
+        # Approval IS the whole policy. This used to assert install_allowed was
+        # False; the flag gated nothing, was never read, and reading as False
+        # beside an approved image implied a second gate an operator had to open.
+        assert pol == {"approved_image_id": "img1"}
         # unknown image -> 400
         st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
                         {"image_id": "nope"}, headers=hh)
@@ -1349,6 +1455,15 @@ def test_csv_import_rejects_oversized(tmp_path):
 import gui_onboard
 
 
+# Guest Shell now runs the same collision preflight as every other platform at
+# job start. These harnesses exist to exercise routes and job mechanics, so
+# default the preflight to a clean device; a test about the preflight itself
+# overrides guestshell_preflight_fn explicitly.
+_CLEAN_GUESTSHELL_PREFLIGHT = (
+    lambda dev, env, resolved: {"status": "passed",
+                                "device_identity": "FOC0000TEST"})
+
+
 def _serve_onboard(tmp_path, run_fn, **svc_kw):
     secrets_path = str(tmp_path / "secrets.json")
     app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
@@ -1366,6 +1481,7 @@ def _serve_onboard(tmp_path, run_fn, **svc_kw):
     # onboard behavior keep exercising run_fn as before; a test of the gate
     # itself would override probe_fn via svc_kw.
     svc_kw.setdefault("probe_fn", lambda dev, env: "C9300")
+    svc_kw.setdefault("guestshell_preflight_fn", _CLEAN_GUESTSHELL_PREFLIGHT)
     onboard = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
                                          mint_fn=lambda d: "TOK", run_fn=run_fn,
                                          **svc_kw)
@@ -1659,6 +1775,7 @@ def _serve_inband(tmp_path, run_fn, device=None):
                                          # the job-start reachability gate (see
                                          # gui_onboard.py) probes it before run_fn
                                          probe_fn=lambda dev, env: "C9300",
+                                         guestshell_preflight_fn=_CLEAN_GUESTSHELL_PREFLIGHT,
                                          iox_preflight_fn=lambda dev, env, resolved: {
                                              "status": "passed",
                                              "device_identity": "FCW0000TEST",
@@ -1769,7 +1886,8 @@ def test_inband_onboard_is_one_click_and_drives_inband_renderer(tmp_path):
         stop()
 
 
-def _serve_router(tmp_path, run_fn, preflight_fn=None, mint_fn=None, device=None):
+def _serve_router(tmp_path, run_fn, preflight_fn=None, mint_fn=None, device=None,
+                  audit_path=None):
     """Receipt-backed server with one C8000V router inventory row."""
     import deployment_receipts
     os.makedirs(tmp_path, exist_ok=True)
@@ -1790,7 +1908,8 @@ def _serve_router(tmp_path, run_fn, preflight_fn=None, mint_fn=None, device=None
         fleet, creds, host_ip="10.9.9.9", mint_fn=mint_fn or (lambda d: "TOK"),
         run_fn=run_fn, receipts=receipts, preflight_fn=preflight_fn)
     srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, creds, None,
-                                 onboard, certfile=None, receipts=receipts)
+                                 onboard, certfile=None, receipts=receipts,
+                                 audit_path=audit_path)
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return "127.0.0.1", port, fleet, receipts, srv.shutdown
@@ -1861,7 +1980,7 @@ def test_router_onboard_uses_router_recipe_env_and_router_resource_kinds(tmp_pat
         assert status == 200
         job = _wait_onboard_job(host, port, cookie, json.loads(body)["job_id"])
         assert job["state"] == "done"
-        assert events == ["preflight", "preflight", "mint"]
+        assert events == ["preflight", "mint"]
         path, env = ran[-1]
         assert path.endswith("device/router-install.sh")
         assert {key: env[key] for key in ("NETWORK_ATTACHMENT", "VPG_NUMBER",
@@ -1880,7 +1999,7 @@ def test_router_onboard_uses_router_recipe_env_and_router_resource_kinds(tmp_pat
         stop()
 
 
-def test_router_preflight_failure_mints_nothing_and_creates_no_receipt(tmp_path):
+def test_router_preflight_failure_is_reported_by_the_queued_job(tmp_path):
     minted, ran = [], []
 
     def reject(*_args):
@@ -1893,8 +2012,12 @@ def test_router_preflight_failure_mints_nothing_and_creates_no_receipt(tmp_path)
         cookie, csrf = _auth(host, port)
         status, _, body = _req(host, port, "POST", "/api/devices/r1/onboard", {},
                                headers={"Cookie": cookie, "X-CSRF-Token": csrf})
-        assert status == 409 and "preflight failed" in json.loads(body)["error"]
-        assert minted == [] and ran == [] and receipts.list("r1") == []
+        assert status == 200
+        job = _wait_onboard_job(host, port, cookie, json.loads(body)["job_id"])
+        assert job["state"] == "error"
+        assert any("preflight failed" in line for line in job["lines"])
+        assert minted == [] and ran == []
+        assert receipts.list("r1")[0]["state"] == "removed"
     finally:
         stop()
 
@@ -2065,6 +2188,7 @@ def _serve_onboard_audit(tmp_path, run_fn, **svc_kw):
         audit_mod.append_event(audit_path, kw.pop("event"), **kw)
 
     svc_kw.setdefault("probe_fn", lambda dev, env: "C9300")  # see _serve_onboard
+    svc_kw.setdefault("guestshell_preflight_fn", _CLEAN_GUESTSHELL_PREFLIGHT)
     onboard = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
                                          mint_fn=lambda d: "TOK", run_fn=run_fn,
                                          audit_fn=audit_fn, **svc_kw)
@@ -2617,6 +2741,71 @@ def test_settings_get(tmp_path):
         stop()
 
 
+import setup_status
+
+
+def test_setup_status_route_requires_auth(tmp_path, monkeypatch):
+    """test_setup_status.py::test_route_is_registered_and_session_gated only
+    greps gui_server.py for the session-check string -- it would still pass
+    if the check were dead code. Prove it over real HTTP: no session cookie
+    must get refused, not a crash or a 200 with data."""
+    monkeypatch.setenv("IRIS_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
+    host, port, _ctx, stop = _serve_full(tmp_path)
+    try:
+        status, _, _ = _req(host, port, "GET", "/api/settings/setup-status")
+        assert status == 401
+    finally:
+        stop()
+
+
+def test_setup_status_route_returns_documented_shape(tmp_path, monkeypatch):
+    """Authenticated GET must actually reach setup_status.build_status and
+    return its three-card shape wired to the real session + credential
+    store -- unlike the source-scan test, this fails if the route raises,
+    returns the wrong shape, or never calls the builder at all."""
+    monkeypatch.setenv("IRIS_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
+    host, port, _ctx, stop = _serve_full(tmp_path)
+    try:
+        ck, _csrf = _auth(host, port)
+        status, _, body = _req(host, port, "GET", "/api/settings/setup-status",
+                               headers={"Cookie": ck})
+        assert status == 200
+        st = json.loads(body)
+        assert set(("admin", "stage_host", "packages")) <= set(st)
+        # the session's real username must flow through, not a placeholder
+        assert st["admin"]["username"] == "admin"
+        pkgs = st["packages"]
+        assert set(("state", "items", "remedy")) <= set(pkgs)
+        assert len(pkgs["items"]) == len(setup_status.IOX_PACKAGES)
+        for item in pkgs["items"]:
+            assert "name" in item and "state" in item
+    finally:
+        stop()
+
+
+def test_setup_status_route_response_has_no_secret_material(tmp_path, monkeypatch):
+    """The card exists to be trustworthy about system state; it must never
+    leak stage-host credentials onto the wire, even after a real stage-host
+    password has been set through the credential store it reads from."""
+    monkeypatch.setenv("IRIS_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
+    host, port, _ctx, stop = _serve_full(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        status, _, _ = _req(host, port, "POST", "/api/settings/stage-host",
+                            {"username": "svc-iris", "password": "hostpw-s3cr3t"},
+                            headers=hh)
+        assert status == 200
+        status, _, body = _req(host, port, "GET", "/api/settings/setup-status",
+                               headers={"Cookie": ck})
+        assert status == 200
+        blob = body.decode().lower()
+        for banned in ("password", "secret", "token", "private", "begin "):
+            assert banned not in blob
+    finally:
+        stop()
+
+
 def test_settings_console_port_is_dynamic(tmp_path, monkeypatch):
     """The Settings page must show the actual published console port
     (IRIS_GUI_PUBLISH), not a hardcoded 8080."""
@@ -2789,7 +2978,9 @@ def _serve_reports(tmp_path):
     secrets_path = str(tmp_path / "secrets.json")
     app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
     cat = catalog_mod.CatalogStore(str(tmp_path / "state"))
-    srv = gui_server.make_server("127.0.0.1", 0, app, None, None, None, cat,
+    fleet = gui_fleet.FleetStore(str(tmp_path / "state"))
+    _policy_device(fleet)
+    srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, None, cat,
                                  certfile=None)
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -2869,10 +3060,10 @@ def test_device_reports_roundtrip(tmp_path):
         assert reports[0]["event"] == "staging-complete"
         assert reports[0]["peers"][0]["ip"] == "10.0.0.7"
         assert "received_at" in reports[0]      # stamped by record_telemetry
-        # unknown device -> empty ring, still 200
+        # Reports are only available for known fleet devices.
         st, _, b = _req(host, port, "GET", "/api/devices/ghost/reports",
                         headers={"Cookie": ck})
-        assert st == 200 and json.loads(b)["reports"] == []
+        assert st == 422 and json.loads(b)["error"] == "device is not in fleet"
     finally:
         stop()
 
@@ -2892,7 +3083,8 @@ def test_request_report_session_csrf_and_429(tmp_path):
         assert st == 200
         res = json.loads(b)
         assert res["ok"] is True and res["expires_at"] > time.time()
-        assert cat.pending_report("d1", time.time()) is True
+        assert cat.pending_report(
+            "d1", time.time())["report_requested"] is True
         # duplicate while pending -> 429
         st, _, b = _req(host, port, "POST", "/api/devices/d1/request-report",
                         {}, headers=hh)
@@ -2902,6 +3094,17 @@ def test_request_report_session_csrf_and_429(tmp_path):
         st, _, _ = _req(host, port, "POST", "/api/devices/d1/request-report",
                         {}, headers=hh)
         assert st == 200
+    finally:
+        stop()
+
+
+def test_request_report_rejects_unknown_fleet_device(tmp_path):
+    host, port, _cat, stop = _serve_reports(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        st, _, body = _req(host, port, "POST", "/api/devices/ghost/request-report",
+                           {}, headers={"Cookie": ck, "X-CSRF-Token": csrf})
+        assert st == 422 and json.loads(body)["error"] == "device is not in fleet"
     finally:
         stop()
 
@@ -3706,7 +3909,11 @@ def test_device_delete_details_ok_and_fail(tmp_path):
         dels = [e for e in _read_audit_lines(audit_path)
                 if e.get("event") == "device_delete"]
         assert dels[0]["result"] == "ok"
-        assert dels[0]["detail"] == "removed (ip 10.0.0.1, model -)"
+        # the receipt outcome is named too: it used to be the one thing delete
+        # changed (or in this case did not change) without saying so
+        assert dels[0]["detail"] == (
+            "removed (ip 10.0.0.1, model -), endpoints retained, "
+            "no deployment receipt")
         # deleting a device that never existed is a FAIL, not a phantom ok
         assert dels[1]["result"] == "fail"
         assert dels[1]["detail"] == "no such device"
@@ -5459,3 +5666,737 @@ def test_help_guide_pages_exist_and_header_help_control_wired():
     assert 'id="help-btn"' in html
     assert 'href="/help-device.html"' in html
     assert 'href="/help-server.html"' in html
+
+
+def test_force_undeploy_delivers_the_force_flag_to_the_recipe(tmp_path):
+    """A forced undeploy must reach the teardown recipe with
+    IRIS_FORCE_AGENT_ONLY=1.
+
+    env_extra is the ONLY channel into the recipe, and the undeploy branch is
+    the only place the flag is ever set. Dropping env_extra for that action
+    silently downgrades a forced teardown to the full receipted one: on Guest
+    Shell and IOx that removes Vlan$VLAN, the IRISQ discriminators and the PKI
+    trustpoint using inventory values no receipt has proven -- precisely the
+    harm the flag exists to prevent -- while the audit trail records that the
+    operator's network was left untouched."""
+    seen = {}
+
+    def run_fn(p, e, on):
+        seen.update(e)
+        return 0
+
+    host, port, stop = _serve_inband(tmp_path, run_fn)
+    try:
+        ck, csrf = _auth(host, port)
+        st, _, b = _req(host, port, "POST", "/api/devices/edge/undeploy",
+                        {"force": True},
+                        headers={"Cookie": ck, "X-CSRF-Token": csrf})
+        assert st == 200, b
+        _wait_onboard_job(host, port, ck, json.loads(b)["job_id"])
+        assert seen.get("IRIS_FORCE_AGENT_ONLY") == "1", (
+            "forced undeploy reached the recipe without the force flag")
+    finally:
+        stop()
+
+
+def test_telemetry_health_badge_lives_on_overview_not_monitoring():
+    """Telemetry export health belongs on the Overview dashboard.
+
+    The Monitoring page is about the audit trail and deployment logs; a
+    telemetry-export badge in its heading described something that page has
+    nothing to do with. Overview is the dashboard, so the badge moves there
+    and must refresh with the Overview, not with Monitoring."""
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    # the badge is declared inside the Overview heading
+    overview = html.split('id="view-overview"', 1)[1].split("</section>", 1)[0]
+    assert 'id="telemetry-health"' in overview
+    # ...and no longer anywhere in the Monitoring section
+    monitoring = html.split('id="view-monitoring"', 1)[1].split("</section>", 1)[0]
+    assert 'id="telemetry-health"' not in monitoring
+    # it refreshes with the Overview, not as part of refreshMonitoring()
+    monitoring_fn = js.split("async function refreshMonitoring()", 1)[1].split("}", 1)[0]
+    assert "refreshTelemetryHealth" not in monitoring_fn
+    overview_fn = js.split("async function refreshOverview()", 1)[1].split("\n  }", 1)[0]
+    assert "refreshTelemetryHealth" in overview_fn
+
+
+def test_console_refreshes_the_visible_view_periodically():
+    """The console had no periodic refresh at all — `setInterval` appeared
+    nowhere — so a view only updated on navigation or after an explicit
+    action. Device state that changes server-side (heartbeats, staging
+    progress, deployment state) was invisible until the operator navigated
+    away and back. refreshDevices() already preserved batch checkbox
+    selections "across the periodic re-render" that never existed.
+
+    The poll must also stop: on view change, and while the tab is hidden, so
+    a backgrounded console does not keep hitting the server."""
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    assert "setInterval" in js, "no periodic refresh wired up"
+    assert "clearInterval" in js, "poll is never cancelled"
+    # a backgrounded tab must not keep polling
+    assert "visibilitychange" in js or "document.hidden" in js
+    # the poll re-runs the CURRENT view, so it must go through the same router
+    assert "startViewPoll" in js and "stopViewPoll" in js
+
+
+def test_devices_filter_every_column_and_act_on_the_filtered_set():
+    """The devices table could not be filtered, so an operator working a
+    subset had to hand-pick rows. Every meaningful column gets a filter, the
+    row count reports the match, and 'select all' marks the FILTERED rows so
+    every bulk action -- quarantine included -- operates on exactly what the
+    filter selected."""
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    devices = html.split('id="view-devices"', 1)[1].split("</section>", 1)[0]
+    # one control per meaningful column, plus free text across the row
+    for control in ("dev-filter-q", "dev-filter-attachment", "dev-filter-platform",
+                    "dev-filter-cred", "dev-filter-telemetry", "dev-filter-peer",
+                    "dev-filter-status", "dev-filter-clear"):
+        assert 'id="%s"' % control in devices, "missing filter control: %s" % control
+    # quarantine is available as a BULK action, not only per row
+    assert 'id="quarantine-selected"' in devices
+    assert 'id="release-selected"' in devices
+    # the predicate exists and is applied before the rows are rendered
+    assert "deviceMatchesFilters" in js
+    # filters re-render, and the periodic poll must not wipe them
+    assert "applyDeviceFilters" in js
+
+
+def test_deploy_logs_paging_graph_search_and_side_drawer():
+    """The deployment-logs pane listed every log in one unpaged table, could
+    only filter by exact device id, had no sense of when deployments happened,
+    and opened a log in a <pre> BELOW the table — pushing the list off screen.
+
+    It gets: a time graph over the logs it holds, free-text search across
+    device/action/result plus action and result pickers, paging, and a
+    right-hand drawer so the list stays put while a log is open."""
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    with open(os.path.join(gui_server.WEBROOT, "styles.css")) as f:
+        css = f.read()
+    pane = html.split('id="monitoring-pane-deploylogs"', 1)[1].split("</div>\n      </section>", 1)[0]
+    # the timeline is the audit timeline's FEATURE -- chips pick a window, a
+    # brush selects a range, and the selection filters the table. A static
+    # sparkline is not the same thing.
+    for control in ("dl-range-chips", "dl-histogram", "dl-bars", "dl-brush",
+                    "dl-window-label", "dl-clear-selection"):
+        assert 'id="%s"' % control in pane, "missing timeline control: %s" % control
+    assert "dlCommitSelection" in js and "after_ts=" in js
+    for control in ("dl-search", "dl-action", "dl-result",
+                    "dl-prev", "dl-next", "dl-page", "dl-drawer", "dl-drawer-close"):
+        assert 'id="%s"' % control in pane, "missing deploy-log control: %s" % control
+    # the log body lives in the drawer now, not loose under the table
+    drawer = pane.split('id="dl-drawer"', 1)[1]
+    assert 'id="dl-text"' in drawer
+    # paging + client-side matching exist
+    assert "dlPage" in js and "deployLogMatches" in js
+    # the drawer slides in from the right, and respects reduce-motion
+    assert "#dl-drawer" in css
+    assert "prefers-reduced-motion" in css
+
+
+def test_first_run_setup_is_a_wizard_not_a_linking_checklist():
+    """Setup was four cards that reported status and sent the operator off to
+    Settings > General / > Telemetry to actually do anything. First run is a
+    flow, so it becomes a stepped wizard that hosts the forms in place.
+
+    Three steps -- telemetry, stage host, device packages -- with admin shown
+    as already complete, because first-run just created it. Every step can be
+    skipped and the wizard resumes at the first incomplete one, because the
+    packages step can NEVER complete in-console (no Docker socket), so a
+    wizard that insisted on completion could never be finished."""
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    with open(os.path.join(gui_server.WEBROOT, "login.js")) as f:
+        login = f.read()
+
+    # a top-level view, not a settings sub-pane
+    assert 'id="view-setup"' in html
+    assert "'setup'" in js.split("var VIEWS =", 1)[1].split("]", 1)[0]
+
+    wiz = html.split('id="view-setup"', 1)[1].split("</section>", 1)[0]
+    # the two form steps mount the SHARED templates rather than copying them
+    assert 'id="wz-td-mount"' in wiz and 'id="wz-sh-mount"' in wiz
+    assert "mountSettingsForm('td', 'wz-td-mount')" in js
+    assert "mountSettingsForm('sh', 'wz-sh-mount')" in js
+    # packages is detect-and-instruct, never a form
+    assert 'id="wz-pkg-recheck"' in wiz
+    assert "<form" not in wiz.split('id="wz-step-packages"', 1)[1]
+    # skippable, resumable, and it reports where you are
+    assert 'id="wz-skip"' in wiz and 'id="wz-next"' in wiz and 'id="wz-back"' in wiz
+    assert "wizardFirstIncompleteStep" in js
+    # the nudge that brings an operator back
+    assert 'id="setup-nudge"' in html
+    # first-run hands off to the wizard, not to the old checklist
+    assert "'/#setup'" in login or '"/#setup"' in login
+    assert "#settings/setup" not in login
+
+
+def test_every_hidden_toggled_element_survives_its_display_rule():
+    """`el.hidden = true` only hides an element if no CSS rule outranks the UA
+    stylesheet's `[hidden] { display: none }`. A class or id selector setting
+    `display:` beats it, so the element stays on screen while the code believes
+    it is gone.
+
+    This bit the setup nudge: `.nudge { display:flex }` meant the banner could
+    never hide, and because updateSetupNudge() returns early once the count is
+    zero, it sat there showing a stale "1 setup step still needs attention"
+    over a fully configured server."""
+    with open(os.path.join(gui_server.WEBROOT, "styles.css")) as f:
+        css = f.read()
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    # Every element that can be hidden -- i.e. carries a `hidden` attribute in
+    # the markup -- contributes its id and its classes. Keying off the markup
+    # rather than off `getElementById(x).hidden` is deliberate: the nudge is
+    # hidden through a local variable, which a call-site scan misses entirely.
+    toggled = set()
+    for tag in re.findall(r"<[a-zA-Z][^>]*\shidden[\s/>]", html):
+        m = re.search(r'id="([\w-]+)"', tag)
+        if m:
+            toggled.add(m.group(1))
+        m = re.search(r'class="([^"]+)"', tag)
+        if m:
+            toggled.update(m.group(1).split())
+
+    offenders = []
+    for sel_group, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
+        if not re.search(r"display\s*:\s*(?!none)[a-z-]+", body):
+            continue
+        for sel in sel_group.split(","):
+            sel = sel.strip()
+            if not sel:
+                continue
+            # `.x:not([hidden]) { display:flex }` is the other correct pattern --
+            # the rule simply stops applying once the attribute is set.
+            if ":not([hidden])" in sel or "[hidden]" in sel:
+                continue
+            # Only the LAST compound is what the rule targets: in
+            # `.menu label { display:block }` the target is the label, not .menu.
+            target = re.split(r"[\s>+~]+", sel)[-1]
+            for token in re.findall(r"[.#]([\w-]+)", target):
+                if token not in toggled:
+                    continue
+                guard = re.search(
+                    r"[.#]" + re.escape(token) +
+                    r"(?::not\(\[hidden\]\)|\[hidden\])[^{}]*\{[^{}]*display",
+                    css)
+                if not guard:
+                    offenders.append(token)
+    assert not offenders, (
+        "these elements are toggled with .hidden but a display rule outranks "
+        "[hidden], so they never actually hide: %s" % sorted(set(offenders)))
+
+
+def test_setup_wizard_shows_every_step_even_when_already_complete():
+    """The wizard renders one step at a time and opens on the first incomplete
+    one. On a server whose telemetry destination already comes from the
+    deployment environment (IRIS_OTLP_ENDPOINT), telemetry resolves to 'ok',
+    so the wizard opened on stage host and the telemetry step was never
+    visible at all -- it looked missing.
+
+    Every step must therefore be listed and reachable, whatever its state."""
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    wiz = html.split('id="view-setup"', 1)[1].split("</section>", 1)[0]
+    assert 'id="wz-steplist"' in wiz, "no step list: completed steps stay invisible"
+    # the list is built from the same step table the wizard navigates
+    assert "renderWizardStepList" in js
+    # and any step can be opened directly, not just the first incomplete one
+    assert "wz-steplist-item" in js
+
+
+def test_onboard_category_chip_does_not_read_as_the_sentence_subject():
+    """auditRowHtml puts the category chip immediately before the verb phrase,
+    so an undeploy event rendered as "onboard started undeploying <device>" --
+    the chip labels the SUBSYSTEM, but it sits where a sentence subject goes.
+
+    One service handles both onboard and undeploy jobs, so the stored category
+    is legitimately "onboard" and must stay that way: it is persisted in
+    audit.jsonl and drives the category filter. Only the visible label changes."""
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+
+    # a display-label map exists and the chip renders through it
+    assert "AUDIT_CAT_LABELS" in js
+    chip = js.split("function auditRowHtml", 1)[1].split("return", 1)[0]
+    assert "AUDIT_CAT_LABELS" in chip, "the chip still prints the raw category"
+    # ...while the class stays keyed on the real category, for the styling
+    assert "cat-' + esc(category)" in chip, \
+        "the chip class must stay keyed on the REAL category, for styling"
+    # the filter still SENDS onboard, whatever it displays
+    assert 'value="onboard"' in html
+    # and the label an operator reads is no longer the bare subsystem name
+    assert ">onboard</option>" not in html
+
+
+def _write_deploy_log(log_dir, finished_at, device, action="onboard",
+                      state="done", rc=0, job="abc123"):
+    """Synthesise a persisted deploy log with a controlled finished_at, so a
+    histogram can be tested without running jobs at real timestamps."""
+    os.makedirs(log_dir, exist_ok=True)
+    name = "%d-%s-%s-%s.log" % (finished_at, device, action, job)
+    header = ("# job=%s device=%s action=%s state=%s rc=%s queued_at=%d "
+              "started_at=%d finished_at=%d platform=guestshell\n"
+              % (job, device, action, state, rc, finished_at - 2,
+                 finished_at - 1, finished_at))
+    with open(os.path.join(log_dir, name), "w") as f:
+        f.write(header + "line one\n")
+    return name
+
+
+def test_deploy_log_histogram_bins_and_the_list_takes_a_time_window(tmp_path):
+    """The deployment-logs timeline must be the audit timeline's feature, not a
+    lookalike: the server bins into buckets over a window, and the list route
+    accepts the brush's range so a selection actually filters the table."""
+    log_dir = str(tmp_path / "deploy-logs")
+    base = 1_700_000_000
+    for i, dev in enumerate(("d1", "d2", "d3")):
+        _write_deploy_log(log_dir, base + i * 3600, dev, job="job%d" % i)
+    _write_deploy_log(log_dir, base + 50 * 3600, "d4", action="undeploy",
+                      job="jobfar")
+
+    host, port, stop = _serve_onboard(tmp_path, lambda p, e, on: 0,
+                                      log_dir=log_dir)
+    try:
+        assert _req(host, port, "GET", "/api/deploy-logs/histogram")[0] == 401
+        ck, _ = _auth(host, port)
+
+        st, _, b = _req(host, port, "GET",
+                        "/api/deploy-logs/histogram?since_ts=%d&until_ts=%d&buckets=4"
+                        % (base, base + 4 * 3600), headers={"Cookie": ck})
+        assert st == 200, b
+        buckets = json.loads(b)["buckets"]
+        assert len(buckets) == 4
+        assert sum(x["count"] for x in buckets) == 3      # the far one is outside
+        assert all("start" in x for x in buckets)
+
+        # the brush range narrows the LIST too
+        _, _, b = _req(host, port, "GET",
+                       "/api/deploy-logs?after_ts=%d&before_ts=%d"
+                       % (base, base + 3600), headers={"Cookie": ck})
+        got = json.loads(b)["logs"]
+        assert [l["device_id"] for l in got] == ["d2", "d1"]   # newest first
+
+        # a nonsense window is refused, exactly as the audit route refuses it
+        assert _req(host, port, "GET",
+                    "/api/deploy-logs/histogram?since_ts=200&until_ts=100",
+                    headers={"Cookie": ck})[0] == 400
+    finally:
+        stop()
+
+
+# ---------------------------------------------------------------------------
+# A deleted device must not bequeath its deployment to the next device
+# registered under the same id, and a replaced box must always be escapable.
+# ---------------------------------------------------------------------------
+
+_ROUTER_ROW = {"device_id": "r1", "device_ip": "192.0.2.10", "model": "C8000V",
+               "management_type": "router-nat", "vpg_number": "10",
+               "nat_interface": "GigabitEthernet1", "app_ip": "10.8.0.2",
+               "app_mask": "255.255.255.252", "app_gateway": "10.8.0.1",
+               "credential_profile_id": "lab"}
+
+_OWNED = [{"kind": k, "ownership": "iris-created"} for k in (
+    "virtualportgroup", "eem-applets", "agent-files", "logging-discriminator",
+    "pki-trustpoint", "http-client-trustpoint", "iox-global",
+    "file-prompt-quiet", "guestshell", "nat-acl", "nat-overload",
+    "nat-static", "nat-outside-marking")]
+
+
+def _stranded_receipt(receipts, resources=None):
+    """A receipt in the state a died-mid-teardown router is left in."""
+    rid = receipts.create({
+        "controller_id": "iris", "device_id": "r1", "inventory_revision": 1,
+        "plan_hash": "b" * 64,
+        "resolved": {"platform": "router", "attachment": "router-nat",
+                     "device_ip": "192.0.2.10", "vpg_number": "10",
+                     "nat_interface": "GigabitEthernet1", "app_ip": "10.8.0.2",
+                     "app_mask": "255.255.255.252", "app_gateway": "10.8.0.1"},
+        "preflight": {"status": "passed", "device_identity": "OLDBOARDID"},
+        "resources": _OWNED if resources is None else resources})["receipt_id"]
+    receipts.transition(rid, "applying")
+    receipts.transition(rid, "needs-reconcile")
+    return rid
+
+
+def test_delete_abandons_receipts_so_a_readded_device_can_onboard(tmp_path, monkeypatch):
+    """Delete must be terminal for a device id.
+
+    Every other per-device store is purged on delete -- assignment, heartbeat,
+    telemetry, pull directive, report ledger -- but the receipt store was never
+    touched, and it is the one that gates onboard. A device deleted and added
+    back under the same id therefore inherited its predecessor's deployment:
+    onboard refused with "undeploy it first", and the undeploy it named refused
+    the box, because a rebuilt VM keeps the id and the address but reports a new
+    board ID. Neither door opened, and delete was no way out either."""
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, fleet, receipts, stop = _serve_router(tmp_path, lambda p, e, on: 0)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        rid = _stranded_receipt(receipts)
+
+        st, _, b = _req(host, port, "POST", "/api/devices/r1/onboard", {}, headers=hh)
+        assert st == 409 and b"deployment receipt" in b
+
+        st, _, b = _req(host, port, "DELETE", "/api/devices/r1", headers=hh)
+        assert st == 200, b
+        assert receipts.get(rid)["state"] == "abandoned"
+        assert receipts.recoverable_for_device("r1") is None
+
+        st, _, b = _req(host, port, "POST", "/api/devices", dict(_ROUTER_ROW),
+                        headers=hh)
+        assert st == 200, b
+        st, _, b = _req(host, port, "POST", "/api/devices/r1/onboard", {},
+                        headers=hh)
+        assert st == 200, b
+    finally:
+        stop()
+
+
+def test_delete_audit_names_the_receipt_outcome(tmp_path, monkeypatch):
+    """The delete audit line already names what it revoked and what it retained.
+    Receipts were the one thing it changed silently."""
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    audit_path = str(tmp_path / "audit.jsonl")
+    host, port, fleet, receipts, stop = _serve_router(
+        tmp_path, lambda p, e, on: 0, audit_path=audit_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        _stranded_receipt(receipts)
+        assert _req(host, port, "DELETE", "/api/devices/r1", headers=hh)[0] == 200
+        with open(audit_path) as stream:
+            events = [json.loads(line) for line in stream if line.strip()]
+        deletes = [e for e in events if e.get("event") == "device_delete"]
+        assert deletes, "no device_delete audit event"
+        assert "1 deployment receipt abandoned" in deletes[0]["detail"], \
+            deletes[0]["detail"]
+    finally:
+        stop()
+
+
+def test_forced_undeploy_is_honoured_when_a_receipt_exists(tmp_path):
+    """Force is the rescue path for a box that no longer matches its receipt --
+    which is exactly a case where a receipt EXISTS. It used to be consulted only
+    on the no-receipt branch, so a replaced device ran the full receipted
+    teardown, hit the recipe's identity guard on the new board ID, and failed
+    every single time with no way to ask for anything else."""
+    seen = {}
+
+    def run_fn(p, e, on):
+        seen.update(e)
+        return 0
+
+    host, port, fleet, receipts, stop = _serve_router(tmp_path, run_fn)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        rid = _stranded_receipt(receipts)
+
+        st, _, b = _req(host, port, "POST", "/api/devices/r1/undeploy",
+                        {"force": True}, headers=hh)
+        assert st == 200, b
+        _wait_onboard_job(host, port, ck, json.loads(b)["job_id"])
+        assert seen.get("IRIS_FORCE_AGENT_ONLY") == "1", (
+            "a forced undeploy ran the receipted teardown instead")
+        # and the receipt it deliberately did not use as authority is retired,
+        # or the very next onboard is refused on it again.
+        assert receipts.get(rid)["state"] == "abandoned"
+        assert receipts.recoverable_for_device("r1") is None
+    finally:
+        stop()
+
+
+def test_forced_undeploy_retires_receipts_only_on_success(tmp_path):
+    """A failure to reach the device is not proof that the receipt is wrong.
+    Voiding a healthy deployment's receipt on a network blip would strand it the
+    way this path exists to prevent, so retirement waits for a clean exit."""
+    host, port, fleet, receipts, stop = _serve_router(
+        tmp_path, lambda p, e, on: 1)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        rid = _stranded_receipt(receipts)
+        st, _, b = _req(host, port, "POST", "/api/devices/r1/undeploy",
+                        {"force": True}, headers=hh)
+        assert st == 200, b
+        _wait_onboard_job(host, port, ck, json.loads(b)["job_id"])
+        assert receipts.get(rid)["state"] != "abandoned"
+    finally:
+        stop()
+
+
+def test_forced_undeploy_escapes_multiple_recoverable_receipts(tmp_path):
+    """Two recoverable receipts refuse onboard, undeploy and adopt alike, and
+    nothing in the product resolved them. The refusal now names force, and force
+    reaches the teardown instead of being rejected ahead of it."""
+    host, port, fleet, receipts, stop = _serve_router(tmp_path, lambda p, e, on: 0)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        first = _stranded_receipt(receipts)
+        second = _stranded_receipt(receipts)
+
+        st, _, b = _req(host, port, "POST", "/api/devices/r1/undeploy", {},
+                        headers=hh)
+        assert st == 409
+        assert b"multiple recoverable receipts" in b and b"force" in b
+
+        st, _, b = _req(host, port, "POST", "/api/devices/r1/undeploy",
+                        {"force": True}, headers=hh)
+        assert st == 200, b
+        _wait_onboard_job(host, port, ck, json.loads(b)["job_id"])
+        assert receipts.get(first)["state"] == "abandoned"
+        assert receipts.get(second)["state"] == "abandoned"
+    finally:
+        stop()
+
+
+def test_repeated_unusable_receipt_undeploy_stays_409(tmp_path):
+    """The 409 path marks the receipt needs-reconcile on its way out. Doing that
+    to a receipt already in needs-reconcile is not a legal transition, and the
+    raise escaped do_POST -- so the first retry answered with a traceback and no
+    JSON body instead of the reason."""
+    host, port, fleet, receipts, stop = _serve_router(tmp_path, lambda p, e, on: 0)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        _stranded_receipt(receipts, resources=[])   # proves ownership of nothing
+        for attempt in range(3):
+            st, _, b = _req(host, port, "POST", "/api/devices/r1/undeploy", {},
+                            headers=hh)
+            assert st == 409, "attempt %d answered %s" % (attempt, st)
+            assert b"does not prove ownership" in b
+    finally:
+        stop()
+
+
+# ---------------------------------------------------------------------------
+# Devices table: status filter parity, bulk image assignment, details drawer
+# ---------------------------------------------------------------------------
+
+def _webroot(name):
+    with open(os.path.join(gui_server.WEBROOT, name)) as stream:
+        return stream.read()
+
+
+def test_every_status_the_cell_can_show_is_filterable():
+    """The Status filter must offer every state the Status cell can render.
+
+    The filter used to derive its own status from a three-branch copy of the
+    cell's logic, so a device reading "onboarding…", "placement failed" or
+    "copying to bootflash:" could not be selected at all, and asking for
+    "enrolled" quietly swept them in. One derivation now feeds both, and the
+    dropdown is generated from it -- this guards that they cannot drift."""
+    app_js = _webroot("app.js")
+    body = app_js.split("function deviceStatus(d, devNow) {", 1)[1]
+    body = body.split("\n  function ", 1)[0]
+    rendered = set(re.findall(r"key: '([a-z-]+)'", body))
+    assert rendered, "deviceStatus() returned no recognisable keys"
+
+    options = app_js.split("var DEVICE_STATUS_OPTIONS = [", 1)[1].split("];", 1)[0]
+    offered = set(re.findall(r"\['([a-z-]+)',", options))
+    assert rendered <= offered, (
+        "renderable but not filterable: %s" % sorted(rendered - offered))
+    # "offline" is a modifier on top of the cell, not one of its branches
+    assert offered - rendered == {"offline"}, sorted(offered - rendered)
+    # the filter compares the shared key, never a second derivation
+    assert "deviceStatus(d, devNow).key !== f.status" in app_js
+    assert "deviceStatusKey" not in app_js
+    # and the markup no longer carries a hand-written subset
+    html = _webroot("index.html")
+    picker = html.split('id="dev-filter-status"', 1)[1].split("</select>", 1)[0]
+    assert picker.count("<option") == 1, "status options are hardcoded again"
+
+
+def test_image_can_be_assigned_to_the_selection():
+    """Assigning an image was per-row only, which does not scale past a handful
+    of devices -- and the devices table gained filters precisely so an operator
+    could act on a subset. The bulk picker shares the selected-action lock with
+    every other bulk action, or a delete could fire mid-assignment."""
+    html = _webroot("index.html")
+    app_js = _webroot("app.js")
+    assert 'id="image-selected"' in html
+    assert 'id="apply-image-selected"' in html
+    assert "'apply-image-selected'" in app_js.split("BULK_BTNS", 1)[1][:400], \
+        "bulk image assign is not under the shared selected-action lock"
+    handler = app_js.split("getElementById('apply-image-selected')", 1)[1][:900]
+    assert "claimSelection()" in handler
+    assert "'/assign'" in handler
+    # unassigning is a deliberate choice, not what an untouched picker does
+    assert "__unassign" in handler and "__unassign" in app_js
+
+
+def test_deployment_details_open_in_a_right_hand_drawer():
+    """It used to render below the devices table, so opening it on a fleet of
+    any size put the details off-screen and made the operator scroll away from
+    the row they had just clicked."""
+    html = _webroot("index.html")
+    css = _webroot("styles.css")
+    app_js = _webroot("app.js")
+    panel = html.split('id="deploy-info-panel"', 1)[1].split(">", 1)[0]
+    assert 'class="drawer"' in panel, panel
+    drawer = css.split(".drawer {", 1)[1].split("}", 1)[0]
+    assert "position:fixed" in drawer and "right:0" in drawer
+    assert "top:0" in drawer and "bottom:0" in drawer
+    # reduced motion is honoured, like the deployment-log drawer
+    assert ".drawer { transition:none; }" in css
+    # and Escape gets the operator out without aiming for the close control
+    assert "closeDeployInfo" in app_js
+    escape = app_js.split("function closeDeployInfo", 1)[1][:700]
+    assert "'Escape'" in escape
+
+
+# ---------------------------------------------------------------------------
+# In-flight work and deployment logs must not outlive the device they describe
+# ---------------------------------------------------------------------------
+
+def _serve_router_jobs(tmp_path, run_fn=None, now_fn=None):
+    """_serve_router, but handing back the onboard service, its log dir and an
+    audit file so a test can plant in-flight work and persisted logs."""
+    import deployment_receipts
+    os.makedirs(tmp_path, exist_ok=True)
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
+    state = str(tmp_path / "state")
+    audit_path = str(tmp_path / "audit.jsonl")
+    log_dir = os.path.join(state, "deploy-logs")
+    kw = {} if now_fn is None else {"now_fn": now_fn}
+    fleet = gui_fleet.FleetStore(state, **kw)
+    fleet.upsert(dict(_ROUTER_ROW))
+    creds = gui_creds.CredentialStore(secrets_path)
+    creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
+    receipts = deployment_receipts.ReceiptStore(state)
+    onboard = gui_onboard.OnboardService(
+        fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
+        run_fn=run_fn or (lambda p, e, on: 0), receipts=receipts,
+        log_dir=log_dir)
+    srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, creds, None,
+                                 onboard, certfile=None, receipts=receipts,
+                                 audit_path=audit_path)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return ("127.0.0.1", port, fleet, onboard, log_dir, audit_path,
+            srv.shutdown)
+
+
+def _plant_deploy_log(log_dir, device_id, finished_at, action="onboard",
+                      job_id="deadbeefcafe0001"):
+    os.makedirs(log_dir, exist_ok=True)
+    name = "%s-%s-%s-%s.log" % (finished_at, device_id, action, job_id)
+    with open(os.path.join(log_dir, name), "w") as stream:
+        stream.write(
+            "# job=%s device=%s action=%s state=done rc=0 queued_at=%s "
+            "started_at=%s finished_at=%s platform=router\n"
+            % (job_id, device_id, action, finished_at - 2, finished_at - 1,
+               finished_at))
+        stream.write("done\n")
+    return name
+
+
+def test_delete_stops_the_device_s_in_flight_jobs(tmp_path, monkeypatch):
+    """A job record is keyed on the bare device id, and delete never looked at
+    one. A job left behind kept the busy guard armed against the NEXT device
+    registered under that name: the opposite action was refused 409, the same
+    action silently joined the dead job, and it cleared only after the job
+    deadline -- two hours."""
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, fleet, onboard, _log_dir, audit_path, stop = _serve_router_jobs(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        onboard._jobs["ghost"] = {
+            "id": "ghost", "device_id": "r1", "action": "onboard",
+            "state": "queued", "queued_at": 1, "started_at": None,
+            "finished_at": None, "lines": [], "returncode": None,
+            "_line_bytes": 0, "_log_truncated": False, "receipt_id": None,
+            "resolved": None, "env_extra": None}
+
+        assert _req(host, port, "DELETE", "/api/devices/r1", headers=hh)[0] == 200
+
+        assert onboard._jobs["ghost"]["state"] == "cancelled"
+        with open(audit_path) as stream:
+            events = [json.loads(l) for l in stream if l.strip()]
+        detail = [e for e in events if e["event"] == "device_delete"][0]["detail"]
+        assert "1 in-flight job stopped" in detail, detail
+
+        # and the re-added device is not busy
+        assert _req(host, port, "POST", "/api/devices", dict(_ROUTER_ROW),
+                    headers=hh)[0] == 200
+        st, _, b = _req(host, port, "POST", "/api/devices/r1/undeploy",
+                        {"force": True}, headers=hh)
+        assert st == 200, b
+    finally:
+        stop()
+
+
+def test_deploy_logs_flag_a_previous_device_s_runs(tmp_path):
+    """Logs deliberately survive a delete -- they are the record of what ran.
+    So a rebuilt box added back under the same name inherited its
+    predecessor's history and the console showed it as the new device's own."""
+    clock = [1000]
+    host, port, fleet, onboard, log_dir, _audit, stop = _serve_router_jobs(
+        tmp_path, now_fn=lambda: clock[0])
+    try:
+        ck, _csrf = _auth(host, port)
+        old = _plant_deploy_log(log_dir, "r1", 500, job_id="aaaaaaaaaaaa0001")
+        recent = _plant_deploy_log(log_dir, "r1", 1500, job_id="bbbbbbbbbbbb0002")
+
+        _, _, b = _req(host, port, "GET", "/api/deploy-logs?device_id=r1",
+                       headers={"Cookie": ck})
+        by_file = {l["file"]: l for l in json.loads(b)["logs"]}
+
+        assert by_file[old]["previous_registration"] is True
+        assert by_file[recent]["previous_registration"] is False
+        # kept, never hidden: the run happened, just to a different machine
+        assert len(by_file) == 2
+    finally:
+        stop()
+
+
+def test_deploy_logs_flag_nothing_without_a_registration_stamp(tmp_path):
+    """Devices registered before the stamp existed have none. Guessing would be
+    worse than saying nothing, so nothing is flagged."""
+    host, port, fleet, onboard, log_dir, _audit, stop = _serve_router_jobs(tmp_path)
+    try:
+        ck, _csrf = _auth(host, port)
+        # a row as it looked before the stamp existed
+        with open(fleet.path) as stream:
+            raw = json.load(stream)
+        raw["devices"]["r1"].pop("registered_at", None)
+        with open(fleet.path, "w") as stream:
+            json.dump(raw, stream)
+        _plant_deploy_log(log_dir, "r1", 500, job_id="cccccccccccc0003")
+
+        _, _, b = _req(host, port, "GET", "/api/deploy-logs?device_id=r1",
+                       headers={"Cookie": ck})
+        entries = json.loads(b)["logs"]
+        assert entries and all("previous_registration" not in e for e in entries)
+    finally:
+        stop()
+
+
+def test_previous_registration_logs_are_labelled_in_the_console():
+    app_js = _webroot("app.js")
+    assert "previous_registration" in app_js
+    block = app_js.split("previous_registration", 1)[1][:400]
+    assert "previous device" in block

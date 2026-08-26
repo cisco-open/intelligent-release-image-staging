@@ -31,6 +31,10 @@ document.getElementById('setup-form').addEventListener('submit', async function 
   });
   if (res.ok) {
     window.sessionStorage.removeItem('iris_setup_grant');
+    // Creating the admin is step one of post-install setup, so hand the next
+    // sign-in straight to the checklist instead of the Overview. Only a
+    // genuine first-run success arms this -- a 409 means setup already ran.
+    window.sessionStorage.setItem('iris_post_setup', '1');
     window.location.href = '/login.html';
   } else if (res.status === 409) {
     window.sessionStorage.removeItem('iris_setup_grant');

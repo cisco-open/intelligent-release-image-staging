@@ -1,0 +1,3122 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Does peer-to-peer distribution actually happen, how much load does it carry, and among whom. Origin-side byte totals are MEASURED (aria2-next 2.5.6 per-connection session counters, banked into the durable peer ledger); the peers-served share is DERIVED as image size x completed devices minus measured origin bytes, and every panel that derives says so in its own description. The untraced residue - origin bytes whose peer connection closed between two samples - is shown explicitly rather than absorbed. All byte panels are backed by counters so a finished transfer keeps its history and nothing blanks when the swarm goes idle. Requires the IRIS /metrics text endpoint (:9101) in Prometheus, either scraped directly or remote-written from the collector's metrics/iris9101 pipeline; the OTLP push path renames image/info_hash and is not read here.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prom}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "code": {
+          "language": "plaintext",
+          "showLineNumbers": false,
+          "showMiniMap": false
+        },
+        "content": "### What this board proves — and what it only infers\n\n**Measured** panels come straight from a counter IRIS observed: aria2's torrent-wide `uploadLength` (banked monotonically by the peer ledger) and aria2-next's per-connection `getSessionUploadLength` per peer.\n\n**Derived** panels are arithmetic on measured quantities and say so in the panel description. *Peers served* is `image size x completed devices - origin sent`; nothing in the hub can watch a device send to another device.\n\n**Untraced** is not an error bar, it is the part of the origin's own upload that could not be traced to a device, because the connection opened and closed between two samples. Lab capture rate: 73.3% at 3 s sampling, 88.1% at 2 s. It is shown, never absorbed.\n\n*Prerequisite:* the `iris_*` families below live on the IRIS `/metrics` text endpoint (`:9101`). Prometheus must scrape it directly, or the collector's `metrics/iris9101` pipeline must gain a `prometheusremotewrite` exporter. The OTLP push path renames the labels (`iris_image_id`, `iris_torrent_info_hash`) and this dashboard does not read it.",
+        "mode": "markdown"
+      },
+      "title": "How to read this board",
+      "type": "text"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "id": 3,
+      "panels": [],
+      "title": "Delivery headline",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "${ds_loki}"
+      },
+      "description": "MEASURED (device-reported) — the sum over devices of the largest `iris.transfer.completed_content_bytes` each device reported on an `iris.device.transfer.report` record inside the range: max per device, then sum. Never a bare sum over report records — a device files several report flavours (staging-complete, seeding-only, pull) and a bare sum multi-counts them; taking the max also keeps a device whose terminal report was lost but whose earlier report arrived. No image-size constant is involved. Note the report carries `iris.image.id` as the CATALOG id (`.SPA.bin`/`.bin` stripped) while the `$image` picker carries the aria2 BASENAME — they are different fields, reconciled by the `$image_catalog_id` suffix-strip variable, never joined directly. No data when no device reported in range; a device that never reported is absent from the sum, not a zero. This is a FLOOR on fleet delivery: it counts only devices that filed a report in range. aria2 counts wire bytes, so hashfailed and duplicate pieces can push a device above the image size. The report carries no info_hash, so there is no per-torrent breakdown.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "bytes",
+          "decimals": 1,
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 0,
+        "y": 6
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${ds_loki}"
+          },
+          "expr": "sum(max by (device_id) (last_over_time(\n  {service_name=\"iris-tracker\"} | otel_log_name=\"iris.device.transfer.report\"\n  | iris_image_id=~\"${image_catalog_id:regex}\"\n  | unwrap iris_transfer_completed_content_bytes [$__range]\n)))",
+          "queryType": "instant",
+          "hide": false,
+          "legendFormat": "delivered"
+        }
+      ],
+      "title": "Delivered to the fleet (measured, device-reported)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prom}"
+      },
+      "description": "MEASURED — `iris_origin_sent_bytes_total`, the origin seeder's own upload counter, banked monotonically by the peer ledger. This is the ALL-TIME CUMULATIVE VALUE of the counter (`last_over_time` over the range), never a window delta: the board must keep its history after the swarm goes idle, and a window delta would read 0 for a finished transfer and make the headline depend on where the operator dragged the time picker. No series in range renders as \"No data\", never 0. Caveats: cumulative since the tracker process started (in-memory ledger, 24 h retention/prune); it counts wire bytes the origin sent, including re-sends of hashfailed pieces, so it can exceed image size x devices.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "blue",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "bytes",
+          "decimals": 1,
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 4,
+        "y": 6
+      },
+      "id": 5,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "sum(last_over_time(iris_origin_sent_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__range]))",
+          "instant": true,
+          "range": false,
+          "legendFormat": "origin",
+          "refId": "A"
+        }
+      ],
+      "title": "Origin sent (measured)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "datasource",
+        "uid": "-- Mixed --"
+      },
+      "description": "DERIVED — fleet delivered (device-reported, panel to the left) minus origin sent (measured). This is the load peer-to-peer distribution carried: everything the fleet received that the origin did not send. It is arithmetic on two measured quantities, not an observation, and it therefore absorbs re-sends, hashfail waste and any clock skew between the log and metric sources. If 'Over-traced excess' is nonzero, this figure is suspect. If either input is missing the panel reads no data — it is never computed against a zero-filled origin. Lab reference: origin 4618.5 MiB, peers 1877.5 MiB of 6496.0 MiB.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "green",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "bytes",
+          "decimals": 1,
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 8,
+        "y": 6
+      },
+      "id": 6,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${ds_loki}"
+          },
+          "expr": "sum(max by (device_id) (last_over_time(\n  {service_name=\"iris-tracker\"} | otel_log_name=\"iris.device.transfer.report\"\n  | iris_image_id=~\"${image_catalog_id:regex}\"\n  | unwrap iris_transfer_completed_content_bytes [$__range]\n)))",
+          "queryType": "instant",
+          "hide": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "expr": "sum(last_over_time(iris_origin_sent_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__range]))",
+          "instant": true,
+          "range": false,
+          "hide": true
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "__expr__",
+            "uid": "__expr__"
+          },
+          "type": "math",
+          "expression": "$A - $B",
+          "hide": false
+        }
+      ],
+      "title": "Delivered peer to peer (derived)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "datasource",
+        "uid": "-- Mixed --"
+      },
+      "description": "DERIVED — 100 x (fleet delivered - origin sent) / fleet delivered, both inputs as defined on the two panels to the left: delivery is device-reported `completed_content_bytes` (max per device, then sum), origin is the cumulative `iris_origin_sent_bytes_total` value. No image-size constant. No data if either input is missing or delivery is not positive. Inherits every caveat of its two inputs. Lab reference: 28.9% fleet-wide, but per device it ranged 18.7% to 55.9% — a fleet average is not a per-device truth (see the per-device table).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 10
+              },
+              {
+                "color": "green",
+                "value": 25
+              }
+            ]
+          },
+          "unit": "percent",
+          "decimals": 1,
+          "max": 100,
+          "min": 0,
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 12,
+        "y": 6
+      },
+      "id": 7,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${ds_loki}"
+          },
+          "expr": "sum(max by (device_id) (last_over_time(\n  {service_name=\"iris-tracker\"} | otel_log_name=\"iris.device.transfer.report\"\n  | iris_image_id=~\"${image_catalog_id:regex}\"\n  | unwrap iris_transfer_completed_content_bytes [$__range]\n)))",
+          "queryType": "instant",
+          "hide": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "expr": "sum(last_over_time(iris_origin_sent_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__range]))",
+          "instant": true,
+          "range": false,
+          "hide": true
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "__expr__",
+            "uid": "__expr__"
+          },
+          "type": "math",
+          "expression": "100 * ($A - $B) / $A",
+          "hide": false
+        }
+      ],
+      "title": "Peer share of delivery (derived, %)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prom}"
+      },
+      "description": "DERIVED — traced bytes ÷ origin-sent, as a percentage. 100% = every origin byte was pinned to a named peer. Below 100% is the untraced residue. **Above 100% is not good news** — it means more bytes were credited to peers than the origin measured sending; see \"Over-traced excess (derived)\". There is no clamp_min on the denominator: if the origin counter is absent or 0 this reads \"No data\" by design, never 0% and never 100%. Caveat: coverage is about *naming* bytes, not about peer-to-peer delivery — it says nothing about how much traffic peers served each other.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 100.0001
+              }
+            ]
+          },
+          "unit": "percent",
+          "decimals": 1,
+          "min": 0,
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 16,
+        "y": 6
+      },
+      "id": 8,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "100 * sum(last_over_time(iris_peer_attributed_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__range]))\n/\nsum(last_over_time(iris_origin_sent_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__range]))",
+          "instant": true,
+          "range": false,
+          "legendFormat": "coverage",
+          "refId": "A"
+        }
+      ],
+      "title": "Trace coverage (derived, % of origin bytes)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prom}"
+      },
+      "description": "MEASURED — the traced-peer count gauge: distinct peers with a nonzero byte total for that torrent, SUMMED across all {image, info_hash} series. Each torrent's ledger counts its own distinct peers, so taking the max across an image's torrents would silently discard every peer of every other torrent. Caveats: this counts peer-torrent pairs — a peer that took two torrents of the same image counts twice — and it is NOT comparable to `iris_swarm_peers`, the tracker's announce-derived population (different populations, different sources). Absent series renders as \"No data\".",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 20,
+        "y": 6
+      },
+      "id": 9,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "sum(last_over_time(iris_swarm_peers_attributed{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__range]))",
+          "instant": true,
+          "range": false,
+          "legendFormat": "peers",
+          "refId": "A"
+        }
+      ],
+      "title": "Peers credited with traced bytes",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 11
+      },
+      "id": 10,
+      "panels": [],
+      "title": "The P2P split over time",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "datasource",
+        "uid": "-- Mixed --"
+      },
+      "description": "Origin is MEASURED (`iris_origin_sent_bytes_total`, cumulative value); the peers band is DERIVED as device-reported fleet delivery minus origin sent. Both are cumulative, so the stack holds its shape after the swarm goes idle instead of collapsing to a blank panel — that is the whole reason these are counters and not gauges. No image-size constant is used, and if either input is missing the peers band is not drawn rather than filled with zero.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "bytes",
+          "decimals": 1,
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 45,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "noValue": "No data"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Origin served (measured)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Peers served (derived)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Peers served (derived)"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 16,
+        "x": 0,
+        "y": 12
+      },
+      "id": 11,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "sum(iris_origin_sent_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "legendFormat": "Origin served (measured)"
+        },
+        {
+          "refId": "L",
+          "datasource": {
+            "type": "loki",
+            "uid": "${ds_loki}"
+          },
+          "expr": "sum(max by (device_id) (last_over_time(\n  {service_name=\"iris-tracker\"} | otel_log_name=\"iris.device.transfer.report\"\n  | iris_image_id=~\"${image_catalog_id:regex}\"\n  | unwrap iris_transfer_completed_content_bytes [$__range]\n)))",
+          "queryType": "range",
+          "hide": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "__expr__",
+            "uid": "__expr__"
+          },
+          "type": "math",
+          "expression": "$L - $A",
+          "hide": false
+        }
+      ],
+      "title": "Cumulative distribution: origin vs peers (stacked)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "datasource",
+        "uid": "-- Mixed --"
+      },
+      "description": "DERIVED — the same two numbers as the stacked chart, at the end of the range: measured origin bytes, and device-reported fleet delivery minus those origin bytes. The peers slice is clamped at zero for display only; a clamp that fires means more was traced to devices than the origin sent, so read 'Over-traced excess' before believing the split. If either input is missing the pie is not drawn — a pie with one measured slice is not a split.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "bytes",
+          "decimals": 1,
+          "noValue": "No data"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Origin served (measured)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Peers served (derived)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Peers served (derived)"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 16,
+        "y": 12
+      },
+      "id": 12,
+      "options": {
+        "displayLabels": [
+          "percent"
+        ],
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "values": [
+            "value"
+          ]
+        },
+        "pieType": "donut",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "sum(iris_origin_sent_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "legendFormat": "Origin served (measured)"
+        },
+        {
+          "refId": "L",
+          "datasource": {
+            "type": "loki",
+            "uid": "${ds_loki}"
+          },
+          "expr": "sum(max by (device_id) (last_over_time(\n  {service_name=\"iris-tracker\"} | otel_log_name=\"iris.device.transfer.report\"\n  | iris_image_id=~\"${image_catalog_id:regex}\"\n  | unwrap iris_transfer_completed_content_bytes [$__range]\n)))",
+          "queryType": "instant",
+          "hide": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "__expr__",
+            "uid": "__expr__"
+          },
+          "type": "math",
+          "expression": "($L - $A) * (($L - $A) > 0)",
+          "hide": false
+        }
+      ],
+      "title": "Delivery split, current range",
+      "type": "piechart"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prom}"
+      },
+      "description": "MEASURED — aria2's own per-torrent upload rate at the origin, `iris_seeder_torrent_upload_bytes_per_second`, summed per image. Origin→swarm only: it is a LOWER BOUND on total swarm throughput because device-to-device reseed traffic is invisible from the origin. No rate is derived from the ledger counters here — those are plotted as cumulative values so a finished transfer keeps its history. Missing scrapes render as no data, never 0.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "Bps",
+          "decimals": 1,
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 21
+      },
+      "id": 13,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (image) (iris_seeder_torrent_upload_bytes_per_second{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{image}}"
+        }
+      ],
+      "title": "Origin upload rate (measured)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prom}"
+      },
+      "description": "MEASURED — the rate of the traced-byte counter: how fast the ledger is pinning origin bytes to named peers. The gap between this and the panel on the left is the residue accruing in real time.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "Bps",
+          "decimals": 1,
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 21
+      },
+      "id": 14,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (image) (rate(iris_peer_attributed_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__rate_interval]))",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{image}} — traced"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (image) (rate(iris_peer_unattributed_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__rate_interval]))",
+          "refId": "B",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{image}} — untraced"
+        }
+      ],
+      "title": "Traced delivery rate, per torrent",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 29
+      },
+      "id": 15,
+      "panels": [],
+      "title": "Untraced residue — what could not be traced to a device",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prom}"
+      },
+      "description": "MEASURED — both counters, plotted as VALUES; this is not a rate, and rate()/increase()/deriv()/resets() are forbidden on the residue series. The orange band is origin traffic whose peer is unknowable after the fact: aria2's per-peer counters only exist while the connection is live, so a connection that opened and closed between two samples takes its counter with it. The residue can step DOWN — it is a difference of two counters and late tracing retires residue; a step down is not a counter reset. Stacked the two bands equal `iris_origin_sent_bytes_total` only while there is no over-tracing — check \"Over-traced excess (derived)\" before reading the stack as the origin total.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "bytes",
+          "decimals": 1,
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 45,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "noValue": "No data"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Traced to a device"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Untraced residue"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 30
+      },
+      "id": 16,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "instant": false,
+          "range": true,
+          "refId": "A",
+          "expr": "sum(last_over_time(iris_peer_attributed_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__interval]))",
+          "legendFormat": "Traced to a device (measured)"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "instant": false,
+          "range": true,
+          "refId": "B",
+          "expr": "sum(last_over_time(iris_peer_unattributed_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__interval]))",
+          "legendFormat": "Untraced residue (measured)"
+        }
+      ],
+      "title": "Origin bytes: traced vs untraced (stacked)",
+      "type": "timeseries",
+      "interval": "1m"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prom}"
+      },
+      "description": "MEASURED — the untraced-residue counter: origin bytes no peer could be named for — short-lived connections that opened and closed between two polls, plus peers refused at the ledger cap (see \"Peer ledger cap saturated\"). Floored at 0 in both the ledger and the exposition. Plotted as the counter VALUE — this is not a rate; rate()/irate()/increase()/deriv()/resets() are forbidden on this series. This series can step DOWN — it is a difference of two counters and late tracing retires residue; a step down is not a counter reset. Absent series renders as \"No data\", never 0.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "orange",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "bytes",
+          "decimals": 1,
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 30
+      },
+      "id": 17,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "sum(last_over_time(iris_peer_unattributed_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__range]))",
+          "instant": true,
+          "range": false,
+          "legendFormat": "residue",
+          "refId": "A"
+        }
+      ],
+      "title": "Untraced residue (measured)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prom}"
+      },
+      "description": "MEASURED — untraced / origin sent, both measured counters. Read it next to the sampler cadence: 2 s active sampling measured 88.1% capture, so ~12% here is expected, not a fault. A sustained climb means connection churn has outrun the sampler.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 15
+              },
+              {
+                "color": "red",
+                "value": 30
+              }
+            ]
+          },
+          "unit": "percent",
+          "decimals": 1,
+          "max": 100,
+          "min": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 30
+      },
+      "id": 18,
+      "options": {
+        "minVizHeight": 75,
+        "minVizWidth": 75,
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "sizing": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "100 * sum(iris_peer_unattributed_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})\n  /\nclamp_min(sum(iris_origin_sent_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}), 1)",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "legendFormat": "residue %"
+        }
+      ],
+      "title": "Residue share of origin traffic",
+      "type": "gauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prom}"
+      },
+      "description": "MEASURED — the traced-byte counter: origin bytes the ledger could pin to a specific peer IP, accumulated as observed, read as the cumulative counter VALUE over the range. The aggregate never carries peer or device labels (per-device labels never enter Prometheus by design); the per-edge detail behind it is the `iris.swarm.peer_bytes` log record. Caveats: tracing is per connection — a connection that opens and closes between two polls is never named and lands in \"Untraced residue (measured)\". Per-peer *rx* tracing elsewhere in IRIS is estimated, but THIS number is measured per connection from aria2's own counters. Absent series renders as \"No data\".",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "green",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "bytes",
+          "decimals": 1,
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 38
+      },
+      "id": 29,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "sum(last_over_time(iris_peer_attributed_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__range]))",
+          "instant": true,
+          "range": false,
+          "legendFormat": "traced",
+          "refId": "A"
+        }
+      ],
+      "title": "Traced to a device (measured)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prom}"
+      },
+      "description": "DERIVED — max(0, traced − origin sent). The ledger floors the residue at 0, so tracing MORE bytes than the origin measured currently renders as a comfortable \"residue 0 / coverage 100%\". This excess is the honest signal that something double-banked (a lost epoch signal, or a baseline evicted by the connection cap), and it must be visible. If either input is absent the panel reads \"No data\" — NOT 0: a missing origin counter must never render as \"everything is excess\" nor as \"no excess\". Any nonzero value means the trace ledger over-counted; treat \"Trace coverage\" as an upper bound and the per-edge totals as suspect for that torrent until this returns to 0.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "bytes",
+          "decimals": 1,
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 6,
+        "y": 38
+      },
+      "id": 30,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "clamp_min(sum(last_over_time(iris_peer_attributed_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__range])) - sum(last_over_time(iris_origin_sent_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__range])), 0)",
+          "instant": true,
+          "range": false,
+          "legendFormat": "excess",
+          "refId": "A"
+        }
+      ],
+      "title": "Over-traced excess (derived)",
+      "type": "stat"
+    },
+    {
+      "id": 31,
+      "type": "state-timeline",
+      "title": "Peer ledger cap saturated",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prom}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 38
+      },
+      "interval": "1m",
+      "description": "MEASURED — `iris_swarm_peers_saturated` (gauge, 0/1): 1 when the per-torrent peer cap refused new peers, so part of the untraced residue is refused peers rather than missed short-lived connections. This is the only way to tell those two causes apart. One track per info_hash. An absent flag renders as \"No data\" — it is not proof of \"not saturated\".",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "fillOpacity": 70,
+            "lineWidth": 0,
+            "spanNulls": false,
+            "insertNulls": false,
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "color": "green",
+                  "index": 0,
+                  "text": "cap not hit"
+                },
+                "1": {
+                  "color": "red",
+                  "index": 1,
+                  "text": "cap refused peers"
+                }
+              }
+            }
+          ],
+          "noValue": "No data",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "alignValue": "left",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "mergeValues": true,
+        "rowHeight": 0.9,
+        "showValue": "auto",
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "instant": false,
+          "range": true,
+          "refId": "A",
+          "legendFormat": "{{info_hash}}",
+          "expr": "max by (info_hash) (last_over_time(iris_swarm_peers_saturated{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__interval]))"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 44
+      },
+      "id": 19,
+      "panels": [],
+      "title": "Per-torrent state",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prom}"
+      },
+      "description": "MEASURED — every column is a measured family joined on `info_hash`. Empty cells are real: the swarm families only exist while peers are announcing (60 s liveness window) and `iris_transfer_progress_ratio` is omitted outright for a stale image — which is why Freshness age sits beside it. The ledger columns persist regardless, so a finished torrent keeps its byte history.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short",
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true,
+            "inspect": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "Origin sent|Traced|Untraced|Bytes remaining"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Origin send rate"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "Bps"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Fleet progress"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "gradient",
+                  "type": "gauge"
+                }
+              },
+              {
+                "id": "max",
+                "value": 1
+              },
+              {
+                "id": "min",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Freshness age"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 45
+      },
+      "id": 20,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (info_hash, image) (iris_origin_sent_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (info_hash) (iris_peer_attributed_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "refId": "B",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (info_hash) (iris_peer_unattributed_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "refId": "C",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (info_hash) (iris_swarm_peers_attributed{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "refId": "D",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (info_hash) (iris_swarm_seeders{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "refId": "E",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (info_hash) (iris_swarm_leechers{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "refId": "F",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (info_hash) (iris_swarm_bytes_remaining{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "refId": "G",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (info_hash) (iris_transfer_progress_ratio{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "refId": "H",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (info_hash) (iris_seeder_torrent_upload_bytes_per_second{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "refId": "I",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "max by (info_hash) (iris_transfer_freshness_age_seconds{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "refId": "J",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "title": "Torrents",
+      "type": "table",
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "info_hash",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "include": {
+              "pattern": "^(info_hash|image|Value #.*)$"
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "indexByName": {},
+            "renameByName": {
+              "Value #A": "Origin sent",
+              "Value #B": "Traced",
+              "Value #C": "Untraced",
+              "Value #D": "Traced peers",
+              "Value #E": "Seeders",
+              "Value #F": "Leechers",
+              "Value #G": "Bytes remaining",
+              "Value #H": "Fleet progress",
+              "Value #I": "Origin send rate",
+              "Value #J": "Freshness age",
+              "image": "Image",
+              "info_hash": "Info hash"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prom}"
+      },
+      "description": "MEASURED — announce-derived population: `iris_swarm_seeders`, `iris_swarm_leechers` and `iris_swarm_peers`, summed per image. Seeders include the origin itself, which announces as a service principal; a peer that finishes and stops announcing is pruned after two 30 s intervals, so a fall is attrition, not necessarily failure. This is a DIFFERENT population from “Peers credited with traced bytes” (ledger peers): the two must never be differenced or plotted as a coverage ratio. Missing scrapes render as no data, never 0.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 53
+      },
+      "id": 21,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (image) (iris_swarm_seeders{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{image}} — seeders"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (image) (iris_swarm_leechers{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "refId": "B",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{image}} — leechers"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (image) (iris_swarm_peers{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "refId": "C",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{image}} — peers"
+        }
+      ],
+      "title": "Swarm population (measured)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prom}"
+      },
+      "description": "MEASURED — `iris_swarm_bytes_remaining`, the sum of the `left` each leecher declared in its own announce, per image. It drops to 0 for an idle swarm with no leechers: that 0 is a measured value, not proof of completion — read it against the leecher series in “Swarm population (measured)” before calling a drop progress. A scrape the pipeline did not deliver renders as no data, never 0.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "bytes",
+          "decimals": 1,
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 53
+      },
+      "id": 22,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (image) (iris_swarm_bytes_remaining{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{image}}"
+        }
+      ],
+      "title": "Bytes remaining in the swarm (measured)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prom}"
+      },
+      "description": "MEASURED — device-reported receive rate, aggregated per image. It is sampled once per 60 s agent tick and a 928 MiB image can finish in well under that, so this panel is structurally blind to a fast stage — the origin send rate above is the high-resolution view. Gaps are omitted stale rows, never zeros.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "Bps",
+          "decimals": 1,
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 53
+      },
+      "id": 23,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (image) (iris_transfer_throughput_bytes_per_second{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\", direction=\"receive\"})",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{image}} — receive"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (image) (iris_transfer_throughput_bytes_per_second{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\", direction=\"transmit\"})",
+          "refId": "B",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{image}} — transmit (reseed)"
+        }
+      ],
+      "title": "Fleet receive rate, per torrent",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 61
+      },
+      "id": 24,
+      "panels": [],
+      "title": "Per-edge detail — who received what (Loki)",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "${ds_loki}"
+      },
+      "description": "MEASURED — `iris.transfer.peer_sent_bytes` on the `iris.swarm.peer_bytes` records: the peer ledger's accumulated total for one origin-to-peer edge, banked as observed, so it survives the transfer ending. Grouping is the canonical edge rule: max of the cumulative counter WITHIN an edge (info_hash, peer address), then sum across edges per peer and device. `iris.peer.role` is deliberately NOT a grouping key — a peer that flips leecher to seeder mid-transfer emits both values and grouping on role would split one edge into two half-sized rows; role is visible per record in the raw log panel. Origin-to-peer only: it cannot show peer-to-peer traffic, which the origin never sees. A peer with no record is absent, not 0. Peers that map to no onboarded device keep their own IP row with the device column shown as 'unresolved'; they are neither dropped nor collapsed into one bucket.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "bytes",
+          "decimals": 1,
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true,
+            "inspect": false
+          },
+          "noValue": "No data"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Bytes from origin"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "gradient",
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "continuous-BlYlRd"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "iris_device_id"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "device"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "special",
+                    "options": {
+                      "match": "empty",
+                      "result": {
+                        "text": "unresolved",
+                        "index": 0
+                      }
+                    }
+                  },
+                  {
+                    "type": "special",
+                    "options": {
+                      "match": "null",
+                      "result": {
+                        "text": "unresolved",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "network_peer_address"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "peer address"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 62
+      },
+      "id": 25,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": true
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Bytes from origin"
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${ds_loki}"
+          },
+          "expr": "sum by (network_peer_address, iris_device_id) (max by (network_peer_address, iris_device_id, iris_torrent_info_hash) (last_over_time(\n  {service_name=\"iris-tracker\"} | otel_log_name=\"iris.swarm.peer_bytes\" | iris_image_id=~\"${image:regex}\" | iris_torrent_info_hash=~\"${info_hash:regex}\"\n  | unwrap iris_transfer_peer_sent_bytes [$__range]\n)))",
+          "queryType": "instant",
+          "hide": false
+        }
+      ],
+      "title": "Origin bytes to this peer (measured, cumulative)",
+      "type": "table",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "iris_device_id": "Device",
+              "network_peer_address": "Peer address",
+              "iris_peer_role": "Role",
+              "Value": "Bytes from origin"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "${ds_loki}"
+      },
+      "description": "DERIVED, in range — max minus min of the cumulative `iris.transfer.peer_sent_bytes` per edge (info_hash, peer address) over the dashboard range, then summed per device. It is deliberately NOT a sum of `iris.transfer.peer_sent_delta_bytes`: the delta sum under-reports silently whenever the LogQueue (max 1000, drop-oldest, flushed on the 15 s pass) overflows between flushes, while max-min self-heals across any record dropped in the middle of the range. An edge with a single sample in range yields max-min = 0, which is a MEASURED zero — that edge gained nothing in range. An edge whose first sample lands inside the range starts from its already-banked total rather than from 0, so the first bucket under-reports; that is why this is labelled 'in range'. Origin-to-device only: whatever a device pulled from another device is not in this bar. Read it beside the telemetry export-health panel.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "bytes",
+          "decimals": 1,
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisPlacement": "auto",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "lineWidth": 1,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 62
+      },
+      "id": 26,
+      "options": {
+        "barRadius": 0,
+        "barWidth": 0.7,
+        "fullHighlight": false,
+        "groupWidth": 0.7,
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "orientation": "horizontal",
+        "showValue": "auto",
+        "stacking": "none",
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${ds_loki}"
+          },
+          "expr": "sum by (iris_device_id) (\n  max by (iris_device_id, network_peer_address, iris_torrent_info_hash) (max_over_time(\n    {service_name=\"iris-tracker\"} | otel_log_name=\"iris.swarm.peer_bytes\" | iris_image_id=~\"${image:regex}\" | iris_torrent_info_hash=~\"${info_hash:regex}\"\n    | unwrap iris_transfer_peer_sent_bytes [$__range]\n  ))\n  -\n  min by (iris_device_id, network_peer_address, iris_torrent_info_hash) (min_over_time(\n    {service_name=\"iris-tracker\"} | otel_log_name=\"iris.swarm.peer_bytes\" | iris_image_id=~\"${image:regex}\" | iris_torrent_info_hash=~\"${info_hash:regex}\"\n    | unwrap iris_transfer_peer_sent_bytes [$__range]\n  ))\n)",
+          "queryType": "instant",
+          "hide": false,
+          "legendFormat": "{{iris_device_id}}"
+        }
+      ],
+      "title": "Origin bytes to this peer, in range (derived)",
+      "type": "barchart",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "iris_device_id": "Device",
+              "Value": "Bytes received"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "${ds_loki}"
+      },
+      "description": "MEASURED — `iris.transfer.peer_send_bps` on the `iris.swarm.peer_rate` records, an instantaneous per-connection reading of the origin's send rate to each peer address, averaged over each display interval. It is a sample, not an integral: do not sum it into bytes — use the per-edge byte panels for that. Gaps are missing samples, not a zero rate, and render as no data; a peer whose connection died between samples simply stops appearing.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "Bps",
+          "decimals": 1,
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 71
+      },
+      "id": 27,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${ds_loki}"
+          },
+          "expr": "avg by (network_peer_address) (last_over_time(\n  {service_name=\"iris-tracker\"} | otel_log_name=\"iris.swarm.peer_rate\" | iris_image_id=~\"${image:regex}\"\n  | unwrap iris_transfer_peer_send_bps [$__auto]\n))",
+          "queryType": "range",
+          "hide": false,
+          "legendFormat": "{{network_peer_address}}"
+        }
+      ],
+      "title": "Origin to peer send rate (measured)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "${ds_loki}"
+      },
+      "description": "MEASURED — the underlying records. Every attribute arrives as Loki structured metadata with dots folded to underscores, and the OTLP wire encoding serialises integers as strings — `unwrap` parses them back, which is why the numeric panels work. Note Loki rejects records older than its `reject_old_samples` window, so a replayed backlog is lossy here while the Prometheus counters stay whole.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 71
+      },
+      "id": 28,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": false,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": false
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${ds_loki}"
+          },
+          "editorMode": "code",
+          "expr": "{service_name=\"iris-tracker\"} | otel_log_name=\"iris.swarm.peer_bytes\" | iris_image_id=~\"${image:regex}\" | iris_torrent_info_hash=~\"${info_hash:regex}\"",
+          "refId": "A",
+          "queryType": "range"
+        }
+      ],
+      "title": "Raw iris.swarm.peer_bytes records",
+      "type": "logs"
+    },
+    {
+      "id": 32,
+      "type": "table",
+      "title": "Peer share of delivery, per device (derived, %)",
+      "description": "DERIVED, per device — 100 x (delivered - origin_to_device) / delivered. `delivered` is that device's largest reported `iris.transfer.completed_content_bytes`; `origin_to_device` is the sum of its origin edges (max of the cumulative `iris.transfer.peer_sent_bytes` per (info_hash, peer address), then summed). The two records are joined ON DEVICE ID ONLY (`iris.device.id` on peer_bytes renamed to `device.id`) within the dashboard range; joining on `iris.image.id` is forbidden because the two records carry different id forms (basename vs catalog id) and would match nothing. A device present in only one of the two sources leaves this cell blank — never 0, never 100%. A device with no traced origin edge (its origin connection was never named) reads as 100% peer-served, which is a tracing artefact, not a fact: read it beside 'Trace coverage' and 'Peer ledger cap saturated'. Lab reference range 18.7%-55.9%.",
+      "datasource": {
+        "type": "datasource",
+        "uid": "-- Mixed --"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 79
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${ds_loki}"
+          },
+          "expr": "sum by (device_id) (max by (device_id, network_peer_address, iris_torrent_info_hash) (last_over_time(\n  {service_name=\"iris-tracker\"} | otel_log_name=\"iris.swarm.peer_bytes\" | iris_image_id=~\"${image:regex}\" | iris_torrent_info_hash=~\"${info_hash:regex}\"\n  | label_format device_id=iris_device_id\n  | unwrap iris_transfer_peer_sent_bytes [$__range]\n)))",
+          "queryType": "instant",
+          "hide": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "loki",
+            "uid": "${ds_loki}"
+          },
+          "expr": "max by (device_id) (last_over_time(\n  {service_name=\"iris-tracker\"} | otel_log_name=\"iris.device.transfer.report\"\n  | iris_image_id=~\"${image_catalog_id:regex}\"\n  | unwrap iris_transfer_completed_content_bytes [$__range]\n))",
+          "queryType": "instant",
+          "hide": true
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "__expr__",
+            "uid": "__expr__"
+          },
+          "type": "math",
+          "expression": "100 * ($B - $A) / $B",
+          "hide": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "noValue": "No data",
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "device_id"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "device"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "C"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "peer share %"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "peer share %",
+            "desc": true
+          }
+        ]
+      },
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prom}"
+      },
+      "description": "MEASURED — `iris_swarm_completed_total`, the tracker's completion counter, summed across `{image, info_hash}` with `max_over_time` over the dashboard range so a swarm that finished inside the range keeps its history after going idle. The counter is in-memory with a 24 h TTL and process-lifetime scope. This count must NEVER be multiplied by an image size to produce a byte figure — fleet delivery is measured from device-reported bytes instead. No data means the pipeline delivered nothing, not zero completions.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "blue",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 6,
+        "x": 12,
+        "y": 79
+      },
+      "id": 33,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "sum(max_over_time(iris_swarm_completed_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__range]))",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "legendFormat": "completed"
+        }
+      ],
+      "title": "Devices that completed the image (measured)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prom}"
+      },
+      "description": "MEASURED — `iris_image_size_bytes{image,info_hash}`, the catalog entry's own `size` field (written by the publisher, read back from the catalog store). Emitted by the hub from the catalog store; a missing series means that image has no published catalog entry, and the panel reads “No data” rather than guessing. There is no hardcoded constant, no textbox fallback and no `or vector(...)` behind it — pricing a fleet total at a fixed 928 MiB is wrong the moment a differently sized image is selected. The panel is informational and progress-only; the fleet-delivery figures never depend on it.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "blue",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "bytes",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 6,
+        "x": 18,
+        "y": 79
+      },
+      "id": 34,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "max by (image, info_hash) (iris_image_size_bytes{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "legendFormat": "{{image}}"
+        }
+      ],
+      "title": "Image size (measured)",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 88
+      },
+      "id": 35,
+      "panels": [],
+      "title": "Telemetry export health",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds_prom}"
+      },
+      "description": "MEASURED — the exporter's own counters and gauges: records dropped and export failures per signal over the dashboard range, samples rejected, and seconds since the last successful export. `increase()` is correct here — these are export-health counters, and the rate ban applies only to the untraced residue. A NONZERO drop count means every log-derived byte figure on this board (fleet delivery, per-device peer share, per-edge origin bytes) is a FLOOR, not a total: those records never reached the backend and their bytes are missing from the sums. Seconds since last success growing without bound means the whole log leg is stale. No data here means the exporter metrics are not being scraped — it is not evidence of a healthy export.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "blue",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "No data"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*since last success.*"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 89
+      },
+      "id": 36,
+      "options": {
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (signal) (increase(iris_telemetry_export_dropped_total{job=~\"$job\"}[$__range]))",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "legendFormat": "{{signal}} — records dropped in range"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (signal) (increase(iris_telemetry_export_failures_total{job=~\"$job\"}[$__range]))",
+          "refId": "B",
+          "range": false,
+          "instant": true,
+          "legendFormat": "{{signal}} — export failures in range"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "sum(increase(iris_telemetry_samples_rejected_total{job=~\"$job\"}[$__range]))",
+          "refId": "C",
+          "range": false,
+          "instant": true,
+          "legendFormat": "samples rejected in range"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds_prom}"
+          },
+          "editorMode": "code",
+          "expr": "time() - max by (signal) (iris_telemetry_export_last_success_seconds{job=~\"$job\"})",
+          "refId": "D",
+          "range": false,
+          "instant": true,
+          "legendFormat": "{{signal}} — since last success"
+        }
+      ],
+      "title": "Telemetry export health (measured)",
+      "type": "stat"
+    }
+  ],
+  "preload": false,
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "iris",
+    "swarm",
+    "bittorrent",
+    "p2p",
+    "telemetry"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Prometheus",
+        "multi": false,
+        "name": "ds_prom",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Loki",
+        "multi": false,
+        "name": "ds_loki",
+        "options": [],
+        "query": "loki",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${ds_prom}"
+        },
+        "definition": "label_values(iris_tracker_up, job)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Scrape job",
+        "multi": true,
+        "name": "job",
+        "options": [],
+        "query": {
+          "qryType": 1,
+          "query": "label_values(iris_tracker_up, job)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${ds_prom}"
+        },
+        "definition": "label_values({__name__=~\"iris_origin_sent_bytes_total|iris_swarm_peers\", job=~\"$job\"}, image)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Image",
+        "multi": true,
+        "name": "image",
+        "options": [],
+        "query": {
+          "qryType": 1,
+          "query": "label_values({__name__=~\"iris_origin_sent_bytes_total|iris_swarm_peers\", job=~\"$job\"}, image)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "name": "image_catalog_id",
+        "label": "Image (catalog id)",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${ds_prom}"
+        },
+        "hide": 2,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "refresh": 2,
+        "regex": "/^(.*?)(?:\\.SPA)?\\.bin$/",
+        "query": {
+          "qryType": 1,
+          "query": "label_values(iris_origin_sent_bytes_total{job=~\"$job\", image=~\"$image\"}, image)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "options": [],
+        "description": "Derived from $image by stripping the .SPA.bin/.bin suffix, mirroring publish.derive_id. iris.device.transfer.report carries the catalog id while iris.swarm.peer_bytes carries the aria2 basename; the two are never equated directly."
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${ds_prom}"
+        },
+        "definition": "label_values({__name__=~\"iris_origin_sent_bytes_total|iris_swarm_peers\", job=~\"$job\", image=~\"$image\"}, info_hash)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Info hash",
+        "multi": true,
+        "name": "info_hash",
+        "options": [],
+        "query": {
+          "qryType": 1,
+          "query": "label_values({__name__=~\"iris_origin_sent_bytes_total|iris_swarm_peers\", job=~\"$job\", image=~\"$image\"}, info_hash)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "IRIS — Peer-to-Peer Distribution",
+  "uid": "iris-swarm-p2p",
+  "version": 1,
+  "weekStart": ""
+}

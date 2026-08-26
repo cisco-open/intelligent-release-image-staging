@@ -361,3 +361,35 @@ _iox_env() {
   [[ "$output" == *"ERROR: device identity mismatch"* ]]
   ! grep -qE 'app-hosting (stop|deactivate|uninstall) appid iris|no app-hosting appid iris' "$COMMAND_LOG"
 }
+
+# --- iox_ready: one login per observation ----------------------------------
+# Both readiness fields live in the SAME `show iox` output, so reading it twice
+# paid a second ssh handshake for nothing -- and this runs on every iteration of
+# a poll loop that can last minutes. The poll itself must still re-observe live
+# state each iteration; only the duplicated read WITHIN one observation is gone.
+
+_iox_ready_fn() {
+  sed -n '/^iox_ready() {/,/^}/p' "$BATS_TEST_DIRNAME/../install.sh"
+}
+
+@test "iox_ready reads show iox exactly once per observation" {
+  log="$BATS_TEST_TMPDIR/iox-reads"
+  : > "$log"
+  run bash -c "
+    RUN() { cat >/dev/null; echo run >> '$log'
+            printf 'IOx service (CAF)  : Running\nDockerd  : Running\n'; }
+    $(_iox_ready_fn)
+    iox_ready"
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$log" | tr -d ' ')" -eq 1 ]
+}
+
+@test "iox_ready still fails when either field is not Running" {
+  for missing in 'IOx service (CAF)  : Running' 'Dockerd  : Running'; do
+    run bash -c "
+      RUN() { cat >/dev/null; printf '%s\n' '$missing'; }
+      $(_iox_ready_fn)
+      iox_ready"
+    [ "$status" -ne 0 ]
+  done
+}

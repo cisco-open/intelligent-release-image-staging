@@ -49,6 +49,7 @@ def test_revoke_sets_all_device_records(tmp_path, monkeypatch):
     sp = _make_store(tmp_path, "dev-1")
     monkeypatch.setenv("IRIS_SECRETS", sp)
     monkeypatch.setenv("IRIS_AGE_RECIPIENTS", "")  # skip encrypt_from
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path))
 
     mod = _load_cli()
     rc = mod.main(["dev-1"])
@@ -70,6 +71,7 @@ def test_revoke_leaves_other_devices_untouched(tmp_path, monkeypatch):
 
     monkeypatch.setenv("IRIS_SECRETS", sp)
     monkeypatch.setenv("IRIS_AGE_RECIPIENTS", "")
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path))
 
     mod = _load_cli()
     rc = mod.main(["dev-1"])
@@ -86,6 +88,7 @@ def test_revoke_unknown_device_returns_rc1(tmp_path, monkeypatch):
     secrets_store.save(secrets_store.load(sp), sp)
     monkeypatch.setenv("IRIS_SECRETS", sp)
     monkeypatch.setenv("IRIS_AGE_RECIPIENTS", "")
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path))
 
     mod = _load_cli()
     rc = mod.main(["no-such-device"])
@@ -96,6 +99,7 @@ def test_revoke_no_args_returns_rc2(tmp_path, monkeypatch):
     """No arguments → usage error rc 2."""
     monkeypatch.setenv("IRIS_SECRETS", str(tmp_path / "secrets.json"))
     monkeypatch.setenv("IRIS_AGE_RECIPIENTS", "")
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path))
 
     mod = _load_cli()
     rc = mod.main([])
@@ -106,6 +110,7 @@ def test_revoke_too_many_args_returns_rc2(tmp_path, monkeypatch):
     """Too many arguments → usage error rc 2."""
     monkeypatch.setenv("IRIS_SECRETS", str(tmp_path / "secrets.json"))
     monkeypatch.setenv("IRIS_AGE_RECIPIENTS", "")
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path))
 
     mod = _load_cli()
     rc = mod.main(["dev-1", "extra"])

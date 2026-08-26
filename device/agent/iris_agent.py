@@ -12,6 +12,7 @@ build_deps() wires the real cli module / aria2 RPC / filesystem."""
 import collections
 import errno
 import json
+import math
 import os
 import random
 import re
@@ -60,11 +61,54 @@ Deps = collections.namedtuple(
     "Deps", "catalog emit ios aria_add file_size verify free_bytes version "
             "copy_to_root purge_others reclaim root_present remove_stage "
              "aria_remove detect_mode target_fs running_image reclaimable "
-             "reclaim_bundle model refresh aria_stats aria_peers io_transfer")
+             "reclaim_bundle model refresh aria_stats aria_peers io_transfer "
+             "checkpoint aria_session")
+
+
+def _atomic_write_state(state_path, state):
+    """Durably persist agent state with the crash-safe tmp+fsync+rename+
+    dir-fsync discipline.
+
+    The sibling rename is atomic on the state filesystem. Sync both the bytes
+    and the directory entry so sudden power loss cannot expose a truncated file
+    or lose the completed rename. A filesystem that does not implement directory
+    fsync raises EINVAL/ENOTSUP on the dir fd — that platform limitation is
+    ignored, but a real I/O failure still surfaces.
+
+    Factored out of main() (behavior unchanged) so Deps.checkpoint can persist
+    identity/sequence facts BEFORE any network side effect that must survive a
+    crash. Raises on a genuine write/fsync failure; callers that need
+    best-effort behavior (main's outer final save) wrap it."""
+    tmp = state_path + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(state, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, state_path)
+        dir_fd = os.open(os.path.dirname(state_path) or ".", os.O_RDONLY)
+        try:
+            try:
+                os.fsync(dir_fd)
+            except OSError as e:
+                unsupported = {errno.EINVAL}
+                if hasattr(errno, "ENOTSUP"):
+                    unsupported.add(errno.ENOTSUP)
+                if e.errno not in unsupported:
+                    raise
+        finally:
+            os.close(dir_fd)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _heartbeat(image, deps, stage_state="staging", target_fs=None,
-               tele_on=True, stage_error=None, sample=None, stream_on=False):
+               tele_on=True, stage_error=None, sample=None, stream_on=False,
+               observation=None):
     hb = {"current_image_id": image["id"] if image else None,
           "free_flash_bytes": deps.free_bytes(target_fs or "flash:"),
           "version": deps.version(),
@@ -76,6 +120,8 @@ def _heartbeat(image, deps, stage_state="staging", target_fs=None,
           "telemetry_stream_enabled": bool(stream_on)}
     if sample is not None:
         hb["sample"] = sample
+    if observation is not None:
+        hb["telemetry_observation"] = observation
     return hb
 
 
@@ -109,6 +155,29 @@ def _send_heartbeat(deps, sid, payload):
 _SLEEP = time.sleep
 
 
+def _checkpoint_or_skip(deps, state, emit_tag, emit_detail):
+    """Durably persist state BEFORE an identity/sequence-bearing POST.
+
+    Returns True on a durable checkpoint (the caller may POST), False if the
+    checkpoint failed OR deps has no checkpoint wired. A FAILED checkpoint MUST
+    prevent the POST: sending an identity/sequence the device could not persist
+    would let a crash-after-POST restart mint a fresh id or rewind sample_seq,
+    breaking server dedupe / reorder rejection. Losing the POST this tick is
+    harmless — the next tick re-checkpoints and re-sends. Never raises."""
+    checkpoint = getattr(deps, "checkpoint", None)
+    if not callable(checkpoint):
+        return False
+    try:
+        checkpoint(state)
+        return True
+    except Exception as e:
+        try:
+            deps.emit(emit_tag, "%s (POST skipped): %s" % (emit_detail, e))
+        except Exception:
+            pass
+        return False
+
+
 def _send_report(cfg, deps, state, img_id, report):
     """POST one telemetry report, BEST-EFFORT — never raises (mirrors
     _send_heartbeat). Jitter BEFORE the POST desynchronizes a batch of devices
@@ -121,15 +190,114 @@ def _send_report(cfg, deps, state, img_id, report):
             return False
         _SLEEP(random.uniform(0, telemetry_report.JITTER_MAX))
         post(cfg["device_id"], report)
+        # A delivered report proves the catalog link is healthy: reset the
+        # heartbeat streak (classifier) AND the separate report streak (spec
+        # §10.2 splits heartbeat_fail_streak from report_fail_streak).
         telemetry_report.record_success(state)
+        telemetry_report.record_report_success(state)
         deps.emit("TELEMETRY", "%s report sent (%s)"
                   % (img_id, report.get("event")))
         return True
     except Exception as e:
-        telemetry_report.record_failure(state)
+        telemetry_report.record_report_failure(state)
         deps.emit("TELEMETRY-FAIL", "%s report failed (ignored): %s"
                   % (img_id, e))
         return False
+
+
+def _not_active_observation(tele_on, now):
+    """State-only v2 envelope for an unassigned/error device (no transfer). It
+    invents no transfer_id/image_id/aria fields (spec §3A). `disabled` when the
+    telemetry master toggle is off, else `not_active`."""
+    try:
+        return telemetry_report.build_observation(
+            obs_state="disabled" if not tele_on else "not_active",
+            observed_at=now, transfer_id=None, image_id=None)
+    except Exception:
+        return None
+
+
+def _build_observation(cfg, deps, state, img_id, stage, phase, now):
+    """Build the state-first v2 `telemetry_observation` envelope for an assigned
+    heartbeat, and — when the state is `observed` — checkpoint the incremented
+    sample_seq BEFORE returning it, so the heartbeat POST that carries the seq
+    is idempotent across a crash (spec §2/§3A). Best-effort: any failure returns
+    (None, None) so the heartbeat still goes out (telemetry never breaks it).
+
+    obs_state decision (per run_once path / config):
+      * telemetry master toggle off        -> disabled
+      * stream toggle off / stream paused  -> paused
+      * cadence not due this tick           -> not_due
+      * aria RPC/no matching download       -> rpc_unavailable
+      * a fresh aria snapshot taken        -> observed (+aria +peers +sampling)
+    A state-only envelope invents no transfer fields. Returns (envelope, peers)
+    where peers is the getPeers rows only for `observed` (reused by the tick)."""
+    try:
+        if not telemetry_report.enabled(cfg):
+            # Telemetry master toggle off: emit a state-only `disabled` envelope
+            # WITHOUT minting/persisting any transfer identity (an off device
+            # has no live transfer telemetry and must not touch tele state).
+            return _not_active_observation(False, now), None
+        transfer_id = telemetry_report.ensure_transfer_id(state, img_id)
+        st = state.setdefault(img_id, {})
+        tele = st.setdefault("tele", {})
+
+        def envelope(obs_state, sample_seq=None, aria_session_id=None,
+                     sampling_class=None, stats=None, peers=None):
+            return telemetry_report.build_observation(
+                obs_state=obs_state, observed_at=now,
+                transfer_id=transfer_id, image_id=img_id,
+                sample_seq=sample_seq, aria_session_id=aria_session_id,
+                sampling_class=sampling_class, stats=stats, peers=peers)
+
+        def state_envelope(obs_state):
+            seq = telemetry_report.next_sample_seq(state, img_id)
+            if not _checkpoint_or_skip(
+                    deps, state, "TELEMETRY-CKPT",
+                    "%s sample_seq checkpoint failed" % img_id):
+                tele["sample_seq"] = seq - 1
+                return None
+            return envelope(obs_state, sample_seq=seq)
+
+        # Only live-transfer phases carry an aria snapshot; steady seeding uses
+        # the RPC-free path and reports not_due (last value ages to stale).
+        if phase not in ("downloading", "seeding-only"):
+            return state_envelope("not_due"), None
+        if not telemetry_report.stream_enabled(cfg):
+            return state_envelope("paused"), None
+        tier = telemetry_report.classify(state, tele.get("avg_bps"))
+        _every, paused = telemetry_report.active_directives(state, now)
+        if paused:
+            return state_envelope("paused"), None
+        if not telemetry_report.should_sample(state, tele, tier, now):
+            return state_envelope("not_due"), None
+        stats = deps.aria_stats(stage)
+        peers = deps.aria_peers(stage)
+        if not stats:
+            # RPC unreachable / no matching download: never retain an old rate.
+            return state_envelope("rpc_unavailable"), None
+        session = None
+        get_session = getattr(deps, "aria_session", None)
+        if callable(get_session):
+            session = get_session()
+        sampling_class = telemetry_report.sampling_class_of(
+            state, tele.get("avg_bps"))
+        # Increment + CHECKPOINT sample_seq BEFORE the observed heartbeat POST
+        # so a crash-after-POST restart never rewinds/reuses the seq. A failed
+        # checkpoint downgrades to not_due (nothing identity-bearing shipped
+        # that could not be persisted) and rolls back the un-persisted seq.
+        seq = telemetry_report.next_sample_seq(state, img_id)
+        if not _checkpoint_or_skip(
+                deps, state, "TELEMETRY-CKPT",
+                "%s sample_seq checkpoint failed" % img_id):
+            tele["sample_seq"] = seq - 1
+            return None, None
+        tele["stream_last_ts"] = now
+        obs = envelope("observed", sample_seq=seq, aria_session_id=session,
+                       sampling_class=sampling_class, stats=stats, peers=peers)
+        return obs, peers
+    except Exception:
+        return None, None
 
 
 def _maybe_sample(cfg, deps, state, img_id, stage, phase, now):
@@ -155,6 +323,51 @@ def _maybe_sample(cfg, deps, state, img_id, stage, phase, now):
         return sample, peers
     except Exception:
         return None, None
+
+
+def _send_frozen_report(cfg, deps, state, img_id, now):
+    """Send the completion/seeding v2 report, freezing it on the first attempt.
+
+    The full payload (body + report_id + report_created_at) is frozen in state
+    and CHECKPOINTED durably BEFORE the first POST (spec §2), so a crash after
+    the POST but before the outer final save restarts with the SAME frozen
+    report/id and re-sends it byte-for-byte (the server dedupes by report_id).
+    Every retry re-sends the identical frozen object. Returns True on delivery.
+    A checkpoint failure skips the POST (no unpersisted identity shipped)."""
+    frozen = telemetry_report.frozen_report(state, img_id)
+    if frozen is None:
+        tele = (state.get(img_id) or {}).get("tele") or {}
+        transfer_id = telemetry_report.ensure_transfer_id(state, img_id)
+        report = telemetry_report.build_report_v2(
+            cfg, state, img_id, tele.get("event") or "staging-complete", now,
+            transfer_id, telemetry_report.mint_id())
+        frozen = telemetry_report.freeze_report(state, img_id, report)
+        if not _checkpoint_or_skip(
+                deps, state, "TELEMETRY-CKPT",
+                "%s report freeze checkpoint failed" % img_id):
+            return False
+    return _send_report(cfg, deps, state, img_id, frozen)
+
+
+def _send_pull_report(cfg, deps, state, img_id, request_id, now):
+    """Send a pull v2 report for the server's report_request_id (spec §10.2b).
+
+    A NEW request_id mints a fresh random report_id, freezes an immutable pull
+    payload keyed by that request, and CHECKPOINTS it BEFORE the POST; a repeat
+    of the same request reuses the identical frozen body. Returns True on
+    delivery."""
+    frozen = telemetry_report.frozen_pull_report(state, request_id)
+    if frozen is None:
+        transfer_id = telemetry_report.ensure_transfer_id(state, img_id)
+        report = telemetry_report.build_report_v2(
+            cfg, state, img_id, "pull", now, transfer_id,
+            telemetry_report.mint_id(), report_request_id=request_id)
+        frozen = telemetry_report.freeze_pull_report(state, request_id, report)
+        if not _checkpoint_or_skip(
+                deps, state, "TELEMETRY-CKPT",
+                "%s pull report freeze checkpoint failed" % img_id):
+            return False
+    return _send_report(cfg, deps, state, img_id, frozen)
 
 
 def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now,
@@ -192,7 +405,8 @@ def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now,
             tele["started_ts"] = now
         if phase in ("downloading", "seeding-only"):
             telemetry_report.observe_peers(
-                tele, peers if peers is not None else deps.aria_peers(stage))
+                tele, peers if peers is not None else deps.aria_peers(stage),
+                now)
         if phase in ("copied", "seeding-only") and not tele.get("done_ts"):
             # Take ONE final participation sample first so peers connected at
             # the end of a fast download still land in the observed set (the
@@ -200,18 +414,32 @@ def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now,
             # a peer-RPC hiccup here must never block marking done.
             if phase == "copied":
                 try:
-                    telemetry_report.observe_peers(tele, deps.aria_peers(stage))
+                    telemetry_report.observe_peers(
+                        tele, deps.aria_peers(stage), now)
                 except Exception:
                     pass
+            # Fold in the hook's exact per-peer byte snapshot BEFORE done_ts,
+            # which is the point the terminal report freezes. This is the one
+            # measurement the sampler above structurally cannot make: a peer
+            # that connected and dropped between two 60 s ticks is invisible
+            # to it, whatever keys it asks for.
+            _ingest_peer_receipts(deps, tele, stage, now)
             tele["done_ts"] = now
             stats = deps.aria_stats(stage)
             if stats:
-                tele["total_bytes"] = int(stats.get("completedLength", 0) or 0)
+                completed = int(stats.get("completedLength", 0) or 0)
+                tele["total_bytes"] = completed
+                # v2 content-at-end fields (spec §3D): not a "bytes transferred"
+                # claim. total is the torrent's declared totalLength when known.
+                tele["completed_content_bytes"] = completed
+                tele["total_content_bytes"] = int(
+                    stats.get("totalLength", completed) or completed)
             elapsed = max(now - tele.get("started_ts", now), 0.0)
             tele["elapsed_s"] = elapsed
             if elapsed > 0 and tele.get("total_bytes"):
+                # avg_bps kept ONLY as an internal classifier input; retired as
+                # an authoritative v2 report field.
                 tele["avg_bps"] = int(tele["total_bytes"] / elapsed)
-            tele["sha_ok"] = bool(st.get("done"))
         # Arm exactly one completion report per image. staging-complete
         # upgrades an armed-but-unsent seeding-only report (the copy gate
         # cleared on a later tick).
@@ -221,6 +449,9 @@ def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now,
             tele["report_pending"] = True
             tele["report_attempts"] = 0
             tele["report_next_ts"] = 0.0
+            # Discard any armed-but-unsent seeding-only frozen payload so the
+            # report re-freezes with the upgraded staging-complete event/id.
+            tele.pop("frozen_report", None)
         elif phase == "seeding-only" and not tele.get("event"):
             tele["event"] = "seeding-only"
             tele["report_pending"] = True
@@ -239,11 +470,25 @@ def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now,
         # tracks bytes at all. No local retry bookkeeping: the server keeps
         # the directive until a report ARRIVES, so a failed send is
         # re-flagged on the next heartbeat anyway.
-        if telemetry_report.pull_requested(hb_resp):
-            _send_report(cfg, deps, state, img_id,
-                         telemetry_report.build_report(cfg, state, img_id,
-                                                       "pull", now))
-        # Pending completion report: tier-gated with exponential backoff.
+        # GUI pull (v2): the server mints a per-request report_request_id
+        # (§10.2b). On a NEW request id the agent mints a FRESH random report_id,
+        # freezes an immutable pull payload for that request, CHECKPOINTS it
+        # BEFORE the POST, and retries it byte-for-byte; a repeat of the SAME
+        # request id reuses the identical frozen body (so repeated console pulls
+        # never collide). A steady tick re-sends the completed transfer's frozen
+        # observed peer set — never a fresh sample.
+        request_id = telemetry_report.pull_request_id(hb_resp)
+        if request_id is not None:
+            _send_pull_report(cfg, deps, state, img_id, request_id, now)
+        elif telemetry_report.pull_requested(hb_resp):
+            # Legacy pull directive without a request_id: fall back to a fresh
+            # per-tick v2 report (no freeze key available).
+            transfer_id = telemetry_report.ensure_transfer_id(state, img_id)
+            report = telemetry_report.build_report_v2(
+                cfg, state, img_id, "pull", now, transfer_id,
+                telemetry_report.mint_id())
+            _send_report(cfg, deps, state, img_id, report)
+        # Pending completion/seeding report (v2): tier-gated backoff, frozen once.
         if tele.get("report_pending") and now >= tele.get("report_next_ts", 0):
             if tele.get("report_attempts", 0) >= telemetry_report.MAX_ATTEMPTS:
                 tele["report_pending"] = False
@@ -255,20 +500,14 @@ def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now,
                     tele["report_attempts"] = tele.get("report_attempts", 0) + 1
                     tele["report_next_ts"] = telemetry_report.next_backoff_ts(
                         tele["report_attempts"], now)
+                elif _send_frozen_report(cfg, deps, state, img_id, now):
+                    tele["report_pending"] = False
+                    tele["report_sent_ts"] = now
                 else:
-                    report = telemetry_report.build_report(
-                        cfg, state, img_id, tele.get("event")
-                        or "staging-complete", now)
-                    if tier == "constrained":
-                        report = telemetry_report.trim_report(report)
-                    if _send_report(cfg, deps, state, img_id, report):
-                        tele["report_pending"] = False
-                        tele["report_sent_ts"] = now
-                    else:
-                        tele["report_attempts"] = \
-                            tele.get("report_attempts", 0) + 1
-                        tele["report_next_ts"] = telemetry_report.next_backoff_ts(
-                            tele["report_attempts"], now)
+                    tele["report_attempts"] = \
+                        tele.get("report_attempts", 0) + 1
+                    tele["report_next_ts"] = telemetry_report.next_backoff_ts(
+                        tele["report_attempts"], now)
     except Exception as e:
         try:
             deps.emit("TELEMETRY-FAIL", "telemetry tick failed (ignored): %s" % e)
@@ -378,7 +617,9 @@ def run_once(cfg, deps, state):
         _send_heartbeat(deps, sid,
                         _heartbeat(None, deps, "unassigned",
                                    target_fs=cfg.get("target_fs"),
-                                   tele_on=tele_on, stream_on=stream_on))
+                                   tele_on=tele_on, stream_on=stream_on,
+                                   observation=_not_active_observation(
+                                       tele_on, time.time())))
         return "no-assignment"
     image = deps.catalog.get_image(img_id)
     if image is None:
@@ -388,7 +629,9 @@ def run_once(cfg, deps, state):
                                    target_fs=cfg.get("target_fs"),
                                    tele_on=tele_on, stream_on=stream_on,
                                    stage_error="assigned image %s not in catalog"
-                                               % img_id))
+                                               % img_id,
+                                   observation=_not_active_observation(
+                                       tele_on, time.time())))
         return "no-image"
 
     # Reject a bad catalog filename before it reaches any IOS command.
@@ -418,10 +661,13 @@ def run_once(cfg, deps, state):
         staged_ok = deps.file_size(stage) is not None
         root_ok = deps.root_present(image["filename"], state.get("stage_fs", "flash:"))
         if content_ok and staged_ok and root_ok:
+            obs, _ = _build_observation(cfg, deps, state, img_id, stage,
+                                        "steady", time.time())
             hb = _send_heartbeat(deps, sid,
                                  _heartbeat(image, deps, "ready",
                                             target_fs=state.get("stage_fs"),
                                             tele_on=tele_on,
+                                            observation=obs,
                                             stream_on=stream_on))
             _telemetry_tick(cfg, deps, state, img_id, stage, "steady",
                             hb, time.time())
@@ -496,6 +742,14 @@ def run_once(cfg, deps, state):
             # state is PER-IMAGE: a reassignment to a new image id must go through
             # the full DONE + copy-to-root cycle again, untouched by the old one.
             st = state.setdefault(img_id, {})
+            # Record the CONTENT-HASH verify outcome INTO STATE at the decision
+            # point (spec §3D): the report reads this verbatim and never infers
+            # 'verified' from done/copied or absence. verify() returned True here.
+            # Durability follows the report it feeds — the report-freeze
+            # checkpoint (spec §2) flushes this fact BEFORE its POST, and the
+            # outer final save persists it either way; a crash before that just
+            # re-derives the same fact next tick (verify is idempotent).
+            st.setdefault("tele", {})["content_sha256_state"] = "verified"
             if st.get("sha") not in (None, image["sha256"]):
                 # A catalog republish under the same id is still genuinely new
                 # content and is the only same-id event allowed to clear a
@@ -542,7 +796,7 @@ def run_once(cfg, deps, state):
                                   "(free=%d need>=%d mode=%s)"
                                   % (image["filename"], free,
                                      copy_bytes + flashcheck.HEADROOM, mode))
-                        sample, peers = _maybe_sample(
+                        obs, peers = _build_observation(
                             cfg, deps, state, img_id, stage, "seeding-only",
                             time.time())
                         hb = _send_heartbeat(
@@ -550,7 +804,7 @@ def run_once(cfg, deps, state):
                                                   "flash_full_seeding_only",
                                                   target_fs=state.get("stage_fs"),
                                                   tele_on=tele_on,
-                                                  sample=sample,
+                                                  observation=obs,
                                                   stream_on=stream_on))
                         _telemetry_tick(cfg, deps, state, img_id, stage,
                                         "seeding-only", hb, time.time(),
@@ -594,9 +848,17 @@ def run_once(cfg, deps, state):
                         st["copied"] = True
                         state["root_file"] = image["filename"]
                         _reset_copy_failures(st)
+                        # Record the IOS copy /verify outcome INTO STATE at the
+                        # decision point (spec §3D): 'ok' means this attempt's
+                        # copy /verify passed. Independent of content_sha256.
+                        # Durability follows the report (freeze checkpoint /
+                        # final save); re-derived idempotently after a crash.
+                        st.setdefault("tele", {})["ios_copy_verify_state"] = "ok"
                     else:
                         attempts = st.get("copy_attempts", 0) + 1
                         st["copy_attempts"] = attempts
+                        st.setdefault("tele", {})[
+                            "ios_copy_verify_state"] = "failed"
                         st["stage_error"] = (
                             "final IOS placement failed; inspect IRIS ROOTCOPY-FAIL")
                         if attempts >= _ROOT_COPY_MAX_ATTEMPTS:
@@ -616,6 +878,8 @@ def run_once(cfg, deps, state):
             # "ready" only when the flash-root copy is actually placed; a failed
             # copy_to_root (signature fail / never appeared) keeps "staging" so
             # the heartbeat never claims a verified root copy that isn't there.
+            obs, _ = _build_observation(cfg, deps, state, img_id, stage,
+                                        "seeding-only", time.time())
             hb = _send_heartbeat(
                 deps, sid, _heartbeat(image, deps,
                                        "ready" if st.get("copied") else
@@ -624,11 +888,17 @@ def run_once(cfg, deps, state):
                                        target_fs=state.get("stage_fs"),
                                        tele_on=tele_on,
                                        stage_error=st.get("stage_error"),
+                                       observation=obs,
                                        stream_on=stream_on))
             _telemetry_tick(cfg, deps, state, img_id, stage, "copied",
                             hb, time.time())
             return "complete"
         deps.emit("ERROR", "%s sha256 MISMATCH - discarding" % image["filename"])
+        # Record the mismatch fact INTO STATE at the decision point (spec §3D):
+        # 'mismatch' is a distinct explicit state, never 'false'/'not_checked'.
+        # Durability follows the report; re-derived idempotently after a crash.
+        state.setdefault(img_id, {}).setdefault("tele", {})[
+            "content_sha256_state"] = "mismatch"
         deps.remove_stage(stage)          # drop the bad file so the next tick re-downloads
         return "bad-sha"
 
@@ -686,6 +956,10 @@ def run_once(cfg, deps, state):
         # the device never heartbeats and is invisible exactly while broken.
         # OSError covers the whole family (URLError subclasses it). Degrade to
         # an error heartbeat; the next tick retries after bootstrap relaunches.
+        # A fresh download of this image starts here: drop any peer-receipt
+        # snapshot left by a PREVIOUS transfer of the same file, which is the
+        # only thing that shares its sidecar name.
+        _discard_peer_receipts(stage)
         try:
             deps.aria_remove(image["filename"])
             deps.aria_add(torrent, stage_dir)
@@ -693,10 +967,20 @@ def run_once(cfg, deps, state):
             deps.emit("ARIA2-DOWN",
                       "aria2c RPC unreachable; cannot stage %s: %s"
                       % (image["filename"], e))
+            rpc_obs = None
+            try:
+                rpc_obs = telemetry_report.build_observation(
+                    obs_state="rpc_unavailable", observed_at=time.time(),
+                    transfer_id=telemetry_report.ensure_transfer_id(
+                        state, img_id),
+                    image_id=img_id)
+            except Exception:
+                pass
             _send_heartbeat(deps, sid,
                             _heartbeat(image, deps, "error",
                                        target_fs=state.get("stage_fs"),
                                        tele_on=tele_on, stream_on=stream_on,
+                                       observation=rpc_obs,
                                        stage_error="aria2c RPC unreachable: %s"
                                                    % e))
             return "aria2-down"
@@ -706,12 +990,12 @@ def run_once(cfg, deps, state):
         # old 10s IRIS-MONITOR raced and spammed). Computed from the on-disk size.
         deps.emit("PROGRESS", "%s %d%% (%dMB/%dMB)"
                   % (image["filename"], have * 100 // size, have >> 20, size >> 20))
-    sample, peers = _maybe_sample(cfg, deps, state, img_id, stage,
-                                  "downloading", time.time())
+    obs, peers = _build_observation(cfg, deps, state, img_id, stage,
+                                    "downloading", time.time())
     hb = _send_heartbeat(deps, sid, _heartbeat(image, deps,
                                                target_fs=state.get("stage_fs"),
                                                tele_on=tele_on,
-                                               sample=sample,
+                                               observation=obs,
                                                stream_on=stream_on))
     _telemetry_tick(cfg, deps, state, img_id, stage, "downloading",
                     hb, time.time(), peers=peers)
@@ -873,6 +1157,91 @@ def _find_aria_gid(rpc, stage_path):
     return None
 
 
+def _take_peer_receipt_sidecar(path):
+    """Read AND remove the hook's peer-receipt snapshot at `path`; returns the
+    raw bytes, or None when there is nothing usable there. NEVER raises.
+
+    Removal is unconditional, including when the document turns out to be
+    garbage: this agent is one-shot, so a snapshot that cannot be used now
+    never becomes usable later, and a leftover file keyed by staged FILENAME
+    would be a candidate for folding into the next transfer of the same image.
+    Bounded by RECEIPT_MAX_BYTES — the hook writes a few hundred bytes per
+    peer, so anything larger is not a snapshot and is not worth reading into a
+    CPU-capped Guest Shell."""
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return None                 # absent is the ordinary case: no hook ran
+    raw = None
+    try:
+        if size <= telemetry_report.RECEIPT_MAX_BYTES:
+            with open(path, "rb") as f:
+                raw = f.read(telemetry_report.RECEIPT_MAX_BYTES)
+    except OSError:
+        raw = None
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    return raw
+
+
+def _discard_peer_receipts(stage_path):
+    """Drop any snapshot left next to `stage_path` before a NEW download of the
+    same image starts. The sidecar is keyed by staged filename, so this is what
+    keeps a previous transfer's receipts from ever being in a position to be
+    attributed to this one (telemetry_report.fold_peer_receipts' started_ts
+    check is the second, independent line of defence). Never raises."""
+    try:
+        os.remove(telemetry_report.receipt_sidecar_path(stage_path))
+    except OSError:
+        pass
+
+
+def _ingest_peer_receipts(deps, tele, stage_path, now):
+    """Fold the hook's exact per-peer byte snapshot into `tele`, then delete it.
+
+    Called once per transfer, at the completion tick, BEFORE done_ts freezes
+    the terminal report — the hook fired minutes earlier (aria2 invoked it, not
+    EEM), which is the whole point: nothing of ours lives between one-shot
+    ticks, so the measurement had to be taken by the process that was there.
+    Best-effort in every direction: an absent snapshot is the ordinary outcome
+    for a device with no hook wired, and a broken hook is SILENT by design
+    (daemon-mode stderr is /dev/null), so this must never be able to fail a
+    tick. Returns True only when a snapshot was accepted."""
+    try:
+        raw = _take_peer_receipt_sidecar(
+            telemetry_report.receipt_sidecar_path(stage_path))
+        if raw is None:
+            return False
+        block = telemetry_report.parse_receipt_snapshot(raw)
+        if not telemetry_report.fold_peer_receipts(tele, block, now):
+            return False
+        deps.emit("TELEMETRY",
+                  "peer receipts: %d peers, %d bytes from peers (measured)"
+                  % (block.get("rows_total", 0),
+                     block.get("bytes_from_all_senders_total", 0)))
+        return True
+    except Exception:
+        return False
+
+
+def _aria_session_impl(rpc):
+    """aria2 session id (`aria2.getSessionInfo`) — the counter-epoch marker so a
+    session change re-baselines rather than bridges a counter decrease (spec §2).
+    Returns the sessionId string, or None on any error / missing field. NEVER
+    raises."""
+    try:
+        info = rpc("aria2.getSessionInfo", [])
+        if isinstance(info, dict):
+            sid = info.get("sessionId")
+            if sid:
+                return str(sid)
+    except Exception:
+        pass
+    return None
+
+
 def _aria_stats_impl(rpc, stage_path):
     """Snapshot aria2 transfer stats for the staged file: the tellStatus subset
     the telemetry report needs (gid, completedLength, totalLength,
@@ -884,8 +1253,9 @@ def _aria_stats_impl(rpc, stage_path):
         if gid is None:
             return None
         status = rpc("aria2.tellStatus",
-                     [gid, ["gid", "completedLength", "totalLength",
-                            "downloadSpeed", "uploadSpeed", "connections"]])
+                      [gid, ["gid", "completedLength", "totalLength",
+                             "downloadSpeed", "uploadSpeed", "connections",
+                             "status"]])
         # _rpc defaults a missing "result" to [] — never leak a non-dict out.
         return status if isinstance(status, dict) else None
     except Exception:
@@ -893,17 +1263,70 @@ def _aria_stats_impl(rpc, stage_path):
 
 
 def _aria_peers_impl(rpc, stage_path):
-    """Observed peer rows for the staged file's download: [{'ip': str}].
-    Participation only — aria2 has no per-peer byte counters, so nothing
-    else from getPeers is consumed. Returns [] on no matching download / ANY
-    error (getPeers on a stopped download is an aria2 error). NEVER raises."""
+    """Measured peer rows for the staged download, or [] on any RPC error.
+
+    Rates are instantaneous aria2 measurements, so absent/malformed values are
+    omitted rather than represented as a measured zero. Terminal participation
+    remains independently IP/timestamp/count-only in observe_peers()."""
     try:
         gid = _find_aria_gid(rpc, stage_path)
         if gid is None:
             return []
-        return [{"ip": p.get("ip", "")} for p in rpc("aria2.getPeers", [gid])]
+        raw_rows = rpc("aria2.getPeers", [
+            gid, ["ip", "port", "downloadSpeed", "uploadSpeed", "peerClientName",
+                  "progress"]])
+        if not isinstance(raw_rows, list):
+            return []
+        rows = []
+        for peer in raw_rows:
+            if not isinstance(peer, dict):
+                continue
+            ip = peer.get("ip")
+            if not isinstance(ip, str) or not ip or len(ip) > 64:
+                continue
+            row = {"ip": ip}
+            port = _optional_bounded_int(peer.get("port"), 65535)
+            if port is not None and port > 0:
+                row["port"] = port
+            receive = _optional_bounded_int(peer.get("downloadSpeed"), 10 ** 12)
+            send = _optional_bounded_int(peer.get("uploadSpeed"), 10 ** 12)
+            if receive is not None:
+                row["receive_bps"] = receive
+            if send is not None:
+                row["send_bps"] = send
+            name = peer.get("peerClientName")
+            if isinstance(name, str) and name:
+                row["peer_client_name"] = name[:64]
+            progress = _optional_progress(peer.get("progress"))
+            if progress is not None:
+                row["progress"] = progress
+            rows.append(row)
+        return rows
     except Exception:
         return []
+
+
+def _optional_bounded_int(value, cap):
+    """Coerce aria2's decimal-string counters, rejecting unknown values."""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        out = int(value)
+    except (TypeError, ValueError):
+        return None
+    if not 0 <= out <= cap:
+        return None
+    return out
+
+
+def _optional_progress(value):
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) and 0 <= out <= 100 else None
 
 
 # ---- agent-side root-copy re-verification (module-level so it's unit-testable
@@ -1205,7 +1628,7 @@ def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
 
 # ---- on-box wiring (not exercised by unit tests) ----
 
-def build_deps(cfg, conf_path):  # pragma: no cover
+def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
     import base64
     import urllib.request
     import catalog_client
@@ -1382,6 +1805,9 @@ def build_deps(cfg, conf_path):  # pragma: no cover
     def aria_peers(stage_path):
         return _aria_peers_impl(_rpc, stage_path)
 
+    def aria_session():
+        return _aria_session_impl(_rpc)
+
     def purge_others(keep_filename, keep_id):
         # 1. drop every download except the current image from aria2c
         for gid, names in _aria_downloads(_rpc):
@@ -1389,12 +1815,16 @@ def build_deps(cfg, conf_path):  # pragma: no cover
                 _aria_drop(_rpc, gid)
         # 2. delete stale staged image artifacts (never the agent's own files)
         import glob
-        keep = {keep_filename, keep_filename + ".aria2", keep_id + ".torrent"}
+        keep = {keep_filename, keep_filename + ".aria2", keep_id + ".torrent",
+                # this image's own peer-receipt snapshot: it may be sitting
+                # here waiting for the completion tick to fold it in
+                keep_filename + telemetry_report.RECEIPT_SIDECAR_SUFFIX}
         for path in glob.glob(os.path.join(cfg["stage_dir"], "*")):
             base = os.path.basename(path)
             if base in keep:
                 continue
-            if base.endswith((".bin", ".torrent", ".aria2")):
+            if base.endswith((".bin", ".torrent", ".aria2",
+                              telemetry_report.RECEIPT_SIDECAR_SUFFIX)):
                 try:
                     os.remove(path)
                 except OSError:
@@ -1517,6 +1947,12 @@ def build_deps(cfg, conf_path):  # pragma: no cover
         # Hardware model (e.g. C9300-48UXM / IE-3400-8T2S) for the swarm map.
         return flash_target.device_model(_show("show version"))
 
+    def checkpoint(state):
+        # Durable pre-POST persistence of identity/sequence facts. Wired to the
+        # same state path main() uses for the ordinary final save, so a crash
+        # after a checkpointed POST restarts with the frozen id/sequence.
+        _atomic_write_state(state_path, state)
+
     return Deps(catalog=catalog, emit=emit, ios=ios, aria_add=aria_add,
                 file_size=lambda p: os.path.getsize(p) if os.path.exists(p) else None,
                 verify=lambda p, sha: verify_image.sha256_matches(p, sha),
@@ -1528,7 +1964,8 @@ def build_deps(cfg, conf_path):  # pragma: no cover
                 running_image=running_image, reclaimable=reclaimable,
                 reclaim_bundle=reclaim_bundle, model=model, refresh=refresh,
                 aria_stats=aria_stats, aria_peers=aria_peers,
-                io_transfer=(_mode == "container"))
+                io_transfer=(_mode == "container"),
+                checkpoint=checkpoint, aria_session=aria_session)
 
 
 def main():  # pragma: no cover
@@ -1558,42 +1995,18 @@ def main():  # pragma: no cover
     except Exception as e:
         state = {}
         load_error = e
-    deps = build_deps(cfg, conf_path)
+    deps = build_deps(cfg, conf_path, state_path)
     if load_error is not None:
         deps.emit("STATE-LOAD-FAIL",
                   "%s unreadable; starting with empty state: %s"
                   % (state_path, load_error))
     result = run_once(cfg, deps, state)
     try:
-        # The sibling rename is atomic on the state filesystem. Sync both the
-        # bytes and directory entry so sudden power loss cannot expose a
-        # truncated file or lose the completed rename.
-        tmp = state_path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(state, f)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, state_path)
-        dir_fd = os.open(os.path.dirname(state_path) or ".", os.O_RDONLY)
-        try:
-            try:
-                os.fsync(dir_fd)
-            except OSError as e:
-                # Some filesystems do not implement directory fsync. Ignore
-                # only that explicit platform limitation; real I/O failures
-                # still surface through STATE-WRITE-FAIL below.
-                unsupported = {errno.EINVAL}
-                if hasattr(errno, "ENOTSUP"):
-                    unsupported.add(errno.ENOTSUP)
-                if e.errno not in unsupported:
-                    raise
-        finally:
-            os.close(dir_fd)
+        # Ordinary final state save: durable, best-effort. A crash-critical
+        # identity/sequence fact was already checkpointed BEFORE its POST, so
+        # losing this outer save only costs progress, never idempotency.
+        _atomic_write_state(state_path, state)
     except Exception as e:
-        try:
-            os.remove(state_path + ".tmp")
-        except OSError:
-            pass
         deps.emit("STATE-WRITE-FAIL", "%s persistence failed: %s"
                   % (state_path, e))
     print(result)

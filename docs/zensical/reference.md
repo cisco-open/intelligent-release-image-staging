@@ -28,19 +28,23 @@ the catalog schema. Every page is listed in the [Overview](index.md).
 | `device/iox/build.sh --image-only` | Build the ARM64 app-hosting image; set `IOX_ARCH=amd64` for x86_64. |
 | `kubectl apply -k kubernetes` | Deploy the optional single-replica Kubernetes seed server. |
 
+Most of these have a console equivalent; the command line is not the only way to run them — see [When to use the CLI](console.md#when-to-use-the-cli).
+
 Docs build commands and their tool pins live in [Development](development.md#documentation-loop).
 
 ## Port quick reference
 
-| Port | Service | Device-facing |
-| --- | --- | --- |
-| 6969 | Tracker | Yes |
-| 8443 | Catalog | Yes |
-| 8000 | Artifact server | Yes |
-| 6881 | Seeder data | Yes |
-| 8080 | Web console | Operator-facing |
-| 9101 | Telemetry | Operator-facing |
-| 6800 | aria2 RPC | No, local-only |
+| Port | Transport | Protocol | Service | Device-facing |
+| --- | --- | --- | --- | --- |
+| 6969 | TCP | HTTP | Tracker | Yes |
+| 8443 | TCP | HTTPS | Catalog | Yes |
+| 8000 | TCP | HTTPS | Artifact server | Yes |
+| 6881 | TCP | BitTorrent | Seeder data | Yes |
+| 8080 | TCP | HTTPS | Web console | Operator-facing |
+| 9101 | TCP | HTTP | Telemetry | Operator-facing |
+| 6800 | TCP | HTTP | aria2 RPC | No, local-only |
+
+Every port is TCP. IRIS opens no UDP listener.
 
 ## Environment variables
 
@@ -62,6 +66,9 @@ Compose refuses to start without these; none has a default.
 | `IRIS_GUI_PUBLISH` | `8080` | Published host port for the console. The container always listens on 8080 internally. |
 | `IRIS_CONSOLE_URL` | unset | Overrides the console link on the port 9101 pointer page verbatim, for hosts publishing the console somewhere other than `https://<IRIS_HOST_IP>:8080/`. Read per request. |
 | `IRIS_VERSION` | unset | Build argument that bakes the release string the console's Settings page shows. Unset means the `VERSION` file in the image. |
+| `IRIS_SAMPLE_INTERVAL` | `15` (seconds) | Seeder/telemetry poll cadence. A transfer that completes inside one interval can be observed with no connected peer, so per-peer rates and the map's measured edges never appear — a 1 GB image at ~90 MB/s lands in about 15 seconds. Lower it to 2–5 on a fast fabric or for a live demo; the cost is more aria2 RPC calls. |
+| `IRIS_REQUIRE_IDENTITY_GATE` | unset (off) | Set to `1` to make the catalog answer 503 to every per-device torrent request until the checkpoint file `identity-compatible-ready` exists under `IRIS_STATE` — the file a proven seeder rotation writes and `--recover` removes. Read per request, so opening or closing the gate needs no restart. The canonical (service) torrent path is unaffected. A deployment that does not set it serves per-device torrents as before. |
+| `IRIS_ONBOARD_CONCURRENCY` | `25` | Maximum onboard/undeploy jobs the worker pool runs at once; the rest queue. `GET /api/onboard/jobs` reports the active value as `max_concurrent`. |
 
 The host-side ownership these paths need is in
 [Server](server.md#host-paths-to-chown-on-every-deploy).
@@ -152,8 +159,8 @@ collector and backend.
 | `IRIS_SWARM_PUBLIC` | unset (off) | Opens `:9101/swarm` to any peer that can reach the port. Default: loopback peers only — the console proxies swarm data over container loopback, so remote access is normally unnecessary. The flag relaxes only the peer-address gate; `IRIS_METRICS_HOST` still controls where the listener binds, so a `127.0.0.1` bind keeps everything local regardless. |
 | `IRIS_OTLP_HEADERS` | unset | Comma-separated `Name=Value` headers attached to every OTLP POST (collector authentication). Values are secrets: never logged, never echoed in errors, and the exporters refuse HTTP redirects so they cannot leak to a redirect target. |
 | `IRIS_OTLP_HEADERS_FILE` | unset | Read the header spec from a file instead (secret mounts). `IRIS_OTLP_HEADERS` wins when both are set. |
-| `IRIS_OTLP_DEVICE_METRICS` | unset (off) | Additionally export per-device OTLP gauges. Cardinality warning: at 10,000 devices this is ~30,000 datapoints per push at your backend. |
-| `IRIS_EVENTS_URL_TEMPLATE` | unset | URL template with `{ip}` / `{device_id}` placeholders for the swarm-map drawer's "View this device's events" button. Unset renders no button. |
+| `IRIS_OTLP_DEVICE_METRICS` | unset (off) | Still accepted so an existing deployment starts, but retired: the per-device OTLP gauges it enabled are no longer exported. Device- and peer-labelled history lives in the OTLP log records instead. |
+| `IRIS_EVENTS_URL_TEMPLATE` | unset | Still injected into the swarm map's page config as `eventsUrlTemplate`, but the current map renders no events link — setting it has no visible effect. |
 
 #### Telemetry gating rule
 
@@ -196,6 +203,7 @@ at 8 MiB and the streamed image upload at 4 GiB.
 | `POST /api/logout` | Revokes the current session and expires the cookie. |
 | `GET /api/session` | The current session's info, or 401. |
 | `GET /api/settings` | Console settings, published port, and the running version — plus the active console certificate (`gui_cert`), the installed trust entries (`trust`), the CA download settings (`ca_trust`), the effective telemetry destination with its source (`telemetry_destination`), and the audit-export destination with its last-run status (`audit_export`; a `password_set` flag only, never the password). |
+| `GET /api/settings/setup-status` | The setup status behind both the first-run wizard (`#setup`) and the Settings → Setup panel: `admin`, `telemetry`, `stage_host`, and `packages`, each with a `state` of `ok`, `unset`, `stale`, `absent`, or `unknown`. `telemetry` is `ok` only when export is enabled *and* an endpoint resolves, and also carries `source` (`override` or `env`), `endpoint`, and `enabled`. `packages` additionally carries `items` (per-package build time, state, and reason), `reference_fingerprint`, and a `remedy` command. See [Setup](console.md#setup). |
 | `POST /api/settings/password` | `{current, new, confirm}`; changes the admin password and revokes every other session. |
 | `POST /api/settings/sessions/revoke-others` | Revokes every session except the caller's. |
 | `POST /api/settings/stage-host` | Stores the stage-host SSH credential; returns the redacted record. |
@@ -245,7 +253,7 @@ event, with `result=fail` and the reason on a rejection.
 | --- | --- |
 | `GET /api/devices` | `{devices: [...], now}` — the inventory view plus the server clock, so the UI computes freshness server-clock-to-server-clock. |
 | `POST /api/devices` | Creates or updates one inventory row; returns `{device: ...}`. |
-| `DELETE /api/devices/<id>` | `{deleted: <bool>}`. |
+| `DELETE /api/devices/<id>` | Retires the device: revokes its credentials first, then clears peer-policy assignment, inventory row, and catalog state. `{deleted: <bool>, degraded: [...]}` — 200 when cleanup was complete, 207 when part of it failed (`degraded` names the areas), 500 `{deleted: false, error: "secret revoke failed"}` when the revoke could not be persisted, in which case nothing was changed. Endpoint rows are retained until they age out. See [Retiring a device](operations.md#retiring-a-device). |
 | `GET /api/devices/export-csv`, `GET /api/devices/example-csv` | The inventory as `devices.csv`, and a blank example. |
 | `POST /api/devices/import-csv` | Bulk inventory import (8 MiB cap, all-or-nothing); returns per-row stats. |
 | `GET /api/devices/<id>/plan` | `{plan}` — the resolved deployment plan; 409 when it cannot resolve. |
@@ -254,7 +262,7 @@ event, with `result=fail` and the reason on a rejection.
 | `POST /api/devices/<id>/assign`, `.../credential`, `.../platform` | Sets the approved image, the credential profile, or the platform and storage target; each returns `{ok: true}`. |
 | `POST /api/devices/<id>/request-report` | Requests a fresh telemetry report; `{ok: true, expires_at}`, or 429 while one is already pending. |
 | `POST /api/devices/<id>/adopt` | Requires `{"acknowledge_adopt": true}`; returns `{receipt_id}`. 409 when the device already has an active receipt; routers cannot be adopted. |
-| `POST /api/devices/<id>/onboard`, `POST /api/devices/<id>/undeploy` | Starts the job; `{job_id}`. 409 when the device is busy with the opposite action. |
+| `POST /api/devices/<id>/onboard`, `POST /api/devices/<id>/undeploy` | Starts the job; `{job_id}`. 409 when the device is busy with the opposite action. Undeploy also answers 409 when the device has no deployment receipt — send `{"force": true}` to run it anyway, which removes only the IRIS-named agent footprint and leaves operator-owned network state (VLAN/SVI, VirtualPortGroup, NAT) untouched, audited as `undeploy_forced`. |
 
 Router deployments carry extra preflight and ownership rules — see
 [Management Type and VLAN Ownership](network-attachment.md#router-preflight-and-ownership).
@@ -285,7 +293,8 @@ Router deployments carry extra preflight and ownership rules — see
 | `GET /api/swarm` | The telemetry `/swarm` JSON, fetched over loopback. Answers 200 with `{"peers": [], "error": ...}` when the telemetry listener is unreachable. |
 | `GET /api/audit` | `{events: [...]}`; `category`, `limit` (max 500), `before_ts`, and `after_ts` query parameters. |
 | `GET /api/audit/histogram` | Per-bucket audit event counts for the activity strip. |
-| `GET /api/deploy-logs` | `{logs: [...]}` — metadata for the persisted per-job deployment logs (file, device, action, state, rc, finish time, size), newest first; a `device_id` query parameter filters to one device. |
+| `GET /api/deploy-logs` | `{logs: [...]}` — metadata for the persisted per-job deployment logs (file, device, action, state, rc, finish time, size), newest first. `device_id` filters to one device; `after_ts` / `before_ts` (Unix seconds, inclusive at both ends) filter by finish time — the range the Deployment logs brush selects. |
+| `GET /api/deploy-logs/histogram` | `{buckets: [{start, count}], now}` — evenly spaced counts of finished jobs, for the time filter's histogram. Takes `window` (seconds, default 604800) or an explicit `since_ts`/`until_ts` pair, `buckets` (default 30, capped at 200), and `device_id`; 400 when `until_ts` is not greater than `since_ts`. |
 | `GET /api/deploy-logs/<file>` | One persisted log as `text/plain`; 404 for a name that does not resolve to a direct child of the log directory. |
 | `GET /api/help` | `{version, deployment_id, docs_url, guides}` — the "?" popover data: the running version, the stable per-deployment id, and the documentation links. |
 | `POST /api/telemetry/stream` | `{"every": <int 1..60>, "pause": <bool>}` — network-wide stream tuning, echoed to every device on its next heartbeat. Audited. |

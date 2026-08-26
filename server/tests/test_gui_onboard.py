@@ -52,6 +52,21 @@ def _wait(svc, job_id, timeout=3.0):
     return svc.get_job(job_id)
 
 
+# Guest Shell now runs a collision preflight at job start, like every other
+# platform. The many tests about job MECHANICS would otherwise shell out to a
+# real device, so default it to "clean device" here; the tests that exercise
+# the preflight itself call the real implementation through this reference.
+_REAL_GUESTSHELL_PREFLIGHT = gui_onboard._default_guestshell_preflight
+
+
+@pytest.fixture(autouse=True)
+def _clean_guestshell_preflight(monkeypatch):
+    monkeypatch.setattr(
+        gui_onboard, "_default_guestshell_preflight",
+        lambda dev, env, resolved, repo_root: {
+            "status": "passed", "device_identity": "FOC0000TEST"})
+
+
 def _svc(run_fn, stage_host=None, **kw):
     fleet = _Fleet({"d1": {"device_id": "d1", "device_ip": "10.0.0.1", "vlan": "666",
                            "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
@@ -68,6 +83,13 @@ def _svc(run_fn, stage_host=None, **kw):
     # exercising run_fn as before; tests of the gate itself override
     # probe_fn explicitly via **kw.
     kw.setdefault("probe_fn", lambda dev, env: "C9300")
+    # Guest Shell now runs the same collision preflight as every other
+    # platform, so a job-start would otherwise shell out to a real device.
+    # Default it to "clean device" for the many tests that are about job
+    # mechanics; tests of the preflight itself override it via **kw.
+    kw.setdefault("guestshell_preflight_fn",
+                  lambda dev, env, resolved: {"status": "passed",
+                                              "device_identity": "FOC0000TEST"})
     kw.setdefault("mint_fn", lambda did: "TOK-" + did)
     return gui_onboard.OnboardService(
         fleet, creds, device_install="/fake/device-install.sh",
@@ -581,7 +603,7 @@ def test_router_execution_preflight_failure_never_mints_or_runs(tmp_path):
 
 
 def _router_preflight_stub(monkeypatch, running="", apps="", guest_share="%Error opening",
-                           interface="GigabitEthernet1 is up, line protocol is up"):
+                            interface="GigabitEthernet1 is up, line protocol is up"):
     outputs = {
         "show version": ("Cisco IOS XE Software\n"
                          "cisco C8000V (VXE) processor\n"
@@ -593,7 +615,15 @@ def _router_preflight_stub(monkeypatch, running="", apps="", guest_share="%Error
     }
 
     def run(_argv, input=None, **_kwargs):
-        return SimpleNamespace(returncode=0, stdout=outputs.get(input.strip(), ""))
+        chunks = []
+        for name, command in (("VERSION", "show version"),
+                              ("RUNNING", "show running-config"),
+                              ("APPS", "show app-hosting list"),
+                              ("GUEST_SHARE", "dir bootflash:guest-share"),
+                              ("INTERFACES", "show interfaces Gi1")):
+            if command in input:
+                chunks.append("__IRIS_PREFLIGHT_%s__\n%s" % (name, outputs[command]))
+        return SimpleNamespace(returncode=0, stdout="\n".join(chunks))
 
     monkeypatch.setattr(gui_onboard.subprocess, "run", run)
 
@@ -618,6 +648,25 @@ def test_default_router_preflight_canonicalizes_interface_and_records_globals(mo
         "file_prompt_quiet_preexisting": True,
         "nat_outside_preexisting": True,
         "nat_interface": "GigabitEthernet1"}
+
+
+def test_default_router_preflight_uses_one_ssh_session(monkeypatch):
+    calls = []
+
+    def run(_argv, input=None, **_kwargs):
+        calls.append(input)
+        return SimpleNamespace(returncode=0, stdout=(
+            "__IRIS_PREFLIGHT_VERSION__\nCisco IOS XE\n"
+            "cisco C8000V (VXE) processor\nProcessor board ID 9ABC123\n"
+            "__IRIS_PREFLIGHT_RUNNING__\n"
+            "__IRIS_PREFLIGHT_APPS__\nNo App found\n"
+            "__IRIS_PREFLIGHT_GUEST_SHARE__\n%Error opening\n"))
+
+    monkeypatch.setattr(gui_onboard.subprocess, "run", run)
+    evidence = gui_onboard._default_router_preflight(
+        {}, {"DEVICE_IP": "192.0.2.10"}, _router_resolved("router-routed"), "/repo")
+    assert evidence["status"] == "passed"
+    assert len(calls) == 1
 
 
 def test_default_router_preflight_rejects_secondary_subnet_overlap(monkeypatch):
@@ -688,9 +737,16 @@ def _iox_show_version(model="IE-3400", identity="9ABC123"):
 
 
 def test_default_iox_preflight_extracts_identity_and_model(monkeypatch):
+    """IOx now probes running-config and the app list too, so it can run the
+    same IRIS-named collision checks as every other platform -- it used to
+    ask for `show version` and nothing else."""
     def run(argv, input=None, **kwargs):
-        assert input.strip() == "show version"
-        return SimpleNamespace(returncode=0, stdout=_iox_show_version())
+        assert "show version" in input
+        assert "show running-config" in input
+        return SimpleNamespace(returncode=0, stdout=(
+            "__IRIS_PREFLIGHT_VERSION__\n" + _iox_show_version() +
+            "\n__IRIS_PREFLIGHT_RUNNING__\nhostname sw1\n"
+            "\n__IRIS_PREFLIGHT_APPS__\nNo App found\n"))
     monkeypatch.setattr(gui_onboard.subprocess, "run", run)
     evidence = gui_onboard._default_iox_preflight(
         {}, {"DEVICE_IP": "192.0.2.30"}, {}, "/repo")
@@ -712,8 +768,11 @@ def test_default_iox_preflight_raises_when_identity_unparseable(monkeypatch):
     output, unexpected prompt, truncated capture) must fail closed rather
     than let an empty identity through to the installer's guard."""
     def run(argv, input=None, **kwargs):
-        return SimpleNamespace(returncode=0,
-                               stdout="Cisco IOS XE Software\ncisco IE-3400 (ARMv7) processor\n")
+        return SimpleNamespace(returncode=0, stdout=(
+            "__IRIS_PREFLIGHT_VERSION__\nCisco IOS XE Software\n"
+            "cisco IE-3400 (ARMv7) processor\n"
+            "\n__IRIS_PREFLIGHT_RUNNING__\nhostname sw1\n"
+            "\n__IRIS_PREFLIGHT_APPS__\nNo App found\n"))
     monkeypatch.setattr(gui_onboard.subprocess, "run", run)
     with pytest.raises(ValueError, match="processor board ID"):
         gui_onboard._default_iox_preflight(
@@ -1744,3 +1803,193 @@ def test_log_persistence_failure_never_fails_the_job(tmp_path):
     svc = _svc(lambda p, e, on: 0, log_dir=str(blocked))
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done" and job["returncode"] == 0
+
+
+def test_a_job_past_the_deadline_stops_blocking_the_device():
+    """A recipe whose output pipe never EOFs hangs forever. The job then never
+    becomes terminal, is never evicted, and the busy guard refuses BOTH a
+    re-onboard and an undeploy for that device -- permanently. That is how
+    100.90.168.116 was stranded: onboard_start with no onboard_finished, no log,
+    and a device already carrying a live Guest Shell.
+
+    Past the deadline the job must be marked failed so the device frees up.
+    """
+    svc = _svc(lambda *a, **k: 0)
+    svc._jobs["stuck"] = {
+        "id": "stuck", "device_id": "dev-x", "action": "onboard",
+        "state": "running", "queued_at": 1000, "started_at": 1000,
+        "finished_at": None, "log": [],
+    }
+    # not yet overdue
+    assert svc._reap_overdue(1000.0 + gui_onboard._JOB_DEADLINE - 1) == []
+    # past the deadline it is reported
+    assert svc._reap_overdue(1000.0 + gui_onboard._JOB_DEADLINE + 1) == ["stuck"]
+
+
+# ---- uniform collision preflight across every platform --------------------
+#
+# preflight() used to return "not-required" for anything that was not a router,
+# so Guest Shell did no checks at all and IOx only probed identity. Three
+# platforms behaved three different ways, and a device left carrying IRIS-named
+# config was refused on a router and silently accepted elsewhere.
+
+_IRIS_NAMED = [
+    "event manager applet IRIS-AGENT authorization bypass\n",
+    "logging discriminator IRISQ mnemonics drops IOX_INST_WARN\n",
+    "logging buffered discriminator IRISQ\n",
+    "crypto pki trustpoint IRIS\n",
+    "ip http client secure-trustpoint IRIS\n",
+]
+
+
+def _common_preflight_stub(monkeypatch, running="", apps="", files=""):
+    """Feed a marker-delimited transcript to the shared preflight probe."""
+    def run(argv, input=None, **kwargs):
+        out = []
+        for name, body in (("VERSION", _iox_show_version()),
+                           ("RUNNING", running), ("APPS", apps),
+                           ("FILES", files)):
+            out.append("__IRIS_PREFLIGHT_%s__\n%s" % (name, body))
+        return SimpleNamespace(returncode=0, stdout="\n".join(out))
+    monkeypatch.setattr(gui_onboard.subprocess, "run", run)
+
+
+@pytest.mark.parametrize("collision", _IRIS_NAMED)
+def test_guestshell_preflight_rejects_iris_named_collisions(monkeypatch, collision):
+    _common_preflight_stub(monkeypatch, running=collision)
+    with pytest.raises(ValueError, match="already exists"):
+        _REAL_GUESTSHELL_PREFLIGHT(
+            {}, {"DEVICE_IP": "192.0.2.20"}, {"platform": "guestshell"}, "/repo")
+
+
+@pytest.mark.parametrize("collision", _IRIS_NAMED)
+def test_iox_preflight_rejects_iris_named_collisions(monkeypatch, collision):
+    _common_preflight_stub(monkeypatch, running=collision)
+    with pytest.raises(ValueError, match="already exists"):
+        gui_onboard._default_iox_preflight(
+            {}, {"DEVICE_IP": "192.0.2.30"}, {"platform": "iox"}, "/repo")
+
+
+def test_guestshell_preflight_passes_on_a_clean_device(monkeypatch):
+    _common_preflight_stub(monkeypatch, running="hostname sw1\n", apps="No App found\n",
+                           files="Directory of bootflash:/guest-share/\n\nNo files in directory\n")
+    evidence = _REAL_GUESTSHELL_PREFLIGHT(
+        {}, {"DEVICE_IP": "192.0.2.20"}, {"platform": "guestshell"}, "/repo")
+    assert evidence["status"] == "passed"
+    assert evidence["device_identity"]
+
+
+def test_iox_preflight_still_returns_the_identity_it_always_did(monkeypatch):
+    _common_preflight_stub(monkeypatch, running="hostname sw1\n", apps="No App found\n")
+    evidence = gui_onboard._default_iox_preflight(
+        {}, {"DEVICE_IP": "192.0.2.30"}, {"platform": "iox"}, "/repo")
+    assert evidence["status"] == "passed"
+    assert evidence["device_identity"] == "9ABC123"
+    assert evidence["detected_model"] == "IE-3400"
+
+
+def test_preflight_is_required_on_every_platform():
+    """The dispatcher must not hand back 'not-required' for a platform simply
+    because it is not a router -- that asymmetry was the bug."""
+    svc = _svc(lambda p, e, on: 0)
+    seen = {}
+
+    def stub(dev, env, resolved):
+        seen[resolved.get("platform")] = True
+        return {"status": "passed"}
+
+    svc._router_preflight = stub
+    svc._iox_preflight = stub
+    svc._guestshell_preflight = stub
+    for platform in ("router", "guestshell", "iox"):
+        result = svc.preflight("d1", {"platform": platform})
+        assert result.get("status") != "not-required", \
+            "%s still skips the collision preflight" % platform
+    assert seen == {"router": True, "guestshell": True, "iox": True}
+
+
+# ---------------------------------------------------------------------------
+# An overdue job must not keep the device it is stuck on busy, and a device
+# that leaves the fleet must not bequeath its in-flight work to a namesake.
+# ---------------------------------------------------------------------------
+
+def _stuck_job(svc, device_id="d1", action="onboard", state="running",
+               started_at=1000):
+    jid = "stuck-" + device_id + "-" + action
+    svc._jobs[jid] = {
+        "id": jid, "device_id": device_id, "action": action, "state": state,
+        "queued_at": started_at, "started_at": started_at, "finished_at": None,
+        "lines": [], "returncode": None, "_line_bytes": 0,
+        "_log_truncated": False, "receipt_id": None, "resolved": None,
+        "env_extra": None}
+    return jid
+
+
+def test_overdue_job_is_reaped_before_the_busy_guard_runs(tmp_path):
+    """The reaper used to run AFTER the busy guard, past every path that
+    returns or raises -- so it could only ever fire during a start() for some
+    OTHER device, never the one actually stuck. A hung job therefore refused
+    its own device for the whole deadline window with no way to clear it."""
+    svc = _svc(lambda *a, **k: 0, now_fn=lambda: 1000.0 + gui_onboard._JOB_DEADLINE + 5)
+    jid = _stuck_job(svc, "d1", action="undeploy")
+
+    # the opposite action on the same device: refused outright before the fix
+    new_id = svc.start("d1", action="onboard")
+
+    assert new_id != jid
+    assert svc._jobs[jid]["state"] == "error"
+
+
+def test_reaped_job_records_the_key_every_reader_uses(tmp_path):
+    """It wrote an "rc" key. Every reader -- get_job, the console, the persisted
+    log header -- reads "returncode", so the failure carried no exit status
+    anywhere it could be seen."""
+    svc = _svc(lambda *a, **k: 0, now_fn=lambda: 1000.0 + gui_onboard._JOB_DEADLINE + 5)
+    jid = _stuck_job(svc)
+    svc.reap_overdue_jobs()
+
+    job = svc.get_job(jid)
+    assert job["state"] == "error"
+    assert job["returncode"] == -1
+    assert "rc" not in job, "the stray key is back"
+
+
+def test_reaped_job_is_persisted_and_audited(tmp_path):
+    """Bypassing _finish meant a reaped job wrote no log and emitted no
+    *_finished event: it failed with nothing anywhere saying so."""
+    events = []
+    svc = _svc(lambda *a, **k: 0,
+               now_fn=lambda: 1000.0 + gui_onboard._JOB_DEADLINE + 5,
+               log_dir=str(tmp_path / "deploy-logs"),
+               audit_fn=lambda **kw: events.append(kw))
+    jid = _stuck_job(svc)
+    assert svc.reap_overdue_jobs() == [jid]
+
+    logs = os.listdir(str(tmp_path / "deploy-logs"))
+    assert len(logs) == 1, logs
+    with open(os.path.join(str(tmp_path / "deploy-logs"), logs[0])) as stream:
+        header = stream.readline()
+    assert "rc=-1" in header and "state=error" in header
+    assert [e for e in events if e.get("event") == "onboard_finished"], events
+    # and the installer handle is released rather than leaked
+    assert jid not in svc._procs
+
+
+def test_cancel_device_stops_queued_and_running_work():
+    """A job record is keyed on the device id alone, so one left behind by a
+    deleted device keeps the busy guard armed against the next device
+    registered under that name."""
+    svc = _svc(lambda *a, **k: 0)
+    queued = _stuck_job(svc, "d1", action="onboard", state="queued")
+    other = _stuck_job(svc, "d2", action="onboard", state="queued")
+
+    result = svc.cancel_device("d1")
+
+    assert result["cancelled"] == 1
+    assert svc._jobs[queued]["state"] == "cancelled"
+    assert svc._jobs[other]["state"] == "queued", "another device was touched"
+
+
+def test_cancel_device_is_a_no_op_for_an_unknown_device():
+    svc = _svc(lambda *a, **k: 0)
+    assert svc.cancel_device("never-existed") == {"cancelled": 0, "aborted": 0}

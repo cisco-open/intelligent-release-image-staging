@@ -8,6 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 
 IRIS separates network onboarding from image assignment. That keeps connectivity data and release intent in different files, which makes review and rollback easier.
 
+These CSV workflows exist for reviewed, repeatable batches. The same inventory, assignment, and onboarding actions are available in the console — see [Bulk device actions](console.md#bulk-device-actions).
+
 ## Inventory
 
 Start from the template:
@@ -69,18 +71,24 @@ delete, and credential assignment all act on the checked rows and report
 per-device refusals instead of failing the whole batch. See
 [Bulk device actions](console.md#bulk-device-actions).
 
-Deleting inventory rows is not an undeploy — an onboarded device keeps its agent
-and its staged image with no inventory entry left to manage it — so undeploy the
-devices before deleting their rows.
+Deleting inventory rows is not an undeploy — undeploy the devices first. See
+[Bulk device actions](console.md#bulk-device-actions).
 
 ### Onboarding path
 
 Management-type-aware onboarding runs through the **Console / API**, which resolves
 an immutable plan, records a durable *receipt* of what it applies, and drives
-teardown from that receipt (not from the editable inventory). A router deployment
-runs its preflight again at execution time and cannot be adopted afterwards; see
-[Router preflight and ownership](network-attachment.md#router-preflight-and-ownership)
-and [Web Console](console.md#onboarding-from-the-console).
+teardown from that receipt (not from the editable inventory). Every
+deployment's preflight runs once, at job execution in the bounded onboarding
+worker pool — not inside the onboard request itself — so submitting a large
+batch returns a job per device promptly instead of the request waiting on live
+SSH to each one. Guest Shell, IOx and router deployments all run the same
+IRIS-named collision checks (a device still carrying IRIS configuration is
+refused until it is undeployed), each plus its own extras; a router deployment
+cannot be adopted afterwards. See
+[Router preflight and ownership](network-attachment.md#router-preflight-and-ownership),
+[Onboarding at scale](operations.md#onboarding-at-scale), and
+[Web Console](console.md#onboarding-from-the-console).
 
 The legacy CLI generator is **routed-only** and deliberately refuses a v2
 (`management_type`) header, because a self-contained installer cannot record
