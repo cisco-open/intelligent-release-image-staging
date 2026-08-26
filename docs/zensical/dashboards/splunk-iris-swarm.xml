@@ -668,7 +668,7 @@
           be named for them. Measured
           origin-side capture: <b>73.3%</b> at 3&#8239;s sampling,
           <b>88.1%</b> at 2&#8239;s. The shortfall is published as
-          <code>iris_peer_unattributed_bytes_total</code> and shown on this
+          the untraced-residue counter and shown on this
           board rather than being folded silently into someone's total.
           <b>Traced + untraced = the origin's own upload counter.</b></p>
 

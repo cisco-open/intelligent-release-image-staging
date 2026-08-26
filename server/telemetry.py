@@ -941,10 +941,9 @@ class Telemetry:
         The ledger is the record of truth here, not the log stream: it is
         written before anything is queued, so a dropped or undelivered record
         costs a data point on a chart, never an accounting of where the load
-        went. The origin's torrent-wide total is banked first — it is the
-        ground truth the edges are reconciled against, and reading it after
-        the edges would let a sample credit bytes the total does not yet
-        admit to."""
+        went. The origin's torrent-wide total and the edge counters are banked
+        in one ledger transaction, after applying any aria2 session change, so
+        both readings belong to the same counter epoch."""
         ledger = self.peer_ledger
         if ledger is None:
             return
@@ -954,15 +953,11 @@ class Telemetry:
             image_id = self._names.get(info_hash)
             conns = (peer_bytes or {}).get(info_hash) or {}
             try:
-                if info_hash in (upload_lengths or {}):
-                    ledger.record_origin_total(info_hash, image_id,
-                                               upload_lengths[info_hash])
-                if not conns:
-                    continue        # nothing observed; no epoch state to move
                 rows = ledger.observe(
                     info_hash, image_id,
                     {key: obs["uploaded"] for key, obs in conns.items()},
-                    session_id, now=now)
+                    session_id, now=now,
+                    upload_length=(upload_lengths or {}).get(info_hash))
             except Exception:
                 continue        # telemetry is never on the critical path
             # The ledger accumulates per IP; the role is per connection. A peer

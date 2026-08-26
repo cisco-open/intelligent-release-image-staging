@@ -210,7 +210,7 @@ class FleetStore:
         self._now = now_fn
 
     def _registration_stamp(self, previous):
-        """When this device id was registered, stamped once at creation.
+        """When this device id was registered, or ``None`` when unknown.
 
         A device that is deleted and added back is a DIFFERENT device wearing a
         familiar name -- routinely a rebuilt or replaced box. Everything else
@@ -219,13 +219,15 @@ class FleetStore:
         record. So they stay, and this stamp is what lets a reader tell which
         registration each one belongs to: a log that finished before this device
         was registered was written about its predecessor."""
-        prior = (previous or {}).get("registered_at")
+        if previous is None:
+            return int(self._now())
+        if not isinstance(previous, dict) or not previous:
+            raise ValueError("existing fleet record must be a non-empty object")
+        prior = previous.get("registered_at")
         try:
-            if prior:
-                return int(prior)
+            return int(prior) if prior is not None else None
         except (TypeError, ValueError):
-            pass
-        return int(self._now())
+            raise ValueError("registered_at must be an integer or null")
 
     def _read(self):
         try:
@@ -260,18 +262,19 @@ class FleetStore:
         did = _text(record.get("device_id"))
         with secrets_store.store_lock(self.path):
             data = self._read()
-            previous = data["devices"].get(did, {})
-            merged = dict(previous)
+            previous = data["devices"].get(did)
+            previous_record = previous if isinstance(previous, dict) else {}
+            merged = dict(previous_record)
             incoming_attachment = record.get(
                 "management_type", record.get("network_attachment"))
             if incoming_attachment is not None:
                 incoming_attachment = _text(incoming_attachment)
-            if incoming_attachment and incoming_attachment != previous.get(
-                    "management_type", previous.get("network_attachment")):
+            if incoming_attachment and incoming_attachment != previous_record.get(
+                    "management_type", previous_record.get("network_attachment")):
                 # Attachment-specific fields are mutually exclusive. A partial
                 # upsert changing type must not retain stale values from the old
                 # family and then fail validation (or, worse, retarget a plan).
-                old_router = previous.get("management_type") in _ROUTER_TYPES
+                old_router = previous_record.get("management_type") in _ROUTER_TYPES
                 new_router = incoming_attachment in _ROUTER_TYPES
                 if old_router and new_router:
                     # VPG and app addressing are shared by both router modes;

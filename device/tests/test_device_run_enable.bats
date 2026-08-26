@@ -42,6 +42,7 @@ fi
 echo "sw1\${after}terminal length 0"
 echo "sw1\${after}show clock"
 echo "10:00:00.000 UTC Tue Aug 25 2026"
+exit "\${FAKE_SSH_STATUS:-0}"
 STUBEOF
   chmod +x "$STUB/sshpass"
   export PATH="$STUB:$PATH"
@@ -88,4 +89,10 @@ STUBEOF
   IRIS_DEVICE_ENABLE_ALWAYS=1 bash -c "printf 'show clock\n' | bash '$RUN' 192.0.2.10" >/dev/null 2>&1
   grep -q '^enable$' "$LOG" || return 1
   grep -q '^zzsecretzz$' "$LOG"
+}
+
+@test "SSH failure survives privilege-cache bookkeeping" {
+  run env FAKE_SSH_STATUS=23 bash -c \
+    "printf 'show clock\n' | bash '$RUN' 192.0.2.10"
+  [ "$status" -eq 23 ]
 }

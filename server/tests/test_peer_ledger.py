@@ -104,6 +104,21 @@ def test_session_change_banks_everything_and_starts_an_epoch(tmp_path):
     assert _totals(ledger) == {"10.0.0.1": 1100}
 
 
+def test_session_change_moves_origin_and_peers_to_one_epoch(tmp_path):
+    """The origin reading must not be banked before the session transition and
+    then counted again after that transition clears its baseline."""
+    ledger = _ledger(tmp_path)
+    ledger.observe(IH, IMAGE, {("10.0.0.1", 6881): 500}, "s1",
+                   upload_length=500)
+    ledger.observe(IH, IMAGE, {("10.0.0.1", 6881): 120}, "s2",
+                   upload_length=120)
+    ledger.observe(IH, IMAGE, {("10.0.0.1", 6881): 200}, "s2",
+                   upload_length=200)
+    totals = ledger.torrent_totals()[IH]
+    assert totals["origin_total"] == 700
+    assert totals["attributed"] == 700
+
+
 def test_session_change_with_a_higher_counter_still_counts_in_full(tmp_path):
     """Without the epoch reset this reading would be diffed against a dead
     session's counter and silently lose 300 bytes."""
@@ -115,35 +130,40 @@ def test_session_change_with_a_higher_counter_still_counts_in_full(tmp_path):
 
 def test_origin_gauge_becomes_a_monotonic_counter(tmp_path):
     ledger = _ledger(tmp_path)
-    assert ledger.record_origin_total(IH, IMAGE, 1000) == 1000
-    assert ledger.record_origin_total(IH, IMAGE, 4618) == 4618
+    ledger.observe(IH, IMAGE, {}, "s1", upload_length=1000)
+    assert ledger.torrent_totals()[IH]["origin_total"] == 1000
+    ledger.observe(IH, IMAGE, {}, "s1", upload_length=4618)
+    assert ledger.torrent_totals()[IH]["origin_total"] == 4618
     # control-state loss: the gauge restarts, the durable counter must not
-    assert ledger.record_origin_total(IH, IMAGE, 200) == 4818
-    assert ledger.record_origin_total(IH, IMAGE, 500) == 5118
+    ledger.observe(IH, IMAGE, {}, "s1", upload_length=200)
+    assert ledger.torrent_totals()[IH]["origin_total"] == 4818
+    ledger.observe(IH, IMAGE, {}, "s1", upload_length=500)
+    assert ledger.torrent_totals()[IH]["origin_total"] == 5118
 
 
 def test_origin_gauge_baseline_resets_on_a_session_change(tmp_path):
     ledger = _ledger(tmp_path)
-    ledger.observe(IH, IMAGE, {("10.0.0.1", 6881): 10}, "s1")
-    ledger.record_origin_total(IH, IMAGE, 4000)
-    ledger.observe(IH, IMAGE, {("10.0.0.1", 6881): 10}, "s2")
-    assert ledger.record_origin_total(IH, IMAGE, 4000) == 8000
+    ledger.observe(IH, IMAGE, {("10.0.0.1", 6881): 10}, "s1",
+                   upload_length=4000)
+    ledger.observe(IH, IMAGE, {("10.0.0.1", 6881): 10}, "s2",
+                   upload_length=4000)
+    assert ledger.torrent_totals()[IH]["origin_total"] == 8000
 
 
 def test_origin_gauge_ignores_junk_readings(tmp_path):
     ledger = _ledger(tmp_path)
-    ledger.record_origin_total(IH, IMAGE, 500)
-    assert ledger.record_origin_total(IH, IMAGE, -1) == 500
-    assert ledger.record_origin_total(IH, IMAGE, None) == 500
-    assert ledger.record_origin_total(IH, IMAGE, "nope") == 500
-    assert ledger.record_origin_total(IH, IMAGE, 600) == 600
+    for value in (500, -1, None, "nope"):
+        ledger.observe(IH, IMAGE, {}, "s1", upload_length=value)
+    assert ledger.torrent_totals()[IH]["origin_total"] == 500
+    ledger.observe(IH, IMAGE, {}, "s1", upload_length=600)
+    assert ledger.torrent_totals()[IH]["origin_total"] == 600
 
 
 def test_unattributed_is_the_residue_between_ground_truth_and_edges(tmp_path):
     ledger = _ledger(tmp_path)
     ledger.observe(IH, IMAGE, {("10.0.0.1", 6881): 700,
-                               ("10.0.0.2", 6881): 300}, "s1")
-    ledger.record_origin_total(IH, IMAGE, 1400)
+                               ("10.0.0.2", 6881): 300}, "s1",
+                   upload_length=1400)
     assert ledger.unattributed(IH) == 400
 
 
@@ -151,8 +171,8 @@ def test_unattributed_never_goes_negative(tmp_path):
     """Edges and the torrent gauge are separate readings; an edge ahead of the
     gauge must not print a negative byte count."""
     ledger = _ledger(tmp_path)
-    ledger.observe(IH, IMAGE, {("10.0.0.1", 6881): 5000}, "s1")
-    ledger.record_origin_total(IH, IMAGE, 100)
+    ledger.observe(IH, IMAGE, {("10.0.0.1", 6881): 5000}, "s1",
+                   upload_length=100)
     assert ledger.unattributed(IH) == 0
     assert ledger.torrent_totals()[IH]["unattributed"] == 0
 
@@ -164,8 +184,8 @@ def test_unattributed_of_an_unknown_torrent_is_zero(tmp_path):
 def test_torrent_totals_reports_the_aggregate_the_dashboards_chart(tmp_path):
     ledger = _ledger(tmp_path)
     ledger.observe(IH, IMAGE, {("10.0.0.1", 6881): 700,
-                               ("10.0.0.2", 6881): 0}, "s1")
-    ledger.record_origin_total(IH, IMAGE, 1000)
+                               ("10.0.0.2", 6881): 0}, "s1",
+                   upload_length=1000)
     totals = ledger.torrent_totals()[IH]
     assert totals["image_id"] == IMAGE
     assert totals["attributed"] == 700
@@ -187,7 +207,8 @@ def test_peer_cap_saturates_visibly_and_leaves_the_bytes_in_the_residue(tmp_path
     assert totals["saturated"] is True
     assert totals["peers"] == peer_ledger._PEER_CAP
     assert "192.0.2.99" not in _totals(ledger)
-    ledger.record_origin_total(IH, IMAGE, peer_ledger._PEER_CAP * 10 + 999)
+    ledger.observe(IH, IMAGE, {}, "s1",
+                   upload_length=peer_ledger._PEER_CAP * 10 + 999)
     assert ledger.unattributed(IH) == 999
 
 
@@ -220,8 +241,8 @@ def test_connection_baselines_are_bounded_per_peer(tmp_path):
 def test_totals_survive_a_reload_from_disk(tmp_path):
     clock = Clock()
     ledger = _ledger(tmp_path, clock)
-    ledger.observe(IH, IMAGE, {("10.0.0.1", 6881): 400}, "s1")
-    ledger.record_origin_total(IH, IMAGE, 1000)
+    ledger.observe(IH, IMAGE, {("10.0.0.1", 6881): 400}, "s1",
+                   upload_length=1000)
     reopened = peer_ledger.PeerLedger(str(tmp_path), now_fn=clock)
     assert _totals(reopened) == {"10.0.0.1": 400}
     assert reopened.unattributed(IH) == 600

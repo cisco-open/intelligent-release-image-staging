@@ -69,11 +69,13 @@ echo "catalog certificate in use"
 echo "  served by catalog   : ${SERVED:-<unreachable>}${HOSTPORT:+  ($HOSTPORT)}"
 echo "  handed to devices   : ${DISTRIBUTED:-<unavailable>}"
 REFERENCE="${SERVED:-$DISTRIBUTED}"
+CATALOG_DRIFT=0
 if [ -z "$REFERENCE" ]; then
   echo "!! cannot determine the live catalog certificate; is the server running?" >&2
   exit 2
 fi
 if [ -n "$SERVED" ] && [ -n "$DISTRIBUTED" ] && [ "$SERVED" != "$DISTRIBUTED" ]; then
+  CATALOG_DRIFT=1
   echo "  !! MISMATCH: the served cert differs from the one devices are told to trust."
   echo "     Every NEW onboard will fail too, not just the pre-built packages."
 fi
@@ -101,6 +103,7 @@ for PKG in iris-amd64.tar iris-arm64.tar; do
   fi
   if [ -z "$FP" ]; then
     printf '  %-18s built %s  %s\n' "$PKG" "$BUILT" "NO PINNED CERT FOUND"
+    STALE+=("$PKG")
   elif [ "$FP" = "$REFERENCE" ]; then
     printf '  %-18s built %s  OK\n' "$PKG" "$BUILT"
   else
@@ -110,14 +113,21 @@ for PKG in iris-amd64.tar iris-arm64.tar; do
 done
 
 echo
-if [ ${#STALE[@]} -eq 0 ]; then
+if [ ${#STALE[@]} -eq 0 ] && [ "$CATALOG_DRIFT" -eq 0 ]; then
   echo "all served packages pin the live catalog certificate."
   exit 0
 fi
 
-echo "STALE: ${STALE[*]}"
-echo "Devices deployed from these packages will install and report RUNNING, then"
-echo "fail every catalog call with CERTIFICATE_VERIFY_FAILED and never heartbeat."
+if [ ${#STALE[@]} -gt 0 ]; then
+  echo "STALE: ${STALE[*]}"
+  echo "Devices deployed from these packages will install and report RUNNING, then"
+  echo "fail every catalog call with CERTIFICATE_VERIFY_FAILED and never heartbeat."
+fi
+if [ "$CATALOG_DRIFT" -eq 1 ]; then
+  echo "Fix the served/distributed catalog certificate mismatch, then rerun this check."
+  echo "Package rebuilding cannot repair the certificate handed to Guest Shell devices."
+  exit 1
+fi
 if [ "$REBUILD" -eq 1 ]; then
   echo
   echo ">> rebuilding all IOx packages"

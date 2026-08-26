@@ -56,9 +56,8 @@ VLAN_IN="${VLAN:-${INBAND_VLAN:-}}"
 VLAN="${VLAN_IN:-666}"
 IOS_FS="${IOS_FS:-flash:}"
 IOS_ROOT="${IOS_FS}guest-share"
-# See header: forces the same agent-footprint-only reduction as inband,
-# regardless of NETWORK_ATTACHMENT, because no receipt proves the VLAN/SVI,
-# IRISQ discriminator, or PKI trustpoint are uniquely IRIS-owned.
+# See header: force preserves only the operator's VLAN/SVI network. Everything
+# carrying IRIS's own name is still removed regardless of NETWORK_ATTACHMENT.
 FORCE_AGENT_ONLY="${IRIS_FORCE_AGENT_ONLY:-0}"
 
 config_teardown() {
@@ -127,11 +126,10 @@ fi
 : "${DEVICE_IP:?set DEVICE_IP}"; : "${DEVICE_USER:?set DEVICE_USER}"
 : "${DEVICE_PASS:?set DEVICE_PASS}"
 if [ "$FORCE_AGENT_ONLY" = "1" ]; then
-  echo "===== FORCE: agent-footprint-only teardown (no receipt) ====="
-  echo "  Removing: IRIS EEM applets, Guest Shell, and $IOS_ROOT."
-  echo "  NOT touching Vlan$VLAN/SVI, IRISQ, or the PKI trustpoint: without a"
-  echo "  receipt there is no proof IRIS created them, so they are left"
-  echo "  exactly as they are."
+  echo "===== FORCE: IRIS-named footprint teardown (no receipt) ====="
+  echo "  Removing: IRIS EEM applets, Guest Shell, $IOS_ROOT, IRISQ, and IRIS PKI."
+  echo "  Preserving: operator VLAN/SVI network configuration, because no receipt"
+  echo "  proves IRIS created it."
 else
   # Only a receipted teardown removes Vlan$VLAN, so only it needs the number.
   # Demanding one in force mode re-strands the receipt-less device this mode
@@ -168,7 +166,7 @@ fi
 echo "  guestshell destroyed"
 
 if [ "$NETWORK_ATTACHMENT" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
-  echo "[4/5] remove agent-only app footprint (app-hosting only; existing network preserved)"
+  echo "[4/5] remove IRIS-named footprint (operator VLAN/SVI preserved)"
 else
   echo "[4/5] remove config footprint (app-hosting block, Vlan$VLAN, IRISQ, PKI trustpoint)"
 fi

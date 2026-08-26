@@ -447,7 +447,7 @@
         "type": "prometheus",
         "uid": "${ds_prom}"
       },
-      "description": "MEASURED — `iris_swarm_peers_attributed` (gauge): distinct peers with a nonzero byte total for that torrent, SUMMED across all {image, info_hash} series. Each torrent's ledger counts its own distinct peers, so taking the max across an image's torrents would silently discard every peer of every other torrent. Caveats: this counts peer-torrent pairs — a peer that took two torrents of the same image counts twice — and it is NOT comparable to `iris_swarm_peers`, the tracker's announce-derived population (different populations, different sources). Absent series renders as \"No data\".",
+      "description": "MEASURED — the traced-peer count gauge: distinct peers with a nonzero byte total for that torrent, SUMMED across all {image, info_hash} series. Each torrent's ledger counts its own distinct peers, so taking the max across an image's torrents would silently discard every peer of every other torrent. Caveats: this counts peer-torrent pairs — a peer that took two torrents of the same image counts twice — and it is NOT comparable to `iris_swarm_peers`, the tracker's announce-derived population (different populations, different sources). Absent series renders as \"No data\".",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -918,7 +918,7 @@
         "type": "prometheus",
         "uid": "${ds_prom}"
       },
-      "description": "MEASURED — `rate(iris_peer_attributed_bytes_total)` — how fast the ledger is pinning origin bytes to named peers. The gap between this and the panel on the left is the residue accruing in real time.",
+      "description": "MEASURED — the rate of the traced-byte counter: how fast the ledger is pinning origin bytes to named peers. The gap between this and the panel on the left is the residue accruing in real time.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1176,7 +1176,7 @@
         "type": "prometheus",
         "uid": "${ds_prom}"
       },
-      "description": "MEASURED — `iris_peer_unattributed_bytes_total`: origin bytes no peer could be named for — short-lived connections that opened and closed between two polls, plus peers refused at the ledger cap (see \"Peer ledger cap saturated\"). Floored at 0 in both the ledger and the exposition. Plotted as the counter VALUE — this is not a rate; rate()/irate()/increase()/deriv()/resets() are forbidden on this series. This series can step DOWN — it is a difference of two counters and late tracing retires residue; a step down is not a counter reset. Absent series renders as \"No data\", never 0.",
+      "description": "MEASURED — the untraced-residue counter: origin bytes no peer could be named for — short-lived connections that opened and closed between two polls, plus peers refused at the ledger cap (see \"Peer ledger cap saturated\"). Floored at 0 in both the ledger and the exposition. Plotted as the counter VALUE — this is not a rate; rate()/irate()/increase()/deriv()/resets() are forbidden on this series. This series can step DOWN — it is a difference of two counters and late tracing retires residue; a step down is not a counter reset. Absent series renders as \"No data\", never 0.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1318,7 +1318,7 @@
         "type": "prometheus",
         "uid": "${ds_prom}"
       },
-      "description": "MEASURED — `iris_peer_attributed_bytes_total`: origin bytes the ledger could pin to a specific peer IP, accumulated as observed, read as the cumulative counter VALUE over the range. The aggregate never carries peer or device labels (per-device labels never enter Prometheus by design); the per-edge detail behind it is the `iris.swarm.peer_bytes` log record. Caveats: tracing is per connection — a connection that opens and closes between two polls is never named and lands in \"Untraced residue (measured)\". Per-peer *rx* tracing elsewhere in IRIS is estimated, but THIS number is measured per connection from aria2's own counters. Absent series renders as \"No data\".",
+      "description": "MEASURED — the traced-byte counter: origin bytes the ledger could pin to a specific peer IP, accumulated as observed, read as the cumulative counter VALUE over the range. The aggregate never carries peer or device labels (per-device labels never enter Prometheus by design); the per-edge detail behind it is the `iris.swarm.peer_bytes` log record. Caveats: tracing is per connection — a connection that opens and closes between two polls is never named and lands in \"Untraced residue (measured)\". Per-peer *rx* tracing elsewhere in IRIS is estimated, but THIS number is measured per connection from aria2's own counters. Absent series renders as \"No data\".",
       "fieldConfig": {
         "defaults": {
           "color": {

@@ -2,6 +2,8 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 #
 # SPDX-License-Identifier: Apache-2.0
+import json
+
 import gui_fleet
 import pytest
 
@@ -336,3 +338,45 @@ def test_csv_import_stamps_a_device_it_creates(tmp_path):
     row = ",".join(str(_ROUTED.get(c, "")) for c in gui_fleet.CSV_V2_COLS)
     fs.import_csv(header + "\n" + row + "\n")
     assert fs.get_device("d1")["registered_at"] == 7000
+
+
+def test_legacy_unstamped_device_stays_unstamped_on_update(tmp_path):
+    clock = [1000]
+    fs = gui_fleet.FleetStore(str(tmp_path), now_fn=lambda: clock[0])
+    fs.upsert(dict(_ROUTED))
+    with open(fs.path) as stream:
+        data = json.load(stream)
+    data["devices"]["d1"].pop("registered_at")
+    with open(fs.path, "w") as stream:
+        json.dump(data, stream)
+
+    clock[0] = 9000
+    assert fs.upsert({"device_id": "d1", "model": "C9300-48UXM"})[
+        "registered_at"] is None
+
+    header = ",".join(gui_fleet.CSV_V2_COLS)
+    row = ",".join(str(_ROUTED.get(c, "")) for c in gui_fleet.CSV_V2_COLS)
+    fs.import_csv(header + "\n" + row + "\n")
+    assert fs.get_device("d1")["registered_at"] is None
+
+
+def test_invalid_registration_stamp_is_rejected(tmp_path):
+    fs = gui_fleet.FleetStore(str(tmp_path))
+    fs.upsert(dict(_ROUTED))
+    with open(fs.path) as stream:
+        data = json.load(stream)
+    data["devices"]["d1"]["registered_at"] = "not-a-timestamp"
+    with open(fs.path, "w") as stream:
+        json.dump(data, stream)
+
+    with pytest.raises(ValueError, match="registered_at"):
+        fs.upsert({"device_id": "d1", "model": "C9300-48UXM"})
+
+
+def test_empty_existing_fleet_record_is_rejected(tmp_path):
+    fs = gui_fleet.FleetStore(str(tmp_path))
+    with open(fs.path, "w") as stream:
+        json.dump({"revision": 1, "devices": {"d1": {}}}, stream)
+
+    with pytest.raises(ValueError, match="non-empty object"):
+        fs.upsert(dict(_ROUTED))

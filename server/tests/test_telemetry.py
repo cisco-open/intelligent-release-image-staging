@@ -2325,6 +2325,11 @@ def test_an_aria2_restart_keeps_the_totals_it_already_banked(tmp_path):
     hub.sample()
     assert hub.peer_ledger.totals("abc") == {"abc": {"10.0.0.2": 620}}
     assert hub.peer_ledger_totals()["abc"]["origin_total"] == 620
+    peers[0] = _peer("10.0.0.2", "51422", 200)
+    torrent["uploadLength"] = 200
+    hub.sample()
+    assert hub.peer_ledger.totals("abc") == {"abc": {"10.0.0.2": 700}}
+    assert hub.peer_ledger_totals()["abc"]["origin_total"] == 700
 
 
 def test_a_failed_control_state_poll_attributes_nothing(tmp_path):

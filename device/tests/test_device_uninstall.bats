@@ -95,11 +95,10 @@ setup() {
 
 # --- IRIS_FORCE_AGENT_ONLY: receipt-less force undeploy ---------------------
 # A device stranded WITHOUT a deployment receipt (onboard died after enabling
-# Guest Shell but before its receipt was written) has no receipt to prove the
-# VLAN/SVI, IRISQ discriminator, or PKI trustpoint are uniquely IRIS-owned.
-# gui_server.py sets IRIS_FORCE_AGENT_ONLY=1 for exactly this case; the script
-# must reduce to the same agent-footprint-only scope NETWORK_ATTACHMENT=inband
-# already uses, regardless of what NETWORK_ATTACHMENT is set to.
+# Guest Shell but before its receipt was written) has no receipt proving IRIS
+# created the VLAN/SVI. gui_server.py sets IRIS_FORCE_AGENT_ONLY=1 for exactly
+# this case; force preserves that operator network while still removing every
+# artifact carrying IRIS's own name.
 
 @test "force dry-run keeps the operator VLAN but clears IRIS-named config" {
   # "Operator-owned" is the VLAN and its SVI -- network IRIS merely configured,
@@ -167,6 +166,8 @@ STUB
     DEVICE_PASS=p IRIS_FORCE_AGENT_ONLY=1 \
     bash "$STUBDIR/device/device-uninstall.sh"
   [[ "$output" != *"VLAN not set"* ]] || return 1
+  [[ "$output" == *"Removing:"*"IRISQ"*"IRIS PKI"* ]] || return 1
+  [[ "$output" == *"Preserving: operator VLAN/SVI"* ]] || return 1
   [ "$status" -eq 0 ]
 }
 

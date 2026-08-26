@@ -63,6 +63,7 @@ OUT_COPY="$(mktemp "${TMPDIR:-/tmp}/iris-run.XXXXXX")"
       }
     ' \
   | tee "$OUT_COPY"
+RUN_STATUS=$?
 
 # Learn from the prompt IOS echoed alongside our own commands. `tee` keeps the
 # caller's output streaming; only this bookkeeping reads the copy.
@@ -74,3 +75,4 @@ else
   grep -qE '>[[:space:]]*terminal length 0' "$OUT_COPY" && rm -f "$PRIV_CACHE"
 fi
 rm -f "$OUT_COPY"
+exit "$RUN_STATUS"

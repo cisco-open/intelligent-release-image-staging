@@ -12,6 +12,7 @@ facts BEFORE any network side effect that must survive a crash.
 import errno
 import json
 import os
+import stat
 
 import iris_agent
 
@@ -60,7 +61,7 @@ def test_atomic_write_state_tolerates_unsupported_dir_fsync(tmp_path,
             pass
         # Distinguish the dir fd: it was opened O_RDONLY on a directory.
         st = os.fstat(fd)
-        if os.path.stat.S_ISDIR(st.st_mode):
+        if stat.S_ISDIR(st.st_mode):
             seen["dir"] = True
             raise OSError(errno.EINVAL, "no dir fsync")
         return real_fsync(fd)
@@ -80,7 +81,7 @@ def test_atomic_write_state_reraises_real_dir_fsync_error(tmp_path,
 
     def fake_fsync(fd):
         st = os.fstat(fd)
-        if os.path.stat.S_ISDIR(st.st_mode):
+        if stat.S_ISDIR(st.st_mode):
             raise OSError(errno.EIO, "real io error")
         return real_fsync(fd)
 

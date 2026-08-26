@@ -158,8 +158,9 @@ class PeerLedger:
 
     # --- accumulation ------------------------------------------------------
 
-    def observe(self, info_hash, image_id, samples, session_id, now=None):
-        """Fold one ``getPeers`` sample into the durable per-(info_hash, ip) total.
+    def observe(self, info_hash, image_id, samples, session_id, now=None,
+                upload_length=None):
+        """Fold one aria2 sample into the durable per-(info_hash, ip) total.
 
         *samples* is ``{(ip, port): uploaded_bytes}`` -- the ephemeral
         PER-CONNECTION cumulative counter for every connection alive at this
@@ -181,6 +182,10 @@ class PeerLedger:
         gauge baseline) is banked and a new counter epoch starts, so the first
         sample of the new epoch is counted in full rather than diffed against
         a counter that no longer exists.
+
+        When supplied, *upload_length* is folded into the origin total in the
+        same locked write, after applying that session transition. This keeps
+        the torrent-wide and per-connection baselines in one counter epoch.
 
         A connection that simply vanishes needs no banking: everything ever
         observed of it is already in the total, and the bytes it carried after
@@ -214,6 +219,7 @@ class PeerLedger:
                         and session_id != rec["session_id"]):
                     self._start_epoch(rec)
                 rec["session_id"] = session_id
+            self._observe_origin(rec, upload_length)
             peers = rec["peers"]
             for ip, port, value in self._clean(samples):
                 peer = peers.get(ip)
@@ -288,38 +294,20 @@ class PeerLedger:
         for port, _ in ordered[:len(conns) - _CONN_CAP]:
             del conns[port]
 
-    def record_origin_total(self, info_hash, image_id, upload_length):
-        """Fold aria2's torrent-wide ``uploadLength`` into a monotonic total.
-
-        ``uploadLength`` is a GAUGE over the torrent's control state: it can
-        exceed the image size (re-sends, many leechers) and it can DECREASE
-        when control state is lost. It is converted the same way a
-        per-connection counter is -- a decrease means the counter restarted,
-        so the value is banked in full rather than diffed against a reading
-        that no longer applies.
-
-        This monotonic total is the ground truth the per-edge attribution is
-        reconciled against; returns it.
-        """
+    @staticmethod
+    def _observe_origin(rec, upload_length):
         value = _bytes(upload_length)
-        now = self._now()
-        with secrets_store.store_lock(self.path):
-            data = self._read()
-            rec = self._torrent(data, str(info_hash), image_id)
-            if rec["first_observed"] is None:
-                rec["first_observed"] = now
-            origin = rec["origin"]
-            if value is not None:
-                previous = origin.get("last")
-                if previous is None or value < previous:
-                    delta = value
-                else:
-                    delta = value - previous
-                origin["last"] = value
-                origin["total"] = min(int(origin.get("total") or 0) + delta, _BYTES_CAP)
-            rec["updated_at"] = now
-            self._write(data)
-            return int(origin.get("total") or 0)
+        origin = rec["origin"]
+        if value is not None:
+            previous = origin.get("last")
+            if previous is None or value < previous:
+                delta = value
+            else:
+                delta = value - previous
+            origin["last"] = value
+            origin["total"] = min(
+                int(origin.get("total") or 0) + delta, _BYTES_CAP)
+        return int(origin.get("total") or 0)
 
     # --- readers -----------------------------------------------------------
 

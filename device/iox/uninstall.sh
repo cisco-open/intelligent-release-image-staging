@@ -24,10 +24,9 @@
 #   the staged OS image on the selected IOS disk. Successful cleanup is
 #   persisted to startup-config so a reload cannot restore IRIS configuration.
 # IRIS_FORCE_AGENT_ONLY=1 forces the same reduction NETWORK_ATTACHMENT=inband
-#   already applies (appid + EEM applets only), regardless of what
-#   NETWORK_ATTACHMENT is set to: a device stranded WITHOUT a deployment
-#   receipt has no receipt to prove the VLAN/SVI or PKI trustpoint are
-#   uniquely IRIS-owned, so they must be left exactly as they are.
+#   already applies, regardless of NETWORK_ATTACHMENT: preserve the operator's
+#   VLAN/SVI network, but remove appid, applets, IRISQ, and IRIS PKI because
+#   those globals carry IRIS's own name.
 #
 # Env (subset of the installer's, supplied by OnboardService._build_env):
 #   DEVICE_IP DEVICE_USER DEVICE_PASS [DEVICE_ENABLE] [VLAN=666]
@@ -43,9 +42,8 @@ DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
 NETWORK_ATTACHMENT="${NETWORK_ATTACHMENT:-routed}"
 VLAN_IN="${VLAN:-${INBAND_VLAN:-}}"
 VLAN="${VLAN_IN:-666}"
-# See header: forces the same agent-footprint-only reduction as inband,
-# regardless of NETWORK_ATTACHMENT, because no receipt proves the VLAN/SVI or
-# PKI trustpoint are uniquely IRIS-owned.
+# See header: force preserves only the operator's VLAN/SVI network. Everything
+# carrying IRIS's own name is still removed regardless of NETWORK_ATTACHMENT.
 FORCE_AGENT_ONLY="${IRIS_FORCE_AGENT_ONLY:-0}"
 PKG="${PKG:-iris-arm64.tar}"; PKG_FS="${PKG_FS:-flash:}"
 # C9k share-mount transfer: when set, [3/4] also deletes OUR iris/ subdir of
@@ -130,11 +128,10 @@ fi
 : "${DEVICE_IP:?set DEVICE_IP}"; : "${DEVICE_USER:?set DEVICE_USER}"
 : "${DEVICE_PASS:?set DEVICE_PASS}"
 if [ "$FORCE_AGENT_ONLY" = "1" ]; then
-  echo "===== FORCE: agent-footprint-only teardown (no receipt) ====="
-  echo "  Removing: IRIS EEM applets, the '$APPID' app, and its staged files."
-  echo "  NOT touching Vlan$VLAN/SVI or the PKI trustpoint: without a receipt"
-  echo "  there is no proof IRIS created them, so they are left exactly as"
-  echo "  they are."
+  echo "===== FORCE: IRIS-named footprint teardown (no receipt) ====="
+  echo "  Removing: IRIS EEM applets, the '$APPID' app, staged files, IRISQ, and IRIS PKI."
+  echo "  Preserving: operator VLAN/SVI network configuration, because no receipt"
+  echo "  proves IRIS created it."
 else
   # Only a receipted teardown removes Vlan$VLAN, so only it needs the number.
   # Demanding one in force mode re-strands the receipt-less device this mode
@@ -162,7 +159,7 @@ st="$(app_state)"
 [ -z "$st" ] || echo "  WARN: '$APPID' still shows state '$st' after uninstall"
 
 if [ "$NETWORK_ATTACHMENT" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
-  echo "[2/4] remove agent-only app footprint (appid, EEM applets; existing network preserved)"
+  echo "[2/4] remove IRIS-named footprint (operator VLAN/SVI preserved)"
 else
   echo "[2/4] remove config footprint (appid, Vlan$VLAN, EEM applets, PKI trustpoint)"
 fi
