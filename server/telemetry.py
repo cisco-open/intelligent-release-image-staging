@@ -720,6 +720,7 @@ class Telemetry:
                                # render() was covered directly by tests, so
                                # nothing caught it -- test the ENDPOINT.
                                swarm_bytes=self.peer_ledger_totals(),
+                               image_sizes=self._image_size_metrics(),
                                seeder_torrents=self._seeder_torrent_metrics(
                                    time.time()))
 
@@ -756,6 +757,26 @@ class Telemetry:
                 for info_hash, upload_length in self._upload_len.items()
                 for image_id, image in [known.get(str(info_hash), (None, None))]
                 if image_id is not None]
+
+    def _image_size_metrics(self):
+        """Catalog image sizes for the iris_image_size_bytes family. Exact by
+        construction -- publish.py records os.path.getsize of the file itself
+        -- and static per image, so unlike the seeder gauges there is no
+        freshness window to respect. Rows without both a size and an
+        info_hash are skipped: a partial row would be a guess, and the boards
+        prefer "no data" over one."""
+        try:
+            images = self._images_info() if self._images_info else {}
+        except Exception:
+            return []
+        if not isinstance(images, dict):
+            return []
+        return [{"image": entry.get("filename", image_id),
+                 "info_hash": str(entry.get("info_hash_hex")),
+                 "size": entry["size"]}
+                for image_id, entry in sorted(images.items())
+                if isinstance(entry, dict) and entry.get("info_hash_hex")
+                and isinstance(entry.get("size"), int) and entry["size"] > 0]
 
     def _legacy_participant_count(self):
         """Distinct current ``legacy_unattributed`` announce participants

@@ -170,9 +170,9 @@ rather than hidden, and they explain most surprising readings:
   `--on-bt-download-complete` hook snapshots `getPeers` at the completion
   instant, which is exact for peers still connected — but `DefaultPeerStorage`
   erases a peer on disconnect, so peers that left mid-download are simply gone.
-* **`iris_image_size_bytes` is specified but not yet emitted.** The *Image
-  size* panel and anything derived from it read "no data" on purpose, rather
-  than showing a placeholder that would look like a measurement.
+* **`iris_image_size_bytes` comes from the catalog, not from traffic.** It is
+  the published file's own size, recorded at publish time. The *Image size*
+  panel reads "no data" only for an image with no catalog entry.
 
 The exact and the estimated per-peer figures are kept in separate OTLP record
 names on purpose — `iris.device.peer_receipt` (exact, device-reported) versus

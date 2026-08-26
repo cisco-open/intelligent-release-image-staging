@@ -2762,7 +2762,7 @@
         "type": "prometheus",
         "uid": "${ds_prom}"
       },
-      "description": "MEASURED — `iris_image_size_bytes{image,info_hash}`, the catalog entry's own `size` field (written by the publisher, read back from the catalog store). This metric is a REQUIRED server emission that does not exist yet: until the hub emits it, this panel reads “No data”. There is no hardcoded constant, no textbox fallback and no `or vector(...)` behind it — pricing a fleet total at a fixed 928 MiB is wrong the moment a differently sized image is selected. The panel is informational and progress-only; the fleet-delivery figures never depend on it.",
+      "description": "MEASURED — `iris_image_size_bytes{image,info_hash}`, the catalog entry's own `size` field (written by the publisher, read back from the catalog store). Emitted by the hub from the catalog store; a missing series means that image has no published catalog entry, and the panel reads “No data” rather than guessing. There is no hardcoded constant, no textbox fallback and no `or vector(...)` behind it — pricing a fleet total at a fixed 928 MiB is wrong the moment a differently sized image is selected. The panel is informational and progress-only; the fleet-delivery figures never depend on it.",
       "fieldConfig": {
         "defaults": {
           "color": {

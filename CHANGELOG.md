@@ -248,17 +248,15 @@ top-level `VERSION` file.
   and dividing it among the peers that happen to still be connected would print
   arithmetic where the panel promises an observation. A shorter poll interval
   leaves less untraced; nothing closes the gap.
-- **`iris_image_size_bytes` is specified but not emitted yet.** The shipped
+- **`iris_image_size_bytes` is published from the catalog.** The shipped
   dashboards ask for it by name to turn delivered bytes into a share of the
-  image, and until `server/metrics.py` publishes it those panels read *No data*.
-  That is deliberate rather than an oversight in the boards: the alternative — a
-  textbox default or an `or vector(...)` fallback — would render a confident
-  progress figure computed from a number nobody measured. The fleet-delivery
-  totals are defined so that they never depend on it.
-
-## [2026.08.25]
-
-### Added
+  image, and it now republishes the catalog entry's own `size` field — exact,
+  recorded from the file itself at publish time, never inferred from traffic.
+  It was briefly specified-but-unemitted; in that state the boards read *No
+  data* deliberately rather than falling back to a textbox default or an `or
+  vector(...)` — a confident progress figure computed from a number nobody
+  measured is worse than an empty panel. An image with no published catalog
+  entry still reads *No data* today, for the same reason.
 - **First-run setup is a guided flow, and Settings > Setup keeps reporting the
   same state afterwards.** A stepped wizard at its own top-level view walks
   telemetry destination, stage host and device packages, with the admin

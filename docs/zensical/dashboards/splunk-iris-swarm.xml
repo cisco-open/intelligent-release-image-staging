@@ -492,7 +492,7 @@
     </panel>
     <panel>
       <title>Image size (measured)</title>
-      <description>iris_image_size_bytes{image,info_hash}, sourced from the catalog entry's own `size` field. REQUIRED NEW SERVER EMISSION: until server/metrics.py render() emits this gauge alongside the swarm gauges, this panel and every progress figure derived from it read "no data". There is no hardcoded constant, no textbox fallback and no substitute — the retired image_size_bytes textbox input was deleted for exactly that reason. Informational and progress-only: the fleet-delivery totals on this board are defined so they never depend on it.</description>
+      <description>iris_image_size_bytes{image,info_hash}, sourced from the catalog entry's own `size` field. Emitted by the hub from the catalog store. A missing series means that image has no published catalog entry; the panel reads "no data" rather than guessing. There is no hardcoded constant, no textbox fallback and no substitute — the retired image_size_bytes textbox input was deleted for exactly that reason. Informational and progress-only: the fleet-delivery totals on this board are defined so they never depend on it.</description>
       <table>
         <search>
           <query>| mstats latest(_value) AS v WHERE index=iris_metrics metric_name="iris_image_size_bytes" AND image="$img$" BY image, info_hash</query>

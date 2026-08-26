@@ -75,7 +75,7 @@ def _ledger_rows(swarm_bytes):
 
 def render(swarm, seeder, counters, reports_stored=0, transfers=None,
            extras=None, otlp_health=None, peer_status=None,
-           seeder_torrents=None, swarm_bytes=None):
+           seeder_torrents=None, swarm_bytes=None, image_sizes=None):
     out = []
 
     def family(name, mtype, help_text):
@@ -96,6 +96,21 @@ def render(swarm, seeder, counters, reports_stored=0, transfers=None,
            "Device telemetry reports currently stored across all devices "
            "(ring-bounded server-side; no per-device labels)")
     out.append("iris_device_reports_stored %d" % _int(reports_stored))
+
+    # --- catalog image sizes ---
+    # The catalog entry's own size field, republished so a board can price
+    # per-image figures without a hardcoded constant. Both dashboards ship
+    # panels that deliberately read "no data" until this family exists --
+    # pricing a fleet total at a fixed 928 MiB is wrong the moment a
+    # differently sized image is selected. Emitted only for images whose size
+    # and info_hash are both known: a partial row would be a guess.
+    if image_sizes:
+        family("iris_image_size_bytes", "gauge",
+               "Size of the published image in bytes, from the catalog entry "
+               "(exact: recorded at publish time from the file itself)")
+        for row in image_sizes:
+            out.append("iris_image_size_bytes%s %d" % (
+                _labels(row["image"], row["info_hash"]), _int(row["size"])))
 
     # --- seeder (from aria2 RPC) ---
     family("iris_seeder_rpc_up", "gauge",

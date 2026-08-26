@@ -2680,3 +2680,26 @@ def test_peer_receipts_reach_the_log_queue_not_just_the_catalog():
         ip = attrs["network.peer.address"]["stringValue"]
         classes[ip] = attrs["iris.peer.attribution"]["stringValue"]
     assert classes == {"10.9.9.9": "origin", "10.0.0.7": "device"}, classes
+
+
+def test_image_size_family_reaches_the_metrics_endpoint(tmp_path):
+    """iris_image_size_bytes must reach /metrics, tested at the ENDPOINT.
+
+    Both dashboards ship panels that deliberately read "no data" until this
+    family exists, refusing a hardcoded size constant. Twice in this feature's
+    history a family existed in render() and never reached the endpoint because
+    a caller argument was missing and only render() was unit-tested -- so this
+    asserts through metrics_text(), not render()."""
+    hub = telemetry.Telemetry(
+        PeerRegistry(),
+        images_info=lambda: {
+            "cat9k": {"filename": "cat9k.bin", "info_hash_hex": "ab" * 20,
+                      "size": 973065200},
+            # no info_hash yet (publish in progress): must be skipped, not guessed
+            "half": {"filename": "half.bin", "size": 5},
+        })
+    text = hub.metrics_text()
+    assert "iris_image_size_bytes" in text
+    assert ('iris_image_size_bytes{image="cat9k.bin",info_hash="%s"} 973065200'
+            % ("ab" * 20)) in text
+    assert "half.bin" not in text

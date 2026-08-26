@@ -446,9 +446,10 @@ flag that says so — the individual rows are still exact either way.
 **Absence of a receipt is not zero.** A device that reported no receipts emits
 no records at all, while a genuine measured zero appears as an explicit `0`.
 
-**`iris_image_size_bytes` is not yet emitted.** It is specified, but no code
-publishes it. Panels that need it read "no data" **deliberately**, rather than
-showing a placeholder that would look like a measurement.
+**`iris_image_size_bytes` is exact, not measured traffic.** It republishes the
+catalog entry's own `size` field, recorded from the file itself at publish
+time. A missing series means the image has no published catalog entry, and the
+panels that need it read "no data" rather than guessing.
 
 **`iris.peer.has_complete_file` does not identify the origin.** It is aria2's
 `seeder` flag, true for any peer holding the complete file — which in a
