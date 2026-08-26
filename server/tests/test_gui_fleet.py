@@ -278,3 +278,61 @@ def test_platform_is_last_csv_column():
     assert gui_fleet.CSV_V2_COLS[-1] == "platform"
     assert gui_fleet.CSV_V2_COLS[0] == "device_id"
     assert "management_type" in gui_fleet.CSV_V2_COLS
+
+
+# ---------------------------------------------------------------------------
+# registered_at: which device currently holds this id
+# ---------------------------------------------------------------------------
+
+def test_registered_at_is_stamped_once_at_creation(tmp_path):
+    """Deployment logs are keyed on the bare device id and deliberately outlive
+    a delete, so something has to say which device each one belongs to. This
+    stamp does, which only works if an ordinary edit does not move it."""
+    clock = [1000]
+    fs = gui_fleet.FleetStore(str(tmp_path), now_fn=lambda: clock[0])
+    created = fs.upsert(dict(_ROUTED))
+    assert created["registered_at"] == 1000
+
+    clock[0] = 2000
+    edited = fs.upsert({"device_id": "d1", "model": "C9300-48UXM"})
+    assert edited["registered_at"] == 1000, "an edit re-registered the device"
+    assert fs.get_device("d1")["registered_at"] == 1000
+
+
+def test_readding_a_deleted_device_registers_it_afresh(tmp_path):
+    """A device deleted and added back is a different machine wearing a
+    familiar name -- routinely a rebuilt box. Its predecessor's runs must stop
+    counting as its own history, and the new stamp is what draws that line."""
+    clock = [1000]
+    fs = gui_fleet.FleetStore(str(tmp_path), now_fn=lambda: clock[0])
+    fs.upsert(dict(_ROUTED))
+    assert fs.delete("d1") is True
+
+    clock[0] = 5000
+    readded = fs.upsert(dict(_ROUTED))
+    assert readded["registered_at"] == 5000
+
+
+def test_csv_reimport_keeps_the_registration_stamp(tmp_path):
+    """import_csv REPLACES a row wholesale. Without carrying the stamp across,
+    a routine re-import would look like a fresh registration of every device
+    and orphan the whole fleet's log history."""
+    clock = [1000]
+    fs = gui_fleet.FleetStore(str(tmp_path), now_fn=lambda: clock[0])
+    fs.upsert(dict(_ROUTED))
+    header = ",".join(gui_fleet.CSV_V2_COLS)
+    row = ",".join(str(_ROUTED.get(c, "")) for c in gui_fleet.CSV_V2_COLS)
+
+    clock[0] = 9000
+    fs.import_csv(header + "\n" + row + "\n")
+
+    assert fs.get_device("d1")["registered_at"] == 1000
+
+
+def test_csv_import_stamps_a_device_it_creates(tmp_path):
+    clock = [7000]
+    fs = gui_fleet.FleetStore(str(tmp_path), now_fn=lambda: clock[0])
+    header = ",".join(gui_fleet.CSV_V2_COLS)
+    row = ",".join(str(_ROUTED.get(c, "")) for c in gui_fleet.CSV_V2_COLS)
+    fs.import_csv(header + "\n" + row + "\n")
+    assert fs.get_device("d1")["registered_at"] == 7000

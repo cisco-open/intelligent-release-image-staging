@@ -27,6 +27,13 @@ ROUTER_RESOURCES_OWNED="${ROUTER_RESOURCES_OWNED:-0}"
 FORCE_AGENT_ONLY="${IRIS_FORCE_AGENT_ONLY:-0}"
 APP_IP="${APP_IP:-}"
 IOS_ROOT="bootflash:guest-share"
+# Everything under IRIS_DIR goes recursively; guest-share itself is a
+# preserved platform directory where only the named files below are removed.
+# The peer-receipt hook adds nothing to that root: its staged source lives at
+# iris/agent/peer-receipt-hook.sh, its snapshots at iris/<image>.peers.json,
+# and its exec-capable copy inside the guest at /home/guestshell (which goes
+# with `guestshell destroy`). Keep it that way -- a stray name at this root is
+# exactly what the collision preflight refuses on the next onboard.
 IRIS_DIR="$IOS_ROOT/iris"
 
 case "$NETWORK_ATTACHMENT" in
@@ -76,8 +83,20 @@ if [ "$DRY" -eq 0 ]; then
   # this mode exists to rescue. The operator named DEVICE_IP explicitly and
   # force only removes artifacts identifiable as IRIS's own by name.
   if [ "$FORCE_AGENT_ONLY" != "1" ]; then
-    [ -n "$LIVE_IDENTITY" ] && [ "$LIVE_IDENTITY" = "$EXPECTED_DEVICE_IDENTITY" ] \
-      || { echo "ERROR: device identity mismatch; refusing to modify $DEVICE_IP" >&2; exit 1; }
+    if [ -z "$LIVE_IDENTITY" ] || [ "$LIVE_IDENTITY" != "$EXPECTED_DEVICE_IDENTITY" ]; then
+      # Name the way out. This fires whenever the box answering at DEVICE_IP is
+      # not the one the receipt was written for -- overwhelmingly because it was
+      # rebuilt or replaced, which keeps the address and the device id but gets
+      # a fresh board ID. Refusing is right; refusing without saying what to do
+      # next left the operator with an undeploy that would not run and an
+      # onboard that told them to run it.
+      echo "ERROR: device identity mismatch; refusing to modify $DEVICE_IP" >&2
+      echo "  receipt expects board ID '$EXPECTED_DEVICE_IDENTITY', device reports '${LIVE_IDENTITY:-none}'" >&2
+      echo "  If this device was rebuilt or replaced, undeploy it again with Force" >&2
+      echo "  (removes the IRIS agent footprint only, leaving VirtualPortGroup and" >&2
+      echo "  NAT untouched), or delete and re-add it in the Console." >&2
+      exit 1
+    fi
   fi
   MODEL="$LIVE_MODEL"
 fi

@@ -246,12 +246,22 @@ def _deploy_log_histogram(log_dir, since_ts, until_ts, buckets, device_id=None):
     return [{"start": int(starts[i]), "count": counts[i]} for i in range(n)]
 
 
-def _list_deploy_logs(log_dir, device_id=None, after_ts=None, before_ts=None):
+def _list_deploy_logs(log_dir, device_id=None, after_ts=None, before_ts=None,
+                      registered_at=None):
     """Metadata for every parseable *.log under log_dir, newest first:
     {"file","device_id","action","state","rc","finished_at","size"}. The
     header line wins; a file with a missing/garbled header falls back to the
     filename fields (state/rc unknown); anything unparseable either way is
-    skipped. The device_id filter compares the RAW id from the header."""
+    skipped. The device_id filter compares the RAW id from the header.
+
+    *registered_at* is when the device currently holding this id was registered.
+    Logs are keyed on the bare id and deliberately outlive a delete (they are
+    the forensic record of what ran), so after a device is deleted and added
+    back — a rebuilt or replaced box — its predecessor's runs would otherwise be
+    read as this device's own history. Entries finishing before that stamp are
+    flagged ``previous_registration`` rather than hidden: the run happened, it
+    just happened to a different machine. Omit the stamp and nothing is
+    flagged, which is what pre-existing devices (no stamp) get."""
     if not log_dir or not os.path.isdir(log_dir):
         return []
     out = []
@@ -281,6 +291,9 @@ def _list_deploy_logs(log_dir, device_id=None, after_ts=None, before_ts=None):
                      "finished_at": int(parts[0]), "size": size}
         if device_id is not None and entry["device_id"] != device_id:
             continue
+        if registered_at is not None:
+            entry["previous_registration"] = (
+                entry.get("finished_at") or 0) < registered_at
         # Inclusive at both ends: a brush selection must contain the entries
         # sitting exactly on the edges the operator dragged to.
         ts = entry.get("finished_at")
@@ -1168,9 +1181,21 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     except ValueError:
                         return None
                 log_dir = getattr(onboard, "log_dir", None) if onboard else None
+                # Only meaningful for a single device's history; the unfiltered
+                # list spans the whole fleet, where one device's stamp says
+                # nothing about another's rows.
+                registered_at = None
+                if device_id and fleet is not None:
+                    try:
+                        registered_at = int(
+                            (fleet.get_device(device_id) or {}).get(
+                                "registered_at") or 0) or None
+                    except (TypeError, ValueError):
+                        registered_at = None
                 self._json(200, {"logs": _list_deploy_logs(
                     log_dir, device_id=device_id,
-                    after_ts=_ts("after_ts"), before_ts=_ts("before_ts"))})
+                    after_ts=_ts("after_ts"), before_ts=_ts("before_ts"),
+                    registered_at=registered_at)})
                 return
             if path == "/api/deploy-logs/histogram":
                 if app.session_info(self._sid()) is None:
@@ -2174,7 +2199,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if entry is None:
                     self._json(400, {"error": "no such image"}); return
                 old = catalog.get_policy(did).get("approved_image_id")
-                catalog.set_policy(did, approved_image_id=image_id)  # install_allowed stays False (stage-only)
+                catalog.set_policy(did, approved_image_id=image_id)  # approval is the whole policy: IRIS stages, never installs
                 detail = "assigned %s (%s) id=%s" % (
                     entry.get("filename"), _fmt_bytes(entry.get("size")), image_id)
                 if old and old != image_id:
@@ -2348,6 +2373,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 receipt_ref = {}
                 prepare = None
                 pre_apply = None
+                on_success = None
                 # Telemetry flags from the onboard form (spec 8.1): reports
                 # default on, streaming default off — both installer-style and
                 # IOx-style env names so every platform recipe picks them up.
@@ -2393,7 +2419,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             if existing is not None:
                                 _reject(409, "router already has a %s "
                                         "deployment receipt; undeploy it before "
-                                        "onboarding again"
+                                        "onboarding again — if this device was "
+                                        "replaced, undeploy with force, or "
+                                        "delete and re-add it"
                                         % existing.get("state", "recorded")); return
                         resolved = plan["resolved"]
 
@@ -2443,48 +2471,82 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     # post-deploy inventory edit cannot retarget cleanup. Without
                     # a receipt store, fall back to legacy fleet-driven teardown.
                     if receipts is not None:
-                        try:
-                            # Not just the ACTIVE receipt: a controller restart
-                            # during an onboard leaves the receipt "unknown"
-                            # while the device is already configured, and that
-                            # receipt still records what IRIS created. Teardown
-                            # must accept it, or the device is stranded — a
-                            # router cannot be adopted and its preflight refuses
-                            # a re-onboard.
-                            receipt = receipts.recoverable_for_device(did)
-                        except ValueError as exc:
-                            # duplicate actives should be impossible (activation
-                            # supersedes siblings; startup collapses legacy dupes)
-                            # — but surface the reason instead of a 500 if not.
-                            _reject(409, str(exc)); return
-                        if receipt is None and not force:
-                            _reject(409, "no deployment receipt for this "
-                                    "device; adopt it first, then undeploy, or "
-                                    "retry with force to remove the agent "
-                                    "footprint only"); return
-                        if receipt is None:
-                            # No receipt => no proof IRIS created the VPG/NAT,
-                            # so the recipe must leave the operator's network
-                            # exactly as it is and strip only what is named
-                            # IRIS. Recorded distinctly in the audit trail.
-                            undeploy_env = {"IRIS_FORCE_AGENT_ONLY": "1"}
+                        # FORCE is decided BEFORE the receipt is read, because a
+                        # forced teardown never uses a receipt as authority: it
+                        # strips only what is identifiably IRIS's by name and
+                        # leaves the operator's network exactly as it is. Force
+                        # used to be consulted only on the no-receipt branch,
+                        # which defeated the one case it exists for — a receipt
+                        # that describes a device no longer there. A rebuilt VM
+                        # keeps its id and address but gets a new board ID, so
+                        # the teardown recipe's identity guard refused it every
+                        # time, while onboard kept naming that same teardown as
+                        # the fix. Force could not be reached from either end.
+                        if force:
                             try:
                                 degraded_plan = self._plan(
                                     did, fleet.get_device(did))
                             except ValueError as exc:
                                 _reject(409, str(exc)); return
                             resolved = degraded_plan["resolved"]
+                            undeploy_env = {"IRIS_FORCE_AGENT_ONLY": "1"}
+
+                            # Retired only once the box is actually clean (see
+                            # OnboardService.start's on_success). EVERY
+                            # non-terminal receipt goes, which is also the only
+                            # exit from "multiple recoverable receipts" — that
+                            # state refuses onboard, undeploy and adopt alike,
+                            # and nothing else in the product resolves it.
+                            def on_success(_did=did):
+                                receipts.retire_device(
+                                    _did, "forced agent-only teardown; the "
+                                    "receipt no longer describes this device")
+
                             self._audit("undeploy_forced", "onboard",
                                         action="start", target=did,
                                         actor=actor, result="ok",
-                                        detail="forced agent-footprint teardown "
-                                               "with no receipt; VPG/NAT left "
-                                               "untouched")
+                                        detail="forced agent-footprint teardown;"
+                                               " VPG/NAT left untouched, any "
+                                               "deployment receipt abandoned "
+                                               "once the teardown succeeds")
                         else:
+                            try:
+                                # Not just the ACTIVE receipt: a controller
+                                # restart during an onboard leaves the receipt
+                                # "unknown" while the device is already
+                                # configured, and that receipt still records
+                                # what IRIS created. Teardown must accept it, or
+                                # the device is stranded — a router cannot be
+                                # adopted and its preflight refuses a re-onboard.
+                                receipt = receipts.recoverable_for_device(did)
+                            except ValueError as exc:
+                                # duplicate actives should be impossible
+                                # (activation supersedes siblings; startup
+                                # collapses legacy dupes) — but surface the
+                                # reason instead of a 500 if not, and name the
+                                # way out rather than leaving the operator with
+                                # a state the console cannot resolve.
+                                _reject(409, "%s; retry with force to remove "
+                                        "the agent footprint only" % exc); return
+                            if receipt is None:
+                                _reject(409, "no deployment receipt for this "
+                                        "device; adopt it first, then undeploy, "
+                                        "or retry with force to remove the "
+                                        "agent footprint only"); return
                             try:
                                 resolved = self._router_teardown_resolved(receipt)
                             except ValueError as exc:
-                                receipts.transition(receipt["receipt_id"], "needs-reconcile")
+                                # Best effort: the receipt may already BE
+                                # needs-reconcile, from an earlier attempt at
+                                # this same broken teardown, and that self-edge
+                                # is not a legal transition. Letting it raise
+                                # turned every retry after the first into an
+                                # unhandled 500 with no JSON body to explain it.
+                                try:
+                                    receipts.transition(receipt["receipt_id"],
+                                                        "needs-reconcile")
+                                except ValueError:
+                                    pass
                                 _reject(409, str(exc)); return
 
                             def prepare():
@@ -2501,12 +2563,23 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 try:
                     jid = onboard.start(
                         did, action=act, resolved=resolved, prepare=prepare,
-                        pre_apply=pre_apply,
+                        pre_apply=pre_apply, on_success=on_success,
                         env_extra=(env_extra if act == "onboard"
                                    else undeploy_env))
                 except ValueError as exc:
                     if receipt_ref.get("id") and act == "onboard":
-                        receipts.transition(receipt_ref["id"], "needs-reconcile")
+                        # Best effort, for the same reason as the teardown-
+                        # resolve handler above: start() retires the receipt
+                        # itself when the work queue is full, so this would be
+                        # removed -> needs-reconcile, which is not a legal edge.
+                        # An illegal transition raised from inside an except
+                        # handler escapes do_POST entirely — the operator gets a
+                        # dropped request instead of the 409 that explains why.
+                        try:
+                            receipts.transition(receipt_ref["id"],
+                                                "needs-reconcile")
+                        except ValueError:
+                            pass
                     # the device is busy with the OPPOSITE action
                     _reject(409, str(exc)); return
                 # Emitted AFTER start() so the job id correlates this start with
@@ -2690,18 +2763,52 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 except Exception:
                     purged = False
                     degraded.append("catalog")
+                # Retire the deployment receipts for the same reason the catalog
+                # state goes: a receipt outlives the fleet row, and the NEXT
+                # device registered under this id inherits it. That strands the
+                # device rather than merely confusing it — onboard refuses while
+                # a recoverable receipt exists and names undeploy as the fix,
+                # while that teardown refuses the (replaced) box on an identity
+                # mismatch. Abandoned, not dropped: the receipt stays the record
+                # of what IRIS built there, which an operator who deleted a
+                # still-configured device is the one person who needs.
+                retired = []
+                try:
+                    if receipts is not None:
+                        retired = receipts.retire_device(
+                            did, "device deleted from the fleet")
+                except Exception:
+                    degraded.append("receipts")
+                # Work in flight outlives the device for the same reason: a job
+                # record is keyed on the device id alone, so one left behind
+                # keeps the busy guard armed against the NEXT device registered
+                # under this name -- refusing the opposite action outright and
+                # silently joining the dead job for the same one.
+                stopped = 0
+                try:
+                    if onboard is not None:
+                        halted = onboard.cancel_device(did)
+                        stopped = halted["cancelled"] + halted["aborted"]
+                except Exception:
+                    degraded.append("jobs")
                 result = "ok" if deleted and not degraded else (
                     "fail" if not deleted else "degraded")
                 if deleted:
                     suffix = (", secrets revoked" if revoke_state == "ok"
                               else "")
                     suffix += ", endpoints retained"
+                    suffix += (", %d deployment receipt%s abandoned"
+                               % (len(retired), "" if len(retired) == 1 else "s")
+                               if retired else ", no deployment receipt")
+                    if stopped:
+                        suffix += (", %d in-flight job%s stopped"
+                                   % (stopped, "" if stopped == 1 else "s"))
                     if degraded:
                         suffix += ", partial cleanup: %s" % ",".join(degraded)
                     detail = ("removed (ip %s, model %s)%s"
                               % ((prev or {}).get("device_ip"),
                                  (prev or {}).get("model") or "-", suffix))
-                elif revoke_state == "ok" or purged:
+                elif revoke_state == "ok" or purged or retired:
                     # No fleet row, but the device had durable secrets/state we
                     # revoked/purged — a real retirement, not a no-op.
                     detail = "no fleet row; secrets revoked, state purged"

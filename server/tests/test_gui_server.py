@@ -184,12 +184,20 @@ def test_all_selected_actions_share_one_busy_lock():
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
     assert "var BULK_BTNS = [" in js
+    block = js.split("var BULK_BTNS = [")[1].split("]")[0]
+    actions = re.findall(r"'([a-z-]+)'", block)
     for el in ("onboard-selected", "undeploy-selected", "adopt-selected",
-               "delete-selected", "apply-cred-selected"):
-        block = js.split("var BULK_BTNS = [")[1].split("]")[0]
-        assert el in block, "%s is not covered by the bulk busy lock" % el
-    # every action claims the lock rather than reading another button's state
-    assert js.count("claimSelection()") == 5
+               "delete-selected", "apply-cred-selected", "apply-image-selected"):
+        assert el in actions, "%s is not covered by the bulk busy lock" % el
+    # Every action claims the lock rather than reading another button's state.
+    # Counted against BULK_BTNS itself rather than a fixed number, so a new bulk
+    # action cannot be added without also claiming the lock -- quarantine and
+    # release are the two exceptions, guarded inside bulkQuarantine instead.
+    claimers = [a for a in actions
+                if a not in ("quarantine-selected", "release-selected")]
+    assert js.count("claimSelection()") == len(claimers), (
+        "%d actions but %d claim the lock"
+        % (len(claimers), js.count("claimSelection()")))
     assert "onBtn.disabled" not in js and "unBtn.disabled" not in js
     # a declined confirmation must release the lock, not wedge the toolbar
     assert js.count("setBulkBusy(false); return;") >= 2
@@ -1199,13 +1207,12 @@ def test_device_delete_purges_catalog_state(tmp_path):
                "guest_ip": "10.0.0.3"}
         st, _, _ = _req(host, port, "POST", "/api/devices", dev, headers=hh)
         assert st == 200
-        cat.set_policy("d1", approved_image_id="img1", install_allowed=True)
+        cat.set_policy("d1", approved_image_id="img1")
         cat.record_heartbeat("d1", {"current_image_id": "img1"}, now=1)
         cat.record_telemetry("d1", {"event": "staging-complete"})
         st, _, b = _req(host, port, "DELETE", "/api/devices/d1", headers=hh)
         assert st == 200 and json.loads(b)["deleted"] is True
-        assert cat.get_policy("d1") == {"approved_image_id": None,
-                                        "install_allowed": False}
+        assert cat.get_policy("d1") == {"approved_image_id": None}
         assert cat.get_device("d1") is None
         assert cat.get_telemetry("d1") == []
         st, _, _ = _req(host, port, "POST", "/api/devices", dev, headers=hh)
@@ -1309,8 +1316,12 @@ def test_assign_image_sets_policy(tmp_path):
         st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
                         {"image_id": "img1"}, headers=hh)
         assert st == 200
-        assert cat.get_policy("d1")["approved_image_id"] == "img1"
-        assert cat.get_policy("d1")["install_allowed"] is False   # stage-only
+        pol = cat.get_policy("d1")
+        assert pol["approved_image_id"] == "img1"
+        # Approval IS the whole policy. This used to assert install_allowed was
+        # False; the flag gated nothing, was never read, and reading as False
+        # beside an approved image implied a second gate an operator had to open.
+        assert pol == {"approved_image_id": "img1"}
         # unknown image -> 400
         st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
                         {"image_id": "nope"}, headers=hh)
@@ -1875,7 +1886,8 @@ def test_inband_onboard_is_one_click_and_drives_inband_renderer(tmp_path):
         stop()
 
 
-def _serve_router(tmp_path, run_fn, preflight_fn=None, mint_fn=None, device=None):
+def _serve_router(tmp_path, run_fn, preflight_fn=None, mint_fn=None, device=None,
+                  audit_path=None):
     """Receipt-backed server with one C8000V router inventory row."""
     import deployment_receipts
     os.makedirs(tmp_path, exist_ok=True)
@@ -1896,7 +1908,8 @@ def _serve_router(tmp_path, run_fn, preflight_fn=None, mint_fn=None, device=None
         fleet, creds, host_ip="10.9.9.9", mint_fn=mint_fn or (lambda d: "TOK"),
         run_fn=run_fn, receipts=receipts, preflight_fn=preflight_fn)
     srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, creds, None,
-                                 onboard, certfile=None, receipts=receipts)
+                                 onboard, certfile=None, receipts=receipts,
+                                 audit_path=audit_path)
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return "127.0.0.1", port, fleet, receipts, srv.shutdown
@@ -3896,8 +3909,11 @@ def test_device_delete_details_ok_and_fail(tmp_path):
         dels = [e for e in _read_audit_lines(audit_path)
                 if e.get("event") == "device_delete"]
         assert dels[0]["result"] == "ok"
+        # the receipt outcome is named too: it used to be the one thing delete
+        # changed (or in this case did not change) without saying so
         assert dels[0]["detail"] == (
-            "removed (ip 10.0.0.1, model -), endpoints retained")
+            "removed (ip 10.0.0.1, model -), endpoints retained, "
+            "no deployment receipt")
         # deleting a device that never existed is a FAIL, not a phantom ok
         assert dels[1]["result"] == "fail"
         assert dels[1]["detail"] == "no such device"
@@ -5985,3 +6001,402 @@ def test_deploy_log_histogram_bins_and_the_list_takes_a_time_window(tmp_path):
                     headers={"Cookie": ck})[0] == 400
     finally:
         stop()
+
+
+# ---------------------------------------------------------------------------
+# A deleted device must not bequeath its deployment to the next device
+# registered under the same id, and a replaced box must always be escapable.
+# ---------------------------------------------------------------------------
+
+_ROUTER_ROW = {"device_id": "r1", "device_ip": "192.0.2.10", "model": "C8000V",
+               "management_type": "router-nat", "vpg_number": "10",
+               "nat_interface": "GigabitEthernet1", "app_ip": "10.8.0.2",
+               "app_mask": "255.255.255.252", "app_gateway": "10.8.0.1",
+               "credential_profile_id": "lab"}
+
+_OWNED = [{"kind": k, "ownership": "iris-created"} for k in (
+    "virtualportgroup", "eem-applets", "agent-files", "logging-discriminator",
+    "pki-trustpoint", "http-client-trustpoint", "iox-global",
+    "file-prompt-quiet", "guestshell", "nat-acl", "nat-overload",
+    "nat-static", "nat-outside-marking")]
+
+
+def _stranded_receipt(receipts, resources=None):
+    """A receipt in the state a died-mid-teardown router is left in."""
+    rid = receipts.create({
+        "controller_id": "iris", "device_id": "r1", "inventory_revision": 1,
+        "plan_hash": "b" * 64,
+        "resolved": {"platform": "router", "attachment": "router-nat",
+                     "device_ip": "192.0.2.10", "vpg_number": "10",
+                     "nat_interface": "GigabitEthernet1", "app_ip": "10.8.0.2",
+                     "app_mask": "255.255.255.252", "app_gateway": "10.8.0.1"},
+        "preflight": {"status": "passed", "device_identity": "OLDBOARDID"},
+        "resources": _OWNED if resources is None else resources})["receipt_id"]
+    receipts.transition(rid, "applying")
+    receipts.transition(rid, "needs-reconcile")
+    return rid
+
+
+def test_delete_abandons_receipts_so_a_readded_device_can_onboard(tmp_path, monkeypatch):
+    """Delete must be terminal for a device id.
+
+    Every other per-device store is purged on delete -- assignment, heartbeat,
+    telemetry, pull directive, report ledger -- but the receipt store was never
+    touched, and it is the one that gates onboard. A device deleted and added
+    back under the same id therefore inherited its predecessor's deployment:
+    onboard refused with "undeploy it first", and the undeploy it named refused
+    the box, because a rebuilt VM keeps the id and the address but reports a new
+    board ID. Neither door opened, and delete was no way out either."""
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, fleet, receipts, stop = _serve_router(tmp_path, lambda p, e, on: 0)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        rid = _stranded_receipt(receipts)
+
+        st, _, b = _req(host, port, "POST", "/api/devices/r1/onboard", {}, headers=hh)
+        assert st == 409 and b"deployment receipt" in b
+
+        st, _, b = _req(host, port, "DELETE", "/api/devices/r1", headers=hh)
+        assert st == 200, b
+        assert receipts.get(rid)["state"] == "abandoned"
+        assert receipts.recoverable_for_device("r1") is None
+
+        st, _, b = _req(host, port, "POST", "/api/devices", dict(_ROUTER_ROW),
+                        headers=hh)
+        assert st == 200, b
+        st, _, b = _req(host, port, "POST", "/api/devices/r1/onboard", {},
+                        headers=hh)
+        assert st == 200, b
+    finally:
+        stop()
+
+
+def test_delete_audit_names_the_receipt_outcome(tmp_path, monkeypatch):
+    """The delete audit line already names what it revoked and what it retained.
+    Receipts were the one thing it changed silently."""
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    audit_path = str(tmp_path / "audit.jsonl")
+    host, port, fleet, receipts, stop = _serve_router(
+        tmp_path, lambda p, e, on: 0, audit_path=audit_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        _stranded_receipt(receipts)
+        assert _req(host, port, "DELETE", "/api/devices/r1", headers=hh)[0] == 200
+        with open(audit_path) as stream:
+            events = [json.loads(line) for line in stream if line.strip()]
+        deletes = [e for e in events if e.get("event") == "device_delete"]
+        assert deletes, "no device_delete audit event"
+        assert "1 deployment receipt abandoned" in deletes[0]["detail"], \
+            deletes[0]["detail"]
+    finally:
+        stop()
+
+
+def test_forced_undeploy_is_honoured_when_a_receipt_exists(tmp_path):
+    """Force is the rescue path for a box that no longer matches its receipt --
+    which is exactly a case where a receipt EXISTS. It used to be consulted only
+    on the no-receipt branch, so a replaced device ran the full receipted
+    teardown, hit the recipe's identity guard on the new board ID, and failed
+    every single time with no way to ask for anything else."""
+    seen = {}
+
+    def run_fn(p, e, on):
+        seen.update(e)
+        return 0
+
+    host, port, fleet, receipts, stop = _serve_router(tmp_path, run_fn)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        rid = _stranded_receipt(receipts)
+
+        st, _, b = _req(host, port, "POST", "/api/devices/r1/undeploy",
+                        {"force": True}, headers=hh)
+        assert st == 200, b
+        _wait_onboard_job(host, port, ck, json.loads(b)["job_id"])
+        assert seen.get("IRIS_FORCE_AGENT_ONLY") == "1", (
+            "a forced undeploy ran the receipted teardown instead")
+        # and the receipt it deliberately did not use as authority is retired,
+        # or the very next onboard is refused on it again.
+        assert receipts.get(rid)["state"] == "abandoned"
+        assert receipts.recoverable_for_device("r1") is None
+    finally:
+        stop()
+
+
+def test_forced_undeploy_retires_receipts_only_on_success(tmp_path):
+    """A failure to reach the device is not proof that the receipt is wrong.
+    Voiding a healthy deployment's receipt on a network blip would strand it the
+    way this path exists to prevent, so retirement waits for a clean exit."""
+    host, port, fleet, receipts, stop = _serve_router(
+        tmp_path, lambda p, e, on: 1)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        rid = _stranded_receipt(receipts)
+        st, _, b = _req(host, port, "POST", "/api/devices/r1/undeploy",
+                        {"force": True}, headers=hh)
+        assert st == 200, b
+        _wait_onboard_job(host, port, ck, json.loads(b)["job_id"])
+        assert receipts.get(rid)["state"] != "abandoned"
+    finally:
+        stop()
+
+
+def test_forced_undeploy_escapes_multiple_recoverable_receipts(tmp_path):
+    """Two recoverable receipts refuse onboard, undeploy and adopt alike, and
+    nothing in the product resolved them. The refusal now names force, and force
+    reaches the teardown instead of being rejected ahead of it."""
+    host, port, fleet, receipts, stop = _serve_router(tmp_path, lambda p, e, on: 0)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        first = _stranded_receipt(receipts)
+        second = _stranded_receipt(receipts)
+
+        st, _, b = _req(host, port, "POST", "/api/devices/r1/undeploy", {},
+                        headers=hh)
+        assert st == 409
+        assert b"multiple recoverable receipts" in b and b"force" in b
+
+        st, _, b = _req(host, port, "POST", "/api/devices/r1/undeploy",
+                        {"force": True}, headers=hh)
+        assert st == 200, b
+        _wait_onboard_job(host, port, ck, json.loads(b)["job_id"])
+        assert receipts.get(first)["state"] == "abandoned"
+        assert receipts.get(second)["state"] == "abandoned"
+    finally:
+        stop()
+
+
+def test_repeated_unusable_receipt_undeploy_stays_409(tmp_path):
+    """The 409 path marks the receipt needs-reconcile on its way out. Doing that
+    to a receipt already in needs-reconcile is not a legal transition, and the
+    raise escaped do_POST -- so the first retry answered with a traceback and no
+    JSON body instead of the reason."""
+    host, port, fleet, receipts, stop = _serve_router(tmp_path, lambda p, e, on: 0)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        _stranded_receipt(receipts, resources=[])   # proves ownership of nothing
+        for attempt in range(3):
+            st, _, b = _req(host, port, "POST", "/api/devices/r1/undeploy", {},
+                            headers=hh)
+            assert st == 409, "attempt %d answered %s" % (attempt, st)
+            assert b"does not prove ownership" in b
+    finally:
+        stop()
+
+
+# ---------------------------------------------------------------------------
+# Devices table: status filter parity, bulk image assignment, details drawer
+# ---------------------------------------------------------------------------
+
+def _webroot(name):
+    with open(os.path.join(gui_server.WEBROOT, name)) as stream:
+        return stream.read()
+
+
+def test_every_status_the_cell_can_show_is_filterable():
+    """The Status filter must offer every state the Status cell can render.
+
+    The filter used to derive its own status from a three-branch copy of the
+    cell's logic, so a device reading "onboarding…", "placement failed" or
+    "copying to bootflash:" could not be selected at all, and asking for
+    "enrolled" quietly swept them in. One derivation now feeds both, and the
+    dropdown is generated from it -- this guards that they cannot drift."""
+    app_js = _webroot("app.js")
+    body = app_js.split("function deviceStatus(d, devNow) {", 1)[1]
+    body = body.split("\n  function ", 1)[0]
+    rendered = set(re.findall(r"key: '([a-z-]+)'", body))
+    assert rendered, "deviceStatus() returned no recognisable keys"
+
+    options = app_js.split("var DEVICE_STATUS_OPTIONS = [", 1)[1].split("];", 1)[0]
+    offered = set(re.findall(r"\['([a-z-]+)',", options))
+    assert rendered <= offered, (
+        "renderable but not filterable: %s" % sorted(rendered - offered))
+    # "offline" is a modifier on top of the cell, not one of its branches
+    assert offered - rendered == {"offline"}, sorted(offered - rendered)
+    # the filter compares the shared key, never a second derivation
+    assert "deviceStatus(d, devNow).key !== f.status" in app_js
+    assert "deviceStatusKey" not in app_js
+    # and the markup no longer carries a hand-written subset
+    html = _webroot("index.html")
+    picker = html.split('id="dev-filter-status"', 1)[1].split("</select>", 1)[0]
+    assert picker.count("<option") == 1, "status options are hardcoded again"
+
+
+def test_image_can_be_assigned_to_the_selection():
+    """Assigning an image was per-row only, which does not scale past a handful
+    of devices -- and the devices table gained filters precisely so an operator
+    could act on a subset. The bulk picker shares the selected-action lock with
+    every other bulk action, or a delete could fire mid-assignment."""
+    html = _webroot("index.html")
+    app_js = _webroot("app.js")
+    assert 'id="image-selected"' in html
+    assert 'id="apply-image-selected"' in html
+    assert "'apply-image-selected'" in app_js.split("BULK_BTNS", 1)[1][:400], \
+        "bulk image assign is not under the shared selected-action lock"
+    handler = app_js.split("getElementById('apply-image-selected')", 1)[1][:900]
+    assert "claimSelection()" in handler
+    assert "'/assign'" in handler
+    # unassigning is a deliberate choice, not what an untouched picker does
+    assert "__unassign" in handler and "__unassign" in app_js
+
+
+def test_deployment_details_open_in_a_right_hand_drawer():
+    """It used to render below the devices table, so opening it on a fleet of
+    any size put the details off-screen and made the operator scroll away from
+    the row they had just clicked."""
+    html = _webroot("index.html")
+    css = _webroot("styles.css")
+    app_js = _webroot("app.js")
+    panel = html.split('id="deploy-info-panel"', 1)[1].split(">", 1)[0]
+    assert 'class="drawer"' in panel, panel
+    drawer = css.split(".drawer {", 1)[1].split("}", 1)[0]
+    assert "position:fixed" in drawer and "right:0" in drawer
+    assert "top:0" in drawer and "bottom:0" in drawer
+    # reduced motion is honoured, like the deployment-log drawer
+    assert ".drawer { transition:none; }" in css
+    # and Escape gets the operator out without aiming for the close control
+    assert "closeDeployInfo" in app_js
+    escape = app_js.split("function closeDeployInfo", 1)[1][:700]
+    assert "'Escape'" in escape
+
+
+# ---------------------------------------------------------------------------
+# In-flight work and deployment logs must not outlive the device they describe
+# ---------------------------------------------------------------------------
+
+def _serve_router_jobs(tmp_path, run_fn=None, now_fn=None):
+    """_serve_router, but handing back the onboard service, its log dir and an
+    audit file so a test can plant in-flight work and persisted logs."""
+    import deployment_receipts
+    os.makedirs(tmp_path, exist_ok=True)
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
+    state = str(tmp_path / "state")
+    audit_path = str(tmp_path / "audit.jsonl")
+    log_dir = os.path.join(state, "deploy-logs")
+    kw = {} if now_fn is None else {"now_fn": now_fn}
+    fleet = gui_fleet.FleetStore(state, **kw)
+    fleet.upsert(dict(_ROUTER_ROW))
+    creds = gui_creds.CredentialStore(secrets_path)
+    creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
+    receipts = deployment_receipts.ReceiptStore(state)
+    onboard = gui_onboard.OnboardService(
+        fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
+        run_fn=run_fn or (lambda p, e, on: 0), receipts=receipts,
+        log_dir=log_dir)
+    srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, creds, None,
+                                 onboard, certfile=None, receipts=receipts,
+                                 audit_path=audit_path)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return ("127.0.0.1", port, fleet, onboard, log_dir, audit_path,
+            srv.shutdown)
+
+
+def _plant_deploy_log(log_dir, device_id, finished_at, action="onboard",
+                      job_id="deadbeefcafe0001"):
+    os.makedirs(log_dir, exist_ok=True)
+    name = "%s-%s-%s-%s.log" % (finished_at, device_id, action, job_id)
+    with open(os.path.join(log_dir, name), "w") as stream:
+        stream.write(
+            "# job=%s device=%s action=%s state=done rc=0 queued_at=%s "
+            "started_at=%s finished_at=%s platform=router\n"
+            % (job_id, device_id, action, finished_at - 2, finished_at - 1,
+               finished_at))
+        stream.write("done\n")
+    return name
+
+
+def test_delete_stops_the_device_s_in_flight_jobs(tmp_path, monkeypatch):
+    """A job record is keyed on the bare device id, and delete never looked at
+    one. A job left behind kept the busy guard armed against the NEXT device
+    registered under that name: the opposite action was refused 409, the same
+    action silently joined the dead job, and it cleared only after the job
+    deadline -- two hours."""
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    host, port, fleet, onboard, _log_dir, audit_path, stop = _serve_router_jobs(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        onboard._jobs["ghost"] = {
+            "id": "ghost", "device_id": "r1", "action": "onboard",
+            "state": "queued", "queued_at": 1, "started_at": None,
+            "finished_at": None, "lines": [], "returncode": None,
+            "_line_bytes": 0, "_log_truncated": False, "receipt_id": None,
+            "resolved": None, "env_extra": None}
+
+        assert _req(host, port, "DELETE", "/api/devices/r1", headers=hh)[0] == 200
+
+        assert onboard._jobs["ghost"]["state"] == "cancelled"
+        with open(audit_path) as stream:
+            events = [json.loads(l) for l in stream if l.strip()]
+        detail = [e for e in events if e["event"] == "device_delete"][0]["detail"]
+        assert "1 in-flight job stopped" in detail, detail
+
+        # and the re-added device is not busy
+        assert _req(host, port, "POST", "/api/devices", dict(_ROUTER_ROW),
+                    headers=hh)[0] == 200
+        st, _, b = _req(host, port, "POST", "/api/devices/r1/undeploy",
+                        {"force": True}, headers=hh)
+        assert st == 200, b
+    finally:
+        stop()
+
+
+def test_deploy_logs_flag_a_previous_device_s_runs(tmp_path):
+    """Logs deliberately survive a delete -- they are the record of what ran.
+    So a rebuilt box added back under the same name inherited its
+    predecessor's history and the console showed it as the new device's own."""
+    clock = [1000]
+    host, port, fleet, onboard, log_dir, _audit, stop = _serve_router_jobs(
+        tmp_path, now_fn=lambda: clock[0])
+    try:
+        ck, _csrf = _auth(host, port)
+        old = _plant_deploy_log(log_dir, "r1", 500, job_id="aaaaaaaaaaaa0001")
+        recent = _plant_deploy_log(log_dir, "r1", 1500, job_id="bbbbbbbbbbbb0002")
+
+        _, _, b = _req(host, port, "GET", "/api/deploy-logs?device_id=r1",
+                       headers={"Cookie": ck})
+        by_file = {l["file"]: l for l in json.loads(b)["logs"]}
+
+        assert by_file[old]["previous_registration"] is True
+        assert by_file[recent]["previous_registration"] is False
+        # kept, never hidden: the run happened, just to a different machine
+        assert len(by_file) == 2
+    finally:
+        stop()
+
+
+def test_deploy_logs_flag_nothing_without_a_registration_stamp(tmp_path):
+    """Devices registered before the stamp existed have none. Guessing would be
+    worse than saying nothing, so nothing is flagged."""
+    host, port, fleet, onboard, log_dir, _audit, stop = _serve_router_jobs(tmp_path)
+    try:
+        ck, _csrf = _auth(host, port)
+        # a row as it looked before the stamp existed
+        with open(fleet.path) as stream:
+            raw = json.load(stream)
+        raw["devices"]["r1"].pop("registered_at", None)
+        with open(fleet.path, "w") as stream:
+            json.dump(raw, stream)
+        _plant_deploy_log(log_dir, "r1", 500, job_id="cccccccccccc0003")
+
+        _, _, b = _req(host, port, "GET", "/api/deploy-logs?device_id=r1",
+                       headers={"Cookie": ck})
+        entries = json.loads(b)["logs"]
+        assert entries and all("previous_registration" not in e for e in entries)
+    finally:
+        stop()
+
+
+def test_previous_registration_logs_are_labelled_in_the_console():
+    app_js = _webroot("app.js")
+    assert "previous_registration" in app_js
+    block = app_js.split("previous_registration", 1)[1][:400]
+    assert "previous device" in block

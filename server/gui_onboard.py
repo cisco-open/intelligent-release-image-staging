@@ -744,7 +744,7 @@ class OnboardService:
             return False
 
     def start(self, device_id, action="onboard", resolved=None, prepare=None,
-              pre_apply=None, env_extra=None):
+              pre_apply=None, env_extra=None, on_success=None):
         """Create a job and run the action's script on a daemon thread.
         Returns the job id immediately. action is "onboard"
         (the platform's install recipe: device-install.sh, device/iox/install.sh
@@ -753,6 +753,12 @@ class OnboardService:
         device/router-uninstall.sh). At most max_concurrent
         installers run at once; beyond that a job stays in a bounded work queue
         until a worker is free or cancel_queued() flips it to "cancelled".
+
+        on_success() (optional) is called once the script exits 0, for caller
+        bookkeeping that must not happen until the box is actually clean. Its
+        exceptions are swallowed: the job already succeeded, and a bookkeeping
+        failure must not restate that as a failure. Like prepare(), it is never
+        registered when this start joins an already-active same-action job.
 
         prepare() (optional) is called EXACTLY ONCE, under the job lock, only
         when a genuinely new job is registered — never when this start joins an
@@ -773,6 +779,13 @@ class OnboardService:
                 "queued_at": int(self._now()),
                 "started_at": None, "finished_at": None, "receipt_id": None,
                 "resolved": resolved, "env_extra": env_extra}
+        # Reap BEFORE the busy guard, not after it. The reaper used to run
+        # further down, past every path that returns or raises — so it could
+        # only ever fire on a start() for some OTHER device, and never for the
+        # one actually stuck. A device whose job hung was refused for the whole
+        # _JOB_DEADLINE window with no way to clear it, which is exactly the
+        # strand the reaper exists to prevent.
+        self.reap_overdue_jobs()
         with self._lock:
             # Never run two scripts against the same device at once: the same
             # action again (double-click, overlapping batches) joins the
@@ -789,14 +802,6 @@ class OnboardService:
             # Only now, holding the lock and past the dedup guard, do we mint the
             # receipt — so exactly one receipt exists per genuinely started job.
             job["receipt_id"] = prepare() if prepare else None
-            for _stale in self._reap_overdue(self._now()):
-                self._jobs[_stale]["state"] = "error"
-                self._jobs[_stale]["finished_at"] = int(self._now())
-                self._jobs[_stale]["rc"] = -1
-                self._append_locked(
-                    self._jobs[_stale],
-                    "[job exceeded %ds deadline; marked failed so the device is "
-                    "not left permanently busy]" % _JOB_DEADLINE)
             self._evict_old(self._now())
             self._jobs[job_id] = job
 
@@ -962,6 +967,17 @@ class OnboardService:
                     self._clear_state(device_id)
                 except Exception:
                     pass   # a bookkeeping failure must never fail the job
+            # Same contract for the caller's own success bookkeeping. A forced
+            # teardown retires its receipts here rather than at submit time:
+            # force means "that receipt does not describe this box", but a
+            # transient failure to reach the device is not proof of that, and
+            # voiding a healthy deployment's receipt on a network blip would
+            # strand it exactly the way this whole path exists to prevent.
+            if rc == 0 and on_success is not None:
+                try:
+                    on_success()
+                except Exception:
+                    pass   # as above: never fail a job that already succeeded
             if rc != 0:
                 self._transition_or_note(job_id, receipt_id, "needs-reconcile")
             elif action == "onboard":
@@ -1211,6 +1227,72 @@ class OnboardService:
             if not self._transition_or_note(jid, receipt_id, "removed"):
                 self._append(jid, "cancelled job receipt could not be retired")
         return n
+
+    def reap_overdue_jobs(self):
+        """Fail every job past its deadline, with the SAME bookkeeping an
+        ordinary finish gets.
+
+        The old inline version wrote a ``rc`` key that no reader looks at (they
+        all read ``returncode``), never went through _finish, and so left the
+        installer handle in self._procs, wrote no persisted log, and emitted no
+        ``*_finished`` audit event — a job could fail with nothing anywhere
+        saying so. Going through _finish fixes all four.
+
+        Takes the lock itself and does the log/audit I/O outside it, so start()
+        can call this before its busy guard.
+
+        A genuinely hung worker may still return later and finish the job a
+        second time. That is deliberate and predates this: the second finish
+        records the real outcome, and recording it twice beats a job that stays
+        non-terminal forever."""
+        with self._lock:
+            overdue = self._reap_overdue(self._now())
+            for jid in overdue:
+                # Claim it while still holding the lock: _reap_overdue only
+                # considers jobs with no finished_at, so stamping one here stops
+                # a concurrent reap from failing the same job twice. _finish
+                # overwrites this with the real stamp a moment later.
+                self._jobs[jid]["finished_at"] = int(self._now())
+                self._append_locked(
+                    self._jobs[jid],
+                    "[job exceeded %ds deadline; marked failed so the device is "
+                    "not left permanently busy]" % _JOB_DEADLINE)
+        for jid in overdue:
+            self._finish(jid, "error", -1)
+        return overdue
+
+    def cancel_device(self, device_id):
+        """Stop everything in flight for *device_id*: queued jobs are
+        cancelled, a running installer is signalled. Returns
+        {"cancelled": n, "aborted": n}.
+
+        Called when the device leaves the fleet. A job record outlives the
+        device — it is keyed on the id alone — so without this a job left
+        behind by a deleted device keeps the busy guard armed against the NEXT
+        device registered under that id: the opposite action is refused 409 and
+        the same action silently joins the dead job, which reads as a click
+        that did nothing. It self-healed only after _JOB_DEADLINE.
+
+        Queued jobs are cancelled through the same path the console's cancel
+        uses, so their receipts are retired too."""
+        with self._lock:
+            queued = [jid for jid, j in self._jobs.items()
+                      if j.get("device_id") == device_id
+                      and j["state"] == "queued"]
+            running = [jid for jid, j in self._jobs.items()
+                       if j.get("device_id") == device_id
+                       and j["state"] == "running"]
+        cancelled = self.cancel_queued(job_ids=set(queued)) if queued else 0
+        aborted = 0
+        for jid in running:
+            # Best effort: a legacy runner that never reports its process
+            # cannot be signalled, and the job then ages out on the deadline.
+            try:
+                if self.abort(jid):
+                    aborted += 1
+            except Exception:
+                pass
+        return {"cancelled": cancelled, "aborted": aborted}
 
     def _reap_overdue(self, now):
         """Fail any job that has been running past the deadline.

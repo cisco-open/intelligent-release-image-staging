@@ -9,6 +9,7 @@ import json
 import os
 import re
 import tempfile
+import time
 
 import secrets_store
 
@@ -203,9 +204,28 @@ def _legacy_like(record):
 
 
 class FleetStore:
-    def __init__(self, state_dir):
+    def __init__(self, state_dir, now_fn=time.time):
         os.makedirs(state_dir, exist_ok=True)
         self.path = os.path.join(state_dir, "fleet.json")
+        self._now = now_fn
+
+    def _registration_stamp(self, previous):
+        """When this device id was registered, stamped once at creation.
+
+        A device that is deleted and added back is a DIFFERENT device wearing a
+        familiar name -- routinely a rebuilt or replaced box. Everything else
+        keyed on the bare id was made to stop outliving the device it described;
+        persisted deployment logs cannot be, because they are the forensic
+        record. So they stay, and this stamp is what lets a reader tell which
+        registration each one belongs to: a log that finished before this device
+        was registered was written about its predecessor."""
+        prior = (previous or {}).get("registered_at")
+        try:
+            if prior:
+                return int(prior)
+        except (TypeError, ValueError):
+            pass
+        return int(self._now())
 
     def _read(self):
         try:
@@ -280,6 +300,7 @@ class FleetStore:
             else:
                 raise ValueError("management_type must be routed, inband, router-routed, "
                                  "router-nat, or legacy_routed")
+            normalized["registered_at"] = self._registration_stamp(previous)
             data["devices"][did] = normalized
             data["revision"] += 1
             _atomic_write_json(self.path, data)
@@ -340,10 +361,15 @@ class FleetStore:
         with secrets_store.store_lock(self.path):
             data = self._read()
             for record in records:
-                if record["device_id"] in data["devices"]:
+                previous = data["devices"].get(record["device_id"])
+                if previous is not None:
                     updated += 1
                 else:
                     new += 1
+                # A re-import REPLACES the row wholesale, so carry the
+                # registration stamp across explicitly or every CSV import
+                # would look like a fresh registration of the whole fleet.
+                record["registered_at"] = self._registration_stamp(previous)
                 data["devices"][record["device_id"]] = record
             if records:
                 data["revision"] += 1

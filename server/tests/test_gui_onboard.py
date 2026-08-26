@@ -1906,3 +1906,90 @@ def test_preflight_is_required_on_every_platform():
         assert result.get("status") != "not-required", \
             "%s still skips the collision preflight" % platform
     assert seen == {"router": True, "guestshell": True, "iox": True}
+
+
+# ---------------------------------------------------------------------------
+# An overdue job must not keep the device it is stuck on busy, and a device
+# that leaves the fleet must not bequeath its in-flight work to a namesake.
+# ---------------------------------------------------------------------------
+
+def _stuck_job(svc, device_id="d1", action="onboard", state="running",
+               started_at=1000):
+    jid = "stuck-" + device_id + "-" + action
+    svc._jobs[jid] = {
+        "id": jid, "device_id": device_id, "action": action, "state": state,
+        "queued_at": started_at, "started_at": started_at, "finished_at": None,
+        "lines": [], "returncode": None, "_line_bytes": 0,
+        "_log_truncated": False, "receipt_id": None, "resolved": None,
+        "env_extra": None}
+    return jid
+
+
+def test_overdue_job_is_reaped_before_the_busy_guard_runs(tmp_path):
+    """The reaper used to run AFTER the busy guard, past every path that
+    returns or raises -- so it could only ever fire during a start() for some
+    OTHER device, never the one actually stuck. A hung job therefore refused
+    its own device for the whole deadline window with no way to clear it."""
+    svc = _svc(lambda *a, **k: 0, now_fn=lambda: 1000.0 + gui_onboard._JOB_DEADLINE + 5)
+    jid = _stuck_job(svc, "d1", action="undeploy")
+
+    # the opposite action on the same device: refused outright before the fix
+    new_id = svc.start("d1", action="onboard")
+
+    assert new_id != jid
+    assert svc._jobs[jid]["state"] == "error"
+
+
+def test_reaped_job_records_the_key_every_reader_uses(tmp_path):
+    """It wrote an "rc" key. Every reader -- get_job, the console, the persisted
+    log header -- reads "returncode", so the failure carried no exit status
+    anywhere it could be seen."""
+    svc = _svc(lambda *a, **k: 0, now_fn=lambda: 1000.0 + gui_onboard._JOB_DEADLINE + 5)
+    jid = _stuck_job(svc)
+    svc.reap_overdue_jobs()
+
+    job = svc.get_job(jid)
+    assert job["state"] == "error"
+    assert job["returncode"] == -1
+    assert "rc" not in job, "the stray key is back"
+
+
+def test_reaped_job_is_persisted_and_audited(tmp_path):
+    """Bypassing _finish meant a reaped job wrote no log and emitted no
+    *_finished event: it failed with nothing anywhere saying so."""
+    events = []
+    svc = _svc(lambda *a, **k: 0,
+               now_fn=lambda: 1000.0 + gui_onboard._JOB_DEADLINE + 5,
+               log_dir=str(tmp_path / "deploy-logs"),
+               audit_fn=lambda **kw: events.append(kw))
+    jid = _stuck_job(svc)
+    assert svc.reap_overdue_jobs() == [jid]
+
+    logs = os.listdir(str(tmp_path / "deploy-logs"))
+    assert len(logs) == 1, logs
+    with open(os.path.join(str(tmp_path / "deploy-logs"), logs[0])) as stream:
+        header = stream.readline()
+    assert "rc=-1" in header and "state=error" in header
+    assert [e for e in events if e.get("event") == "onboard_finished"], events
+    # and the installer handle is released rather than leaked
+    assert jid not in svc._procs
+
+
+def test_cancel_device_stops_queued_and_running_work():
+    """A job record is keyed on the device id alone, so one left behind by a
+    deleted device keeps the busy guard armed against the next device
+    registered under that name."""
+    svc = _svc(lambda *a, **k: 0)
+    queued = _stuck_job(svc, "d1", action="onboard", state="queued")
+    other = _stuck_job(svc, "d2", action="onboard", state="queued")
+
+    result = svc.cancel_device("d1")
+
+    assert result["cancelled"] == 1
+    assert svc._jobs[queued]["state"] == "cancelled"
+    assert svc._jobs[other]["state"] == "queued", "another device was touched"
+
+
+def test_cancel_device_is_a_no_op_for_an_unknown_device():
+    svc = _svc(lambda *a, **k: 0)
+    assert svc.cancel_device("never-existed") == {"cancelled": 0, "aborted": 0}
