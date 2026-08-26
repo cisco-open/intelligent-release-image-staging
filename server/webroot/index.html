@@ -143,12 +143,10 @@
             <option value="quarantined">quarantined</option>
             <option value="not-quarantined">not quarantined</option>
           </select>
+          <!-- Options are generated in app.js from DEVICE_STATUS_OPTIONS, the
+               same list the Status cell derives from. -->
           <select id="dev-filter-status" aria-label="Filter by status">
             <option value="">Status: any</option>
-            <option value="deployed">deployed</option>
-            <option value="enrolled">enrolled</option>
-            <option value="not-enrolled">not enrolled</option>
-            <option value="offline">offline</option>
           </select>
           <button class="linkish" id="dev-filter-clear">clear filters</button>
           <span class="muted push" id="dev-filter-count"></span>
@@ -168,13 +166,16 @@
           <div class="menu-wrap">
             <button class="btn ghost" id="undeploy-menu-btn" aria-expanded="false">Undeploy ▾</button>
             <div class="menu" id="undeploy-pop" hidden>
-              <label class="muted"><input type="checkbox" id="undeploy-force"> Force (device has no deployment receipt)</label>
+              <label class="muted"><input type="checkbox" id="undeploy-force"> Force (no usable deployment receipt)</label>
               <div class="help-row muted menu-note">
-                Use only when a device is stranded: an onboard that died before its
-                receipt was written leaves a router that cannot be undeployed,
-                adopted, or re-onboarded. Force removes the IRIS agent footprint
-                only — the VirtualPortGroup and NAT are left untouched, because
-                without a receipt there is no proof IRIS created them.
+                Use when a device is stranded — an onboard that died before its
+                receipt was written, or a box that was rebuilt or replaced, so the
+                receipt names hardware that is no longer there and the teardown
+                refuses it on an identity mismatch. Force skips the receipt
+                entirely and removes the IRIS agent footprint only: the
+                VirtualPortGroup and NAT are left untouched, because nothing here
+                proves IRIS created them. Any receipt for the device is abandoned
+                once the teardown succeeds, so it can be onboarded again.
               </div>
               <button class="btn menu-close" id="undeploy-selected">Start undeploy</button>
             </div>
@@ -186,6 +187,10 @@
           <span class="joined">
             <select id="cred-selected"><option value="">— credential for selected —</option></select>
             <button class="btn ghost" id="apply-cred-selected">Apply</button>
+          </span>
+          <span class="joined">
+            <select id="image-selected"><option value="">— image for selected —</option></select>
+            <button class="btn ghost" id="apply-image-selected">Apply</button>
           </span>
           <button class="btn danger push" id="delete-selected">Delete…</button>
         </div>
@@ -229,17 +234,25 @@
           <thead><tr><th><input type="checkbox" id="mark-all"></th><th>Device</th><th>IP</th><th>Model</th><th>Management type</th><th>Platform</th><th>Credential</th><th>Assigned image</th><th>Telemetry</th><th>Peer policy</th><th>Status</th></tr></thead>
           <tbody id="dev-rows"></tbody>
         </table>
-        <div id="deploy-info-panel" hidden>
-          <h3>Deployment details <span id="di-dev" class="muted"></span></h3>
-          <p class="muted" id="di-note"></p>
-          <table class="tbl" id="di-tbl"><tbody id="di-rows"></tbody></table>
-          <h3>Deployment logs</h3>
-          <table class="tbl" id="di-log-tbl">
-            <thead><tr><th>Finished</th><th>Action</th><th>Result</th><th>Size</th><th></th></tr></thead>
-            <tbody id="di-log-rows"></tbody>
-          </table>
-          <pre class="log" id="di-log-text" hidden></pre>
-          <p><button class="btn ghost" id="di-close">Close</button></p>
+        <!-- Slides in from the RIGHT, like the deployment-log drawer. It used
+             to be appended below the devices table, so opening it on a fleet of
+             any size pushed the details off-screen and made the operator scroll
+             away from the row they had just clicked. -->
+        <div id="deploy-info-panel" class="drawer" hidden aria-label="Deployment details">
+          <div class="drawer-head">
+            <span>Deployment details <span id="di-dev" class="mono"></span></span>
+            <button class="btn ghost" id="di-close" aria-label="Close deployment details">✕</button>
+          </div>
+          <div class="drawer-body">
+            <p class="muted" id="di-note"></p>
+            <table class="tbl" id="di-tbl"><tbody id="di-rows"></tbody></table>
+            <h3>Deployment logs</h3>
+            <table class="tbl" id="di-log-tbl">
+              <thead><tr><th>Finished</th><th>Action</th><th>Result</th><th>Size</th><th></th></tr></thead>
+              <tbody id="di-log-rows"></tbody>
+            </table>
+            <pre class="log" id="di-log-text" hidden></pre>
+          </div>
         </div>
         <div id="batch-panel" hidden>
           <h3>Onboarding batch <span id="batch-summary" class="muted"></span></h3>

@@ -216,6 +216,28 @@ body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-
 .doc .warn strong { color:#8a4b06; }
 
 
+/* Right-hand drawers. Both the deployment-log viewer and the per-device
+   deployment details open beside the list they were opened from, rather than
+   below it: a panel appended under a long table puts its content off-screen,
+   and the operator has to scroll away from the row they clicked to read it. */
+.drawer { position:fixed; top:0; right:0; bottom:0; width:min(720px, 92vw);
+  z-index:60; display:flex; flex-direction:column; background:var(--panel, #fff);
+  border-left:1px solid var(--line, #d7dee8); box-shadow:-8px 0 24px rgba(11,37,69,.18);
+  transform:translateX(100%); transition:transform .18s ease; }
+.drawer:not([hidden]) { transform:translateX(0); }
+/* A class selector outranks the UA stylesheet's [hidden]{display:none}. */
+.drawer[hidden] { display:none; }
+.drawer-head { display:flex; align-items:center; justify-content:space-between;
+  gap:10px; padding:10px 12px; border-bottom:1px solid var(--line, #d7dee8);
+  font-weight:600; }
+.drawer-body { flex:1; overflow:auto; padding:12px 14px; }
+.drawer-body h3:first-child { margin-top:0; }
+.drawer-body .log { max-height:45vh; overflow:auto; }
+
+@media (prefers-reduced-motion: reduce) {
+  .drawer { transition:none; }
+}
+
 /* Deployment-log drawer: slides in from the RIGHT so the list it was opened
    from stays where the operator left it, instead of being pushed off screen
    by a panel appended below the table. */

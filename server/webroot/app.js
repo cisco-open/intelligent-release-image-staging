@@ -47,13 +47,83 @@
     };
   }
 
-  // Same derivations the row renderer uses, so a filter can never disagree
-  // with the cell the operator is reading.
-  function deviceStatusKey(d, devNow) {
+  // ONE derivation of the Status cell, read by the row renderer AND by the
+  // filter. It used to be written twice, and the filter's copy knew only three
+  // of the eleven states the cell can actually show: a device reading
+  // "onboarding…", "placement failed" or "copying to bootflash:" could not be
+  // picked from the Status filter at all, and asking for "enrolled" silently
+  // swept them in. Returning the label and the class from the same place is
+  // what makes the two structurally unable to disagree.
+  //
+  // Order matters and mirrors the cell exactly: job-aware states come FIRST,
+  // because right after an onboard the agent needs minutes to bootstrap before
+  // its first heartbeat, and without them the row reads "not enrolled" and
+  // looks like the onboard did nothing.
+  var DEVICE_STATUS_OPTIONS = [
+    ['onboarding', 'onboarding'],
+    ['undeploying', 'undeploying'],
+    ['waiting-heartbeat', 'waiting for heartbeat'],
+    ['onboard-failed', 'onboard failed'],
+    ['undeploy-failed', 'undeploy failed'],
+    ['deployed', 'deployed'],
+    ['placement-failed', 'placement failed'],
+    ['copying', 'copying to IOS storage'],
+    ['staging', 'staging (other)'],
+    ['enrolled', 'enrolled'],
+    ['not-enrolled', 'not enrolled'],
+    ['offline', 'offline (no recent heartbeat)']
+  ];
+  function deviceStatus(d, devNow) {
+    // "no heartbeat since the job finished" — the job outcome is the freshest
+    // truth we have about this device
+    var jobFresh = d.onboard_finished_at &&
+      (!d.last_seen || d.last_seen < d.onboard_finished_at);
+    if (d.onboard_state === 'queued' || d.onboard_state === 'running') {
+      return d.onboard_action === 'undeploy'
+        ? { key: 'undeploying', label: 'undeploying…', cls: 'badge badge-running' }
+        : { key: 'onboarding', label: 'onboarding…', cls: 'badge badge-running' };
+    }
+    if (d.onboard_state === 'done' && d.onboard_action === 'onboard' && jobFresh) {
+      return { key: 'waiting-heartbeat', label: 'waiting for heartbeat',
+               cls: 'badge badge-queued' };
+    }
+    if (d.onboard_state === 'error' && jobFresh) {
+      return d.onboard_action === 'undeploy'
+        ? { key: 'undeploy-failed', label: 'undeploy failed', cls: 'badge badge-fail' }
+        : { key: 'onboard-failed', label: 'onboard failed', cls: 'badge badge-fail' };
+    }
+    // "deployed" = the assigned image is staged and verified on the box.
     if (d.stage_state === 'ready' && d.current_image_id &&
-        d.current_image_id === d.assigned_image_id) return 'deployed';
-    if (d.last_seen) return 'enrolled';
-    return 'not-enrolled';
+        d.current_image_id === d.assigned_image_id) {
+      return { key: 'deployed', label: 'deployed', cls: 'badge badge-ok' };
+    }
+    if (d.stage_error) {
+      return { key: 'placement-failed', label: 'placement failed',
+               cls: 'badge badge-fail', detail: d.stage_error };
+    }
+    if (d.stage_state === 'transferring_to_ios') {
+      return { key: 'copying', label: 'copying to ' + (d.target_fs || 'IOS storage'),
+               cls: 'badge badge-running' };
+    }
+    if (d.stage_state) {
+      return { key: 'staging', label: d.stage_state, cls: 'badge badge-running' };
+    }
+    if (d.last_seen) {
+      return { key: 'enrolled', label: 'enrolled', cls: 'badge badge-queued' };
+    }
+    return { key: 'not-enrolled', label: 'not enrolled', cls: 'muted' };
+  }
+  function deviceStatusHtml(d, devNow) {
+    var st = deviceStatus(d, devNow);
+    var title = st.detail ? ' title="' + esc(st.detail) + '"' : '';
+    var html = '<span class="' + st.cls + '"' + title + '>' + esc(st.label) + '</span>';
+    if (st.detail) {
+      html += ' <span class="muted"' + title + '>' + esc(st.detail) + '</span>';
+    }
+    if (deviceIsOffline(d, devNow)) {
+      html += ' <span class="muted" style="font-size:10px">offline</span>';
+    }
+    return html;
   }
   function deviceIsOffline(d, devNow) {
     return !!(d.last_seen && (devNow - d.last_seen) >= 600);
@@ -84,8 +154,10 @@
       if (q !== f.peer) return false;
     }
     if (f.status) {
+      // "offline" is a modifier on top of whatever the cell says (a device can
+      // read "deployed" and still be stale), so it stays its own choice.
       if (f.status === 'offline') { if (!deviceIsOffline(d, devNow)) return false; }
-      else if (deviceStatusKey(d, devNow) !== f.status) return false;
+      else if (deviceStatus(d, devNow).key !== f.status) return false;
     }
     return true;
   }
@@ -396,6 +468,7 @@
     credOpts = cr.ok ? ((await cr.json()).profiles || []) : [];
     if (mine !== devicesRefreshGeneration) return;
     syncCredSelected();
+    syncImageSelected();
     LAST_DEVICES = devs;
     LAST_DEV_NOW = devNow;
     syncDeviceFilterOptions();
@@ -441,39 +514,7 @@
       ].map(function (o) {
         return '<option value="' + esc(o[0]) + '"' + (o[0] === platVal ? ' selected' : '') + '>' + esc(o[1]) + '</option>';
       }).join('');
-      // "deployed" = the assigned image is staged and verified on the box;
-      // anything else shows the raw stage_state, or enrollment/liveness.
-      // Job-aware states come FIRST: right after an onboard the agent needs
-      // minutes to bootstrap before its first heartbeat — without these the
-      // row reads "not enrolled" and looks like the onboard did nothing.
-      var fresh = d.last_seen && (devNow - d.last_seen) < 600;
-      // "no heartbeat since the job finished" — the job outcome is the
-      // freshest truth we have about this device
-      var jobFresh = d.onboard_finished_at && (!d.last_seen || d.last_seen < d.onboard_finished_at);
-      var status;
-      if (d.onboard_state === 'queued' || d.onboard_state === 'running') {
-        status = '<span class="badge badge-running">' +
-          (d.onboard_action === 'undeploy' ? 'undeploying…' : 'onboarding…') + '</span>';
-      } else if (d.onboard_state === 'done' && d.onboard_action === 'onboard' && jobFresh) {
-        status = '<span class="badge badge-queued">waiting for heartbeat</span>';
-      } else if (d.onboard_state === 'error' && jobFresh) {
-        status = '<span class="badge badge-fail">' +
-          (d.onboard_action === 'undeploy' ? 'undeploy' : 'onboard') + ' failed</span>';
-      } else if (d.stage_state === 'ready' && d.current_image_id && d.current_image_id === d.assigned_image_id) {
-        status = '<span class="badge badge-ok">deployed</span>';
-      } else if (d.stage_error) {
-        status = '<span class="badge badge-fail" title="' + esc(d.stage_error) + '">placement failed</span>' +
-          ' <span class="muted" title="' + esc(d.stage_error) + '">' + esc(d.stage_error) + '</span>';
-      } else if (d.stage_state === 'transferring_to_ios') {
-        status = '<span class="badge badge-running">copying to ' + esc(d.target_fs || 'IOS storage') + '</span>';
-      } else if (d.stage_state) {
-        status = '<span class="badge badge-running">' + esc(d.stage_state) + '</span>';
-      } else if (d.last_seen) {
-        status = '<span class="badge badge-queued">enrolled</span>';
-      } else {
-        status = '<span class="muted">not enrolled</span>';
-      }
-      if (d.last_seen && !fresh) status += ' <span class="muted" style="font-size:10px">offline</span>';
+      var status = deviceStatusHtml(d, devNow);
       var attachment = d.management_type || d.network_attachment || 'legacy';
       var attachmentDetail = attachment.indexOf('router-') === 0
         ? (' / VPG' + (d.vpg_number == null ? '' : d.vpg_number))
@@ -636,8 +677,18 @@
       return;
     }
     tbody.innerHTML = logs.map(function (l) {
+      // Deployment logs deliberately outlive a delete — they are the record of
+      // what actually ran. So a device deleted and added back under the same
+      // name inherits its predecessor's runs, and without this they read as its
+      // own history. The run is kept and shown; it is just never presented as
+      // belonging to the device currently holding the name.
+      var prev = l.previous_registration
+        ? ' <span class="badge badge-off" title="This run finished before the' +
+          ' current device was registered under this name, so it belongs to a' +
+          ' previous device.">previous device</span>'
+        : '';
       return '<tr data-file="' + esc(l.file) + '"><td>' + esc(fmtDate(l.finished_at)) +
-        '</td><td>' + esc(l.action || '') + '</td><td>' + deployLogResult(l) +
+        prev + '</td><td>' + esc(l.action || '') + '</td><td>' + deployLogResult(l) +
         '</td><td>' + esc(fmtSize(l.size)) + '</td>' +
         '<td><button class="linkish dlog-view">view</button></td></tr>';
     }).join('');
@@ -648,9 +699,16 @@
       });
     });
   }
-  document.getElementById('di-close').addEventListener('click', function () {
+  function closeDeployInfo() {
     deployInfoDev = null;
     document.getElementById('deploy-info-panel').hidden = true;
+  }
+  document.getElementById('di-close').addEventListener('click', closeDeployInfo);
+  // Escape closes it, the same as the deployment-log drawer: a drawer that
+  // covers part of the table needs a way out that is not aiming for the ✕.
+  document.addEventListener('keydown', function (e) {
+    var panel = document.getElementById('deploy-info-panel');
+    if (e.key === 'Escape' && panel && !panel.hidden) closeDeployInfo();
   });
   // ---- Per-job onboard log panels ----
   // One panel PER JOB in #onboard-logs — its own <pre>, its own EventSource,
@@ -968,6 +1026,7 @@
   // running job — onboard/undeploy previously guarded only each other.
   var BULK_BTNS = ['onboard-selected', 'undeploy-selected', 'adopt-selected',
                    'delete-selected', 'apply-cred-selected',
+                   'apply-image-selected',
                    'quarantine-selected', 'release-selected'];
   var bulkBusy = false;
   function setBulkBusy(busy) {
@@ -1000,6 +1059,23 @@
       }).join('');
     if (keep) sel.value = keep;
   }
+  // The bulk image picker is populated from the same imageIds the per-row
+  // "Assigned image" dropdowns use, so the two can never offer different
+  // catalogs. Assigning by selection is how an operator stages a filtered
+  // subset -- doing it row by row was the only way before, which does not
+  // scale past a handful of devices.
+  function syncImageSelected() {
+    var sel = document.getElementById('image-selected');
+    if (!sel) return;
+    var keep = sel.value;
+    sel.innerHTML = '<option value="">— image for selected —</option>' +
+      '<option value="__unassign">— unassign —</option>' +
+      imageIds.map(function (id) {
+        return '<option value="' + esc(id) + '">' + esc(id) + '</option>';
+      }).join('');
+    if (keep) sel.value = keep;
+    if (sel.value !== keep) sel.value = '';   // the kept image is gone
+  }
   function delWarning(ids) {
     // Removing inventory does NOT undeploy: an onboarded device keeps running
     // its agent with no Console record of it, so say so before it happens.
@@ -1007,6 +1083,9 @@
       ids.join(', ') + '\n\nThis removes the Console record only — it does NOT ' +
       'undeploy. An onboarded device keeps its agent and staged image with no ' +
       'inventory entry left to manage it. Undeploy first if that is what you want.' +
+      '\n\nAny deployment receipt is abandoned: it is kept as the record of what ' +
+      'IRIS built on the box, but it stops authorising a teardown, so re-adding ' +
+      'this device id later starts from scratch.' +
       '\n\nThis cannot be undone.';
   }
   // Run *fn* for each selected id, reporting per-device refusals rather than
@@ -1041,6 +1120,16 @@
     });
   });
   // ---- Devices: filter wiring ----
+  // The Status options are generated from the same list the cell derives from,
+  // so a state can never be renderable but unfilterable.
+  (function () {
+    var sel = document.getElementById('dev-filter-status');
+    if (!sel) return;
+    sel.innerHTML = '<option value="">Status: any</option>' +
+      DEVICE_STATUS_OPTIONS.map(function (o) {
+        return '<option value="' + esc(o[0]) + '">' + esc(o[1]) + '</option>';
+      }).join('');
+  })();
   ['dev-filter-q', 'dev-filter-attachment', 'dev-filter-platform',
    'dev-filter-cred', 'dev-filter-telemetry', 'dev-filter-peer',
    'dev-filter-status'].forEach(function (id) {
@@ -1130,6 +1219,20 @@
       return jpost('/api/devices/' + encodeURIComponent(id) + '/adopt',
                    { acknowledge_adopt: true });
     });
+  });
+  document.getElementById('apply-image-selected').addEventListener('click', async function () {
+    var raw = document.getElementById('image-selected').value;
+    if (!raw) { devStatus.textContent = 'Pick an image for the selection first.'; return; }
+    var ids = claimSelection();
+    if (!ids) return;
+    // "— unassign —" is a distinct choice, not the empty placeholder: clearing
+    // an assignment is a real action and must not be what an unset picker does.
+    var imageId = raw === '__unassign' ? '' : raw;
+    await forSelected(imageId ? 'Assigned ' + imageId + ' to' : 'Unassigned', ids,
+      function (id) {
+        return jpost('/api/devices/' + encodeURIComponent(id) + '/assign',
+                     { image_id: imageId });
+      });
   });
   document.getElementById('apply-cred-selected').addEventListener('click', async function () {
     var ids = claimSelection();
