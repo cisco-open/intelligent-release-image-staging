@@ -12,6 +12,8 @@
   counters -- dict: announces_total
   reports_stored -- int: device telemetry reports currently stored
               across ALL devices (flat gauge; no per-device labels)
+  swarm_bytes -- peer-ledger byte attribution, either the ledger's
+              `torrent_totals()` mapping or a list of equivalent rows
 
 Aggregate metrics are labelled by image only (info_hash + image name) to keep
 Prometheus cardinality low; per-device detail goes to the OTLP logs pipeline,
@@ -57,9 +59,23 @@ _SWARM_GAUGES = (
 )
 
 
+def _ledger_rows(swarm_bytes):
+    """Normalise the peer ledger's `torrent_totals()` mapping into rows.
+
+    A list is accepted too, so a caller that has already inner-joined the
+    image catalog (as `_seeder_torrent_metrics` does) can pass its own rows.
+    The catalog join is the caller's, not ours: this module never learns what
+    an image id means, it only prints the label it is handed."""
+    if isinstance(swarm_bytes, dict):
+        return [dict(rec, info_hash=info_hash)
+                for info_hash, rec in sorted(swarm_bytes.items())
+                if isinstance(rec, dict)]
+    return [row for row in swarm_bytes if isinstance(row, dict)]
+
+
 def render(swarm, seeder, counters, reports_stored=0, transfers=None,
            extras=None, otlp_health=None, peer_status=None,
-           seeder_torrents=None):
+           seeder_torrents=None, swarm_bytes=None):
     out = []
 
     def family(name, mtype, help_text):
@@ -116,6 +132,72 @@ def render(swarm, seeder, counters, reports_stored=0, transfers=None,
         out.append("iris_swarm_completed_total%s %d"
                    % (_labels(s["image"], s["info_hash"]),
                       _int(s["completed"])))
+
+    # --- swarm byte attribution (peer ledger) ---
+    # AGGREGATE ONLY. The edges these numbers are summed from are keyed by peer
+    # IP, and a peer IP is a per-device label: it belongs in the OTLP logs
+    # pipeline (iris.swarm.peer_bytes), never in a Prometheus label. What
+    # survives the aggregation is how much the origin sent (exact), how much
+    # of that we could trace to a specific device, and how much went out to a
+    # recipient we could not name.
+    #
+    # Counters, not gauges, because the operator requirement is that a finished
+    # transfer keeps its history: a swarm that goes idle stops advancing these
+    # series, it does not blank the panel drawing them.
+    if swarm_bytes is not None:
+        rows = _ledger_rows(swarm_bytes)
+
+        def _row_labels(row):
+            return _labels(row.get("image") or row.get("image_id") or "",
+                           row.get("info_hash", ""))
+
+        family("iris_origin_sent_bytes_total", "counter",
+               "Bytes the origin seeder has sent for this torrent: the exact "
+               "total, counted at the sender (monotonic: aria2's gauge is "
+               "banked on control-state loss)")
+        for row in rows:
+            out.append("iris_origin_sent_bytes_total%s %d"
+                       % (_row_labels(row), _int(row.get("origin_total"))))
+        family("iris_peer_attributed_bytes_total", "counter",
+               "Origin bytes we could trace to a specific device, summed "
+               "over devices. Traced from aria2's per-connection counters, "
+               "which we can only read while the connection is open")
+        for row in rows:
+            out.append("iris_peer_attributed_bytes_total%s %d"
+                       % (_row_labels(row), _int(row.get("attributed"))))
+        family("iris_peer_unattributed_bytes_total", "counter",
+               "Origin bytes whose recipient we could not identify: the "
+               "connection opened and closed between two samples, or the peer "
+               "was refused at the ledger's cap. The bytes did leave the "
+               "origin; only the recipient is unknown. Difference of two "
+               "counters, so tracing a device late can step it down -- graph "
+               "the value, not rate()")
+        for row in rows:
+            # Prefer the ledger's own residue; a hand-built row that omits it
+            # still gets the honest difference rather than a silent zero.
+            residue = row.get("unattributed")
+            if residue is None:
+                residue = _int(row.get("origin_total")) \
+                    - _int(row.get("attributed"))
+            # Floored here as well as in the ledger: the exposition must never
+            # print a negative byte count, whoever assembled the row.
+            out.append("iris_peer_unattributed_bytes_total%s %d"
+                       % (_row_labels(row), max(0, _int(residue))))
+        family("iris_swarm_peers_attributed", "gauge",
+               "Distinct devices we could trace a nonzero byte total to for "
+               "this torrent")
+        for row in rows:
+            out.append("iris_swarm_peers_attributed%s %d"
+                       % (_row_labels(row), _int(row.get("peers_attributed"))))
+        # Without this the residue is unreadable: it cannot be told apart from
+        # missed short-lived connections once the cap starts refusing peers.
+        family("iris_swarm_peers_saturated", "gauge",
+               "1 when the ledger's per-torrent peer cap refused new peers, "
+               "so some untraced bytes went to peers the cap turned away "
+               "rather than to connections that ended between samples")
+        for row in rows:
+            out.append("iris_swarm_peers_saturated%s %d"
+                       % (_row_labels(row), 1 if row.get("saturated") else 0))
 
     # --- live transfer streaming (canonical low-cardinality families,
     #     design §10.9). Ambiguous "active"/"stalled" and the old

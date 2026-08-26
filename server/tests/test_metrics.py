@@ -200,3 +200,137 @@ class TestPerSignalExportHealthMetrics:
         assert "iris_peer_enforcement_applied_revision 6" in text
         assert "iris_peer_enforcement_desired_ips 3" in text
         assert "iris_peer_enforcement_health 1" in text
+
+
+class TestSwarmByteAttribution:
+    # Peer-ledger byte attribution. AGGREGATE ONLY: the per-peer edges behind
+    # these numbers are keyed by IP and live in the OTLP logs pipeline. The
+    # figures below are the lab run -- 7 C8000V routers pulling one 928 MiB
+    # image from a single origin -- with the 3 s-sampling capture rate (73.3%)
+    # that leaves the rest as honest residue.
+    ORIGIN_TOTAL = 4842614784          # 4618.5 MiB the origin actually served
+    ATTRIBUTED = 3549636637            # 73.3% pinned to a named peer at 3 s
+    RESIDUE = ORIGIN_TOTAL - ATTRIBUTED
+
+    TOTALS = {
+        "aa11": {"image_id": "c8000v-17.15.1a", "image": "c8000v.bin",
+                 "attributed": ATTRIBUTED, "origin_total": ORIGIN_TOTAL,
+                 "unattributed": RESIDUE, "peers": 7, "peers_attributed": 7,
+                 "saturated": False, "updated_at": 1000},
+    }
+
+    def _render(self, swarm_bytes=None):
+        return metrics.render([], {}, {}, swarm_bytes=(
+            self.TOTALS if swarm_bytes is None else swarm_bytes))
+
+    def _lines(self, text, family):
+        return [ln for ln in text.splitlines()
+                if ln.startswith(family + "{") or ln.startswith(family + " ")]
+
+    def test_family_names_types_and_labels(self):
+        text = self._render()
+        for name, mtype in (("iris_origin_sent_bytes_total", "counter"),
+                            ("iris_peer_attributed_bytes_total", "counter"),
+                            ("iris_peer_unattributed_bytes_total", "counter"),
+                            ("iris_swarm_peers_attributed", "gauge"),
+                            ("iris_swarm_peers_saturated", "gauge")):
+            assert "# HELP %s " % name in text, name
+            assert "# TYPE %s %s" % (name, mtype) in text, name
+        labels = '{image="c8000v.bin",info_hash="aa11"}'
+        assert "iris_origin_sent_bytes_total%s %d" % (
+            labels, self.ORIGIN_TOTAL) in text
+        assert "iris_peer_attributed_bytes_total%s %d" % (
+            labels, self.ATTRIBUTED) in text
+        assert "iris_peer_unattributed_bytes_total%s %d" % (
+            labels, self.RESIDUE) in text
+        assert "iris_swarm_peers_attributed%s 7" % labels in text
+        assert "iris_swarm_peers_saturated%s 0" % labels in text
+
+    def test_byte_families_are_counters_so_idle_swarms_keep_history(self):
+        # The operator requirement: a finished transfer must keep its history,
+        # so these are counters and never reset to a gauge-shaped zero.
+        text = self._render()
+        for name in ("iris_origin_sent_bytes_total",
+                     "iris_peer_attributed_bytes_total",
+                     "iris_peer_unattributed_bytes_total"):
+            assert "# TYPE %s counter" % name in text, name
+            assert "# TYPE %s gauge" % name not in text, name
+
+    def test_no_per_peer_labels_on_any_new_family(self):
+        # The design rule at the top of metrics.py: per-device/per-peer detail
+        # never appears here. Every sample of every new family must carry
+        # exactly {image, info_hash} -- no ip, port, peer, device or role.
+        totals = dict(self.TOTALS)
+        totals["bb22"] = {"image": "cat9k.bin", "attributed": 1,
+                          "origin_total": 2, "unattributed": 1,
+                          "peers_attributed": 1, "saturated": True,
+                          # a hostile row: peer detail offered, must be ignored
+                          "ip": "10.1.1.7", "peer": "10.1.1.7:6881",
+                          "device_id": "R7", "peers": {"10.1.1.7": 1}}
+        text = self._render(totals)
+        for family in ("iris_origin_sent_bytes_total",
+                       "iris_peer_attributed_bytes_total",
+                       "iris_peer_unattributed_bytes_total",
+                       "iris_swarm_peers_attributed",
+                       "iris_swarm_peers_saturated"):
+            lines = self._lines(text, family)
+            assert lines, family
+            for line in lines:
+                labels = line[line.index("{") + 1:line.rindex("}")]
+                keys = {part.split("=", 1)[0] for part in labels.split(",")}
+                assert keys == {"image", "info_hash"}, (family, line)
+        assert "10.1.1.7" not in text
+        assert "R7" not in text
+
+    def test_accepts_pre_joined_rows_as_well_as_the_ledger_mapping(self):
+        rows = [{"image": "c8000v.bin", "info_hash": "aa11",
+                 "origin_total": self.ORIGIN_TOTAL,
+                 "attributed": self.ATTRIBUTED,
+                 "unattributed": self.RESIDUE, "peers_attributed": 7}]
+        assert self._render(rows) == self._render()
+
+    def test_image_label_falls_back_to_image_id(self):
+        text = self._render({"aa11": {"image_id": "c8000v-17.15.1a",
+                                      "origin_total": 10, "attributed": 4,
+                                      "unattributed": 6}})
+        assert ('iris_origin_sent_bytes_total{image="c8000v-17.15.1a",'
+                'info_hash="aa11"} 10' in text)
+
+    def test_residue_is_derived_when_the_row_omits_it(self):
+        text = self._render([{"image": "cat9k.bin", "info_hash": "aa11",
+                              "origin_total": 100, "attributed": 30}])
+        assert ('iris_peer_unattributed_bytes_total{image="cat9k.bin",'
+                'info_hash="aa11"} 70' in text)
+
+    def test_residue_never_prints_negative_bytes(self):
+        # Edge counters and the torrent-wide gauge are read at different
+        # instants; a row that catches an edge ahead of the gauge floors at 0.
+        text = self._render([{"image": "cat9k.bin", "info_hash": "aa11",
+                              "origin_total": 10, "attributed": 40,
+                              "unattributed": -30}])
+        assert ('iris_peer_unattributed_bytes_total{image="cat9k.bin",'
+                'info_hash="aa11"} 0' in text)
+
+    def test_saturation_is_visible(self):
+        text = self._render({"aa11": {"image": "cat9k.bin", "origin_total": 9,
+                                      "attributed": 4, "unattributed": 5,
+                                      "peers_attributed": 512,
+                                      "saturated": True}})
+        assert ('iris_swarm_peers_saturated{image="cat9k.bin",'
+                'info_hash="aa11"} 1' in text)
+
+    def test_empty_ledger_still_declares_the_families(self):
+        # Panels must not go blank: the families exist as soon as the ledger
+        # does, even before the first byte is attributed.
+        text = self._render({})
+        assert "# TYPE iris_origin_sent_bytes_total counter" in text
+        assert "iris_origin_sent_bytes_total{" not in text
+
+    def test_absent_when_none(self):
+        text = metrics.render([], {}, {})
+        for name in ("iris_origin_sent_bytes_total",
+                     "iris_peer_attributed_bytes_total",
+                     "iris_peer_unattributed_bytes_total",
+                     "iris_swarm_peers_attributed",
+                     "iris_swarm_peers_saturated"):
+            assert name not in text, name
