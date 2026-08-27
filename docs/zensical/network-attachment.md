@@ -77,7 +77,7 @@ network: the VLAN, its SVI, routes, and VRF.
 ### Inband IOx and the IOS SSH endpoint
 
 Guest Shell runs inside IOS, so it configures the device locally. An **IOx** app
-runs in a container and reaches IOS by SSH-ing to an IOS IP to run `copy /verify`.
+runs in a container and reaches IOS by SSH-ing to an IOS IP to run the placement copy.
 For a routed IOx device that is the IRIS-managed SVI; for an **inband** IOx
 device there is no IRIS SVI, the app connects to the switch's management IP (`device_ip`) by default; an
 optional `ios_ssh_host` overrides that for asymmetric topologies. IRIS adds the
@@ -148,7 +148,7 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
 - **router-nat** rows additionally fill `nat_interface`. `platform=router` is
   required (and selected automatically for a known Catalyst 8000 (C8xxx) model).
 - `ios_ssh_host` is an OPTIONAL advanced override: the IOS endpoint the inband
-  IOx app SSHes to for `copy /verify`. It defaults to the device's management IP
+  IOx app SSHes to for the placement copy. It defaults to the device's management IP
   (`device_ip`), which is on the same existing management VLAN. Only set it for an
   asymmetric topology; Guest Shell never uses it.
 

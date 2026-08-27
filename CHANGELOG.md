@@ -11,6 +11,12 @@ top-level `VERSION` file.
 
 ## [Unreleased]
 
+### Changed
+- Image verification is now the same on every platform: the agent proves integrity by
+  sha256 against the catalog's published value, and placement onto the boot filesystem
+  is attested by exact byte size. The on-device `copy /verify` step is retired; device
+  telemetry reports its state as `not_run`.
+
 ## [2026.08.26]
 
 ### Added

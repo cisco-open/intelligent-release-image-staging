@@ -22,8 +22,8 @@ const workflow = {
   },
   verify: {
     title: "Verify on the device",
-    body: "The agent checks the downloaded file and the device verifies the staged copy before IRIS reports success.",
-    command: "copy /verify <staged-file> <device-storage>:<image>.bin",
+    body: "The agent checks the downloaded file's sha256 against the catalog's known-good value, then copies it to device storage — a plain copy attested by exact byte size.",
+    command: "copy <staged-file> <device-storage>:<image>.bin",
   },
   report: {
     title: "Report staged and stop",
@@ -44,7 +44,7 @@ const paths = {
   },
   iox: {
     title: "Industrial Ethernet IOx",
-    copy: "Package the same staging model as an IOx Docker app and use SSH-to-self for IOS copy and verify commands.",
+    copy: "Package the same staging model as an IOx Docker app and use SSH-to-self for IOS copy commands.",
     items: [
       "Serves operator-built `iris-arm64.tar` from artifacts.",
       "Downloads image pieces through the private swarm.",

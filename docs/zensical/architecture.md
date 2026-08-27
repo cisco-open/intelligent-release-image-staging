@@ -115,8 +115,10 @@ from the read-only image root survives. See
 [Catalog entry fields](reference.md#catalog-entry-fields).
 
 On an IOx device, `/data/iris` is persistent application scratch rather than an
-IOS-visible image destination. After swarm verification, the app hands the file
-to IOS — a disk-speed write through the bind-mounted share where available, an
-scp push on IE-3400 or as the fallback — and IOS performs the final
-`copy /verify`. This keeps signature enforcement and the final filesystem
-write inside IOS.
+IOS-visible image destination. The agent checks the staged file's sha256
+against the catalog's known-good value before hand-off — image authenticity
+itself is established at publish time on the server. The app then hands the
+file to IOS — a disk-speed write through the bind-mounted share where
+available, an scp push on IE-3400 or as the fallback — and IOS performs the
+final placement as a plain copy, which the agent attests by polling for the
+file and confirming it matches the catalog's declared byte size exactly.
