@@ -27,6 +27,15 @@ CFG="$DIR/eem-iris-copyroot.cfg"
   grep -qE 'copy flash:/guest-share/iris/<IMG> flash:<IMG>' "$CFG"
 }
 
+@test "copyroot applet never invokes ANY verify command in an action" {
+  # Broader than the /verify guard below: no applet ACTION may run `verify`
+  # in any form — not `verify /sha512`, not a bare `verify`, not a future
+  # variant. The agent (_agent_reverify_root) is the sole author of the
+  # verdict, and nothing on the box re-hashes the placed copy. This is the
+  # assertion the pre-rewrite suite carried; keep both.
+  ! grep -qE 'cli command "verify' "$CFG"
+}
+
 @test "copyroot applet never runs /verify — the agent is the sole author of the verdict" {
   # The applet makes NO verification claim of its own: no `copy /verify`, no
   # `verify` command at all. The agent (_agent_reverify_root) is the sole
