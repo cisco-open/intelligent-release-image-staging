@@ -331,6 +331,28 @@ def test_csv_reimport_keeps_the_registration_stamp(tmp_path):
     assert fs.get_device("d1")["registered_at"] == 1000
 
 
+def test_csv_reimport_keeps_a_cached_os_family(tmp_path):
+    """os_family is machine-determined, so it is deliberately NOT a CSV column
+    -- an operator typing it would be a new way to lie to the system. But
+    import_csv REPLACES a row wholesale, so without carrying it across, the
+    documented export -> edit -> re-import bulk workflow silently drops the
+    classification and reopens the IOS-XR misroute on the next onboard."""
+    fs = _fs(tmp_path)
+    fs.upsert(dict(_ROUTED, os_family="xr"))
+    header = ",".join(gui_fleet.CSV_V2_COLS)
+    row = ",".join(str(_ROUTED.get(c, "")) for c in gui_fleet.CSV_V2_COLS)
+
+    fs.import_csv(header + "\n" + row + "\n")
+
+    assert fs.get_device("d1")["os_family"] == "xr"
+
+
+def test_os_family_is_not_an_operator_editable_csv_column():
+    # It must stay machine-determined: exported for nobody to edit, imported
+    # from nowhere.
+    assert "os_family" not in gui_fleet.CSV_V2_COLS
+
+
 def test_csv_import_stamps_a_device_it_creates(tmp_path):
     clock = [7000]
     fs = gui_fleet.FleetStore(str(tmp_path), now_fn=lambda: clock[0])

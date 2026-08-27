@@ -373,6 +373,15 @@ class FleetStore:
                 # registration stamp across explicitly or every CSV import
                 # would look like a fresh registration of the whole fleet.
                 record["registered_at"] = self._registration_stamp(previous)
+                # Same reason, different field: os_family is determined from
+                # the device's own 'show version' banner and is deliberately
+                # NOT a CSV column -- an operator typing it would be a new way
+                # to lie to the system. Dropping it on the documented
+                # export -> edit -> re-import round trip would silently reopen
+                # the IOS-XR misroute on the next onboard.
+                family = previous.get("os_family") if isinstance(previous, dict) else None
+                if family:
+                    record["os_family"] = family
                 data["devices"][record["device_id"]] = record
             if records:
                 data["revision"] += 1
