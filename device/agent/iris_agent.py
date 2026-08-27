@@ -763,12 +763,13 @@ def run_once(cfg, deps, state):
                           % (image["filename"], img_id))
             # Place at flash root via NATIVE EEM. The agent templates the
             # IRIS-COPYROOT applet and fires it; the applet clears any stale
-            # same-named leftover, then runs `copy /verify` (copy + Cisco
-            # signature, enforced by IOS in one step — a bad signature fails the
-            # copy and deletes the destination). The agent then polls for the
-            # file at flash root: presence proves THIS attempt's copy/verify
-            # passed. copy_to_root returns False if the file never appears ->
-            # st['copied'] stays False so the next tick retries.
+            # same-named leftover, then runs a plain `copy` — no in-band
+            # signature check. The agent then polls for the file at flash
+            # root and blesses the copy only on presence AND an exact
+            # byte-size match against the catalog's declared size for this
+            # image. copy_to_root returns False if the file never appears or
+            # never reaches the expected size -> st['copied'] stays False so
+            # the next tick retries.
             # Copy gate: placing the flash-root copy needs room for a SECOND
             # full-size image alongside the staged/seeding scratch. On a tight
             # device that fit one image but not two, degrade to keep-seeding-only
@@ -813,7 +814,7 @@ def run_once(cfg, deps, state):
                         return "seeding-only"
                 st.pop("blocked_no_space", None)
                 # Container-mode IOx devices must SCP the completed image into
-                # IOS-visible storage before the final copy /verify. That large
+                # IOS-visible storage before the final placement copy. That large
                 # transfer blocks this agent process, so publish its state first
                 # instead of leaving the Console on ambiguous "staging".
                 now = time.time()
@@ -1581,10 +1582,11 @@ def _share_settings(cfg):
 # for a uid-0 container shell, while 100 MB writes to the CAF-created share
 # root ran at 1.5 GB/s). Isolation therefore comes from a NAME PREFIX: every
 # file IRIS writes or sweeps here starts with "iris-", and operator/CAF files
-# at the root are never touched. copy /verify reads the fixed staged name and
-# writes the REAL image name to the target FS, verifying the Cisco signature
-# from the bytes — the staged name is cosmetic. The swarm seeds from the
-# CAF-persistent stage_dir copy, never from the share.
+# at the root are never touched. The final copy reads the fixed staged name
+# and writes the REAL image name to the target FS — the staged name is
+# cosmetic. Content was already verified by sha256 before staging; the agent
+# attests this placement by exact byte size against the catalog. The swarm
+# seeds from the CAF-persistent stage_dir copy, never from the share.
 _SHARE_PREFIX = "iris-"
 _SHARE_PROBE = "iris-probe.txt"
 _SHARE_STAGE = "iris-staged.bin"
@@ -1594,8 +1596,8 @@ def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
                           copy_direct_fn, emit_fn, cli_execute_fn):
     """Land the downloaded scratch in the bind-mounted app-hosting share
     (C9k: usbflash1:iox_host_data_share, mounted into the container via
-    run-opts -v), then have IOS place it with an INTERNAL disk-to-disk
-    `copy /verify` — no scp, no control-plane punt path, no CoPP ceiling.
+    run-opts -v), then have IOS place it with an INTERNAL disk-to-disk plain
+    `copy` — no scp, no control-plane punt path, no CoPP ceiling.
 
     Everything IRIS writes lives at the share root under the reserved `iris-`
     filename prefix, so the orphan sweep below can never touch operator files
@@ -1615,7 +1617,7 @@ def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
     Returns None when the share cannot be used (unconfigured, not mounted,
     probe failed, or the local copy failed) so the caller falls back to the
     scp push. Otherwise returns copy_direct_fn's bool verdict: an IOS-side
-    `copy /verify` failure AFTER a good probe is FINAL — scp would push the
+    placement failure AFTER a good probe is FINAL — scp would push the
     same bytes. The transient share copy is always removed (the swarm seeds
     from the scratch under stage_dir, not from the share)."""
     if not (share_dir and share_ios_path and os.path.isdir(share_dir)):
@@ -1662,9 +1664,10 @@ def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
         _sweep()
         return None
     try:
-        # copy /verify reads the fixed staged name and writes the REAL image
-        # name to the target FS (the caller's dst); the Cisco signature is
-        # verified from the bytes, so the source name is cosmetic.
+        # The final copy reads the fixed staged name and writes the REAL
+        # image name to the target FS (the caller's dst) — the source name
+        # is cosmetic; the agent attests placement afterward by exact byte
+        # size against the catalog.
         return copy_direct_fn(
             lambda f, target_prefix: "%s/%s" % (share_ios_path, _SHARE_STAGE))
     finally:
@@ -1698,8 +1701,8 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
     # to the container is blocked, so the agent can't write the IOS-visible SD
     # directly. Instead it scp-PUSHES the downloaded scratch to sdflash:guest-share/
     # iris via the device's SCP server (container -> device, the proven direction —
-    # same as the SSH-to-self CLI), then the SSH vty runs
-    # `copy /verify sdflash:guest-share/iris/<img> sdflash:<img>` — byte-identical
+    # same as the SSH-to-self CLI), then the SSH vty runs a plain
+    # `copy sdflash:guest-share/iris/<img> sdflash:<img>` — byte-identical
     # to the C9300 flash:guest-share -> flash: flow. Guest Shell (C9300) writes its
     # scratch via the in-VM mount, so it pushes nothing here.
     _mode = (os.environ.get("IRIS_RUNTIME_MODE")
@@ -1708,8 +1711,8 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
 
     def _push_scratch(fname, target_prefix):
         # create the IOS-side scratch dir (idempotent; file prompt quiet => no
-        # prompt) then scp the downloaded file into it so `copy /verify` has a
-        # source IOS can read.
+        # prompt) then scp the downloaded file into it so the placement copy
+        # has a source IOS can read.
         for d in ("%sguest-share" % target_prefix,
                   "%sguest-share/iris" % target_prefix):
             try:
@@ -1748,8 +1751,8 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
         if _mode == "container" and _transport is not None:
             # C9k container: the SSD share (usbflash1:iox_host_data_share) is
             # bind-mounted at IRIS_SHARE_DIR, so the scratch lands there at
-            # disk speed and IOS places it with an internal disk-to-disk
-            # `copy /verify` — no scp, no CoPP-policed punt traffic. None =
+            # disk speed and IOS places it with an internal disk-to-disk plain
+            # `copy` — no scp, no CoPP-policed punt traffic. None =
             # share unusable -> fall through to the scp push below.
             share_dir, share_ios_path = _share_settings(cfg)
             if share_dir:
@@ -1764,11 +1767,12 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
                 if shared is not None:
                     return shared
             # IE-3x00 / container fallback: push the scratch onto the
-            # IOS-visible SD, then `copy /verify` DIRECTLY over the SSH-to-self
-            # vty. The EEM applet offload is only needed for the C9300 Guest
-            # Shell cli module (can't drive interactive copy); a real vty runs
-            # copy fine, and the EEM `cli command "copy"` action is a no-op on
-            # this platform — so the direct path is both correct and necessary.
+            # IOS-visible SD, then run a plain `copy` DIRECTLY over the
+            # SSH-to-self vty. The EEM applet offload is only needed for the
+            # C9300 Guest Shell cli module (can't drive interactive copy); a
+            # real vty runs copy fine, and the EEM `cli command "copy"` action
+            # is a no-op on this platform — so the direct path is both correct
+            # and necessary.
             try:
                 _push_scratch(fname, target_prefix)
             except Exception as e:

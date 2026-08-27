@@ -37,9 +37,10 @@ def derive_id(filename):
 def digests_file(path, chunk=1 << 20):
     """Return (sha256_hex, sha512_hex) in one pass.
 
-    The agent checks sha256 against the staged file (hashed in Python) and
-    sha512 against the flash-root copy via IOS `verify /sha512` — IOS has
-    /sha512 but not /sha256, hence both."""
+    The agent checks sha256 against the staged file (hashed in Python) as
+    the integrity check. sha512 is not checked on-device — it exists as the
+    join key into Cisco's published Bulk Hash data, matching this image to
+    Cisco's own authoritative hash record at publish time."""
     h256, h512 = hashlib.sha256(), hashlib.sha512()
     with open(path, "rb") as f:
         for block in iter(lambda: f.read(chunk), b""):
