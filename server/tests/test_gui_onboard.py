@@ -536,11 +536,47 @@ def test_probe_resolves_iox_and_caches_model(tmp_path):
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done"
     assert seen["install_path"].endswith("device/iox/install.sh")
-    # The probe closure now also caches os_family alongside the model; the
-    # fake probe_fn here never sets dev["os_family"], so it caches as "".
-    assert {"device_id": "d1", "model": "IE-3400", "os_family": ""} in fleet.upserts
+    assert {"device_id": "d1", "model": "IE-3400"} in fleet.upserts
     # the job line reports the model the probe just found, not a placeholder
     assert any("platform: iox (model IE-3400)" in l for l in job["lines"])
+
+
+def test_probe_does_not_wipe_cached_os_family(tmp_path):
+    # A device previously classified "xr" (however that got recorded) must
+    # keep that classification when a LATER probe finds a model but can't
+    # parse a family from a truncated/unparseable banner. FleetStore.upsert
+    # filters None but keeps "" (server/gui_fleet.py:291), so writing
+    # os_family="" here would silently erase the "xr" tag on disk and
+    # reopen the ASR9k -> guestshell misroute this guard exists to close.
+    #
+    # Calls _resolve() directly rather than through svc.start(): once a
+    # device's os_family is cached as "xr", resolve_platform's entry guard
+    # refuses it before probe() ever runs again, so the full onboard flow
+    # can never exercise this closure a second time for that device. This
+    # isolates the closure's own invariant -- it must never overwrite a
+    # cached family with an empty one -- independent of that guard.
+    fleet = _iox_fleet()
+    fleet._d["d1"]["os_family"] = "xr"  # already known, from a prior probe
+    creds = _iox_creds()
+    # This call's dev has no cached model/family of its own -- the same
+    # shape probe() always receives on a device's first classification.
+    dev = {"device_id": "d1", "credential_profile_id": "lab"}
+    env = {"DEVICE_IP": "10.0.0.1"}
+
+    def fake_probe(d, e):
+        # Found a model, but the banner didn't parse to a family this time.
+        return "ASR-9906"
+
+    svc = gui_onboard.OnboardService(
+        fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
+        run_fn=lambda *a, **k: 0, probe_fn=fake_probe,
+        artifacts_dir=str(tmp_path))
+    svc._resolve("d1", dev, env, "onboard")
+    assert {"device_id": "d1", "model": "ASR-9906"} in fleet.upserts
+    assert not any("os_family" in u for u in fleet.upserts)
+    # The fake fleet's upsert merges onto the stored dict same as the real
+    # one (minus the None/"" filtering) -- the cached family must survive.
+    assert fleet._d["d1"]["os_family"] == "xr"
 
 
 def test_probe_returning_none_errors_without_running(tmp_path):

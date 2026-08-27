@@ -750,8 +750,15 @@ class OnboardService:
         def probe(d):
             model = self._probe(d, env)
             if model:
-                self.fleet.upsert({"device_id": device_id, "model": model,
-                                   "os_family": d.get("os_family") or ""})
+                # Only record a family we actually determined. Writing "" here
+                # would overwrite a previously cached family (upsert filters
+                # None, not empty strings) and silently reopen the misroute
+                # this guard exists to close.
+                record = {"device_id": device_id, "model": model}
+                family = d.get("os_family")
+                if family:
+                    record["os_family"] = family
+                self.fleet.upsert(record)
                 dev["model"] = model   # so the job line reports what was found
             return model
 
