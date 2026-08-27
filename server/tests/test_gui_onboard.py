@@ -439,6 +439,36 @@ def test_resolve_platform_refuses_xr_discovered_by_probe():
         assert "IOS-XR" in str(exc)
 
 
+def test_resolve_platform_probes_ambiguous_model_for_family():
+    # A cached model with no os_family short-circuits on the model map on
+    # every later onboard. ^ASR spans both IOS-XE and IOS-XR, so a cached
+    # 'ASR-9906' with no classified family must not resolve to guestshell --
+    # it must consult the probe first and refuse once the probe learns 'xr'.
+    dev = {"device_id": "d1", "model": "ASR-9906"}
+
+    def probe(d):
+        d["os_family"] = "xr"
+
+    try:
+        gui_onboard.resolve_platform(dev, probe=probe)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "IOS-XR" in str(exc)
+
+
+def test_resolve_platform_unambiguous_model_does_not_probe():
+    # C9300 is never IOS-XR -- probing it would be a needless SSH round-trip
+    # on every onboard.
+    dev = {"device_id": "d1", "model": "C9300-48UXM"}
+    calls = []
+
+    def probe(d):
+        calls.append(d)
+
+    assert gui_onboard.resolve_platform(dev, probe=probe) == "guestshell"
+    assert calls == []
+
+
 # --- parse_os_family ----------------------------------------------------
 
 def test_parse_os_family_xe_banner():

@@ -84,6 +84,11 @@ _MODEL_PLATFORMS = (          # first match wins; case-insensitive prefix regexe
     (r"^(ISR|ASR|CSR)", "guestshell"),  # legacy router mapping; not yet supported
 )
 
+# ASR1000/ISR/CSR are IOS-XE, but ASR9000 is IOS-XR: this prefix spans both
+# families, so a model match alone cannot decide which recipe applies. Only
+# the show version banner can.
+_FAMILY_AMBIGUOUS_MODEL = re.compile(r"^(ISR|ASR|CSR)", re.IGNORECASE)
+
 # Model families that take the arm64 IOx package (installer defaults: iris-arm64.tar,
 # AppGigabitEthernet1/1, sdflash:). Used ONLY after platform has resolved to iox.
 _ARM_IOX_MODELS = (r"^IE-?3", r"^IR1[018]")
@@ -159,6 +164,14 @@ def resolve_platform(dev, probe=None, os_family=None):
     if model:
         platform = _match(model)
         if platform:
+            if not os_family and probe is not None \
+                    and _FAMILY_AMBIGUOUS_MODEL.match(model):
+                # A cached model short-circuits here on every later onboard, so
+                # a device whose family was never classified would stay
+                # misrouted forever. Ask the device before trusting the prefix.
+                probe(dev)
+                if dev.get("os_family") == "xr":
+                    _refuse_xr(device_id)
             return platform
         raise ValueError(
             "cannot determine platform for %s: unrecognized model %r -- set "
@@ -255,7 +268,8 @@ def _default_probe(dev, env, repo_root):
     DEVICE_USER/DEVICE_PASS already resolved into env. Returns the model string
     ('' when it cannot be read) and records the operating-system family on
     ``dev['os_family']`` as a side effect -- the return value stays a plain
-    string because a caller at :831 uses it as a truthiness reachability test.
+    string because the reachability check in OnboardService.start()'s worker
+    uses it as a truthiness reachability test.
     ANY failure -> '' (never raises) -- an unreachable device just falls
     through to the resolve_platform ValueError telling the operator to set
     platform/model."""
