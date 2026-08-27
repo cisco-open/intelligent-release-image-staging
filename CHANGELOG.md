@@ -11,6 +11,12 @@ top-level `VERSION` file.
 
 ## [Unreleased]
 
+### Fixed
+- Device onboarding now reads the operating-system family from the `show version`
+  banner. An IOS-XR device is refused with an explanatory error instead of being
+  handed an IOS-XE recipe — previously an ASR 9000 matched the same `^ASR`
+  prefix as an IOS-XE ASR 1000 and was onboarded as a Guest Shell device.
+
 ## [2026.08.26]
 
 ### Added
