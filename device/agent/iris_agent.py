@@ -57,6 +57,25 @@ _ROOT_COPY_BACKOFF_MAX = 60 * 60
 # never truthy/falsy-compared, so it can't be mistaken for True/False.
 ROOT_COPY_RUNNING_IMAGE_UNKNOWN = object()
 
+# Sentinel returned by every copy_to_root path that gives up BEFORE any IOS
+# command runs: both running-image refusals, an scp scratch push that raised, an
+# applet run that never fired, a delete-first that raised. It exists because the
+# terminal-state reclaim (_reclaim_failed_root_copy) is only safe when THIS
+# attempt's `delete /force` actually executed — that delete is what proves a file
+# sitting at the image name is our own partial. After a pre-IOS failure nothing
+# was deleted, so a file at that name is the OPERATOR'S, and on the
+# running-image-refusal path it is the running image itself: deleting it strands
+# a bundle-mode box in rommon at the next reload.
+#
+# Retry/backoff accounting treats this EXACTLY like plain False — the attempt
+# counts, the backoff advances, copy_terminal still eventually fires, because an
+# operator must still be shown the terminal state. The only difference is that it
+# never sets st["ios_copy_started"], the flag that arms the reclaim.
+#
+# Identity-checked (`is`), NEVER truthy/falsy-compared: it is a plain object() and
+# therefore TRUTHY, so any success branch must exclude it explicitly first.
+ROOT_COPY_NOT_ATTEMPTED = object()
+
 Deps = collections.namedtuple(
     "Deps", "catalog emit ios aria_add file_size verify free_bytes version "
             "copy_to_root purge_others reclaim root_present remove_stage "
@@ -527,7 +546,8 @@ def _protect_set(image, state):
 
 
 def _reset_copy_failures(st):
-    for key in ("copy_attempts", "copy_next_ts", "copy_terminal", "stage_error"):
+    for key in ("copy_attempts", "copy_next_ts", "copy_terminal", "stage_error",
+                "ios_copy_started"):
         st.pop(key, None)
 
 
@@ -547,17 +567,54 @@ def _reclaim_failed_root_copy(deps, target_prefix, image):
     what looks like a perfectly good image. state['root_file'] is only set on
     SUCCESS, so no other cleanup path owns this file.
 
-    WHY THIS IS SAFE TO DELETE (do not regress): every placement attempt
-    begins with `delete /force <FS><filename>` — the IRIS-COPYROOT applet's
-    action 020 on the Guest Shell path, the vty command on the direct path.
-    So a file present at that name when the attempt fails can only be the
-    partial THIS attempt just wrote. It cannot be an operator's own image:
-    theirs was already gone before the copy started.
+    WHY A DELETE HERE CAN BE SAFE: a placement attempt that reached IOS begins
+    with `delete /force <FS><filename>` — the IRIS-COPYROOT applet's action 020
+    on the Guest Shell path, the vty command on the direct path. So a file
+    present at that name after such an attempt fails can only be the partial
+    THAT attempt wrote.
+
+    THAT INVARIANT DOES NOT HOLD UNCONDITIONALLY, and this function must never
+    assume it. Attempts that fail BEFORE any IOS command — the running-image
+    refusals, an scp push that raised, an applet run that never fired — delete
+    nothing, so a file at that name is the operator's, and on the
+    running-image-refusal path it IS the running image. Two independent layers
+    keep that file safe:
+
+      Layer 1 (caller): run_once only calls this when at least one attempt in
+        this image's cycle came back a genuine post-delete-first False
+        (st["ios_copy_started"]); ROOT_COPY_NOT_ATTEMPTED never sets it.
+      Layer 2 (below, unconditional): re-read the running image and refuse if
+        the target matches its basename, or if the running image cannot be
+        confirmed at all. This holds even if Layer 1 regresses, and mirrors the
+        same running_image()/_ios_basename comparison copy_to_root makes before
+        any destructive command. An unknown running image is treated exactly as
+        _reclaim_for_mode treats it (#4): no protect-set can be built, so no
+        delete may run.
 
     Stage-only: this reclaims exactly one name — IRIS's own failed copy — and
     is reclamation, not install activity. Best-effort; a delete that raises is
     logged and swallowed, since the terminal state is already reported."""
     fname = image["filename"]
+    # ---- Layer 2: independent last-line check, before ANY delete is issued ----
+    try:
+        running = deps.running_image()
+    except Exception as e:
+        deps.emit("ROOTCOPY-RECLAIM-REFUSED",
+                  "%s left in place at %s: running image unknown "
+                  "(show version read raised: %s) — refusing a delete that "
+                  "cannot be proven safe" % (fname, target_prefix, e))
+        return
+    if not running:
+        deps.emit("ROOTCOPY-RECLAIM-REFUSED",
+                  "%s left in place at %s: running image unknown — refusing a "
+                  "delete that cannot be proven safe" % (fname, target_prefix))
+        return
+    if _ios_basename(running).casefold() == fname.casefold():
+        deps.emit("ROOTCOPY-RECLAIM-REFUSED",
+                  "%s left in place at %s: it IS the running image (%s) — "
+                  "refusing destructive delete"
+                  % (fname, target_prefix, running))
+        return
     try:
         deps.reclaim_bundle(target_prefix, [fname])
     except Exception as e:
@@ -873,6 +930,9 @@ def run_once(cfg, deps, state):
                 if not st.get("copy_terminal") \
                         and now >= st.get("copy_next_ts", 0):
                     result = deps.copy_to_root(image["filename"], target_prefix, size)
+                    # ROOT_COPY_NOT_ATTEMPTED is a truthy object(), so it MUST be
+                    # excluded before any plain truth test on `result`.
+                    attempted = result is not ROOT_COPY_NOT_ATTEMPTED
                     if result is ROOT_COPY_RUNNING_IMAGE_UNKNOWN:
                         # Transient: the running-image scrape glitched, not a
                         # copy failure. Leave copy_attempts/copy_next_ts alone
@@ -880,11 +940,22 @@ def run_once(cfg, deps, state):
                         # copy_failed terminal state — retry next tick exactly
                         # as before the bounded-retry schedule existed.
                         pass
-                    elif result:
+                    elif attempted and result:
                         st["copied"] = True
                         state["root_file"] = image["filename"]
                         _reset_copy_failures(st)
                     else:
+                        if attempted:
+                            # A genuine failure that got past the delete-first:
+                            # IOS work ran, so a file at the image name now is
+                            # OUR partial. This is the ONLY thing that arms the
+                            # terminal reclaim (Layer 1). A pre-IOS refusal
+                            # still counts as an attempt below — the operator
+                            # must still reach the terminal state — but it
+                            # deleted nothing, so it must never authorise a
+                            # delete. Cleared with copy_attempts in
+                            # _reset_copy_failures.
+                            st["ios_copy_started"] = True
                         attempts = st.get("copy_attempts", 0) + 1
                         st["copy_attempts"] = attempts
                         st["stage_error"] = (
@@ -898,7 +969,19 @@ def run_once(cfg, deps, state):
                             # Transition-only: copy_terminal short-circuits the
                             # whole copy block from the next tick on, so this
                             # runs exactly once. Nothing else owns the leftover.
-                            _reclaim_failed_root_copy(deps, target_prefix, image)
+                            # Layer 1: only a genuine post-delete-first failure
+                            # proves the file at that name is ours to delete.
+                            if st.get("ios_copy_started"):
+                                _reclaim_failed_root_copy(deps, target_prefix,
+                                                          image)
+                            else:
+                                deps.emit(
+                                    "ROOTCOPY-RECLAIM-REFUSED",
+                                    "%s left in place at %s: no attempt reached "
+                                    "IOS (every failure was refused or failed "
+                                    "before the delete-first), so anything at "
+                                    "that name is not ours to delete"
+                                    % (image["filename"], target_prefix))
                         else:
                             if attempts == 1:
                                 # Retry on the next tick for fast recovery from
@@ -1524,7 +1607,11 @@ def _copy_to_root_impl(fname, target_prefix, cli_configure_fn, cli_execute_fn,
     (_agent_reverify_root) — see its docstring for the presence + exact
     catalog byte size contract this function relies on.
 
-    Module-level + injected callables so it's unit-testable. Returns bool.
+    Module-level + injected callables so it's unit-testable. Returns True/False
+    — or ROOT_COPY_NOT_ATTEMPTED when it gives up before any IOS command runs
+    (either running-image refusal, or the applet run raising), because the
+    caller's terminal reclaim must not treat those as "our partial is at that
+    name".
 
     `copy_source` (optional) overrides the copy SOURCE. Default (None) is
     the Guest Shell scratch on the staging FS (`<FS>/guest-share/iris/<fname>`)
@@ -1538,12 +1625,14 @@ def _copy_to_root_impl(fname, target_prefix, cli_configure_fn, cli_execute_fn,
         running = running_image_fn()
         if not running:
             emit_fn("ROOTCOPY-REFUSED",
-                    "%s running image unknown; refusing destructive replacement" % fname)
-            return False
+                    "%s running image unknown; refusing destructive replacement "
+                    "(nothing was deleted — no IOS command ran)" % fname)
+            return ROOT_COPY_NOT_ATTEMPTED
         if _ios_basename(running).casefold() == fname.casefold():
             emit_fn("ROOTCOPY-REFUSED",
-                    "%s is the running image; refusing destructive replacement" % fname)
-            return False
+                    "%s is the running image; refusing destructive replacement "
+                    "(nothing was deleted — no IOS command ran)" % fname)
+            return ROOT_COPY_NOT_ATTEMPTED
     src = (copy_source(fname, target_prefix) if copy_source
            else "%s/guest-share/iris/%s" % (target_prefix, fname))
     cli_configure_fn([
@@ -1558,8 +1647,14 @@ def _copy_to_root_impl(fname, target_prefix, cli_configure_fn, cli_execute_fn,
     try:
         cli_execute_fn("event manager run IRIS-COPYROOT")
     except Exception as e:
-        emit_fn("ROOTCOPY-FAIL", "%s applet run raised: %s" % (fname, e))
-        return False
+        # The applet never fired (or we cannot tell that it did), so its
+        # action 020 delete-first cannot be assumed to have run. Anything at
+        # the target name is therefore NOT provably our partial: report the
+        # failure, but withhold the reclaim authorisation.
+        emit_fn("ROOTCOPY-FAIL",
+                "%s applet run raised before any IOS work could be confirmed: "
+                "%s" % (fname, e))
+        return ROOT_COPY_NOT_ATTEMPTED
     return reverify_fn(fname, target_prefix, cli_execute_fn, emit_fn,
                        expected_size=expected_size)
 
@@ -1592,25 +1687,40 @@ def _copy_to_root_direct_impl(fname, target_prefix, cli_execute_fn, emit_fn,
     docstring for the presence + exact catalog byte size contract this
     function relies on (and to which `expected_size` is forwarded unchanged).
     Keeps the success-log gating identical to the applet path and
-    unit-testable. Returns bool. `copy_source` overrides the SOURCE like
-    _copy_to_root_impl."""
+    unit-testable. Returns True/False — or ROOT_COPY_NOT_ATTEMPTED when it gives
+    up before the delete-first completes (either running-image refusal, or the
+    delete itself raising), because the caller's terminal reclaim must not treat
+    those as "our partial is at that name". A `copy` that raises AFTER the
+    delete-first is a plain False: that leftover really is ours. `copy_source`
+    overrides the SOURCE like _copy_to_root_impl."""
     if running_image_fn is not None:
         running = running_image_fn()
         if not running:
             emit_fn("ROOTCOPY-REFUSED",
-                    "%s running image unknown; refusing destructive replacement" % fname)
-            return False
+                    "%s running image unknown; refusing destructive replacement "
+                    "(nothing was deleted — no IOS command ran)" % fname)
+            return ROOT_COPY_NOT_ATTEMPTED
         if _ios_basename(running).casefold() == fname.casefold():
             emit_fn("ROOTCOPY-REFUSED",
-                    "%s is the running image; refusing destructive replacement" % fname)
-            return False
+                    "%s is the running image; refusing destructive replacement "
+                    "(nothing was deleted — no IOS command ran)" % fname)
+            return ROOT_COPY_NOT_ATTEMPTED
     src = (copy_source(fname, target_prefix) if copy_source
            else "%s/guest-share/iris/%s" % (target_prefix, fname))
     dst = "%s%s" % (target_prefix, fname)
     try:
         cli_execute_fn("delete /force %s" % dst)
+    except Exception as e:
+        # The delete-first itself failed, so the name was never cleared: a file
+        # there is the operator's, not ours. Withhold reclaim authorisation.
+        emit_fn("ROOTCOPY-FAIL",
+                "%s delete-first raised; no copy attempted: %s" % (fname, e))
+        return ROOT_COPY_NOT_ATTEMPTED
+    try:
         cli_execute_fn("copy %s %s" % (src, dst))
     except Exception as e:
+        # delete-first DID run: whatever is at the name now is our own partial,
+        # so a plain False (reclaim-authorising) is correct here.
         emit_fn("ROOTCOPY-FAIL", "%s direct copy raised: %s" % (fname, e))
         return False
     ok = reverify_fn(fname, target_prefix, cli_execute_fn, emit_fn,
@@ -1636,7 +1746,8 @@ def _reclaim_bundle_impl(target_prefix, names, cli_configure_fn, cli_execute_fn)
     (running/staging/seeding image + IRIS's own root copy), the replaced-root
     cleanup passes only re-whitelisted IRIS-placed root copies, and the
     failed-placement reclaim (_reclaim_failed_root_copy) passes the single name
-    this attempt's own delete-first had already cleared.
+    an attempt's own delete-first had already cleared, and only after its own
+    running-image check clears it.
     Fire-and-forget — callers that need proof re-check afterwards (the
     replaced-root cleanup verifies file presence; the download gate re-reads
     free space).
@@ -1831,9 +1942,14 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
             return ROOT_COPY_RUNNING_IMAGE_UNKNOWN
         if _ios_basename(running).casefold() == fname.casefold():
             emit("ROOTCOPY-REFUSED",
-                 "%s is the running image; refusing destructive replacement"
-                 % fname)
-            return False
+                 "%s is the running image; refusing destructive replacement "
+                 "(nothing was deleted — no IOS command ran)" % fname)
+            # NOT plain False: this refusal happens before any IOS command, so
+            # the delete-first never ran and the file at that name is the
+            # RUNNING IMAGE. A False here would authorise the terminal reclaim
+            # to delete it. Counts as an attempt all the same — see
+            # ROOT_COPY_NOT_ATTEMPTED.
+            return ROOT_COPY_NOT_ATTEMPTED
         # Freeze the confirmed value for this operation. Re-querying show version
         # after a 1.2 GB scratch transfer adds failure modes without improving the
         # basename safety decision made before any destructive command.
@@ -1866,9 +1982,12 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
             try:
                 _push_scratch(fname, target_prefix)
             except Exception as e:
+                # Pure container-side transfer failure: no IOS command ran, so
+                # no delete-first cleared the target name.
                 emit("ROOTCOPY-FAIL",
-                     "%s scp push to %s failed: %s" % (fname, target_prefix, e))
-                return False
+                     "%s scp push to %s failed before any IOS work: %s"
+                     % (fname, target_prefix, e))
+                return ROOT_COPY_NOT_ATTEMPTED
             # NOTE: like the Guest Shell path, placement transiently needs
             # ~2x the image on the target FS (scratch + root copy); the
             # verified-delete below reclaims the scratch afterwards.

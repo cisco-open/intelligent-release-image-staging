@@ -887,6 +887,268 @@ def test_terminal_reclaim_failure_is_logged_and_swallowed(monkeypatch):
     assert any(m == "ROOTCOPY-RECLAIM-FAIL" for m, _ in emitted)
 
 
+# --- CRITICAL: the terminal reclaim must never delete a file IRIS did not
+# write. Its whole safety argument rests on "this attempt's delete-first
+# already cleared the name" — an invariant that is FALSE for every path that
+# gives up BEFORE any IOS command runs (the running-image refusals, an scp
+# push that raised, an applet run that never fired). On the running-image
+# refusal the file at that name IS the operator's running image, and deleting
+# it lands a bundle-mode box in rommon at the next reload. Two independent
+# layers below; each is tested on its own so a regression in one is still
+# caught by the other's tests. ---
+
+def _reclaim_probe_deps(running="running.bin"):
+    """run_once harness whose copy_to_root verdict the caller supplies."""
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 5,
+                       "sha256": "abc"})
+    deps, emitted, _, _, _, _, _, bundle_reclaimed = make_deps(
+        cat, {"/stage/img1.bin": 5}, verify_ok=True)
+    return deps._replace(running_image=lambda: running), emitted, bundle_reclaimed
+
+
+def _tick_to_terminal(deps, monkeypatch, ticks=None):
+    now = [1_000.0]
+    monkeypatch.setattr(iris_agent.time, "time", lambda: now[0])
+    state = {}
+    for _ in range(ticks or iris_agent._ROOT_COPY_MAX_ATTEMPTS):
+        iris_agent.run_once(CFG, deps, state)
+        now[0] += 3600          # clear any armed backoff
+    return state
+
+
+# --- Layer 1: only a failure that got PAST the delete-first arms the reclaim ---
+
+def test_running_image_refusal_at_terminal_never_reclaims(monkeypatch):
+    # The reviewer's scenario. copy_to_root refuses because the assigned image
+    # IS the running image (reachable with copied=False on a fresh/lost state
+    # file, after the schema-2 upgrade clears "copied", or when the operator
+    # already reloaded onto the staged image). Four refusals reach the terminal
+    # state — and the reclaim must delete NOTHING: no IOS command ran, so the
+    # only file at flash:img1.bin is the running image itself.
+    deps, emitted, bundle_reclaimed = _reclaim_probe_deps(running="img1.bin")
+    ios_cmds = []
+
+    def real_copy(fname, target_prefix="flash:", expected_size=None):
+        # the REAL Guest Shell impl, refusing on its own running-image check
+        return iris_agent._copy_to_root_impl(
+            fname, target_prefix, lambda lines: ios_cmds.extend(lines),
+            lambda c: ios_cmds.append(c) or "",
+            lambda m, msg: emitted.append((m, msg)),
+            reverify_fn=lambda *a, **k: True,
+            running_image_fn=lambda: "flash:img1.bin",
+            expected_size=expected_size)
+
+    deps = deps._replace(copy_to_root=real_copy)
+    state = _tick_to_terminal(deps, monkeypatch)
+    assert ios_cmds == []                              # never touched IOS
+    assert state["img1"]["copy_terminal"] is True      # operator still sees it
+    assert state["img1"]["copy_attempts"] == iris_agent._ROOT_COPY_MAX_ATTEMPTS
+    assert state["img1"].get("ios_copy_started") is not True
+    assert bundle_reclaimed == []                      # nothing deleted, ever
+    assert not any(m == "ROOTCOPY-RECLAIM" for m, _ in emitted)
+    # "no attempt reached IOS" is Layer 1 speaking; Layer 2 has its own wording,
+    # so this pins the ios_copy_started gate specifically.
+    assert any(m == "ROOTCOPY-RECLAIM-REFUSED" and "no attempt reached IOS" in msg
+               for m, msg in emitted)
+
+
+def test_scp_push_failure_at_terminal_never_reclaims(monkeypatch):
+    # Container path: the scp scratch push raised, so no IOS command ran. The
+    # running image has a DIFFERENT name here, so Layer 2 cannot be what saves
+    # the file — this isolates Layer 1's ios_copy_started gate.
+    deps, emitted, bundle_reclaimed = _reclaim_probe_deps(running="running.bin")
+    deps = deps._replace(
+        copy_to_root=lambda fname, target_prefix="flash:", expected_size=None:
+            iris_agent.ROOT_COPY_NOT_ATTEMPTED)
+    state = _tick_to_terminal(deps, monkeypatch)
+    assert state["img1"]["copy_terminal"] is True
+    assert bundle_reclaimed == []
+    assert any(m == "ROOTCOPY-RECLAIM-REFUSED" for m, _ in emitted)
+
+
+def test_not_attempted_sentinel_is_never_mistaken_for_success():
+    # ROOT_COPY_NOT_ATTEMPTED is a truthy object(); a plain `if result:` would
+    # report a placement that never happened as a verified root copy.
+    deps, _, _ = _reclaim_probe_deps(running="img1.bin")
+    deps = deps._replace(
+        copy_to_root=lambda fname, target_prefix="flash:", expected_size=None:
+            iris_agent.ROOT_COPY_NOT_ATTEMPTED)
+    state = {}
+    iris_agent.run_once(CFG, deps, state)
+    assert state["img1"].get("copied") is not True
+    assert state.get("root_file") is None
+    assert state["img1"]["copy_attempts"] == 1        # counts, like plain False
+
+
+def test_mixed_cycle_one_refusal_then_real_failures_still_reclaims(monkeypatch):
+    # A refusal followed by attempts that DID run the delete-first: the genuine
+    # failures set ios_copy_started, so the leftover partial is still reclaimed.
+    deps, emitted, bundle_reclaimed = _reclaim_probe_deps(running="running.bin")
+    results = iter([iris_agent.ROOT_COPY_NOT_ATTEMPTED, False, False, False])
+    deps = deps._replace(
+        copy_to_root=lambda fname, target_prefix="flash:", expected_size=None:
+            next(results))
+    state = _tick_to_terminal(deps, monkeypatch)
+    assert state["img1"]["copy_terminal"] is True
+    assert bundle_reclaimed == [("flash:", ["img1.bin"])]
+    assert any(m == "ROOTCOPY-RECLAIM" for m, _ in emitted)
+
+
+def test_ios_copy_started_clears_when_copy_failures_reset():
+    # The flag is per-image-cycle: a success must clear it with copy_attempts,
+    # or a later cycle of pure refusals would inherit the authorisation.
+    deps, _, _ = _reclaim_probe_deps(running="running.bin")
+    results = iter([False, True])
+    deps = deps._replace(
+        copy_to_root=lambda fname, target_prefix="flash:", expected_size=None:
+            next(results))
+    state = {}
+    iris_agent.run_once(CFG, deps, state)             # genuine failure
+    assert state["img1"]["ios_copy_started"] is True
+    iris_agent.run_once(CFG, deps, state)             # success resets the cycle
+    assert state["img1"]["copied"] is True
+    assert state["img1"].get("ios_copy_started") is None
+    assert state["img1"].get("copy_attempts") is None
+
+
+def test_genuine_placement_failure_through_the_real_impl_still_reclaims(monkeypatch):
+    # End-to-end through the REAL direct impl: delete-first runs, the copy runs,
+    # and reverify fails on a short file. That leftover IS ours, so the terminal
+    # reclaim must still fire — the fix must not disarm the legitimate case.
+    deps, emitted, bundle_reclaimed = _reclaim_probe_deps(running="running.bin")
+    cli_calls = []
+
+    def cli_exec(cmd):
+        cli_calls.append(cmd)
+        if cmd.startswith("dir "):
+            return "  121  -rw-  3  Jun 16 2026  img1.bin"    # short: 3 != 5
+        return ""
+
+    def real_copy(fname, target_prefix="flash:", expected_size=None):
+        return iris_agent._copy_to_root_direct_impl(
+            fname, target_prefix, cli_exec,
+            lambda m, msg: emitted.append((m, msg)),
+            reverify_fn=lambda *a, **k: iris_agent._agent_reverify_root(
+                *a, poll_attempts=1, sleep_fn=lambda s: None, **k),
+            running_image_fn=lambda: "flash:running.bin",
+            expected_size=expected_size)
+
+    deps = deps._replace(copy_to_root=real_copy)
+    state = _tick_to_terminal(deps, monkeypatch)
+    assert "delete /force flash:img1.bin" in cli_calls    # delete-first DID run
+    assert state["img1"]["ios_copy_started"] is True
+    assert bundle_reclaimed == [("flash:", ["img1.bin"])]
+    assert any(m == "ROOTCOPY-RECLAIM" for m, _ in emitted)
+
+
+# --- Layer 2: _reclaim_failed_root_copy's own unconditional last-line check.
+# Tested by calling it DIRECTLY with a plain-False cycle behind it, i.e. as if
+# Layer 1 had regressed. ---
+
+def _direct_reclaim(running):
+    deps, emitted, bundle_reclaimed = _reclaim_probe_deps(running=running)
+    iris_agent._reclaim_failed_root_copy(
+        deps, "flash:", {"id": "img1", "filename": "img1.bin"})
+    return emitted, bundle_reclaimed
+
+
+def test_reclaim_refuses_to_delete_the_running_image():
+    emitted, bundle_reclaimed = _direct_reclaim("flash:img1.bin")
+    assert bundle_reclaimed == []
+    assert any(m == "ROOTCOPY-RECLAIM-REFUSED" and "IS the running image" in msg
+               for m, msg in emitted)
+
+
+def test_reclaim_running_image_match_is_case_insensitive():
+    # IOS is inconsistent about filename case in `show version`; a case-only
+    # difference must not open the delete path.
+    emitted, bundle_reclaimed = _direct_reclaim("bootflash:/IMG1.BIN")
+    assert bundle_reclaimed == []
+    assert any(m == "ROOTCOPY-RECLAIM-REFUSED" for m, _ in emitted)
+
+
+def test_reclaim_refuses_when_running_image_is_unknown():
+    # Same rule _reclaim_for_mode already follows (#4): with no confirmable
+    # running image there is no safe protect set, so no delete may run.
+    emitted, bundle_reclaimed = _direct_reclaim(None)
+    assert bundle_reclaimed == []
+    assert any(m == "ROOTCOPY-RECLAIM-REFUSED" and "running image unknown" in msg
+               for m, msg in emitted)
+
+
+def test_reclaim_refuses_when_the_running_image_read_raises():
+    deps, emitted, bundle_reclaimed = _reclaim_probe_deps()
+
+    def boom():
+        raise RuntimeError("show version glitch")
+
+    deps = deps._replace(running_image=boom)
+    iris_agent._reclaim_failed_root_copy(
+        deps, "flash:", {"id": "img1", "filename": "img1.bin"})
+    assert bundle_reclaimed == []
+    assert any(m == "ROOTCOPY-RECLAIM-REFUSED" and "running image unknown" in msg
+               for m, msg in emitted)
+
+
+def test_reclaim_deletes_when_the_target_is_not_the_running_image():
+    emitted, bundle_reclaimed = _direct_reclaim("flash:running.bin")
+    assert bundle_reclaimed == [("flash:", ["img1.bin"])]
+    assert any(m == "ROOTCOPY-RECLAIM" for m, _ in emitted)
+
+
+def test_layer2_alone_blocks_the_reviewer_scenario_end_to_end(monkeypatch):
+    # Layer 1 deliberately bypassed: copy_to_root returns a plain False
+    # (exactly what the regressed build returned for the running-image
+    # refusal), so ios_copy_started IS set and the caller asks for the reclaim.
+    # Layer 2 must still refuse, because the target is the running image.
+    deps, emitted, bundle_reclaimed = _reclaim_probe_deps(running="img1.bin")
+    deps = deps._replace(
+        copy_to_root=lambda fname, target_prefix="flash:", expected_size=None: False)
+    state = _tick_to_terminal(deps, monkeypatch)
+    assert state["img1"]["copy_terminal"] is True
+    assert bundle_reclaimed == []             # NOT [("flash:", ["img1.bin"])]
+    assert any(m == "ROOTCOPY-RECLAIM-REFUSED" and "IS the running image" in msg
+               for m, msg in emitted)
+
+
+# --- The pre-IOS/post-IOS classification at its source: the copy impls. ---
+
+def test_copy_impls_refusals_return_not_attempted():
+    for impl, args in (
+            (iris_agent._copy_to_root_impl,
+             ("img1.bin", "flash:", lambda lines: None, lambda c: "")),
+            (iris_agent._copy_to_root_direct_impl,
+             ("img1.bin", "flash:", lambda c: ""))):
+        for running in ("flash:img1.bin", "flash:IMG1.BIN", None):
+            emitted = []
+            out = impl(*args, emit_fn=lambda m, msg: emitted.append((m, msg)),
+                       reverify_fn=lambda *a, **k: True,
+                       running_image_fn=lambda: running)
+            assert out is iris_agent.ROOT_COPY_NOT_ATTEMPTED, (impl, running)
+            assert any(m == "ROOTCOPY-REFUSED" and "no IOS command ran" in msg
+                       for m, msg in emitted)
+
+
+def test_copy_to_root_direct_delete_first_raise_is_not_attempted():
+    # The delete-first never cleared the name, so the name is not ours.
+    emitted, reverify_calls = [], []
+
+    def cli_exec(cmd):
+        if cmd.startswith("delete"):
+            raise RuntimeError("vty glitch")
+        return ""
+
+    out = iris_agent._copy_to_root_direct_impl(
+        "img1.bin", "sdflash:", cli_exec,
+        lambda m, msg: emitted.append((m, msg)),
+        reverify_fn=lambda *a, **k: reverify_calls.append(1) or True)
+    assert out is iris_agent.ROOT_COPY_NOT_ATTEMPTED
+    assert reverify_calls == []
+    assert any(m == "ROOTCOPY-FAIL" and "delete-first raised" in msg
+               for m, msg in emitted)
+
+
 def test_first_retry_timestamp_from_regressed_state_is_ignored(monkeypatch):
     cat = FakeCatalog({"approved_image_id": "img1"},
                       {"id": "img1", "filename": "img1.bin", "size": 5,
@@ -1443,7 +1705,9 @@ def test_copy_to_root_impl_reverify_false_returns_false_no_success_log():
 
 def test_copy_to_root_impl_applet_fire_raises_no_reverify():
     """If `event manager run` itself raises, the wrapper bails before reverify.
-    Returns False + ROOTCOPY-FAIL with `applet run raised:` reason."""
+    Returns ROOT_COPY_NOT_ATTEMPTED + ROOTCOPY-FAIL naming the applet run: the
+    applet's action 020 delete-first cannot be assumed to have run, so this
+    failure must not authorise the terminal reclaim to delete that name."""
     cli_cfg, _, emit, _, _, emitted = _capture_calls()
 
     def cli_execute_fn(cmd):
@@ -1457,7 +1721,7 @@ def test_copy_to_root_impl_applet_fire_raises_no_reverify():
 
     ok = iris_agent._copy_to_root_impl(
         "img1.bin", "flash:", cli_cfg, cli_execute_fn, emit, reverify_fn=reverify)
-    assert ok is False
+    assert ok is iris_agent.ROOT_COPY_NOT_ATTEMPTED
     assert reverify_calls == []   # reverify never reached
     assert any(m == "ROOTCOPY-FAIL" and "applet run raised" in msg
                for m, msg in emitted)
