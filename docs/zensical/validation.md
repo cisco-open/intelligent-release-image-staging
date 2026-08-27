@@ -43,7 +43,7 @@ For the commands and the pinned Zensical and Python versions, see
 | Catalyst 8000V router path | `router-routed` and `router-nat` onboard, stage a verified image, and undeploy from their receipts. Swarm Map shows the device, and the operator's OTLP backend shows its telemetry when observability is enabled. |
 | Assignment applies | Device reports the approved image id. |
 | Download completes | Swarm state shows completed pieces. |
-| Verification passes | Agent reports the staged file and IOS verify success. |
+| Verification passes | Agent reports the staged file and a sha256 match against the catalog's known-good value. |
 | Undeploy from receipt | Teardown targets only receipt-owned resources; router adoption is refused and requires re-onboarding. For `router-nat`, teardown clears only translations for the receipt's app IP, verifies the overload rule is gone before deleting its ACL, and reports no leftover IRIS NAT rule. |
 | No activation occurs | Boot variables, install state, and reload state remain operator-controlled. |
 

@@ -41,7 +41,7 @@ flowchart LR
     Catalog --> Policy["Per-device assignment"]
     Policy --> Agent["Device agent"]
     Seeder --> Agent
-    Agent --> Verify["Hash and IOS verification"]
+    Agent --> Verify["Hash verification"]
     Verify --> Stage["Stage image on flash"]
     Stage -. "operator-controlled" .-> Install["Install or reload outside IRIS"]
 ```
