@@ -388,6 +388,40 @@ def test_resolve_platform_probe_returning_none_raises():
         assert "d1" in str(exc)
 
 
+# --- parse_os_family ----------------------------------------------------
+
+def test_parse_os_family_xe_banner():
+    text = "Cisco IOS XE Software, Version 17.09.04a\ncisco C9300-48UXM (X86) processor\n"
+    assert gui_onboard.parse_os_family(text) == "xe"
+
+
+def test_parse_os_family_xr_banner():
+    text = "Cisco IOS XR Software, Version 24.4.1\ncisco ASR9K (Intel 686 F6M14S4)\n"
+    assert gui_onboard.parse_os_family(text) == "xr"
+
+
+def test_parse_os_family_is_case_insensitive():
+    assert gui_onboard.parse_os_family("cisco ios xr software, version 25.1.1") == "xr"
+
+
+def test_parse_os_family_unknown_returns_empty():
+    assert gui_onboard.parse_os_family("Cisco Adaptive Security Appliance Software") == ""
+    assert gui_onboard.parse_os_family("") == ""
+
+
+def test_parse_os_family_xr_not_confused_by_xe_substring():
+    # 'IOS XE' and 'IOS XR' differ by one character; a loose match returns the
+    # wrong family and silently misroutes the device.
+    assert gui_onboard.parse_os_family("Cisco IOS XE Software") == "xe"
+    assert gui_onboard.parse_os_family("Cisco IOS XR Software") == "xr"
+
+
+def test_parse_os_family_classic_ios_is_xe_family():
+    # 12.x/15.x Catalysts print no 'XE' token but are driven by the same recipes.
+    assert gui_onboard.parse_os_family(
+        "Cisco IOS Software, C3750E Software (C3750E-UNIVERSALK9-M), Version 15.0(2)") == "xe"
+
+
 # --- OnboardService: platform-aware recipe selection --------------------
 
 def _iox_fleet(platform=None, model=None):

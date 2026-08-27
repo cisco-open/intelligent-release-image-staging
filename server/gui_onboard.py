@@ -197,6 +197,28 @@ def _default_runner(install_path, env, on_line, on_proc=None):
 _MODEL_RE = re.compile(r"^cisco\s+(\S+)\s+\(", re.MULTILINE)
 _DEVICE_IDENTITY_RE = re.compile(r"(?im)^Processor board ID\s+(\S+)\s*$")
 
+# 'IOS XE' and 'IOS XR' differ by a single character, and no model prefix can
+# separate the families: ^ASR matches both an ASR 1000 (IOS-XE, Guest Shell
+# capable) and an ASR 9000 (IOS-XR, which has no Guest Shell at all). The
+# banner is the only authority, so match the whole token and never a prefix.
+_OS_XR_RE = re.compile(r"\bIOS[\s-]*XR\b", re.IGNORECASE)
+_OS_XE_RE = re.compile(r"\bIOS[\s-]*XE\b", re.IGNORECASE)
+_OS_CLASSIC_RE = re.compile(r"\bCisco IOS Software\b", re.IGNORECASE)
+
+
+def parse_os_family(version_text):
+    """Classify 'show version' output as 'xe', 'xr', or '' (unknown).
+
+    Classic IOS (no XE/XR token) reports 'xe': it is driven by the same
+    recipes, and the distinction that matters here is XE-family vs XR-family,
+    not XE vs classic."""
+    text = version_text or ""
+    if _OS_XR_RE.search(text):
+        return "xr"
+    if _OS_XE_RE.search(text) or _OS_CLASSIC_RE.search(text):
+        return "xe"
+    return ""
+
 
 def _parse_show_version(version_text):
     """Extract (model, device_identity) from 'show version' output. Either
