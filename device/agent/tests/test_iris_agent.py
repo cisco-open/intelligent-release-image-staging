@@ -855,12 +855,14 @@ def test_root_copy_unknown_interleaved_with_real_failures_only_real_ones_count()
 
 
 # --- Direct tests of _agent_reverify_root (the real code path).
-# The IRIS-COPYROOT EEM applet deletes any stale leftover, then runs
-# `copy /verify` — copy + Cisco signature in one IOS-enforced step. A failed
-# signature fails the copy and deletes the dest, and the pre-copy delete scopes
-# the result to THIS attempt, so file presence at flash root IS the verdict.
-# The agent polls `dir flash:<fname>` (small, fast cli call) and blesses on
-# presence — no syslog parsing required. ---
+# The IRIS-COPYROOT EEM applet deletes any stale leftover, then runs a plain
+# `copy` (no /verify) — a plain copy that dies mid-transfer can leave a
+# PARTIAL file, so presence alone is no longer sound. The agent polls
+# `dir flash:<fname>` (small, fast cli call): with no expected_size, presence
+# is still the verdict (legacy callers); with an expected_size, presence AND
+# exact byte size is the verdict — a wrong size mid-poll just means the copy
+# is still running, and only a mismatch that persists to the end of the poll
+# budget fails. ---
 
 _FNAME = "cat9k.bin"
 
@@ -912,7 +914,7 @@ def test_reverify_happy_path_emits_rootcopy_success():
     assert sum(c.startswith("dir flash:") for c in cli_calls) == 1
     # heartbeat for operators + authoritative success log, both agent-owned
     assert any(m == "ROOTCOPY-VERIFYING" for m, _ in emitted)
-    assert ("ROOTCOPY", "cat9k.bin placed at flash root + verified") in emitted
+    assert ("ROOTCOPY", "cat9k.bin placed at flash root") in emitted
 
 
 def test_reverify_no_file_means_signature_failed_or_copy_aborted():
@@ -923,7 +925,7 @@ def test_reverify_no_file_means_signature_failed_or_copy_aborted():
     cli, emit, _, emitted = _make_reverify_cli(dir_out=_DIR_MISSING)
     ok = _reverify(cli, emit, poll_attempts=3)
     assert ok is False
-    assert any(m == "ROOTCOPY-FAIL" and "no file appeared" in msg
+    assert any(m == "ROOTCOPY-FAIL" and "never appeared" in msg
                for m, msg in emitted)
     assert all(m != "ROOTCOPY" for m, _ in emitted)
 
@@ -958,7 +960,7 @@ def test_reverify_dir_raises_every_poll_times_out():
     cli, emit, _, emitted = _make_reverify_cli(raise_on="dir")
     ok = _reverify(cli, emit, poll_attempts=3)
     assert ok is False
-    assert any(m == "ROOTCOPY-FAIL" and "no file appeared" in msg
+    assert any(m == "ROOTCOPY-FAIL" and "never appeared" in msg
                for m, msg in emitted)
 
 
@@ -973,24 +975,83 @@ def test_reverify_does_not_confuse_other_filenames_in_dir_output():
     assert all(m != "ROOTCOPY" for m, _ in emitted)
 
 
+# --- _dir_size_of: parses the byte size out of an IOS `dir` row, anchored to
+# the row end so a whitelisted filename never reads a sibling row's size
+# (e.g. cat9k.bin must not match cat9k.bin.backup). Plain copy (no /verify)
+# can leave a partial file, so _agent_reverify_root now needs size, not just
+# presence. ---
+
+def test_dir_size_of_parses_ios_dir_line():
+    out = ("Directory of flash:/\n"
+           "  121  -rw-      1260618344  Jun 16 2026 12:30:01 +00:00  cat9k.bin\n"
+           "11353194496 bytes total (8438681600 bytes free)\n")
+    assert iris_agent._dir_size_of(out, "cat9k.bin") == 1260618344
+
+
+def test_dir_size_of_absent_file_returns_none():
+    assert iris_agent._dir_size_of("No such file or directory", "cat9k.bin") is None
+    assert iris_agent._dir_size_of("", "cat9k.bin") is None
+
+
+def test_dir_size_of_matches_whole_name_not_substring():
+    # cat9k.bin must not match the cat9k.bin.backup row's size
+    out = "  122  -rw-  999  Jun 16 2026 12:30:01 +00:00  cat9k.bin.backup\n"
+    assert iris_agent._dir_size_of(out, "cat9k.bin") is None
+
+
+def test_reverify_size_match_succeeds():
+    emits = []
+    out = "  121  -rw-  1260618344  Jun 16 2026  cat9k.bin"
+    ok = iris_agent._agent_reverify_root(
+        "cat9k.bin", "flash:", lambda c: out,
+        lambda tag, msg: emits.append((tag, msg)),
+        poll_attempts=1, poll_interval_s=0, expected_size=1260618344)
+    assert ok is True
+    assert emits[-1][0] == "ROOTCOPY"
+
+
+def test_reverify_partial_file_fails_with_size_reason():
+    # A plain copy that died mid-way leaves a short file: presence alone must NOT pass.
+    emits = []
+    out = "  121  -rw-  1048576  Jun 16 2026  cat9k.bin"
+    ok = iris_agent._agent_reverify_root(
+        "cat9k.bin", "flash:", lambda c: out,
+        lambda tag, msg: emits.append((tag, msg)),
+        poll_attempts=2, poll_interval_s=0, sleep_fn=lambda s: None,
+        expected_size=1260618344)
+    assert ok is False
+    assert emits[-1][0] == "ROOTCOPY-FAIL"
+    assert "size" in emits[-1][1]
+
+
+def test_reverify_without_expected_size_keeps_presence_only():
+    out = "  121  -rw-  1048576  Jun 16 2026  cat9k.bin"
+    ok = iris_agent._agent_reverify_root(
+        "cat9k.bin", "flash:", lambda c: out, lambda tag, msg: None,
+        poll_attempts=1, poll_interval_s=0)
+    assert ok is True
+
+
 # --- Source-level guard: the templated applet inside iris_agent.py must do the
 # COPY only and log a NEUTRAL breadcrumb — never claim a verified copy. Only the
-# agent emits the "+ verified" log, after _agent_reverify_root sees the file.
+# agent emits the "placed at flash root" log, after _agent_reverify_root sees
+# the file (and, when given expected_size, the matching size).
 # Refuter 3 caught that the bats test only inspects the reference .cfg, not the
 # runtime-templated string. ---
 
 def test_iris_agent_source_applet_is_neutral_no_self_verdict():
     """The templated applet must (a) delete any stale leftover before copying,
     (b) run `copy /verify` (copy + Cisco signature), and (c) log only a NEUTRAL
-    ROOTCOPY-ATTEMPTED breadcrumb — never a pass/fail verdict or a "+ verified"
-    claim. The agent owns the verdict via file presence. Plus a HW-driven
-    regression guard: the broken $_arg1 trigger must not return. The bats only
-    inspects the reference .cfg; this checks the runtime template living inside
-    iris_agent.py itself."""
+    ROOTCOPY-ATTEMPTED breadcrumb — never a pass/fail verdict or a "placed at
+    flash root" claim. The agent owns the verdict via file presence (and,
+    where checked, size). Plus a HW-driven regression guard: the broken
+    $_arg1 trigger must not return. The bats only inspects the reference
+    .cfg; this checks the runtime template living inside iris_agent.py
+    itself."""
     src = open(iris_agent.__file__).read()
     # the authoritative success log lives in the agent's emit(), issued ONLY
     # after _agent_reverify_root passes — never inside an applet syslog action.
-    assert "placed at flash root + verified" in src
+    assert "placed at flash root" in src
     syslog_lines = [l for l in src.splitlines()
                     if "syslog msg" in l and "action 0" in l]
     assert syslog_lines, "missing the templated applet syslog action line"
