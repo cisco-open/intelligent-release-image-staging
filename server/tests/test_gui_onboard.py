@@ -544,6 +544,30 @@ def test_parse_os_family_xrv_match_does_not_over_match_xe():
     assert gui_onboard.parse_os_family(text) == "xe"
 
 
+def test_parse_os_family_ignores_an_xr_shaped_hostname():
+    # lab/device-run.sh runs `ssh -tt`, so the text handed to the classifier is
+    # the whole transcript: MOTD, login banner and the prompt echoed with every
+    # command. A C9300 whose hostname happens to be 'ios-xr-lab-01' is IOS-XE,
+    # and a false 'xr' is UNRECOVERABLE -- _refuse_xr tells the operator that
+    # forcing 'platform' will not work, and the family is cached on the fleet
+    # row. Only a banner line may decide the family.
+    text = ("\r\nios-xr-lab-01#show version\r\n"
+            "Cisco IOS XE Software, Version 17.09.04a\r\n"
+            "cisco C9300-48UXM (X86) processor\r\n"
+            "ios-xr-lab-01#\r\n")
+    assert gui_onboard.parse_os_family(text) == "xe"
+
+
+def test_parse_os_family_ignores_an_xr_mention_in_the_login_banner():
+    # Same failure through the MOTD rather than the prompt: free prose naming
+    # the family is not a version banner.
+    text = ("*** lab pod 4 -- IOS XR gear lives on 10.9.0.0/24 ***\r\n"
+            "sw1#show version\r\n"
+            "Cisco IOS XE Software, Version 17.09.04a\r\n"
+            "cisco C9300-48UXM (X86) processor\r\n")
+    assert gui_onboard.parse_os_family(text) == "xe"
+
+
 # --- OnboardService: platform-aware recipe selection --------------------
 
 def _iox_fleet(platform=None, model=None):
@@ -632,6 +656,50 @@ def test_probe_does_not_wipe_cached_os_family(tmp_path):
     # The fake fleet's upsert merges onto the stored dict same as the real
     # one (minus the None/"" filtering) -- the cached family must survive.
     assert fleet._d["d1"]["os_family"] == "xr"
+
+
+# The console never calls start() bare: gui_server._plan() resolves the platform
+# up front, bakes it into plan["resolved"], and start() is handed that dict. So
+# _build_env copies platform onto the device, resolve_platform takes the
+# EXPLICIT branch, and every family check inside resolution -- the entry guard,
+# the ambiguous-model re-probe, the post-probe re-check -- is bypassed. These
+# two tests walk that production path; the resolution-level tests above cannot
+# see it.
+
+def _xr_probe(d, env):
+    """A live probe against an ASR 9000: reads the banner, records the family
+    (exactly what _default_probe does) and returns the model string."""
+    d["os_family"] = "xr"
+    return "ASR-9906"
+
+
+def test_preresolved_guestshell_platform_still_refuses_an_xr_device(tmp_path):
+    ran = []
+
+    def fake_run(install_path, env, on_line):
+        ran.append(install_path)
+        return 0
+
+    svc = _svc(fake_run, probe_fn=_xr_probe)
+    svc.fleet._d["d1"]["model"] = "ASR-9906"
+    job = _wait(svc, svc.start("d1", resolved={"platform": "guestshell"}))
+    assert job["state"] == "error"
+    assert any("IOS-XR" in line for line in job["lines"]), job["lines"]
+    # The whole point: device/device-install.sh must never be handed an
+    # IOS-XR box.
+    assert ran == []
+
+
+def test_preresolved_onboard_caches_the_family_it_just_learned(tmp_path):
+    # Nothing back-fills os_family onto existing fleet rows, so the refusal is
+    # only durable if the onboard that discovered the family writes it down.
+    # Without this the console re-probes (and re-refuses) on every attempt, and
+    # the devices table never shows why.
+    svc = _svc(lambda p, e, on: 0, probe_fn=_xr_probe)
+    svc.fleet._d["d1"]["model"] = "ASR-9906"
+    _wait(svc, svc.start("d1", resolved={"platform": "guestshell"}))
+    assert {"device_id": "d1", "os_family": "xr"} in svc.fleet.upserts
+    assert svc.fleet._d["d1"]["os_family"] == "xr"
 
 
 def test_probe_returning_none_errors_without_running(tmp_path):
@@ -2073,11 +2141,12 @@ _IRIS_NAMED = [
 ]
 
 
-def _common_preflight_stub(monkeypatch, running="", apps="", files=""):
+def _common_preflight_stub(monkeypatch, running="", apps="", files="",
+                           version=None):
     """Feed a marker-delimited transcript to the shared preflight probe."""
     def run(argv, input=None, **kwargs):
         out = []
-        for name, body in (("VERSION", _iox_show_version()),
+        for name, body in (("VERSION", version or _iox_show_version()),
                            ("RUNNING", running), ("APPS", apps),
                            ("FILES", files)):
             out.append("__IRIS_PREFLIGHT_%s__\n%s" % (name, body))
@@ -2108,6 +2177,34 @@ def test_guestshell_preflight_passes_on_a_clean_device(monkeypatch):
         {}, {"DEVICE_IP": "192.0.2.20"}, {"platform": "guestshell"}, "/repo")
     assert evidence["status"] == "passed"
     assert evidence["device_identity"]
+
+
+def test_guestshell_preflight_refuses_an_ios_xr_device(monkeypatch):
+    """The preflight already holds 'show version', so it can classify without
+    another SSH round trip -- and it is the LAST gate before
+    device/device-install.sh touches the box. A console onboard arrives with
+    the platform already resolved, so nothing inside resolve_platform ever
+    looked at the family."""
+    _common_preflight_stub(
+        monkeypatch,
+        version=("Cisco IOS XR Software, Version 24.4.1\n"
+                 "cisco ASR-9906 (Intel 686 F6M14S4)\n"
+                 "Processor board ID FOX1234ABCD\n"),
+        running="hostname xr1\n", apps="No App found\n",
+        files="Directory of bootflash:/guest-share/\n\nNo files in directory\n")
+    dev = {"device_id": "xr1"}
+    with pytest.raises(ValueError, match="IOS-XR"):
+        _REAL_GUESTSHELL_PREFLIGHT(dev, {"DEVICE_IP": "192.0.2.20"},
+                                   {"platform": "guestshell"}, "/repo")
+
+
+def test_guestshell_preflight_records_the_family_it_read(monkeypatch):
+    _common_preflight_stub(monkeypatch, running="hostname sw1\n", apps="No App found\n",
+                           files="Directory of bootflash:/guest-share/\n\nNo files in directory\n")
+    dev = {"device_id": "sw1"}
+    _REAL_GUESTSHELL_PREFLIGHT(dev, {"DEVICE_IP": "192.0.2.20"},
+                               {"platform": "guestshell"}, "/repo")
+    assert dev["os_family"] == "xe"
 
 
 def test_iox_preflight_still_returns_the_identity_it_always_did(monkeypatch):

@@ -235,9 +235,17 @@ _DEVICE_IDENTITY_RE = re.compile(r"(?im)^Processor board ID\s+(\S+)\s*$")
 # separate the families: ^ASR matches both an ASR 1000 (IOS-XE, Guest Shell
 # capable) and an ASR 9000 (IOS-XR, which has no Guest Shell at all). The
 # banner is the only authority, so match the whole token and never a prefix.
-_OS_XR_RE = re.compile(r"\bIOS[\s-]*XRv?\b", re.IGNORECASE)
-_OS_XE_RE = re.compile(r"\bIOS[\s-]*XE\b", re.IGNORECASE)
-_OS_CLASSIC_RE = re.compile(r"\bCisco IOS Software\b", re.IGNORECASE)
+#
+# Anchored to a BANNER LINE, not to free text. lab/device-run.sh runs `ssh -tt`,
+# so what reaches the classifier is the whole transcript -- MOTD, login banner,
+# and the prompt echoed with every command. A C9300 named 'ios-xr-lab-01' (or a
+# MOTD naming the family) would otherwise classify as 'xr', and that verdict is
+# unrecoverable: _refuse_xr tells the operator that forcing 'platform' will not
+# work, and the family is cached onto the fleet row. A version banner always
+# starts its line with 'cisco'; nothing else may decide the family.
+_OS_XR_RE = re.compile(r"(?im)^\s*cisco\s+IOS[\s-]*XRv?\b")
+_OS_XE_RE = re.compile(r"(?im)^\s*cisco\s+IOS[\s-]*XE\b")
+_OS_CLASSIC_RE = re.compile(r"(?im)^\s*cisco\s+IOS\s+Software\b")
 
 
 def parse_os_family(version_text):
@@ -352,6 +360,15 @@ def _default_guestshell_preflight(dev, env, resolved, repo_root):
         ("apps", "show app-hosting list"),
         ("files", "dir bootflash:guest-share"),
     ), "guestshell")
+    # Classify from the banner already in hand -- no extra SSH round trip. The
+    # console resolves the platform before a job starts, so resolve_platform
+    # took its explicit branch and never saw the family; this preflight is the
+    # last gate before device-install.sh runs an IOS-XE recipe on the box.
+    family = parse_os_family(sections["version"])
+    if family:
+        dev["os_family"] = family
+    if family == "xr":
+        _refuse_xr(dev.get("device_id") or env.get("DEVICE_IP", "?"))
     model, device_identity = _parse_show_version(sections["version"])
     if not device_identity:
         raise ValueError("could not determine the device's processor board ID")
@@ -909,6 +926,17 @@ class OnboardService:
                             "cannot reach device %s — ping/SSH probe "
                             "failed; check the device IP and credentials"
                             % env.get("DEVICE_IP", device_id))
+                    # That probe just read 'show version'. A console onboard
+                    # arrives with plan["resolved"]["platform"] already set, so
+                    # _build_env copied it onto the device and resolve_platform
+                    # returned from its EXPLICIT branch -- none of the family
+                    # checks inside resolution ran. This is the first place the
+                    # classification exists, and no existing fleet row carries
+                    # one. Cache it so later calls short-circuit at resolution.
+                    if dev.get("os_family") == "xr":
+                        self.fleet.upsert({"device_id": device_id,
+                                           "os_family": "xr"})
+                        _refuse_xr(device_id)
                     # Guest Shell used to stop there, so a device still
                     # carrying IRIS config was refused as a router and
                     # silently accepted here.
