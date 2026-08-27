@@ -6,8 +6,10 @@
 
 """Publish an IOS-XE image into the IRIS catalog and seeder.
 sha256 → private .torrent (token in announce URL) → info_hash → catalog → seed.
-Server does NOT check the Cisco signature (no cli module off-box); the device is
-the on-box trust gate (spec §6). Stdlib only + the `mktorrent` CLI."""
+Server does NOT check the Cisco signature (no cli module off-box): authenticity
+is settled before publish, and the device's check is the agent's sha256 of the
+staged file against this catalog entry (spec §6). Nothing on the box re-hashes
+the placed copy. Stdlib only + the `mktorrent` CLI."""
 import argparse
 import base64
 import hashlib

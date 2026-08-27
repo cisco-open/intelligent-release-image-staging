@@ -36,7 +36,7 @@ available to the application (for example, as `/iox_data` on Catalyst 9300), but
 not an IOS filesystem root. The agent uses that disk for resumable swarm data,
 then hands the completed file to IOS for the final plain copy, attested by
 the agent afterward against the catalog's exact byte size — the file was
-already verified by sha256 against the catalog before staging, and its
+already verified by sha256 against the catalog before the placement copy, and its
 authenticity was established at publish time on the server. On Catalyst 9300
 the app-hosting SSD share
 (`usbflash1:iox_host_data_share`) is bind-mounted into the container, so the

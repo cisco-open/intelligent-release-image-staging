@@ -158,8 +158,10 @@ docker build --platform linux/amd64 -f server/Dockerfile -t iris:docker-alpha .
 ```
 
 The Cisco app-hosting agent supports ARM64 IE platforms and x86_64 Catalyst 9300
-platforms. It downloads into the CAF persistent directory and hands the image
-to IOS for a signature-enforcing `copy /verify`: on Catalyst 9300 through the
+platforms. It downloads into the CAF persistent directory, checks the staged
+file's sha256 against its catalog entry, and hands it to IOS for a plain copy
+onto the filesystem root — a placement the agent then attests against the
+catalog's exact byte size: on Catalyst 9300 through the
 bind-mounted SSD share at disk speed, on IE-3400 by SCP over SSH-to-self (see
 [IOx app](docs/zensical/iox.md)). Build an image for inspection, or package it
 with `ioxclient`:

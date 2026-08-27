@@ -105,7 +105,7 @@ docker compose -f server/docker-compose.yml exec iris \
   iris-publish /opt/images/iosxe/c9300/<image>.bin
 ```
 
-`iris-publish` computes `sha256` and `sha512`, creates a private torrent, hands it to the seeder, and records catalog metadata. The server does not decide whether the Cisco image signature is trusted; the device-side copy and verify path is the final gate.
+`iris-publish` computes `sha256` and `sha512`, creates a private torrent, hands it to the seeder, and records catalog metadata. The server does not decide whether the Cisco image signature is trusted: authenticity is settled before publish, and what the device checks is the staged file's `sha256` against this catalog entry.
 
 ### Import an image already on disk
 

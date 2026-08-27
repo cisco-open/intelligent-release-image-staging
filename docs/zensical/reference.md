@@ -335,10 +335,10 @@ written to `<state>/torrents/<image_id>.torrent`, never next to the image itself
 | `id` | Catalog id, derived from the filename by stripping `.SPA.bin` or `.bin`. What a device policy names. |
 | `filename` | Basename of the image file, as it reaches the device. |
 | `source_dir` | Absolute directory the image is seeded from. Set by `publish()`. |
-| `size` | Image size in bytes. |
+| `size` | Image size in bytes. What the agent attests the placed copy against. |
 | `sha256` | Checked by the agent against the staged file. |
-| `sha512` | Checked by the agent against the flash-root copy via `verify /sha512` (IOS has `/sha512` but not `/sha256`). |
-| `cisco_signature_verified` | Whether the Cisco signature was verified elsewhere. The server never checks it; the device is the on-box trust gate. |
+| `sha512` | Recorded at publish time and never recomputed on a device. It is the join key to Cisco's published bulk-hash data, which is what an authenticity claim about this file rests on. |
+| `cisco_signature_verified` | Whether the Cisco signature was verified elsewhere. The server does not check it. Authenticity is a publish-time property of the catalog entry; on the device the check is the agent's sha256 of the staged file against this entry's `sha256`, and nothing re-hashes the placed copy. |
 | `info_hash_hex` | Torrent info hash, used to stop seeding on delete. |
 | `published_at` | Unix timestamp of the publish. |
 
