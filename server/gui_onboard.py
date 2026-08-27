@@ -118,15 +118,22 @@ def _iox_arch_env(device_id, model):
         % device_id)
 
 
-def resolve_platform(dev, probe=None):
+def resolve_platform(dev, probe=None, os_family=None):
     """Resolve which onboarding platform drives a device.
 
-    Resolution order: (a) explicit dev['platform'] if it names a known recipe;
-    (b) dev['model'] matched against _MODEL_PLATFORMS; (c) if a probe callable
-    is given, call it with dev -- if it returns a model string, match that
-    (the CALLER is responsible for caching the probed model, e.g. into the
-    fleet store); (d) ValueError telling the operator how to unblock."""
+    Resolution order: (a) an IOS-XR device is refused outright -- every recipe
+    here is IOS-XE and no model prefix can tell the families apart; (b) explicit
+    dev['platform'] if it names a known recipe; (c) dev['model'] matched against
+    _MODEL_PLATFORMS; (d) if a probe callable is given, call it with dev -- if it
+    returns a model string, match that (the CALLER is responsible for caching the
+    probed model, e.g. into the fleet store); (e) ValueError telling the operator
+    how to unblock."""
     device_id = dev.get("device_id", "?")
+    if os_family == "xr":
+        raise ValueError(
+            "%s runs IOS-XR, which IRIS cannot stage to yet: every onboarding "
+            "recipe here is IOS-XE. Remove the device or wait for XR support; "
+            "forcing 'platform' will not work." % device_id)
     explicit = dev.get("platform")
     if explicit:
         if explicit not in _PLATFORM_RECIPES:

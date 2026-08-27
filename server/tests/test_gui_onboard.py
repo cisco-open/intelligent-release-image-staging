@@ -388,6 +388,40 @@ def test_resolve_platform_probe_returning_none_raises():
         assert "d1" in str(exc)
 
 
+def test_resolve_platform_xr_family_refuses_xe_recipe():
+    # ASR 9000 runs IOS-XR. ^ASR would otherwise map it to guestshell.
+    dev = {"device_id": "d1", "model": "ASR-9906"}
+    try:
+        gui_onboard.resolve_platform(dev, os_family="xr")
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "IOS-XR" in str(exc)
+        assert "d1" in str(exc)
+
+
+def test_resolve_platform_xr_family_refuses_even_explicit_xe_platform():
+    # An operator forcing platform=guestshell on an XR box is still wrong.
+    dev = {"device_id": "d1", "platform": "guestshell", "model": "ASR-9906"}
+    try:
+        gui_onboard.resolve_platform(dev, os_family="xr")
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "IOS-XR" in str(exc)
+
+
+def test_resolve_platform_xe_family_still_resolves_asr_to_guestshell():
+    # ASR 1000 IS IOS-XE and must keep working exactly as before.
+    dev = {"device_id": "d1", "model": "ASR1001-X"}
+    assert gui_onboard.resolve_platform(dev, os_family="xe") == "guestshell"
+
+
+def test_resolve_platform_unknown_family_behaves_as_before():
+    # os_family omitted or '' -> unchanged legacy behaviour.
+    dev = {"device_id": "d1", "model": "C9300-48UXM"}
+    assert gui_onboard.resolve_platform(dev) == "guestshell"
+    assert gui_onboard.resolve_platform(dev, os_family="") == "guestshell"
+
+
 # --- parse_os_family ----------------------------------------------------
 
 def test_parse_os_family_xe_banner():
