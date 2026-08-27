@@ -118,6 +118,13 @@ def _iox_arch_env(device_id, model):
         % device_id)
 
 
+def _refuse_xr(device_id):
+    raise ValueError(
+        "%s runs IOS-XR, which IRIS cannot stage to yet: every onboarding "
+        "recipe here is IOS-XE. Remove the device or wait for XR support; "
+        "forcing 'platform' will not work." % device_id)
+
+
 def resolve_platform(dev, probe=None, os_family=None):
     """Resolve which onboarding platform drives a device.
 
@@ -130,10 +137,7 @@ def resolve_platform(dev, probe=None, os_family=None):
     how to unblock."""
     device_id = dev.get("device_id", "?")
     if os_family == "xr":
-        raise ValueError(
-            "%s runs IOS-XR, which IRIS cannot stage to yet: every onboarding "
-            "recipe here is IOS-XE. Remove the device or wait for XR support; "
-            "forcing 'platform' will not work." % device_id)
+        _refuse_xr(device_id)
     explicit = dev.get("platform")
     if explicit:
         if explicit not in _PLATFORM_RECIPES:
@@ -163,6 +167,12 @@ def resolve_platform(dev, probe=None, os_family=None):
 
     if probe is not None:
         probed_model = probe(dev)
+        # The probe is the first thing that can learn the family. A
+        # first-contact device had no cached os_family, so the guard at the
+        # top saw None -- re-check here or the very first onboard of an XR
+        # device still resolves to an IOS-XE recipe.
+        if dev.get("os_family") == "xr":
+            _refuse_xr(device_id)
         if probed_model:
             platform = _match(probed_model)
             if platform:
@@ -242,9 +252,13 @@ def _parse_show_version(version_text):
 
 def _default_probe(dev, env, repo_root):
     """Best-effort live 'show version' probe over lab/device-run.sh, using the
-    DEVICE_USER/DEVICE_PASS already resolved into env. ANY failure -> None
-    (never raises) -- an unreachable device just falls through to the
-    resolve_platform ValueError telling the operator to set platform/model."""
+    DEVICE_USER/DEVICE_PASS already resolved into env. Returns the model string
+    ('' when it cannot be read) and records the operating-system family on
+    ``dev['os_family']`` as a side effect -- the return value stays a plain
+    string because a caller at :831 uses it as a truthiness reachability test.
+    ANY failure -> '' (never raises) -- an unreachable device just falls
+    through to the resolve_platform ValueError telling the operator to set
+    platform/model."""
     device_ip = env.get("DEVICE_IP", "")
     try:
         out = subprocess.run(
@@ -252,9 +266,13 @@ def _default_probe(dev, env, repo_root):
             input="show version\n", capture_output=True, text=True, env=env,
             timeout=45)
     except Exception:
-        return None
-    m = _MODEL_RE.search(out.stdout or "")
-    return m.group(1) if m else None
+        return ""
+    text = out.stdout or ""
+    family = parse_os_family(text)
+    if family:
+        dev["os_family"] = family
+    m = _MODEL_RE.search(text)
+    return m.group(1) if m else ""
 
 
 # Collisions that mean the same thing on EVERY platform: each carries IRIS's
@@ -732,11 +750,13 @@ class OnboardService:
         def probe(d):
             model = self._probe(d, env)
             if model:
-                self.fleet.upsert({"device_id": device_id, "model": model})
+                self.fleet.upsert({"device_id": device_id, "model": model,
+                                   "os_family": d.get("os_family") or ""})
                 dev["model"] = model   # so the job line reports what was found
             return model
 
-        platform = resolve_platform(dev, probe=probe)
+        platform = resolve_platform(dev, probe=probe,
+                                    os_family=dev.get("os_family"))
         # For iox, derive the arch env (C9k->amd64, IE-3k/IR->arm defaults,
         # blank/unclassifiable -> raise). Runs for BOTH onboard and undeploy so
         # teardown deletes the RESOLVED package (iris-arm64.tar vs iris-amd64.tar).

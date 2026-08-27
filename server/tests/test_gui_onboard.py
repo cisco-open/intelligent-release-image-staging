@@ -422,6 +422,23 @@ def test_resolve_platform_unknown_family_behaves_as_before():
     assert gui_onboard.resolve_platform(dev, os_family="") == "guestshell"
 
 
+def test_resolve_platform_refuses_xr_discovered_by_probe():
+    # First contact: nothing cached, so the entry guard sees os_family=None.
+    # The probe learns the family; resolution must refuse on THAT, not fall
+    # through to the model map (where ^ASR would return 'guestshell').
+    dev = {"device_id": "d1"}
+
+    def probe(d):
+        d["os_family"] = "xr"
+        return "ASR-9906"
+
+    try:
+        gui_onboard.resolve_platform(dev, probe=probe)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "IOS-XR" in str(exc)
+
+
 # --- parse_os_family ----------------------------------------------------
 
 def test_parse_os_family_xe_banner():
@@ -519,7 +536,9 @@ def test_probe_resolves_iox_and_caches_model(tmp_path):
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done"
     assert seen["install_path"].endswith("device/iox/install.sh")
-    assert {"device_id": "d1", "model": "IE-3400"} in fleet.upserts
+    # The probe closure now also caches os_family alongside the model; the
+    # fake probe_fn here never sets dev["os_family"], so it caches as "".
+    assert {"device_id": "d1", "model": "IE-3400", "os_family": ""} in fleet.upserts
     # the job line reports the model the probe just found, not a placeholder
     assert any("platform: iox (model IE-3400)" in l for l in job["lines"])
 
@@ -540,6 +559,43 @@ def test_probe_returning_none_errors_without_running(tmp_path):
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "error"
     assert called == []
+
+
+def test_default_probe_records_os_family_on_dev(monkeypatch):
+    banner = ("Cisco IOS XR Software, Version 24.4.1\n"
+              "cisco ASR-9906 (Intel 686 F6M14S4)\n")
+
+    class _Out:
+        stdout = banner
+        returncode = 0
+
+    monkeypatch.setattr(gui_onboard.subprocess, "run", lambda *a, **k: _Out())
+    dev = {"device_id": "d1"}
+    model = gui_onboard._default_probe(dev, {"DEVICE_IP": "10.0.0.1"}, "/repo")
+    assert model == "ASR-9906"
+    assert dev["os_family"] == "xr"
+
+
+def test_default_probe_still_returns_falsy_when_unreachable(monkeypatch):
+    # The reachability check at gui_onboard.py:831 does `if not self._probe(...)`.
+    # The return value must stay falsy on failure or that check silently breaks.
+    def _boom(*a, **k):
+        raise OSError("unreachable")
+
+    monkeypatch.setattr(gui_onboard.subprocess, "run", _boom)
+    dev = {"device_id": "d1"}
+    assert not gui_onboard._default_probe(dev, {"DEVICE_IP": "10.0.0.1"}, "/repo")
+
+
+def test_default_probe_xe_device_records_xe(monkeypatch):
+    class _Out:
+        stdout = "Cisco IOS XE Software, Version 17.09.04a\ncisco C9300-48UXM (X86) processor\n"
+        returncode = 0
+
+    monkeypatch.setattr(gui_onboard.subprocess, "run", lambda *a, **k: _Out())
+    dev = {"device_id": "d1"}
+    assert gui_onboard._default_probe(dev, {"DEVICE_IP": "10.0.0.1"}, "/repo") == "C9300-48UXM"
+    assert dev["os_family"] == "xe"
 
 
 def test_iox_env_has_ssh_creds(tmp_path):
