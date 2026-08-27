@@ -659,7 +659,8 @@ def run_once(cfg, deps, state):
             and done_st.get("copied"):
         content_ok = done_st.get("sha", image["sha256"]) == image["sha256"]
         staged_ok = deps.file_size(stage) is not None
-        root_ok = deps.root_present(image["filename"], state.get("stage_fs", "flash:"))
+        root_ok = deps.root_present(image["filename"], state.get("stage_fs", "flash:"),
+                                    size)
         if content_ok and staged_ok and root_ok:
             obs, _ = _build_observation(cfg, deps, state, img_id, stage,
                                         "steady", time.time())
@@ -836,7 +837,7 @@ def run_once(cfg, deps, state):
                                               stream_on=stream_on))
                 if not st.get("copy_terminal") \
                         and now >= st.get("copy_next_ts", 0):
-                    result = deps.copy_to_root(image["filename"], target_prefix)
+                    result = deps.copy_to_root(image["filename"], target_prefix, size)
                     if result is ROOT_COPY_RUNNING_IMAGE_UNKNOWN:
                         # Transient: the running-image scrape glitched, not a
                         # copy failure. Leave copy_attempts/copy_next_ts alone
@@ -1726,10 +1727,12 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
         local = os.path.join(cfg["stage_dir"], fname)
         _transport.put(local, "%sguest-share/iris/%s" % (target_prefix, fname))
 
-    def copy_to_root(fname, target_prefix="flash:"):
+    def copy_to_root(fname, target_prefix="flash:", expected_size=None):
         # Thin wrapper — the actual flow lives in module-level impls so
         # behavioural tests can inject all callables and prove the success log
-        # is gated by _agent_reverify_root's pass.
+        # is gated by _agent_reverify_root's pass. expected_size is forwarded
+        # unchanged to whichever impl the platform branch below selects, and
+        # from there to _agent_reverify_root's presence + exact-size contract.
         running = running_image()
         if not running:
             emit("ROOTCOPY-REFUSED",
@@ -1763,7 +1766,8 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
                     lambda copy_source: _copy_to_root_direct_impl(
                         fname, target_prefix, cli_execute, emit,
                         copy_source=copy_source,
-                        running_image_fn=confirmed_running),
+                        running_image_fn=confirmed_running,
+                        expected_size=expected_size),
                     emit, cli_execute)
                 if shared is not None:
                     return shared
@@ -1785,10 +1789,12 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
             return _copy_to_root_direct_impl(fname, target_prefix,
                                              cli_execute, emit,
                                              delete_source_on_success=True,
-                                             running_image_fn=confirmed_running)
+                                             running_image_fn=confirmed_running,
+                                             expected_size=expected_size)
         return _copy_to_root_impl(fname, target_prefix,
                                   cli_configure, cli_execute, emit,
-                                  running_image_fn=confirmed_running)
+                                  running_image_fn=confirmed_running,
+                                  expected_size=expected_size)
 
     def reclaim():
         # Free flash with `install remove inactive` — the ONLY automated reclaim
@@ -1882,18 +1888,25 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
                 except OSError:
                     pass
 
-    def root_present(fname, prefix="flash:"):
+    def root_present(fname, prefix="flash:", expected_size=None):
         # Cheap existence check of the staged root copy (no hashing).
         # IOS says it's gone -> False (re-copy). cli_execute itself raised
         # (transient glitch) -> True, so one flaky tick doesn't trigger a full
         # 1.2 GB re-copy; a real loss still shows as "No such file" next tick.
+        # When expected_size is given (the caller has a catalog byte size to
+        # check against), presence alone is not enough -- a partial file from
+        # an interrupted transfer must not pass as "still there".
         try:
             out = cli_execute("dir %s%s" % (prefix, fname))
         except Exception:
             return True
         if "%Error" in out or "No such file" in out:
             return False
-        return fname in out
+        if fname not in out:
+            return False
+        if expected_size is not None:
+            return _dir_size_of(out, fname) == expected_size
+        return True
 
     def remove_stage(path):
         try:

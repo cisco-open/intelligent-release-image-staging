@@ -90,10 +90,11 @@ def make_deps(catalog, sizes, verify_ok=True, free=9_000_000_000,
         verify=lambda p, sha: verify_ok,
         free_bytes=lambda prefix="flash:": free,
         version=lambda: "17.18.03",
-        copy_to_root=lambda fname, target_prefix="flash:": copied.append(fname) or True,
+        copy_to_root=lambda fname, target_prefix="flash:", expected_size=None:
+            copied.append(fname) or True,
         purge_others=lambda keep, kid: purged.append((keep, kid)),
         reclaim=lambda: reclaimed.append(True),
-        root_present=lambda fname, prefix="flash:": root_ok,
+        root_present=lambda fname, prefix="flash:", expected_size=None: root_ok,
         remove_stage=_remove_stage,
         aria_remove=lambda fname: None,
         detect_mode=lambda: mode,
@@ -211,7 +212,7 @@ def test_replaced_image_cleanup_claim_gated_on_actual_absence():
     deps, emitted, ios_cmds, _, _, _, _, bundle_reclaimed = make_deps(
         cat, {"/stage/img2.bin": 7}, verify_ok=True)
     deps = deps._replace(                       # the old root REFUSES to die
-        root_present=lambda fname, prefix="flash:": fname == "old.bin")
+        root_present=lambda fname, prefix="flash:", expected_size=None: fname == "old.bin")
     state = {"schema_version": iris_agent._STATE_SCHEMA,
              "image_id": "img1", "root_file": "old.bin"}
     iris_agent.run_once(CFG, deps, state)
@@ -233,7 +234,7 @@ def test_replaced_image_cleanup_retry_refires_bypass_applet():
     deps, _, ios_cmds, _, _, _, _, bundle_reclaimed = make_deps(
         cat, {"/stage/img2.bin": 7}, verify_ok=True)
     deps = deps._replace(                       # the old root REFUSES to die
-        root_present=lambda fname, prefix="flash:": fname == "old.bin")
+        root_present=lambda fname, prefix="flash:", expected_size=None: fname == "old.bin")
     state = {"schema_version": iris_agent._STATE_SCHEMA,
              "image_id": "img1", "root_file": "old.bin"}
     iris_agent.run_once(CFG, deps, state)
@@ -251,7 +252,7 @@ def test_replaced_image_cleanup_confirmed_when_gone():
     deps, emitted, ios_cmds, _, _, _, _, bundle_reclaimed = make_deps(
         cat, {"/stage/img2.bin": 7}, verify_ok=True)
     deps = deps._replace(                        # old root really deleted
-        root_present=lambda fname, prefix="flash:": fname != "old.bin")
+        root_present=lambda fname, prefix="flash:", expected_size=None: fname != "old.bin")
     state = {"schema_version": iris_agent._STATE_SCHEMA,
              "image_id": "img1", "root_file": "old.bin"}
     iris_agent.run_once(CFG, deps, state)
@@ -487,7 +488,7 @@ def test_reassignment_purges_old_image_everywhere():
     deps, emitted, ios_cmds, _, _, purged, _, bundle_reclaimed = make_deps(
         cat, {}, free=9_000_000_000)
     deps = deps._replace(   # the delete genuinely lands: old root reads absent
-        root_present=lambda fname, prefix="flash:": fname != "img1.bin")
+        root_present=lambda fname, prefix="flash:", expected_size=None: fname != "img1.bin")
     state = {"schema_version": iris_agent._STATE_SCHEMA,
              "image_id": "img1", "root_file": "img1.bin",
              "img1": {"done": True, "copied": True}}
@@ -626,6 +627,56 @@ def test_self_heal_recopy_does_not_touch_aria():
     assert copied == ["img1.bin"] and aria_removed == []
 
 
+# --- Task 3: the catalog's declared byte size must thread into both the
+# current-image copy/presence checks, but NOT into the old-root cleanup
+# check (a replaced image's size is unknown and irrelevant -- it is about
+# to be deleted). ---
+
+def test_run_once_passes_catalog_size_to_copy_and_presence():
+    # root_present (steady-state check) reports the flash-root copy missing,
+    # which drives the self-heal re-copy path -- exercising BOTH deps calls
+    # for the CURRENT image in a single tick.
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 5,
+                       "sha256": "abc"})
+    seen = {}
+
+    def copy_to_root(fname, prefix, expected_size):
+        seen["copy_size"] = expected_size
+        return True
+
+    def root_present(fname, prefix, expected_size=None):
+        seen.setdefault("present_sizes", []).append(expected_size)
+        return False   # root missing -> triggers the self-heal re-copy below
+
+    deps, _, _, _, _, _, _, _ = make_deps(cat, {"/stage/img1.bin": 5})
+    deps = deps._replace(copy_to_root=copy_to_root, root_present=root_present)
+    assert iris_agent.run_once(CFG, deps, _DONE()) == "complete"
+    assert seen["copy_size"] == 5
+    assert 5 in seen["present_sizes"]
+
+
+def test_old_root_cleanup_root_present_no_catalog_size():
+    # reassignment: the replaced image's root_present check stays
+    # presence-only -- no catalog size exists for an image that is about to
+    # be deleted, so the call must NOT carry a third (size) argument.
+    cat = FakeCatalog({"approved_image_id": "img2"},
+                      {"id": "img2", "filename": "img2.bin", "size": 7,
+                       "sha256": "def"})
+    calls = []
+
+    def root_present(fname, prefix, expected_size=None):
+        calls.append((fname, prefix, expected_size))
+        return fname != "old.bin"   # confirm the old root is gone
+
+    deps, _, _, _, _, _, _, _ = make_deps(cat, {}, verify_ok=True)
+    deps = deps._replace(root_present=root_present)
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "image_id": "img1", "root_file": "old.bin"}
+    iris_agent.run_once(CFG, deps, state)
+    assert ("old.bin", "flash:", None) in calls
+
+
 def test_steady_state_holds_when_files_present_and_sha_matches():
     # the happy path must still short-circuit WITHOUT re-hashing or re-copying
     cat = FakeCatalog({"approved_image_id": "img1"},
@@ -666,7 +717,7 @@ def test_root_copy_failure_does_not_mark_copied_and_retries_next_tick():
         cat, {"/stage/img1.bin": 5}, verify_ok=True)
     calls = []
 
-    def failing_copy(fname, target_prefix="flash:"):
+    def failing_copy(fname, target_prefix="flash:", expected_size=None):
         calls.append(fname)
         return False
 
@@ -693,7 +744,7 @@ def test_root_copy_failure_then_success_settles_to_complete():
     results = iter([False, True])
     calls = []
 
-    def flaky_copy(fname, target_prefix="flash:"):
+    def flaky_copy(fname, target_prefix="flash:", expected_size=None):
         calls.append(fname)
         return next(results)
 
@@ -716,7 +767,7 @@ def test_root_copy_backoff_starts_after_second_failure(monkeypatch):
         cat, {"/stage/img1.bin": 5}, verify_ok=True)
     calls = []
     deps = deps._replace(
-        copy_to_root=lambda fname, target_prefix="flash:": calls.append(fname) or False)
+        copy_to_root=lambda fname, target_prefix="flash:", expected_size=None: calls.append(fname) or False)
     now = [1_000.0]
     monkeypatch.setattr(iris_agent.time, "time", lambda: now[0])
     state = {}
@@ -747,7 +798,7 @@ def test_first_retry_timestamp_from_regressed_state_is_ignored(monkeypatch):
         cat, {"/stage/img1.bin": 5}, verify_ok=True)
     calls = []
     deps = deps._replace(
-        copy_to_root=lambda fname, target_prefix="flash:": calls.append(fname) or True)
+        copy_to_root=lambda fname, target_prefix="flash:", expected_size=None: calls.append(fname) or True)
     monkeypatch.setattr(iris_agent.time, "time", lambda: 1_000.0)
     state = {"schema_version": iris_agent._STATE_SCHEMA,
              "image_id": "img1",
@@ -780,7 +831,7 @@ def test_root_copy_running_image_unknown_does_not_count_toward_terminal():
         cat, {"/stage/img1.bin": 5}, verify_ok=True)
     calls = []
 
-    def unknown_running_copy(fname, target_prefix="flash:"):
+    def unknown_running_copy(fname, target_prefix="flash:", expected_size=None):
         calls.append(fname)
         return iris_agent.ROOT_COPY_RUNNING_IMAGE_UNKNOWN
 
@@ -810,7 +861,7 @@ def test_root_copy_running_image_unknown_then_resolves_copies_normally():
                     True])
     calls = []
 
-    def flaky_then_ok(fname, target_prefix="flash:"):
+    def flaky_then_ok(fname, target_prefix="flash:", expected_size=None):
         calls.append(fname)
         return next(results)
 
@@ -839,7 +890,7 @@ def test_root_copy_unknown_interleaved_with_real_failures_only_real_ones_count()
                     False])
     calls = []
 
-    def mixed(fname, target_prefix="flash:"):
+    def mixed(fname, target_prefix="flash:", expected_size=None):
         calls.append(fname)
         return next(results)
 
@@ -1637,16 +1688,16 @@ def test_rejects_catalog_filename_with_path_traversal():
 
 
 def test_run_once_threads_filename_to_copy_to_root():
-    """run_once must pass the catalog filename into copy_to_root. Nothing else
-    is needed — `copy /verify` is the verification (the signature covers the
-    content), so no size or per-image sha needs to thread through."""
+    """run_once must pass the catalog filename into copy_to_root (the catalog
+    byte size is covered separately by test_run_once_passes_catalog_size_to_
+    copy_and_presence)."""
     cat = FakeCatalog({"approved_image_id": "img1"},
                       {"id": "img1", "filename": "img1.bin", "size": 5,
                        "sha256": "abc"})
     captured = []
     deps, _, _, _, _, _, _, _ = make_deps(cat, {"/stage/img1.bin": 5})
     deps = deps._replace(
-        copy_to_root=lambda fname, target_prefix="flash:": captured.append(fname) or True)
+        copy_to_root=lambda fname, target_prefix="flash:", expected_size=None: captured.append(fname) or True)
     assert iris_agent.run_once(CFG, deps, {}) == "complete"
     assert captured == ["img1.bin"]
 
@@ -1712,7 +1763,7 @@ def test_heartbeat_not_ready_when_copy_failed():
     deps, _, _, _, copied, _, _, _ = make_deps(cat, {"/stage/img1.bin": 5})
     deps = deps._replace(
         catalog=_HeartbeatSpy(cat, sent),
-        copy_to_root=lambda fname, target_prefix="flash:": False)  # copy fails
+        copy_to_root=lambda fname, target_prefix="flash:", expected_size=None: False)  # copy fails
     assert iris_agent.run_once(CFG, deps, {}) == "complete"
     assert copied == []
     assert sent[-1]["stage_state"] == "staging"          # NOT "ready"
@@ -1743,7 +1794,7 @@ def test_run_once_bundle_ie3k_copies_to_sdflash():
     calls = []
     deps = deps._replace(
         target_fs=lambda: ("sdflash:", 9_000_000_000),
-        copy_to_root=lambda fname, target_prefix="flash:":
+        copy_to_root=lambda fname, target_prefix="flash:", expected_size=None:
             calls.append((fname, target_prefix)) or True)
     assert iris_agent.run_once(CFG, deps, {}) == "complete"
     assert calls == [("img1.bin", "sdflash:")]   # copy placed on sdflash:, not flash:
@@ -1775,7 +1826,7 @@ def test_steady_state_root_check_probes_cached_stage_fs():
     deps, _, _, _, _, _, _, _ = make_deps(cat, {"/stage/img1.bin": 5}, mode="bundle")
     probed = []
     deps = deps._replace(
-        root_present=lambda fname, prefix="flash:":
+        root_present=lambda fname, prefix="flash:", expected_size=None:
             (probed.append(prefix) or prefix == "sdflash:"))
     state = dict(_DONE(), stage_fs="sdflash:")
     assert iris_agent.run_once(CFG, deps, state) == "complete"
@@ -1789,7 +1840,7 @@ def test_run_once_c9300_still_copies_to_flash():
     deps, _, _, _, _, _, _, _ = make_deps(cat, {"/stage/img1.bin": 5}, mode="bundle")
     calls = []
     deps = deps._replace(           # default target_fs returns ("flash:", free)
-        copy_to_root=lambda fname, target_prefix="flash:":
+        copy_to_root=lambda fname, target_prefix="flash:", expected_size=None:
             calls.append((fname, target_prefix)) or True)
     assert iris_agent.run_once(CFG, deps, {}) == "complete"
     assert calls == [("img1.bin", "flash:")]

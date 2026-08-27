@@ -51,9 +51,9 @@ def _deps(cat, sizes, **over):
         catalog=cat, emit=lambda *a: None, ios=lambda c: "",
         aria_add=lambda t, d: None, file_size=lambda p: sizes.get(p),
         verify=lambda p, sha: True, free_bytes=lambda prefix="flash:": 9_000_000_000,
-        version=lambda: "17", copy_to_root=lambda f, tp="flash:": True,
+        version=lambda: "17", copy_to_root=lambda f, tp="flash:", expected_size=None: True,
         purge_others=lambda k, i: None, reclaim=lambda: None,
-        root_present=lambda f, prefix="flash:": True,
+        root_present=lambda f, prefix="flash:", expected_size=None: True,
         remove_stage=lambda p: sizes.pop(p, None), aria_remove=lambda f: None,
         detect_mode=lambda: "bundle", target_fs=lambda: ("flash:", 9_000_000_000),
         running_image=lambda: "running.bin",
@@ -112,7 +112,7 @@ def test_copy_failure_persists_failed_independent_of_sha():
     cat = _Cat({"approved_image_id": "img1"}, _IMG)
     state = {}
     deps = _deps(cat, {"/stage/img1.bin": 5},
-                 copy_to_root=lambda f, tp="flash:": False)
+                 copy_to_root=lambda f, tp="flash:", expected_size=None: False)
     iris_agent.run_once(_CFG, deps, state)
     # content verify still passed (independent fact)
     assert telemetry_report.content_sha256_state(state, "img1") == "verified"
@@ -124,7 +124,7 @@ def test_running_image_unknown_is_not_a_copy_decision():
     state = {}
     deps = _deps(
         cat, {"/stage/img1.bin": 5},
-        copy_to_root=lambda f, tp="flash:":
+        copy_to_root=lambda f, tp="flash:", expected_size=None:
             iris_agent.ROOT_COPY_RUNNING_IMAGE_UNKNOWN)
     iris_agent.run_once(_CFG, deps, state)
     # verify passed, but the transient running-image-unknown is NOT a
