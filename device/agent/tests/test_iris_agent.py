@@ -790,6 +790,103 @@ def test_root_copy_backoff_starts_after_second_failure(monkeypatch):
     assert "copy_next_ts" not in state["img1"]
 
 
+# --- A terminal placement failure must not strand a partial image at the
+# boot-FS root. Once copy_terminal is set no further copy fires, so the
+# placement path's delete-first never runs again — and the leftover carries the
+# REAL Cisco image name, so it both wastes ~1.2 GB and looks like a good image
+# to an operator listing flash:. state['root_file'] is only set on SUCCESS, so
+# nothing else owns the cleanup. ---
+
+def _terminal_copy_deps(bundle_sink_wanted=True):
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 5,
+                       "sha256": "abc"})
+    deps, emitted, _, _, _, _, _, bundle_reclaimed = make_deps(
+        cat, {"/stage/img1.bin": 5}, verify_ok=True)
+    deps = deps._replace(
+        copy_to_root=lambda fname, target_prefix="flash:", expected_size=None: False)
+    return deps, emitted, bundle_reclaimed
+
+
+def test_terminal_placement_failure_reclaims_this_attempts_partial(monkeypatch):
+    deps, emitted, bundle_reclaimed = _terminal_copy_deps()
+    now = [1_000.0]
+    monkeypatch.setattr(iris_agent.time, "time", lambda: now[0])
+    state = {}
+    for _ in range(iris_agent._ROOT_COPY_MAX_ATTEMPTS):
+        iris_agent.run_once(CFG, deps, state)
+        now[0] += 3600           # clear any armed backoff
+    assert state["img1"]["copy_terminal"] is True
+    # EXACTLY the one filename IRIS itself wrote — the delete-first at the head
+    # of this attempt means a file at that name can only be this attempt's
+    # partial, never an operator's image. Nothing else may be swept.
+    assert bundle_reclaimed == [("flash:", ["img1.bin"])]
+    assert any(m == "ROOTCOPY-RECLAIM" for m, _ in emitted)
+
+
+def test_terminal_reclaim_fires_once_not_every_tick(monkeypatch):
+    deps, _, bundle_reclaimed = _terminal_copy_deps()
+    now = [1_000.0]
+    monkeypatch.setattr(iris_agent.time, "time", lambda: now[0])
+    state = {}
+    for _ in range(iris_agent._ROOT_COPY_MAX_ATTEMPTS + 5):
+        iris_agent.run_once(CFG, deps, state)
+        now[0] += 3600
+    assert len(bundle_reclaimed) == 1
+
+
+def test_non_terminal_placement_failure_never_reclaims(monkeypatch):
+    # Retries are still coming, and each one starts by deleting the name
+    # itself. Reclaiming between attempts would be pure churn.
+    deps, emitted, bundle_reclaimed = _terminal_copy_deps()
+    now = [1_000.0]
+    monkeypatch.setattr(iris_agent.time, "time", lambda: now[0])
+    state = {}
+    for _ in range(iris_agent._ROOT_COPY_MAX_ATTEMPTS - 1):
+        iris_agent.run_once(CFG, deps, state)
+        now[0] += 3600
+    assert state["img1"]["copy_attempts"] == iris_agent._ROOT_COPY_MAX_ATTEMPTS - 1
+    assert state["img1"].get("copy_terminal") is not True
+    assert bundle_reclaimed == []
+    assert not any(m == "ROOTCOPY-RECLAIM" for m, _ in emitted)
+
+
+def test_transient_running_image_unknown_never_reclaims():
+    # The sentinel is not a copy failure at all, so it must neither go terminal
+    # nor delete anything.
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 5,
+                       "sha256": "abc"})
+    deps, _, _, _, _, _, _, bundle_reclaimed = make_deps(
+        cat, {"/stage/img1.bin": 5}, verify_ok=True)
+    deps = deps._replace(
+        copy_to_root=lambda fname, target_prefix="flash:", expected_size=None:
+            iris_agent.ROOT_COPY_RUNNING_IMAGE_UNKNOWN)
+    state = {}
+    for _ in range(iris_agent._ROOT_COPY_MAX_ATTEMPTS + 2):
+        iris_agent.run_once(CFG, deps, state)
+    assert bundle_reclaimed == []
+
+
+def test_terminal_reclaim_failure_is_logged_and_swallowed(monkeypatch):
+    # The device is already reported as copy_failed; a delete that raises must
+    # not take the tick down with it.
+    deps, emitted, _ = _terminal_copy_deps()
+
+    def boom(prefix, names):
+        raise RuntimeError("cli glitch")
+
+    deps = deps._replace(reclaim_bundle=boom)
+    now = [1_000.0]
+    monkeypatch.setattr(iris_agent.time, "time", lambda: now[0])
+    state = {}
+    for _ in range(iris_agent._ROOT_COPY_MAX_ATTEMPTS):
+        iris_agent.run_once(CFG, deps, state)
+        now[0] += 3600
+    assert state["img1"]["copy_terminal"] is True
+    assert any(m == "ROOTCOPY-RECLAIM-FAIL" for m, _ in emitted)
+
+
 def test_first_retry_timestamp_from_regressed_state_is_ignored(monkeypatch):
     cat = FakeCatalog({"approved_image_id": "img1"},
                       {"id": "img1", "filename": "img1.bin", "size": 5,

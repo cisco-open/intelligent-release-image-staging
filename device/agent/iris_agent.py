@@ -536,6 +536,40 @@ def _copy_backoff(attempts):
                _ROOT_COPY_BACKOFF_MAX)
 
 
+def _reclaim_failed_root_copy(deps, target_prefix, image):
+    """Delete this attempt's failed root copy when the retry gate goes
+    terminal. Called ONCE, on the transition into copy_terminal.
+
+    Why it has to happen here: after copy_terminal is set, no further copy
+    fires, so the placement path's delete-first never runs again. Without this
+    the leftover sits at the boot-FS root under the REAL Cisco image name,
+    burning ~1.2 GB indefinitely — and an operator listing flash: would see
+    what looks like a perfectly good image. state['root_file'] is only set on
+    SUCCESS, so no other cleanup path owns this file.
+
+    WHY THIS IS SAFE TO DELETE (do not regress): every placement attempt
+    begins with `delete /force <FS><filename>` — the IRIS-COPYROOT applet's
+    action 020 on the Guest Shell path, the vty command on the direct path.
+    So a file present at that name when the attempt fails can only be the
+    partial THIS attempt just wrote. It cannot be an operator's own image:
+    theirs was already gone before the copy started.
+
+    Stage-only: this reclaims exactly one name — IRIS's own failed copy — and
+    is reclamation, not install activity. Best-effort; a delete that raises is
+    logged and swallowed, since the terminal state is already reported."""
+    fname = image["filename"]
+    try:
+        deps.reclaim_bundle(target_prefix, [fname])
+    except Exception as e:
+        deps.emit("ROOTCOPY-RECLAIM-FAIL",
+                  "%s failed placement left at %s; delete raised: %s"
+                  % (fname, target_prefix, e))
+        return
+    deps.emit("ROOTCOPY-RECLAIM",
+              "%s placement gave up; deleted this attempt's partial copy from %s"
+              % (fname, target_prefix))
+
+
 def _ios_basename(path):
     return (path or "").rsplit(":", 1)[-1].rsplit("/", 1)[-1]
 
@@ -861,6 +895,10 @@ def run_once(cfg, deps, state):
                             deps.emit("ROOTCOPY-GIVEUP",
                                       "%s placement failed %d times; manual intervention required"
                                       % (image["filename"], attempts))
+                            # Transition-only: copy_terminal short-circuits the
+                            # whole copy block from the next tick on, so this
+                            # runs exactly once. Nothing else owns the leftover.
+                            _reclaim_failed_root_copy(deps, target_prefix, image)
                         else:
                             if attempts == 1:
                                 # Retry on the next tick for fast recovery from
@@ -1595,8 +1633,10 @@ def _reclaim_bundle_impl(target_prefix, names, cli_configure_fn, cli_execute_fn)
     IRIS-RECLAIM-BUNDLE authorization-bypass applet (AAA nodes silently no-op
     a raw exec `delete`). Callers own the never-delete-that guarantee: the
     bundle-mode download gate passes only names outside its protect set
-    (running/staging/seeding image + IRIS's own root copy), and the
-    replaced-root cleanup passes only re-whitelisted IRIS-placed root copies.
+    (running/staging/seeding image + IRIS's own root copy), the replaced-root
+    cleanup passes only re-whitelisted IRIS-placed root copies, and the
+    failed-placement reclaim (_reclaim_failed_root_copy) passes the single name
+    this attempt's own delete-first had already cleared.
     Fire-and-forget — callers that need proof re-check afterwards (the
     replaced-root cleanup verifies file presence; the download gate re-reads
     free space).
@@ -2037,9 +2077,25 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
 
     def reclaim_bundle(target_prefix, names):
         # Thin wrapper — the applet templating lives in the module-level impl
-        # so it's unit-tested off-box. Serves both the bundle-mode download
-        # gate and the replaced-root cleanup in run_once (see the impl's
-        # docstring for each caller's safety guarantee).
+        # so it's unit-tested off-box. Serves the bundle-mode download gate,
+        # the replaced-root cleanup, and the failed-placement reclaim in
+        # run_once (see each caller's docstring for its safety guarantee).
+        #
+        # Platform split mirrors copy_to_root's. The EEM applet exists because
+        # the C9300 Guest Shell `cli` module can't drive privileged exec work,
+        # and a raw exec `delete` silently no-ops on AAA/TACACS-managed nodes
+        # without `authorization bypass`. The container / SSH-to-self platforms
+        # reach IOS over a real vty, where `delete /force` runs directly — the
+        # same command _copy_to_root_direct_impl already issues there before
+        # every copy. Best-effort per name so one failure can't strand the rest.
+        if _mode == "container" and _transport is not None:
+            for n in names:
+                try:
+                    cli_execute("delete /force %s%s" % (target_prefix, n))
+                except Exception as e:
+                    emit("RECLAIM-FAIL",
+                         "%s%s delete failed: %s" % (target_prefix, n, e))
+            return
         _reclaim_bundle_impl(target_prefix, names, cli_configure, cli_execute)
 
     def version():
