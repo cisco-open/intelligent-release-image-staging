@@ -1114,6 +1114,97 @@ def test_reverify_without_expected_size_keeps_presence_only():
     assert ok is True
 
 
+# --- present-but-unparseable `dir` row: the file IS there, the row just didn't
+# parse (unexpected format). That must be handled like a wrong size — keep
+# polling — and the eventual failure must say what was actually seen, not
+# "never appeared". A false "never appeared" sends an operator hunting the
+# wrong fault. ---
+
+# a row the size regex cannot read: no permissions column at all
+_DIR_UNPARSEABLE = "Directory of flash:/\n  cat9k.bin\n"
+
+
+def test_reverify_present_but_unparseable_row_keeps_polling():
+    # Poll 1 and 2 return an unreadable row; poll 3 returns a well-formed row
+    # with the right size. The unreadable ticks must not end the poll early.
+    seq = iter([_DIR_UNPARSEABLE, _DIR_UNPARSEABLE,
+                "  121  -rw-  1260618344  Jun 16 2026  cat9k.bin"])
+    sleeps = []
+    emits = []
+    ok = iris_agent._agent_reverify_root(
+        "cat9k.bin", "flash:", lambda c: next(seq),
+        lambda tag, msg: emits.append((tag, msg)),
+        poll_attempts=5, poll_interval_s=0,
+        sleep_fn=lambda s: sleeps.append(s), expected_size=1260618344)
+    assert ok is True
+    assert len(sleeps) == 2
+    assert emits[-1][0] == "ROOTCOPY"
+
+
+def test_reverify_present_but_unparseable_fails_with_an_honest_reason():
+    # Persisting to the end of the budget IS a failure — but the file was
+    # plainly present, so the log must not claim it never appeared.
+    emits = []
+    ok = iris_agent._agent_reverify_root(
+        "cat9k.bin", "flash:", lambda c: _DIR_UNPARSEABLE,
+        lambda tag, msg: emits.append((tag, msg)),
+        poll_attempts=2, poll_interval_s=0, sleep_fn=lambda s: None,
+        expected_size=1260618344)
+    assert ok is False
+    tag, msg = emits[-1]
+    assert tag == "ROOTCOPY-FAIL"
+    assert "present but size unreadable from dir output" in msg
+    assert "never appeared" not in msg
+
+
+def test_reverify_readable_mismatch_after_unparseable_reports_the_mismatch():
+    # The message describes the LAST thing the poll actually saw: a readable
+    # short size beats an earlier unreadable row.
+    seq = iter([_DIR_UNPARSEABLE,
+                "  121  -rw-  1048576  Jun 16 2026  cat9k.bin"])
+    emits = []
+    ok = iris_agent._agent_reverify_root(
+        "cat9k.bin", "flash:", lambda c: next(seq),
+        lambda tag, msg: emits.append((tag, msg)),
+        poll_attempts=2, poll_interval_s=0, sleep_fn=lambda s: None,
+        expected_size=1260618344)
+    assert ok is False
+    assert "size mismatch" in emits[-1][1]
+
+
+# --- _root_present_from_dir: the steady-state presence verdict build_deps.
+# root_present wraps. Absence is the ONLY hard False (besides a readable size
+# that disagrees); anything ambiguous stays True so one bad tick can't cost a
+# full ~GB re-copy. ---
+
+def test_root_present_from_dir_absent_is_false():
+    assert iris_agent._root_present_from_dir(
+        "%Error opening flash:/cat9k.bin (No such file or directory)",
+        "cat9k.bin", 1260618344) is False
+    assert iris_agent._root_present_from_dir("", "cat9k.bin") is False
+    assert iris_agent._root_present_from_dir(
+        "  121  -rw-  5  Jun 16 2026  other.bin", "cat9k.bin") is False
+
+
+def test_root_present_from_dir_exact_size_matches():
+    out = "  121  -rw-  1260618344  Jun 16 2026  cat9k.bin"
+    assert iris_agent._root_present_from_dir(out, "cat9k.bin", 1260618344) is True
+
+
+def test_root_present_from_dir_readable_short_size_is_false():
+    # a partial left by an interrupted transfer must not pass as "still there"
+    out = "  121  -rw-  1048576  Jun 16 2026  cat9k.bin"
+    assert iris_agent._root_present_from_dir(out, "cat9k.bin", 1260618344) is False
+
+
+def test_root_present_from_dir_unparseable_row_stays_present():
+    # The file IS there; only the row format defeated the parser. Returning
+    # False here would re-copy ~1.2 GB over a parse quirk — same rationale as
+    # the raise-tolerating path: a real loss shows as absence next tick.
+    assert iris_agent._root_present_from_dir(
+        _DIR_UNPARSEABLE, "cat9k.bin", 1260618344) is True
+
+
 # --- Source-level guard: the templated applet inside iris_agent.py must do the
 # COPY only and log a NEUTRAL breadcrumb — never claim a verified copy. Only the
 # agent emits the "placed at flash root" log, after _agent_reverify_root sees

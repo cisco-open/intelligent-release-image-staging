@@ -1344,6 +1344,33 @@ def _dir_size_of(dir_out, fname):
     return int(m.group(1)) if m else None
 
 
+def _root_present_from_dir(dir_out, fname, expected_size=None):
+    """Steady-state presence verdict for the placed root copy, from one `dir`
+    read. Pure (module-level so it's unit-testable); build_deps.root_present
+    wraps it with the CLI call.
+
+    True unless IOS positively says the file is gone. When `expected_size` is
+    given, a parsed size that DISAGREES is False — a partial file left by an
+    interrupted transfer must not pass as "still there".
+
+    A row that is present but whose size can't be parsed returns True, for the
+    same reason build_deps.root_present returns True when the `dir` call itself
+    raises: one flaky or unparseable tick must not trigger a full ~GB re-copy,
+    and a real loss shows up as plain absence on the next tick."""
+    if not dir_out:
+        return False
+    if "%Error" in dir_out or "No such file" in dir_out:
+        return False
+    if fname not in dir_out:
+        return False
+    if expected_size is None:
+        return True
+    observed = _dir_size_of(dir_out, fname)
+    if observed is None:
+        return True
+    return observed == expected_size
+
+
 def _agent_reverify_root(fname, target_prefix, cli_execute_fn, emit_fn,
                         poll_attempts=180, poll_interval_s=5.0,
                         sleep_fn=time.sleep, expected_size=None):
@@ -1374,17 +1401,27 @@ def _agent_reverify_root(fname, target_prefix, cli_execute_fn, emit_fn,
     entry the sha256 was checked against). This poll only confirms presence
     and exact catalog byte size at the target-FS root.
 
+    A row that IS present but whose size can't be parsed out of the `dir`
+    output (an unexpected format) is handled exactly like a wrong size: keep
+    polling, and if it persists to the end of the budget, fail — but say so
+    truthfully. Claiming the copy "never appeared" when it plainly did would
+    send an operator looking for the wrong fault.
+
     Polls `dir <FS><fname>` and returns bool:
       * file appears with the expected size (or, when expected_size is None,
         appears at all) -> emit ROOTCOPY, return True
-      * size mismatch persists through the whole poll budget, or the file
-        never appears at all -> emit ROOTCOPY-FAIL, return False.
+      * a size mismatch, or a present-but-unreadable size, persists through the
+        whole poll budget, or the file never appears at all -> emit
+        ROOTCOPY-FAIL naming which of those it was, return False.
 
     Default poll budget (180 * 5 s ≈ 895 s) is sized to track a copy path's
     typical ~900 s execution budget, so a legitimately slow ~1.2 GB copy
     isn't abandoned a few minutes early."""
     emit_fn("ROOTCOPY-VERIFYING", "%s awaiting root copy" % fname)
     last_size = None
+    # Records the outcome of the LAST poll that actually saw the row, so the
+    # failure message below describes what was observed rather than guessing.
+    size_unreadable = False
     for i in range(poll_attempts):
         try:
             dir_out = cli_execute_fn("dir %s%s" % (target_prefix, fname))
@@ -1395,15 +1432,28 @@ def _agent_reverify_root(fname, target_prefix, cli_execute_fn, emit_fn,
             if expected_size is None:
                 emit_fn("ROOTCOPY", "%s placed at flash root" % fname)
                 return True
-            last_size = _dir_size_of(dir_out, fname)
-            if last_size == expected_size:
-                emit_fn("ROOTCOPY", "%s placed at flash root, size verified "
-                        "(%d bytes)" % (fname, expected_size))
-                return True
-            # present but wrong size: may still be mid-copy — keep polling.
+            observed = _dir_size_of(dir_out, fname)
+            if observed is None:
+                # Present, but the row didn't parse. Treat it like a wrong
+                # size — keep polling — rather than declaring the copy absent.
+                size_unreadable = True
+            else:
+                size_unreadable = False
+                last_size = observed
+                if last_size == expected_size:
+                    emit_fn("ROOTCOPY", "%s placed at flash root, size verified "
+                            "(%d bytes)" % (fname, expected_size))
+                    return True
+            # present but wrong/unreadable size: may still be mid-copy — keep
+            # polling.
         if i < poll_attempts - 1:
             sleep_fn(poll_interval_s)
-    if last_size is not None:
+    if size_unreadable:
+        emit_fn("ROOTCOPY-FAIL",
+                "%s root copy present but size unreadable from dir output; "
+                "cannot confirm the catalog's %s bytes — treated as unplaced"
+                % (fname, expected_size))
+    elif last_size is not None:
         emit_fn("ROOTCOPY-FAIL", "%s root copy size mismatch: dir shows %d, "
                 "catalog says %d — partial copy treated as absent"
                 % (fname, last_size, expected_size))
@@ -1889,20 +1939,15 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
         # IOS says it's gone -> False (re-copy). cli_execute itself raised
         # (transient glitch) -> True, so one flaky tick doesn't trigger a full
         # 1.2 GB re-copy; a real loss still shows as "No such file" next tick.
-        # When expected_size is given (the caller has a catalog byte size to
-        # check against), presence alone is not enough -- a partial file from
-        # an interrupted transfer must not pass as "still there".
+        # The verdict on the output itself lives in the module-level
+        # _root_present_from_dir so it's unit-testable off-box (including the
+        # present-but-unparseable case, which is tolerated for exactly the same
+        # reason as the raise above).
         try:
             out = cli_execute("dir %s%s" % (prefix, fname))
         except Exception:
             return True
-        if "%Error" in out or "No such file" in out:
-            return False
-        if fname not in out:
-            return False
-        if expected_size is not None:
-            return _dir_size_of(out, fname) == expected_size
-        return True
+        return _root_present_from_dir(out, fname, expected_size)
 
     def remove_stage(path):
         try:
