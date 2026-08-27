@@ -40,7 +40,7 @@ export IRIS_RPC_PORT="$RPC_PORT"
 
 # Image hand-off to IOS: on C9k the app-hosting SSD share is bind-mounted in
 # (IRIS_SHARE_DIR, run-opts -v) and the agent lands its scratch there at disk
-# speed for an IOS-internal `copy /verify`; without a share (IE-3x00) it
+# speed for an IOS-internal plain `copy`; without a share (IE-3x00) it
 # scp-pushes the image to <target>guest-share/iris through the device's SCP
 # server instead.
 mkdir -p "$STAGE_DIR" "$(dirname "$CONF")" "$(dirname "$STATE")"

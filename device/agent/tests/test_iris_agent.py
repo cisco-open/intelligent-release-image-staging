@@ -969,10 +969,12 @@ def test_reverify_happy_path_emits_rootcopy_success():
 
 
 def test_reverify_no_file_means_signature_failed_or_copy_aborted():
-    # Cisco `copy /verify` deletes the destination on a failed signature, so a
-    # missing file means signature failed (or the copy never ran). The agent
-    # times out and emits FAIL (nothing to delete — the applet cleared any
-    # stale leftover up front).
+    # Placement is a plain `copy` now — there's no on-box signature check to
+    # fail. A missing file after the poll window just means the copy never
+    # completed (aborted, hung, or never started); any partial from a prior
+    # attempt gets cleared by the applet's delete-first step, not left behind
+    # for the agent to see. The agent times out and emits FAIL (nothing to
+    # delete here — the applet already cleared any stale leftover up front).
     cli, emit, _, emitted = _make_reverify_cli(dir_out=_DIR_MISSING)
     ok = _reverify(cli, emit, poll_attempts=3)
     assert ok is False
@@ -983,7 +985,7 @@ def test_reverify_no_file_means_signature_failed_or_copy_aborted():
 
 def test_reverify_polls_until_file_appears():
     # The applet runs ~2-4 min while the agent polls. dir reports
-    # "No such file" until the copy /verify finishes — then the file is there
+    # "No such file" until the copy finishes — then the file is there
     # at the expected path. The agent must keep polling, then pass.
     seq = iter([_DIR_MISSING, _DIR_MISSING, _DIR_OK])
     sleeps = []
@@ -1121,9 +1123,10 @@ def test_reverify_without_expected_size_keeps_presence_only():
 
 def test_iris_agent_source_applet_is_neutral_no_self_verdict():
     """The templated applet must (a) delete any stale leftover before copying,
-    (b) run `copy /verify` (copy + Cisco signature), and (c) log only a NEUTRAL
-    ROOTCOPY-ATTEMPTED breadcrumb — never a pass/fail verdict or a "placed at
-    flash root" claim. The agent owns the verdict via file presence (and,
+    (b) run a plain `copy` (no /verify, no in-band signature check), and (c)
+    log only a NEUTRAL ROOTCOPY-ATTEMPTED breadcrumb — never a pass/fail
+    verdict or a "placed at flash root" claim. The agent owns the verdict via
+    file presence (and,
     where checked, size). Plus a HW-driven regression guard: the broken
     $_arg1 trigger must not return. The bats only inspects the reference
     .cfg; this checks the runtime template living inside iris_agent.py
@@ -1431,7 +1434,7 @@ def test_reclaim_bundle_impl_empty_names_is_a_no_op():
 # --- Share-mount staging (C9k IOx): the app-hosting SSD share
 # (usbflash1:iox_host_data_share) is bind-mounted into the container, so the
 # agent lands its scratch there at DISK speed and the final placement is an
-# IOS-internal `copy /verify` from the SSD to the target FS — no scp, no
+# IOS-internal plain `copy` from the SSD to the target FS — no scp, no
 # control-plane punt path, no CoPP ceiling. Falls back to the scp push when
 # the share is not mounted (IE-3x00, or a failed -v mount). ---
 
@@ -1461,7 +1464,7 @@ def test_stage_via_share_lands_file_then_copy_verifies_from_share(tmp_path):
     seen = {}
 
     def copy_direct(copy_source):
-        # the share copy must be fully in place when copy /verify fires
+        # the share copy must be fully in place before the plain copy runs
         seen["source"] = copy_source("img1.bin", "flash:")
         seen["bytes"] = (share / iris_agent._SHARE_STAGE).read_bytes()
         return True
@@ -1473,9 +1476,10 @@ def test_stage_via_share_lands_file_then_copy_verifies_from_share(tmp_path):
     # IRIS stages at the share ROOT (container-created SUBDIRS become
     # inaccessible to the container itself on the C9300 SSD share —
     # hardware-observed; the CAF-created root stays writable at disk speed)
-    # under its own iris- prefixed fixed name. copy /verify reads that source
-    # and writes the REAL image name to flash:, verifying the signature from
-    # the bytes, so the staged name is cosmetic.
+    # under its own iris- prefixed fixed name. The plain copy reads that
+    # source and writes the REAL image name to flash:, so the staged name is
+    # cosmetic — content integrity is the agent's own sha256 against the
+    # catalog, checked before this copy runs.
     assert seen["source"] == \
         "usbflash1:iox_host_data_share/" + iris_agent._SHARE_STAGE
     assert iris_agent._SHARE_STAGE.startswith("iris-")
@@ -1519,7 +1523,7 @@ def test_stage_via_share_probe_failure_falls_back_before_big_copy(tmp_path):
         lambda m, msg: emitted.append((m, msg)),
         lambda cmd: "%Error opening usbflash1:WRONG/ (No such device)")
     assert result is None          # -> scp fallback
-    assert calls == []             # copy /verify never attempted
+    assert calls == []             # the copy was never attempted
     assert any(m == "SHARE-FALLBACK" for m, _ in emitted)
     assert _iris_share_files(share) == []  # probe cleaned, image never copied
 
@@ -1579,9 +1583,9 @@ def test_stage_via_share_local_copy_failure_falls_back(tmp_path):
 
 
 def test_stage_via_share_copy_verify_failure_is_final_and_cleans_up(tmp_path):
-    # IOS-side copy /verify genuinely failed AFTER a successful probe (e.g.
-    # signature rejection): scp would push the SAME bytes, so there is no
-    # fallback — the verdict is False and the share copy is still removed.
+    # IOS-side plain copy genuinely failed AFTER a successful probe (e.g. a
+    # transport error mid-copy): scp would push the SAME bytes, so there is
+    # no fallback — the verdict is False and the share copy is still removed.
     stage = _mk_scratch(tmp_path)
     share = tmp_path / "share"
     share.mkdir()

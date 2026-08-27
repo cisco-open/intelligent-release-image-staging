@@ -6,9 +6,10 @@
 
 content_sha256_state (verified|mismatch|not_checked) is written WHEN run_once
 makes the content-hash verify decision; ios_copy_verify_state
-(ok|failed|not_run|unsupported) is written WHEN it makes the IOS copy /verify
-decision. The report reads them verbatim — never inferred from done/copied or
-absence, never 'false' for unchecked, and the two facts are independent.
+(ok|failed|not_run|unsupported) is retained for wire compatibility — there is
+no copy-verify step anymore, so it always reads 'not_run'. The report reads
+both verbatim — never inferred from done/copied or absence, never 'false' for
+unchecked, and the two facts are independent.
 """
 import time as _time
 
@@ -127,7 +128,7 @@ def test_running_image_unknown_is_not_a_copy_decision():
         copy_to_root=lambda f, tp="flash:", expected_size=None:
             iris_agent.ROOT_COPY_RUNNING_IMAGE_UNKNOWN)
     iris_agent.run_once(_CFG, deps, state)
-    # verify passed, but the transient running-image-unknown is NOT a
-    # copy /verify decision -> copy state remains not_run (no false 'failed').
+    # verify passed, but the transient running-image-unknown is not a copy
+    # decision either -> copy state remains not_run (no false 'failed').
     assert telemetry_report.content_sha256_state(state, "img1") == "verified"
     assert telemetry_report.ios_copy_verify_state(state, "img1") == "not_run"

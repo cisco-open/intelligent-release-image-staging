@@ -69,7 +69,7 @@ class SSHCli(object):
 
     Commands and SCP transfers reuse an OpenSSH control connection for a short
     time. A single agent tick makes several IOS calls (filesystem checks,
-    transfer, copy /verify, telemetry); reconnecting per call creates a login
+    transfer, plain copy, telemetry); reconnecting per call creates a login
     storm on the device. The login may land at priv-1 or priv-15; each CLI
     channel still sends `enable` + the enable secret before its command.
 
@@ -150,7 +150,7 @@ class SSHCli(object):
         direction; IOx can't bind-mount sdflash: and inbound to the container is
         blocked). `remote_dest` is an IOS path, e.g. 'sdflash:guest-share/iris/
         cat9k.bin'. This is how the IOx-app agent lands its downloaded scratch on
-        the IOS-visible SD so `copy /verify` can place it — the IE3x00 analog of
+        the IOS-visible SD so a plain `copy` can place it — the IE3x00 analog of
         the C9300 writing the scratch via the guestshell mount."""
         target = "%s@%s:%s" % (self.user, self.host, remote_dest)
         try:

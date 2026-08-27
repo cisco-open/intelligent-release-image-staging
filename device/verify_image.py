@@ -7,12 +7,12 @@
 """Verifier for the IRIS device agent.
 
 sha256_matches hashes the STAGED file (under /flash/guest-share, readable from
-guestshell) and gates whether the copy-to-root runs at all. It's the only check
-the agent computes itself; the flash-root copy's authenticity is enforced
-on-box by IOS `copy /verify` (copy + Cisco signature in one step — a bad
-signature fails the copy and deletes the destination), so the agent never has
-to read the image back. Pure function so it unit-tests off-box without the
-on-device `cli` module."""
+guestshell) and gates whether the copy-to-root runs at all. This hash check IS
+the image-integrity verification — there is no on-box re-check. The
+flash-root copy itself is a plain `copy`; placement is attested by the agent's
+own dir-presence + exact catalog byte size check, not by reading the image
+back. Authenticity is established server-side at publish time. Pure function
+so it unit-tests off-box without the on-device `cli` module."""
 import hashlib
 
 

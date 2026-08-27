@@ -82,9 +82,10 @@ def content_sha256_state(state, img_id):
 
 
 def ios_copy_verify_state(state, img_id):
-    """The persisted IOS copy /verify fact for a report (spec §3D), read
-    VERBATIM from the decision point. Defaults to 'not_run' when no copy /verify
-    decision has been made. Independent of content_sha256_state."""
+    """The IOS copy /verify field (spec §3D), retained for wire compatibility.
+    No copy-verify step exists anymore — placement is a plain `copy`, attested
+    by the agent itself via dir presence and catalog byte size — so this
+    always reads 'not_run'. Independent of content_sha256_state."""
     tele = (state.get(img_id) or {}).get("tele") or {}
     v = tele.get("ios_copy_verify_state")
     return v if v in IOS_COPY_VERIFY_STATES else "not_run"

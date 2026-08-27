@@ -13,7 +13,8 @@
 #     snapshots; the hook program itself lives in the app image)
 #   - remove the app-hosting appid + the IRIS VLAN/SVI
 #   - remove any IRIS-COPYROOT / IRIS-AGENT EEM applet the agent created at
-#     runtime for its copy /verify (no-op if absent — IOx has no 60s timer)
+#     runtime for its plain-copy placement (no-op if absent — IOx has no 60s
+#     timer)
 #   - remove crypto pki trustpoint IRIS + ip http client secure-trustpoint IRIS
 #   - delete the staged app package (<pkg-fs>iris-arm64.tar) and, on C9k share
 #     deployments, the IRIS iris/ subdir of the CAF share (transient transfer

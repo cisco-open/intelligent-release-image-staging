@@ -8,9 +8,11 @@
 This is security-critical rather than housekeeping: server/trust.py shells out
 to the base image's `openssl` binary to parse the TLS trust store and verify
 CMS integrity for downloaded CA bundles (PKCS#7/CMS). It does NOT verify Cisco
-IOS image signatures -- IOS image authenticity is enforced device-side by IOS
-`copy /verify`. The two Dockerfiles share a base and must be bumped in lockstep,
-so a drift between them is itself a failure (issue #13)."""
+IOS image signatures -- IOS image authenticity is established server-side at
+publish time, not via any on-device signature check (placement is a plain
+`copy`, attested by the agent itself). The two Dockerfiles share a base and
+must be bumped in lockstep, so a drift between them is itself a failure
+(issue #13)."""
 import os
 import re
 
@@ -51,12 +53,14 @@ def test_both_images_share_one_base_in_lockstep():
 def test_server_dockerfile_states_trust_boundary_accurately():
     # The OpenSSL rationale in the server Dockerfile must describe what
     # trust.py actually does -- CA-bundle / trust-store processing -- and must
-    # NOT claim the server verifies IOS image signatures (that is enforced
-    # device-side by IOS `copy /verify`).
+    # NOT claim the server verifies IOS image signatures (authenticity is
+    # established server-side at publish time, not via any on-device
+    # signature check -- there is no `copy /verify` anymore).
     text = open(SERVER_DOCKERFILE).read().lower()
     assert "trust.py" in text
-    assert "copy /verify" in text, (
-        "Dockerfile must credit IOS `copy /verify` for image authenticity")
+    assert "publish time" in text, (
+        "Dockerfile must credit server-side publish-time attestation for "
+        "image authenticity, not a device-side signature check")
     assert re.search(r"ca[ -]?bundle|trust store|trust-store", text), (
         "Dockerfile must describe CA-bundle/trust-store processing")
     assert "image signature" not in text and "image-signature" not in text, (
