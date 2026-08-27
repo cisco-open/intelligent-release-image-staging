@@ -23,16 +23,18 @@ CFG="$DIR/eem-iris-copyroot.cfg"
   grep -qF 'event manager applet IRIS-COPYROOT authorization bypass' "$CFG"
 }
 
-@test "copyroot applet copies with /verify (copy + Cisco signature in one step)" {
-  grep -qE 'copy /verify flash:/guest-share/iris/<IMG> flash:<IMG>' "$CFG"
+@test "copyroot applet copies with a plain copy (no /verify — agent owns the verdict)" {
+  grep -qE 'copy flash:/guest-share/iris/<IMG> flash:<IMG>' "$CFG"
 }
 
-@test "copyroot applet runs ONLY copy /verify — no second verify (the verification is one step)" {
-  # `copy /verify` is the verification: it copies AND enforces the Cisco
-  # signature in one IOS-enforced step. A second `verify /sha512` against the
-  # catalog adds nothing once the signature passes (signature covers content)
-  # and slows the applet by 2+ minutes.
-  ! grep -qE 'cli command "verify' "$CFG"
+@test "copyroot applet never runs /verify — the agent is the sole author of the verdict" {
+  # The applet makes NO verification claim of its own: no `copy /verify`, no
+  # `verify` command at all. The agent (_agent_reverify_root) is the sole
+  # author of the verdict, via `dir` presence + an exact byte-size match
+  # against the catalog. Permanent regression guard — do not let /verify back
+  # into an applet ACTION. Check non-comment lines only — the comment block
+  # legitimately documents the absence of /verify in prose.
+  ! grep -v '^!' "$CFG" | grep -qE '/verify'
 }
 
 @test "copyroot applet deletes any stale leftover BEFORE the copy" {
@@ -45,7 +47,7 @@ CFG="$DIR/eem-iris-copyroot.cfg"
 @test "copyroot applet syslog is a NEUTRAL breadcrumb, not a verdict" {
   # The applet makes NO pass/fail claim — a syslog action fires regardless of
   # exit code, so an in-applet verdict can't be trusted. The agent owns the
-  # verdict via file presence after `copy /verify`.
+  # verdict via `dir` presence + exact catalog byte size after the plain copy.
   grep -qF 'syslog msg "ROOTCOPY-ATTEMPTED <IMG>"' "$CFG"
 }
 
