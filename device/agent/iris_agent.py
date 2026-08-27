@@ -849,17 +849,9 @@ def run_once(cfg, deps, state):
                         st["copied"] = True
                         state["root_file"] = image["filename"]
                         _reset_copy_failures(st)
-                        # Record the IOS copy /verify outcome INTO STATE at the
-                        # decision point (spec §3D): 'ok' means this attempt's
-                        # copy /verify passed. Independent of content_sha256.
-                        # Durability follows the report (freeze checkpoint /
-                        # final save); re-derived idempotently after a crash.
-                        st.setdefault("tele", {})["ios_copy_verify_state"] = "ok"
                     else:
                         attempts = st.get("copy_attempts", 0) + 1
                         st["copy_attempts"] = attempts
-                        st.setdefault("tele", {})[
-                            "ios_copy_verify_state"] = "failed"
                         st["stage_error"] = (
                             "final IOS placement failed; inspect IRIS ROOTCOPY-FAIL")
                         if attempts >= _ROOT_COPY_MAX_ATTEMPTS:

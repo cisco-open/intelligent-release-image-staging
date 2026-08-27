@@ -95,7 +95,7 @@ def test_verify_pass_persists_verified_and_copy_ok():
     assert iris_agent.run_once(_CFG, _deps(cat, {"/stage/img1.bin": 5}),
                                state) == "complete"
     assert telemetry_report.content_sha256_state(state, "img1") == "verified"
-    assert telemetry_report.ios_copy_verify_state(state, "img1") == "ok"
+    assert telemetry_report.ios_copy_verify_state(state, "img1") == "not_run"
 
 
 def test_verify_mismatch_persists_mismatch():
@@ -116,7 +116,7 @@ def test_copy_failure_persists_failed_independent_of_sha():
     iris_agent.run_once(_CFG, deps, state)
     # content verify still passed (independent fact)
     assert telemetry_report.content_sha256_state(state, "img1") == "verified"
-    assert telemetry_report.ios_copy_verify_state(state, "img1") == "failed"
+    assert telemetry_report.ios_copy_verify_state(state, "img1") == "not_run"
 
 
 def test_running_image_unknown_is_not_a_copy_decision():

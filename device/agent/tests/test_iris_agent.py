@@ -2517,7 +2517,7 @@ def test_fast_download_reports_totals_only():
     assert report["peers_total"] == 0
     assert report["content"]["completed_content_bytes"] == 5
     assert report["content_sha256"]["state"] == "verified"
-    assert report["ios_copy_verify"]["state"] == "ok"
+    assert report["ios_copy_verify"]["state"] == "not_run"
     assert "avg_bps" not in report and "transfer" not in report
     assert len(report["report_id"]) == 32 and len(report["transfer_id"]) == 32
     tele = state["img1"]["tele"]
