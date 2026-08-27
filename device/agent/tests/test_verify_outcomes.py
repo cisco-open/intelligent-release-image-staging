@@ -5,11 +5,14 @@
 """Task 18 — explicit persisted verification outcomes (spec §3D).
 
 content_sha256_state (verified|mismatch|not_checked) is written WHEN run_once
-makes the content-hash verify decision; ios_copy_verify_state
-(ok|failed|not_run|unsupported) is retained for wire compatibility — there is
-no copy-verify step anymore, so it always reads 'not_run'. The report reads
-both verbatim — never inferred from done/copied or absence, never 'false' for
-unchecked, and the two facts are independent.
+makes the content-hash verify decision, and the report reads it VERBATIM —
+never inferred from done/copied or absence, never 'false' for unchecked.
+
+ios_copy_verify_state (ok|failed|not_run|unsupported) is retained for wire
+compatibility only. There is no copy-verify step anymore, nothing writes the
+key, and its reader is AUTHORITATIVE rather than verbatim: it answers
+'not_run' unconditionally so an upgraded device cannot keep reporting the
+stale 'ok' its previous agent persisted. The two facts stay independent.
 """
 import time as _time
 
@@ -75,10 +78,38 @@ def test_content_sha256_state_defaults_not_checked():
     assert telemetry_report.content_sha256_state(state, "img") == "not_checked"
 
 
-def test_ios_copy_verify_state_defaults_not_run():
+def test_ios_copy_verify_state_is_always_not_run():
     assert telemetry_report.ios_copy_verify_state({}, "img") == "not_run"
     state = {"img": {"copied": True}}
     assert telemetry_report.ios_copy_verify_state(state, "img") == "not_run"
+
+
+def test_ios_copy_verify_state_ignores_a_legacy_persisted_ok():
+    # An in-place upgrade keeps the state file the PREVIOUS agent wrote, which
+    # recorded 'ok' back when the placement really did run a copy-verify step.
+    # Echoing that would make every already-staged device claim a verification
+    # the code no longer performs, forever. The reader is authoritative.
+    state = {"img": {"copied": True, "tele": {"ios_copy_verify_state": "ok"}}}
+    assert telemetry_report.ios_copy_verify_state(state, "img") == "not_run"
+    # every other legacy value is dropped the same way
+    for legacy in ("failed", "unsupported", "not_run"):
+        stale = {"img": {"tele": {"ios_copy_verify_state": legacy}}}
+        assert telemetry_report.ios_copy_verify_state(stale, "img") == "not_run"
+
+
+def test_report_emits_not_run_over_a_legacy_persisted_ok():
+    # End-to-end through the wire body: the field is still present (the server
+    # schema requires it) but never carries the stale verdict.
+    state = {"img1": {"copied": True,
+                      "tele": {"transfer_id": "a" * 32,
+                               "content_sha256_state": "verified",
+                               "ios_copy_verify_state": "ok"}}}
+    report = telemetry_report.build_report_v2(
+        {"device_id": "sw1"}, state, "img1", "staging-complete", 1200.5,
+        "a" * 32, "b" * 32)
+    assert report["ios_copy_verify"] == {"state": "not_run"}
+    # the independent content fact IS still read verbatim
+    assert report["content_sha256"]["state"] == "verified"
 
 
 def test_reader_rejects_garbage_values():
