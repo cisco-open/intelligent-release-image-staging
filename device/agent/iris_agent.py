@@ -1421,33 +1421,37 @@ def _agent_reverify_root(fname, target_prefix, cli_execute_fn, emit_fn,
 
 def _copy_to_root_impl(fname, target_prefix, cli_configure_fn, cli_execute_fn,
                        emit_fn, reverify_fn=_agent_reverify_root,
-                       copy_source=None, running_image_fn=None):
+                       copy_source=None, running_image_fn=None,
+                       expected_size=None):
     """Copy the staged image to the target filesystem root, then confirm it
     landed.
 
     The IRIS-COPYROOT EEM applet does the privileged work inside native IOS
     (operator requirement + `authorization bypass` for AAA nodes), because the
-    device's guestshell can't run `copy`/`verify` directly:
+    device's guestshell can't run `copy` directly:
       1. After confirming `<fname>` is not the running image, `delete /force
          <FS><fname>` clears any stale same-named leftover so
          the presence check below is scoped to THIS attempt. Harmless if no
          such file exists (`file prompt quiet` suppresses the prompt).
-      2. `copy /verify <FS>/guest-share/iris/<fname> <FS><fname>` — copy +
-         Cisco signature in one IOS-enforced step; a bad signature fails the
-         copy and leaves no destination file. Source and destination are both
-         the chosen staging FS: flash: on the C9300, sdflash: on the IE3k (where
-         IOx and the guest-share scratch live on the SD card).
-    The applet logs a NEUTRAL `ROOTCOPY-ATTEMPTED` breadcrumb only — it makes no
-    pass/fail claim. The agent (reverify_fn) owns the verdict: it polls for the
-    file and emits the authoritative `ROOTCOPY ... + verified` log on presence.
+      2. `copy <FS>/guest-share/iris/<fname> <FS><fname>` — a plain copy, no
+         in-band signature check. Source and destination are both the chosen
+         staging FS: flash: on the C9300, sdflash: on the IE3k (where IOx and
+         the guest-share scratch live on the SD card).
+    The applet logs a NEUTRAL `ROOTCOPY-ATTEMPTED` breadcrumb only — it makes
+    no pass/fail claim. The verdict belongs entirely to reverify_fn
+    (_agent_reverify_root) — see its docstring for the presence + exact
+    catalog byte size contract this function relies on.
 
     Module-level + injected callables so it's unit-testable. Returns bool.
 
-    `copy_source` (optional) overrides the `copy /verify` SOURCE. Default (None)
-    is the Guest Shell scratch on the staging FS (`<FS>/guest-share/iris/<fname>`)
+    `copy_source` (optional) overrides the copy SOURCE. Default (None) is
+    the Guest Shell scratch on the staging FS (`<FS>/guest-share/iris/<fname>`)
     — the C9300 path, unchanged. The IOx path SCP-pushes its local scratch to
     that same IOS-visible location before using the direct SSH copy helper. The
-    destination is always the target-FS root."""
+    destination is always the target-FS root.
+
+    `expected_size` is forwarded to reverify_fn unchanged; None (the default)
+    keeps the old presence-only behaviour for callers with no catalog size."""
     if running_image_fn is not None:
         running = running_image_fn()
         if not running:
@@ -1466,8 +1470,7 @@ def _copy_to_root_impl(fname, target_prefix, cli_configure_fn, cli_execute_fn,
         "event none maxrun 900",
         'action 010 cli command "enable"',
         'action 020 cli command "delete /force %s%s"' % (target_prefix, fname),
-        'action 030 cli command "copy /verify %s %s%s"'
-        % (src, target_prefix, fname),
+        'action 030 cli command "copy %s %s%s"' % (src, target_prefix, fname),
         'action 040 syslog msg "ROOTCOPY-ATTEMPTED %s"' % fname,
     ])
     try:
@@ -1475,37 +1478,40 @@ def _copy_to_root_impl(fname, target_prefix, cli_configure_fn, cli_execute_fn,
     except Exception as e:
         emit_fn("ROOTCOPY-FAIL", "%s applet run raised: %s" % (fname, e))
         return False
-    return reverify_fn(fname, target_prefix, cli_execute_fn, emit_fn)
+    return reverify_fn(fname, target_prefix, cli_execute_fn, emit_fn,
+                       expected_size=expected_size)
 
 
 def _copy_to_root_direct_impl(fname, target_prefix, cli_execute_fn, emit_fn,
                               reverify_fn=_agent_reverify_root, copy_source=None,
                               delete_source_on_success=False,
-                              running_image_fn=None):
-    """Copy the staged image to the target-FS root by running `copy /verify`
+                              running_image_fn=None, expected_size=None):
+    """Copy the staged image to the target-FS root by running a plain `copy`
     DIRECTLY in the agent's IOS vty — no EEM applet. This is the container /
     SSH-to-self (IE-3x00) path.
 
     The IRIS-COPYROOT applet offload (see _copy_to_root_impl) exists ONLY because
-    the C9300's Guest Shell `cli` module can't drive an interactive
-    `copy`/`verify` (it hangs). The IE-3x00 agent reaches IOS over a real
-    SSH-to-self vty (identical to `lab/device-run.sh`), which runs `copy /verify`
-    to completion — and on that platform/IOS-XE the EEM `action cli command
-    "copy …"` is a NO-OP (the applet completes in ~3 s reporting success but
-    transfers nothing), so the applet path is both unnecessary and broken here.
+    the C9300's Guest Shell `cli` module can't drive an interactive `copy`
+    (it hangs). The IE-3x00 agent reaches IOS over a real SSH-to-self vty
+    (identical to `lab/device-run.sh`), which runs `copy` to completion — and
+    on that platform/IOS-XE the EEM `action cli command "copy …"` is a NO-OP
+    (the applet completes in ~3 s reporting success but transfers nothing),
+    so the applet path is both unnecessary and broken here.
 
     Same two privileged steps the applet did, now issued directly:
       1. After confirming `<fname>` is not the running image, `delete /force
          <FS><fname>` clears any stale same-named leftover so the
          dir-presence verdict is scoped to THIS attempt (`file prompt quiet`
          suppresses the prompt; harmless if absent).
-      2. `copy /verify <src> <FS><fname>` — copy + Cisco signature in one
-         IOS-enforced step; a bad signature fails the copy and leaves no
-         destination file. `copy /verify` is synchronous, so the file is present
-         the moment it returns.
-    Verdict is owned by reverify_fn's dir-presence poll, exactly as the applet
-    path — keeping the success-log gating identical and unit-testable. Returns
-    bool. `copy_source` overrides the SOURCE like _copy_to_root_impl."""
+      2. `copy <src> <FS><fname>` — a plain copy, no in-band signature check.
+         `copy` is synchronous, so the file is present the moment it returns
+         (though possibly still short of its final size on a slow transfer).
+    Verdict belongs entirely to reverify_fn (_agent_reverify_root) — see its
+    docstring for the presence + exact catalog byte size contract this
+    function relies on (and to which `expected_size` is forwarded unchanged).
+    Keeps the success-log gating identical to the applet path and
+    unit-testable. Returns bool. `copy_source` overrides the SOURCE like
+    _copy_to_root_impl."""
     if running_image_fn is not None:
         running = running_image_fn()
         if not running:
@@ -1521,16 +1527,17 @@ def _copy_to_root_direct_impl(fname, target_prefix, cli_execute_fn, emit_fn,
     dst = "%s%s" % (target_prefix, fname)
     try:
         cli_execute_fn("delete /force %s" % dst)
-        cli_execute_fn("copy /verify %s %s" % (src, dst))
+        cli_execute_fn("copy %s %s" % (src, dst))
     except Exception as e:
-        emit_fn("ROOTCOPY-FAIL", "%s direct copy /verify raised: %s" % (fname, e))
+        emit_fn("ROOTCOPY-FAIL", "%s direct copy raised: %s" % (fname, e))
         return False
-    ok = reverify_fn(fname, target_prefix, cli_execute_fn, emit_fn)
+    ok = reverify_fn(fname, target_prefix, cli_execute_fn, emit_fn,
+                     expected_size=expected_size)
     # In container mode the scp-pushed guest-share scratch is a transfer
     # intermediary (the swarm seeds from the CAF-persistent stage_dir), so a
     # verified placement deletes it — otherwise a duplicate image doubles
     # steady-state target-FS usage. Kept on failure: the next tick re-runs
-    # copy /verify from it instead of re-pushing over the slow scp path.
+    # copy from it instead of re-pushing over the slow scp path.
     if ok and delete_source_on_success:
         try:
             cli_execute_fn("delete /force %s" % src)

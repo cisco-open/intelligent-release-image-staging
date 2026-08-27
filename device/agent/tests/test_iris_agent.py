@@ -1094,11 +1094,13 @@ def test_iris_agent_source_applet_is_neutral_no_self_verdict():
     # presence is the verdict, so the applet must clear any stale leftover first
     assert 'delete /force %s%s' in src, \
         "applet must delete any stale same-named leftover before the copy"
-    # the applet copies WITH /verify (copy + Cisco signature in one step) and
-    # does NOT run a second standalone verify (the agent reads no syslog verdict).
+    # the applet copies PLAINLY (no /verify, no in-band signature check) and
+    # does NOT run any standalone verify (the agent reads no syslog verdict).
     # The copy SOURCE is parameterized (default = the guest-share scratch on the
     # staging FS for the C9300; an injected http:// URL for the IE3x00 container).
-    assert "copy /verify %s %s%s" in src            # parameterized src + dst
+    assert "copy %s %s%s" in src            # parameterized src + dst
+    assert "copy /verify %s %s%s" not in src, \
+        "REGRESSION: the templated action must not return to copy /verify"
     assert "%s/guest-share/iris/%s" in src          # default (C9300) source
     assert "$_ok" not in src and "regexp" not in src, \
         "REGRESSION: the dead syslog-verdict capture (_ok/regexp) is back"
@@ -1143,24 +1145,25 @@ def test_copy_to_root_impl_fires_applet_then_calls_reverify():
     cli_cfg, cli_exec, emit, configured, cli_calls, emitted = _capture_calls()
     reverify_calls = []
 
-    def reverify(fname, prefix, cli_exec_arg, emit_arg):
+    def reverify(fname, prefix, cli_exec_arg, emit_arg, expected_size=None):
         reverify_calls.append(fname)
         return True
 
     ok = iris_agent._copy_to_root_impl(
         "img1.bin", "flash:", cli_cfg, cli_exec, emit, reverify_fn=reverify)
     assert ok is True
-    # the applet was templated: clear-leftover (delete) + copy /verify + a
-    # NEUTRAL breadcrumb. No verdict capture, no second verify, no claim.
+    # the applet was templated: clear-leftover (delete) + plain copy + a
+    # NEUTRAL breadcrumb. No verdict capture, no signature check, no claim.
     assert len(configured) == 1
     body = "\n".join(configured[0])
     assert "delete /force flash:img1.bin" in body
-    assert "copy /verify flash:/guest-share/iris/img1.bin flash:img1.bin" in body
+    assert "copy flash:/guest-share/iris/img1.bin flash:img1.bin" in body
+    assert "/verify" not in body
     assert "ROOTCOPY-ATTEMPTED img1.bin" in body
     assert "placed at flash root + verified" not in body          # neutral applet
     assert "$_ok" not in body and "regexp" not in body            # no dead verdict capture
     assert "verify /sha512" not in body, \
-        "applet must NOT run a second verify — copy /verify is the verification"
+        "applet must NOT run a signature verify — the agent owns the verdict"
     # applet was fired
     assert cli_calls == ["event manager run IRIS-COPYROOT"]
     # reverify got the filename
@@ -1173,10 +1176,10 @@ def test_copy_applet_uses_target_prefix():
     cli_cfg, cli_exec, emit, configured, cli_calls, emitted = _capture_calls()
     iris_agent._copy_to_root_impl(
         "img1.bin", "sdflash:", cli_cfg, cli_exec, emit,
-        reverify_fn=lambda fname, prefix, c, e: True)
+        reverify_fn=lambda fname, prefix, c, e, expected_size=None: True)
     body = "\n".join(configured[0])
     assert "delete /force sdflash:img1.bin" in body
-    assert "copy /verify sdflash:/guest-share/iris/img1.bin sdflash:img1.bin" in body
+    assert "copy sdflash:/guest-share/iris/img1.bin sdflash:img1.bin" in body
 
 
 def test_copy_to_root_impl_reverify_false_returns_false_no_success_log():
@@ -1218,7 +1221,29 @@ def test_copy_to_root_impl_applet_fire_raises_no_reverify():
                for m, msg in emitted)
 
 
-# --- Direct-copy path (container / IE-3x00 SSH-to-self): `copy /verify` is run
+def test_applet_template_uses_plain_copy():
+    cfg_lines = []
+    iris_agent._copy_to_root_impl(
+        "img.bin", "flash:", lambda lines: cfg_lines.extend(lines),
+        lambda c: "", lambda t, m: None, reverify_fn=lambda *a, **k: True)
+    joined = "\n".join(cfg_lines)
+    assert 'copy flash:/guest-share/iris/img.bin flash:img.bin' in joined
+    assert "/verify" not in joined
+    assert 'delete /force flash:img.bin' in joined  # delete-first stays load-bearing
+
+
+def test_applet_impl_passes_expected_size_to_reverify():
+    seen = {}
+    def fake_reverify(fname, prefix, cli, emit, expected_size=None):
+        seen["size"] = expected_size
+        return True
+    iris_agent._copy_to_root_impl(
+        "img.bin", "flash:", lambda lines: None, lambda c: "",
+        lambda t, m: None, reverify_fn=fake_reverify, expected_size=1234)
+    assert seen["size"] == 1234
+
+
+# --- Direct-copy path (container / IE-3x00 SSH-to-self): plain `copy` is run
 # DIRECTLY in the agent's real vty, NOT via the IRIS-COPYROOT EEM applet (whose
 # `cli command "copy"` action is a no-op on the IE3x00 — completes "success" in
 # ~3 s, transfers nothing). delete-then-copy is issued directly; the verdict is
@@ -1231,7 +1256,7 @@ def test_copy_to_root_direct_runs_copy_then_reverify():
         cli_calls.append(cmd)
         return ""
 
-    def reverify(fname, prefix, cli_arg, emit_arg):
+    def reverify(fname, prefix, cli_arg, emit_arg, expected_size=None):
         reverify_calls.append(fname)
         return True
 
@@ -1242,21 +1267,33 @@ def test_copy_to_root_direct_runs_copy_then_reverify():
     # delete-then-copy issued DIRECTLY — no applet templating, no `event manager run`
     assert cli_calls == [
         "delete /force sdflash:img1.bin",
-        "copy /verify sdflash:/guest-share/iris/img1.bin sdflash:img1.bin",
+        "copy sdflash:/guest-share/iris/img1.bin sdflash:img1.bin",
     ]
     assert all("event manager" not in c for c in cli_calls)
     assert reverify_calls == ["img1.bin"]
     assert all(m != "ROOTCOPY-FAIL" for m, _ in emitted)
 
 
+def test_direct_impl_uses_plain_copy_and_passes_size():
+    cmds, seen = [], {}
+    def fake_reverify(fname, prefix, cli, emit, expected_size=None):
+        seen["size"] = expected_size
+        return True
+    iris_agent._copy_to_root_direct_impl(
+        "img.bin", "sdflash:", lambda c: cmds.append(c) or "",
+        lambda t, m: None, reverify_fn=fake_reverify, expected_size=99)
+    assert any(c.startswith("copy ") and "/verify" not in c for c in cmds)
+    assert seen["size"] == 99
+
+
 def test_copy_to_root_direct_uses_copy_source_override():
     cli_calls = []
     iris_agent._copy_to_root_direct_impl(
         "img1.bin", "sdflash:", lambda c: cli_calls.append(c) or "",
-        lambda m, msg: None, reverify_fn=lambda *a: True,
+        lambda m, msg: None, reverify_fn=lambda *a, **k: True,
         copy_source=lambda f, p: "http://10.0.0.1:8000/%s" % f)
     assert cli_calls[1] == \
-        "copy /verify http://10.0.0.1:8000/img1.bin sdflash:img1.bin"
+        "copy http://10.0.0.1:8000/img1.bin sdflash:img1.bin"
 
 
 def test_copy_to_root_direct_copy_raises_no_reverify():
@@ -1270,10 +1307,10 @@ def test_copy_to_root_direct_copy_raises_no_reverify():
     ok = iris_agent._copy_to_root_direct_impl(
         "img1.bin", "sdflash:", cli_exec,
         lambda m, msg: emitted.append((m, msg)),
-        reverify_fn=lambda *a: reverify_calls.append(1) or True)
+        reverify_fn=lambda *a, **k: reverify_calls.append(1) or True)
     assert ok is False
     assert reverify_calls == []          # bailed before reverify
-    assert any(m == "ROOTCOPY-FAIL" and "direct copy /verify raised" in msg
+    assert any(m == "ROOTCOPY-FAIL" and "direct copy raised" in msg
                for m, msg in emitted)
 
 
@@ -1281,7 +1318,7 @@ def test_copy_to_root_direct_reverify_false_returns_false():
     emitted = []
     ok = iris_agent._copy_to_root_direct_impl(
         "bad.bin", "sdflash:", lambda c: "",
-        lambda m, msg: emitted.append((m, msg)), reverify_fn=lambda *a: False)
+        lambda m, msg: emitted.append((m, msg)), reverify_fn=lambda *a, **k: False)
     assert ok is False
     assert all(m != "ROOTCOPY" for m, _ in emitted)
 
@@ -1294,7 +1331,7 @@ def test_copy_to_root_direct_deletes_scp_scratch_after_success():
     cli_calls = []
     ok = iris_agent._copy_to_root_direct_impl(
         "img1.bin", "flash:", lambda c: cli_calls.append(c) or "",
-        lambda m, msg: None, reverify_fn=lambda *a: True,
+        lambda m, msg: None, reverify_fn=lambda *a, **k: True,
         delete_source_on_success=True)
     assert ok is True
     assert cli_calls[-1] == "delete /force flash:/guest-share/iris/img1.bin"
@@ -1306,7 +1343,7 @@ def test_copy_to_root_direct_keeps_scratch_on_failure():
     cli_calls = []
     ok = iris_agent._copy_to_root_direct_impl(
         "img1.bin", "flash:", lambda c: cli_calls.append(c) or "",
-        lambda m, msg: None, reverify_fn=lambda *a: False,
+        lambda m, msg: None, reverify_fn=lambda *a, **k: False,
         delete_source_on_success=True)
     assert ok is False
     assert all(not c.startswith("delete /force flash:/guest-share")
@@ -2188,11 +2225,11 @@ def test_copy_to_root_impl_uses_injected_copy_source():
     cli_cfg, cli_exec, emit, configured, cli_calls, emitted = _capture_calls()
     iris_agent._copy_to_root_impl(
         "img1.bin", "sdflash:", cli_cfg, cli_exec, emit,
-        reverify_fn=lambda fname, prefix, c, e: True,
+        reverify_fn=lambda fname, prefix, c, e, expected_size=None: True,
         copy_source=lambda f, p: "http://100.92.100.254:8090/%s" % f)
     body = "\n".join(configured[0])
     assert "delete /force sdflash:img1.bin" in body
-    assert "copy /verify http://100.92.100.254:8090/img1.bin sdflash:img1.bin" in body
+    assert "copy http://100.92.100.254:8090/img1.bin sdflash:img1.bin" in body
     assert "guest-share/iris/img1.bin" not in body   # default source NOT used
 
 
