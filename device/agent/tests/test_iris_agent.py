@@ -999,6 +999,12 @@ def test_dir_size_of_matches_whole_name_not_substring():
     assert iris_agent._dir_size_of(out, "cat9k.bin") is None
 
 
+def test_dir_size_of_ignores_directory_rows():
+    # A same-named directory must not report its nominal size as a file size.
+    out = "  121  drwx  4096  Jun 16 2026  cat9k.bin"
+    assert iris_agent._dir_size_of(out, "cat9k.bin") is None
+
+
 def test_reverify_size_match_succeeds():
     emits = []
     out = "  121  -rw-  1260618344  Jun 16 2026  cat9k.bin"
@@ -1022,6 +1028,29 @@ def test_reverify_partial_file_fails_with_size_reason():
     assert ok is False
     assert emits[-1][0] == "ROOTCOPY-FAIL"
     assert "size" in emits[-1][1]
+
+
+def test_reverify_keeps_polling_while_size_grows_then_succeeds():
+    # Mid-copy: dir shows a short, growing file across successive polls. The
+    # poll must NOT fail on the first wrong-size reading — the copy landing
+    # the file is asynchronous from the agent's point of view, and a short
+    # file partway through the poll window usually just means still-copying.
+    # Only a mismatch that persists to the end of the poll budget is a
+    # failure; here the full size shows up before the budget runs out, so
+    # the call must succeed.
+    sizes = iter([100, 1048576, 1260618344])
+
+    def cli(cmd):
+        return "  121  -rw-  %d  Jun 16 2026  cat9k.bin" % next(sizes)
+
+    emits = []
+    ok = iris_agent._agent_reverify_root(
+        "cat9k.bin", "flash:", cli,
+        lambda tag, msg: emits.append((tag, msg)),
+        poll_attempts=3, poll_interval_s=0, sleep_fn=lambda s: None,
+        expected_size=1260618344)
+    assert ok is True
+    assert emits[-1][0] == "ROOTCOPY"
 
 
 def test_reverify_without_expected_size_keeps_presence_only():

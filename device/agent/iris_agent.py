@@ -1333,13 +1333,17 @@ def _optional_progress(value):
 # with injected cli_execute / sha256 callables; build_deps below wires it up
 # with the real on-box implementations) ----
 
-_DIR_ROW_RE_TMPL = r"(?m)^\s*\d+\s+\S+\s+(\d+)\s+.*\s%s\s*$"
+_DIR_ROW_RE_TMPL = r"(?m)^\s*\d+\s+[^d\s]\S*\s+(\d+)\s+.*\s%s\s*$"
 
 
 def _dir_size_of(dir_out, fname):
     """Byte size of *fname* from IOS `dir` output, or None when the row is
-    absent or unparseable. Anchored to the row END so cat9k.bin never reads
-    cat9k.bin.backup's size."""
+    absent, unparseable, or a directory row. Anchored to the row END so
+    cat9k.bin never reads cat9k.bin.backup's size. The permissions column is
+    matched as any non-directory token ([^d\\s]\\S*) rather than a bare \\S+,
+    so a same-named directory (row starts with `d...`) is never mistaken for
+    a file — IOS file rows carry `-rw-`-style tokens, sometimes with a
+    trailing `.` (e.g. `-rw-rw-r--.`)."""
     if not dir_out:
         return None
     m = re.search(_DIR_ROW_RE_TMPL % re.escape(fname), dir_out)
@@ -1349,42 +1353,42 @@ def _dir_size_of(dir_out, fname):
 def _agent_reverify_root(fname, target_prefix, cli_execute_fn, emit_fn,
                         poll_attempts=180, poll_interval_s=5.0,
                         sleep_fn=time.sleep, expected_size=None):
-    """Bless the target-FS root copy once the IRIS-COPYROOT applet's plain
-    `copy` has completed.
+    """Bless the target-FS root copy by presence AND exact size, independent
+    of however the file arrived at the target-FS root.
 
-    Presence alone is no longer a verdict: the applet now runs a plain `copy`
-    (no `/verify`), and a plain copy that dies mid-transfer leaves a PARTIAL
-    file at the destination rather than nothing. So the verdict this function
-    owns is presence AND exact size: `dir <FS><fname>` must report a byte
+    The contract this function owns: `dir <FS><fname>` must report a byte
     count matching `expected_size` (the catalog's declared size for this
-    image). When `expected_size` is None, callers get the old presence-only
-    behaviour (used where the caller has no catalog size to check against).
+    image) before the copy is called good. Presence alone is not a
+    verdict — a copy that dies mid-transfer can leave a PARTIAL file at the
+    destination rather than nothing. When `expected_size` is None, callers
+    get the old presence-only behaviour (used where the caller has no
+    catalog size to check against).
 
-    The applet's `copy` is asynchronous from the agent's point of view: a row
-    that's present but the WRONG size partway through the poll window just
-    means the transfer is still running, so polling continues. Only a size
-    mismatch that persists all the way to the end of the poll budget is
-    treated as a failure — the applet's delete-before-copy on the next tick
-    clears the partial before retrying, so there's nothing extra to clean up
-    here.
+    Whatever lands the file may still be in flight when this function polls:
+    a row that's present but the WRONG size partway through the poll window
+    just means the transfer is still running, so polling continues. Only a
+    size mismatch that persists all the way to the end of the poll budget is
+    treated as a failure. There's nothing extra to clean up here: it's on
+    whatever re-fires the copy on the next tick to clear any stale partial
+    before retrying.
 
-    This function does not establish content integrity or authenticity: the
-    agent already computed a sha256 over the staged file before this copy
-    ran, and authenticity of that staged content is a server-side,
-    publish-time property (the catalog entry the sha256 was checked against).
-    This poll only confirms the privileged copy actually landed the
-    already-verified bytes at the target-FS root.
+    This function makes no claim about how the file got there or whether any
+    signature was checked as part of landing it — it does not establish
+    content integrity or authenticity. The agent already computed a sha256
+    over the staged file before the copy ran, and authenticity of that
+    staged content is a server-side, publish-time property (the catalog
+    entry the sha256 was checked against). This poll only confirms presence
+    and exact catalog byte size at the target-FS root.
 
     Polls `dir <FS><fname>` and returns bool:
       * file appears with the expected size (or, when expected_size is None,
         appears at all) -> emit ROOTCOPY, return True
       * size mismatch persists through the whole poll budget, or the file
-        never appears at all -> emit ROOTCOPY-FAIL, return False. Nothing to
-        delete; the next tick re-fires the applet, which deletes any leftover
-        before copying again.
+        never appears at all -> emit ROOTCOPY-FAIL, return False.
 
-    Default poll budget (180 * 5 s ≈ 895 s) tracks the applet's `maxrun 900` so
-    a legitimately slow ~1.2 GB copy isn't abandoned a few minutes early."""
+    Default poll budget (180 * 5 s ≈ 895 s) is sized to track a copy path's
+    typical ~900 s execution budget, so a legitimately slow ~1.2 GB copy
+    isn't abandoned a few minutes early."""
     emit_fn("ROOTCOPY-VERIFYING", "%s awaiting root copy" % fname)
     last_size = None
     for i in range(poll_attempts):
