@@ -1751,6 +1751,39 @@ def test_sse_stream_survives_queue_wait(tmp_path, monkeypatch):
         stop()
 
 
+def test_plan_refuses_device_with_cached_xr_family(tmp_path):
+    """A fleet-stored device whose record already carries os_family='xr' must
+    not plan onto an IOS-XE platform. The /plan route calls
+    gui_onboard.resolve_platform(device) with no os_family= argument (see
+    gui_server._plan), so the refusal must come from the device record
+    itself, not a caller-supplied argument."""
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
+    state = str(tmp_path / "state")
+    fleet = gui_fleet.FleetStore(state)
+    fleet.upsert({"device_id": "xr1", "device_ip": "10.0.0.9", "model": "ASR-9906",
+                  "os_family": "xr", "credential_profile_id": "lab"})
+    creds = gui_creds.CredentialStore(secrets_path)
+    creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
+    onboard = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
+                                         mint_fn=lambda d: "TOK",
+                                         run_fn=lambda p, e, on: 0)
+    srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, creds, None,
+                                 onboard, certfile=None)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    host = "127.0.0.1"
+    try:
+        ck, csrf = _auth(host, port)
+        st, _, b = _req(host, port, "GET", "/api/devices/xr1/plan",
+                        headers={"Cookie": ck})
+        # Not 200 with an IOS-XE platform (guestshell/iox/router) -- refused.
+        assert st == 409, b
+        assert "IOS-XR" in json.loads(b)["error"]
+    finally:
+        srv.shutdown()
+
+
 def _serve_inband(tmp_path, run_fn, device=None):
     import deployment_receipts
     secrets_path = str(tmp_path / "secrets.json")

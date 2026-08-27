@@ -134,14 +134,18 @@ def resolve_platform(dev, probe=None, os_family=None):
     """Resolve which onboarding platform drives a device.
 
     Resolution order: (a) an IOS-XR device is refused outright -- every recipe
-    here is IOS-XE and no model prefix can tell the families apart; (b) explicit
-    dev['platform'] if it names a known recipe; (c) dev['model'] matched against
-    _MODEL_PLATFORMS; (d) if a probe callable is given, call it with dev -- if it
-    returns a model string, match that (the CALLER is responsible for caching the
-    probed model, e.g. into the fleet store); (e) ValueError telling the operator
-    how to unblock."""
+    here is IOS-XE and no model prefix can tell the families apart; the family
+    is read from the os_family argument or, failing that, dev['os_family'];
+    (b) explicit dev['platform'] if it names a known recipe; (c) dev['model']
+    matched against _MODEL_PLATFORMS; (d) if a probe callable is given, call
+    it with dev -- if it returns a model string, match that (the CALLER is
+    responsible for caching the probed model, e.g. into the fleet store);
+    (e) ValueError telling the operator how to unblock."""
     device_id = dev.get("device_id", "?")
-    if os_family == "xr":
+    # The parameter supplements the record, it does not replace it: callers
+    # that pass a stored device (gui_server._plan) never pass os_family, and
+    # a cached family must refuse there too.
+    if (os_family or dev.get("os_family")) == "xr":
         _refuse_xr(device_id)
     explicit = dev.get("platform")
     if explicit:

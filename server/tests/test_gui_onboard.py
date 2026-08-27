@@ -409,6 +409,31 @@ def test_resolve_platform_xr_family_refuses_even_explicit_xe_platform():
         assert "IOS-XR" in str(exc)
 
 
+def test_resolve_platform_refuses_xr_cached_on_device_record():
+    # No os_family= argument at all -- only the fleet-stored record carries
+    # the cached family. gui_server._plan calls resolve_platform(device) with
+    # no keyword, so the record itself must be enough to refuse.
+    dev = {"device_id": "d1", "model": "ASR-9906", "os_family": "xr"}
+    try:
+        gui_onboard.resolve_platform(dev)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "IOS-XR" in str(exc)
+        assert "d1" in str(exc)
+
+
+def test_resolve_platform_record_family_refuses_without_argument_for_explicit_platform():
+    # A cached record family must refuse even when the device also carries an
+    # explicit platform -- an explicit platform cannot bypass a cached family.
+    dev = {"device_id": "d1", "platform": "guestshell", "model": "ASR-9906",
+           "os_family": "xr"}
+    try:
+        gui_onboard.resolve_platform(dev)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "IOS-XR" in str(exc)
+
+
 def test_resolve_platform_xe_family_still_resolves_asr_to_guestshell():
     # ASR 1000 IS IOS-XE and must keep working exactly as before.
     dev = {"device_id": "d1", "model": "ASR1001-X"}
