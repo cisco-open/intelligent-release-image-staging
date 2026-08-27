@@ -201,7 +201,7 @@ _DEVICE_IDENTITY_RE = re.compile(r"(?im)^Processor board ID\s+(\S+)\s*$")
 # separate the families: ^ASR matches both an ASR 1000 (IOS-XE, Guest Shell
 # capable) and an ASR 9000 (IOS-XR, which has no Guest Shell at all). The
 # banner is the only authority, so match the whole token and never a prefix.
-_OS_XR_RE = re.compile(r"\bIOS[\s-]*XR\b", re.IGNORECASE)
+_OS_XR_RE = re.compile(r"\bIOS[\s-]*XRv?\b", re.IGNORECASE)
 _OS_XE_RE = re.compile(r"\bIOS[\s-]*XE\b", re.IGNORECASE)
 _OS_CLASSIC_RE = re.compile(r"\bCisco IOS Software\b", re.IGNORECASE)
 
@@ -211,7 +211,9 @@ def parse_os_family(version_text):
 
     Classic IOS (no XE/XR token) reports 'xe': it is driven by the same
     recipes, and the distinction that matters here is XE-family vs XR-family,
-    not XE vs classic."""
+    not XE vs classic. XR is checked before XE, so a banner containing both
+    tokens is classified 'xr'; this precedence is intentional, not
+    incidental."""
     text = version_text or ""
     if _OS_XR_RE.search(text):
         return "xr"

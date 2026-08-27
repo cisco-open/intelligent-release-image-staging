@@ -422,6 +422,22 @@ def test_parse_os_family_classic_ios_is_xe_family():
         "Cisco IOS Software, C3750E Software (C3750E-UNIVERSALK9-M), Version 15.0(2)") == "xe"
 
 
+def test_parse_os_family_matches_virtual_xr_platforms():
+    # XRv9000 is a virtual platform whose banner spells the token 'XRv', not
+    # 'XR' followed by a boundary; a device that falls through here silently
+    # misroutes to the legacy code path instead of the XR one.
+    assert gui_onboard.parse_os_family(
+        "cisco IOS-XRv 9000 (VXR) processor") == "xr"
+    assert gui_onboard.parse_os_family("Cisco IOS XRv Software") == "xr"
+
+
+def test_parse_os_family_xrv_match_does_not_over_match_xe():
+    # Guard against the trailing-'v' allowance in the XR pattern bleeding
+    # into XE banners.
+    text = "Cisco IOS XE Software, Version 17.09.04a\ncisco C9300-48UXM (X86) processor\n"
+    assert gui_onboard.parse_os_family(text) == "xe"
+
+
 # --- OnboardService: platform-aware recipe selection --------------------
 
 def _iox_fleet(platform=None, model=None):
