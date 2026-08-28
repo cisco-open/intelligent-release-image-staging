@@ -76,10 +76,14 @@
           <p class="muted" id="status"></p>
         </div>
         <p class="muted">Images copied onto the server under
-          <span class="mono">/opt/images</span> — for example
-          <span class="mono">/opt/images/iosxe/c9300/</span> — are offered for
-          import below without uploading. Set <span class="mono">IMAGES_ROOT</span>
-          to scan a different directory.</p>
+          <span class="mono">/opt/images</span> — including any subdirectory,
+          such as <span class="mono">/opt/images/iosxe/c9300/</span> or
+          <span class="mono">/opt/images/iosxr/</span> — are offered for import
+          below without uploading. Files ending in
+          <span class="mono">.bin</span>, <span class="mono">.iso</span>,
+          <span class="mono">.tar</span> or <span class="mono">.rpm</span> are
+          scanned. Set <span class="mono">IMAGES_ROOT</span> to scan a
+          different directory.</p>
         <div id="import-panel" hidden>
           <h3>Import from disk</h3>
           <p class="muted">Images already present on this server that are not in the
