@@ -209,8 +209,12 @@ _IMG = {"id": "img1", "filename": "img1.bin", "size": 5, "sha256": "abc"}
 
 
 class _Cat:
-    def __init__(self, policy, image):
+    def __init__(self, policy, image, images=None):
         self._policy, self._image = policy, image
+        # Rows this catalog can answer for BY ID. A real catalog answers every
+        # id with its own row; the single-image default below is kept for the
+        # cases that only ever ask about one image.
+        self._images = {i["id"]: i for i in (images or ())}
         self.heartbeats, self.telemetry, self.order = [], [], []
         self.hb_response = None
 
@@ -218,7 +222,7 @@ class _Cat:
         return self._policy
 
     def get_image(self, iid):
-        return self._image
+        return self._images.get(iid, self._image)
 
     def download_torrent(self, iid, dest):
         pass
@@ -328,9 +332,13 @@ def test_reassignment_a_b_a_mints_three_distinct_transfer_ids():
     state = {}
 
     def run(img_id):
-        img = {"id": img_id, "filename": img_id + ".bin", "size": 5,
-               "sha256": "abc"}
-        cat = _Cat({"approved_image_id": img_id}, img)
+        rows = [{"id": i, "filename": i + ".bin", "size": 5, "sha256": "abc"}
+                for i in ("imgA", "imgB")]
+        img = next(r for r in rows if r["id"] == img_id)
+        # The catalog answers each id with ITS OWN row, as the real one does:
+        # the park pass has to name the departing image's staged file before it
+        # can stop that torrent and delete the file.
+        cat = _Cat({"approved_image_id": img_id}, img, images=rows)
         deps = _deps(cat, {"/stage/%s.bin" % img_id: 2,
                            "/stage/%s.bin.aria2" % img_id: 1},
                      purge_others=lambda k, i: None)

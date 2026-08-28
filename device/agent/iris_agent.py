@@ -838,16 +838,43 @@ def _reconcile_set(deps, state, ids, stage_dir):
         # Never touch a file the assigned set claims. A catalog that answers
         # for a dropped id with an assigned image's filename (or two ids
         # sharing one filename) must not cost the set its staged bytes.
-        if fname and fname not in keep:
-            try:
-                deps.aria_remove(fname)
-            except OSError:
-                # aria2 RPC down: best-effort. The stage copy still goes, and
-                # the purge sweep below drops the download once the RPC is
-                # back — a parked torrent must never stall the tick.
-                pass
+        if not fname or fname in keep:
+            # NOTHING was attempted for this entry, so it is NOT parked. The
+            # flag is what takes a record out of `stale`, so setting it here
+            # retires an image whose torrent is still running and whose partial
+            # still occupies flash — permanently, with no way back short of
+            # hand-editing the state file. Leave the record alone and the next
+            # tick re-runs the park, once the catalog can name the file again.
+            deps.emit("PARK-DEFERRED",
+                      "%s left the assignment set but its staged file could "
+                      "not be named this tick; park retried next tick" % key)
+            continue
+        try:
+            deps.aria_remove(fname)
+        except OSError:
+            # aria2 RPC down: best-effort. The stage copy still goes, and
+            # the purge sweep below drops the download once the RPC is
+            # back — a parked torrent must never stall the tick.
+            pass
+        try:
             deps.remove_stage(os.path.join(stage_dir, fname))
+        except OSError:
+            # Best-effort for the same reason: a stage copy that cannot be
+            # deleted this tick still leaves a record whose torrent IS stopped,
+            # and the purge sweep collects the file later.
+            pass
+        # BOTH park actions have now been attempted for this entry, which is
+        # exactly what the flag asserts. A park interrupted before this point
+        # (anything later in the tick raising) leaves the record unflagged and
+        # re-runs from the top next tick.
         entry["parked"] = True
+        # The top-level root_file is the LEGACY mirror for the set's FIRST
+        # image. Parking that image makes it stale: _protect_set and every
+        # legacy reader would pair this file with whatever image_id the new set
+        # goes on to write. Move it into the record that actually owns it.
+        if state.get("root_file") == fname:
+            entry.setdefault("root_file", fname)
+            state.pop("root_file", None)
         # The acquisition cycle ends here (the stage copy is gone), so the
         # transfer identity must not outlive it: coming back into the set is a
         # fresh download and mints a fresh transfer_id. This pass is the
@@ -897,8 +924,21 @@ def _send_set_heartbeat(deps, sid, state, ids, ticks):
     staged = _staged_image_ids(state, ids)
     hb = live[0].build(staged_image_ids=staged)
     seen = [t.stage_state for t in live]
-    hb["current_image_id"] = ids[0]       # compat: the FIRST image checked
-    if len(staged) == len(ids):
+    # Identity is NOT forced to ids[0]: it comes from live[0], the first image
+    # that actually produced heartbeat data this tick, whose payload this is.
+    # Overriding it filed live[0]'s observation, target_fs and free-byte
+    # reading under a DIFFERENT image's id whenever the first image bailed
+    # before reporting (a rejected catalog filename). For a healthy set — and
+    # for every one-image set, which returns above — live[0] IS ids[0], so the
+    # compat pointer is unchanged.
+    #
+    # `staged` is read from STATE, so it still counts an image that was staged
+    # on an earlier tick but FAILED on this one (the catalog dropped it, flash
+    # filled up, placement gave up). Reporting "ready" then contradicts the
+    # stage_error travelling in the same payload, so this tick's own verdicts
+    # have to agree before the set is called ready.
+    failed = [s for s in seen if s in _SET_STAGE_STATES]
+    if len(staged) == len(ids) and not failed:
         hb["stage_state"] = "ready"
     else:
         hb["stage_state"] = next((s for s in _SET_STAGE_STATES if s in seen),
@@ -908,7 +948,8 @@ def _send_set_heartbeat(deps, sid, state, ids, ticks):
     return _send_heartbeat(deps, sid, hb)
 
 
-def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick):
+def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
+                 legacy_pointer=False):
     """Stage ONE image of the assigned set and return its status string.
 
     This is the whole of the pre-multi-image run_once() from the catalog
@@ -930,8 +971,12 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick):
         against the answer. (The container-mode `transferring_to_ios` publish
         is the exception: it exists to be seen BEFORE a long blocking
         transfer, so it still POSTs on the spot.)
-      * the top-level state["image_id"] pointer, and parking/un-parking images
-        as they leave and re-enter the set (see _reconcile_set).
+      * parking and un-parking images as they leave and re-enter the set
+        (see _reconcile_set).
+
+    The top-level state["image_id"] pointer IS still written here, for the
+    first image of the set only (`legacy_pointer`), at the point in the tick
+    the single-image agent wrote it — see below.
     """
     sid = cfg["device_id"]
     stage_dir = cfg["stage_dir"]
@@ -997,8 +1042,30 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick):
             # Same catalog id with new content is a genuine image change, so a
             # previous terminal placement failure must not poison the new bytes.
             _reset_copy_failures(done_st)
+        # 'copied' is a fact about the FLASH-ROOT copy, and root_present()
+        # above just checked THAT copy by presence AND exact catalog size.
+        # Clearing it unconditionally threw that answer away and re-ran a
+        # ~1.2 GB placement for a copy demonstrably still in place — which is
+        # precisely where an un-parked image lands (park deletes the stage
+        # copy and deliberately keeps the root copy, so the only thing missing
+        # is the staged file). Content that CHANGED invalidates the root copy
+        # too, so a stale sha still forces the re-placement, as does a root
+        # copy that is missing or the wrong size.
         done_st["done"] = staged_ok       # keep 'done' only for a root-only loss
-        done_st["copied"] = False         # always re-copy
+        done_st["copied"] = bool(root_ok and content_ok)
+
+    # Legacy bookkeeping: the old agent's one-image world had a single
+    # top-level "current image" pointer, and readers of the state file (plus
+    # the top-level root_file mirror written on placement) still expect it.
+    # The FIRST image of the set owns it; the per-image records under
+    # state[<image id>] are the real thing.
+    # Written HERE rather than in run_once to keep the single-image agent's
+    # ORDER: the pointer only ever advanced AFTER the catalog answered for the
+    # image and its filename passed the whitelist, so a device assigned an
+    # image the catalog does not have — or one it names illegally — keeps
+    # pointing at the image it actually staged.
+    if legacy_pointer:
+        state["image_id"] = img_id
 
     # Delete replaced flash-root images, VERIFYING each is actually gone
     # before claiming CLEANUP: AAA nodes silently no-op a raw exec `delete`
@@ -1399,20 +1466,17 @@ def run_once(cfg, deps, state):
     # left it, un-park what came back — BEFORE staging anything.
     _reconcile_set(deps, state, ids, stage_dir)
 
-    # Legacy bookkeeping: the old agent's one-image world had a single
-    # top-level "current image" pointer, and readers of the state file (plus
-    # the top-level root_file mirror written on placement) still expect it.
-    # Keep writing the FIRST image of the set; the per-image records under
-    # state[<image id>] are the real thing.
-    state["image_id"] = ids[0]
-
     ticks = []
     statuses = []
-    for img_id in ids:
+    for idx, img_id in enumerate(ids):
         tick = _ImageTick()
         ticks.append(tick)
+        # The FIRST image of the set carries the legacy top-level "image_id"
+        # pointer; _stage_image writes it where the single-image agent did,
+        # after that image's own catalog and filename checks pass.
         statuses.append(_stage_image(cfg, deps, state, img_id, tele_on,
-                                     stream_on, tick))
+                                     stream_on, tick,
+                                     legacy_pointer=(idx == 0)))
 
     # ONE heartbeat for the whole set (the device is one row on the server),
     # then each image's telemetry replayed against the answer it carried.

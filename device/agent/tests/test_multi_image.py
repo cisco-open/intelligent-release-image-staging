@@ -43,12 +43,17 @@ class MultiCatalog:
         self.heartbeats = []
         self.downloaded = []
         self.hb_response = None
+        # ids whose lookup RAISES this tick (a 5xx/timeout), as opposed to
+        # answering None (the image is genuinely gone from the catalog).
+        self.raises = set()
 
     def get_policy(self, sid):
         return {"approved_image_id": self.ids[0] if self.ids else None,
                 "approved_image_ids": list(self.ids)}
 
     def get_image(self, image_id):
+        if image_id in self.raises:
+            raise RuntimeError("catalog unreachable for %s" % image_id)
         return self.images.get(image_id)
 
     def download_torrent(self, image_id, dest):
@@ -198,24 +203,155 @@ def test_unchecked_image_is_parked_not_deleted():
     assert any("img-a" in msg for msg in _emits(rec, "PARKED"))
 
 
-def test_recheck_of_parked_image_unparks_and_confirms_root():
-    # The image comes back into the set. Its root copy survived parking, so
-    # placement is the cheap presence+size confirm the steady-state
-    # short-circuit already does — no re-download, no re-copy.
-    cat = MultiCatalog([_img("img-a")], ids=["img-a"])
-    deps, rec = make_deps(cat, {"/stage/img-a.bin": 5})
-    state = {"schema_version": iris_agent._STATE_SCHEMA,
-             "image_id": "img-a",
-             "img-a": {"done": True, "copied": True, "sha": "img-a-sha",
-                       "root_file": "img-a.bin", "parked": True,
-                       "copy_terminal": True, "copy_attempts": 4}}
+def test_park_then_unpark_reuses_the_surviving_root_copy():
+    # Park -> un-park driven through REAL ticks (a park deletes the stage copy,
+    # so a state with parked=True AND the stage file still present is a state
+    # the agent can never be in).
+    #
+    # Coming back into the set IS a real re-download: the stage copy is gone
+    # and seeding a checked image needs it. PLACEMENT is the part parking was
+    # designed to save — the root copy was deliberately kept, so the
+    # steady-state presence+size confirm settles it and no second ~1.2 GB copy
+    # runs. A root copy that is genuinely gone must still be re-placed.
+    cat = MultiCatalog([_img("img-a"), _img("img-b")], ids=["img-a", "img-b"])
+    sizes = {"/stage/img-a.bin": 5, "/stage/img-b.bin": 5}
+    root_ok = {}
+    deps, rec = make_deps(cat, sizes)
+    deps = deps._replace(
+        root_present=lambda fname, prefix="flash:", expected_size=None:
+        root_ok.get(fname, True))
+    state = {}
+    assert iris_agent.run_once(CFG, deps, state) == "multi:complete,complete"
+    assert rec["copied"] == ["img-a.bin", "img-b.bin"]
 
+    cat.ids = ["img-b"]                            # img-a leaves the set
+    iris_agent.run_once(CFG, deps, state)
+    assert state["img-a"]["parked"] is True
+    assert sizes.get("/stage/img-a.bin") is None   # stage copy really is gone
+    assert state["img-a"]["root_file"] == "img-a.bin"      # root copy kept
+
+    # --- back in the set, root copy intact: re-download, NO re-placement ---
+    cat.ids = ["img-a", "img-b"]
+    rec["aria_added"].clear()
+    rec["copied"].clear()
+    assert iris_agent.run_once(CFG, deps, state) == "multi:downloading,complete"
+    assert rec["aria_added"] == [("/stage/img-a.torrent", "/stage")]
+    sizes["/stage/img-a.bin"] = 5                  # aria2 finishes the transfer
+    assert iris_agent.run_once(CFG, deps, state) == "multi:complete,complete"
+    assert rec["copied"] == []                     # confirmed, never re-copied
+
+    # --- park it again, and lose the root copy while it is out of the set ---
+    cat.ids = ["img-b"]
+    iris_agent.run_once(CFG, deps, state)
+    root_ok["img-a.bin"] = False
+    cat.ids = ["img-a", "img-b"]
+    rec["copied"].clear()
+    assert iris_agent.run_once(CFG, deps, state) == "multi:downloading,complete"
+    sizes["/stage/img-a.bin"] = 5
+    assert iris_agent.run_once(CFG, deps, state) == "multi:complete,complete"
+    assert rec["copied"] == ["img-a.bin"]          # genuinely gone -> re-placed
+
+
+def test_park_interrupted_before_its_actions_is_retried_next_tick():
+    # "parked" means the park ACTIONS ran. A tick that could not name the
+    # dropped image's file (a transient catalog failure) and then died staging
+    # another image must not leave the record flagged: the flag is what takes a
+    # record out of the stale list, so a false one strands a live aria2
+    # download and its partial on flash with no way back but hand-editing
+    # state.
+    cat = MultiCatalog([_img("img-a"), _img("img-b")], ids=["img-a", "img-b"])
+    sizes = {}
+    deps, rec = make_deps(cat, sizes)
+    state = {}
+    assert iris_agent.run_once(CFG, deps, state) == "multi:downloading,downloading"
+    sizes["/stage/img-a.bin"] = 3                  # a partial, mid-transfer
+
+    # img-a drops out on the very tick the catalog goes bad: nothing can be
+    # named, so nothing is stopped or deleted, and the tick then dies on img-b.
+    cat.ids = ["img-b"]
+    cat.raises = {"img-a", "img-b"}
+    rec["aria_removed"].clear()
+    rec["removed"].clear()
+    try:
+        iris_agent.run_once(CFG, deps, state)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("this case needs the tick to die staging img-b")
+    assert rec["aria_removed"] == [] and rec["removed"] == []   # nothing ran...
+    assert "parked" not in state["img-a"]                       # ...so not parked
+
+    cat.raises = set()                             # next healthy tick
+    iris_agent.run_once(CFG, deps, state)
+    # (img-b.bin is also force-removed on this tick — the stale-entry clear
+    # every re-add does — so this checks membership, not the whole list.)
+    assert "img-a.bin" in rec["aria_removed"]      # the park actually happens
+    assert rec["removed"] == ["/stage/img-a.bin"]
+    assert state["img-a"]["parked"] is True        # and only THEN is it flagged
+
+
+def test_park_moves_the_legacy_root_file_into_the_parked_record():
+    # The top-level root_file is the legacy mirror for the set's FIRST image.
+    # Parking that image makes it stale: _protect_set and any legacy reader
+    # would pair one image's file with another image's image_id.
+    cat = MultiCatalog([_img("img-a"), _img("img-b")], ids=["img-a"])
+    deps, rec = make_deps(cat, {"/stage/img-a.bin": 5})
+    state = {}
     assert iris_agent.run_once(CFG, deps, state) == "complete"
-    assert "parked" not in state["img-a"]                  # un-parked
-    assert "copy_terminal" not in state["img-a"]           # _reset_copy_failures
-    assert "copy_attempts" not in state["img-a"]
-    assert rec["aria_added"] == []                         # no re-download
-    assert rec["copied"] == []                             # no re-copy
+    assert state["root_file"] == "img-a.bin"
+
+    cat.ids = ["img-b"]                            # img-a parked, img-b staging
+    assert iris_agent.run_once(CFG, deps, state) == "downloading"
+    assert "root_file" not in state                # moved out of the top level
+    assert state["img-a"]["root_file"] == "img-a.bin"      # into its owner
+
+
+def test_legacy_image_id_pointer_waits_for_a_valid_catalog_answer():
+    # The old agent advanced the top-level pointer only AFTER the catalog
+    # answered for the image and its filename passed the whitelist. A device
+    # assigned an image the catalog does not have staged nothing, so it must
+    # not end up pointing at that image.
+    cat = MultiCatalog([_img("img1")], ids=["img1"])
+    deps, rec = make_deps(cat, {"/stage/img1.bin": 5})
+    state = {}
+    assert iris_agent.run_once(CFG, deps, state) == "complete"
+    assert state["image_id"] == "img1"
+
+    cat.ids = ["img-gone"]
+    assert iris_agent.run_once(CFG, deps, state) == "no-image"
+    assert state["image_id"] == "img1"
+
+
+def test_heartbeat_is_not_ready_while_an_image_errors_this_tick():
+    # staged_image_ids is read from STATE, so it still counts an image that was
+    # staged on an earlier tick but failed on THIS one. "ready" alongside a
+    # stage_error is a contradiction the console cannot act on.
+    cat = MultiCatalog([_img("img-a"), _img("img-b")], ids=["img-a", "img-b"])
+    deps, rec = make_deps(cat, {"/stage/img-a.bin": 5, "/stage/img-b.bin": 5})
+    state = {}
+    assert iris_agent.run_once(CFG, deps, state) == "multi:complete,complete"
+    assert cat.heartbeats[-1]["stage_state"] == "ready"
+
+    del cat.images["img-b"]                        # the catalog drops one
+    assert iris_agent.run_once(CFG, deps, state) == "multi:complete,no-image"
+    hb = cat.heartbeats[-1]
+    assert hb["staged_image_ids"] == ["img-a", "img-b"]   # state still says both
+    assert hb["stage_state"] != "ready"
+    assert hb["stage_state"] == "error"                   # what it actually hit
+    assert hb["stage_error"] == "assigned image img-b not in catalog"
+
+
+def test_heartbeat_identity_comes_from_the_image_that_produced_it():
+    # img-a bails before it reports anything (its catalog filename is
+    # rejected), so the payload — free flash, target_fs, observation — is
+    # img-b's reading of the device. The id on it must be img-b's too.
+    bad = _img("img-a")
+    bad["filename"] = "img a.bin"                  # space: fails the whitelist
+    cat = MultiCatalog([bad, _img("img-b")], ids=["img-a", "img-b"])
+    deps, rec = make_deps(cat, {"/stage/img-b.bin": 5})
+    state = {}
+    assert iris_agent.run_once(CFG, deps, state) == "multi:bad-filename,complete"
+    assert cat.heartbeats[-1]["current_image_id"] == "img-b"
 
 
 def test_flash_full_on_one_image_does_not_block_the_next():
