@@ -2602,3 +2602,45 @@ def test_cancel_device_stops_queued_and_running_work():
 def test_cancel_device_is_a_no_op_for_an_unknown_device():
     svc = _svc(lambda *a, **k: 0)
     assert svc.cancel_device("never-existed") == {"cancelled": 0, "aborted": 0}
+
+
+def test_log_is_on_disk_before_the_job_reports_terminal(tmp_path):
+    """The deploy log must be fully written BEFORE the job's terminal state is
+    visible to pollers. The console (and the API's own tests) poll the job to
+    'done' and immediately read /api/deploy-logs; persisting after the state
+    flip raced that read — an operator got a created-but-empty file. Pin the
+    ordering itself: at the moment _persist_log runs, the job must still be
+    reported as running."""
+    log_dir = str(tmp_path / "deploy-logs")
+    svc = _svc(lambda p, e, on: (on("[1/6] hi"), on("[6/6] done"), 0)[2],
+               log_dir=log_dir)
+    seen = {}
+    real_persist = svc._persist_log
+
+    def spying_persist(job):
+        live = svc.get_job(job["id"])
+        seen["state_at_persist"] = live["state"] if live else None
+        real_persist(job)
+
+    svc._persist_log = spying_persist
+    job = _wait(svc, svc.start("d1"))
+    assert job["state"] == "done"
+    assert seen, "persist hook never ran"
+    assert seen["state_at_persist"] not in ("done", "error"), (
+        "log persisted AFTER the terminal state was already visible: %r"
+        % seen["state_at_persist"])
+
+
+def test_persist_failure_still_finishes_the_job(tmp_path):
+    """Persisting before the state flip must not let a persist failure wedge
+    the job in 'running' forever — best-effort stays best-effort."""
+    log_dir = str(tmp_path / "deploy-logs")
+    svc = _svc(lambda p, e, on: (on("[6/6] done"), 0)[1], log_dir=log_dir)
+
+    def broken_persist(job):
+        raise OSError("volume is read-only")
+
+    svc._persist_log = broken_persist
+    job = _wait(svc, svc.start("d1"))
+    assert job["state"] == "done"
+    assert job["returncode"] == 0

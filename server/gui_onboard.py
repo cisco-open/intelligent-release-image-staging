@@ -1327,7 +1327,12 @@ class OnboardService:
             self._procs.pop(job_id, None)   # drop the (now-dead) installer handle
             j = self._jobs.get(job_id)
             if j is not None:
-                j["state"] = state
+                # The terminal state is deliberately NOT set here. Pollers
+                # (the console, and readers of /api/deploy-logs) treat a
+                # terminal state as "the log is readable now", so the log
+                # must be fully on disk BEFORE the flip is visible — the old
+                # order raced them into a created-but-empty file. The flip
+                # happens in the finally below, after _persist_log returns.
                 j["returncode"] = rc
                 j["finished_at"] = int(self._now())
                 device_id = j.get("device_id")
@@ -1348,16 +1353,28 @@ class OnboardService:
                     if err:
                         detail += " -- " + err[:120]
                 if self.log_dir:
-                    # snapshot under the lock; the disk write happens outside it
-                    log_job = dict(j, lines=list(j["lines"]))
-        if log_job is not None:
-            # Best-effort: a full or read-only state volume must never fail
-            # the job (or block the audit emit below). Log lines are the
-            # installer's stdout, which never echoes passwords (see above).
-            try:
-                self._persist_log(log_job)
-            except Exception:
-                pass
+                    # snapshot under the lock; the disk write happens outside
+                    # it. The job dict does not carry the terminal state yet,
+                    # so the header's state comes from the argument.
+                    log_job = dict(j, state=state, lines=list(j["lines"]))
+        try:
+            if log_job is not None:
+                # Best-effort: a full or read-only state volume must never
+                # fail the job (or block the audit emit below). Log lines are
+                # the installer's stdout, which never echoes passwords (see
+                # above).
+                try:
+                    self._persist_log(log_job)
+                except Exception:
+                    pass
+        finally:
+            # Only now does the job report done/error — with the log already
+            # readable. The finally guarantees a persist crash can never
+            # wedge the job in "running".
+            with self._lock:
+                j = self._jobs.get(job_id)
+                if j is not None:
+                    j["state"] = state
         if self._audit is not None:
             try:
                 self._audit(event="%s_finished" % action, category="onboard",
