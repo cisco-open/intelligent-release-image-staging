@@ -67,8 +67,13 @@ reviewable, Git-friendly file.
 ### Batch operations in the Console
 
 The Devices toolbar finishes a CSV import in bulk: onboard, undeploy, adopt,
-delete, and credential assignment all act on the checked rows and report
-per-device refusals instead of failing the whole batch. See
+delete, credential assignment, and image assignment all act on the checked
+rows and report per-device refusals instead of failing the whole batch. Image
+assignment applies a *set* — up to ten images — to the whole selection in one
+pick, not one image per device: the toolbar opens the same checkbox picker as
+each row's own control, pre-checked with the intersection of what the
+selection already has assigned so applying can never silently add or drop an
+image for a device outside what you see checked. See
 [Bulk device actions](console.md#bulk-device-actions).
 
 Deleting inventory rows is not an undeploy — undeploy the devices first. See
@@ -109,7 +114,9 @@ Start from the template:
 cp fleet/assignments.csv.example fleet/assignments.csv
 ```
 
-Assignments are release intent:
+Assignments are release intent, one image per device per row — this CSV path
+does not carry the console's multi-image set; assign more than one image to a
+device from the console instead (see [Bulk device actions](console.md#bulk-device-actions)):
 
 ```text
 device_id,image_id

@@ -259,7 +259,8 @@ event, with `result=fail` and the reason on a rejection.
 | `GET /api/devices/<id>/plan` | `{plan}` — the resolved deployment plan; 409 when it cannot resolve. |
 | `GET /api/devices/<id>/reports` | `{reports: [...]}` — the device's stored telemetry ring. |
 | `GET /api/devices/<id>/deployment` | `{receipt, total}` — the receipt that best describes the device (the active one, else the teardown-authorizing one, else the newest) plus the stored-receipt count; `receipt` is `null` when none exists. Read-only — feeds the deployment-details panel. |
-| `POST /api/devices/<id>/assign`, `.../credential`, `.../platform` | Sets the approved image, the credential profile, or the platform and storage target; each returns `{ok: true}`. |
+| `POST /api/devices/<id>/assign` | `{image_ids: [...]}` sets the device's ordered, up-to-ten-image approved set (an empty array unassigns); the singular `{image_id: <id or null>}` is the pre-multi-image compat shape and always means a one-element set. 400 for more than ten ids, a duplicate, or an id not in the catalog. See [Policy schema](#policy-schema). |
+| `POST /api/devices/<id>/credential`, `.../platform` | Sets the credential profile, or the platform (Agent install choice) and storage target; each returns `{ok: true}`. |
 | `POST /api/devices/<id>/request-report` | Requests a fresh telemetry report; `{ok: true, expires_at}`, or 429 while one is already pending. |
 | `POST /api/devices/<id>/adopt` | Requires `{"acknowledge_adopt": true}`; returns `{receipt_id}`. 409 when the device already has an active receipt; routers cannot be adopted. |
 | `POST /api/devices/<id>/onboard`, `POST /api/devices/<id>/undeploy` | Starts the job; `{job_id}`. 409 when the device is busy with the opposite action. Undeploy also answers 409 when the device has no deployment receipt — send `{"force": true}` to run it anyway, which removes only the IRIS-named agent footprint and leaves operator-owned network state (VLAN/SVI, VirtualPortGroup, NAT) untouched, audited as `undeploy_forced`. |
@@ -349,6 +350,28 @@ is never destroyed. Entries published before `source_dir` was recorded keep the
 older behaviour: their delete unlinks `IRIS_IMAGES_DIR/<filename>`. The startup
 re-seed likewise prefers `source_dir`, falling back to its basename walk for
 entries with no `source_dir` or whose recorded directory has gone away.
+
+## Policy schema
+
+`policy.json` (`<state>/policy.json`) holds per-device staging approval — what
+IRIS is allowed to stage, never what it installs, activates, or reloads.
+
+| Field | Meaning |
+| --- | --- |
+| `approved_image_ids` | Ordered list of catalog image ids, up to ten. The agent stages and verifies every id in the set, transferring them in parallel. Authoritative: a raw read of this file, or a stale write, is resolved from this key, never from `approved_image_id`. |
+| `approved_image_id` | The set's first element, or `null` when empty. Recomputed from `approved_image_ids` on every read and write — kept only so a reader that predates the ordered set (a raw `policy.json` parse, or an agent that has not yet upgraded) still sees a single assignment. |
+
+`POST /api/devices/<id>/assign` (see [Devices](#devices)) writes this file.
+
+The device's heartbeat (`devices.json`, `<state>/devices.json`) reports
+per-image staging progress against that set:
+
+| Field | Meaning |
+| --- | --- |
+| `current_image_id` | The one image the agent is actively transferring or placing this tick, if any. |
+| `stage_state` | The agent's own state string for `current_image_id` (for example `staging`, `downloading`, `transferring_to_ios`, `ready`, `error`) — on an agent that predates per-image reporting, the single most actionable state across the whole tick. |
+| `staged_image_ids` | Which of the assigned images this agent has staged and verified, as of its last heartbeat. Absent on an agent that predates multi-image staging, in which case staged/not-staged falls back to `stage_state == "ready"` paired with `current_image_id`. |
+| `errored_image_ids` | Which of the assigned images hit a terminal per-image failure on the agent's last tick. Absent on an agent that predates the field. |
 
 ## Device agent config keys
 

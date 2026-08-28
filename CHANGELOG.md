@@ -11,6 +11,15 @@ top-level `VERSION` file.
 
 ## [Unreleased]
 
+### Added
+- A device can now stage up to ten images at once: pick them per device or for a
+  whole selection in the console, transfers run in parallel, and each image
+  reports its own state. Unchecking an image stops its torrent and frees the
+  staging copy while leaving the staged file on the boot filesystem, still
+  tracked by IRIS. The console now says "Agent install" instead of "platform",
+  labels bare inventory honestly, only offers installs the device model can run,
+  and refuses IOS-XR devices with the same clear message on every path.
+
 ### Changed
 - Image verification is now the same on every platform: the agent proves integrity by
   sha256 against the catalog's published value, and placement onto the boot filesystem

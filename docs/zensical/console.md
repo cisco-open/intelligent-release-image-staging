@@ -67,8 +67,7 @@ server long after it was installed.
 | --- | --- |
 | Overview | Rollout counters and per-image staging progress. Carries the *Telemetry export* badge (`ok` / `degraded` / `off`, or `unknown` when the health endpoint cannot be read), fed by the hub's OTLP export health. |
 | Images | Shows published image metadata and staged network status, uploads new images, and imports images already on disk. |
-| Devices | Lists known devices, their **management type**, platform details, current assignment, and recent reports. |
-| Assignments | Maps each device to the image it should stage. |
+| Devices | Lists known devices, their **management type**, **Agent install** choice, assigned images, and recent reports. |
 | Onboarding | Starts and tracks install or undeploy jobs when the device's assigned credential profile is configured. |
 | Swarm | Shows peer progress and seeder/device participation. |
 | Monitoring | Holds the audit trail and per-job deployment logs. |
@@ -158,6 +157,11 @@ device table shows each device's management type rather than a bare VLAN/SVI val
 - **Router NAT - VPG behind NAT** — adds overload NAT and static TCP PAT for
   port 6881. The receipt preserves a pre-existing `ip nat outside` marking.
 
+A device with no attachment chosen yet — imported from an older positional CSV,
+or added without picking one of the four types above — reads **Inventory only —
+attachment not chosen** in that column instead. See
+[Older positional CSVs](fleet-workflows.md#inventory).
+
 Router choices show the VPG number and app addressing; Router NAT also requires
 the outside interface. Both target the Catalyst 8000 family and are validated on
 Catalyst 8000V across onboarding, image staging, receipt-backed undeploy, Swarm Map, and
@@ -173,12 +177,17 @@ be adopted — re-onboard instead. For preflight and receipt ownership see
 
 Each device row's **ⓘ Deployment details** control opens a read-only drawer
 beside the table — it slides in from the right, closes on **Esc** or **✕**, and
-leaves the row you opened it from where it was — showing what the deployment
-holds: the receipt state (`active`, `removed`, `superseded`, `needs-reconcile`,
+leaves the row you opened it from where it was. It opens on an **Images** table
+listing every image currently assigned to the device with its own state:
+`ready` once that image is staged and verified, the agent's own in-progress
+state (for example `staging`, `downloading`, `transferring_to_ios`, optionally
+with the reported error) for whichever image is current, and `queued` for the
+rest. Below that, it shows the deployment itself: the receipt state (`active`,
+`removed`, `superseded`, `needs-reconcile`,
 `abandoned`) and receipt id, the
 preflight result, and the resolved configuration the onboard applied — the
 attachment type, the owned management VLAN or VPG, SVI and app addressing,
-NAT interface, swarm port, and the recorded model, platform, and device
+NAT interface, swarm port, and the recorded model, **Agent install** choice, and device
 identity. A device with no receipt says so, naming adopt or re-onboard as the
 fix. The drawer ends with that device's persisted deployment logs
 ([Deployment logs](#deployment-logs)), each viewable in place. A run that
@@ -202,7 +211,7 @@ The Devices toolbar acts on every checked row, so a CSV import can be finished
 without touching each device.
 
 Above it, the filter bar narrows what is rendered — free text across device, IP
-and model, plus management type, platform, credential, telemetry, peer policy
+and model, plus management type, **Agent install**, credential, telemetry, peer policy
 and status. Only matching rows are drawn, so filtering and then **select all**
 is how you act on a subset instead of hand-picking rows out of the whole fleet.
 The **Status** choices are generated from the same derivation the Status column
@@ -220,7 +229,21 @@ device can read `deployed` and still have gone quiet.
 | Adopt selected | Records the ownership receipt for each device. | Yes — a dialog listing the selected devices |
 | Delete selected | Removes the inventory rows only. | Yes — a dialog listing the devices and warning that deletion is not an undeploy |
 | *credential for selected* + **Apply** | Assigns one credential profile to every checked device. Leaving the picker on either blank entry clears the credential instead. | No |
-| *image for selected* + **Apply** | Assigns one catalog image to every checked device — the bulk form of the per-row **Assigned image** picker, and the reason the filter bar exists: filter to a platform or model, select all, assign. Choosing *— unassign —* clears the assignment instead; an untouched picker does nothing. | No |
+| Assign images to selected | Opens the shared image picker for the whole checked selection — the bulk form of each row's own **Assigned images** button, and the reason the filter bar exists: filter to a platform or model, select all, assign. | Only when it would unassign every image |
+
+A device can have up to ten images assigned at once, staged and transferred in
+parallel; the per-row **Assigned images** button and the toolbar's **Assign
+images to *N* devices…** button open the same checkbox picker, reading `Choose
+images` with a live `checked/10` count — an eleventh box disables itself
+rather than waiting for a server-side rejection. Applying to a multi-device
+selection pre-checks the *intersection* of what the selection already has
+assigned — never the union — so **Apply** can never silently add an image to
+one device or drop it from another; when the selection's assignments actually
+differ, a note says so before you apply. Applying an empty pick is a
+deliberate unassign and confirms first, whether for one device or for the
+whole selection: unchecking an image stops its torrent and frees the staging
+copy, but leaves any already-staged file on the device's boot filesystem,
+still tracked by IRIS.
 
 The **Adopt** dialog names the whole selection. It warns that you should only
 adopt a device whose inventory row matches what is really on the box, points at

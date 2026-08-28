@@ -1162,7 +1162,10 @@ class Telemetry:
             ``tracker`` (authenticated presence), optional ``device_observation``
             (freshness-gated live snapshot), optional current
             ``server_observation.peer`` (this-connection rate), optional
-            ``latest_report``, optional ``peer_policy``/``peer_enforcement``.
+            ``latest_report``, optional ``peer_policy``/``peer_enforcement``,
+            optional heartbeat staging state (``current_image_id``,
+            ``stage_state``, ``staged_image_ids``, ``errored_image_ids`` --
+            issue: multi-image assignment) for a typed device principal.
 
         Identity joins (device_observation / latest_report / policy /
         enforcement) are keyed ONLY by the authenticated device **principal id**
@@ -1593,6 +1596,20 @@ def _peer_row(p, total, up_now, devices_by_id, report_by_device,
         if model is not None:
             row["model"] = model
         row["device_id"] = device_id
+        # Multi-image staging state, straight from the same heartbeat record
+        # (issue: multi-image assignment) -- unmodified, so the swarm-map
+        # drawer can list every image this device's agent is currently
+        # tracking state for. Omitted (not None-valued) when the heartbeat
+        # never carried the field, matching model/device_observation/etc
+        # above: absence is a fact, never invented as null.
+        if rec.get("current_image_id") is not None:
+            row["current_image_id"] = rec.get("current_image_id")
+        if rec.get("stage_state") is not None:
+            row["stage_state"] = rec.get("stage_state")
+        if rec.get("staged_image_ids") is not None:
+            row["staged_image_ids"] = rec.get("staged_image_ids")
+        if rec.get("errored_image_ids") is not None:
+            row["errored_image_ids"] = rec.get("errored_image_ids")
     return row
 
 
