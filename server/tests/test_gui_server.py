@@ -1212,7 +1212,8 @@ def test_device_delete_purges_catalog_state(tmp_path):
         cat.record_telemetry("d1", {"event": "staging-complete"})
         st, _, b = _req(host, port, "DELETE", "/api/devices/d1", headers=hh)
         assert st == 200 and json.loads(b)["deleted"] is True
-        assert cat.get_policy("d1") == {"approved_image_id": None}
+        assert cat.get_policy("d1") == {"approved_image_id": None,
+                                        "approved_image_ids": []}
         assert cat.get_device("d1") is None
         assert cat.get_telemetry("d1") == []
         st, _, _ = _req(host, port, "POST", "/api/devices", dev, headers=hh)
@@ -1321,7 +1322,8 @@ def test_assign_image_sets_policy(tmp_path):
         # Approval IS the whole policy. This used to assert install_allowed was
         # False; the flag gated nothing, was never read, and reading as False
         # beside an approved image implied a second gate an operator had to open.
-        assert pol == {"approved_image_id": "img1"}
+        assert pol == {"approved_image_id": "img1",
+                       "approved_image_ids": ["img1"]}
         # unknown image -> 400
         st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
                         {"image_id": "nope"}, headers=hh)

@@ -104,9 +104,16 @@ class ImageService:
             if entry is None:
                 raise KeyError(image_id)
             pol = store.list_policies()
+            # Raw rows, not get_policy()'s normalised shape: a row written by
+            # the single-image release carries only approved_image_id, a row
+            # written since carries approved_image_ids. Block while the id is
+            # in EITHER shape's set -- a device with a multi-image assignment
+            # still guards every member, not just the first.
             assigned = sorted(
                 did for did, p in pol.items()
-                if p.get("approved_image_id") == image_id
+                if image_id in (p.get("approved_image_ids") or
+                                ([p["approved_image_id"]]
+                                 if p.get("approved_image_id") else []))
                 and (live_device_ids is None or did in live_device_ids))
             if assigned:
                 return assigned

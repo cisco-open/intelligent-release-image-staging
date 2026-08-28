@@ -30,6 +30,11 @@ import secretfs
 import secrets_store
 import torrent_personalize
 
+# A device may hold an ordered set of approved images at once (issue: multi-
+# image assignment); this bounds the set so policy.json rows and the console
+# stay a fixed, glanceable size rather than an unbounded list.
+MAX_ASSIGNED_IMAGES = 10
+
 
 def _audit_id(value):
     """Derive a short, non-secret correlation id from a token value.
@@ -611,10 +616,15 @@ class CatalogStore:
         with set_policy."""
         return secrets_store.store_lock(self.catalog_path + ".assign")
 
-    def set_policy(self, device_id, approved_image_id=None):
-        """Approve an image for a device. Approval is the whole policy: IRIS
-        stages and verifies, and never installs, activates or reloads, so there
-        is nothing further to authorise.
+    def set_policy(self, device_id, approved_image_id=None, approved_image_ids=None):
+        """Approve an ordered set of images (max MAX_ASSIGNED_IMAGES) for a
+        device. Approval is the whole policy: IRIS stages and verifies, and
+        never installs, activates or reloads, so there is nothing further to
+        authorise.
+
+        The singular kwarg remains for callers/rows from the single-image
+        era and means a one-element set; passing both is a programming
+        error.
 
         There used to be an ``install_allowed`` flag here. It gated nothing --
         no code in server/ or device/ ever read it -- and it was always written
@@ -622,26 +632,55 @@ class CatalogStore:
         operator as a False beside an approved image it read as a second gate
         still to be opened, which is worse than absent: it invited people to go
         looking for the switch that would let staging proceed."""
+        if approved_image_id is not None and approved_image_ids is not None:
+            raise ValueError(
+                "pass approved_image_id or approved_image_ids, not both")
+        if approved_image_ids is None:
+            ids = [approved_image_id] if approved_image_id else []
+        else:
+            ids = [str(i) for i in approved_image_ids]
+        if len(ids) > MAX_ASSIGNED_IMAGES:
+            raise ValueError("at most %d images per device" % MAX_ASSIGNED_IMAGES)
+        if len(set(ids)) != len(ids):
+            raise ValueError("duplicate image id in assignment")
         with self.image_policy_lock():
             # Re-check at persistence time. Missing catalog.json remains valid
             # for legacy bootstrap callers; an existing catalog fails closed.
-            if approved_image_id and os.path.exists(self.catalog_path) \
-                    and self.get_image(approved_image_id) is None:
-                raise ValueError("no such image")
+            if ids and os.path.exists(self.catalog_path):
+                for iid in ids:
+                    if self.get_image(iid) is None:
+                        raise ValueError("no such image")
             with secrets_store.store_lock(self.policy_path):
                 pol = self._read(self.policy_path)
-                pol[device_id] = {"approved_image_id": approved_image_id}
+                # Keep writing approved_image_id (first-or-None) alongside
+                # approved_image_ids: raw policy.json readers that predate the
+                # ordered set (gui_server's device-view merge and Overview
+                # aggregation both read list_policies() directly, not through
+                # get_policy()'s normalisation) must keep seeing an assignment
+                # without themselves knowing about the plural key.
+                pol[device_id] = {"approved_image_id": ids[0] if ids else None,
+                                  "approved_image_ids": ids}
                 _atomic_write_json(self.policy_path, pol)
 
     def get_policy(self, device_id):
-        """The device's approval, normalised. A record written before
-        ``install_allowed`` was removed still carries the key on disk; it is
-        dropped on the way out so callers never see a field that means nothing,
-        and the row rewrites itself in the new shape at the next set_policy."""
+        """The device's approvals, normalised: every historical row shape
+        reads as ``{approved_image_id: first-or-None, approved_image_ids:
+        [..]}``. A record written before ``install_allowed`` was removed
+        still carries the key on disk; it is dropped on the way out so
+        callers never see a field that means nothing. A row written by the
+        single-image release carries only ``approved_image_id`` and reads
+        back as its one-element list, with no migration step -- the row
+        rewrites itself in the new shape at the next set_policy."""
         rec = self._read(self.policy_path).get(device_id)
         if not isinstance(rec, dict):
-            return {"approved_image_id": None}
-        return {"approved_image_id": rec.get("approved_image_id")}
+            return {"approved_image_id": None, "approved_image_ids": []}
+        ids = rec.get("approved_image_ids")
+        if not isinstance(ids, list):
+            one = rec.get("approved_image_id")
+            ids = [one] if one else []
+        ids = [str(i) for i in ids if i]
+        return {"approved_image_id": ids[0] if ids else None,
+                "approved_image_ids": ids}
 
     def list_policies(self):
         return self._read(self.policy_path)
@@ -1053,8 +1092,8 @@ class Catalog:
                 return self._json(400, {"error": "bad report"})
             if report.get("schema") == "v2":
                 assigned = self.store.get_policy(parts[2]).get(
-                    "approved_image_id")
-                if not assigned or report.get("image_id") != assigned:
+                    "approved_image_ids") or []
+                if report.get("image_id") not in assigned:
                     return self._json(400, {"error": "bad report"})
             self.store.record_telemetry(parts[2], report)
             return self._json(200, {"ok": True})

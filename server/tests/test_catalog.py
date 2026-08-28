@@ -45,6 +45,25 @@ def _store(tmp_path):
     return s
 
 
+def _store_with_images(tmp_path, ids):
+    """A CatalogStore whose catalog.json carries a minimal published entry
+    for each id in *ids* (multi-image assignment tests need more than the
+    single img1 that _store() seeds)."""
+    s = catalog.CatalogStore(str(tmp_path))
+    for iid in ids:
+        s.save_image({"id": iid, "filename": iid + ".bin", "size": 5,
+                      "sha256": "ab" * 32, "cisco_signature_verified": False,
+                      "info_hash_hex": "cc" * 20, "published_at": 111})
+    return s
+
+
+def _write_policy_json(store, rows):
+    """Write *rows* (device_id -> raw policy record) straight to
+    policy.json, bypassing set_policy -- stands in for a row written by a
+    previous release."""
+    catalog._atomic_write_json(store.policy_path, rows)
+
+
 # ---------------------------------------------------------------------------
 # Ported CatalogStore unit tests (unchanged behaviour)
 # ---------------------------------------------------------------------------
@@ -62,7 +81,8 @@ def test_store_heartbeat_and_policy(tmp_path):
                                 "free_flash_bytes": 9, "version": "17.18"}, now=222)
     assert s.get_device("sw-1")["last_seen"] == 222
     s.set_policy("sw-1", approved_image_id="img1")
-    assert s.get_policy("sw-1") == {"approved_image_id": "img1"}
+    assert s.get_policy("sw-1") == {"approved_image_id": "img1",
+                                     "approved_image_ids": ["img1"]}
 
 
 def test_set_policy_serializes_with_image_deletion_across_processes(tmp_path):
@@ -125,12 +145,64 @@ def test_purge_device_clears_all_state(tmp_path):
     # deleted-and-re-added devices must come back unassigned: EVERY
     # per-device store is emptied, unlike forget_device()
     assert s.get_device("sw-1") is None
-    assert s.get_policy("sw-1") == {"approved_image_id": None}
+    assert s.get_policy("sw-1") == {"approved_image_id": None,
+                                     "approved_image_ids": []}
     assert s.get_telemetry("sw-1") == []
     assert s.pending_report("sw-1", now=1001) is None
     # idempotent on a purged / never-seen device
     assert s.purge_device("sw-1") is False
     assert s.purge_device("never-seen") is False
+
+
+# ---------------------------------------------------------------------------
+# Multi-image assignment: policy holds an ordered set (issue: multi-image
+# assignment, task 1 -- storage layer only)
+# ---------------------------------------------------------------------------
+
+def test_policy_list_round_trip_and_order(tmp_path):
+    store = _store_with_images(tmp_path, ["img-a", "img-b", "img-c"])
+    store.set_policy("d1", approved_image_ids=["img-c", "img-a"])
+    pol = store.get_policy("d1")
+    assert pol["approved_image_ids"] == ["img-c", "img-a"]   # order preserved
+    assert pol["approved_image_id"] == "img-c"               # singular = first
+
+
+def test_policy_singular_write_reads_as_one_element_list(tmp_path):
+    store = _store_with_images(tmp_path, ["img-a"])
+    store.set_policy("d1", approved_image_id="img-a")
+    assert store.get_policy("d1")["approved_image_ids"] == ["img-a"]
+
+
+def test_policy_legacy_row_on_disk_reads_as_list(tmp_path):
+    # A row written by the PREVIOUS release must read cleanly.
+    store = _store_with_images(tmp_path, ["img-a"])
+    _write_policy_json(store, {"d1": {"approved_image_id": "img-a"}})
+    assert store.get_policy("d1")["approved_image_ids"] == ["img-a"]
+    assert store.get_policy("d1")["approved_image_id"] == "img-a"
+
+
+def test_policy_cap_ten(tmp_path):
+    ids = ["img-%02d" % i for i in range(11)]
+    store = _store_with_images(tmp_path, ids)
+    with pytest.raises(ValueError, match="at most 10"):
+        store.set_policy("d1", approved_image_ids=ids)
+    store.set_policy("d1", approved_image_ids=ids[:10])      # 10 is fine
+
+
+def test_policy_rejects_unknown_and_duplicate_ids(tmp_path):
+    store = _store_with_images(tmp_path, ["img-a"])
+    with pytest.raises(ValueError):
+        store.set_policy("d1", approved_image_ids=["img-a", "nope"])
+    with pytest.raises(ValueError):
+        store.set_policy("d1", approved_image_ids=["img-a", "img-a"])
+
+
+def test_policy_unassign_with_empty_list(tmp_path):
+    store = _store_with_images(tmp_path, ["img-a"])
+    store.set_policy("d1", approved_image_ids=["img-a"])
+    store.set_policy("d1", approved_image_ids=[])
+    assert store.get_policy("d1") == {"approved_image_id": None,
+                                      "approved_image_ids": []}
 
 
 def test_heartbeat_stores_stage_state(tmp_path):
@@ -1589,6 +1661,34 @@ def test_telemetry_oversized_sanitized_report_is_400(tmp_path):
         srv.shutdown()
     stored = catalog.CatalogStore(str(tmp_path)).get_telemetry("sw-9")
     assert len(stored) == 1              # only the normal report was stored
+
+
+def test_v2_report_accepted_for_any_member_of_the_set(tmp_path):
+    """A device holding an ORDERED SET of approved images (multi-image
+    assignment) must accept a v2 terminal report naming ANY member, not just
+    the first -- the old equality-with-singular check would 400 a truthful
+    report for the second image. A report for an id NOT in the set stays
+    400. Uses the file's _v2() v2-report fixture (defined below, alongside
+    the other _sanitize_report/v2 unit tests it already serves)."""
+    srv, port = _serve(tmp_path, "tok", device_id="sw-9")
+    try:
+        store = catalog.CatalogStore(str(tmp_path))
+        store.save_image({"id": "img2", "filename": "img2.bin", "size": 5,
+                          "sha256": "cd" * 32, "info_hash_hex": "dd" * 20,
+                          "published_at": 112})
+        store.set_policy("sw-9", approved_image_ids=["img1", "img2"])
+        status, resp = _post(port, "/v1/devices/sw-9/telemetry", "tok",
+                             json.dumps(_v2(image_id="img2")).encode())
+        assert status == 200 and resp == {"ok": True}
+        # an id NOT in the assigned set is still rejected
+        status, resp = _post(
+            port, "/v1/devices/sw-9/telemetry", "tok",
+            json.dumps(_v2(image_id="img-not-assigned",
+                           report_id="8c1f0b9a2d3e4f5061728394a5b6c7d9")
+                      ).encode())
+        assert status == 400
+    finally:
+        srv.shutdown()
 
 
 # --- heartbeat: telemetry_enabled whitelist + report_requested flag ---------
