@@ -205,6 +205,43 @@ def test_policy_unassign_with_empty_list(tmp_path):
                                       "approved_image_ids": []}
 
 
+def test_policy_compare_and_set_refuses_a_stale_expectation(tmp_path):
+    """Two operators with the picker open on the same device both applied and
+    the second silently overwrote the first: the write path had no
+    compare-and-set at all, unlike the peer-policy PUT beside it in the API.
+
+    Passing the set the caller believes is stored makes the write conditional:
+    it goes through when the expectation still holds, and raises
+    PolicyConflict carrying the CURRENT set when it does not, with nothing
+    written. Omitting it keeps the unconditional write older callers rely
+    on."""
+    store = _store_with_images(tmp_path, ["img-a", "img-b", "img-c"])
+    # a device with nothing assigned: the empty list is a real expectation,
+    # not "no expectation"
+    store.set_policy("d1", approved_image_ids=["img-a"], expect_image_ids=[])
+    assert store.get_policy("d1")["approved_image_ids"] == ["img-a"]
+
+    with pytest.raises(catalog.PolicyConflict) as exc:
+        store.set_policy("d1", approved_image_ids=["img-b"],
+                         expect_image_ids=[])
+    assert exc.value.current_ids == ["img-a"]
+    assert store.get_policy("d1")["approved_image_ids"] == ["img-a"]
+
+    # order is part of the set: applying rewrites it, so a caller that saw a
+    # different order did not see this row
+    with pytest.raises(catalog.PolicyConflict):
+        store.set_policy("d1", approved_image_ids=["img-c"],
+                         expect_image_ids=["img-a", "img-b"])
+
+    # unassign is conditional the same way, and no expectation still writes
+    with pytest.raises(catalog.PolicyConflict):
+        store.set_policy("d1", approved_image_ids=[], expect_image_ids=["img-b"])
+    store.set_policy("d1", approved_image_ids=[], expect_image_ids=["img-a"])
+    assert store.get_policy("d1")["approved_image_ids"] == []
+    store.set_policy("d1", approved_image_ids=["img-c"])
+    assert store.get_policy("d1")["approved_image_ids"] == ["img-c"]
+
+
 def test_heartbeat_stores_stage_state(tmp_path):
     s = catalog.CatalogStore(str(tmp_path))
     s.record_heartbeat("sw-1", {"current_image_id": "img1",

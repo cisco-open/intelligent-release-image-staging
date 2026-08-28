@@ -1450,6 +1450,66 @@ def test_unassign_clears_the_whole_set(tmp_path):
         stop()
 
 
+def test_assign_honours_an_expected_set_and_409s_on_a_stale_one(tmp_path):
+    """Review finding: nothing guarded two operators editing the same
+    device's images. Both open the picker on {A}, one applies {A,B}, the
+    other applies {A,C} a moment later, and the first edit is gone with no
+    sign it ever happened -- while the peer-policy PUT next door has carried
+    an if_revision compare-and-set all along.
+
+    The picker now sends the set it was opened on. A stored set that has
+    moved on is refused with 409 and the CURRENT set, nothing is written, and
+    nothing is audited. A body without the field keeps the unconditional
+    write, so older clients and API callers are unaffected."""
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    _app, fleet, _creds, cat = _ctx
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        _req(host, port, "POST", "/api/devices",
+             {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
+        # the expectation holds (nothing assigned yet) -> the write goes in
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_ids": ["img1"], "expect_image_ids": []},
+                        headers=hh)
+        assert st == 200
+        # the second operator still believes it is unassigned -> refused
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_ids": ["img2"], "expect_image_ids": []},
+                        headers=hh)
+        assert st == 409
+        body = json.loads(b)
+        assert body["error"] == "assignment_conflict"
+        assert body["assigned_image_ids"] == ["img1"]      # what it really is
+        assert cat.get_policy("d1")["approved_image_ids"] == ["img1"]
+        # a refused write is not an assignment, so it is not audited as one
+        assigns = [e for e in _read_audit_lines(audit_path)
+                  if e.get("action") == "assign"]
+        assert len(assigns) == 1
+
+        # unassign is guarded the same way
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_ids": [], "expect_image_ids": ["img2"]},
+                        headers=hh)
+        assert st == 409
+        assert cat.get_policy("d1")["approved_image_ids"] == ["img1"]
+
+        # a malformed expectation is a 400, never a silently ignored guard
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_ids": ["img2"], "expect_image_ids": "img1"},
+                        headers=hh)
+        assert st == 400
+        assert cat.get_policy("d1")["approved_image_ids"] == ["img1"]
+
+        # omitting it entirely keeps the old unconditional write
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_ids": ["img2"]}, headers=hh)
+        assert st == 200
+        assert cat.get_policy("d1")["approved_image_ids"] == ["img2"]
+    finally:
+        stop()
+
+
 def test_assign_audit_names_the_images_it_removed(tmp_path):
     """Review finding: narrowing a device from {A,B,C} to {A} logged only
     "assigned 1 image(s): A". The audit trail is the record of what an
@@ -6910,7 +6970,7 @@ def test_image_can_be_assigned_to_the_selection():
     # listener registration specifically so this pins the handler, not the
     # label update.
     handler = app_js.split(
-        "getElementById('assign-images-selected').addEventListener", 1)[1][:3200]
+        "getElementById('assign-images-selected').addEventListener", 1)[1][:3800]
     assert "openImagePicker(" in handler
     assert "claimSelection()" in handler
     # the intersection of the selection's current sets, not the union of them
@@ -6932,7 +6992,7 @@ def test_empty_apply_confirms_before_unassigning(tmp_path):
     harmless extra prompt, not a special case to detect."""
     app_js = _webroot("app.js")
     bulk_handler = app_js.split(
-        "getElementById('assign-images-selected').addEventListener", 1)[1][:3200]
+        "getElementById('assign-images-selected').addEventListener", 1)[1][:3800]
     assert "!imgIds.length" in bulk_handler
     assert "confirm('Unassign all images from ' + claimed.length + ' device(s)?')" \
         in bulk_handler
@@ -6940,7 +7000,7 @@ def test_empty_apply_confirms_before_unassigning(tmp_path):
     # same way the existing delete-selected cancel path does
     assert "setBulkBusy(false)" in bulk_handler.split(
         "Unassign all images from", 1)[1][:200]
-    row_handler = app_js.split("openImagePicker(rowAssignedIds(d)", 1)[1][:400]
+    row_handler = app_js.split("function openRowAssign(id, btn) {", 1)[1][:1400]
     assert "!ids.length" in row_handler
     assert "confirm('Unassign all images from ' + id + '?')" in row_handler
 
@@ -6956,7 +7016,7 @@ def test_bulk_picker_notes_differing_assignments_on_empty_intersection():
     app_js = _webroot("app.js")
     assert 'id="img-picker-note"' in html
     bulk_handler = app_js.split(
-        "getElementById('assign-images-selected').addEventListener", 1)[1][:3200]
+        "getElementById('assign-images-selected').addEventListener", 1)[1][:3800]
     assert "Selected devices have differing assignments" in bulk_handler
     assert "sets.some(" in bulk_handler
     # the picker itself resets any stale note on every open, so a note left
@@ -6981,7 +7041,7 @@ def test_bulk_picker_warns_when_the_sets_merely_overlap():
     included -- stay a plain, unconfirmed apply."""
     app_js = _webroot("app.js")
     bulk_handler = app_js.split(
-        "getElementById('assign-images-selected').addEventListener", 1)[1][:3200]
+        "getElementById('assign-images-selected').addEventListener", 1)[1][:3800]
     assert "setsDiffer" in bulk_handler
     # the gate is no longer the emptiness of the intersection
     assert "!intersection.length &&" not in bulk_handler, \
@@ -7010,14 +7070,17 @@ def test_per_row_assign_never_releases_the_bulk_selected_action_lock():
     assert "ownsBulkLock" in helper, \
         "forSelected still releases the bulk lock unconditionally"
     assert "if (opts.ownsBulkLock !== false) setBulkBusy(false);" in helper
-    row_handler = app_js.split("openImagePicker(rowAssignedIds(d)", 1)[1][:1000]
+    row_handler = app_js.split("function openRowAssign(id, btn) {", 1)[1][:1400]
     assert "ownsBulkLock: false" in row_handler
     # ...and the row disables its own control while the POST is in flight
     assert "btn.disabled = true" in row_handler
     assert "btn.isConnected" in row_handler
+    # and the row is the only caller that opts out -- openRowAssign is where
+    # that decision lives, so it cannot be copied into a bulk path by accident
+    assert app_js.count("ownsBulkLock: false") == 1
     # the bulk callers keep the default: they claimed the lock, they release it
     bulk_handler = app_js.split(
-        "getElementById('assign-images-selected').addEventListener", 1)[1][:3200]
+        "getElementById('assign-images-selected').addEventListener", 1)[1][:3800]
     assert "ownsBulkLock" not in bulk_handler
 
 
@@ -7036,6 +7099,58 @@ def test_image_picker_and_drawer_show_filename_not_just_id():
     assert "imageLabel(id)" in picker
     drawer = app_js.split("function deployImageRows(d) {", 1)[1][:1200]
     assert "imageLabel(iid)" in drawer
+
+
+def test_picker_sends_the_set_it_was_opened_on_and_answers_409():
+    """Review finding: two operators editing the same device's images had
+    nothing between them -- the later Apply simply won, and the earlier edit
+    vanished without a trace, while the peer-policy PUT beside it has carried
+    an if_revision compare-and-set all along.
+
+    Both entry points now capture what each device was showing when the picker
+    opened and send it as expect_image_ids. A 409 means nothing was written:
+    the client re-reads, says so, and re-opens the picker for a single device
+    on the set that is really stored."""
+    app_js = _webroot("app.js")
+    body = app_js.split("function assignImagesTo(ids, imgIds, opts) {", 1)[1][:1600]
+    assert "expect_image_ids" in body
+    # the expectation is the caller's SNAPSHOT, never a fresh read here (that
+    # would absorb the very concurrent edit this is meant to catch)
+    assert "opts.expect" in body
+    assert "r.status === 409" in body
+    assert "openRowAssign(conflicts[0], null)" in body
+    # ...and both callers capture one
+    row = app_js.split("function openRowAssign(id, btn) {", 1)[1][:1400]
+    assert "expect[id] = current" in row
+    assert "expect: expect" in row
+    bulk = app_js.split(
+        "getElementById('assign-images-selected').addEventListener", 1)[1][:3600]
+    assert "expect[id] = sets[i]" in bulk
+    assert "assignImagesTo(claimed, imgIds, { expect: expect })" in bulk
+    # device ids are operator-chosen strings, so these maps have no prototype
+    assert app_js.count("Object.create(null)") >= 2
+
+
+def test_picker_does_not_open_on_a_failed_image_fetch():
+    """Hardening: a failed /api/images substitutes an empty list, which by the
+    time it reaches the picker is indistinguishable from an empty catalog --
+    and an empty picker can only be applied as "unassign everything". Neither
+    entry point opens on a fetch that did not succeed; the status line says so
+    instead.
+
+    Companion: an assigned id the catalog list does not carry was filtered out
+    of the picker entirely, so Apply -- which posts exactly what is checked --
+    dropped it. It keeps its place, checked and disabled."""
+    app_js = _webroot("app.js")
+    assert "imageListOk = ir.ok" in app_js, \
+        "the image list's load state is assumed rather than recorded"
+    assert app_js.count("if (!imageListOk) {") == 2, \
+        "both picker entry points must refuse a picker with no real catalog"
+    picker = app_js.split("function openImagePicker(currentIds, onApply) {", 1)[1]
+    picker = picker.split("\n  function closeImagePicker", 1)[0]
+    assert "var unknown = imageIds.indexOf(id) === -1" in picker
+    assert "unknown ? ' disabled' : ''" in picker
+    assert "not in the catalog" in picker
 
 
 def test_image_picker_is_one_function_shared_by_both_entry_points():
@@ -7068,7 +7183,11 @@ def test_row_assign_is_a_button_not_a_select():
     assert '<select class="assign"' not in app_js
     assert 'class="linkish assign-btn"' in app_js
     assert "#dev-rows .assign-btn" in app_js
-    assert "openImagePicker(rowAssignedIds(d)" in app_js
+    # the button opens the shared picker on the row's own assigned set
+    # (through openRowAssign, which the 409 retry re-enters)
+    assert "openRowAssign(btn.closest('tr').getAttribute('data-id'), btn)" in app_js
+    row = app_js.split("function openRowAssign(id, btn) {", 1)[1][:1400]
+    assert "rowAssignedIds(d)" in row and "openImagePicker(current," in row
     assert 'id="mark-all"' in html   # the checkbox column stays untouched
 
 

@@ -498,6 +498,20 @@ def _sanitize_report(data):
     return report
 
 
+class PolicyConflict(Exception):
+    """A conditional set_policy() whose expectation no longer held.
+
+    Deliberately NOT a ValueError: callers map ValueError to "the request was
+    malformed" (400), and a lost race is neither malformed nor the caller's
+    mistake -- it is a concurrent edit the caller must be shown before it
+    decides again. ``current_ids`` carries what is actually stored, so the
+    answer can say so without a second read racing the first."""
+
+    def __init__(self, current_ids):
+        super().__init__("assignment changed since it was read")
+        self.current_ids = list(current_ids)
+
+
 class CatalogStore:
     TELEMETRY_RING = 5      # newest reports kept per device (hard disk bound)
     SEEN_REPORT_IDS = 256   # durable per-device seen v2 report_id ledger bound
@@ -616,7 +630,8 @@ class CatalogStore:
         with set_policy."""
         return secrets_store.store_lock(self.catalog_path + ".assign")
 
-    def set_policy(self, device_id, approved_image_id=None, approved_image_ids=None):
+    def set_policy(self, device_id, approved_image_id=None,
+                   approved_image_ids=None, expect_image_ids=None):
         """Approve an ordered set of images (max MAX_ASSIGNED_IMAGES) for a
         device. Approval is the whole policy: IRIS stages and verifies, and
         never installs, activates or reloads, so there is nothing further to
@@ -631,7 +646,16 @@ class CatalogStore:
         False, because the scope decision had already been made. Displayed to an
         operator as a False beside an approved image it read as a second gate
         still to be opened, which is worse than absent: it invited people to go
-        looking for the switch that would let staging proceed."""
+        looking for the switch that would let staging proceed.
+
+        ``expect_image_ids`` makes the write CONDITIONAL: the stored set must
+        still equal it, or PolicyConflict is raised and nothing is written.
+        Two operators with the image picker open on the same device used to
+        overwrite each other in silence, the later Apply simply winning. The
+        comparison is by sequence, since applying rewrites order as well as
+        membership, and an empty list is a real expectation ("I saw nothing
+        assigned"), distinct from None ("I am not checking"). Passing None
+        keeps the unconditional write every existing caller relies on."""
         if approved_image_id is not None and approved_image_ids is not None:
             raise ValueError(
                 "pass approved_image_id or approved_image_ids, not both")
@@ -651,6 +675,13 @@ class CatalogStore:
                     if self.get_image(iid) is None:
                         raise ValueError("no such image")
             with secrets_store.store_lock(self.policy_path):
+                # Inside the same lock the write takes: a check outside it
+                # would be a compare-and-set with a gap wide enough for the
+                # very race it exists to catch.
+                if expect_image_ids is not None:
+                    current = self.get_policy(device_id)["approved_image_ids"]
+                    if [str(i) for i in expect_image_ids] != current:
+                        raise PolicyConflict(current)
                 pol = self._read(self.policy_path)
                 # Keep writing approved_image_id (first-or-None) alongside
                 # approved_image_ids: raw policy.json readers that predate the

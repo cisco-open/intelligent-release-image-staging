@@ -26,6 +26,8 @@ from urllib.parse import unquote, parse_qs, urlsplit
 
 import audit
 import audit_export
+# aliased: `catalog` is the injected STORE everywhere below
+import catalog as catalog_mod
 import gui_app
 import gui_auth
 import gui_onboard
@@ -2312,6 +2314,20 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 # compat shape and always means a one-element set. Either an
                 # explicit `image_id: null` or an empty `image_ids` means
                 # unassign.
+                # Optional compare-and-set. The console's picker sends the
+                # set it was opened on, so an assignment another operator (or
+                # another tab) wrote in between is refused rather than
+                # overwritten in silence -- the same guard the peer-policy PUT
+                # carries as if_revision. Absent = the unconditional write
+                # older clients and API callers already depend on.
+                expect = None
+                if "expect_image_ids" in body:
+                    expect = body.get("expect_image_ids")
+                    if not isinstance(expect, list) or not all(
+                            isinstance(i, str) and i for i in expect):
+                        self._json(400, {"error": "expect_image_ids must be "
+                                                  "a list of image ids"})
+                        return
                 plural = "image_ids" in body
                 if plural:
                     # validate the SHAPE before iterating anything: a bare
@@ -2335,7 +2351,13 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     # explicit unassign: clear the approval so the agent stops
                     # staging without deleting the device
                     old_ids = catalog.get_policy(did).get("approved_image_ids") or []
-                    catalog.set_policy(did, approved_image_ids=[])
+                    try:
+                        catalog.set_policy(did, approved_image_ids=[],
+                                           expect_image_ids=expect)
+                    except catalog_mod.PolicyConflict as exc:
+                        self._json(409, {"error": "assignment_conflict",
+                                         "assigned_image_ids": exc.current_ids})
+                        return
                     # EVERY image this cleared, not just the set's first: the
                     # audit trail is the record of what was done to the
                     # device, and naming one of three removed images made it
@@ -2357,7 +2379,14 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 old_ids = old_pol.get("approved_image_ids") or []
                 try:
                     # approval is the whole policy: IRIS stages, never installs
-                    catalog.set_policy(did, approved_image_ids=ids)
+                    catalog.set_policy(did, approved_image_ids=ids,
+                                       expect_image_ids=expect)
+                except catalog_mod.PolicyConflict as exc:
+                    # a lost race, not a bad request: answer with what is
+                    # really stored so the client can show it and decide again
+                    self._json(409, {"error": "assignment_conflict",
+                                     "assigned_image_ids": exc.current_ids})
+                    return
                 except ValueError as exc:
                     self._json(400, {"error": str(exc)}); return
                 if plural:

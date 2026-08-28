@@ -414,6 +414,11 @@
   // ---- Devices ----
   var devStatus = document.getElementById('dev-status');
   var imageIds = [];
+  // Whether imageIds/imageFilenames came from a SUCCESSFUL /api/images read.
+  // A failed fetch substitutes an empty list, which is indistinguishable from
+  // an empty catalog once it reaches the picker -- and a picker showing no
+  // images can only be applied as "unassign everything".
+  var imageListOk = false;
   // id -> filename, refreshed alongside imageIds -- so a picker/drawer row
   // can show which file an id actually is, the way the catalog list does.
   var imageFilenames = {};
@@ -515,6 +520,7 @@
     var devs = dbody.devices || [];
     var devNow = dbody.now || Date.now() / 1000;   // server clock for last_seen freshness
     var imgs = ir.ok ? ((await ir.json()).images || []) : [];
+    imageListOk = ir.ok;
     imageIds = imgs.map(function (i) { return i.id; });
     imageFilenames = {};
     imgs.forEach(function (i) { imageFilenames[i.id] = i.filename || ''; });
@@ -594,22 +600,7 @@
     }).join('');
     document.querySelectorAll('#dev-rows .assign-btn').forEach(function (btn) {
       btn.addEventListener('click', function () {
-        var id = btn.closest('tr').getAttribute('data-id');
-        var d = LAST_DEVICES.filter(function (x) { return x.device_id === id; })[0] || {};
-        openImagePicker(rowAssignedIds(d), function (ids) {
-          // An empty pick is a deliberate unassign for a device that already
-          // has one; for anything else it is one unchecked box away from
-          // wiping the assigned set by accident, so confirm before it posts.
-          if (!ids.length && !confirm('Unassign all images from ' + id + '?')) return;
-          // ONE row is not a selected-action, so this must never touch the
-          // shared bulk lock: releasing it here re-enabled every bulk button
-          // mid-batch. The row's own button carries the busy state instead.
-          btn.disabled = true;
-          assignImagesTo([id], ids, { ownsBulkLock: false }).then(function () {
-            // the refresh may have re-rendered this row out from under us
-            if (btn.isConnected) btn.disabled = false;
-          });
-        });
+        openRowAssign(btn.closest('tr').getAttribute('data-id'), btn);
       });
     });
     document.querySelectorAll('#dev-rows .cred').forEach(function (sel) {
@@ -1192,6 +1183,38 @@
   // the row select and the bulk dropdown that used to do this separately
   // cannot drift apart again.
   var imgPickerOnApply = null;
+  // Open the picker for ONE device and apply what comes back. Named, because
+  // two callers need it: each row's assign button, and the conflict retry in
+  // assignImagesTo -- a lost race must re-open the very control the operator
+  // was using, on the set that is really stored now.
+  function openRowAssign(id, btn) {
+    if (!imageListOk) {
+      devStatus.textContent = 'Image list unavailable; not opening the picker. ' +
+        'Retry once the Images list loads.';
+      return;
+    }
+    var d = LAST_DEVICES.filter(function (x) { return x.device_id === id; })[0] || {};
+    var current = rowAssignedIds(d);
+    // Device ids are operator-chosen strings, so the map must not inherit
+    // (or assign into) anything from Object.prototype.
+    var expect = Object.create(null);
+    expect[id] = current;
+    openImagePicker(current, function (ids) {
+      // An empty pick is a deliberate unassign for a device that already
+      // has one; for anything else it is one unchecked box away from
+      // wiping the assigned set by accident, so confirm before it posts.
+      if (!ids.length && !confirm('Unassign all images from ' + id + '?')) return;
+      // ONE row is not a selected-action, so this must never touch the
+      // shared bulk lock: releasing it here re-enabled every bulk button
+      // mid-batch. The row's own button carries the busy state instead.
+      if (btn) btn.disabled = true;
+      assignImagesTo([id], ids, { ownsBulkLock: false, expect: expect })
+        .then(function () {
+          // the refresh may have re-rendered this row out from under us
+          if (btn && btn.isConnected) btn.disabled = false;
+        });
+    });
+  }
   function openImagePicker(currentIds, onApply) {
     var overlay = document.getElementById('img-picker');
     var rows = document.getElementById('img-picker-rows');
@@ -1206,11 +1229,20 @@
     // catalog image -- so what is already assigned is never buried below
     // the fold in a large catalog, and Apply's read order (top to bottom)
     // preserves it.
-    var ordered = (currentIds || []).filter(function (id) { return imageIds.indexOf(id) !== -1; })
+    // An assigned id the catalog list does not carry used to be filtered out
+    // of the picker entirely. Apply posts exactly what is checked, so the id
+    // the operator was never shown was removed from the device by the act of
+    // looking. It keeps its place in the order instead, checked and disabled,
+    // and applying preserves it.
+    var ordered = (currentIds || [])
       .concat(imageIds.filter(function (id) { return !checkedSet[id]; }));
     rows.innerHTML = ordered.length ? ordered.map(function (id) {
+      var unknown = imageIds.indexOf(id) === -1;
       return '<label class="img-pick-row"><input type="checkbox" class="img-pick" value="' +
-        esc(id) + '"' + (checkedSet[id] ? ' checked' : '') + '> ' + imageLabel(id) + '</label>';
+        esc(id) + '"' + (checkedSet[id] ? ' checked' : '') + (unknown ? ' disabled' : '') +
+        '> ' + imageLabel(id) +
+        (unknown ? ' <span class="muted">— not in the catalog; kept as assigned</span>' : '') +
+        '</label>';
     }).join('') : '<p class="muted">No images in the catalog yet.</p>';
     function updateCount() {
       var n = rows.querySelectorAll('input:checked').length;
@@ -1290,11 +1322,33 @@
   // same shape as every other bulk action. An empty imgIds is a deliberate
   // unassign, not the absence of a choice: the picker's Apply always POSTs
   // whatever is checked, including nothing.
+  //
+  // opts.expect maps a device id to the set its picker was OPENED on, and the
+  // server refuses (409) if the stored set has moved on since. It has to be a
+  // snapshot the caller captured: reading the current set here would pick up
+  // whatever the 10s poll last wrote, which is precisely the concurrent edit
+  // the check exists to catch -- absorbed in silence. Devices with no
+  // snapshot post without the field and keep the unconditional write.
   function assignImagesTo(ids, imgIds, opts) {
+    opts = opts || {};
+    var expect = opts.expect;
     var label = imgIds.length ? ('Assigned ' + imgIds.length + ' image(s) to') : 'Unassigned';
-    return forSelected(label, ids, function (id) {
-      return jpost('/api/devices/' + encodeURIComponent(id) + '/assign', { image_ids: imgIds });
-    }, opts);
+    var conflicts = [];
+    return forSelected(label, ids, async function (id) {
+      var body = { image_ids: imgIds };
+      if (expect && expect[id] !== undefined) body.expect_image_ids = expect[id];
+      var r = await jpost('/api/devices/' + encodeURIComponent(id) + '/assign', body);
+      if (r.status === 409) conflicts.push(id);
+      return r;
+    }, opts).then(async function () {
+      if (!conflicts.length) return;
+      // Nothing was written for these. Re-read first, so what the operator is
+      // told (and re-opened on) is what the device actually carries now.
+      await refreshDevices().catch(function () { });
+      devStatus.textContent = 'Images changed elsewhere on ' + conflicts.join(', ') +
+        '; nothing was written there. Review the current set and apply again.';
+      if (ids.length === 1 && conflicts.length === 1) openRowAssign(conflicts[0], null);
+    });
   }
   document.getElementById('delete-selected').addEventListener('click', async function () {
     var ids = claimSelection();
@@ -1409,6 +1463,11 @@
   document.getElementById('assign-images-selected').addEventListener('click', function () {
     var ids = selectedIds();
     if (!ids.length) { devStatus.textContent = 'No devices selected.'; return; }
+    if (!imageListOk) {
+      devStatus.textContent = 'Image list unavailable; not opening the picker. ' +
+        'Retry once the Images list loads.';
+      return;
+    }
     // Pre-check the INTERSECTION of the selection's current sets: pre-
     // checking the UNION would silently ADD an image to a device that does
     // not have it the moment ANY other selected device does; pre-checking
@@ -1434,6 +1493,11 @@
     // Apply both read this one derivation.
     var firstSet = sets[0].join('\u0000');
     var setsDiffer = sets.some(function (s) { return s.join('\u0000') !== firstSet; });
+    // What each selected device was showing when the picker opened, so an
+    // assignment written by someone else in between is refused rather than
+    // flattened by this Apply.
+    var expect = Object.create(null);
+    ids.forEach(function (id, i) { expect[id] = sets[i]; });
     openImagePicker(intersection, function (imgIds) {
       var claimed = claimSelection();
       if (!claimed) return;
@@ -1451,7 +1515,7 @@
                    'that is not checked here is dropped from it.\n\nProceed?')) {
         setBulkBusy(false); return;
       }
-      assignImagesTo(claimed, imgIds);
+      assignImagesTo(claimed, imgIds, { expect: expect });
     });
     // Sets that disagree are the trap, whatever their intersection comes to:
     // Apply as-is replaces everyone's set with whatever ends up checked. Say
