@@ -71,9 +71,11 @@ delete, credential assignment, and image assignment all act on the checked
 rows and report per-device refusals instead of failing the whole batch. Image
 assignment applies a *set* — up to ten images — to the whole selection in one
 pick, not one image per device: the toolbar opens the same checkbox picker as
-each row's own control, pre-checked with the intersection of what the
-selection already has assigned so applying can never silently add or drop an
-image for a device outside what you see checked. See
+each row's own control, pre-checked with the intersection of what the selection
+already has assigned, so applying never adds an image outside what you see
+checked. It does replace each selected device's whole set, dropping anything
+left unchecked, so a selection whose assignments differ is flagged in the
+picker and confirmed on apply. See
 [Bulk device actions](console.md#bulk-device-actions).
 
 Deleting inventory rows is not an undeploy — undeploy the devices first. See

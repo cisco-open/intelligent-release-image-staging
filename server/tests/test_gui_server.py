@@ -6868,7 +6868,7 @@ def test_image_can_be_assigned_to_the_selection():
     # listener registration specifically so this pins the handler, not the
     # label update.
     handler = app_js.split(
-        "getElementById('assign-images-selected').addEventListener", 1)[1][:1400]
+        "getElementById('assign-images-selected').addEventListener", 1)[1][:3200]
     assert "openImagePicker(" in handler
     assert "claimSelection()" in handler
     # the intersection of the selection's current sets, not the union of them
@@ -6890,7 +6890,7 @@ def test_empty_apply_confirms_before_unassigning(tmp_path):
     harmless extra prompt, not a special case to detect."""
     app_js = _webroot("app.js")
     bulk_handler = app_js.split(
-        "getElementById('assign-images-selected').addEventListener", 1)[1][:1800]
+        "getElementById('assign-images-selected').addEventListener", 1)[1][:3200]
     assert "!imgIds.length" in bulk_handler
     assert "confirm('Unassign all images from ' + claimed.length + ' device(s)?')" \
         in bulk_handler
@@ -6903,20 +6903,38 @@ def test_empty_apply_confirms_before_unassigning(tmp_path):
     assert "confirm('Unassign all images from ' + id + '?')" in row_handler
 
 
-def test_bulk_picker_notes_differing_assignments_on_empty_intersection():
-    """Additional to the confirm above: an empty intersection can ALSO mean
-    every selected device genuinely has nothing assigned -- not a trap, so no
-    note. It is a trap only when at least one selected device DOES have an
-    assignment (the empty pre-check came from sets that disagree, not from
-    everyone being unassigned); that case gets a one-line warning in the
-    picker before the operator checks anything."""
+def test_bulk_picker_notes_and_confirms_whenever_the_sets_differ():
+    """Review finding: the note (and nothing else) used to fire only when the
+    INTERSECTION of the selection's sets came out EMPTY. dev1=[A,B] with
+    dev2=[A] intersects to a NON-empty [A], so that selection got no note and
+    no confirm -- Apply posted [A] to both and dev1 silently lost B.
+
+    The rule is about the SETS, not their intersection: Apply writes one set
+    to every selected device, so whenever the selected devices' assignments
+    are not all identical, applying replaces them all and can drop images the
+    operator never saw. That case now gets BOTH the picker note and a confirm
+    on Apply, from one shared derivation. Identical sets (including every
+    device unassigned) stay a plain, unconfirmed apply."""
     html = _webroot("index.html")
     app_js = _webroot("app.js")
     assert 'id="img-picker-note"' in html
     bulk_handler = app_js.split(
-        "getElementById('assign-images-selected').addEventListener", 1)[1][:2400]
-    assert "Selected devices have differing assignments" in bulk_handler
+        "getElementById('assign-images-selected').addEventListener", 1)[1][:3200]
+    # ONE derivation of "the selected devices disagree", read by both the note
+    # and the confirm -- they cannot drift apart into two different rules.
+    assert "setsDiffer" in bulk_handler
     assert "sets.some(" in bulk_handler
+    # ...and it is no longer the empty-intersection test
+    assert "!intersection.length &&" not in bulk_handler, \
+        "the note still fires only on an EMPTY intersection"
+    assert "if (setsDiffer) {" in bulk_handler
+    assert "Selected devices have differing assignments" in bulk_handler
+    # Apply confirms before it replaces differing sets, and cancelling that
+    # confirm releases the shared selected-action lock like every other one.
+    guard = bulk_handler.split("} else if (setsDiffer &&", 1)
+    assert len(guard) == 2, "Apply does not confirm when the sets differ"
+    assert "confirm(" in guard[1][:200]
+    assert "setBulkBusy(false)" in guard[1][:900]
     # the picker itself resets any stale note on every open, so a note left
     # over from one bulk pick never bleeds into the next (bulk or per-row)
     picker = app_js.split("function openImagePicker(currentIds, onApply) {", 1)[1]

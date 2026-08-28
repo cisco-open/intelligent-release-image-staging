@@ -1360,23 +1360,42 @@
     var intersection = sets.reduce(function (a, b) {
       return a.filter(function (x) { return b.indexOf(x) !== -1; });
     });
+    // Whether the selection's sets are all IDENTICAL, which is the only case
+    // Apply cannot surprise anyone in. Apply posts ONE set to every selected
+    // device, so every image the picker does not show checked is DROPPED from
+    // whichever device had it -- and an intersection can be perfectly
+    // non-empty while the sets still disagree ([A,B] + [A] -> [A]). That is
+    // exactly the case that used to apply in silence: the pre-check looked
+    // complete, so nothing warned and nothing confirmed, and the device with
+    // the larger set quietly lost an image. Compared as SEQUENCES, since
+    // applying rewrites the order too. The note below and the confirm inside
+    // Apply both read this one derivation.
+    var firstSet = sets[0].join('\u0000');
+    var setsDiffer = sets.some(function (s) { return s.join('\u0000') !== firstSet; });
     openImagePicker(intersection, function (imgIds) {
       var claimed = claimSelection();
       if (!claimed) return;
       // An empty pick from the bulk path is one accidental Apply away from
       // wiping every selected device's assignment (an empty intersection
       // opens the picker with nothing pre-checked) -- confirm before it posts.
-      if (!imgIds.length &&
-          !confirm('Unassign all images from ' + claimed.length + ' device(s)?')) {
+      if (!imgIds.length) {
+        if (!confirm('Unassign all images from ' + claimed.length + ' device(s)?')) {
+          setBulkBusy(false); return;
+        }
+      } else if (setsDiffer &&
+          !confirm('The selected devices have differing image assignments.\n\n' +
+                   'Applying replaces every selected device\'s set with the ' +
+                   imgIds.length + ' checked image(s). Any image a device has ' +
+                   'that is not checked here is dropped from it.\n\nProceed?')) {
         setBulkBusy(false); return;
       }
       assignImagesTo(claimed, imgIds);
     });
-    // The intersection is empty either because every selected device
-    // genuinely has nothing assigned, or because their sets DIFFER -- only
-    // the second case is a trap (Apply as-is would replace everyone's set
-    // with whatever gets checked), so only that case gets the note.
-    if (!intersection.length && sets.some(function (s) { return s.length; })) {
+    // Sets that disagree are the trap, whatever their intersection comes to:
+    // Apply as-is replaces everyone's set with whatever ends up checked. Say
+    // so before the operator picks. Devices that all agree -- including every
+    // one of them unassigned -- are not a trap and get no note.
+    if (setsDiffer) {
       var note = document.getElementById('img-picker-note');
       if (note) {
         note.textContent = 'Selected devices have differing assignments; '

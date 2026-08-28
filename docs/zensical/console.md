@@ -247,9 +247,11 @@ toolbar's **Assign images to *N* devices…** button open the same checkbox
 picker, reading `Choose images` with a live `n/10` count — an eleventh box
 disables itself rather than waiting for a server-side rejection. Applying to
 a multi-device selection pre-checks the *intersection* of what the selection
-already has assigned — never the union — so **Apply** can never silently add an image to
-one device or drop it from another; when the selection's assignments actually
-differ, a note says so before you apply. Applying an empty pick is a
+already has assigned — never the union — so **Apply** can never silently add an
+image to a device that lacks it. Apply then writes the checked set to *every*
+selected device, so an image a device has that you leave unchecked is dropped
+from it: whenever the selection's assignments are not all identical, the picker
+says so and **Apply** asks you to confirm before it posts. Applying an empty pick is a
 deliberate unassign and confirms first, whether for one device or for the
 whole selection: unchecking an image stops its torrent and frees the staging
 copy, but leaves any already-staged file on the device's boot filesystem,
