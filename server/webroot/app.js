@@ -67,6 +67,7 @@
     ['undeploy-failed', 'undeploy failed'],
     ['deployed', 'deployed'],
     ['placement-failed', 'placement failed'],
+    ['image-failed', 'image failed'],
     ['copying', 'copying to IOS storage'],
     ['staging', 'staging (other)'],
     ['enrolled', 'enrolled'],
@@ -92,6 +93,12 @@
     if (sids != null) return sids.indexOf(iid) !== -1;
     return d.stage_state === 'ready' && d.current_image_id === iid;
   }
+  // The images this device's last tick called a terminal per-image failure.
+  // Empty for an agent that predates the field (and for a healthy set), so a
+  // one-image agent's row is decided exactly as it always was.
+  function rowErroredIds(d) {
+    return d.errored_image_ids || [];
+  }
   function deviceStatus(d, devNow) {
     // "no heartbeat since the job finished" — the job outcome is the freshest
     // truth we have about this device
@@ -116,9 +123,26 @@
     // fallback for an agent that predates staged_image_ids, so a one-image
     // set on an old agent is exactly today's single-field check.
     var assignedIds = rowAssignedIds(d);
-    if (assignedIds.length &&
+    // Images of the set the agent's own last tick gave up on. They are not
+    // staged, so the set is not deployed -- this cell used to answer
+    // "deployed" before it looked at any error, and read all-green beside a
+    // drawer and a swarm map both showing the same image as failed.
+    var erroredIds = rowErroredIds(d).filter(function (iid) {
+      return assignedIds.indexOf(iid) !== -1;
+    });
+    if (assignedIds.length && !erroredIds.length &&
         assignedIds.every(function (iid) { return rowHasStaged(d, iid); })) {
       return { key: 'deployed', label: 'deployed', cls: 'badge badge-ok' };
+    }
+    // Named per-image failures beat the collapsed single stage_state below:
+    // that one string is whatever the tick found most actionable, so falling
+    // through to it would report a set with three dead images as whatever the
+    // fourth is doing. The drawer says WHICH images these are.
+    if (erroredIds.length) {
+      return { key: 'image-failed',
+               label: erroredIds.length + ' of ' + assignedIds.length +
+                      ' image(s) failed',
+               cls: 'badge badge-fail', detail: d.stage_error };
     }
     if (d.stage_error) {
       return { key: 'placement-failed', label: 'placement failed',
@@ -662,23 +686,34 @@
       return '<tr><td class="muted">' + esc(kv[0]) + '</td><td>' + kv[1] + '</td></tr>';
     }).join('');
   }
-  // One row per assigned image: id + state. "ready" comes from
-  // rowHasStaged() (staged_image_ids membership, or the legacy
-  // current_image_id/stage_state pair for an agent that predates it); the
-  // one currently in flight shows the heartbeat's own stage_state, with
-  // stage_error appended when that is the one erroring; everything else
-  // still outstanding reads as queued. Parked is deliberately NOT a state
-  // shown here: an image the agent parked is no longer in the assigned set,
-  // so it never produces a row at all -- there is nothing to say about it.
+  // One row per assigned image: id + state, resolved in the SAME order the
+  // swarm map's own image list uses, so the two views of one heartbeat can
+  // never disagree. "ready" comes from rowHasStaged() (staged_image_ids
+  // membership, or the legacy current_image_id/stage_state pair for an agent
+  // that predates it); then errored_image_ids, which the agent reports and
+  // this drawer used to ignore entirely -- a failed image that was not the
+  // current one read as "queued" while the map showed it as "error", and the
+  // stage_error travelling in the same heartbeat was attached to no row at
+  // all; then the one in flight, showing the heartbeat's own stage_state;
+  // everything else still outstanding reads as queued. Parked is deliberately
+  // NOT a state shown here: an image the agent parked is no longer in the
+  // assigned set, so it never produces a row at all.
   function deployImageRows(d) {
     var ids = rowAssignedIds(d);
     if (!ids.length) {
       return '<tr><td colspan="2" class="muted">No images assigned.</td></tr>';
     }
+    var errored = rowErroredIds(d);
     return ids.map(function (iid) {
       var state;
       if (rowHasStaged(d, iid)) {
         state = 'ready';
+      } else if (errored.indexOf(iid) !== -1) {
+        // stage_error is ONE field for the whole tick, filed under the image
+        // the heartbeat's current_image_id names -- show it on that image's
+        // row only, rather than repeating one image's reason on every failure.
+        state = 'error' + (d.current_image_id === iid && d.stage_error
+          ? ' — ' + d.stage_error : '');
       } else if (d.current_image_id === iid) {
         state = (d.stage_state || 'staging') + (d.stage_error ? ' — ' + d.stage_error : '');
       } else {

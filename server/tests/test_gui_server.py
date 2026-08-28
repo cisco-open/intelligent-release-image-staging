@@ -7034,6 +7034,42 @@ def test_deployment_drawer_lists_one_row_per_assigned_image():
     assert "document.getElementById('di-img-rows').innerHTML = deployImageRows(d)" in app_js
 
 
+def test_devices_side_reads_the_per_image_errors_the_agent_reports():
+    """Review finding: the agent has reported errored_image_ids since this
+    branch landed it, the swarm map's drawer reads it -- and the Devices side
+    never did. deviceStatus() returned "deployed" before it looked at any
+    error, and deployImageRows() called every non-current image "queued", so
+    the console could say "A ready, B queued" for the same tick the map showed
+    as "B — error", with the stage_error attached to no row at all.
+
+    Both now resolve membership in errored_image_ids, in the SAME precedence
+    the map uses (staged wins, then errored, then whichever image is in
+    flight), and an errored image blocks the all-green "deployed" badge and
+    gets its own filterable state instead."""
+    app_js = _webroot("app.js")
+    assert "function rowErroredIds(d)" in app_js
+    errored_fn = app_js.split("function rowErroredIds(d) {", 1)[1][:300]
+    assert "errored_image_ids" in errored_fn
+
+    drawer = app_js.split("function deployImageRows(d) {", 1)[1][:1200]
+    assert "rowErroredIds(d)" in drawer
+    assert "'error'" in drawer
+    # staged wins over errored, and the in-flight image is consulted only
+    # after both -- the resolution order swarmmap.html already uses
+    assert drawer.index("rowHasStaged(d, iid)") < drawer.index("errored.indexOf(iid)")
+    assert (drawer.index("errored.indexOf(iid)")
+            < drawer.index("d.current_image_id === iid"))
+
+    body = app_js.split("function deviceStatus(d, devNow) {", 1)[1]
+    body = body.split("\n  function ", 1)[0]
+    assert "rowErroredIds(d)" in body
+    # "deployed" is gated on no assigned image having errored...
+    assert "!erroredIds.length" in body
+    # ...and the errored set reads as its own state rather than falling
+    # through to whatever the collapsed stage_state happens to be
+    assert "key: 'image-failed'" in body
+
+
 def test_deployment_details_open_in_a_right_hand_drawer():
     """It used to render below the devices table, so opening it on a fleet of
     any size put the details off-screen and made the operator scroll away from

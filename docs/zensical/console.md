@@ -179,10 +179,14 @@ Each device row's **ⓘ Deployment details** control opens a read-only drawer
 beside the table — it slides in from the right, closes on **Esc** or **✕**, and
 leaves the row you opened it from where it was. It opens on an **Images** table
 listing every image currently assigned to the device with its own state:
-`ready` once that image is staged and verified, the agent's own in-progress
-state (for example `staging`, `downloading`, `transferring_to_ios`, optionally
-with the reported error) for whichever image is current, and `queued` for the
-rest. Below that, it shows the deployment itself: the receipt state (`active`,
+`ready` once that image is staged and verified, `error` for an image the
+agent's last tick gave up on (with the reported reason on the image the
+heartbeat filed it under), the agent's own in-progress state (for example
+`staging`, `downloading`, `transferring_to_ios`) for whichever image is
+current, and `queued` for the rest. That is the same resolution the Swarm
+Map's drawer uses, so the two never disagree about an image, and a device
+with any failed image reads `N of M image(s) failed` in the Status column
+rather than `deployed`. Below that, it shows the deployment itself: the receipt state (`active`,
 `removed`, `superseded`, `needs-reconcile`,
 `abandoned`) and receipt id, the
 preflight result, and the resolved configuration the onboard applied — the
@@ -204,7 +208,8 @@ above: its **Image staging** section is built from the device's last
 heartbeat (`staged_image_ids`, `errored_image_ids`, `current_image_id`), so it
 shows what the device last reported, not what is assigned. The Devices drawer
 above shows the full assigned set, including images still `queued` and not
-yet staged. A freshly assigned image therefore appears in the Devices drawer
+yet staged; it reads the same heartbeat fields for the states it shares, so
+an image is never `error` on one and something else on the other. A freshly assigned image therefore appears in the Devices drawer
 right away but does not show on the map until the device's next heartbeat
 reports it.
 
@@ -226,8 +231,8 @@ is how you act on a subset instead of hand-picking rows out of the whole fleet.
 The **Status** choices are generated from the same derivation the Status column
 renders, so every state a row can show can be filtered for: `onboarding`,
 `undeploying`, `waiting for heartbeat`, `onboard failed`, `undeploy failed`,
-`deployed`, `placement failed`, `copying to IOS storage`, `staging (other)`,
-`enrolled`, `not enrolled`, and `offline` — the last being a modifier, since a
+`deployed`, `placement failed`, `image failed`, `copying to IOS storage`,
+`staging (other)`, `enrolled`, `not enrolled`, and `offline` — the last being a modifier, since a
 device can read `deployed` and still have gone quiet.
 
 | Control | What it does | Confirms first |
