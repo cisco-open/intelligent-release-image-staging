@@ -2732,6 +2732,78 @@ def test_overview_staging_excludes_error_when_nothing_else_is_outstanding(tmp_pa
         srv.shutdown()
 
 
+def test_overview_staging_all_errored_is_not_staging(tmp_path):
+    """Review finding on the two tests above: _send_set_heartbeat collapses a
+    multi-image tick's per-image statuses into ONE stage_state, so
+    "1 errored, 2 in flight" and "all 3 errored" used to look identical to
+    the server -- a device stuck on every assigned image counted as staging
+    forever. errored_image_ids (this fix) names the images that actually
+    failed THIS tick, so a device where every assigned image is accounted
+    for by staged_image_ids or errored_image_ids has nothing left in flight
+    and must not count."""
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
+    state = str(tmp_path / "state")
+    fleet = gui_fleet.FleetStore(state)
+    cat = catalog_mod.CatalogStore(state)
+    for iid in ("a", "b", "c"):
+        cat.save_image({"id": iid, "filename": iid + ".bin", "sha256": iid,
+                        "published_at": 1})
+    fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+    cat.set_policy("d1", approved_image_ids=["a", "b", "c"])
+    # every assigned image is either staged (none are) or errored (all are)
+    cat.record_heartbeat("d1", {"stage_state": "error",
+                                "stage_error": "everything failed",
+                                "staged_image_ids": [],
+                                "errored_image_ids": ["a", "b", "c"],
+                                "current_image_id": "a"}, now=10)
+    srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, None, cat,
+                                 None, None, certfile=None,
+                                 now_fn=lambda: 100)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        ck, _csrf = _auth("127.0.0.1", port)
+        ov = json.loads(_req("127.0.0.1", port, "GET", "/api/overview",
+                             headers={"Cookie": ck})[2])
+        assert ov["staging_now"] == 0
+    finally:
+        srv.shutdown()
+
+
+def test_overview_staging_one_errored_two_outstanding_counts(tmp_path):
+    """Companion to the above: with errored_image_ids naming only the ONE
+    image that actually failed, the other two -- neither staged nor errored
+    -- are genuinely still in flight, so the device counts as staging."""
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
+    state = str(tmp_path / "state")
+    fleet = gui_fleet.FleetStore(state)
+    cat = catalog_mod.CatalogStore(state)
+    for iid in ("a", "b", "c"):
+        cat.save_image({"id": iid, "filename": iid + ".bin", "sha256": iid,
+                        "published_at": 1})
+    fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+    cat.set_policy("d1", approved_image_ids=["a", "b", "c"])
+    cat.record_heartbeat("d1", {"stage_state": "error",
+                                "stage_error": "a: no space",
+                                "staged_image_ids": [],
+                                "errored_image_ids": ["a"],
+                                "current_image_id": "b"}, now=10)
+    srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, None, cat,
+                                 None, None, certfile=None,
+                                 now_fn=lambda: 100)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        ck, _csrf = _auth("127.0.0.1", port)
+        ov = json.loads(_req("127.0.0.1", port, "GET", "/api/overview",
+                             headers={"Cookie": ck})[2])
+        assert ov["staging_now"] == 1
+    finally:
+        srv.shutdown()
+
+
 def test_swarm_proxy_and_error(tmp_path):
     host, port, stop = _serve_overview(tmp_path, swarm_fetch=lambda: b'{"peers":[1,2,3]}')
     try:
@@ -6646,6 +6718,67 @@ def test_image_can_be_assigned_to_the_selection():
     assert "image_ids:" in apply_fn
 
 
+def test_empty_apply_confirms_before_unassigning(tmp_path):
+    """Review finding: two selected devices with DIFFERENT image sets
+    intersect to an EMPTY picker selection, which opens with nothing
+    pre-checked -- clicking Apply without touching a box then silently wipes
+    every selected device's assignment, no confirmation. Both the bulk path
+    and the single-device (per-row) path must confirm before POSTing an
+    empty image_ids body; a device that already has nothing assigned is a
+    harmless extra prompt, not a special case to detect."""
+    app_js = _webroot("app.js")
+    bulk_handler = app_js.split(
+        "getElementById('assign-images-selected').addEventListener", 1)[1][:1800]
+    assert "!imgIds.length" in bulk_handler
+    assert "confirm('Unassign all images from ' + claimed.length + ' device(s)?')" \
+        in bulk_handler
+    # cancelling the confirm must release the bulk selected-action lock, the
+    # same way the existing delete-selected cancel path does
+    assert "setBulkBusy(false)" in bulk_handler.split(
+        "Unassign all images from", 1)[1][:200]
+    row_handler = app_js.split("openImagePicker(rowAssignedIds(d)", 1)[1][:400]
+    assert "!ids.length" in row_handler
+    assert "confirm('Unassign all images from ' + id + '?')" in row_handler
+
+
+def test_bulk_picker_notes_differing_assignments_on_empty_intersection():
+    """Additional to the confirm above: an empty intersection can ALSO mean
+    every selected device genuinely has nothing assigned -- not a trap, so no
+    note. It is a trap only when at least one selected device DOES have an
+    assignment (the empty pre-check came from sets that disagree, not from
+    everyone being unassigned); that case gets a one-line warning in the
+    picker before the operator checks anything."""
+    html = _webroot("index.html")
+    app_js = _webroot("app.js")
+    assert 'id="img-picker-note"' in html
+    bulk_handler = app_js.split(
+        "getElementById('assign-images-selected').addEventListener", 1)[1][:2400]
+    assert "Selected devices have differing assignments" in bulk_handler
+    assert "sets.some(" in bulk_handler
+    # the picker itself resets any stale note on every open, so a note left
+    # over from one bulk pick never bleeds into the next (bulk or per-row)
+    picker = app_js.split("function openImagePicker(currentIds, onApply) {", 1)[1]
+    picker = picker.split("\n  function closeImagePicker", 1)[0]
+    assert "img-picker-note" in picker
+
+
+def test_image_picker_and_drawer_show_filename_not_just_id():
+    """Review finding: the picker and the deployment drawer showed a bare
+    image id, forcing the operator to go find it in the Images tab to see
+    what it actually is. Both now render 'id — filename', escaped like every
+    other interpolation in this file, matching how the catalog list already
+    shows both facts about an image."""
+    app_js = _webroot("app.js")
+    assert "function imageLabel(id)" in app_js
+    label_fn = app_js.split("function imageLabel(id) {", 1)[1][:300]
+    assert "esc(id)" in label_fn and "esc(fn)" in label_fn
+    picker = app_js.split("function openImagePicker(currentIds, onApply) {", 1)[1]
+    picker = picker.split("\n  function closeImagePicker", 1)[0]
+    assert "imageLabel(id)" in picker
+    drawer = app_js.split("function deployImageRows(d) {", 1)[1][:700]
+    assert "imageLabel(iid)" in drawer
+
+
 def test_image_picker_is_one_function_shared_by_both_entry_points():
     """The row select and the bulk dropdown used to be two separate ways to
     assign the same thing, through two different code paths that could (and
@@ -6692,6 +6825,10 @@ def test_deployed_badge_requires_every_assigned_image_staged():
     body = body.split("\n  function ", 1)[0]
     assert "rowAssignedIds(d)" in body
     assert "rowHasStaged" in body
+    # EVERY assigned image, not just one -- pin the .every( call itself so a
+    # regression to .some() (any image staged is "deployed") fails here
+    # instead of only showing up as a wrong badge in the console.
+    assert ".every(" in body
     staged_fn = app_js.split("function rowHasStaged", 1)[1][:300]
     assert "staged_image_ids" in staged_fn
     # the legacy fallback (no staged_image_ids on the heartbeat) is preserved

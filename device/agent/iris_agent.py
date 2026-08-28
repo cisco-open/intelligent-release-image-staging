@@ -127,7 +127,8 @@ def _atomic_write_state(state_path, state):
 
 def _heartbeat(image, deps, stage_state="staging", target_fs=None,
                tele_on=True, stage_error=None, sample=None, stream_on=False,
-               observation=None, staged_image_ids=None):
+               observation=None, staged_image_ids=None,
+               errored_image_ids=None):
     hb = {"current_image_id": image["id"] if image else None,
           "free_flash_bytes": deps.free_bytes(target_fs or "flash:"),
           "version": deps.version(),
@@ -147,6 +148,13 @@ def _heartbeat(image, deps, stage_state="staging", target_fs=None,
         # field) leaves it out, and the server falls back to the
         # current_image_id/stage_state pair for those.
         hb["staged_image_ids"] = staged_image_ids
+    if errored_image_ids is not None:
+        # Which images of an assigned SET hit a terminal per-image failure
+        # THIS tick. Same one-image-set/legacy-agent omission as
+        # staged_image_ids above: paired with it, it lets the server tell
+        # "everything is stuck" from "one erred, the rest are still going"
+        # instead of guessing from the set's single collapsed stage_state.
+        hb["errored_image_ids"] = errored_image_ids
     return hb
 
 
@@ -718,9 +726,10 @@ class _ImageTick:
     def telemetry(self, *args, **kwargs):
         self.tele = (args, kwargs)
 
-    def build(self, staged_image_ids=None):
+    def build(self, staged_image_ids=None, errored_image_ids=None):
         args, kwargs = self.hb
-        return _heartbeat(*args, staged_image_ids=staged_image_ids, **kwargs)
+        return _heartbeat(*args, staged_image_ids=staged_image_ids,
+                          errored_image_ids=errored_image_ids, **kwargs)
 
     def replay(self, hb_resp):
         if self.tele is None:
@@ -911,9 +920,9 @@ def _send_set_heartbeat(deps, sid, state, ids, ticks):
     """POST the tick's single heartbeat for the whole set; return the response.
 
     A one-image set POSTs its recorded payload verbatim — same keys, same
-    values, no staged_image_ids (the server falls back to
-    current_image_id/stage_state for one-image agents, as it must for every
-    agent that predates the field)."""
+    values, no staged_image_ids or errored_image_ids (the server falls back
+    to current_image_id/stage_state for one-image agents, as it must for
+    every agent that predates the fields)."""
     live = [t for t in ticks if t.hb is not None]
     if not live:
         # Every image bailed before its heartbeat (a rejected catalog filename
@@ -922,7 +931,15 @@ def _send_set_heartbeat(deps, sid, state, ids, ticks):
     if len(ids) == 1:
         return _send_heartbeat(deps, sid, live[0].build())
     staged = _staged_image_ids(state, ids)
-    hb = live[0].build(staged_image_ids=staged)
+    # Which assigned images THIS TICK's own per-image status calls a
+    # terminal failure -- the same _SET_STAGE_STATES vocabulary `failed`
+    # below already checks each live tick's stage_state against. Paired
+    # with staged_image_ids, this tells the server "N images stuck in
+    # error" apart from "one erred, the rest are still in flight" instead
+    # of guessing from the set's single collapsed stage_state.
+    errored = [img_id for img_id, t in zip(ids, ticks)
+              if t.hb is not None and t.stage_state in _SET_STAGE_STATES]
+    hb = live[0].build(staged_image_ids=staged, errored_image_ids=errored)
     seen = [t.stage_state for t in live]
     # Identity is NOT forced to ids[0]: it comes from live[0], the first image
     # that actually produced heartbeat data this tick, whose payload this is.

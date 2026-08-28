@@ -380,3 +380,34 @@ def test_return_string_for_multi_set():
     out = iris_agent.run_once(CFG, deps, state)
     assert out.startswith("multi:")
     assert out.split(":", 1)[1].split(",") == ["complete", "downloading"]
+
+
+def test_multi_image_heartbeat_names_the_errored_image():
+    # Review finding: _row_is_staging (server) cannot tell "1 errored, 2 in
+    # flight" from "all 3 errored" from stage_state alone. img-a has no room
+    # (a terminal per-image failure this tick), img-b is already fully
+    # staged, img-c is still downloading -- the set heartbeat must name
+    # exactly the one that is actually stuck, not the whole set.
+    cat = MultiCatalog([_img("img-a", size=2_000_000_000), _img("img-b", size=5),
+                        _img("img-c", size=5)],
+                       ids=["img-a", "img-b", "img-c"])
+    deps, rec = make_deps(cat, {"/stage/img-b.bin": 5}, free=1_000_000_000)
+    state = {}
+
+    iris_agent.run_once(CFG, deps, state)
+    hb = cat.heartbeats[-1]
+    assert hb["errored_image_ids"] == ["img-a"]
+    assert hb["staged_image_ids"] == ["img-b"]      # img-c is still in flight
+
+
+def test_single_image_heartbeat_omits_errored_image_ids():
+    # Compat: a one-image set's heartbeat is byte-identical to the
+    # pre-multi-image agent -- no errored_image_ids key, same as it has no
+    # staged_image_ids key (test_single_image_set_behaves_exactly_as_before
+    # pins the full key set; this is the narrow marker for this one field).
+    cat = MultiCatalog([_img("img1")], ids=["img1"])
+    deps, rec = make_deps(cat, {"/stage/img1.bin": 5})
+    state = {}
+
+    iris_agent.run_once(CFG, deps, state)
+    assert "errored_image_ids" not in cat.heartbeats[0]

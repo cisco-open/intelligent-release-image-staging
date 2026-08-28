@@ -1360,6 +1360,11 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 # (Task 3); absent from an agent that predates the field, in
                 # which case rollout falls back to current_image_id/stage_state
                 row["staged_image_ids"] = h.get("staged_image_ids")
+                # which assigned images hit a terminal per-image failure on
+                # the agent's last tick; absent from an agent that predates
+                # the field, in which case staging falls back to guessing
+                # from the single aggregate stage_state (_row_is_staging)
+                row["errored_image_ids"] = h.get("errored_image_ids")
                 row["heartbeat_model"] = h.get("model")
                 # the "copying to <fs>" badge needs the heartbeat's target FS
                 row["target_fs"] = h.get("target_fs")
@@ -1412,28 +1417,62 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             """Whether *row* is actively staging, given its last (fresh)
             heartbeat.
 
-            For a one-image agent, "error" is a terminal stage_state and
-            everything else non-idle counts -- that check alone used to be
-            enough. Task 3's set heartbeat (_send_set_heartbeat) reports the
-            single MOST ACTIONABLE stage_state across every image in the
-            tick, so ONE failed image in a multi-image set pins the WHOLE
-            heartbeat to "error" even while another assigned image is still
-            downloading -- that device dropped out of "staging" entirely
-            under the old, single-field check. "error" is only a whole-set
-            failure when at most one assigned image remains unstaged: with
-            more than one still outstanding, at least one of them could be
-            the one actually still in flight, so the device stays counted as
-            staging."""
-            state = row.get("stage_state")
-            if state in (None, "", "unassigned", "ready"):
-                return False
-            if state != "error":
-                return True
+            Task 3's set heartbeat (_send_set_heartbeat) reports the single
+            MOST ACTIONABLE stage_state across every image in the tick, so a
+            bare stage_state can no longer tell "one image failed, another is
+            still downloading" from "every assigned image is stuck" -- both
+            collapse to the same "error". Which tier below applies depends on
+            what the agent's last heartbeat was actually able to report:
+
+            1. staged_image_ids ABSENT: a legacy single-image agent, which
+               only ever stages the first (and only) approved image --
+               singular semantics are correct here regardless of how many
+               images the POLICY assigns, since a legacy agent ignores the
+               rest. This is the pre-multi-image check, verbatim -- and, as a
+               side effect, it fixes a legacy-agent overcount: a
+               permanently-errored single-image device whose POLICY still
+               named several images used to read as staging forever, because
+               the multi-image math below ran on the policy's id count
+               instead of stopping at what this agent can even attempt.
+
+            2. staged_image_ids present, errored_image_ids ABSENT: this
+               branch's multi-image agent BEFORE errored_image_ids existed.
+               No fleet has ever run it, so this tier only covers the brief
+               in-branch window before every agent picks up the field --
+               kept exactly as it was: a set pinned to a collapsed "error" is
+               called wholly failed only once at most one assigned image is
+               still unstaged (with more than one outstanding, one of them
+               could be the one actually still in flight -- an honest guess,
+               not a derivation).
+
+            3. Both present: no guessing needed. staged_image_ids marks what
+               finished; errored_image_ids marks what is stuck THIS tick; an
+               assigned image in neither is genuinely still in flight, so the
+               set is staging iff at least one such image exists."""
+            sids = row.get("staged_image_ids")
+            if sids is None:
+                # Tier 1: legacy single-image agent.
+                state = row.get("stage_state")
+                return state not in (None, "", "unassigned", "ready", "error")
+            eids = row.get("errored_image_ids")
+            if eids is None:
+                # Tier 2: multi-image agent that predates errored_image_ids.
+                state = row.get("stage_state")
+                if state in (None, "", "unassigned", "ready"):
+                    return False
+                if state != "error":
+                    return True
+                ids = self._row_assigned_ids(row)
+                if len(ids) <= 1:
+                    return False
+                staged = [iid for iid in ids if self._row_has_staged(row, iid)]
+                return (len(ids) - len(staged)) > 1
+            # Tier 3: precise -- derived from this tick's own verdicts.
             ids = self._row_assigned_ids(row)
-            if len(ids) <= 1:
+            if not ids:
                 return False
-            staged = [iid for iid in ids if self._row_has_staged(row, iid)]
-            return (len(ids) - len(staged)) > 1
+            staged, errored = set(sids), set(eids)
+            return any(iid not in staged and iid not in errored for iid in ids)
 
         def _overview(self):
             imgs = catalog.list_images() if catalog else []

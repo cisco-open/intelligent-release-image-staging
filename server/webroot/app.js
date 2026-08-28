@@ -390,6 +390,9 @@
   // ---- Devices ----
   var devStatus = document.getElementById('dev-status');
   var imageIds = [];
+  // id -> filename, refreshed alongside imageIds -- so a picker/drawer row
+  // can show which file an id actually is, the way the catalog list does.
+  var imageFilenames = {};
   var credOpts = [];
   var peerPolicy = { revision: null, quarantine_assignments: [], enforcement: {} };
   var peerPolicyBusy = {};
@@ -487,7 +490,10 @@
     peerPolicy = nextPolicy;
     var devs = dbody.devices || [];
     var devNow = dbody.now || Date.now() / 1000;   // server clock for last_seen freshness
-    imageIds = ir.ok ? ((await ir.json()).images || []).map(function (i) { return i.id; }) : [];
+    var imgs = ir.ok ? ((await ir.json()).images || []) : [];
+    imageIds = imgs.map(function (i) { return i.id; });
+    imageFilenames = {};
+    imgs.forEach(function (i) { imageFilenames[i.id] = i.filename || ''; });
     credOpts = cr.ok ? ((await cr.json()).profiles || []) : [];
     if (mine !== devicesRefreshGeneration) return;
     syncCredSelected();
@@ -564,6 +570,10 @@
         var id = btn.closest('tr').getAttribute('data-id');
         var d = LAST_DEVICES.filter(function (x) { return x.device_id === id; })[0] || {};
         openImagePicker(rowAssignedIds(d), function (ids) {
+          // An empty pick is a deliberate unassign for a device that already
+          // has one; for anything else it is one unchecked box away from
+          // wiping the assigned set by accident, so confirm before it posts.
+          if (!ids.length && !confirm('Unassign all images from ' + id + '?')) return;
           assignImagesTo([id], ids);
         });
       });
@@ -671,7 +681,7 @@
       } else {
         state = 'queued';
       }
-      return '<tr><td class="mono">' + esc(iid) + '</td><td>' + esc(state) + '</td></tr>';
+      return '<tr><td class="mono">' + imageLabel(iid) + '</td><td>' + esc(state) + '</td></tr>';
     }).join('');
   }
   async function openDeployInfo(id) {
@@ -1109,6 +1119,15 @@
       }).join('');
     if (keep) sel.value = keep;
   }
+  // "id — filename", both escaped -- the same two facts the catalog list
+  // shows for an image, so a picker/drawer row never makes the operator go
+  // find the id in the Images tab to see what it actually is. Falls back to
+  // the bare id when the filename is not known (a stale id the catalog no
+  // longer has, or imageFilenames not loaded yet).
+  function imageLabel(id) {
+    var fn = imageFilenames[id];
+    return fn ? esc(id) + ' — ' + esc(fn) : esc(id);
+  }
   // ---- Image picker: one control shared by the per-row assign button and
   // the bulk "Assign images to N devices…" toolbar action below. Both POST
   // the checked ids, in the order the checked-first render placed them,
@@ -1121,6 +1140,10 @@
     var overlay = document.getElementById('img-picker');
     var rows = document.getElementById('img-picker-rows');
     var counter = document.getElementById('img-picker-count');
+    // Reset any note left over from a previous open (the bulk caller below
+    // sets one back on right after this returns, when it applies).
+    var note = document.getElementById('img-picker-note');
+    if (note) note.hidden = true;
     var checkedSet = {};
     (currentIds || []).forEach(function (id) { checkedSet[id] = true; });
     // checked-first: the current set, in its own order, before every other
@@ -1131,7 +1154,7 @@
       .concat(imageIds.filter(function (id) { return !checkedSet[id]; }));
     rows.innerHTML = ordered.length ? ordered.map(function (id) {
       return '<label class="img-pick-row"><input type="checkbox" class="img-pick" value="' +
-        esc(id) + '"' + (checkedSet[id] ? ' checked' : '') + '> ' + esc(id) + '</label>';
+        esc(id) + '"' + (checkedSet[id] ? ' checked' : '') + '> ' + imageLabel(id) + '</label>';
     }).join('') : '<p class="muted">No images in the catalog yet.</p>';
     function updateCount() {
       var n = rows.querySelectorAll('input:checked').length;
@@ -1337,8 +1360,27 @@
     openImagePicker(intersection, function (imgIds) {
       var claimed = claimSelection();
       if (!claimed) return;
+      // An empty pick from the bulk path is one accidental Apply away from
+      // wiping every selected device's assignment (an empty intersection
+      // opens the picker with nothing pre-checked) -- confirm before it posts.
+      if (!imgIds.length &&
+          !confirm('Unassign all images from ' + claimed.length + ' device(s)?')) {
+        setBulkBusy(false); return;
+      }
       assignImagesTo(claimed, imgIds);
     });
+    // The intersection is empty either because every selected device
+    // genuinely has nothing assigned, or because their sets DIFFER -- only
+    // the second case is a trap (Apply as-is would replace everyone's set
+    // with whatever gets checked), so only that case gets the note.
+    if (!intersection.length && sets.some(function (s) { return s.length; })) {
+      var note = document.getElementById('img-picker-note');
+      if (note) {
+        note.textContent = 'Selected devices have differing assignments; '
+          + 'applying replaces them all.';
+        note.hidden = false;
+      }
+    }
   });
   document.getElementById('apply-cred-selected').addEventListener('click', async function () {
     var ids = claimSelection();
