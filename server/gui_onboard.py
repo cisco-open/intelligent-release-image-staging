@@ -929,6 +929,26 @@ class OnboardService:
             env["DEVICE_SSH_USER"] = env["DEVICE_USER"]
         return platform, script
 
+    def _persist_os_family(self, device_id, dev, prior_family):
+        """Best-effort cache of a freshly classified os_family onto the
+        fleet row. Mirrors the guard in _resolve's probe() closure: only
+        write a family we actually determined AND that is new -- writing ""
+        would overwrite a previously cached family (upsert filters None, not
+        empty strings) and silently reopen the misroute that guard exists to
+        close. Called after the router/iox execution preflights, on both
+        their success and refusal paths, so an XR device short-circuits at
+        resolve_platform's cached-family guard on the next attempt instead of
+        being re-probed over SSH every time. Swallows store errors: a hiccup
+        here must never mask the preflight's own success or refusal, which
+        the caller has already decided by the time this runs."""
+        family = dev.get("os_family")
+        if not family or family == prior_family:
+            return
+        try:
+            self.fleet.upsert({"device_id": device_id, "os_family": family})
+        except Exception:
+            pass
+
     def _transition_or_note(self, job_id, receipt_id, state):
         """Advance the job's receipt, downgrading lifecycle races to a job
         line. A concurrent action can retire the bound receipt between this
@@ -1057,11 +1077,21 @@ class OnboardService:
                     except Exception as exc:
                         raise ValueError("preflight failed: %s" % exc)
                 if action == "onboard" and platform == "router":
+                    # The router preflight classifies os_family from the
+                    # banner it just read (_default_router_preflight), same
+                    # as Guest Shell above -- but only onto this LOCAL dev
+                    # dict. Persist it on BOTH the success and the refusal
+                    # path: the classification happened even when refused,
+                    # and that is exactly the case that must short-circuit a
+                    # retry instead of re-probing an XR router over SSH again.
+                    prior_family = dev.get("os_family")
                     try:
                         evidence = self._router_preflight(
                             dev, env, j.get("resolved") or dev)
                     except Exception as exc:
+                        self._persist_os_family(device_id, dev, prior_family)
                         raise ValueError("preflight failed: %s" % exc)
+                    self._persist_os_family(device_id, dev, prior_family)
                     final_resolved = (pre_apply(evidence) if pre_apply else
                                       apply_router_preflight(
                                           j.get("resolved") or dev, evidence))
@@ -1084,11 +1114,16 @@ class OnboardService:
                     # EXPECTED_DEVICE_IDENTITY -- a no-op guard against
                     # reconfiguring the wrong switch. Probe live here, at
                     # execution time, the same as the router flow.
+                    # Persist a classification the same way as the router
+                    # path above -- see _persist_os_family.
+                    prior_family = dev.get("os_family")
                     try:
                         evidence = self._iox_preflight(
                             dev, env, j.get("resolved") or dev)
                     except Exception as exc:
+                        self._persist_os_family(device_id, dev, prior_family)
                         raise ValueError("preflight failed: %s" % exc)
+                    self._persist_os_family(device_id, dev, prior_family)
                     final_resolved = apply_iox_preflight(
                         j.get("resolved") or dev, evidence)
                     with self._lock:

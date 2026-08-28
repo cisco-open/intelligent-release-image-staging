@@ -1022,6 +1022,103 @@ def test_router_execution_preflight_failure_never_mints_or_runs(tmp_path):
     assert receipts.recoverable_for_device("r1") is None
 
 
+def _router_fleet():
+    return _Fleet({"r1": {
+        "device_id": "r1", "device_ip": "192.0.2.10", "model": "C8000V",
+        "platform": "router", "management_type": "router-nat",
+        "vpg_number": "10", "nat_interface": "GigabitEthernet1",
+        "app_ip": "10.8.0.2", "app_mask": "255.255.255.252",
+        "app_gateway": "10.8.0.1", "credential_profile_id": "lab"}})
+
+
+def test_router_onboard_persists_xr_family_on_refusal(tmp_path):
+    # The router preflight classifies os_family onto a LOCAL dev dict
+    # (_default_router_preflight sets dev["os_family"] and then refuses via
+    # _refuse_xr) -- nothing here wrote that back to the fleet store, so a
+    # retry re-probed the same XR router over SSH instead of short-circuiting
+    # at resolve_platform's cached-family guard.
+    fleet = _router_fleet()
+
+    def preflight(dev, env, resolved):
+        dev["os_family"] = "xr"
+        gui_onboard._refuse_xr(dev.get("device_id"))
+
+    svc = gui_onboard.OnboardService(
+        fleet, _iox_creds(), host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
+        run_fn=lambda p, e, on: 0, artifacts_dir=str(tmp_path),
+        preflight_fn=preflight)
+    job = _wait(svc, svc.start("r1"))
+    assert job["state"] == "error"
+    assert any("IOS-XR" in line for line in job["lines"]), job["lines"]
+    assert {"device_id": "r1", "os_family": "xr"} in fleet.upserts
+    assert fleet._d["r1"]["os_family"] == "xr"
+
+
+def test_iox_onboard_persists_xr_family_on_refusal(tmp_path):
+    # Same gap as the router path above, but for the IOx execution preflight.
+    # The model is C9k-shaped (not 8xxx) so _resolve's _iox_arch_env lets the
+    # device through to the iox preflight itself -- an 8xxx-shaped model
+    # would refuse earlier, inside _iox_arch_env, without ever reaching it.
+    fleet = _iox_fleet(platform="iox", model="C9300")
+    creds = _iox_creds()
+
+    def iox_preflight(dev, env, resolved):
+        dev["os_family"] = "xr"
+        gui_onboard._refuse_xr(dev.get("device_id"))
+
+    svc = gui_onboard.OnboardService(
+        fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
+        run_fn=lambda p, e, on: 0, iox_preflight_fn=iox_preflight,
+        artifacts_dir=str(tmp_path))
+    job = _wait(svc, svc.start("d1"))
+    assert job["state"] == "error"
+    assert any("IOS-XR" in line for line in job["lines"]), job["lines"]
+    assert {"device_id": "d1", "os_family": "xr"} in fleet.upserts
+    assert fleet._d["d1"]["os_family"] == "xr"
+
+
+def test_router_onboard_second_attempt_short_circuits_on_cached_family(tmp_path):
+    # Once the family is persisted (the fix under test above), a later
+    # onboard attempt must be refused by resolve_platform's cached-family
+    # guard BEFORE the router preflight (or any probe) runs again -- that is
+    # the whole point of writing the classification down.
+    fleet = _router_fleet()
+    calls = []
+
+    def first_preflight(dev, env, resolved):
+        calls.append("preflight-1")
+        dev["os_family"] = "xr"
+        gui_onboard._refuse_xr(dev.get("device_id"))
+
+    def spy_probe(dev, env):
+        calls.append("probe")
+        return "C8000V"
+
+    def spy_run(p, e, on):
+        calls.append("run")
+        return 0
+
+    svc = gui_onboard.OnboardService(
+        fleet, _iox_creds(), host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
+        run_fn=spy_run, probe_fn=spy_probe, artifacts_dir=str(tmp_path),
+        preflight_fn=first_preflight)
+    job1 = _wait(svc, svc.start("r1"))
+    assert job1["state"] == "error"
+    assert {"device_id": "r1", "os_family": "xr"} in fleet.upserts
+
+    def second_preflight(dev, env, resolved):
+        calls.append("preflight-2")
+        return {"status": "passed"}
+
+    svc._router_preflight = second_preflight
+    job2 = _wait(svc, svc.start("r1"))
+    assert job2["state"] == "error"
+    assert any("IOS-XR" in line for line in job2["lines"]), job2["lines"]
+    # Only the first attempt's preflight ran; the second never reached the
+    # router preflight, the probe, or the installer.
+    assert calls == ["preflight-1"]
+
+
 def _router_preflight_stub(monkeypatch, running="", apps="", guest_share="%Error opening",
                             interface="GigabitEthernet1 is up, line protocol is up"):
     outputs = {
