@@ -1386,6 +1386,28 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     and (row.get("last_seen") is None
                          or row["last_seen"] < (row.get("onboard_finished_at") or 0)))
 
+        @staticmethod
+        def _row_assigned_ids(row):
+            """The device's approved image ids. assigned_image_ids is None
+            for a policy row that predates the ordered set, so fall back to
+            the singular field it still carries."""
+            ids = row.get("assigned_image_ids")
+            if ids:
+                return ids
+            single = row.get("assigned_image_id")
+            return [single] if single else []
+
+        @staticmethod
+        def _row_has_staged(row, iid):
+            """Whether *row*'s device has staged image *iid*: the heartbeat's
+            staged_image_ids set when the agent reports it directly (Task 3),
+            else the legacy current_image_id/stage_state pair."""
+            sids = row.get("staged_image_ids")
+            if sids is not None:
+                return iid in sids
+            return (row.get("stage_state") == "ready"
+                    and row.get("current_image_id") == iid)
+
         def _overview(self):
             imgs = catalog.list_images() if catalog else []
             # the merged device rows already carry policy + heartbeat, so one
@@ -1396,30 +1418,28 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             for img in imgs:
                 iid = img.get("id")
                 # a device counts under EVERY image in its approved set, not
-                # just a single "the" assignment; assigned_image_ids is None
-                # for a device whose policy row predates the ordered set, so
-                # fall back to the singular field it still carries
-                assigned = [r for r in rows
-                            if iid in (r.get("assigned_image_ids")
-                                       or ([r["assigned_image_id"]]
-                                           if r.get("assigned_image_id")
-                                           else []))]
-                staged = []
-                for r in assigned:
-                    sids = r.get("staged_image_ids")
-                    if sids is not None:
-                        # agent reports its staged set directly (Task 3)
-                        is_staged = iid in sids
-                    else:
-                        # old agent, no staged_image_ids in its heartbeat yet
-                        is_staged = (r.get("stage_state") == "ready"
-                                    and r.get("current_image_id") == iid)
-                    if is_staged:
-                        staged.append(r)
+                # just a single "the" assignment
+                assigned = [r for r in rows if iid in self._row_assigned_ids(r)]
+                staged = [r for r in assigned if self._row_has_staged(r, iid)]
                 rollout.append({"image_id": iid, "filename": img.get("filename"),
                                 "assigned": len(assigned), "staged": len(staged)})
-            assigned_total = sum(r["assigned"] for r in rollout)
-            staged_total = sum(r["staged"] for r in rollout)
+            # The aggregate cards are about DEVICES, not (image, device)
+            # pairs -- app.js renders "Staged" as a device count. Summing the
+            # per-image rollout rows double-counts a device across every
+            # image it's assigned, so tally devices directly here instead: a
+            # device counts once in assigned_total if its set is non-empty,
+            # and once in staged_total only if EVERY image in that set is
+            # staged (the per-image rollout rows above stay per-pair, which
+            # is what the rollout table is specced to show).
+            assigned_total = 0
+            staged_total = 0
+            for r in rows:
+                ids = self._row_assigned_ids(r)
+                if not ids:
+                    continue
+                assigned_total += 1
+                if all(self._row_has_staged(r, iid) for iid in ids):
+                    staged_total += 1
             # "Staging" must mean devices ACTUALLY staging: enrolled (their
             # agent heartbeats), FRESH (last_seen inside the same 600s the
             # UI uses for its "offline" badge — a device that died mid-stage
@@ -2210,7 +2230,20 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 # unassign.
                 plural = "image_ids" in body
                 if plural:
-                    ids = [str(i) for i in (body.get("image_ids") or []) if i]
+                    # validate the SHAPE before iterating anything: a bare
+                    # int isn't iterable (TypeError -> the connection used to
+                    # die instead of answering 400), a bare string iterates
+                    # into one-character "ids", and a falsy/non-string
+                    # element used to be silently filtered out rather than
+                    # rejected. image_ids must be a JSON array whose every
+                    # element is a non-empty string; anything else is 400.
+                    raw_ids = body.get("image_ids")
+                    if not isinstance(raw_ids, list) or not all(
+                            isinstance(i, str) and i for i in raw_ids):
+                        self._json(400, {"error":
+                                   "image_ids must be a list of image ids"})
+                        return
+                    ids = raw_ids
                 else:
                     image_id = str(body.get("image_id") or "")
                     ids = [image_id] if image_id else []

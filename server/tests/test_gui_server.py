@@ -1364,6 +1364,48 @@ def test_assign_accepts_image_id_list_and_caps_at_ten(tmp_path):
         stop()
 
 
+def test_assign_rejects_malformed_image_ids(tmp_path):
+    """image_ids must be validated as a shape -- a JSON array of non-empty
+    strings -- BEFORE anything iterates it. A non-list value used to raise a
+    TypeError that killed the connection instead of answering 400 (a bare
+    int wasn't iterable at all; a bare string iterated into characters); a
+    list with a falsy/non-string element used to be silently filtered
+    instead of rejected. All four shapes must now answer 400 with a JSON
+    body, and the connection must still be alive to read it."""
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, cat = deps
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        _req(host, port, "POST", "/api/devices",
+             {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
+        # a bare int: previously raised TypeError and dropped the connection
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_ids": 5}, headers=hh)
+        assert st == 400
+        assert json.loads(b) == {"error": "image_ids must be a list of image ids"}
+        # a bare string: previously iterated into one-character "ids"
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_ids": "img-a"}, headers=hh)
+        assert st == 400
+        assert json.loads(b) == {"error": "image_ids must be a list of image ids"}
+        # a falsy element: previously silently dropped instead of rejected
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_ids": ["img-a", ""]}, headers=hh)
+        assert st == 400
+        assert json.loads(b) == {"error": "image_ids must be a list of image ids"}
+        # a non-string element
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_ids": ["img-a", 123]}, headers=hh)
+        assert st == 400
+        assert json.loads(b) == {"error": "image_ids must be a list of image ids"}
+        # none of the rejected bodies touched the device's policy
+        assert cat.get_policy("d1") == {"approved_image_id": None,
+                                        "approved_image_ids": []}
+    finally:
+        stop()
+
+
 def test_assign_singular_body_still_works(tmp_path):
     host, port, deps, stop = _serve_full(tmp_path)
     _app, fleet, _creds, cat = deps
@@ -1400,6 +1442,30 @@ def test_unassign_clears_the_whole_set(tmp_path):
         events = [e for e in _read_audit_lines(audit_path)
                  if e.get("action") == "unassign"]
         assert events and events[-1]["detail"] == "unassigned (was img1.bin)"
+    finally:
+        stop()
+
+
+def test_assign_audit_detail_pins_plural_wording(tmp_path):
+    """The plural (image_ids) assign path's audit detail is distinct wording
+    from the singular compat path's -- pin the exact "assigned N image(s):"
+    phrasing plus both filenames so a rewording doesn't slip by unnoticed."""
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    _app, fleet, _creds, cat = _ctx
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        _req(host, port, "POST", "/api/devices",
+             {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_ids": ["img1", "img2"]}, headers=hh)
+        assert st == 200
+        events = [e for e in _read_audit_lines(audit_path)
+                 if e.get("action") == "assign"]
+        assert events
+        detail = events[-1]["detail"]
+        assert "assigned 2 image(s):" in detail
+        assert "img1.bin" in detail and "img2.bin" in detail
     finally:
         stop()
 
@@ -1469,6 +1535,63 @@ def test_rollout_staged_uses_heartbeat_staged_image_ids(tmp_path):
         rollout = {r["image_id"]: r for r in json.loads(b)["rollout"]}
         assert rollout["img1"]["staged"] == 1
         assert rollout["img2"]["staged"] == 1
+    finally:
+        stop()
+
+
+def test_overview_totals_count_devices_not_image_pairs(tmp_path):
+    """Overview's aggregate cards ('Devices staged', rendered in app.js as a
+    device count) must count each DEVICE once, not once per assigned image.
+    A device with two images assigned and BOTH staged adds exactly 1 to
+    staged_total, not 2 -- and it adds 1 to assigned_total, not 2."""
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, cat = deps
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        cat.save_image({"id": "img2", "filename": "img2.bin", "sha256": "cd",
+                        "published_at": 2})
+        _req(host, port, "POST", "/api/devices",
+             {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
+        cat.set_policy("d1", approved_image_ids=["img1", "img2"])
+        cat.record_heartbeat("d1", {"staged_image_ids": ["img1", "img2"],
+                                    "current_image_id": None,
+                                    "stage_state": "staging"}, now=10)
+        st, _, b = _req(host, port, "GET", "/api/overview", headers={"Cookie": ck})
+        assert st == 200
+        ov = json.loads(b)
+        assert ov["assigned"] == 1   # one device, not one per assigned image
+        assert ov["staged"] == 1     # fully staged device counts once
+    finally:
+        stop()
+
+
+def test_overview_staged_total_excludes_partially_staged_device(tmp_path):
+    """A device with only SOME of its assigned images staged must not count
+    toward staged_total at all -- staged_total is whole-set-or-nothing per
+    device. The per-image rollout row for the image that IS staged still
+    shows it; only the aggregate is device-deduped."""
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, cat = deps
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        cat.save_image({"id": "img2", "filename": "img2.bin", "sha256": "cd",
+                        "published_at": 2})
+        _req(host, port, "POST", "/api/devices",
+             {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
+        cat.set_policy("d1", approved_image_ids=["img1", "img2"])
+        cat.record_heartbeat("d1", {"staged_image_ids": ["img1"],
+                                    "current_image_id": None,
+                                    "stage_state": "staging"}, now=10)
+        st, _, b = _req(host, port, "GET", "/api/overview", headers={"Cookie": ck})
+        assert st == 200
+        ov = json.loads(b)
+        assert ov["assigned"] == 1
+        assert ov["staged"] == 0     # not fully staged -> device doesn't count
+        rollout = {r["image_id"]: r for r in ov["rollout"]}
+        assert rollout["img1"]["staged"] == 1   # per-image row still shows it
+        assert rollout["img2"]["staged"] == 0
     finally:
         stop()
 
