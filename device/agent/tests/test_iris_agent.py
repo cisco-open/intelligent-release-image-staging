@@ -200,6 +200,15 @@ def test_state_is_per_image_so_reassignment_recopies():
     assert copied == ["img2.bin"]
 
 
+# --- pending_root_deletes drain ---------------------------------------------
+# The queue is no longer FED by reassignment: an image dropped from the
+# assignment set is PARKED and its root copy deliberately kept (multi-image
+# assignment; see tests/test_multi_image.py). The drain below still runs on
+# every tick, for state files written by the agent that did queue replaced root
+# copies, and its delete-then-verify contract is unchanged — so these tests
+# seed the queue directly instead of provoking it with a reassignment.
+
+
 def test_replaced_image_cleanup_claim_gated_on_actual_absence():
     # AAA nodes silently no-op a raw exec `delete` (the reclaim/copyroot EEM
     # applets exist for exactly that reason) — so the delete must run through
@@ -214,7 +223,7 @@ def test_replaced_image_cleanup_claim_gated_on_actual_absence():
     deps = deps._replace(                       # the old root REFUSES to die
         root_present=lambda fname, prefix="flash:", expected_size=None: fname == "old.bin")
     state = {"schema_version": iris_agent._STATE_SCHEMA,
-             "image_id": "img1", "root_file": "old.bin"}
+             "image_id": "img2", "pending_root_deletes": ["old.bin"]}
     iris_agent.run_once(CFG, deps, state)
     assert bundle_reclaimed == [("flash:", ["old.bin"])]   # via the bypass applet
     assert all("delete" not in c for c in ios_cmds)        # never a raw exec delete
@@ -236,7 +245,7 @@ def test_replaced_image_cleanup_retry_refires_bypass_applet():
     deps = deps._replace(                       # the old root REFUSES to die
         root_present=lambda fname, prefix="flash:", expected_size=None: fname == "old.bin")
     state = {"schema_version": iris_agent._STATE_SCHEMA,
-             "image_id": "img1", "root_file": "old.bin"}
+             "image_id": "img2", "pending_root_deletes": ["old.bin"]}
     iris_agent.run_once(CFG, deps, state)
     iris_agent.run_once(CFG, deps, state)
     assert bundle_reclaimed == [("flash:", ["old.bin"]),
@@ -254,7 +263,7 @@ def test_replaced_image_cleanup_confirmed_when_gone():
     deps = deps._replace(                        # old root really deleted
         root_present=lambda fname, prefix="flash:", expected_size=None: fname != "old.bin")
     state = {"schema_version": iris_agent._STATE_SCHEMA,
-             "image_id": "img1", "root_file": "old.bin"}
+             "image_id": "img2", "pending_root_deletes": ["old.bin"]}
     iris_agent.run_once(CFG, deps, state)
     assert bundle_reclaimed == [("flash:", ["old.bin"])]
     assert "pending_root_deletes" not in state
@@ -479,52 +488,55 @@ def test_aria_remove_rpc_down_heartbeats_error_instead_of_crashing():
     assert "aria2c" in hb["stage_error"]
 
 
-def test_reassignment_purges_old_image_everywhere():
-    # device completed img1 (incl. root copy); operator reassigns img2 ->
-    # the agent must purge the old torrent/files and delete the old root copy
+def test_reassignment_parks_old_image_and_keeps_its_root_copy():
+    # device completed img1 (incl. root copy); operator reassigns img2 -> img1
+    # is PARKED, not purged: its torrent is stopped and its stage copy deleted,
+    # its record stays in state, and the root copy it placed is KEPT. (Deleting
+    # it was the old single-image behaviour; with an assignment SET an image
+    # that leaves it can come back, and the surviving root copy is what makes
+    # that a presence check instead of another 1.2 GB placement.)
     cat = FakeCatalog({"approved_image_id": "img2"},
                       {"id": "img2", "filename": "img2.bin",
                        "size": 1000, "sha256": "def"})
     deps, emitted, ios_cmds, _, _, purged, _, bundle_reclaimed = make_deps(
         cat, {}, free=9_000_000_000)
-    deps = deps._replace(   # the delete genuinely lands: old root reads absent
-        root_present=lambda fname, prefix="flash:", expected_size=None: fname != "img1.bin")
     state = {"schema_version": iris_agent._STATE_SCHEMA,
              "image_id": "img1", "root_file": "img1.bin",
              "img1": {"done": True, "copied": True}}
     assert iris_agent.run_once(CFG, deps, state) == "downloading"
-    assert purged == [("img2.bin", "img2")]            # old torrent/files purged
-    # old ROOT copy removed (ours) — via the bypass applet, never a raw delete
-    assert bundle_reclaimed == [("flash:", ["img1.bin"])]
+    # the stage/aria2 sweep keeps the whole assigned SET, not one survivor
+    assert purged == [(["img2.bin"], ["img2"])]
+    assert bundle_reclaimed == []                      # root copy NOT deleted
+    assert "pending_root_deletes" not in state         # and never queued
     assert all("delete" not in c for c in ios_cmds)
-    assert any(m == "CLEANUP" for m, _ in emitted)
-    assert "img1" not in state and state["image_id"] == "img2"
+    assert any(m == "PARKED" for m, _ in emitted)
+    assert state["img1"]["parked"] is True             # remembered, not dropped
+    assert state["image_id"] == "img2"
 
 
-def test_reassignment_purges_old_root_on_cached_stage_fs():
-    # Device previously staged on sdflash: (cached). Reassigned to a new image ->
-    # the old root copy must be deleted from sdflash:, not flash:.
+def test_queued_root_delete_uses_cached_stage_fs():
+    # Device previously staged on sdflash: (cached). A root copy still queued
+    # for deletion must be deleted from sdflash:, not flash:.
     cat = FakeCatalog({"approved_image_id": "img2"},
                       {"id": "img2", "filename": "img2.bin", "size": 5,
                        "sha256": "abc"})
     deps, _, _, _, _, _, _, bundle_reclaimed = make_deps(
         cat, {"/stage/img2.bin": 5}, mode="bundle")
     deps = deps._replace(target_fs=lambda: ("sdflash:", 9_000_000_000))
-    state = {"image_id": "img1", "root_file": "img1.bin", "stage_fs": "sdflash:",
-             "img1": {"done": True, "copied": True}}
+    state = {"image_id": "img2", "stage_fs": "sdflash:",
+             "pending_root_deletes": ["img1.bin"]}
     iris_agent.run_once(CFG, deps, state)
     assert bundle_reclaimed == [("sdflash:", ["img1.bin"])]
 
 
-def test_reassignment_purge_defaults_to_flash_for_legacy_state():
+def test_queued_root_delete_defaults_to_flash_for_legacy_state():
     # Pre-#24 state has no stage_fs; the old root copy was placed on flash:.
     cat = FakeCatalog({"approved_image_id": "img2"},
                       {"id": "img2", "filename": "img2.bin", "size": 5,
                        "sha256": "abc"})
     deps, _, _, _, _, _, _, bundle_reclaimed = make_deps(
         cat, {"/stage/img2.bin": 5}, mode="bundle")
-    state = {"image_id": "img1", "root_file": "img1.bin",
-             "img1": {"done": True, "copied": True}}
+    state = {"image_id": "img2", "pending_root_deletes": ["img1.bin"]}
     iris_agent.run_once(CFG, deps, state)
     assert bundle_reclaimed == [("flash:", ["img1.bin"])]
 
@@ -657,7 +669,7 @@ def test_run_once_passes_catalog_size_to_copy_and_presence():
 
 
 def test_old_root_cleanup_root_present_no_catalog_size():
-    # reassignment: the replaced image's root_present check stays
+    # queued root delete: the replaced image's root_present check stays
     # presence-only -- no catalog size exists for an image that is about to
     # be deleted, so the call must NOT carry a third (size) argument.
     cat = FakeCatalog({"approved_image_id": "img2"},
@@ -672,7 +684,7 @@ def test_old_root_cleanup_root_present_no_catalog_size():
     deps, _, _, _, _, _, _, _ = make_deps(cat, {}, verify_ok=True)
     deps = deps._replace(root_present=root_present)
     state = {"schema_version": iris_agent._STATE_SCHEMA,
-             "image_id": "img1", "root_file": "old.bin"}
+             "image_id": "img2", "pending_root_deletes": ["old.bin"]}
     iris_agent.run_once(CFG, deps, state)
     assert ("old.bin", "flash:", None) in calls
 

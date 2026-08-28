@@ -341,11 +341,13 @@ def test_reassignment_a_b_a_mints_three_distinct_transfer_ids():
     run("imgA")
     a1 = state["imgA"]["tele"]["transfer_id"]
     run("imgB")
-    # PRODUCTION reassignment: run_once's own state.pop(prev) drops the old
-    # image entry (tele + transfer_id) when the assigned image changes — it does
-    # NOT call telemetry_report.clear_transfer(). Prove the old A cycle is truly
-    # gone from state, so the return to A below re-mints rather than reusing.
-    assert "imgA" not in state
+    # PRODUCTION reassignment: an image that leaves the assignment set is
+    # PARKED — its record survives (root copy kept), so the park pass is what
+    # ends the acquisition cycle, clearing the transfer identity. Prove the old
+    # A cycle is truly gone, so the return to A below re-mints rather than
+    # reusing.
+    assert state["imgA"]["parked"] is True
+    assert "transfer_id" not in state["imgA"].get("tele", {})
     run("imgA")
     a2 = state["imgA"]["tele"]["transfer_id"]
     assert len(set(tids)) == 3

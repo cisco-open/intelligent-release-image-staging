@@ -115,9 +115,10 @@ def ensure_transfer_id(state, img_id):
     """Return this acquisition cycle's transfer_id, minting+persisting a random
     one on the first observation of an image with no stored transfer (spec §2).
     Stable across ticks for the same cycle. The image-change boundary needs no
-    call here: run_once's own reassignment cleanup does state.pop(prev) on the
-    old image entry (dropping its tele + transfer_id), so the next acquisition of
-    that id mints fresh — an A->B->A sequence yields three distinct ids. P1
+    call here: an image that leaves the assignment set is parked, and the park
+    pass calls clear_transfer() on it (dropping transfer_id + sample_seq), so
+    the next acquisition of that id mints fresh — an A->B->A sequence yields
+    three distinct ids. P1
     boundaries (changed hash / local loss) keep the same image id and its stored
     transfer, so they intentionally reuse the existing id — dedupe/freshness
     still advance via report_id/sample_seq."""
@@ -133,14 +134,17 @@ def clear_transfer(state, img_id):
     """Drop only the transfer identity + sequence for an image, leaving the rest
     of its state intact.
 
-    NOT on the production reassignment path: run_once clears an old cycle by
-    popping the whole old image entry (state.pop(prev) in iris_agent.run_once),
-    which removes tele/transfer_id/sample_seq together. This narrower helper is
-    retained solely for the legacy pure v2 unit tests that simulate an
-    acquisition-cycle boundary in isolation (test_telemetry_v2:
-    test_a_b_a_mints_three_distinct_transfer_ids,
-    test_sample_seq_resets_for_a_new_transfer). Do not wire it into run_once —
-    the two paths would then both clear and disagree on cleanup ownership."""
+    This IS the production acquisition-cycle boundary, and there is exactly
+    one caller of it: iris_agent's park pass (_reconcile_set), which runs when
+    an image leaves the device's assignment set. Parking deletes that image's
+    stage copy, so its transfer is over; coming back into the set is a fresh
+    download and must mint a fresh transfer_id (an A->B->A sequence yields
+    three distinct ids). The record itself survives parking — the root copy it
+    placed is deliberately kept — so the whole-entry drop that used to end a
+    cycle (state.pop(prev), from the single-image agent) no longer happens and
+    this narrower clear owns the boundary. The pure v2 unit tests
+    (test_telemetry_v2) call it directly to simulate that boundary in
+    isolation."""
     tele = (state.get(img_id) or {}).get("tele")
     if isinstance(tele, dict):
         tele.pop("transfer_id", None)

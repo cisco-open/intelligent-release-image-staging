@@ -127,7 +127,7 @@ def _atomic_write_state(state_path, state):
 
 def _heartbeat(image, deps, stage_state="staging", target_fs=None,
                tele_on=True, stage_error=None, sample=None, stream_on=False,
-               observation=None):
+               observation=None, staged_image_ids=None):
     hb = {"current_image_id": image["id"] if image else None,
           "free_flash_bytes": deps.free_bytes(target_fs or "flash:"),
           "version": deps.version(),
@@ -141,6 +141,12 @@ def _heartbeat(image, deps, stage_state="staging", target_fs=None,
         hb["sample"] = sample
     if observation is not None:
         hb["telemetry_observation"] = observation
+    if staged_image_ids is not None:
+        # Which images of an assigned SET are fully staged. Sent only for a
+        # real set: a one-image device (and every agent that predates the
+        # field) leaves it out, and the server falls back to the
+        # current_image_id/stage_state pair for those.
+        hb["staged_image_ids"] = staged_image_ids
     return hb
 
 
@@ -536,12 +542,18 @@ def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now,
 
 def _protect_set(image, state):
     """Files reclaim must never delete: the running image, the image being
-    staged (+ its torrent/aria2 sidecars), and IRIS's own placed root copy."""
+    staged (+ its torrent/aria2 sidecars), and every root copy IRIS itself
+    placed — its own, the assigned set's other images, and the ones parked out
+    of the set, whose root copies are deliberately kept. Freeing space for one
+    image of a set must never eat another image of the same set."""
     keep = {image["filename"], image["filename"] + ".aria2",
             image["id"] + ".torrent"}
     rf = state.get("root_file")
     if rf:
         keep.add(rf)
+    for value in state.values():
+        if isinstance(value, dict) and value.get("root_file"):
+            keep.add(value["root_file"])
     return keep
 
 
@@ -664,65 +676,275 @@ def _reclaim_for_mode(deps, mode, target_prefix, image, state):
     return False
 
 
-def run_once(cfg, deps, state):
-    # Self-refresh the catalog token BEFORE any catalog work, once it's past
-    # half-life (or its expiry is unknown). Best-effort: deps.refresh() does the
-    # POST + atomic conf rewrite and returns the updated cfg, or None on failure
-    # — on failure we log and proceed on the CURRENT token (a 7d TTL + half-life
-    # refresh leaves a ~3.5d retry buffer, so a few failed ticks never strand
-    # the device).
-    if needs_refresh(time.time(),
-                     int(float(cfg.get("token_expires_at", 0) or 0)),
-                     _TOKEN_TTL, _TOKEN_REFRESH_AT):
-        new_cfg = deps.refresh()
-        if new_cfg is None:
-            deps.emit("TOKEN-REFRESH-FAIL",
-                      "catalog token refresh failed; proceeding on current token")
-        else:
-            cfg = new_cfg
+class _ImageTick:
+    """One image's deferred heartbeat + telemetry work for this tick.
+
+    The device is ONE row on the server, so an assigned set of images still
+    gets ONE heartbeat per tick — but its stage_state and staged_image_ids are
+    facts about the whole set, and cannot be settled until every image has been
+    checked. So _stage_image() decides what it would report, exactly where it
+    always did, and records the _heartbeat() arguments here; run_once()
+    composes the single payload, POSTs it, and replays the telemetry against
+    the response.
+
+    For a one-image set this is a pure deferral: the same payload, built from
+    the same arguments, POSTed at the same point in the tick (nothing runs
+    between the end of the loop and the POST), followed by the same telemetry
+    tick with the same response."""
+
+    __slots__ = ("hb", "tele", "stage_state", "stage_error")
+
+    # Index of _telemetry_tick()'s hb_resp parameter in the recorded call.
+    _HB_RESP_ARG = 6
+
+    def __init__(self):
+        self.hb = None
+        self.tele = None
+        self.stage_state = None
+        self.stage_error = None
+
+    def heartbeat(self, *args, **kwargs):
+        """Record this image's _heartbeat() call. Returns None because the
+        server's answer does not exist yet — replay() substitutes the real
+        response into the telemetry call that consumes it."""
+        self.hb = (args, kwargs)
+        # What this image would have reported on its own, kept out here so the
+        # set-level aggregate never has to re-run _heartbeat's device reads.
+        self.stage_state = (args[2] if len(args) > 2
+                            else kwargs.get("stage_state", "staging"))
+        self.stage_error = kwargs.get("stage_error")
+        return None
+
+    def telemetry(self, *args, **kwargs):
+        self.tele = (args, kwargs)
+
+    def build(self, staged_image_ids=None):
+        args, kwargs = self.hb
+        return _heartbeat(*args, staged_image_ids=staged_image_ids, **kwargs)
+
+    def replay(self, hb_resp):
+        if self.tele is None:
+            return
+        args, kwargs = self.tele
+        args = list(args)
+        args[self._HB_RESP_ARG] = hb_resp
+        _telemetry_tick(*args, **kwargs)
+
+
+# Top-level state keys that are NOT per-image records: scalars the agent keeps
+# about the device, plus telemetry's own bags. Everything else that looks like
+# an image record (below) is keyed by image id.
+_RESERVED_STATE_KEYS = frozenset((
+    "schema_version", "image_id", "root_file", "stage_fs",
+    "pending_root_deletes", "link", "frozen_pull", "stream_directives"))
+
+# Fields only a per-image record carries. Membership in the assigned set is
+# not enough to recognise one: the park pass has to find records for images
+# that are no longer assigned at all.
+_IMAGE_ENTRY_FIELDS = ("done", "copied", "sha", "tele", "root_file", "parked",
+                       "copy_attempts", "copy_terminal", "copy_reclaim_tried",
+                       "ios_copy_started", "reclaim_tried", "blocked_no_space",
+                       "stage_error")
+
+
+def _is_image_entry(value):
+    return isinstance(value, dict) and any(k in value
+                                           for k in _IMAGE_ENTRY_FIELDS)
+
+
+def _image_filename(deps, entry, img_id):
+    """The staged/placed filename of an image the loop is not staging.
+
+    Prefer what the device already recorded (free, and still right for an
+    image the catalog has since dropped), then ask the catalog. Returns None
+    if neither answers, or if the answer fails the filename whitelist that
+    guards every interpolation into an IOS command."""
+    fname = (entry or {}).get("root_file")
+    if not fname:
+        try:
+            image = deps.catalog.get_image(img_id)
+        except Exception:
+            image = None
+        fname = (image or {}).get("filename")
+    return fname if fname and _FILENAME_RE.match(fname) else None
+
+
+def _reconcile_set(deps, state, ids, stage_dir):
+    """Reconcile what is on the device against the assigned set, before staging.
+
+    PARK — an image the device has state for that is no longer in the set:
+    stop its torrent, delete its stage copy, mark the record parked. Its ROOT
+    copy is deliberately KEPT. An image dropped from a set is not necessarily
+    gone for good (sets are edited), and a surviving root copy turns re-adding
+    it into a presence-and-size check instead of another ~1.2 GB placement.
+    This replaces the old single-image reassignment cleanup, which queued the
+    old root copy for deletion — the opposite call. (pending_root_deletes
+    itself stays: state files written by that agent can still carry a queue,
+    and the drain + its whitelist re-check still run.)
+
+    UN-PARK — a parked image back in the set: clear the flag and the placement
+    retry gate, then let the normal path re-confirm it.
+
+    The aria2/stage-dir sweep is re-scoped with it: purge_others() now keeps
+    the WHOLE set. Called with one survivor it would delete the other assigned
+    images' staged files."""
+    # The old agent kept ONE top-level root_file, for its ONE image. Migrate it
+    # into that image's own record — the park pass needs to know the filename
+    # an image placed, and per-image is where placement is recorded now.
+    legacy_root = state.get("root_file")
+    legacy_id = state.get("image_id")
+    if legacy_root and legacy_id and isinstance(state.get(legacy_id, {}), dict):
+        state.setdefault(legacy_id, {}).setdefault("root_file", legacy_root)
+
+    for img_id in ids:
+        entry = state.get(img_id)
+        if isinstance(entry, dict) and entry.pop("parked", None):
+            # Back in the set: a durable placement failure from before must not
+            # outlive the reassignment, exactly as a fresh assignment cleared it.
+            _reset_copy_failures(entry)
+            deps.emit("UNPARKED", "%s back in the assignment set; re-checking "
+                                  "its staged and root copies" % img_id)
+
+    stale = [k for k in state
+             if k not in ids and k not in _RESERVED_STATE_KEYS
+             and _is_image_entry(state[k]) and not state[k].get("parked")]
+    if not stale and (not legacy_id or legacy_id in ids):
+        return                            # set unchanged: nothing to park or sweep
+
+    # What the sweep must spare: for every assigned image, the name the catalog
+    # gives it NOW (the file being downloaded) and the name it already placed
+    # (they differ if the image was republished under a new filename). An image
+    # that resolves to neither leaves the sweep disarmed, below.
+    keep_files = []
+    resolved = 0
+    for img_id in ids:
+        names = []
+        try:
+            image = deps.catalog.get_image(img_id)
+        except Exception:
+            image = None
+        for fname in ((image or {}).get("filename"),
+                      (state.get(img_id) or {}).get("root_file")):
+            if fname and _FILENAME_RE.match(fname) and fname not in names:
+                names.append(fname)
+        if names:
+            resolved += 1
+            keep_files.extend(names)
+    keep = set(keep_files)
+
+    for key in stale:
+        entry = state[key]
+        fname = _image_filename(deps, entry, key)
+        # Never touch a file the assigned set claims. A catalog that answers
+        # for a dropped id with an assigned image's filename (or two ids
+        # sharing one filename) must not cost the set its staged bytes.
+        if fname and fname not in keep:
+            try:
+                deps.aria_remove(fname)
+            except OSError:
+                # aria2 RPC down: best-effort. The stage copy still goes, and
+                # the purge sweep below drops the download once the RPC is
+                # back — a parked torrent must never stall the tick.
+                pass
+            deps.remove_stage(os.path.join(stage_dir, fname))
+        entry["parked"] = True
+        # The acquisition cycle ends here (the stage copy is gone), so the
+        # transfer identity must not outlive it: coming back into the set is a
+        # fresh download and mints a fresh transfer_id. This pass is the
+        # cycle-boundary owner the old state.pop(prev) used to be.
+        telemetry_report.clear_transfer(state, key)
+        deps.emit("PARKED", "%s removed from the assignment set; torrent "
+                            "stopped, stage copy deleted, root copy kept" % key)
+    # Only sweep when EVERY assigned image resolved to a filename. The sweep
+    # deletes every staged artifact outside the keep set, so an image the
+    # catalog merely failed to answer for this tick must never look unassigned
+    # — that would discard a fully downloaded image over a transient 404.
+    if resolved == len(ids):
+        deps.purge_others(keep_files, list(ids))
+
+
+def _staged_image_ids(state, ids):
+    """The images of the set this device has fully staged: content verified
+    (`done`) AND placed at the target-FS root (`copied`) — the same pair the
+    steady-state short-circuit trusts."""
+    return [i for i in ids
+            if (state.get(i) or {}).get("done") and (state.get(i) or {}).get("copied")]
+
+
+# Aggregate stage_state for a set of more than one image, most actionable
+# first. "ready" only when every image is staged; otherwise report whichever
+# gate or failure an image actually hit, rather than a bland "staging" for a
+# device that is out of room or has given up placing. Which images are done
+# rides staged_image_ids, and why one is not rides stage_error.
+_SET_STAGE_STATES = ("flash_full_seeding_only", "flash_full", "error",
+                     "copy_failed")
+
+
+def _send_set_heartbeat(deps, sid, state, ids, ticks):
+    """POST the tick's single heartbeat for the whole set; return the response.
+
+    A one-image set POSTs its recorded payload verbatim — same keys, same
+    values, no staged_image_ids (the server falls back to
+    current_image_id/stage_state for one-image agents, as it must for every
+    agent that predates the field)."""
+    live = [t for t in ticks if t.hb is not None]
+    if not live:
+        # Every image bailed before its heartbeat (a rejected catalog filename
+        # is the only such path). Say nothing, exactly as before.
+        return None
+    if len(ids) == 1:
+        return _send_heartbeat(deps, sid, live[0].build())
+    staged = _staged_image_ids(state, ids)
+    hb = live[0].build(staged_image_ids=staged)
+    seen = [t.stage_state for t in live]
+    hb["current_image_id"] = ids[0]       # compat: the FIRST image checked
+    if len(staged) == len(ids):
+        hb["stage_state"] = "ready"
+    else:
+        hb["stage_state"] = next((s for s in _SET_STAGE_STATES if s in seen),
+                                 "staging")
+    hb["stage_error"] = next((t.stage_error for t in live if t.stage_error),
+                             None)
+    return _send_heartbeat(deps, sid, hb)
+
+
+def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick):
+    """Stage ONE image of the assigned set and return its status string.
+
+    This is the whole of the pre-multi-image run_once() from the catalog
+    lookup down, unchanged: the same steady-state short-circuit, the same
+    sha/copy-to-root gate, the same download branch, the same return-string
+    vocabulary ("no-image" | "bad-filename" | "complete" | "bad-sha" |
+    "seeding-only" | "no-space" | "aria2-down" | "downloading"). run_once()
+    calls it once per assigned image.
+
+    Two things it no longer owns, because they belong to the whole set rather
+    than to one image:
+
+      * the heartbeat POST and the telemetry tick. The device has ONE row on
+        the server, so the set gets ONE heartbeat per tick — but its
+        stage_state and staged_image_ids can only be settled after every image
+        has been checked. So this function still decides exactly what it would
+        report, exactly where it always did, and records it on `tick`;
+        run_once composes the one payload, POSTs it, and replays the telemetry
+        against the answer. (The container-mode `transferring_to_ios` publish
+        is the exception: it exists to be seen BEFORE a long blocking
+        transfer, so it still POSTs on the spot.)
+      * the top-level state["image_id"] pointer, and parking/un-parking images
+        as they leave and re-enter the set (see _reconcile_set).
+    """
     sid = cfg["device_id"]
     stage_dir = cfg["stage_dir"]
-    tele_on = telemetry_report.enabled(cfg)
-    stream_on = telemetry_report.stream_enabled(cfg)
-
-    # Upgrade from an older agent: clear "copied" so the next copy_to_root
-    # re-verifies the flash-root copy instead of trusting the old flag.
-    # Keep root_file — the reassignment cleanup below needs it to delete the
-    # old root copy. Only emit UPGRADE if we actually cleared something.
-    if state.get("schema_version", 1) < _STATE_SCHEMA:
-        cleared = False
-        for v in state.values():
-            if isinstance(v, dict) and v.get("copied"):
-                v["copied"] = False
-                cleared = True
-        state["schema_version"] = _STATE_SCHEMA
-        if cleared:
-            deps.emit("UPGRADE", "re-verifying flash-root copy after upgrade")
-
-    policy = deps.catalog.get_policy(sid)
-    img_id = policy.get("approved_image_id")
-    if not img_id:
-        # Still heartbeat: an unassigned device must register (devices.json,
-        # swarm map, telemetry posture) or console onboarding can never see
-        # it come up — assignment only gates staging, not presence.
-        _send_heartbeat(deps, sid,
-                        _heartbeat(None, deps, "unassigned",
-                                   target_fs=cfg.get("target_fs"),
-                                   tele_on=tele_on, stream_on=stream_on,
-                                   observation=_not_active_observation(
-                                       tele_on, time.time())))
-        return "no-assignment"
     image = deps.catalog.get_image(img_id)
     if image is None:
         deps.emit("ERROR", "assigned image %s not in catalog" % img_id)
-        _send_heartbeat(deps, sid,
-                        _heartbeat(None, deps, "error",
-                                   target_fs=cfg.get("target_fs"),
-                                   tele_on=tele_on, stream_on=stream_on,
-                                   stage_error="assigned image %s not in catalog"
-                                               % img_id,
-                                   observation=_not_active_observation(
-                                       tele_on, time.time())))
+        tick.heartbeat(None, deps, "error",
+                       target_fs=cfg.get("target_fs"),
+                       tele_on=tele_on, stream_on=stream_on,
+                       stage_error="assigned image %s not in catalog"
+                                   % img_id,
+                       observation=_not_active_observation(
+                           tele_on, time.time()))
         return "no-image"
 
     # Reject a bad catalog filename before it reaches any IOS command.
@@ -745,9 +967,13 @@ def run_once(cfg, deps, state):
     # checks (no hashing). If content changed, or either copy went missing, fall
     # through to re-acquire (re-download a missing/stale staged file; re-copy a
     # missing root file).
+    # The image's OWN record decides, not a top-level "current image" pointer:
+    # every image of the set gets the same short-circuit, and an image that
+    # comes back into the set after being parked gets it too (its root copy
+    # survived parking, so this is the presence-and-size confirm that spares
+    # it a full re-placement).
     done_st = state.get(img_id, {})
-    if state.get("image_id") == img_id and done_st.get("done") \
-            and done_st.get("copied"):
+    if done_st.get("done") and done_st.get("copied"):
         content_ok = done_st.get("sha", image["sha256"]) == image["sha256"]
         staged_ok = deps.file_size(stage) is not None
         root_ok = deps.root_present(image["filename"], state.get("stage_fs", "flash:"),
@@ -755,14 +981,13 @@ def run_once(cfg, deps, state):
         if content_ok and staged_ok and root_ok:
             obs, _ = _build_observation(cfg, deps, state, img_id, stage,
                                         "steady", time.time())
-            hb = _send_heartbeat(deps, sid,
-                                 _heartbeat(image, deps, "ready",
-                                            target_fs=state.get("stage_fs"),
-                                            tele_on=tele_on,
-                                            observation=obs,
-                                            stream_on=stream_on))
-            _telemetry_tick(cfg, deps, state, img_id, stage, "steady",
-                            hb, time.time())
+            hb = tick.heartbeat(image, deps, "ready",
+                                target_fs=state.get("stage_fs"),
+                                tele_on=tele_on,
+                                observation=obs,
+                                stream_on=stream_on)
+            tick.telemetry(cfg, deps, state, img_id, stage, "steady",
+                           hb, time.time())
             return "complete"
         deps.emit("RECHECK", "%s re-acquiring (content=%s staged=%s root=%s)"
                   % (image["filename"], content_ok, staged_ok, root_ok))
@@ -775,24 +1000,6 @@ def run_once(cfg, deps, state):
         done_st["done"] = staged_ok       # keep 'done' only for a root-only loss
         done_st["copied"] = False         # always re-copy
 
-    # reassigned to a DIFFERENT image? clean up everything from the old one FIRST
-    # (operator requirement: no stale files on the device). Removes the old torrent
-    # from aria2c, deletes old staged files, and deletes the old flash-root copy —
-    # but ONLY the one IRIS itself placed there (tracked in state).
-    prev = state.get("image_id")
-    if prev and prev != img_id:
-        deps.purge_others(image["filename"], img_id)
-        old_root = state.pop("root_file", None)
-        if old_root and old_root != image["filename"]:
-            pending = state.setdefault("pending_root_deletes", [])
-            if old_root not in pending:
-                pending.append(old_root)
-        state.pop(prev, None)             # old image's done/copied flags
-        # Returning to an image id seen in older state is still a new catalog
-        # assignment and is allowed to clear that image's terminal retry gate.
-        _reset_copy_failures(state.setdefault(img_id, {}))
-    state["image_id"] = img_id
-
     # Delete replaced flash-root images, VERIFYING each is actually gone
     # before claiming CLEANUP: AAA nodes silently no-op a raw exec `delete`
     # (the reclaim/copyroot EEM applets exist for exactly that), so the
@@ -802,6 +1009,10 @@ def run_once(cfg, deps, state):
     # retried every tick (the applet may still be running when we look; the
     # next tick's re-check settles it). The whitelist re-check guards the
     # destructive interpolation against a hand-edited state file.
+    # NOTHING QUEUES HERE ANY MORE: an image dropped from the assignment set is
+    # parked and its root copy deliberately kept (_reconcile_set). The drain
+    # stays for state files written by the agent that did queue replaced root
+    # copies — those deletes were promised to an operator and must still land.
     pending = state.get("pending_root_deletes") or []
     if pending:
         fs = state.get("stage_fs", "flash:")
@@ -892,16 +1103,15 @@ def run_once(cfg, deps, state):
                         obs, peers = _build_observation(
                             cfg, deps, state, img_id, stage, "seeding-only",
                             time.time())
-                        hb = _send_heartbeat(
-                            deps, sid, _heartbeat(image, deps,
-                                                  "flash_full_seeding_only",
-                                                  target_fs=state.get("stage_fs"),
-                                                  tele_on=tele_on,
-                                                  observation=obs,
-                                                  stream_on=stream_on))
-                        _telemetry_tick(cfg, deps, state, img_id, stage,
-                                        "seeding-only", hb, time.time(),
-                                        peers=peers)
+                        hb = tick.heartbeat(image, deps,
+                                            "flash_full_seeding_only",
+                                            target_fs=state.get("stage_fs"),
+                                            tele_on=tele_on,
+                                            observation=obs,
+                                            stream_on=stream_on)
+                        tick.telemetry(cfg, deps, state, img_id, stage,
+                                       "seeding-only", hb, time.time(),
+                                       peers=peers)
                         return "seeding-only"
                 st.pop("blocked_no_space", None)
                 # Container-mode IOx devices must SCP the completed image into
@@ -922,6 +1132,10 @@ def run_once(cfg, deps, state):
                               "%s retry deferred until %d"
                               % (image["filename"], st["copy_next_ts"]))
                 elif deps.io_transfer:
+                    # POSTed on the spot, not deferred with the tick's set
+                    # heartbeat: its whole point is to be visible BEFORE the
+                    # long blocking transfer below, so the Console does not sit
+                    # on an ambiguous "staging" for minutes.
                     _send_heartbeat(
                         deps, sid, _heartbeat(image, deps, "transferring_to_ios",
                                               target_fs=target_prefix,
@@ -942,7 +1156,14 @@ def run_once(cfg, deps, state):
                         pass
                     elif attempted and result:
                         st["copied"] = True
-                        state["root_file"] = image["filename"]
+                        # Per image, because a set can have several root copies
+                        # placed at once — and parking one has to know which
+                        # file it placed. The top-level key stays as the legacy
+                        # mirror for the FIRST image of the set (state files are
+                        # read by older code paths and by _protect_set).
+                        st["root_file"] = image["filename"]
+                        if state.get("image_id") == img_id:
+                            state["root_file"] = image["filename"]
                         _reset_copy_failures(st)
                     else:
                         if attempted:
@@ -995,18 +1216,17 @@ def run_once(cfg, deps, state):
             # the heartbeat never claims a verified root copy that isn't there.
             obs, _ = _build_observation(cfg, deps, state, img_id, stage,
                                         "seeding-only", time.time())
-            hb = _send_heartbeat(
-                deps, sid, _heartbeat(image, deps,
-                                       "ready" if st.get("copied") else
-                                       ("copy_failed" if st.get("copy_terminal")
-                                        else "staging"),
-                                       target_fs=state.get("stage_fs"),
-                                       tele_on=tele_on,
-                                       stage_error=st.get("stage_error"),
-                                       observation=obs,
-                                       stream_on=stream_on))
-            _telemetry_tick(cfg, deps, state, img_id, stage, "copied",
-                            hb, time.time())
+            hb = tick.heartbeat(image, deps,
+                                "ready" if st.get("copied") else
+                                ("copy_failed" if st.get("copy_terminal")
+                                 else "staging"),
+                                target_fs=state.get("stage_fs"),
+                                tele_on=tele_on,
+                                stage_error=st.get("stage_error"),
+                                observation=obs,
+                                stream_on=stream_on)
+            tick.telemetry(cfg, deps, state, img_id, stage, "copied",
+                           hb, time.time())
             return "complete"
         deps.emit("ERROR", "%s sha256 MISMATCH - discarding" % image["filename"])
         # Record the mismatch fact INTO STATE at the decision point (spec §3D):
@@ -1044,13 +1264,12 @@ def run_once(cfg, deps, state):
                        % (image["filename"], free,
                           stage_bytes + flashcheck.HEADROOM,
                          mode))
-            hb = _send_heartbeat(
-                deps, sid, _heartbeat(image, deps, "flash_full",
-                                      target_fs=state.get("stage_fs"),
-                                      tele_on=tele_on,
-                                      stream_on=stream_on))
-            _telemetry_tick(cfg, deps, state, img_id, stage, "no-space",
-                            hb, time.time())
+            hb = tick.heartbeat(image, deps, "flash_full",
+                                target_fs=state.get("stage_fs"),
+                                tele_on=tele_on,
+                                stream_on=stream_on)
+            tick.telemetry(cfg, deps, state, img_id, stage, "no-space",
+                           hb, time.time())
             return "no-space"
 
     # stage the torrent, then kick aria2c — but ONLY if the image file isn't there
@@ -1091,13 +1310,11 @@ def run_once(cfg, deps, state):
                     image_id=img_id)
             except Exception:
                 pass
-            _send_heartbeat(deps, sid,
-                            _heartbeat(image, deps, "error",
-                                       target_fs=state.get("stage_fs"),
-                                       tele_on=tele_on, stream_on=stream_on,
-                                       observation=rpc_obs,
-                                       stage_error="aria2c RPC unreachable: %s"
-                                                   % e))
+            tick.heartbeat(image, deps, "error",
+                           target_fs=state.get("stage_fs"),
+                           tele_on=tele_on, stream_on=stream_on,
+                           observation=rpc_obs,
+                           stage_error="aria2c RPC unreachable: %s" % e)
             return "aria2-down"
         deps.emit("STAGING", "downloading %s via private swarm" % image["filename"])
     else:
@@ -1107,14 +1324,108 @@ def run_once(cfg, deps, state):
                   % (image["filename"], have * 100 // size, have >> 20, size >> 20))
     obs, peers = _build_observation(cfg, deps, state, img_id, stage,
                                     "downloading", time.time())
-    hb = _send_heartbeat(deps, sid, _heartbeat(image, deps,
-                                               target_fs=state.get("stage_fs"),
-                                               tele_on=tele_on,
-                                               observation=obs,
-                                               stream_on=stream_on))
-    _telemetry_tick(cfg, deps, state, img_id, stage, "downloading",
-                    hb, time.time(), peers=peers)
+    hb = tick.heartbeat(image, deps,
+                        target_fs=state.get("stage_fs"),
+                        tele_on=tele_on,
+                        observation=obs,
+                        stream_on=stream_on)
+    tick.telemetry(cfg, deps, state, img_id, stage, "downloading",
+                   hb, time.time(), peers=peers)
     return "downloading"
+
+
+def run_once(cfg, deps, state):
+    # Self-refresh the catalog token BEFORE any catalog work, once it's past
+    # half-life (or its expiry is unknown). Best-effort: deps.refresh() does the
+    # POST + atomic conf rewrite and returns the updated cfg, or None on failure
+    # — on failure we log and proceed on the CURRENT token (a 7d TTL + half-life
+    # refresh leaves a ~3.5d retry buffer, so a few failed ticks never strand
+    # the device).
+    if needs_refresh(time.time(),
+                     int(float(cfg.get("token_expires_at", 0) or 0)),
+                     _TOKEN_TTL, _TOKEN_REFRESH_AT):
+        new_cfg = deps.refresh()
+        if new_cfg is None:
+            deps.emit("TOKEN-REFRESH-FAIL",
+                      "catalog token refresh failed; proceeding on current token")
+        else:
+            cfg = new_cfg
+    sid = cfg["device_id"]
+    stage_dir = cfg["stage_dir"]
+    tele_on = telemetry_report.enabled(cfg)
+    stream_on = telemetry_report.stream_enabled(cfg)
+
+    # Upgrade from an older agent: clear "copied" so the next copy_to_root
+    # re-verifies the flash-root copy instead of trusting the old flag.
+    # Keep root_file — the park pass below needs it to know which file each
+    # image placed. Only emit UPGRADE if we actually cleared something.
+    # Runs ONCE per tick, before the set is reconciled or any image is staged.
+    if state.get("schema_version", 1) < _STATE_SCHEMA:
+        cleared = False
+        for v in state.values():
+            if isinstance(v, dict) and v.get("copied"):
+                v["copied"] = False
+                cleared = True
+        state["schema_version"] = _STATE_SCHEMA
+        if cleared:
+            deps.emit("UPGRADE", "re-verifying flash-root copy after upgrade")
+
+    policy = deps.catalog.get_policy(sid)
+    # The server assigns an ORDERED SET of images (at most 10). Older servers,
+    # and policy rows they wrote, carry only the singular approved_image_id —
+    # fall back to it and stage a set of one, which is byte-for-byte the old
+    # single-image behaviour.
+    ids = policy.get("approved_image_ids")
+    if not isinstance(ids, (list, tuple)) or not ids:
+        single = policy.get("approved_image_id")
+        ids = [single] if single else []
+    # De-duplicate, keeping assignment order. The server rejects duplicates, so
+    # this only guards a hand-edited policy: staging the same id twice in one
+    # tick would double every emit and list it twice in staged_image_ids.
+    ids = list(dict.fromkeys(i for i in ids if i))
+    if not ids:
+        # Still heartbeat: an unassigned device must register (devices.json,
+        # swarm map, telemetry posture) or console onboarding can never see
+        # it come up — assignment only gates staging, not presence.
+        _send_heartbeat(deps, sid,
+                        _heartbeat(None, deps, "unassigned",
+                                   target_fs=cfg.get("target_fs"),
+                                   tele_on=tele_on, stream_on=stream_on,
+                                   observation=_not_active_observation(
+                                       tele_on, time.time())))
+        return "no-assignment"
+
+    # Settle what the set means for what is already on the device — park what
+    # left it, un-park what came back — BEFORE staging anything.
+    _reconcile_set(deps, state, ids, stage_dir)
+
+    # Legacy bookkeeping: the old agent's one-image world had a single
+    # top-level "current image" pointer, and readers of the state file (plus
+    # the top-level root_file mirror written on placement) still expect it.
+    # Keep writing the FIRST image of the set; the per-image records under
+    # state[<image id>] are the real thing.
+    state["image_id"] = ids[0]
+
+    ticks = []
+    statuses = []
+    for img_id in ids:
+        tick = _ImageTick()
+        ticks.append(tick)
+        statuses.append(_stage_image(cfg, deps, state, img_id, tele_on,
+                                     stream_on, tick))
+
+    # ONE heartbeat for the whole set (the device is one row on the server),
+    # then each image's telemetry replayed against the answer it carried.
+    hb_resp = _send_set_heartbeat(deps, sid, state, ids, ticks)
+    for tick in ticks:
+        tick.replay(hb_resp)
+
+    # A one-image set returns EXACTLY the string the single-image agent did —
+    # bootstrap logs and tests key off that vocabulary. A real set reports
+    # every image's status, in the order the server assigned them.
+    if len(ids) == 1:
+        return statuses[0]
+    return "multi:" + ",".join(statuses)
 
 
 # ---- catalog TLS context selection (#12: verify-if-present) ----
@@ -2071,17 +2382,27 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
     def aria_session():
         return _aria_session_impl(_rpc)
 
-    def purge_others(keep_filename, keep_id):
-        # 1. drop every download except the current image from aria2c
+    def purge_others(keep_filenames, keep_ids):
+        # Keep the WHOLE assigned SET, not one survivor: a device stages every
+        # image the server assigned it, so anything outside that set is what
+        # this sweep is for. (Called with a single survivor it would delete the
+        # other assigned images' downloads and staged files.)
+        keep_filenames = list(keep_filenames)
+        # 1. drop every download outside the assigned set from aria2c
         for gid, names in _aria_downloads(_rpc):
-            if keep_filename not in names:
+            if not any(k in names for k in keep_filenames):
                 _aria_drop(_rpc, gid)
         # 2. delete stale staged image artifacts (never the agent's own files)
         import glob
-        keep = {keep_filename, keep_filename + ".aria2", keep_id + ".torrent",
-                # this image's own peer-receipt snapshot: it may be sitting
-                # here waiting for the completion tick to fold it in
-                keep_filename + telemetry_report.RECEIPT_SIDECAR_SUFFIX}
+        keep = set()
+        for keep_filename in keep_filenames:
+            keep.update((keep_filename, keep_filename + ".aria2",
+                         # this image's own peer-receipt snapshot: it may be
+                         # sitting here waiting for the completion tick to fold
+                         # it in
+                         keep_filename
+                         + telemetry_report.RECEIPT_SIDECAR_SUFFIX))
+        keep.update(keep_id + ".torrent" for keep_id in keep_ids)
         for path in glob.glob(os.path.join(cfg["stage_dir"], "*")):
             base = os.path.basename(path)
             if base in keep:
