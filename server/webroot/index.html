@@ -124,10 +124,10 @@
             <option value="inband">inband</option>
             <option value="router-routed">router-routed</option>
             <option value="router-nat">router-nat</option>
-            <option value="legacy">legacy</option>
+            <option value="legacy">Inventory only — attachment not chosen</option>
           </select>
-          <select id="dev-filter-platform" aria-label="Filter by platform">
-            <option value="">Platform: any</option>
+          <select id="dev-filter-platform" aria-label="Filter by agent install">
+            <option value="">Agent install: any</option>
             <option value="guestshell">Guest Shell</option>
             <option value="iox">IOx</option>
             <option value="router">Router</option>
@@ -207,7 +207,7 @@
           <input id="df-mask" placeholder="App mask">
           <input id="df-gateway" placeholder="App gateway (VPG IP for routers)" title="For router modes, this is the IP configured on VirtualPortGroup<N>">
           <input id="df-model" placeholder="model (e.g. C9300-48UXM / IE-3400 / C8000V) — optional">
-          <select id="df-platform"><option value="">Platform - auto by model</option><option value="guestshell">Guest Shell</option><option value="iox">IOx</option><option value="router">Router (Guest Shell via VirtualPortGroup)</option></select>
+          <select id="df-platform"><option value="">Agent install - auto by model</option><option value="guestshell">Guest Shell</option><option value="iox">IOx</option><option value="router">Router (Guest Shell via VirtualPortGroup)</option></select>
           <select id="df-cred"><option value="">— no credential —</option></select>
           <button class="btn" type="submit">Save device</button>
           <button class="btn ghost" type="button" id="df-cancel">Cancel</button>
@@ -232,7 +232,7 @@
           </form>
         </div>
         <table class="tbl" id="devices">
-          <thead><tr><th><input type="checkbox" id="mark-all"></th><th>Device</th><th>IP</th><th>Model</th><th>Management type</th><th>Platform</th><th>Credential</th><th>Assigned images</th><th>Telemetry</th><th>Peer policy</th><th>Status</th></tr></thead>
+          <thead><tr><th><input type="checkbox" id="mark-all"></th><th>Device</th><th>IP</th><th>Model</th><th>Management type</th><th>Agent install</th><th>Credential</th><th>Assigned images</th><th>Telemetry</th><th>Peer policy</th><th>Status</th></tr></thead>
           <tbody id="dev-rows"></tbody>
         </table>
         <!-- Slides in from the RIGHT, like the deployment-log drawer. It used

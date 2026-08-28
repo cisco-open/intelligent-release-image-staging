@@ -143,6 +143,85 @@ def test_router_platform_and_management_type_are_bidirectional(tmp_path):
         fs.upsert(dict(_ROUTED, model="C8000V", platform="guestshell"))
 
 
+def test_validate_record_model_guardrail_matrix(tmp_path):
+    """A device's explicit platform must be one install_options_for allows for
+    its model -- gui_onboard.install_options_for and validate_record share
+    one table, so these two views of "what can this model run" cannot drift
+    apart. Every family gets one accepted platform and (where the earlier
+    router/model coupling checks don't already intercept it) one refused
+    platform."""
+    fs = _fs(tmp_path)
+    ok = [
+        dict(_ROUTED, device_id="c9-gs", model="C9300-48UXM", platform="guestshell"),
+        dict(_ROUTED, device_id="c9-iox", model="C9300-48UXM", platform="iox"),
+        dict(_ROUTED, device_id="ie3-iox", model="IE-3400", platform="iox"),
+        dict(_ROUTED, device_id="ir11-iox", model="IR1101", platform="iox"),
+        dict(_ROUTED, device_id="ir18-iox", model="IR1800", platform="iox"),
+        dict(_ROUTED, device_id="isr-gs", model="ISR4451", platform="guestshell"),
+        dict(_ROUTED, device_id="asr-gs", model="ASR1001", platform="guestshell"),
+        dict(_ROUTED, device_id="csr-gs", model="CSR1000v", platform="guestshell"),
+        dict(_ROUTER, device_id="c8-router", model="C8000V", platform="router"),
+    ]
+    for record in ok:
+        saved = fs.upsert(record)
+        assert saved["platform"] == record["platform"], record["device_id"]
+
+    bad = [
+        # the motivating incident: an IOS-XR 8201 offered guestshell/iox
+        dict(_ROUTED, device_id="xr-8201-gs", model="8201", platform="guestshell"),
+        dict(_ROUTED, device_id="xr-8201-iox", model="8201", platform="iox"),
+        # an IOx-only family offered guestshell
+        dict(_ROUTED, device_id="ie3-gs", model="IE-3400", platform="guestshell"),
+        # a Guest-Shell-only family offered iox
+        dict(_ROUTED, device_id="isr-iox", model="ISR4451", platform="iox"),
+    ]
+    for record in bad:
+        with pytest.raises(ValueError, match="cannot run"):
+            fs.upsert(record)
+
+
+def test_validate_record_refuses_8201_guestshell_explicitly():
+    # The exact scenario from the brief: model 8201 (Cisco 8000-series,
+    # IOS-XR) must never accept platform=guestshell, whether typed at the
+    # console or smuggled through a CSV import.
+    with pytest.raises(ValueError) as exc:
+        gui_fleet.validate_record(dict(_ROUTED, device_id="d1", model="8201",
+                                       platform="guestshell"))
+    assert "8201" in str(exc.value) and "guestshell" in str(exc.value)
+
+
+def test_validate_record_xr_os_family_refuses_explicit_platform():
+    # os_family=="xr" forbids every explicit platform even for a model this
+    # table has never seen before -- the ASR9k-shaped case: a model that
+    # superficially matches the ISR/ASR/CSR guestshell family but is actually
+    # IOS-XR hardware.
+    with pytest.raises(ValueError, match="cannot run"):
+        gui_fleet.validate_record(dict(_ROUTED, device_id="d1", model="ASR-9906",
+                                       platform="guestshell", os_family="xr"))
+
+
+def test_validate_record_unknown_model_does_not_restrict_platform(tmp_path):
+    # None (unknown/blank model) means "no guardrail opinion" -- an
+    # unrecognized model must still accept any structurally-valid platform,
+    # exactly as before this guardrail existed.
+    fs = _fs(tmp_path)
+    saved = fs.upsert(dict(_ROUTED, device_id="d1", model="WS-C2960", platform="guestshell"))
+    assert saved["platform"] == "guestshell"
+
+
+def test_validate_record_normalizes_sys_suffix_on_import(tmp_path):
+    # '8201-SYS' and '8201' must be stored identically -- and, since the
+    # normalized form fails the SAME guardrail as the bare number, a
+    # platform=guestshell row for '8201-SYS' is refused exactly like '8201'
+    # is: no suffix-shaped loophole for a CSV import to smuggle through.
+    normalized = gui_fleet.validate_record(dict(_ROUTED, device_id="d1",
+                                                model="8201-SYS", platform=""))
+    assert normalized["model"] == "8201"
+    fs = _fs(tmp_path)
+    with pytest.raises(ValueError, match="cannot run"):
+        fs.upsert(dict(_ROUTED, device_id="d2", model="8201-SYS", platform="guestshell"))
+
+
 def test_management_type_transitions_clear_only_incompatible_fields(tmp_path):
     fs = _fs(tmp_path)
     fs.upsert(dict(_ROUTED))
@@ -336,11 +415,18 @@ def test_csv_reimport_keeps_a_cached_os_family(tmp_path):
     -- an operator typing it would be a new way to lie to the system. But
     import_csv REPLACES a row wholesale, so without carrying it across, the
     documented export -> edit -> re-import bulk workflow silently drops the
-    classification and reopens the IOS-XR misroute on the next onboard."""
+    classification and reopens the IOS-XR misroute on the next onboard.
+
+    Platform is blanked here: os_family="xr" now forbids every explicit
+    platform (the model-aware install guardrail), and a device actually
+    classified "xr" would never carry one -- this test is purely about the
+    os_family field surviving the round trip, not about resolving
+    guestshell/iox/router."""
     fs = _fs(tmp_path)
-    fs.upsert(dict(_ROUTED, os_family="xr"))
+    seed = dict(_ROUTED, os_family="xr", platform="")
+    fs.upsert(seed)
     header = ",".join(gui_fleet.CSV_V2_COLS)
-    row = ",".join(str(_ROUTED.get(c, "")) for c in gui_fleet.CSV_V2_COLS)
+    row = ",".join(str(seed.get(c, "")) for c in gui_fleet.CSV_V2_COLS)
 
     fs.import_csv(header + "\n" + row + "\n")
 

@@ -1082,6 +1082,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 # server-clock-to-server-clock in the UI (skewed lab VMs)
                 self._json(200, {"devices": self._device_view(),
                                   "now": int(time.time())}); return
+            if path == "/api/install-options":
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                qs = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                model = (qs.get("model") or [""])[0]
+                self._json(200, {"options": gui_onboard.install_options_for(model)}); return
             if path.startswith("/api/devices/") and path.endswith("/plan"):
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return

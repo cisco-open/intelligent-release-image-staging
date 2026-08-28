@@ -11,6 +11,7 @@ import re
 import tempfile
 import time
 
+import gui_onboard
 import secrets_store
 
 
@@ -118,6 +119,12 @@ def validate_record(record, allow_legacy=False):
     if platform not in ("", "guestshell", "iox", "router"):
         raise ValueError("platform must be guestshell, iox, or router")
     model = result.get("model", "")
+    if model:
+        # '8201-SYS' and '8201' must read identically wherever a model is
+        # stored, whether it arrived here via console/CSV entry or (in
+        # gui_onboard) a live probe.
+        model = gui_onboard.normalize_model(model)
+        result["model"] = model
     if model and not _MODEL_RE.fullmatch(model):
         raise ValueError("model contains unsupported characters")
     model_is_c8k = bool(_C8K_RE.match(model))
@@ -132,6 +139,17 @@ def validate_record(record, allow_legacy=False):
         raise ValueError("Catalyst 8000 models require management_type router-routed or router-nat")
     elif effective_platform == "router":
         raise ValueError("platform router requires management_type router-routed or router-nat")
+    if platform:
+        # Model-aware guardrail: an operator (or a CSV import) must not be
+        # able to force an install method the hardware cannot run -- e.g.
+        # 'guestshell' on an IOS-XR 8201, which has no Guest Shell at all.
+        # None means the model is blank or not a recognized family, so there
+        # is nothing to check against; the c8k-specific rules above already
+        # cover Catalyst 8000.
+        allowed = gui_onboard.install_options_for(model, result.get("os_family", ""))
+        if allowed is not None and platform not in allowed:
+            raise ValueError("model %s cannot run %s; allowed: %s"
+                             % (model, platform, ", ".join(allowed) or "none"))
     result["schema_version"] = 2
     result["management_type"] = attachment
     if attachment == "routed":

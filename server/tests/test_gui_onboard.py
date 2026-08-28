@@ -494,6 +494,72 @@ def test_resolve_platform_unambiguous_model_does_not_probe():
     assert calls == []
 
 
+# --- install_options_for / normalize_model -------------------------------
+
+def test_install_options_for_c9k_allows_guestshell_and_iox():
+    for model in ("C9300-48UXM", "c9300-48uxm", "C9500-24Y4C"):
+        assert gui_onboard.install_options_for(model, "") == ["guestshell", "iox"], model
+
+
+def test_install_options_for_iox_only_models():
+    for model in ("IE-3400", "ie-3400", "IR1101", "IR1800"):
+        assert gui_onboard.install_options_for(model, "") == ["iox"], model
+
+
+def test_install_options_for_c8k_router_only():
+    for model in ("C8000V", "C8200-1N-4T", "C8300-2N2S-6T", "C8500-12X"):
+        assert gui_onboard.install_options_for(model, "") == ["router"], model
+
+
+def test_install_options_for_legacy_router_family_guestshell():
+    for model in ("ISR4451", "ASR1001", "CSR1000v"):
+        assert gui_onboard.install_options_for(model, "") == ["guestshell"], model
+
+
+def test_install_options_for_xr_os_family_refuses_everything():
+    # os_family alone is authoritative, independent of what the model prefix
+    # would otherwise suggest -- e.g. ASR-9906 matches the ISR/ASR/CSR prefix
+    # but is IOS-XR hardware, the exact misroute this guardrail closes.
+    assert gui_onboard.install_options_for("ASR-9906", "xr") == []
+    assert gui_onboard.install_options_for("C9300-48UXM", "xr") == []
+
+
+def test_install_options_for_8xxx_model_refuses_even_without_os_family():
+    # Belt-and-suspenders: an XR-shaped model number refuses on its own, even
+    # when os_family was never probed/cached -- the 8201 incident this
+    # guardrail closes (an 8201 offered iox and died on an XE-flavoured arch
+    # error).
+    for model in ("8201", "8201-SYS", "820", "8999"):
+        assert gui_onboard.install_options_for(model, "") == [], model
+    assert gui_onboard.install_options_for("8201") == []   # os_family omitted entirely
+
+
+def test_install_options_for_unknown_or_blank_model_returns_none():
+    # None means "no guardrail opinion" -- console still offers Auto, and
+    # validate_record does not restrict the explicit platform choice.
+    assert gui_onboard.install_options_for("", "") is None
+    assert gui_onboard.install_options_for(None, None) is None
+    assert gui_onboard.install_options_for("WS-C2960", "") is None
+
+
+def test_install_options_for_matches_model_platforms_table():
+    # The guardrail table and the auto-resolution table must not drift: every
+    # family's auto-resolution default (what resolve_platform picks) is the
+    # FIRST entry install_options_for returns for that same model.
+    for model in ("C9300-48UXM", "IE-3400", "IR1101", "C8000V", "ISR4451"):
+        options = gui_onboard.install_options_for(model, "")
+        assert options[0] == gui_onboard.resolve_platform({"device_id": "d", "model": model})
+
+
+def test_normalize_model_strips_sys_suffix():
+    assert gui_onboard.normalize_model("8201-SYS") == "8201"
+    assert gui_onboard.normalize_model("8201") == "8201"
+    assert gui_onboard.normalize_model("C9300-48UXM") == "C9300-48UXM"   # untouched
+    assert gui_onboard.normalize_model("") == ""
+    assert gui_onboard.normalize_model(None) == ""
+    assert gui_onboard.normalize_model("  8201-SYS  ") == "8201"         # whitespace trimmed
+
+
 # --- parse_os_family ----------------------------------------------------
 
 def test_parse_os_family_xe_banner():
@@ -618,6 +684,33 @@ def test_probe_resolves_iox_and_caches_model(tmp_path):
     assert {"device_id": "d1", "model": "IE-3400"} in fleet.upserts
     # the job line reports the model the probe just found, not a placeholder
     assert any("platform: iox (model IE-3400)" in l for l in job["lines"])
+
+
+def test_probe_normalizes_sys_suffix_before_caching(tmp_path):
+    # '8201-SYS' and '8201' must read identically wherever a model is
+    # recorded -- gui_fleet.validate_record normalizes it on the console/CSV
+    # path; the probe must do the same on ITS path, or the two would drift
+    # (a device onboarded via a live probe could carry a suffixed model the
+    # fleet UI/API never sees on a console-entered one).
+    fleet = _iox_fleet()
+    creds = _iox_creds()
+    dev = {"device_id": "d1", "credential_profile_id": "lab"}
+    env = {"DEVICE_IP": "10.0.0.1"}
+
+    def fake_probe(d, e):
+        return "8201-SYS"
+
+    svc = gui_onboard.OnboardService(
+        fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
+        run_fn=lambda *a, **k: 0, probe_fn=fake_probe,
+        artifacts_dir=str(tmp_path))
+    # '8201' has no _MODEL_PLATFORMS entry (a bare-digit IOS-XR model number),
+    # so resolution itself still fails after the probe runs -- what matters
+    # here is what got cached onto the fleet row, not whether onboarding
+    # proceeds.
+    with pytest.raises(ValueError):
+        svc._resolve("d1", dev, env, "onboard")
+    assert {"device_id": "d1", "model": "8201"} in fleet.upserts
 
 
 def test_probe_does_not_wipe_cached_os_family(tmp_path):

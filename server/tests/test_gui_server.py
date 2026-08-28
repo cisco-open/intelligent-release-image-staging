@@ -6283,6 +6283,104 @@ def test_devices_filter_every_column_and_act_on_the_filtered_set():
     assert "applyDeviceFilters" in js
 
 
+def test_agent_install_rename_and_inventory_only_label():
+    """Vocabulary fix: the 'platform' field (guestshell/iox/router) read as
+    networking hardware to operators, so its DISPLAY text becomes "Agent
+    install" everywhere it appears -- the add-form placeholder, the devices-
+    table header, and the filter label. Separately, the 'legacy'/
+    'legacy_routed' attachment value displayed as the word "legacy", which
+    reads like a real inventory state rather than "attachment not chosen
+    yet" -- it becomes "Inventory only — attachment not chosen". Both are
+    display-only: the wire field name 'platform', its values (guestshell/
+    iox/router), and the attachment values (legacy/legacy_routed) are
+    unchanged."""
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+
+    # index.html: filter option, filter label, table header, add-form select
+    assert '<option value="legacy">Inventory only — attachment not chosen</option>' in html
+    assert 'aria-label="Filter by agent install"' in html
+    assert '<option value="">Agent install: any</option>' in html
+    assert '<th>Agent install</th>' in html
+    assert 'Agent install - auto by model' in html
+    # the old wording is gone everywhere it used to appear as a label
+    assert '>Platform<' not in html
+    assert 'Platform: any' not in html
+    assert 'Filter by platform"' not in html
+    assert '>legacy</option>' not in html
+
+    # the field id, its values, and the attachment values are untouched
+    assert 'id="df-platform"' in html and 'id="dev-filter-platform"' in html
+    assert 'value="guestshell"' in html and 'value="iox"' in html
+    assert 'value="router"' in html
+    assert '<option value="legacy"' in html
+
+    # app.js: the row-attachment display and the status/detail lines
+    assert "'Inventory only — attachment not chosen'" in js
+    assert "attachment === 'legacy_routed' || attachment === 'legacy'" in js
+    assert "'Agent install updated for '" in js
+    assert "'Agent install update failed: '" in js
+    assert "['Agent install', esc(res.platform" in js
+
+
+def test_add_device_form_model_field_precedes_agent_install_select():
+    """Agent-install options depend on the model (gui_onboard.
+    install_options_for), so the model input must render BEFORE the agent-
+    install select in the add-device form's DOM order -- app.js's
+    refreshInstallOptions reads df-model's live value to filter df-platform's
+    options as the operator types, before the field it is about to filter
+    even exists otherwise."""
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    assert html.index('id="df-model"') < html.index('id="df-platform"')
+
+
+def test_add_device_form_filters_install_options_live_by_model():
+    """Source guard for the /api/install-options wiring: as the operator
+    types a model, the agent-install select is refetched and repainted --
+    disabled with explanatory text when the model has no valid install
+    option (IOS-XR today), reset to the full set when the model is blank or
+    unrecognized."""
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    assert "getElementById('df-model').addEventListener('input'" in js
+    assert "/api/install-options?model=" in js
+    assert "IOS-XR — no agent install available yet" in js
+    assert "refreshInstallOptions" in js
+
+
+def test_install_options_api_requires_auth_and_matches_model_matrix(tmp_path):
+    host, port, _, stop = _serve(tmp_path)
+    try:
+        assert _req(host, port, "GET",
+                    "/api/install-options?model=C9300-48UXM")[0] == 401
+        cookie, _ = _login(host, port)
+        headers = {"Cookie": cookie}
+
+        st, _, b = _req(host, port, "GET",
+                        "/api/install-options?model=C9300-48UXM", headers=headers)
+        assert st == 200
+        assert json.loads(b)["options"] == ["guestshell", "iox"]
+
+        # the 8201 incident: an IOS-XR model gets an empty list, not null
+        st, _, b = _req(host, port, "GET", "/api/install-options?model=8201",
+                        headers=headers)
+        assert st == 200
+        assert json.loads(b)["options"] == []
+
+        # blank/unrecognized model -> None ("auto only", no guardrail opinion)
+        st, _, b = _req(host, port, "GET", "/api/install-options?model=",
+                        headers=headers)
+        assert json.loads(b)["options"] is None
+        st, _, b = _req(host, port, "GET", "/api/install-options",
+                        headers=headers)
+        assert json.loads(b)["options"] is None
+    finally:
+        stop()
+
+
 def test_deploy_logs_paging_graph_search_and_side_drawer():
     """The deployment-logs pane listed every log in one unpaged table, could
     only filter by exact device id, had no sense of when deployments happened,

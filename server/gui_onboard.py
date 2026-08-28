@@ -76,18 +76,72 @@ _UNINSTALL_RECIPES = {
     "iox": "device/iox/uninstall.sh",
     "router": "device/router-uninstall.sh",
 }
-_MODEL_PLATFORMS = (          # first match wins; case-insensitive prefix regexes
-    (r"^IE-?3", "iox"),       # IE-3x00: no Guest Shell on IOS-XE >=17.9
-    (r"^IR1[018]", "iox"),    # IR1101/IR18xx are IOx-hosted the same way
-    (r"^C9[0-9]{3}", "guestshell"),
-    (r"^C8[0-9]{3}", "router"),
-    (r"^(ISR|ASR|CSR)", "guestshell"),  # legacy router mapping; not yet supported
+# One shared table drives both auto-resolution (_MODEL_PLATFORMS, a single
+# default platform per family) and the install-options guardrail
+# (install_options_for, below -- every platform a family may explicitly run),
+# so the two views of "what can this model run" cannot drift apart. First
+# match wins; case-insensitive prefix regexes. A family's first option is its
+# auto-resolution default.
+_MODEL_INSTALL_TABLE = (
+    (r"^IE-?3", ("iox",)),        # IE-3x00: no Guest Shell on IOS-XE >=17.9
+    (r"^IR1[018]", ("iox",)),     # IR1101/IR18xx are IOx-hosted the same way
+    (r"^C9[0-9]{3}", ("guestshell", "iox")),
+    (r"^C8[0-9]{3}", ("router",)),
+    (r"^(ISR|ASR|CSR)", ("guestshell",)),  # legacy router mapping; not yet supported
 )
+_MODEL_PLATFORMS = tuple((pattern, options[0])
+                         for pattern, options in _MODEL_INSTALL_TABLE)
 
 # ASR1000/ISR/CSR are IOS-XE, but ASR9000 is IOS-XR: this prefix spans both
 # families, so a model match alone cannot decide which recipe applies. Only
 # the show version banner can.
 _FAMILY_AMBIGUOUS_MODEL = re.compile(r"^(ISR|ASR|CSR)", re.IGNORECASE)
+
+# Cisco 8000-series (IOS-XR) model numbers: bare digits, not a letter prefix,
+# so no _MODEL_INSTALL_TABLE row covers them, and they are never a valid
+# agent-install target. Matching the model number directly is a
+# belt-and-suspenders check that still refuses an explicit platform even when
+# os_family was never probed -- the incident this closes: an 8201 offered iox
+# and dying on an XE-flavoured arch error.
+_XR_MODEL_RE = re.compile(r"^8[0-9]{2,3}(-SYS)?$")
+# Some contexts report the '-SYS' suffix on that same model number
+# ('8201-SYS'), others just the bare number ('8201'). Normalized to the bare
+# number so the fleet's stored model reads consistently regardless of which
+# path recorded it (console form, CSV import, live probe).
+_SYS_SUFFIX_RE = re.compile(r"^(8[0-9]{2,3})-SYS$")
+
+
+def normalize_model(model):
+    """Strip the '-SYS' suffix some Cisco 8000-series banners carry, so
+    '8201-SYS' and '8201' are stored identically everywhere a model is
+    recorded (validate_record, the onboarding probe)."""
+    return _SYS_SUFFIX_RE.sub(r"\1", (model or "").strip())
+
+
+def install_options_for(model, os_family=None):
+    """Return the agent-install platform values ``model``/``os_family`` may
+    explicitly run.
+
+    [] means none can: IOS-XR, whether known via ``os_family`` or inferred
+    from an XR-shaped 8xxx/8xxx-SYS model number. None means the model is
+    blank or not a family this table recognizes, so no guardrail applies --
+    the console still offers Auto, and validate_record does not restrict the
+    explicit platform choice for hardware this table has no opinion on.
+    Otherwise, the list is every platform _MODEL_INSTALL_TABLE names for that
+    family (not just its auto-resolution default -- e.g. a C9xxx may run
+    guestshell OR iox, though guestshell alone is what Auto picks)."""
+    model = (model or "").strip()
+    if (os_family or "") == "xr":
+        return []
+    if model and _XR_MODEL_RE.match(model):
+        return []
+    if not model:
+        return None
+    for pattern, options in _MODEL_INSTALL_TABLE:
+        if re.match(pattern, model, re.IGNORECASE):
+            return list(options)
+    return None
+
 
 # Model families that take the arm64 IOx package (installer defaults: iris-arm64.tar,
 # AppGigabitEthernet1/1, sdflash:). Used ONLY after platform has resolved to iox.
@@ -785,6 +839,10 @@ class OnboardService:
         def probe(d):
             model = self._probe(d, env)
             if model:
+                # Normalize '8201-SYS' -> '8201' so the stored model reads
+                # the same whether it arrived via a live probe or console/CSV
+                # entry (validate_record does the same normalization there).
+                model = normalize_model(model)
                 # Only record a family we actually determined. Writing "" here
                 # would overwrite a previously cached family (upsert filters
                 # None, not empty strings) and silently reopen the misroute

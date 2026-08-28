@@ -546,12 +546,15 @@
       var attachmentDetail = attachment.indexOf('router-') === 0
         ? (' / VPG' + (d.vpg_number == null ? '' : d.vpg_number))
         : (' / ' + (d.inband_vlan || d.iris_vlan || ''));
+      var attachmentLabel = (attachment === 'legacy_routed' || attachment === 'legacy')
+        ? 'Inventory only — attachment not chosen'
+        : (attachment + attachmentDetail);
       return '<tr data-id="' + esc(d.device_id) + '">' +
         '<td><input type="checkbox" class="mark" data-id="' + esc(d.device_id) + '"' +
         (marked[d.device_id] ? ' checked' : '') + '></td>' +
         '<td>' + esc(d.device_id) + '</td><td>' + esc(d.device_ip || '') + '</td>' +
         '<td>' + esc(d.model || d.heartbeat_model || '') + '</td>' +
-        '<td>' + esc(attachment + attachmentDetail) + '</td>' +
+        '<td>' + esc(attachmentLabel) + '</td>' +
         '<td><select class="platform">' + platSel + '</select></td>' +
         '<td><select class="cred">' + credSel + '</select></td>' +
         '<td><button type="button" class="linkish assign-btn">' + esc(assignLabel) + '</button></td>' +
@@ -590,10 +593,10 @@
         var id = sel.closest('tr').getAttribute('data-id');
         var r = await jpost('/api/devices/' + encodeURIComponent(id) + '/platform', { platform: sel.value });
         if (r.ok) {
-          devStatus.textContent = 'Platform updated for ' + id;
+          devStatus.textContent = 'Agent install updated for ' + id;
         } else {
           // surface the real reason and revert the dropdown to the saved value
-          devStatus.textContent = 'Platform update failed: ' + ((await r.json()).error || r.status);
+          devStatus.textContent = 'Agent install update failed: ' + ((await r.json()).error || r.status);
           refreshDevices();
         }
       });
@@ -652,7 +655,7 @@
       ['NAT interface', esc(res.nat_interface || '—')],
       ['Swarm port', esc(res.swarm_port || '—')],
       ['Model', esc(res.model || '—')],
-      ['Platform', esc(res.platform || '—')],
+      ['Agent install', esc(res.platform || '—')],
       ['Device identity', esc(res.device_identity || '—')]
     ];
     return pairs.map(function (kv) {
@@ -1421,13 +1424,57 @@
     if (!router && platform.value === 'router') platform.value = '';
   }
   document.getElementById('df-attachment').addEventListener('change', updateDeviceFields);
+  // Agent-install options depend on the model, so df-model sits ahead of
+  // df-platform in the form and this repaints the select as the operator
+  // types -- the same model-aware guardrail server-side validation enforces
+  // (gui_fleet.validate_record / gui_onboard.install_options_for), surfaced
+  // before submit instead of as a rejection after it.
+  var INSTALL_OPTION_LABELS = { guestshell: 'Guest Shell', iox: 'IOx',
+                                router: 'Router (Guest Shell via VirtualPortGroup)' };
+  var FULL_INSTALL_OPTIONS_HTML = '<option value="">Agent install - auto by model</option>' +
+    Object.keys(INSTALL_OPTION_LABELS).map(function (k) {
+      return '<option value="' + esc(k) + '">' + esc(INSTALL_OPTION_LABELS[k]) + '</option>';
+    }).join('');
+  var installOptionsGen = 0;
+  async function refreshInstallOptions() {
+    var model = document.getElementById('df-model').value.trim();
+    var platform = document.getElementById('df-platform');
+    var gen = ++installOptionsGen;
+    if (!model) {
+      platform.disabled = false;
+      platform.innerHTML = FULL_INSTALL_OPTIONS_HTML;
+      return;
+    }
+    var r = await fetch('/api/install-options?model=' + encodeURIComponent(model));
+    if (gen !== installOptionsGen) return;   // a newer keystroke superseded this fetch
+    if (!r.ok) return;
+    var options = (await r.json()).options;
+    if (options === null) {
+      platform.disabled = false;
+      platform.innerHTML = FULL_INSTALL_OPTIONS_HTML;
+      return;
+    }
+    if (options.length === 0) {
+      platform.innerHTML = '<option value="">IOS-XR — no agent install available yet</option>';
+      platform.disabled = true;
+      return;
+    }
+    var kept = platform.value;
+    platform.disabled = false;
+    platform.innerHTML = '<option value="">Agent install - auto by model</option>' +
+      options.map(function (o) {
+        return '<option value="' + esc(o) + '">' + esc(INSTALL_OPTION_LABELS[o] || o) + '</option>';
+      }).join('');
+    if (options.indexOf(kept) !== -1) platform.value = kept;
+  }
+  document.getElementById('df-model').addEventListener('input', refreshInstallOptions);
   document.getElementById('add-dev').addEventListener('click', function () {
     // populate the credential dropdown from the latest profiles
     var sel = document.getElementById('df-cred');
     sel.innerHTML = '<option value="">— no credential —</option>' +
       credOpts.map(function (c) { return '<option value="' + esc(c.id) + '">' + esc(c.id) + '</option>'; }).join('');
     devForm.hidden = !devForm.hidden;
-    if (!devForm.hidden) updateDeviceFields();
+    if (!devForm.hidden) { updateDeviceFields(); refreshInstallOptions(); }
   });
   document.getElementById('df-cancel').addEventListener('click', function () { devForm.hidden = true; });
   devForm.addEventListener('submit', async function (e) {
