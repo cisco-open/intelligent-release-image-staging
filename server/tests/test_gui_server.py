@@ -1332,6 +1332,147 @@ def test_assign_image_sets_policy(tmp_path):
         stop()
 
 
+def test_assign_accepts_image_id_list_and_caps_at_ten(tmp_path):
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, cat = deps
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        for i in range(2, 12):    # img2..img11, alongside _serve_full's img1
+            cat.save_image({"id": "img%d" % i, "filename": "img%d.bin" % i,
+                            "sha256": "s%d" % i, "published_at": i})
+        _req(host, port, "POST", "/api/devices",
+             {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_ids": ["img1", "img2"]}, headers=hh)
+        assert st == 200
+        pol = cat.get_policy("d1")
+        assert pol["approved_image_ids"] == ["img1", "img2"]
+        assert pol["approved_image_id"] == "img1"
+        st, _, b = _req(host, port, "GET", "/api/devices", headers={"Cookie": ck})
+        row = [d for d in json.loads(b)["devices"] if d["device_id"] == "d1"][0]
+        assert row["assigned_image_ids"] == ["img1", "img2"]
+        assert row["assigned_image_id"] == "img1"
+        eleven = ["img%d" % i for i in range(1, 12)]
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_ids": eleven}, headers=hh)
+        assert st == 400
+        assert "at most 10" in json.loads(b)["error"]
+        # a rejected assignment must not have mutated the existing policy
+        assert cat.get_policy("d1")["approved_image_ids"] == ["img1", "img2"]
+    finally:
+        stop()
+
+
+def test_assign_singular_body_still_works(tmp_path):
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, cat = deps
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        _req(host, port, "POST", "/api/devices",
+             {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_id": "img1"}, headers=hh)
+        assert st == 200
+        assert cat.get_policy("d1")["approved_image_ids"] == ["img1"]
+    finally:
+        stop()
+
+
+def test_unassign_clears_the_whole_set(tmp_path):
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    _app, fleet, _creds, cat = _ctx
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        cat.save_image({"id": "img3", "filename": "img3.bin", "sha256": "ef",
+                        "size": 5, "published_at": 3})
+        _req(host, port, "POST", "/api/devices",
+             {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
+        cat.set_policy("d1", approved_image_ids=["img1", "img2", "img3"])
+        assert len(cat.get_policy("d1")["approved_image_ids"]) == 3
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_id": None}, headers=hh)
+        assert st == 200 and json.loads(b)["ok"] is True
+        assert cat.get_policy("d1") == {"approved_image_id": None,
+                                        "approved_image_ids": []}
+        events = [e for e in _read_audit_lines(audit_path)
+                 if e.get("action") == "unassign"]
+        assert events and events[-1]["detail"] == "unassigned (was img1.bin)"
+    finally:
+        stop()
+
+
+def test_device_rows_carry_the_list(tmp_path):
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, cat = deps
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        cat.save_image({"id": "img2", "filename": "img2.bin", "sha256": "cd",
+                        "published_at": 2})
+        _req(host, port, "POST", "/api/devices",
+             {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
+        cat.set_policy("d1", approved_image_ids=["img1", "img2"])
+        st, _, b = _req(host, port, "GET", "/api/devices", headers={"Cookie": ck})
+        assert st == 200
+        row = [d for d in json.loads(b)["devices"] if d["device_id"] == "d1"][0]
+        assert row["assigned_image_ids"] == ["img1", "img2"]
+        assert row["assigned_image_id"] == "img1"
+    finally:
+        stop()
+
+
+def test_rollout_counts_a_device_under_every_assigned_image(tmp_path):
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, cat = deps
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        cat.save_image({"id": "img2", "filename": "img2.bin", "sha256": "cd",
+                        "published_at": 2})
+        _req(host, port, "POST", "/api/devices",
+             {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
+        cat.set_policy("d1", approved_image_ids=["img1", "img2"])
+        st, _, b = _req(host, port, "GET", "/api/overview", headers={"Cookie": ck})
+        assert st == 200
+        rollout = {r["image_id"]: r for r in json.loads(b)["rollout"]}
+        assert rollout["img1"]["assigned"] == 1
+        assert rollout["img2"]["assigned"] == 1
+    finally:
+        stop()
+
+
+def test_rollout_staged_uses_heartbeat_staged_image_ids(tmp_path):
+    # Task 3 lands staged_image_ids on the heartbeat; rollout must read it
+    # directly rather than the single current_image_id/stage_state pair, so a
+    # device staging TWO images at once counts as staged under both.
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, cat = deps
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        cat.save_image({"id": "img2", "filename": "img2.bin", "sha256": "cd",
+                        "published_at": 2})
+        _req(host, port, "POST", "/api/devices",
+             {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
+        cat.set_policy("d1", approved_image_ids=["img1", "img2"])
+        # a synthetic heartbeat carrying the new field, as a Task-3 agent
+        # would send it -- current_image_id/stage_state deliberately say
+        # something that would NOT count under the legacy fallback logic
+        cat.record_heartbeat("d1", {"staged_image_ids": ["img1", "img2"],
+                                    "current_image_id": None,
+                                    "stage_state": "staging"}, now=10)
+        st, _, b = _req(host, port, "GET", "/api/overview", headers={"Cookie": ck})
+        assert st == 200
+        rollout = {r["image_id"]: r for r in json.loads(b)["rollout"]}
+        assert rollout["img1"]["staged"] == 1
+        assert rollout["img2"]["staged"] == 1
+    finally:
+        stop()
+
+
 def test_csv_import_accepts_large_body(tmp_path):
     host, port, _, stop = _serve_full(tmp_path)
     try:

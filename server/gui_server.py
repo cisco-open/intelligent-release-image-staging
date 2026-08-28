@@ -1351,10 +1351,15 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 h = hb.get(did, {})
                 row = dict(d)
                 row["assigned_image_id"] = pol.get("approved_image_id")
+                row["assigned_image_ids"] = pol.get("approved_image_ids")
                 row["last_seen"] = h.get("last_seen")
                 row["stage_state"] = h.get("stage_state")
                 row["stage_error"] = h.get("stage_error")
                 row["current_image_id"] = h.get("current_image_id")
+                # the ordered set of images the agent reports as staged
+                # (Task 3); absent from an agent that predates the field, in
+                # which case rollout falls back to current_image_id/stage_state
+                row["staged_image_ids"] = h.get("staged_image_ids")
                 row["heartbeat_model"] = h.get("model")
                 # the "copying to <fs>" badge needs the heartbeat's target FS
                 row["target_fs"] = h.get("target_fs")
@@ -1390,11 +1395,27 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             rollout = []
             for img in imgs:
                 iid = img.get("id")
+                # a device counts under EVERY image in its approved set, not
+                # just a single "the" assignment; assigned_image_ids is None
+                # for a device whose policy row predates the ordered set, so
+                # fall back to the singular field it still carries
                 assigned = [r for r in rows
-                            if r.get("assigned_image_id") == iid]
-                staged = [r for r in assigned
-                          if r.get("stage_state") == "ready"
-                          and r.get("current_image_id") == iid]
+                            if iid in (r.get("assigned_image_ids")
+                                       or ([r["assigned_image_id"]]
+                                           if r.get("assigned_image_id")
+                                           else []))]
+                staged = []
+                for r in assigned:
+                    sids = r.get("staged_image_ids")
+                    if sids is not None:
+                        # agent reports its staged set directly (Task 3)
+                        is_staged = iid in sids
+                    else:
+                        # old agent, no staged_image_ids in its heartbeat yet
+                        is_staged = (r.get("stage_state") == "ready"
+                                    and r.get("current_image_id") == iid)
+                    if is_staged:
+                        staged.append(r)
                 rollout.append({"image_id": iid, "filename": img.get("filename"),
                                 "assigned": len(assigned), "staged": len(staged)})
             assigned_total = sum(r["assigned"] for r in rollout)
@@ -2180,14 +2201,24 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 body = self._json_body(raw)
                 if body is None:
                     return
-                image_id = str(body.get("image_id") or "")
-                if not image_id:
+                if catalog is None:
+                    self._json(404, {"error": "not found"}); return
+                # `image_ids` (plural, the ordered-set body) takes priority
+                # when present; `image_id` (singular) is the pre-multi-image
+                # compat shape and always means a one-element set. Either an
+                # explicit `image_id: null` or an empty `image_ids` means
+                # unassign.
+                plural = "image_ids" in body
+                if plural:
+                    ids = [str(i) for i in (body.get("image_ids") or []) if i]
+                else:
+                    image_id = str(body.get("image_id") or "")
+                    ids = [image_id] if image_id else []
+                if not ids:
                     # explicit unassign: clear the approval so the agent stops
                     # staging without deleting the device
-                    if catalog is None:
-                        self._json(404, {"error": "not found"}); return
                     old = catalog.get_policy(did).get("approved_image_id")
-                    catalog.set_policy(did, approved_image_id=None)
+                    catalog.set_policy(did, approved_image_ids=[])
                     old_entry = catalog.get_image(old) if old else None
                     self._audit("device_assign", "device", action="unassign",
                                target=did, actor=actor,
@@ -2195,16 +2226,30 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                       % ((old_entry or {}).get("filename")
                                          or old or "none"))
                     self._json(200, {"ok": True}); return
-                entry = catalog.get_image(image_id) if catalog is not None else None
-                if entry is None:
-                    self._json(400, {"error": "no such image"}); return
+                entries = {}
+                for iid in ids:
+                    entry = catalog.get_image(iid)
+                    if entry is None:
+                        self._json(400, {"error": "no such image"}); return
+                    entries[iid] = entry
                 old = catalog.get_policy(did).get("approved_image_id")
-                catalog.set_policy(did, approved_image_id=image_id)  # approval is the whole policy: IRIS stages, never installs
-                detail = "assigned %s (%s) id=%s" % (
-                    entry.get("filename"), _fmt_bytes(entry.get("size")), image_id)
-                if old and old != image_id:
-                    old_entry = catalog.get_image(old)
-                    detail += ", was %s" % ((old_entry or {}).get("filename") or old)
+                try:
+                    # approval is the whole policy: IRIS stages, never installs
+                    catalog.set_policy(did, approved_image_ids=ids)
+                except ValueError as exc:
+                    self._json(400, {"error": str(exc)}); return
+                if plural:
+                    detail = "assigned %d image(s): %s" % (
+                        len(ids), ", ".join(entries[i].get("filename") for i in ids))
+                else:
+                    # singular compat: keep the pre-multi-image detail shape
+                    # (existing audit tests assert this text verbatim)
+                    entry = entries[ids[0]]
+                    detail = "assigned %s (%s) id=%s" % (
+                        entry.get("filename"), _fmt_bytes(entry.get("size")), ids[0])
+                    if old and old != ids[0]:
+                        old_entry = catalog.get_image(old)
+                        detail += ", was %s" % ((old_entry or {}).get("filename") or old)
                 self._audit("device_assign", "device", action="assign", target=did,
                            detail=detail, actor=actor)
                 self._json(200, {"ok": True}); return
