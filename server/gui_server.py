@@ -51,6 +51,12 @@ _IRIS_CERT_DEFAULT = "/run/iris/tls/cert.pem"
 # this is what the UI badges "offline" (app.js uses the same 600), so the
 # overview must not count it as actively staging
 _HEARTBEAT_FRESH = 600
+# stage_states that are a failure the agent RETRIES rather than a terminal
+# one: it is alive, out of room, and will place the image as soon as space
+# appears, so the device is still staging. The agent reports these images in
+# errored_image_ids alongside genuinely dead ones, which is why the precise
+# tier below cannot read that list alone.
+_RETRYABLE_STAGE_STATES = ("flash_full", "flash_full_seeding_only")
 # GET /swarmmap swaps this exact placeholder line in the single-source
 # server/swarmmap.html for the console config line (the file on disk keeps
 # working standalone; only the served copy is rewritten):
@@ -1492,6 +1498,14 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             ids = self._row_assigned_ids(row)
             if not ids:
                 return False
+            # errored_image_ids carries the retryable failures too, so a set
+            # entirely blocked on space is fully "accounted for" while the
+            # agent is in fact still working it -- the one failure both tiers
+            # above deliberately count. Reading the list alone dropped exactly
+            # those devices out of staging_now the moment their agent grew the
+            # field, so an operator freeing room saw nothing happening.
+            if row.get("stage_state") in _RETRYABLE_STAGE_STATES:
+                return True
             staged, errored = set(sids), set(eids)
             return any(iid not in staged and iid not in errored for iid in ids)
 

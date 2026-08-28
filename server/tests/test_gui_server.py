@@ -2937,6 +2937,43 @@ def test_overview_staging_all_errored_is_not_staging(tmp_path):
         srv.shutdown()
 
 
+def test_overview_staging_counts_a_flash_full_set_as_still_staging(tmp_path):
+    """Review minor: Tier 3 treats every id in errored_image_ids as accounted
+    for -- but the agent files flash_full there too, and flash_full is the one
+    failure this count has always deliberately kept ("the agent is alive and
+    retrying"). Tiers 1 and 2 both count it; Tier 3 dropped the same device
+    out of staging_now entirely the moment its agent grew the field, so
+    freeing space on the box looked like nothing was happening."""
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
+    state = str(tmp_path / "state")
+    fleet = gui_fleet.FleetStore(state)
+    cat = catalog_mod.CatalogStore(state)
+    for iid in ("a", "b"):
+        cat.save_image({"id": iid, "filename": iid + ".bin", "sha256": iid,
+                        "published_at": 1})
+    fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+    cat.set_policy("d1", approved_image_ids=["a", "b"])
+    # both images are waiting on room: accounted for, but not finished with
+    cat.record_heartbeat("d1", {"stage_state": "flash_full",
+                                "stage_error": "no room for b.bin",
+                                "staged_image_ids": [],
+                                "errored_image_ids": ["a", "b"],
+                                "current_image_id": "a"}, now=10)
+    srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, None, cat,
+                                 None, None, certfile=None,
+                                 now_fn=lambda: 100)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        ck, _csrf = _auth("127.0.0.1", port)
+        ov = json.loads(_req("127.0.0.1", port, "GET", "/api/overview",
+                             headers={"Cookie": ck})[2])
+        assert ov["staging_now"] == 1
+    finally:
+        srv.shutdown()
+
+
 def test_overview_staging_one_errored_two_outstanding_counts(tmp_path):
     """Companion to the above: with errored_image_ids naming only the ONE
     image that actually failed, the other two -- neither staged nor errored
