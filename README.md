@@ -65,20 +65,13 @@ The public website source is in [docs/](docs/index.html). The GitHub Pages workf
 
 ## Platform support
 
-IRIS stages Cisco software on IOS-XE switches and routers today. The agent runs
-in Guest Shell or as an IOx application, depending on what the platform offers:
-Catalyst 9000 switches use Guest Shell, or IOx where app-hosting storage is
-available; Industrial Ethernet switches use IOx; Catalyst 8000 routers use
-Guest Shell behind an IRIS-managed VirtualPortGroup, in routed or NAT
-attachment. Cisco 8000 series routers running IOS-XR are supported at the
-image level: their software imports and distributes through the swarm, and an
-on-device agent is not yet available.
+IRIS stages Cisco software on IOS-XE switches and routers; Cisco 8000 series
+IOS-XR routers are supported at the image level (import and swarm
+distribution). Which agent runs where, how each platform stages, and what has
+been lab-validated is documented in
+[device agents](docs/zensical/device-agents.md) and
+[validation](docs/zensical/validation.md).
 
-Router onboarding re-runs its read-only preflight just before execution and
-before the enrollment token is minted. Receipts bind the management address
-and processor-board identity, and a router is never adopted in place —
-re-onboard it instead. The [validation](docs/zensical/validation.md) page
-lists what has been lab-validated, platform by platform.
 
 ## Quick Start
 
@@ -118,7 +111,7 @@ Publish an image mounted under `/opt/images` — or upload it, or import it in p
 
 ```bash
 docker compose -f server/docker-compose.yml exec iris \
-  iris-publish /opt/images/iosxe/c9300/<image>.bin
+  iris-publish /opt/images/<path-to-image>
 ```
 
 Prepare the management-aware inventory and assignments:
@@ -159,13 +152,9 @@ The seed-server image is self-contained and built from the repository root:
 docker build --platform linux/amd64 -f server/Dockerfile -t iris:docker-alpha .
 ```
 
-The Cisco app-hosting agent supports ARM64 IE platforms and x86_64 Catalyst 9300
-platforms. It downloads into the CAF persistent directory, checks the staged
-file's sha256 against its catalog entry, and hands it to IOS for a plain copy
-onto the filesystem root — a placement the agent then attests against the
-catalog's exact byte size: on Catalyst 9300 through the
-bind-mounted SSD share at disk speed, on IE-3400 by SCP over SSH-to-self (see
-[IOx app](docs/zensical/iox.md)). Build an image for inspection, or package it
+The Cisco app-hosting agent ships for ARM64 and x86_64 platforms; how each
+platform transfers and attests staged software is covered in
+[IOx app](docs/zensical/iox.md). Build an image for inspection, or package it
 with `ioxclient`:
 
 ```bash
@@ -173,16 +162,13 @@ with `ioxclient`:
 CATALOG_PEM=/path/to/iris-catalog.pem device/iox/build.sh --image-only
 CATALOG_PEM=/path/to/iris-catalog.pem device/iox/build.sh device/iox/out
 
-# x86_64 package for Catalyst 9300 app hosting
+# x86_64 package
 IOX_ARCH=amd64 PACKAGE_NAME=iris-amd64.tar \
   CATALOG_PEM=/path/to/iris-catalog.pem device/iox/build.sh device/iox/out
 ```
 
-`device/iox/install.sh` defaults to the IE-3400 profile (`TARGET_FS=sdflash:`,
-`AppGigabitEthernet1/1`). Console-onboarded Catalyst 9300 deployments use the amd64
-package with `APP_INTF=AppGigabitEthernet1/0/1`, `TARGET_FS=flash:`, and the
-SSD-share pair `SHARE_HOST_PATH=/vol/usb1/iox_host_data_share` /
-`SHARE_IOS_PATH=usbflash1:iox_host_data_share` carrying the transfer. See
+`device/iox/install.sh` ships per-platform defaults; the console sets the
+right package, interface, and target filesystem per device model. See
 [IOx app](docs/zensical/iox.md) and
 [Container deployments](docs/zensical/containers.md) for the complete data path
 and [Kubernetes](docs/zensical/kubernetes.md) for the optional seed-server
