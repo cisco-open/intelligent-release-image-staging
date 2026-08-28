@@ -28,6 +28,21 @@ The docs site builds clean from the repository root, with no reported issues.
 For the commands and the pinned Zensical and Python versions, see
 [Documentation loop](development.md#documentation-loop).
 
+## Validated platforms
+
+| Platform | Device staging | Status |
+| --- | --- | --- |
+| Catalyst 9300 | Guest Shell | Lab-validated |
+| Catalyst 8000V | Guest Shell (router, VirtualPortGroup) | Lab-validated |
+| IE-3400 | IOx | Lab-validated |
+| Cisco 8000 series (IOS-XR) | none | On-device agent not yet available |
+
+Image import and swarm distribution work today for Cisco 8000 series / IOS-XR:
+`.iso`, `.tar`, and `.rpm` artifacts publish to the catalog and distribute
+through the swarm like any other image. What is not available yet is a
+device-side staging agent for IOS-XR, so an IOS-XR device does not stage or
+verify an image the way the platforms above do.
+
 ## Lab checklist
 
 | Check | Expected result |

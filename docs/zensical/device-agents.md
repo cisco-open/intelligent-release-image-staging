@@ -208,3 +208,7 @@ it exists for operators who want the connection pinned.
 
 The router path targets the Catalyst 8000 family and is lab-tested on Catalyst 8000V; see
 [Router routed and router NAT](network-attachment.md#router-routed-and-router-nat-iris-managed-virtualportgroup).
+
+For the lab-validation status behind this table, and where Cisco 8000 series /
+IOS-XR fits today — image import and swarm distribution work, no device
+agent yet — see [Validation: Validated platforms](validation.md#validated-platforms).

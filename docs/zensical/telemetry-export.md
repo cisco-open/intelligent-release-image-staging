@@ -10,7 +10,7 @@ IRIS does not talk to your monitoring backend directly. It publishes two
 surfaces and stops there, so the operator picks the backend: a Prometheus
 exposition endpoint to scrape, and an OpenTelemetry OTLP endpoint to push to.
 Everything on this page is about getting those two surfaces into Prometheus,
-Grafana, Loki, or Splunk.
+Splunk, Grafana, or Loki.
 
 Telemetry is best-effort and silent. A bounded queue drops the oldest records
 when the destination is unreachable. **Export loss can never affect image
@@ -362,10 +362,10 @@ Two boards ship in this repository under
 [`docs/zensical/dashboards/`](dashboards/README.md). They read the same telemetry from the
 two different stores, so you can run either backend alone:
 
-* **The Grafana board** reads the Prometheus surface (aggregate series) plus
-  Loki for the per-peer log records.
 * **The Splunk board** reads `iris_metrics` with `mstats` and `iris_logs` with
   `spath`, and reproduces the same panel families in SPL.
+* **The Grafana board** reads the Prometheus surface (aggregate series) plus
+  Loki for the per-peer log records.
 
 ### Panel families
 

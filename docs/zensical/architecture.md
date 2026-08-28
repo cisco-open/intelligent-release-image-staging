@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Architecture
 
-IRIS uses a private BitTorrent swarm to distribute large Cisco IOS-XE images to routers and switches. The goal is simple: get the image staged on every approved device faster and with better transfer resilience, while leaving install and reload decisions to the operator.
+IRIS uses a private BitTorrent swarm to distribute large Cisco images and patches to routers and switches. The goal is simple: get the image staged on every approved device faster and with better transfer resilience, while leaving install and reload decisions to the operator.
 
 ## The simple model
 
@@ -63,7 +63,7 @@ sequenceDiagram
     participant DeviceB as Device B
     participant IOS
 
-    Operator->>Server: Publish IOS-XE image
+    Operator->>Server: Publish image
     Server->>Server: Hash image and create private torrent
     Operator->>Server: Assign image to approved devices
     DeviceA->>Server: Poll catalog for assignment
@@ -103,7 +103,7 @@ starts. See [Runtime identity](server.md#runtime-identity).
 
 The server keeps durable state under `/var/lib/iris`. Catalog records are small JSON documents written atomically with advisory locks so concurrent GUI and CLI operations do not corrupt state. Secret material is encrypted at rest under `/etc/iris` with age recipients and decrypted to `/run/iris` tmpfs only while the container is running.
 
-Generated artifacts live under `artifacts/` on the host and are served by the artifact server. IOS-XE image files stay outside the repository, commonly under `/opt/images`, and are mounted read-only into the container.
+Generated artifacts live under `artifacts/` on the host and are served by the artifact server. Image files stay outside the repository, commonly under `/opt/images`, and are mounted read-only into the container.
 
 Publishing does not move the image. The seeder seeds it from the directory it
 already occupies, the generated `.torrent` goes to the state directory, and the

@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # IRIS Documentation
 
-IRIS, Intelligent Release and Image Staging, stages Cisco IOS-XE images across a network before an operator performs any install or reload activity. It combines a private BitTorrent swarm, a signed catalog, per-device policies, and a small on-device agent so large images can move efficiently without giving up device-side verification.
+IRIS, Intelligent Release and Image Staging, stages Cisco images and patches across a network before an operator performs any install or reload activity. It combines a private BitTorrent swarm, a signed catalog, per-device policies, and a small on-device agent so large images can move efficiently without giving up device-side verification.
 
 IRIS also measures that distribution rather than only performing it. Every rollout accounts for how many bytes the devices served to each other and how many came from the origin seeder, and each device reports the peers it actually took its image from — see [Telemetry Export](telemetry-export.md).
 

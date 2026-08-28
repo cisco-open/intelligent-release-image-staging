@@ -6,8 +6,8 @@ much load does it carry, and among whom — and nothing else.
 
 | File | Backend | Board title / UID |
 | --- | --- | --- |
-| `grafana-iris-swarm.json` | Grafana (Prometheus + Loki) | *IRIS — Peer-to-Peer Distribution*, uid `iris-swarm-p2p` |
 | `splunk-iris-swarm.xml` | Splunk (Simple XML view) | *IRIS — Peer-to-Peer Distribution (measured peer tracing)* |
+| `grafana-iris-swarm.json` | Grafana (Prometheus + Loki) | *IRIS — Peer-to-Peer Distribution*, uid `iris-swarm-p2p` |
 
 Both are optional. IRIS does not install, require, or talk to either backend;
 it emits OpenTelemetry and serves a Prometheus text endpoint, and the operator
@@ -78,39 +78,7 @@ you have already written keeps working while the panel above it says *traced*.
 
 Per-peer and per-device detail is deliberately **not** in Prometheus — it would
 put unbounded peer identity into label cardinality. That detail arrives as OTLP
-log records and is read from Loki (Grafana) or the event index (Splunk).
-
-## Importing the Grafana board
-
-**No UID rewriting is needed.** The board uses datasource *template variables*
-rather than hardcoded datasource UIDs: every panel targets `${ds_prom}` or
-`${ds_loki}`, and the two variables are typed `datasource`, so Grafana
-populates them from the instance you import into and picks a default. If your
-Prometheus or Loki datasource is not the default, change it from the two
-pickers at the top of the board.
-
-**Via the UI** — Dashboards → New → Import → *Upload dashboard JSON file* (or
-paste the file contents) → Import. Grafana will prompt for a folder.
-
-**Via the API** — the `/api/dashboards/db` endpoint takes the dashboard object
-wrapped in an envelope, not the bare file:
-
-```bash
-jq '{dashboard: ., folderUid: "", overwrite: true}' grafana-iris-swarm.json \
-  | curl -sS -X POST https://grafana.example.net/api/dashboards/db \
-      -H "Authorization: Bearer $GRAFANA_TOKEN" \
-      -H 'Content-Type: application/json' \
-      --data-binary @-
-```
-
-The file ships with `"version": 1` and `"id"` absent, so the first POST creates
-the board. `overwrite: true` lets a later POST update it in place under the same
-uid `iris-swarm-p2p`.
-
-Panels sourced from Loki (`Per-edge detail — who received what`, the raw
-`iris.swarm.peer_bytes` records, per-device peer share) need the OTLP log
-records to reach Loki. Without Loki those panels are empty while the aggregate
-panels above still work.
+log records and is read from the event index (Splunk) or Loki (Grafana).
 
 ## Importing the Splunk view
 
@@ -151,6 +119,38 @@ the `IN()` lists can be halved:
 ```
 | mcatalog values(metric_name) WHERE index=iris_metrics metric_name="iris_*bytes*"
 ```
+
+## Importing the Grafana board
+
+**No UID rewriting is needed.** The board uses datasource *template variables*
+rather than hardcoded datasource UIDs: every panel targets `${ds_prom}` or
+`${ds_loki}`, and the two variables are typed `datasource`, so Grafana
+populates them from the instance you import into and picks a default. If your
+Prometheus or Loki datasource is not the default, change it from the two
+pickers at the top of the board.
+
+**Via the UI** — Dashboards → New → Import → *Upload dashboard JSON file* (or
+paste the file contents) → Import. Grafana will prompt for a folder.
+
+**Via the API** — the `/api/dashboards/db` endpoint takes the dashboard object
+wrapped in an envelope, not the bare file:
+
+```bash
+jq '{dashboard: ., folderUid: "", overwrite: true}' grafana-iris-swarm.json \
+  | curl -sS -X POST https://grafana.example.net/api/dashboards/db \
+      -H "Authorization: Bearer $GRAFANA_TOKEN" \
+      -H 'Content-Type: application/json' \
+      --data-binary @-
+```
+
+The file ships with `"version": 1` and `"id"` absent, so the first POST creates
+the board. `overwrite: true` lets a later POST update it in place under the same
+uid `iris-swarm-p2p`.
+
+Panels sourced from Loki (`Per-edge detail — who received what`, the raw
+`iris.swarm.peer_bytes` records, per-device peer share) need the OTLP log
+records to reach Loki. Without Loki those panels are empty while the aggregate
+panels above still work.
 
 ## Reading the boards honestly
 

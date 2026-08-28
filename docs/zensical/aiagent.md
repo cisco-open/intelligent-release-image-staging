@@ -112,8 +112,8 @@ At the end of every step, state the next action required from me.
    hub traces origin-to-device bytes and each device reports which peers
    supplied its image, so a rollout can state how much of the load the devices
    carried for each other versus what came from the server. See
-   [Telemetry export](telemetry-export.md) and the importable Grafana and
-   Splunk boards under `docs/zensical/dashboards/`.
+   [Telemetry export](telemetry-export.md) and the importable Splunk and
+   Grafana boards under `docs/zensical/dashboards/`.
 9. **Stop at staged.** Handoff installation, activation, reload, and boot
    management to the normal device-management process. They are outside IRIS.
 

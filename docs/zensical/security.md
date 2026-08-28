@@ -84,7 +84,7 @@ that against your storage class before deploying. See
 ```mermaid
 flowchart TB
     subgraph OperatorZone["Operator zone"]
-        Images["IOS-XE image files"]
+        Images["Image files"]
         Credentials["Stage-host and device credentials"]
     end
     subgraph ServerZone["IRIS server"]
@@ -271,7 +271,7 @@ Do not commit:
 - Real `creds/` files.
 - `fleet/devices.csv` or `fleet/assignments.csv` with sensitive lab data.
 - Private keys, certificates, tokens, or RPC secrets.
-- IOS-XE images or generated release artifacts.
+- Cisco images, patches, or generated release artifacts.
 
 ## Importing images from disk
 

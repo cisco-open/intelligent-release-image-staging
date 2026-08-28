@@ -1,6 +1,6 @@
 # IRIS: Intelligent Release and Image Staging
 
-IRIS stages Cisco IOS-XE images across a network before an operator performs any install or reload activity. It uses a private BitTorrent swarm, a catalog of approved image metadata, and a small device agent to move large images efficiently while keeping verification on the device.
+IRIS stages Cisco images and patches across a network before an operator performs any install or reload activity. It uses a private BitTorrent swarm, a catalog of approved image metadata, and a small device agent to move large images efficiently while keeping verification on the device.
 
 > IRIS distributes, verifies, and stages images. It never installs, activates, reloads, changes boot variables, or mutates the running software state of a device.
 
@@ -61,7 +61,7 @@ The public website source is in [docs/](docs/index.html). The GitHub Pages workf
 | `kubernetes/` | Optional single-replica seed-server deployment with persistent storage. |
 | `fleet/` | CSV templates for device inventory and image assignments. |
 | `tools/` | Operator helpers for agent bundles, per-device installers, assignments, torrents, and releases. |
-| `docs/` | Dynamic public website, Zensical documentation source, and importable Grafana and Splunk dashboards. |
+| `docs/` | Dynamic public website, Zensical documentation source, and importable Splunk and Grafana dashboards. |
 
 ## Platform support
 
