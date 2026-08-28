@@ -1691,6 +1691,73 @@ def test_v2_report_accepted_for_any_member_of_the_set(tmp_path):
         srv.shutdown()
 
 
+# --- heartbeat: staged_image_ids / errored_image_ids whitelist -------------
+#
+# Task 3/4 land staged_image_ids and errored_image_ids on the multi-image
+# heartbeat, and every consumer (device rows, the deployed badge, rollout,
+# staging counts) reads them off the STORED record. record_heartbeat() itself
+# has no allowlist -- but the real HTTP ingest handler above builds the
+# stored record from an explicit key whitelist, so a field missing from that
+# whitelist is silently dropped in production even though a direct
+# record_heartbeat() call (as most consumer-side tests use) would see it.
+# Same rationale as test_route_post_forwards_target_fs.
+
+def test_route_post_forwards_staged_and_errored_image_ids(tmp_path):
+    """The HTTP heartbeat path must forward both multi-image fields through
+    the whitelist to record_heartbeat."""
+    srv, port = _serve(tmp_path, "tok", device_id="sw-1")
+    try:
+        status, _, _ = _req(
+            port, "POST", "/v1/devices/sw-1/heartbeat", token="tok",
+            body=json.dumps({"current_image_id": "img1",
+                             "staged_image_ids": ["img1", "img2"],
+                             "errored_image_ids": ["img3"]}))
+        assert status == 200
+    finally:
+        srv.shutdown()
+    rec = catalog.CatalogStore(str(tmp_path)).get_device("sw-1")
+    assert rec["staged_image_ids"] == ["img1", "img2"]
+    assert rec["errored_image_ids"] == ["img3"]
+
+
+def test_route_post_absent_staged_errored_image_ids_stores_none(tmp_path):
+    """A heartbeat that omits the fields (a legacy single-image agent) must
+    store None, not []  -- consumers key the legacy fallback off the field
+    being absent/None; an invented [] would read as 'a multi-image agent
+    that has staged nothing', not 'a legacy agent'."""
+    srv, port = _serve(tmp_path, "tok", device_id="sw-1")
+    try:
+        status, _, _ = _req(
+            port, "POST", "/v1/devices/sw-1/heartbeat", token="tok",
+            body=json.dumps({"current_image_id": "img1"}))
+        assert status == 200
+    finally:
+        srv.shutdown()
+    rec = catalog.CatalogStore(str(tmp_path)).get_device("sw-1")
+    assert rec["staged_image_ids"] is None
+    assert rec["errored_image_ids"] is None
+
+
+def test_route_post_malformed_staged_errored_image_ids_sanitised(tmp_path):
+    """Malformed device-supplied values -- a bare string instead of a list,
+    or a list of non-string entries -- must sanitise to None (not crash the
+    request with a 500, and not silently filter down to a meaningful-looking
+    [])."""
+    srv, port = _serve(tmp_path, "tok", device_id="sw-1")
+    try:
+        status, _, _ = _req(
+            port, "POST", "/v1/devices/sw-1/heartbeat", token="tok",
+            body=json.dumps({"current_image_id": "img1",
+                             "staged_image_ids": "junk-string",
+                             "errored_image_ids": [1, 2]}))
+        assert status == 200
+    finally:
+        srv.shutdown()
+    rec = catalog.CatalogStore(str(tmp_path)).get_device("sw-1")
+    assert rec["staged_image_ids"] is None
+    assert rec["errored_image_ids"] is None
+
+
 # --- heartbeat: telemetry_enabled whitelist + report_requested flag ---------
 
 def test_heartbeat_forwards_telemetry_enabled(tmp_path):

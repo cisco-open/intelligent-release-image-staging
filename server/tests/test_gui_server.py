@@ -1596,6 +1596,70 @@ def test_overview_staged_total_excludes_partially_staged_device(tmp_path):
         stop()
 
 
+def test_real_heartbeat_ingest_feeds_overview_staged_logic(tmp_path):
+    """End-to-end guard: a heartbeat posted through the REAL catalog HTTP
+    ingest route (catalog.route_post's field whitelist), not via a direct
+    record_heartbeat() call, must still be visible to the console's
+    deployed/staged derivation (rollout + staged_total in /api/overview).
+
+    Every other rollout/staged test in this file (e.g.
+    test_rollout_staged_uses_heartbeat_staged_image_ids above) calls
+    cat.record_heartbeat() directly, which bypasses catalog.py's HTTP
+    ingest handler entirely -- so those tests would keep passing even if the
+    ingest handler's whitelist silently dropped staged_image_ids /
+    errored_image_ids in production. This test posts over the real wire, the
+    same as a device agent would, to close that gap."""
+    import secrets_store
+
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, cat = deps
+    secrets_path = str(tmp_path / "secrets.json")
+    dev_srv = catalog_mod.make_server("127.0.0.1", 0, cat, secrets_path)
+    dev_port = dev_srv.server_address[1]
+    threading.Thread(target=dev_srv.serve_forever, daemon=True).start()
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        cat.save_image({"id": "img2", "filename": "img2.bin", "sha256": "cd",
+                        "published_at": 2})
+        _req(host, port, "POST", "/api/devices",
+             {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
+        cat.set_policy("d1", approved_image_ids=["img1", "img2"])
+
+        # Mint the device's real catalog_token and POST the heartbeat over
+        # the real ingest HTTP path -- the exact code the review finding
+        # flagged as dropping staged_image_ids/errored_image_ids.
+        store = secrets_store.load(secrets_path)
+        tok = secrets_store.mint(store, "d1", "catalog_token", time.time())
+        secrets_store.save(store, secrets_path)
+        conn = http.client.HTTPConnection("127.0.0.1", dev_port, timeout=5)
+        conn.request(
+            "POST", "/v1/devices/d1/heartbeat",
+            body=json.dumps({"current_image_id": None,
+                             "stage_state": "staging",
+                             "staged_image_ids": ["img1", "img2"]}),
+            headers={"Authorization": "Bearer " + tok,
+                     "Content-Type": "application/json"})
+        hb_resp = conn.getresponse()
+        assert hb_resp.status == 200
+        hb_resp.read()
+        conn.close()
+
+        st, _, b = _req(host, port, "GET", "/api/overview",
+                        headers={"Cookie": ck})
+        assert st == 200
+        ov = json.loads(b)
+        # Only a stored (not dropped) staged_image_ids covering the whole
+        # assigned set makes this device count as fully staged.
+        assert ov["staged"] == 1
+        rollout = {r["image_id"]: r for r in ov["rollout"]}
+        assert rollout["img1"]["staged"] == 1
+        assert rollout["img2"]["staged"] == 1
+    finally:
+        dev_srv.shutdown()
+        stop()
+
+
 def test_csv_import_accepts_large_body(tmp_path):
     host, port, _, stop = _serve_full(tmp_path)
     try:

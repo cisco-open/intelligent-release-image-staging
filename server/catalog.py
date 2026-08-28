@@ -844,6 +844,21 @@ class CatalogStore:
             _atomic_write_json(self.pull_path, pr)
 
 
+def _id_list(value, cap=16):
+    """A device-supplied list of image ids, sanitised: None when absent or
+    malformed (absence is meaningful — a legacy agent — so never invent []),
+    else up to *cap* non-empty strings. cap > MAX_ASSIGNED_IMAGES so a
+    misbehaving agent cannot bloat the heartbeat store unbounded.
+
+    A non-list, or a list holding anything other than strings, is rejected
+    wholesale as None rather than silently filtered down to [] — a filtered
+    [] would be indistinguishable from a real agent's "nothing staged yet",
+    turning malformed input into meaningful data instead of failing closed."""
+    if not isinstance(value, list) or not all(isinstance(i, str) for i in value):
+        return None
+    return [i for i in value[:cap] if i]
+
+
 class Catalog:
     def __init__(self, store, secrets_path,
                  audit_path=None, live_table=None, stream_settings=None,
@@ -1010,6 +1025,14 @@ class Catalog:
                 "model": data.get("model"),
                 "telemetry_enabled": data.get("telemetry_enabled"),
                 "telemetry_stream_enabled": data.get("telemetry_stream_enabled"),
+                # Multi-image staging state (issue: multi-image assignment).
+                # Sanitised via _id_list: absence/malformed input stores None
+                # (a legacy or misbehaving agent), never an invented [] --
+                # the console's fallback logic keys off staged_image_ids
+                # being None to fall back to the singular stage_state/
+                # current_image_id pair.
+                "staged_image_ids": _id_list(data.get("staged_image_ids")),
+                "errored_image_ids": _id_list(data.get("errored_image_ids")),
                 # The heartbeat's source IP is the agent's Guest Shell IP — the
                 # SAME IP it announces to the tracker with — so the swarm map can
                 # join this device's model onto its swarm peer by IP.
