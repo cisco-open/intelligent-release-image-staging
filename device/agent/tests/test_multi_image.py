@@ -306,6 +306,42 @@ def test_park_moves_the_legacy_root_file_into_the_parked_record():
     assert state["img-a"]["root_file"] == "img-a.bin"      # into its owner
 
 
+def test_protect_set_offers_parked_root_copies_to_reclaim():
+    """The uncheck contract keeps a parked image's ROOT copy, but only until a
+    newly checked image needs the room: "the reclaim-bundle download gate may
+    consume parked root copies for space exactly as it does replaced ones
+    today". _protect_set protected EVERY state entry's root_file, parked
+    included, so a device with a full boot filesystem could never free
+    anything IRIS had placed and stayed flash_full forever."""
+    state = {"img-a": {"root_file": "img-a.bin", "parked": True},
+             "img-b": {"root_file": "img-b.bin"},
+             "img-c": {"root_file": "img-c.bin", "done": True, "copied": True}}
+    keep = iris_agent._protect_set(_img("img-b"), state)
+    assert "img-a.bin" not in keep          # parked -> reclaimable
+    assert "img-b.bin" in keep              # the image being staged
+    assert "img-c.bin" in keep              # another image of the LIVE set
+    assert "img-b.bin.aria2" in keep and "img-b.torrent" in keep
+
+
+def test_bundle_reclaim_offers_the_parked_copy_and_protects_the_running_image():
+    """The same rule through the gate that actually deletes: the parked root
+    copy reaches reclaimable(), while the running image and the live set's own
+    placed copies never do."""
+    cat = MultiCatalog([_img("img-a"), _img("img-b")], ids=["img-b"])
+    deps, rec = make_deps(cat, {})
+    seen = {}
+    deps = deps._replace(reclaimable=lambda prefix, protect:
+                         (seen.update(protect=set(protect)) or ["img-a.bin"]))
+    state = {"img-a": {"root_file": "img-a.bin", "parked": True},
+             "img-b": {"root_file": "img-b.bin"}}
+    assert iris_agent._reclaim_for_mode(
+        deps, "bundle", "flash:", _img("img-b"), state) is True
+    assert "img-a.bin" not in seen["protect"]     # parked -> offered up
+    assert "running.bin" in seen["protect"]       # never the running image
+    assert "img-b.bin" in seen["protect"]         # never the live set's own
+    assert rec["bundle_reclaimed"] == [("flash:", ["img-a.bin"])]
+
+
 def test_legacy_image_id_pointer_waits_for_a_valid_catalog_answer():
     # The old agent advanced the top-level pointer only AFTER the catalog
     # answered for the image and its filename passed the whitelist. A device

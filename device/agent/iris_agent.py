@@ -549,18 +549,29 @@ def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now,
 
 
 def _protect_set(image, state):
-    """Files reclaim must never delete: the running image, the image being
-    staged (+ its torrent/aria2 sidecars), and every root copy IRIS itself
-    placed — its own, the assigned set's other images, and the ones parked out
-    of the set, whose root copies are deliberately kept. Freeing space for one
-    image of a set must never eat another image of the same set."""
+    """Files reclaim must never delete: the running image (added by the caller,
+    which is the only place that knows it), the image being staged (+ its
+    torrent/aria2 sidecars), and every root copy IRIS placed for an image still
+    IN the assigned set. Freeing space for one image of a set must never eat
+    another image of the same set.
+
+    PARKED root copies are deliberately NOT protected. Park keeps them, but
+    keeps them the way a replaced image's copy is kept: available to the
+    reclaim gate the moment a newly checked image needs the room. Protecting
+    them here made the "kept until space is needed" half of the uncheck
+    contract unreachable — a device with a full boot filesystem had nothing
+    left it was allowed to free, so it reported flash_full forever no matter
+    how many images the operator unchecked. An image that comes back into the
+    set is un-parked before this runs (_reconcile_set), so it is protected
+    again by its membership, not by its flag."""
     keep = {image["filename"], image["filename"] + ".aria2",
             image["id"] + ".torrent"}
     rf = state.get("root_file")
     if rf:
         keep.add(rf)
     for value in state.values():
-        if isinstance(value, dict) and value.get("root_file"):
+        if (isinstance(value, dict) and value.get("root_file")
+                and not value.get("parked")):
             keep.add(value["root_file"])
     return keep
 
