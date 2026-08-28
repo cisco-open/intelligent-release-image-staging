@@ -6995,6 +6995,32 @@ def test_bulk_picker_warns_when_the_sets_merely_overlap():
     assert "setBulkBusy(false)" in guard[1][:900]
 
 
+def test_per_row_assign_never_releases_the_bulk_selected_action_lock():
+    """Review finding: the per-row assign button routes through forSelected(),
+    whose finally unconditionally did setBulkBusy(false). Assigning one row
+    while a bulk action was still running therefore re-enabled every bulk
+    button -- a delete could then fire while an onboard batch was still
+    starting, which is precisely what the shared selected-action lock exists
+    to prevent.
+
+    One row is not a selected-action: it must not touch that lock at all. The
+    row's own button carries the busy state for the duration of its POST."""
+    app_js = _webroot("app.js")
+    helper = app_js.split("async function forSelected(", 1)[1][:1400]
+    assert "ownsBulkLock" in helper, \
+        "forSelected still releases the bulk lock unconditionally"
+    assert "if (opts.ownsBulkLock !== false) setBulkBusy(false);" in helper
+    row_handler = app_js.split("openImagePicker(rowAssignedIds(d)", 1)[1][:1000]
+    assert "ownsBulkLock: false" in row_handler
+    # ...and the row disables its own control while the POST is in flight
+    assert "btn.disabled = true" in row_handler
+    assert "btn.isConnected" in row_handler
+    # the bulk callers keep the default: they claimed the lock, they release it
+    bulk_handler = app_js.split(
+        "getElementById('assign-images-selected').addEventListener", 1)[1][:3200]
+    assert "ownsBulkLock" not in bulk_handler
+
+
 def test_image_picker_and_drawer_show_filename_not_just_id():
     """Review finding: the picker and the deployment drawer showed a bare
     image id, forcing the operator to go find it in the Images tab to see

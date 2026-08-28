@@ -601,7 +601,14 @@
           // has one; for anything else it is one unchecked box away from
           // wiping the assigned set by accident, so confirm before it posts.
           if (!ids.length && !confirm('Unassign all images from ' + id + '?')) return;
-          assignImagesTo([id], ids);
+          // ONE row is not a selected-action, so this must never touch the
+          // shared bulk lock: releasing it here re-enabled every bulk button
+          // mid-batch. The row's own button carries the busy state instead.
+          btn.disabled = true;
+          assignImagesTo([id], ids, { ownsBulkLock: false }).then(function () {
+            // the refresh may have re-rendered this row out from under us
+            if (btn.isConnected) btn.disabled = false;
+          });
         });
       });
     });
@@ -1248,7 +1255,16 @@
   }
   // Run *fn* for each selected id, reporting per-device refusals rather than
   // failing the whole batch — same shape as startBatch's error handling.
-  async function forSelected(label, ids, fn) {
+  //
+  // opts.ownsBulkLock (default true) says whether this call is the
+  // selected-action holding the shared bulk lock. It is false for the ONE
+  // caller that is not a selected-action at all: the per-row assign button,
+  // which shares this helper for its status-line reporting. Releasing the
+  // lock there re-enabled every bulk button in the middle of someone else's
+  // batch — a delete could then fire while an onboard was still starting,
+  // which is the exact thing the lock exists to prevent.
+  async function forSelected(label, ids, fn, opts) {
+    opts = opts || {};
     var failed = [];
     try {
       await Promise.all(ids.map(async function (id) {
@@ -1262,7 +1278,7 @@
         } catch (e) { failed.push(id); }
       }));
     } finally {
-      setBulkBusy(false);
+      if (opts.ownsBulkLock !== false) setBulkBusy(false);
     }
     devStatus.textContent = label + ' ' + (ids.length - failed.length) + '/' +
       ids.length + ' device(s)' + (failed.length ? '; failed: ' + failed.join(', ') : '');
@@ -1274,11 +1290,11 @@
   // same shape as every other bulk action. An empty imgIds is a deliberate
   // unassign, not the absence of a choice: the picker's Apply always POSTs
   // whatever is checked, including nothing.
-  function assignImagesTo(ids, imgIds) {
+  function assignImagesTo(ids, imgIds, opts) {
     var label = imgIds.length ? ('Assigned ' + imgIds.length + ' image(s) to') : 'Unassigned';
     return forSelected(label, ids, function (id) {
       return jpost('/api/devices/' + encodeURIComponent(id) + '/assign', { image_ids: imgIds });
-    });
+    }, opts);
   }
   document.getElementById('delete-selected').addEventListener('click', async function () {
     var ids = claimSelection();
