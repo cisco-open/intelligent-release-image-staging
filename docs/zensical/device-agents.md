@@ -102,6 +102,8 @@ config already exists on the persistent mount. There is no EEM timer on IOx:
 `entrypoint.sh` is its own supervisor loop, running the agent once every
 `IRIS_TICK_SECONDS` (default 60s).
 
+Re-provision a device when replacing its bootstrap configuration or enrollment material: the cutover replaces only the staging agent's credentials and never touches the device's software.
+
 **Upgrade on IOx is uninstall, then reinstall** — there is no in-place package
 update. `device/iox/install.sh` is idempotent by design: its first step always
 stops, deactivates, and uninstalls any existing `iris` app before copying the
