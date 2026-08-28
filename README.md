@@ -4,7 +4,7 @@ IRIS stages Cisco images and patches across a network before an operator perform
 
 > IRIS distributes, verifies, and stages images. It never installs, activates, reloads, changes boot variables, or mutates the running software state of a device.
 
-> Bringing the server up is a command-line task. After that the [web console](docs/zensical/console.md) covers the everyday workflow — publishing images, assigning them, onboarding devices, and watching progress — so the commands below are one way to drive IRIS, not the only one.
+> Bringing the server up is a command-line task. After that the [web console](docs/zensical/console.md) covers the everyday workflow — publishing images, assigning them, onboarding devices, and watching progress.
 
 ## Documentation
 
