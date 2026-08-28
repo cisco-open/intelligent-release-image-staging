@@ -686,41 +686,52 @@
       return '<tr><td class="muted">' + esc(kv[0]) + '</td><td>' + kv[1] + '</td></tr>';
     }).join('');
   }
-  // One row per assigned image: id + state, resolved in the SAME order the
-  // swarm map's own image list uses, so the two views of one heartbeat can
-  // never disagree. "ready" comes from rowHasStaged() (staged_image_ids
-  // membership, or the legacy current_image_id/stage_state pair for an agent
-  // that predates it); then errored_image_ids, which the agent reports and
-  // this drawer used to ignore entirely -- a failed image that was not the
-  // current one read as "queued" while the map showed it as "error", and the
-  // stage_error travelling in the same heartbeat was attached to no row at
-  // all; then the one in flight, showing the heartbeat's own stage_state;
-  // everything else still outstanding reads as queued. Parked is deliberately
-  // NOT a state shown here: an image the agent parked is no longer in the
-  // assigned set, so it never produces a row at all.
+  // One row per assigned image: id + state, resolved from the per-image
+  // MEMBERSHIP the agent reports -- staged_image_ids first, then
+  // errored_image_ids -- which is exactly how the Swarm Map's own image list
+  // resolves it, so two views of one heartbeat cannot disagree about an image.
+  //
+  // current_image_id is deliberately NOT consulted here. It is the wire-compat
+  // identity pointer: the FIRST image of the set that produced heartbeat data
+  // this tick, which is typically one already staged -- not the one in flight.
+  // Reading it as "the image currently transferring" is what left a failed
+  // image that happened not to be it reading "queued" in this drawer while the
+  // map showed it as "error", and pinned the tick's stage_error to a row that
+  // had nothing to do with it.
+  //
+  // stage_state and stage_error describe the whole TICK, not one image, so
+  // they are shown against an image only where they unambiguously are that
+  // image's own: an agent reporting no per-image lists at all, which is a
+  // one-image heartbeat and always has been. For a set, the tick's error rides
+  // its own row below the images, attributed no further than the agent
+  // attributes it. Parked is deliberately not a state here: a parked image is
+  // no longer in the assigned set, so it never produces a row at all.
   function deployImageRows(d) {
     var ids = rowAssignedIds(d);
     if (!ids.length) {
       return '<tr><td colspan="2" class="muted">No images assigned.</td></tr>';
     }
     var errored = rowErroredIds(d);
-    return ids.map(function (iid) {
+    var perImage = d.staged_image_ids != null || d.errored_image_ids != null;
+    var rows = ids.map(function (iid) {
       var state;
       if (rowHasStaged(d, iid)) {
         state = 'ready';
       } else if (errored.indexOf(iid) !== -1) {
-        // stage_error is ONE field for the whole tick, filed under the image
-        // the heartbeat's current_image_id names -- show it on that image's
-        // row only, rather than repeating one image's reason on every failure.
-        state = 'error' + (d.current_image_id === iid && d.stage_error
-          ? ' — ' + d.stage_error : '');
-      } else if (d.current_image_id === iid) {
+        state = 'error';
+      } else if (!perImage) {
         state = (d.stage_state || 'staging') + (d.stage_error ? ' — ' + d.stage_error : '');
       } else {
-        state = 'queued';
+        // neither staged nor errored this tick: genuinely still in flight
+        state = 'staging';
       }
       return '<tr><td class="mono">' + imageLabel(iid) + '</td><td>' + esc(state) + '</td></tr>';
     }).join('');
+    if (perImage && d.stage_error) {
+      rows += '<tr><td class="muted">Last reported error</td><td>' +
+        esc(d.stage_error) + '</td></tr>';
+    }
+    return rows;
   }
   async function openDeployInfo(id) {
     deployInfoDev = id;

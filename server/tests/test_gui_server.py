@@ -6945,43 +6945,54 @@ def test_empty_apply_confirms_before_unassigning(tmp_path):
     assert "confirm('Unassign all images from ' + id + '?')" in row_handler
 
 
-def test_bulk_picker_notes_and_confirms_whenever_the_sets_differ():
-    """Review finding: the note (and nothing else) used to fire only when the
-    INTERSECTION of the selection's sets came out EMPTY. dev1=[A,B] with
-    dev2=[A] intersects to a NON-empty [A], so that selection got no note and
-    no confirm -- Apply posted [A] to both and dev1 silently lost B.
-
-    The rule is about the SETS, not their intersection: Apply writes one set
-    to every selected device, so whenever the selected devices' assignments
-    are not all identical, applying replaces them all and can drop images the
-    operator never saw. That case now gets BOTH the picker note and a confirm
-    on Apply, from one shared derivation. Identical sets (including every
-    device unassigned) stay a plain, unconfirmed apply."""
+def test_bulk_picker_notes_differing_assignments_on_empty_intersection():
+    """Additional to the confirm above: an empty intersection can ALSO mean
+    every selected device genuinely has nothing assigned -- not a trap, so no
+    note. It is a trap only when at least one selected device DOES have an
+    assignment (the empty pre-check came from sets that disagree, not from
+    everyone being unassigned); that case gets a one-line warning in the
+    picker before the operator checks anything."""
     html = _webroot("index.html")
     app_js = _webroot("app.js")
     assert 'id="img-picker-note"' in html
     bulk_handler = app_js.split(
         "getElementById('assign-images-selected').addEventListener", 1)[1][:3200]
-    # ONE derivation of "the selected devices disagree", read by both the note
-    # and the confirm -- they cannot drift apart into two different rules.
-    assert "setsDiffer" in bulk_handler
+    assert "Selected devices have differing assignments" in bulk_handler
     assert "sets.some(" in bulk_handler
-    # ...and it is no longer the empty-intersection test
+    # the picker itself resets any stale note on every open, so a note left
+    # over from one bulk pick never bleeds into the next (bulk or per-row)
+    picker = app_js.split("function openImagePicker(currentIds, onApply) {", 1)[1]
+    picker = picker.split("\n  function closeImagePicker", 1)[0]
+    assert "img-picker-note" in picker
+
+
+def test_bulk_picker_warns_when_the_sets_merely_overlap():
+    """Review finding, untested until now: the note and the confirm keyed off
+    an EMPTY intersection, which catches only the extreme case. dev1=[A,B]
+    with dev2=[A] intersects to a perfectly non-empty [A], so that selection
+    got no note and no confirm -- the picker looked complete, Apply posted [A]
+    to both, and dev1 lost B with nothing said.
+
+    The rule belongs on the SETS, not their intersection: Apply writes one set
+    to every selected device, so any selection whose assignments are not all
+    identical can drop an image the operator never saw. Both the note and a
+    confirm on Apply now read one shared derivation of that, so they cannot
+    drift into two different rules. Identical sets -- every device unassigned
+    included -- stay a plain, unconfirmed apply."""
+    app_js = _webroot("app.js")
+    bulk_handler = app_js.split(
+        "getElementById('assign-images-selected').addEventListener", 1)[1][:3200]
+    assert "setsDiffer" in bulk_handler
+    # the gate is no longer the emptiness of the intersection
     assert "!intersection.length &&" not in bulk_handler, \
         "the note still fires only on an EMPTY intersection"
     assert "if (setsDiffer) {" in bulk_handler
-    assert "Selected devices have differing assignments" in bulk_handler
     # Apply confirms before it replaces differing sets, and cancelling that
     # confirm releases the shared selected-action lock like every other one.
     guard = bulk_handler.split("} else if (setsDiffer &&", 1)
     assert len(guard) == 2, "Apply does not confirm when the sets differ"
     assert "confirm(" in guard[1][:200]
     assert "setBulkBusy(false)" in guard[1][:900]
-    # the picker itself resets any stale note on every open, so a note left
-    # over from one bulk pick never bleeds into the next (bulk or per-row)
-    picker = app_js.split("function openImagePicker(currentIds, onApply) {", 1)[1]
-    picker = picker.split("\n  function closeImagePicker", 1)[0]
-    assert "img-picker-note" in picker
 
 
 def test_image_picker_and_drawer_show_filename_not_just_id():
@@ -6997,7 +7008,7 @@ def test_image_picker_and_drawer_show_filename_not_just_id():
     picker = app_js.split("function openImagePicker(currentIds, onApply) {", 1)[1]
     picker = picker.split("\n  function closeImagePicker", 1)[0]
     assert "imageLabel(id)" in picker
-    drawer = app_js.split("function deployImageRows(d) {", 1)[1][:700]
+    drawer = app_js.split("function deployImageRows(d) {", 1)[1][:1200]
     assert "imageLabel(iid)" in drawer
 
 
@@ -7059,19 +7070,19 @@ def test_deployed_badge_requires_every_assigned_image_staged():
 
 def test_deployment_drawer_lists_one_row_per_assigned_image():
     """The drawer said nothing about which images were staged where. One row
-    per assigned image: id + state -- ready via staged_image_ids, the
-    in-flight one via current_image_id/stage_state with stage_error shown on
-    it, everything else outstanding read as queued. Parked is deliberately
-    NOT a console state: a parked image is simply absent from the assigned
-    set, so it never gets a row here at all."""
+    per assigned image: id + state -- ready via staged_image_ids, error via
+    errored_image_ids, everything else outstanding still in flight, with the
+    tick's own stage_error carried alongside. Parked is deliberately NOT a
+    console state: a parked image is simply absent from the assigned set, so
+    it never gets a row here at all."""
     html = _webroot("index.html")
     app_js = _webroot("app.js")
     assert 'id="di-img-rows"' in html
     assert "function deployImageRows(d)" in app_js
-    body = app_js.split("function deployImageRows(d) {", 1)[1][:700]
+    body = app_js.split("function deployImageRows(d) {", 1)[1][:1200]
     assert "rowAssignedIds(d)" in body
     assert "rowHasStaged(d, iid)" in body
-    assert "current_image_id" in body and "stage_error" in body
+    assert "stage_error" in body
     assert "parked" not in body.lower()
     assert "document.getElementById('di-img-rows').innerHTML = deployImageRows(d)" in app_js
 
@@ -7096,11 +7107,14 @@ def test_devices_side_reads_the_per_image_errors_the_agent_reports():
     drawer = app_js.split("function deployImageRows(d) {", 1)[1][:1200]
     assert "rowErroredIds(d)" in drawer
     assert "'error'" in drawer
-    # staged wins over errored, and the in-flight image is consulted only
-    # after both -- the resolution order swarmmap.html already uses
+    # staged wins over errored -- the resolution order swarmmap.html uses
     assert drawer.index("rowHasStaged(d, iid)") < drawer.index("errored.indexOf(iid)")
-    assert (drawer.index("errored.indexOf(iid)")
-            < drawer.index("d.current_image_id === iid"))
+    # ...and per-image state is never derived from the identity pointer.
+    # current_image_id is the first image of the set that produced heartbeat
+    # data this tick (typically one already STAGED), not the one in flight, so
+    # reading it as "currently transferring" mislabels whichever image it
+    # lands on and leaves the real failure reading "queued".
+    assert "current_image_id" not in drawer
 
     body = app_js.split("function deviceStatus(d, devNow) {", 1)[1]
     body = body.split("\n  function ", 1)[0]

@@ -368,10 +368,10 @@ per-image staging progress against that set:
 
 | Field | Meaning |
 | --- | --- |
-| `current_image_id` | The one image the agent is actively transferring or placing this tick, if any. |
-| `stage_state` | The agent's own state string for `current_image_id` (for example `staging`, `downloading`, `transferring_to_ios`, `ready`, `error`) — on an agent that predates per-image reporting, the single most actionable state across the whole tick. |
-| `staged_image_ids` | Which of the assigned images this agent has staged and verified, as of its last heartbeat. Absent on an agent that predates multi-image staging, in which case staged/not-staged falls back to `stage_state == "ready"` paired with `current_image_id`. |
-| `errored_image_ids` | Which of the assigned images hit a terminal per-image failure on the agent's last tick. Absent on an agent that predates the field. |
+| `current_image_id` | Wire-compatible identity pointer: the first image of the set that produced heartbeat data this tick — typically one already staged. It is **not** the image being transferred, and per-image state must not be read from it; it exists so a reader that predates the ordered set still sees a single image id. |
+| `stage_state` | One state string for the whole tick. On a one-image heartbeat it is that image's own state (for example `staging`, `downloading`, `transferring_to_ios`, `ready`, `error`). For a set the agent collapses the tick into the single most actionable state across every assigned image, so it describes the set, not `current_image_id`. `stage_error`, likewise, is one reason per tick. |
+| `staged_image_ids` | Which of the assigned images this agent has staged and verified, as of its last heartbeat. Absent on a one-image heartbeat (and on an agent that predates multi-image staging), in which case staged/not-staged falls back to `stage_state == "ready"` paired with `current_image_id`. |
+| `errored_image_ids` | Which of the assigned images hit a terminal per-image failure on the agent's last tick, including retryable ones such as a full boot filesystem. Absent on a one-image heartbeat and on an agent that predates the field. |
 
 ## Device agent config keys
 

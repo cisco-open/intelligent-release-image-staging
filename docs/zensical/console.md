@@ -180,13 +180,15 @@ beside the table — it slides in from the right, closes on **Esc** or **✕**, 
 leaves the row you opened it from where it was. It opens on an **Images** table
 listing every image currently assigned to the device with its own state:
 `ready` once that image is staged and verified, `error` for an image the
-agent's last tick gave up on (with the reported reason on the image the
-heartbeat filed it under), the agent's own in-progress state (for example
-`staging`, `downloading`, `transferring_to_ios`) for whichever image is
-current, and `queued` for the rest. That is the same resolution the Swarm
-Map's drawer uses, so the two never disagree about an image, and a device
-with any failed image reads `N of M image(s) failed` in the Status column
-rather than `deployed`. Below that, it shows the deployment itself: the receipt state (`active`,
+agent's last tick gave up on, and `staging` for one still in flight. That is
+the same resolution the Swarm Map's drawer uses, so the two never disagree
+about an image, and a device with any failed image reads `N of M image(s)
+failed` in the Status column rather than `deployed`. A device staging a
+single image shows that agent's own state string instead (for example
+`downloading`, `transferring_to_ios`), since a one-image heartbeat reports
+exactly one image. The reported error is one per heartbeat, for the tick
+rather than for a particular image, so a multi-image set carries it on its
+own **Last reported error** row below the images. Below that, it shows the deployment itself: the receipt state (`active`,
 `removed`, `superseded`, `needs-reconcile`,
 `abandoned`) and receipt id, the
 preflight result, and the resolved configuration the onboard applied — the
