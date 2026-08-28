@@ -1389,6 +1389,19 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             return out
 
         @staticmethod
+        def _audit_image_names(cat, ids):
+            """Audit-facing names for a list of image ids: the catalog
+            filename when the catalog still has the image, else the bare id.
+            A policy row can outlive its images, and an audit entry that
+            silently drops the ids it could not resolve would understate what
+            was removed -- the one thing this text exists to record."""
+            out = []
+            for iid in ids:
+                entry = cat.get_image(iid) if cat else None
+                out.append((entry or {}).get("filename") or iid)
+            return ", ".join(out)
+
+        @staticmethod
         def _awaiting_heartbeat(row):
             """True when the device finished an ONBOARD but no heartbeat has
             arrived since — the agent is still bootstrapping on-box."""
@@ -2321,14 +2334,17 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if not ids:
                     # explicit unassign: clear the approval so the agent stops
                     # staging without deleting the device
-                    old = catalog.get_policy(did).get("approved_image_id")
+                    old_ids = catalog.get_policy(did).get("approved_image_ids") or []
                     catalog.set_policy(did, approved_image_ids=[])
-                    old_entry = catalog.get_image(old) if old else None
+                    # EVERY image this cleared, not just the set's first: the
+                    # audit trail is the record of what was done to the
+                    # device, and naming one of three removed images made it
+                    # read as a far smaller change than it was.
                     self._audit("device_assign", "device", action="unassign",
                                target=did, actor=actor,
                                detail="unassigned (was %s)"
-                                      % ((old_entry or {}).get("filename")
-                                         or old or "none"))
+                                      % (self._audit_image_names(catalog, old_ids)
+                                         or "none"))
                     self._json(200, {"ok": True}); return
                 entries = {}
                 for iid in ids:
@@ -2336,7 +2352,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     if entry is None:
                         self._json(400, {"error": "no such image"}); return
                     entries[iid] = entry
-                old = catalog.get_policy(did).get("approved_image_id")
+                old_pol = catalog.get_policy(did)
+                old = old_pol.get("approved_image_id")
+                old_ids = old_pol.get("approved_image_ids") or []
                 try:
                     # approval is the whole policy: IRIS stages, never installs
                     catalog.set_policy(did, approved_image_ids=ids)
@@ -2345,6 +2363,14 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if plural:
                     detail = "assigned %d image(s): %s" % (
                         len(ids), ", ".join(entries[i].get("filename") for i in ids))
+                    # Narrowing a set is an assign, and what it REMOVED is the
+                    # consequential half of that edit: an operator reading
+                    # "assigned 1 image(s): A" had no way to tell it from a
+                    # fresh assignment that dropped nothing.
+                    removed = [i for i in old_ids if i not in ids]
+                    if removed:
+                        detail += "; removed: %s" % self._audit_image_names(
+                            catalog, removed)
                 else:
                     # singular compat: keep the pre-multi-image detail shape
                     # (existing audit tests assert this text verbatim)

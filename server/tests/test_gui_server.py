@@ -1441,7 +1441,49 @@ def test_unassign_clears_the_whole_set(tmp_path):
                                         "approved_image_ids": []}
         events = [e for e in _read_audit_lines(audit_path)
                  if e.get("action") == "unassign"]
-        assert events and events[-1]["detail"] == "unassigned (was img1.bin)"
+        # every image the unassign actually removed, not just the set's first:
+        # the audit trail is the record of what was done to this device, and
+        # "(was img1.bin)" hid two of the three images that were dropped.
+        assert events and events[-1]["detail"] == \
+            "unassigned (was img1.bin, img2.bin, img3.bin)"
+    finally:
+        stop()
+
+
+def test_assign_audit_names_the_images_it_removed(tmp_path):
+    """Review finding: narrowing a device from {A,B,C} to {A} logged only
+    "assigned 1 image(s): A". The audit trail is the record of what an
+    operator did to a device, and the two images the operator dropped -- the
+    consequential half of that edit -- appeared nowhere in it.
+
+    A plural assign now names what it removed as well as what it set, and
+    only when it actually removed something. Ids whose catalog entry is gone
+    still get named (by id), since a policy row can outlive the image."""
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    _app, fleet, _creds, cat = _ctx
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        cat.save_image({"id": "img3", "filename": "img3.bin", "sha256": "ef",
+                        "size": 5, "published_at": 3})
+        _req(host, port, "POST", "/api/devices",
+             {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
+        cat.set_policy("d1", approved_image_ids=["img1", "img2", "img3"])
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_ids": ["img1"]}, headers=hh)
+        assert st == 200
+        events = [e for e in _read_audit_lines(audit_path)
+                 if e.get("action") == "assign"]
+        assert events[-1]["detail"] == \
+            "assigned 1 image(s): img1.bin; removed: img2.bin, img3.bin"
+
+        # widening removes nothing, so nothing is claimed to have been removed
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_ids": ["img1", "img2"]}, headers=hh)
+        assert st == 200
+        events = [e for e in _read_audit_lines(audit_path)
+                 if e.get("action") == "assign"]
+        assert events[-1]["detail"] == "assigned 2 image(s): img1.bin, img2.bin"
     finally:
         stop()
 
