@@ -94,8 +94,8 @@ _FAMILY_AMBIGUOUS_MODEL = re.compile(r"^(ISR|ASR|CSR)", re.IGNORECASE)
 _ARM_IOX_MODELS = (r"^IE-?3", r"^IR1[018]")
 # Catalyst 9000 -> amd64 IOx package; the app-hosting SSD share
 # (usbflash1:iox_host_data_share, host-side /vol/usb1) is bind-mounted into
-# the app so image transfer is a local disk write + an IOS-internal
-# `copy /verify` onto bootflash — same final placement as Guest Shell, and no
+# the app so image transfer is a local disk write + an IOS-internal plain
+# `copy` onto bootflash — same final placement as Guest Shell, and no
 # CoPP-policed punt traffic. Stacked-member-overridable APP_INTF.
 _C9K_MODEL = r"^C9[0-9]{3}"
 _C9K_IOX_ENV = {

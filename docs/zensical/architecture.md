@@ -47,7 +47,7 @@ flowchart TB
 | Faster network distribution | The server does not need to send every byte of a multi-gigabyte image to every device. Devices that already have pieces can help the rest of the network. |
 | Higher transfer tolerance | Downloads are piece-based and resumable. If a transfer is interrupted or one path is slow, a device can continue by fetching missing pieces from available peers and the seeder. |
 | Controlled rollout intent | The catalog tells each device which image is approved for staging. Devices that are not assigned do not stage that image. |
-| Device-side safety | Each device verifies the downloaded file and the final staged copy. IRIS stops after staging; install, activation, boot changes, and reloads remain outside IRIS. |
+| Device-side safety | Each device verifies the downloaded file's hash and confirms the final staged copy by exact byte size. IRIS stops after staging; install, activation, boot changes, and reloads remain outside IRIS. |
 
 !!! note "Central services still matter"
     IRIS improves image distribution, not every possible failure mode. The catalog and tracker still coordinate policy and swarm participation. The fault-tolerance benefit is in the transfer path: devices can resume piece downloads and use more than one source once the swarm has content.
@@ -72,7 +72,7 @@ sequenceDiagram
     DeviceB->>Server: Download initial pieces
     DeviceA<<->>DeviceB: Exchange missing pieces
     DeviceA->>DeviceA: Verify downloaded image hash
-    DeviceA->>IOS: Copy and verify staged image
+    DeviceA->>IOS: Copy staged image
     DeviceA->>Server: Report staged status
 ```
 
@@ -115,8 +115,10 @@ from the read-only image root survives. See
 [Catalog entry fields](reference.md#catalog-entry-fields).
 
 On an IOx device, `/data/iris` is persistent application scratch rather than an
-IOS-visible image destination. After swarm verification, the app hands the file
-to IOS — a disk-speed write through the bind-mounted share where available, an
-scp push on IE-3400 or as the fallback — and IOS performs the final
-`copy /verify`. This keeps signature enforcement and the final filesystem
-write inside IOS.
+IOS-visible image destination. The agent checks the staged file's sha256
+against the catalog's known-good value before hand-off — image authenticity
+itself is established at publish time on the server. The app then hands the
+file to IOS — a disk-speed write through the bind-mounted share where
+available, an scp push on IE-3400 or as the fallback — and IOS performs the
+final placement as a plain copy, which the agent attests by polling for the
+file and confirming it matches the catalog's declared byte size exactly.

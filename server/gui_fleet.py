@@ -152,10 +152,11 @@ def validate_record(record, allow_legacy=False):
         if any(result.get(key) for key in ("iris_vlan", "svi_ip", "svi_mask",
                                            "vpg_number", "nat_interface")):
             raise ValueError("inband inventory cannot contain routed or router fields")
-        # ios_ssh_host is the IOS endpoint the inband IOx app SSHes to for
-        # copy /verify. It defaults to the device's management IP (device_ip),
-        # which is on the same existing management VLAN; it is only set here as
-        # an advanced override for asymmetric topologies. Guest Shell never uses it.
+        # ios_ssh_host is the IOS endpoint the inband IOx app SSHes to for its
+        # plain-copy placement. It defaults to the device's management IP
+        # (device_ip), which is on the same existing management VLAN; it is
+        # only set here as an advanced override for asymmetric topologies.
+        # Guest Shell never uses it.
         if result.get("ios_ssh_host"):
             result["ios_ssh_host"] = _ipv4(result.get("ios_ssh_host"), "ios_ssh_host")
     else:

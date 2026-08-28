@@ -82,12 +82,22 @@ def content_sha256_state(state, img_id):
 
 
 def ios_copy_verify_state(state, img_id):
-    """The persisted IOS copy /verify fact for a report (spec §3D), read
-    VERBATIM from the decision point. Defaults to 'not_run' when no copy /verify
-    decision has been made. Independent of content_sha256_state."""
-    tele = (state.get(img_id) or {}).get("tele") or {}
-    v = tele.get("ios_copy_verify_state")
-    return v if v in IOS_COPY_VERIFY_STATES else "not_run"
+    """The IOS copy-verify field (spec §3D), RETAINED FOR WIRE COMPATIBILITY
+    ONLY — the server schema still requires it, so the report keeps carrying
+    it.
+
+    There is no copy-verify step on any platform anymore: placement is a plain
+    `copy`, and the agent itself attests it via dir presence plus the exact
+    catalog byte size. Nothing writes this key, so the answer is a constant
+    'not_run'.
+
+    This reader is deliberately AUTHORITATIVE rather than a verbatim read of
+    state: a device upgraded in place still carries the 'ok' its previous agent
+    persisted, and echoing that would report a verification the code no longer
+    performs. Persisted values from older agents are therefore ignored on
+    purpose. Independent of content_sha256_state, which IS read verbatim from
+    its decision point."""
+    return "not_run"
 
 
 def mint_id():
@@ -749,8 +759,10 @@ def build_report_v2(cfg, state, img_id, event, now, transfer_id, report_id,
                     window_complete=True):
     """Assemble the EXACT v2 terminal report body (spec §10.2). Pure read of
     cfg/state. IDs are supplied by the caller (frozen once, retried verbatim).
-    Verification is TWO independent persisted facts read verbatim
-    (content_sha256_state / ios_copy_verify_state); avg_bps / sha_ok / the
+    Verification carries two independent fields: content_sha256_state is the
+    persisted fact read verbatim from its decision point, while
+    ios_copy_verify_state is a wire-compat constant 'not_run' (no copy-verify
+    step exists — see its reader). avg_bps / sha_ok / the
     generic 'tier' are retired. Peers carry first/last/count participation only.
     `report_request_id` is set only for pull reports (null otherwise).
 

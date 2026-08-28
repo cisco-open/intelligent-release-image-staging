@@ -45,25 +45,31 @@ scratch file to IOS depends on the platform:
   into the container (`run-opts "-v …:/mnt/share"`). The agent copies the
   scratch to the share ROOT under its fixed `iris-staged.bin` name at disk
   speed, then drives an IOS-internal
-  `copy /verify usbflash1:iox_host_data_share/iris-staged.bin flash:<img>`
+  `copy usbflash1:iox_host_data_share/iris-staged.bin flash:<img>`
   over its SSH-to-self CLI. That is the same bootflash-root placement as Guest
-  Shell, with no image bytes crossing the device CPU; `copy /verify`
-  restores the real image name and checks the Cisco signature from the bytes.
-  IRIS never creates a subdirectory in the share (a container-created subdir
-  becomes inaccessible to the container itself on this platform) and confines
+  Shell, with no image bytes crossing the device CPU; the copy is a plain
+  copy that restores the real image name, and the agent attests the
+  placement by polling for the file and confirming it matches the catalog's
+  declared byte size exactly. The image was already verified by sha256
+  against the catalog before the placement copy, and its authenticity was established
+  at publish time on the server. IRIS never creates a subdirectory in the
+  share (a container-created subdir becomes inaccessible to the container
+  itself on this platform) and confines
   itself to `iris-` prefixed filenames: each attempt sweeps only its own
   leftovers, a tiny probe proves IOS can actually read the share before any
   multi-GB copy is committed (falling back to scp otherwise), the transient
   copy is removed after placement, and undeploy deletes the prefixed files.
 - **IE-3400 (scp push)**: IOx cannot bind-mount the SD card there, so the
   container SCP-pushes the scratch to `guest-share/iris` through the device's
-  SCP server and then runs `copy /verify` for the final placement. The agent
-  also falls back to this path automatically if the share mount is absent or
-  unreadable from IOS. This scp traffic is addressed to the device itself, so
-  default CoPP caps it at roughly 1.4 MB/s; IRIS never modifies CoPP.
+  SCP server and then runs a plain `copy` for the final placement, attested
+  afterward by the agent polling for an exact byte-size match at the
+  destination. The agent also falls back to this path automatically if the
+  share mount is absent or unreadable from IOS. This scp traffic is addressed
+  to the device itself, so default CoPP caps it at roughly 1.4 MB/s; IRIS
+  never modifies CoPP.
 
-Both platforms drive IOS over the app's SSH-to-self CLI, for `copy /verify` and for
-the one-shot EEM applets that place and reclaim files at the target-FS root. That
+Both platforms drive IOS over the app's SSH-to-self CLI, for the placement copy and
+for the one-shot EEM applets that place and reclaim files at the target-FS root. That
 connection can optionally be pinned: set `device_ssh_known_hosts` in the agent config
 and, when that file exists, the app's `ssh` and `scp` calls verify the IOS host key
 against it instead of running unverified. See

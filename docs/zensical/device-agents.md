@@ -35,7 +35,7 @@ flowchart TB
     Agent --> Poll["Poll catalog"]
     Poll --> Download["Download with aria2c"]
     Download --> Hash["Verify sha256"]
-    Hash --> Copy["IOS copy /verify to the storage root"]
+    Hash --> Copy["Plain copy to the storage root, byte-size attested"]
     Copy --> Report["Report status"]
 ```
 
@@ -153,7 +153,7 @@ The agent loop is deliberately boring:
 4. Skip work when the approved image is already staged and verified.
 5. Download missing content through `aria2c`.
 6. Verify the downloaded file hash.
-7. Copy to the IOS storage root with IOS verification.
+7. Copy to the IOS storage root and attest placement by exact byte size.
 8. Report health, progress, and errors.
 
 ## Verification gates
@@ -162,8 +162,8 @@ IRIS uses two checks because the server and device have different capabilities:
 
 | Check | Where | Why |
 | --- | --- | --- |
-| `sha256` | Agent Python code | Confirms the downloaded file matches catalog metadata before IOS copy. |
-| Cisco signature (`copy /verify`) | IOS copy path | IOS enforces the embedded Cisco image signature while copying to the storage root; a failed signature fails the copy and leaves no destination file. |
+| `sha256` | Agent Python code | Confirms the downloaded file matches the catalog's known-good value — the same value established at publish time on the server — before the IOS copy runs. |
+| Byte size at the storage root | Agent Python code, polling IOS `dir` | The IOS copy to the storage root is a plain copy with no in-band signature check; the agent attests it landed correctly by polling for the file and confirming its size matches the catalog exactly. |
 
 If verification fails, the agent reports the failure and leaves installation decisions untouched. It does not change boot variables and does not reload the device.
 
@@ -186,7 +186,7 @@ before they reach the applet, so a hand-edited state file cannot inject a comman
 ## Device SSH host-key pinning
 
 Guest Shell runs inside IOS and configures the device locally. The IOx app instead
-reaches IOS over SSH to run `copy /verify` and the cleanup applets, so it has a host
+reaches IOS over SSH to run the placement copy and the cleanup applets, so it has a host
 key to consider.
 
 Host-key pinning is optional and off by default. Set `device_ssh_known_hosts` in the

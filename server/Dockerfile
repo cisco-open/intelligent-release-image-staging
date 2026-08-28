@@ -20,9 +20,11 @@
 # `openssl` binary to parse the TLS trust store and verify CMS integrity for
 # downloaded CA bundles (PKCS#7/CMS), so the TLS/crypto stack here is a security
 # boundary, not just a build detail. Note this is trust-store/CA-bundle
-# processing only: IOS image authenticity is enforced device-side by IOS
-# `copy /verify`, not by the server. Keep in lockstep with device/iox/Dockerfile,
-# which shares this base (issue #13).
+# processing only: IOS image authenticity is established server-side at
+# publish time, not by a device-side signature check — the device places the
+# image with a plain `copy`, and the agent attests placement and content
+# integrity itself. Keep in lockstep with device/iox/Dockerfile, which shares
+# this base (issue #13).
 FROM python:3.12-slim-trixie
 
 

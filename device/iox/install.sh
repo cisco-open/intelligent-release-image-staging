@@ -10,7 +10,7 @@
 # device/device-install.sh: push the IRIS PKI trustpoint over SSH FIRST, then
 # `copy https://STAGE_HOST:8000/<pkg>` from the always-on container artifact
 # server (no throwaway HTTP server). The agent then pulls its assigned image over
-# the swarm and copies it to an IOS-visible disk via `copy /verify`, such as
+# the swarm and copies it to an IOS-visible disk via a plain `copy`, such as
 # sdflash: on IE-3x00 or usbflash1: on C9300. Distribute/stage
 # ONLY; never install/activate/reload the IOS image.
 #
@@ -43,7 +43,7 @@ fi
 # Attachment model. routed: IRIS creates a dedicated VLAN/SVI and the app SSHes
 # to that SVI. inband: the app attaches to an EXISTING operator-owned VLAN that
 # IRIS never creates/changes/removes, and SSHes to the existing IOS management
-# SVI (IOS_SSH_HOST) for its copy /verify. The AppGig trunk is the one inband
+# SVI (IOS_SSH_HOST) for its plain-copy placement. The AppGig trunk is the one inband
 # touch: IRIS ADDs the inband VLAN to its allowed list (additive only, never
 # replaced, never removed on uninstall).
 NETWORK_ATTACHMENT="${NETWORK_ATTACHMENT:-routed}"
@@ -137,7 +137,7 @@ interface $APP_INTF
 file prompt quiet
 !
 ! SCP server: the scp fallback hand-off (primary on IE-3x00; C9k uses the
-! bind-mounted SSD share) pushes the scratch here, then copy /verify places it.
+! bind-mounted SSD share) pushes the scratch here, then the plain copy places it.
 ip scp server enable
 !
 end
@@ -162,7 +162,7 @@ file prompt quiet
 !
 ! SCP server: the scp hand-off (primary on IE-3x00, where IOx cannot
 ! bind-mount sdflash:; the C9k default is the SSD share) pushes the scratch to
-! guest-share, then copy /verify places it.
+! guest-share, then the plain copy places it.
 ip scp server enable
 !
 end
@@ -255,7 +255,7 @@ if [ "$DRY" -eq 1 ]; then
   ios_net
   echo "===== PKI TRUSTPOINT (pasted over SSH FIRST, before any copy) ====="
   trustpoint_block
-  echo "===== APP-HOSTING appid $APPID (app SSHes to IOS at $IOS_SSH_HOST for copy /verify) ====="
+  echo "===== APP-HOSTING appid $APPID (app SSHes to IOS at $IOS_SSH_HOST for the image copy) ====="
   appid_block
   if [ -n "$SHARE_IOS_PATH" ]; then
     echo "===== SHARE (created on IOS before activation so the bind-mount target exists) ====="
@@ -419,6 +419,6 @@ case "$save_out" in
 esac
 
 echo "[9/9] $APPID RUNNING. The agent refreshes its token, downloads $DEVICE_ID's"
-echo "      assigned image over the swarm, and copies it to $TARGET_FS via copy /verify."
+echo "      assigned image over the swarm, and copies it to $TARGET_FS via a plain copy."
 echo "      Watch:  printf 'dir $TARGET_FS\\n' | lab/device-run.sh $DEVICE_IP"
 echo "      Swarm:  https://$STAGE_HOST:8080/  (Console -> Swarm tab)"

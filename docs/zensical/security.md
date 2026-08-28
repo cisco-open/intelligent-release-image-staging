@@ -16,7 +16,7 @@ IRIS is designed around least surprise: it moves images, verifies images, and re
 | No reload | IRIS does not reload or schedule reloads. |
 | No boot mutation | IRIS does not change boot variables or running software state. |
 | No inband network mutation | For inband devices, IRIS never creates, changes, or removes the existing VLAN, SVI, gateway, routes, or VRF. |
-| Device-side verification | The device verifies the staged copy before reporting success. |
+| Device-side content check | The agent hashes the staged file with sha256 against its catalog entry before placing it, and confirms the placed copy by exact catalog byte size. |
 | Private swarm | Torrents use private metadata and authenticated announces. |
 | Unprivileged runtime | Every server process runs as a fixed non-root uid with all Linux capabilities dropped. |
 
@@ -95,7 +95,7 @@ flowchart TB
     subgraph DeviceZone["Device"]
         Agent["Agent token"]
         Flash["Staged image on storage"]
-        IOS["IOS verification"]
+        IOS["Plain copy, byte-size attested"]
     end
 
     Images --> Catalog

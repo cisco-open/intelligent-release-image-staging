@@ -53,7 +53,7 @@ Device reports are useful for both current status and post-incident review. Typi
 | Identity | Device id, platform, storage target. |
 | Assignment | Approved image id and current staged image. |
 | Transfer | Download state, progress, peer information, seeder participation. |
-| Verification | Hash checks, IOS copy or verify result, failure reason. |
+| Verification | Hash checks, staged-copy byte-size confirmation, failure reason. |
 | Timing | Last poll, last report, and operation duration. |
 
 ## Legacy participants
@@ -336,7 +336,7 @@ what a future bump will require.
 | Device never appears | Installer output, artifact server reachability, catalog trustpoint, enrollment token expiry. |
 | Download does not start | Tracker port, announce key, seeder port, device route to server. |
 | Download stalls | Swarm view, peer count, seeder availability, storage capacity. |
-| Verification fails | Catalog hash, file name, IOS copy output, image integrity. |
+| Verification fails | Catalog hash, file name, staged-copy byte size, image integrity. |
 | Console stale | Telemetry health, catalog service logs, device report interval. |
 | Prometheus target down, dashboard blank | `IRIS_OBSERVABILITY` — unset means `/metrics` answers 404 by design; then check reachability to port 9101. |
 | `403` on `:9101/swarm` | Swarm data is console-gated by design: use the console's Swarm tab, the authenticated `GET /api/swarm`, or `docker compose -f server/docker-compose.yml exec iris curl -s http://127.0.0.1:9101/swarm` (`kubectl exec` on Kubernetes). `IRIS_SWARM_PUBLIC=1` reopens remote access. |

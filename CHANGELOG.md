@@ -11,6 +11,12 @@ top-level `VERSION` file.
 
 ## [Unreleased]
 
+### Changed
+- Image verification is now the same on every platform: the agent proves integrity by
+  sha256 against the catalog's published value, and placement onto the boot filesystem
+  is attested by exact byte size. The on-device `copy /verify` step is retired; device
+  telemetry reports its state as `not_run`.
+
 ### Fixed
 - Device onboarding now reads the operating-system family from the `show version`
   banner. An IOS-XR device is refused with an explanatory error instead of being

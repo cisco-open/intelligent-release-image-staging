@@ -57,6 +57,25 @@ _ROOT_COPY_BACKOFF_MAX = 60 * 60
 # never truthy/falsy-compared, so it can't be mistaken for True/False.
 ROOT_COPY_RUNNING_IMAGE_UNKNOWN = object()
 
+# Sentinel returned by every copy_to_root path that gives up BEFORE any IOS
+# command runs: both running-image refusals, an scp scratch push that raised, an
+# applet run that never fired, a delete-first that raised. It exists because the
+# terminal-state reclaim (_reclaim_failed_root_copy) is only safe when THIS
+# attempt's `delete /force` actually executed — that delete is what proves a file
+# sitting at the image name is our own partial. After a pre-IOS failure nothing
+# was deleted, so a file at that name is the OPERATOR'S, and on the
+# running-image-refusal path it is the running image itself: deleting it strands
+# a bundle-mode box in rommon at the next reload.
+#
+# Retry/backoff accounting treats this EXACTLY like plain False — the attempt
+# counts, the backoff advances, copy_terminal still eventually fires, because an
+# operator must still be shown the terminal state. The only difference is that it
+# never sets st["ios_copy_started"], the flag that arms the reclaim.
+#
+# Identity-checked (`is`), NEVER truthy/falsy-compared: it is a plain object() and
+# therefore TRUTHY, so any success branch must exclude it explicitly first.
+ROOT_COPY_NOT_ATTEMPTED = object()
+
 Deps = collections.namedtuple(
     "Deps", "catalog emit ios aria_add file_size verify free_bytes version "
             "copy_to_root purge_others reclaim root_present remove_stage "
@@ -527,13 +546,85 @@ def _protect_set(image, state):
 
 
 def _reset_copy_failures(st):
-    for key in ("copy_attempts", "copy_next_ts", "copy_terminal", "stage_error"):
+    for key in ("copy_attempts", "copy_next_ts", "copy_terminal", "stage_error",
+                "ios_copy_started"):
         st.pop(key, None)
 
 
 def _copy_backoff(attempts):
     return min(_ROOT_COPY_BACKOFF_BASE * (2 ** max(attempts - 2, 0)),
                _ROOT_COPY_BACKOFF_MAX)
+
+
+def _reclaim_failed_root_copy(deps, target_prefix, image):
+    """Delete this attempt's failed root copy when the retry gate goes
+    terminal. Called ONCE, on the transition into copy_terminal.
+
+    Why it has to happen here: after copy_terminal is set, no further copy
+    fires, so the placement path's delete-first never runs again. Without this
+    the leftover sits at the boot-FS root under the REAL Cisco image name,
+    burning ~1.2 GB indefinitely — and an operator listing flash: would see
+    what looks like a perfectly good image. state['root_file'] is only set on
+    SUCCESS, so no other cleanup path owns this file.
+
+    WHY A DELETE HERE CAN BE SAFE: a placement attempt that reached IOS begins
+    with `delete /force <FS><filename>` — the IRIS-COPYROOT applet's action 020
+    on the Guest Shell path, the vty command on the direct path. So a file
+    present at that name after such an attempt fails can only be the partial
+    THAT attempt wrote.
+
+    THAT INVARIANT DOES NOT HOLD UNCONDITIONALLY, and this function must never
+    assume it. Attempts that fail BEFORE any IOS command — the running-image
+    refusals, an scp push that raised, an applet run that never fired — delete
+    nothing, so a file at that name is the operator's, and on the
+    running-image-refusal path it IS the running image. Two independent layers
+    keep that file safe:
+
+      Layer 1 (caller): run_once only calls this when at least one attempt in
+        this image's cycle came back a genuine post-delete-first False
+        (st["ios_copy_started"]); ROOT_COPY_NOT_ATTEMPTED never sets it.
+      Layer 2 (below, unconditional): re-read the running image and refuse if
+        the target matches its basename, or if the running image cannot be
+        confirmed at all. This holds even if Layer 1 regresses, and mirrors the
+        same running_image()/_ios_basename comparison copy_to_root makes before
+        any destructive command. An unknown running image is treated exactly as
+        _reclaim_for_mode treats it (#4): no protect-set can be built, so no
+        delete may run.
+
+    Stage-only: this reclaims exactly one name — IRIS's own failed copy — and
+    is reclamation, not install activity. Best-effort; a delete that raises is
+    logged and swallowed, since the terminal state is already reported."""
+    fname = image["filename"]
+    # ---- Layer 2: independent last-line check, before ANY delete is issued ----
+    try:
+        running = deps.running_image()
+    except Exception as e:
+        deps.emit("ROOTCOPY-RECLAIM-REFUSED",
+                  "%s left in place at %s: running image unknown "
+                  "(show version read raised: %s) — refusing a delete that "
+                  "cannot be proven safe" % (fname, target_prefix, e))
+        return
+    if not running:
+        deps.emit("ROOTCOPY-RECLAIM-REFUSED",
+                  "%s left in place at %s: running image unknown — refusing a "
+                  "delete that cannot be proven safe" % (fname, target_prefix))
+        return
+    if _ios_basename(running).casefold() == fname.casefold():
+        deps.emit("ROOTCOPY-RECLAIM-REFUSED",
+                  "%s left in place at %s: it IS the running image (%s) — "
+                  "refusing destructive delete"
+                  % (fname, target_prefix, running))
+        return
+    try:
+        deps.reclaim_bundle(target_prefix, [fname])
+    except Exception as e:
+        deps.emit("ROOTCOPY-RECLAIM-FAIL",
+                  "%s failed placement left at %s; delete raised: %s"
+                  % (fname, target_prefix, e))
+        return
+    deps.emit("ROOTCOPY-RECLAIM",
+              "%s placement gave up; deleted this attempt's partial copy from %s"
+              % (fname, target_prefix))
 
 
 def _ios_basename(path):
@@ -659,7 +750,8 @@ def run_once(cfg, deps, state):
             and done_st.get("copied"):
         content_ok = done_st.get("sha", image["sha256"]) == image["sha256"]
         staged_ok = deps.file_size(stage) is not None
-        root_ok = deps.root_present(image["filename"], state.get("stage_fs", "flash:"))
+        root_ok = deps.root_present(image["filename"], state.get("stage_fs", "flash:"),
+                                    size)
         if content_ok and staged_ok and root_ok:
             obs, _ = _build_observation(cfg, deps, state, img_id, stage,
                                         "steady", time.time())
@@ -762,12 +854,13 @@ def run_once(cfg, deps, state):
                           % (image["filename"], img_id))
             # Place at flash root via NATIVE EEM. The agent templates the
             # IRIS-COPYROOT applet and fires it; the applet clears any stale
-            # same-named leftover, then runs `copy /verify` (copy + Cisco
-            # signature, enforced by IOS in one step — a bad signature fails the
-            # copy and deletes the destination). The agent then polls for the
-            # file at flash root: presence proves THIS attempt's copy/verify
-            # passed. copy_to_root returns False if the file never appears ->
-            # st['copied'] stays False so the next tick retries.
+            # same-named leftover, then runs a plain `copy` — no in-band
+            # signature check. The agent then polls for the file at flash
+            # root and blesses the copy only on presence AND an exact
+            # byte-size match against the catalog's declared size for this
+            # image. copy_to_root returns False if the file never appears or
+            # never reaches the expected size -> st['copied'] stays False so
+            # the next tick retries.
             # Copy gate: placing the flash-root copy needs room for a SECOND
             # full-size image alongside the staged/seeding scratch. On a tight
             # device that fit one image but not two, degrade to keep-seeding-only
@@ -812,7 +905,7 @@ def run_once(cfg, deps, state):
                         return "seeding-only"
                 st.pop("blocked_no_space", None)
                 # Container-mode IOx devices must SCP the completed image into
-                # IOS-visible storage before the final copy /verify. That large
+                # IOS-visible storage before the final placement copy. That large
                 # transfer blocks this agent process, so publish its state first
                 # instead of leaving the Console on ambiguous "staging".
                 now = time.time()
@@ -836,7 +929,10 @@ def run_once(cfg, deps, state):
                                               stream_on=stream_on))
                 if not st.get("copy_terminal") \
                         and now >= st.get("copy_next_ts", 0):
-                    result = deps.copy_to_root(image["filename"], target_prefix)
+                    result = deps.copy_to_root(image["filename"], target_prefix, size)
+                    # ROOT_COPY_NOT_ATTEMPTED is a truthy object(), so it MUST be
+                    # excluded before any plain truth test on `result`.
+                    attempted = result is not ROOT_COPY_NOT_ATTEMPTED
                     if result is ROOT_COPY_RUNNING_IMAGE_UNKNOWN:
                         # Transient: the running-image scrape glitched, not a
                         # copy failure. Leave copy_attempts/copy_next_ts alone
@@ -844,21 +940,24 @@ def run_once(cfg, deps, state):
                         # copy_failed terminal state — retry next tick exactly
                         # as before the bounded-retry schedule existed.
                         pass
-                    elif result:
+                    elif attempted and result:
                         st["copied"] = True
                         state["root_file"] = image["filename"]
                         _reset_copy_failures(st)
-                        # Record the IOS copy /verify outcome INTO STATE at the
-                        # decision point (spec §3D): 'ok' means this attempt's
-                        # copy /verify passed. Independent of content_sha256.
-                        # Durability follows the report (freeze checkpoint /
-                        # final save); re-derived idempotently after a crash.
-                        st.setdefault("tele", {})["ios_copy_verify_state"] = "ok"
                     else:
+                        if attempted:
+                            # A genuine failure that got past the delete-first:
+                            # IOS work ran, so a file at the image name now is
+                            # OUR partial. This is the ONLY thing that arms the
+                            # terminal reclaim (Layer 1). A pre-IOS refusal
+                            # still counts as an attempt below — the operator
+                            # must still reach the terminal state — but it
+                            # deleted nothing, so it must never authorise a
+                            # delete. Cleared with copy_attempts in
+                            # _reset_copy_failures.
+                            st["ios_copy_started"] = True
                         attempts = st.get("copy_attempts", 0) + 1
                         st["copy_attempts"] = attempts
-                        st.setdefault("tele", {})[
-                            "ios_copy_verify_state"] = "failed"
                         st["stage_error"] = (
                             "final IOS placement failed; inspect IRIS ROOTCOPY-FAIL")
                         if attempts >= _ROOT_COPY_MAX_ATTEMPTS:
@@ -867,6 +966,22 @@ def run_once(cfg, deps, state):
                             deps.emit("ROOTCOPY-GIVEUP",
                                       "%s placement failed %d times; manual intervention required"
                                       % (image["filename"], attempts))
+                            # Transition-only: copy_terminal short-circuits the
+                            # whole copy block from the next tick on, so this
+                            # runs exactly once. Nothing else owns the leftover.
+                            # Layer 1: only a genuine post-delete-first failure
+                            # proves the file at that name is ours to delete.
+                            if st.get("ios_copy_started"):
+                                _reclaim_failed_root_copy(deps, target_prefix,
+                                                          image)
+                            else:
+                                deps.emit(
+                                    "ROOTCOPY-RECLAIM-REFUSED",
+                                    "%s left in place at %s: no attempt reached "
+                                    "IOS (every failure was refused or failed "
+                                    "before the delete-first), so anything at "
+                                    "that name is not ours to delete"
+                                    % (image["filename"], target_prefix))
                         else:
                             if attempts == 1:
                                 # Retry on the next tick for fast recovery from
@@ -1333,31 +1448,101 @@ def _optional_progress(value):
 # with injected cli_execute / sha256 callables; build_deps below wires it up
 # with the real on-box implementations) ----
 
+_DIR_ROW_RE_TMPL = r"(?m)^\s*\d+\s+[^d\s]\S*\s+(\d+)\s+.*\s%s\s*$"
+
+
+def _dir_size_of(dir_out, fname):
+    """Byte size of *fname* from IOS `dir` output, or None when the row is
+    absent, unparseable, or a directory row. Anchored to the row END so
+    cat9k.bin never reads cat9k.bin.backup's size. The permissions column is
+    matched as any non-directory token ([^d\\s]\\S*) rather than a bare \\S+,
+    so a same-named directory (row starts with `d...`) is never mistaken for
+    a file — IOS file rows carry `-rw-`-style tokens, sometimes with a
+    trailing `.` (e.g. `-rw-rw-r--.`)."""
+    if not dir_out:
+        return None
+    m = re.search(_DIR_ROW_RE_TMPL % re.escape(fname), dir_out)
+    return int(m.group(1)) if m else None
+
+
+def _root_present_from_dir(dir_out, fname, expected_size=None):
+    """Steady-state presence verdict for the placed root copy, from one `dir`
+    read. Pure (module-level so it's unit-testable); build_deps.root_present
+    wraps it with the CLI call.
+
+    True unless IOS positively says the file is gone. When `expected_size` is
+    given, a parsed size that DISAGREES is False — a partial file left by an
+    interrupted transfer must not pass as "still there".
+
+    A row that is present but whose size can't be parsed returns True, for the
+    same reason build_deps.root_present returns True when the `dir` call itself
+    raises: one flaky or unparseable tick must not trigger a full ~GB re-copy,
+    and a real loss shows up as plain absence on the next tick."""
+    if not dir_out:
+        return False
+    if "%Error" in dir_out or "No such file" in dir_out:
+        return False
+    if fname not in dir_out:
+        return False
+    if expected_size is None:
+        return True
+    observed = _dir_size_of(dir_out, fname)
+    if observed is None:
+        return True
+    return observed == expected_size
+
+
 def _agent_reverify_root(fname, target_prefix, cli_execute_fn, emit_fn,
                         poll_attempts=180, poll_interval_s=5.0,
-                        sleep_fn=time.sleep):
-    """Bless the target-FS root copy once the IRIS-COPYROOT applet's
-    `copy /verify` has completed.
+                        sleep_fn=time.sleep, expected_size=None):
+    """Bless the target-FS root copy by presence AND exact size, independent
+    of however the file arrived at the target-FS root.
 
-    We trust `copy /verify`: IOS copies the file AND enforces the Cisco
-    signature in one step, and a failed signature fails the copy and deletes
-    the destination. The applet deletes any stale same-named leftover BEFORE
-    the copy (see _copy_to_root_impl), so after it runs a file at
-    <FS><fname> can only be one this attempt's `copy /verify` wrote and
-    signature-verified. That makes file presence a sound, attempt-scoped
-    verdict — and the device's guestshell can't read the FS root as a file or
-    run `verify` (it hangs) anyway, so `dir <FS><fname>` (a small, fast cli
-    call) is all it needs.
+    The contract this function owns: `dir <FS><fname>` must report a byte
+    count matching `expected_size` (the catalog's declared size for this
+    image) before the copy is called good. Presence alone is not a
+    verdict — a copy that dies mid-transfer can leave a PARTIAL file at the
+    destination rather than nothing. When `expected_size` is None, callers
+    get the old presence-only behaviour (used where the caller has no
+    catalog size to check against).
+
+    Whatever lands the file may still be in flight when this function polls:
+    a row that's present but the WRONG size partway through the poll window
+    just means the transfer is still running, so polling continues. Only a
+    size mismatch that persists all the way to the end of the poll budget is
+    treated as a failure. There's nothing extra to clean up here: it's on
+    whatever re-fires the copy on the next tick to clear any stale partial
+    before retrying.
+
+    This function makes no claim about how the file got there or whether any
+    signature was checked as part of landing it — it does not establish
+    content integrity or authenticity. The agent already computed a sha256
+    over the staged file before the copy ran, and authenticity of that
+    staged content is a server-side, publish-time property (the catalog
+    entry the sha256 was checked against). This poll only confirms presence
+    and exact catalog byte size at the target-FS root.
+
+    A row that IS present but whose size can't be parsed out of the `dir`
+    output (an unexpected format) is handled exactly like a wrong size: keep
+    polling, and if it persists to the end of the budget, fail — but say so
+    truthfully. Claiming the copy "never appeared" when it plainly did would
+    send an operator looking for the wrong fault.
 
     Polls `dir <FS><fname>` and returns bool:
-      * file appears  -> emit ROOTCOPY, return True
-      * never appears within the poll budget (signature failed -> dest deleted,
-        or the copy never ran) -> emit ROOTCOPY-FAIL, return False. Nothing to
-        delete; the next tick re-fires the applet.
+      * file appears with the expected size (or, when expected_size is None,
+        appears at all) -> emit ROOTCOPY, return True
+      * a size mismatch, or a present-but-unreadable size, persists through the
+        whole poll budget, or the file never appears at all -> emit
+        ROOTCOPY-FAIL naming which of those it was, return False.
 
-    Default poll budget (180 * 5 s ≈ 895 s) tracks the applet's `maxrun 900` so
-    a legitimately slow ~1.2 GB copy isn't abandoned a few minutes early."""
-    emit_fn("ROOTCOPY-VERIFYING", "%s applet running copy /verify" % fname)
+    Default poll budget (180 * 5 s ≈ 895 s) is sized to track a copy path's
+    typical ~900 s execution budget, so a legitimately slow ~1.2 GB copy
+    isn't abandoned a few minutes early."""
+    emit_fn("ROOTCOPY-VERIFYING", "%s awaiting root copy" % fname)
+    last_size = None
+    # Records the outcome of the LAST poll that actually saw the row, so the
+    # failure message below describes what was observed rather than guessing.
+    size_unreadable = False
     for i in range(poll_attempts):
         try:
             dir_out = cli_execute_fn("dir %s%s" % (target_prefix, fname))
@@ -1365,54 +1550,89 @@ def _agent_reverify_root(fname, target_prefix, cli_execute_fn, emit_fn,
             dir_out = ""
         if dir_out and "%Error" not in dir_out and "No such file" not in dir_out \
                 and fname in dir_out:
-            emit_fn("ROOTCOPY", "%s placed at flash root + verified" % fname)
-            return True
+            if expected_size is None:
+                emit_fn("ROOTCOPY", "%s placed at flash root" % fname)
+                return True
+            observed = _dir_size_of(dir_out, fname)
+            if observed is None:
+                # Present, but the row didn't parse. Treat it like a wrong
+                # size — keep polling — rather than declaring the copy absent.
+                size_unreadable = True
+            else:
+                size_unreadable = False
+                last_size = observed
+                if last_size == expected_size:
+                    emit_fn("ROOTCOPY", "%s placed at flash root, size verified "
+                            "(%d bytes)" % (fname, expected_size))
+                    return True
+            # present but wrong/unreadable size: may still be mid-copy — keep
+            # polling.
         if i < poll_attempts - 1:
             sleep_fn(poll_interval_s)
-    emit_fn("ROOTCOPY-FAIL",
-            "%s verify timed out (no file appeared at flash root)" % fname)
+    if size_unreadable:
+        emit_fn("ROOTCOPY-FAIL",
+                "%s root copy present but size unreadable from dir output; "
+                "cannot confirm the catalog's %s bytes — treated as unplaced"
+                % (fname, expected_size))
+    elif last_size is not None:
+        emit_fn("ROOTCOPY-FAIL", "%s root copy size mismatch: dir shows %d, "
+                "catalog says %d — partial copy treated as absent"
+                % (fname, last_size, expected_size))
+    else:
+        emit_fn("ROOTCOPY-FAIL",
+                "%s root copy never appeared at flash root" % fname)
     return False
 
 
 def _copy_to_root_impl(fname, target_prefix, cli_configure_fn, cli_execute_fn,
                        emit_fn, reverify_fn=_agent_reverify_root,
-                       copy_source=None, running_image_fn=None):
+                       copy_source=None, running_image_fn=None,
+                       expected_size=None):
     """Copy the staged image to the target filesystem root, then confirm it
     landed.
 
     The IRIS-COPYROOT EEM applet does the privileged work inside native IOS
     (operator requirement + `authorization bypass` for AAA nodes), because the
-    device's guestshell can't run `copy`/`verify` directly:
+    device's guestshell can't run `copy` directly:
       1. After confirming `<fname>` is not the running image, `delete /force
          <FS><fname>` clears any stale same-named leftover so
          the presence check below is scoped to THIS attempt. Harmless if no
          such file exists (`file prompt quiet` suppresses the prompt).
-      2. `copy /verify <FS>/guest-share/iris/<fname> <FS><fname>` — copy +
-         Cisco signature in one IOS-enforced step; a bad signature fails the
-         copy and leaves no destination file. Source and destination are both
-         the chosen staging FS: flash: on the C9300, sdflash: on the IE3k (where
-         IOx and the guest-share scratch live on the SD card).
-    The applet logs a NEUTRAL `ROOTCOPY-ATTEMPTED` breadcrumb only — it makes no
-    pass/fail claim. The agent (reverify_fn) owns the verdict: it polls for the
-    file and emits the authoritative `ROOTCOPY ... + verified` log on presence.
+      2. `copy <FS>/guest-share/iris/<fname> <FS><fname>` — a plain copy, no
+         in-band signature check. Source and destination are both the chosen
+         staging FS: flash: on the C9300, sdflash: on the IE3k (where IOx and
+         the guest-share scratch live on the SD card).
+    The applet logs a NEUTRAL `ROOTCOPY-ATTEMPTED` breadcrumb only — it makes
+    no pass/fail claim. The verdict belongs entirely to reverify_fn
+    (_agent_reverify_root) — see its docstring for the presence + exact
+    catalog byte size contract this function relies on.
 
-    Module-level + injected callables so it's unit-testable. Returns bool.
+    Module-level + injected callables so it's unit-testable. Returns True/False
+    — or ROOT_COPY_NOT_ATTEMPTED when it gives up before any IOS command runs
+    (either running-image refusal, or the applet run raising), because the
+    caller's terminal reclaim must not treat those as "our partial is at that
+    name".
 
-    `copy_source` (optional) overrides the `copy /verify` SOURCE. Default (None)
-    is the Guest Shell scratch on the staging FS (`<FS>/guest-share/iris/<fname>`)
+    `copy_source` (optional) overrides the copy SOURCE. Default (None) is
+    the Guest Shell scratch on the staging FS (`<FS>/guest-share/iris/<fname>`)
     — the C9300 path, unchanged. The IOx path SCP-pushes its local scratch to
     that same IOS-visible location before using the direct SSH copy helper. The
-    destination is always the target-FS root."""
+    destination is always the target-FS root.
+
+    `expected_size` is forwarded to reverify_fn unchanged; None (the default)
+    keeps the old presence-only behaviour for callers with no catalog size."""
     if running_image_fn is not None:
         running = running_image_fn()
         if not running:
             emit_fn("ROOTCOPY-REFUSED",
-                    "%s running image unknown; refusing destructive replacement" % fname)
-            return False
+                    "%s running image unknown; refusing destructive replacement "
+                    "(nothing was deleted — no IOS command ran)" % fname)
+            return ROOT_COPY_NOT_ATTEMPTED
         if _ios_basename(running).casefold() == fname.casefold():
             emit_fn("ROOTCOPY-REFUSED",
-                    "%s is the running image; refusing destructive replacement" % fname)
-            return False
+                    "%s is the running image; refusing destructive replacement "
+                    "(nothing was deleted — no IOS command ran)" % fname)
+            return ROOT_COPY_NOT_ATTEMPTED
     src = (copy_source(fname, target_prefix) if copy_source
            else "%s/guest-share/iris/%s" % (target_prefix, fname))
     cli_configure_fn([
@@ -1421,71 +1641,95 @@ def _copy_to_root_impl(fname, target_prefix, cli_configure_fn, cli_execute_fn,
         "event none maxrun 900",
         'action 010 cli command "enable"',
         'action 020 cli command "delete /force %s%s"' % (target_prefix, fname),
-        'action 030 cli command "copy /verify %s %s%s"'
-        % (src, target_prefix, fname),
+        'action 030 cli command "copy %s %s%s"' % (src, target_prefix, fname),
         'action 040 syslog msg "ROOTCOPY-ATTEMPTED %s"' % fname,
     ])
     try:
         cli_execute_fn("event manager run IRIS-COPYROOT")
     except Exception as e:
-        emit_fn("ROOTCOPY-FAIL", "%s applet run raised: %s" % (fname, e))
-        return False
-    return reverify_fn(fname, target_prefix, cli_execute_fn, emit_fn)
+        # The applet never fired (or we cannot tell that it did), so its
+        # action 020 delete-first cannot be assumed to have run. Anything at
+        # the target name is therefore NOT provably our partial: report the
+        # failure, but withhold the reclaim authorisation.
+        emit_fn("ROOTCOPY-FAIL",
+                "%s applet run raised before any IOS work could be confirmed: "
+                "%s" % (fname, e))
+        return ROOT_COPY_NOT_ATTEMPTED
+    return reverify_fn(fname, target_prefix, cli_execute_fn, emit_fn,
+                       expected_size=expected_size)
 
 
 def _copy_to_root_direct_impl(fname, target_prefix, cli_execute_fn, emit_fn,
                               reverify_fn=_agent_reverify_root, copy_source=None,
                               delete_source_on_success=False,
-                              running_image_fn=None):
-    """Copy the staged image to the target-FS root by running `copy /verify`
+                              running_image_fn=None, expected_size=None):
+    """Copy the staged image to the target-FS root by running a plain `copy`
     DIRECTLY in the agent's IOS vty — no EEM applet. This is the container /
     SSH-to-self (IE-3x00) path.
 
     The IRIS-COPYROOT applet offload (see _copy_to_root_impl) exists ONLY because
-    the C9300's Guest Shell `cli` module can't drive an interactive
-    `copy`/`verify` (it hangs). The IE-3x00 agent reaches IOS over a real
-    SSH-to-self vty (identical to `lab/device-run.sh`), which runs `copy /verify`
-    to completion — and on that platform/IOS-XE the EEM `action cli command
-    "copy …"` is a NO-OP (the applet completes in ~3 s reporting success but
-    transfers nothing), so the applet path is both unnecessary and broken here.
+    the C9300's Guest Shell `cli` module can't drive an interactive `copy`
+    (it hangs). The IE-3x00 agent reaches IOS over a real SSH-to-self vty
+    (identical to `lab/device-run.sh`), which runs `copy` to completion — and
+    on that platform/IOS-XE the EEM `action cli command "copy …"` is a NO-OP
+    (the applet completes in ~3 s reporting success but transfers nothing),
+    so the applet path is both unnecessary and broken here.
 
     Same two privileged steps the applet did, now issued directly:
       1. After confirming `<fname>` is not the running image, `delete /force
          <FS><fname>` clears any stale same-named leftover so the
          dir-presence verdict is scoped to THIS attempt (`file prompt quiet`
          suppresses the prompt; harmless if absent).
-      2. `copy /verify <src> <FS><fname>` — copy + Cisco signature in one
-         IOS-enforced step; a bad signature fails the copy and leaves no
-         destination file. `copy /verify` is synchronous, so the file is present
-         the moment it returns.
-    Verdict is owned by reverify_fn's dir-presence poll, exactly as the applet
-    path — keeping the success-log gating identical and unit-testable. Returns
-    bool. `copy_source` overrides the SOURCE like _copy_to_root_impl."""
+      2. `copy <src> <FS><fname>` — a plain copy, no in-band signature check.
+         `copy` is synchronous, so the file is present the moment it returns
+         (though possibly still short of its final size on a slow transfer).
+    Verdict belongs entirely to reverify_fn (_agent_reverify_root) — see its
+    docstring for the presence + exact catalog byte size contract this
+    function relies on (and to which `expected_size` is forwarded unchanged).
+    Keeps the success-log gating identical to the applet path and
+    unit-testable. Returns True/False — or ROOT_COPY_NOT_ATTEMPTED when it gives
+    up before the delete-first completes (either running-image refusal, or the
+    delete itself raising), because the caller's terminal reclaim must not treat
+    those as "our partial is at that name". A `copy` that raises AFTER the
+    delete-first is a plain False: that leftover really is ours. `copy_source`
+    overrides the SOURCE like _copy_to_root_impl."""
     if running_image_fn is not None:
         running = running_image_fn()
         if not running:
             emit_fn("ROOTCOPY-REFUSED",
-                    "%s running image unknown; refusing destructive replacement" % fname)
-            return False
+                    "%s running image unknown; refusing destructive replacement "
+                    "(nothing was deleted — no IOS command ran)" % fname)
+            return ROOT_COPY_NOT_ATTEMPTED
         if _ios_basename(running).casefold() == fname.casefold():
             emit_fn("ROOTCOPY-REFUSED",
-                    "%s is the running image; refusing destructive replacement" % fname)
-            return False
+                    "%s is the running image; refusing destructive replacement "
+                    "(nothing was deleted — no IOS command ran)" % fname)
+            return ROOT_COPY_NOT_ATTEMPTED
     src = (copy_source(fname, target_prefix) if copy_source
            else "%s/guest-share/iris/%s" % (target_prefix, fname))
     dst = "%s%s" % (target_prefix, fname)
     try:
         cli_execute_fn("delete /force %s" % dst)
-        cli_execute_fn("copy /verify %s %s" % (src, dst))
     except Exception as e:
-        emit_fn("ROOTCOPY-FAIL", "%s direct copy /verify raised: %s" % (fname, e))
+        # The delete-first itself failed, so the name was never cleared: a file
+        # there is the operator's, not ours. Withhold reclaim authorisation.
+        emit_fn("ROOTCOPY-FAIL",
+                "%s delete-first raised; no copy attempted: %s" % (fname, e))
+        return ROOT_COPY_NOT_ATTEMPTED
+    try:
+        cli_execute_fn("copy %s %s" % (src, dst))
+    except Exception as e:
+        # delete-first DID run: whatever is at the name now is our own partial,
+        # so a plain False (reclaim-authorising) is correct here.
+        emit_fn("ROOTCOPY-FAIL", "%s direct copy raised: %s" % (fname, e))
         return False
-    ok = reverify_fn(fname, target_prefix, cli_execute_fn, emit_fn)
+    ok = reverify_fn(fname, target_prefix, cli_execute_fn, emit_fn,
+                     expected_size=expected_size)
     # In container mode the scp-pushed guest-share scratch is a transfer
     # intermediary (the swarm seeds from the CAF-persistent stage_dir), so a
     # verified placement deletes it — otherwise a duplicate image doubles
     # steady-state target-FS usage. Kept on failure: the next tick re-runs
-    # copy /verify from it instead of re-pushing over the slow scp path.
+    # copy from it instead of re-pushing over the slow scp path.
     if ok and delete_source_on_success:
         try:
             cli_execute_fn("delete /force %s" % src)
@@ -1499,8 +1743,11 @@ def _reclaim_bundle_impl(target_prefix, names, cli_configure_fn, cli_execute_fn)
     IRIS-RECLAIM-BUNDLE authorization-bypass applet (AAA nodes silently no-op
     a raw exec `delete`). Callers own the never-delete-that guarantee: the
     bundle-mode download gate passes only names outside its protect set
-    (running/staging/seeding image + IRIS's own root copy), and the
-    replaced-root cleanup passes only re-whitelisted IRIS-placed root copies.
+    (running/staging/seeding image + IRIS's own root copy), the replaced-root
+    cleanup passes only re-whitelisted IRIS-placed root copies, and the
+    failed-placement reclaim (_reclaim_failed_root_copy) passes the single name
+    an attempt's own delete-first had already cleared, and only after its own
+    running-image check clears it.
     Fire-and-forget — callers that need proof re-check afterwards (the
     replaced-root cleanup verifies file presence; the download gate re-reads
     free space).
@@ -1536,10 +1783,11 @@ def _share_settings(cfg):
 # for a uid-0 container shell, while 100 MB writes to the CAF-created share
 # root ran at 1.5 GB/s). Isolation therefore comes from a NAME PREFIX: every
 # file IRIS writes or sweeps here starts with "iris-", and operator/CAF files
-# at the root are never touched. copy /verify reads the fixed staged name and
-# writes the REAL image name to the target FS, verifying the Cisco signature
-# from the bytes — the staged name is cosmetic. The swarm seeds from the
-# CAF-persistent stage_dir copy, never from the share.
+# at the root are never touched. The final copy reads the fixed staged name
+# and writes the REAL image name to the target FS — the staged name is
+# cosmetic. Content was already verified by sha256 before staging; the agent
+# attests this placement by exact byte size against the catalog. The swarm
+# seeds from the CAF-persistent stage_dir copy, never from the share.
 _SHARE_PREFIX = "iris-"
 _SHARE_PROBE = "iris-probe.txt"
 _SHARE_STAGE = "iris-staged.bin"
@@ -1549,8 +1797,8 @@ def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
                           copy_direct_fn, emit_fn, cli_execute_fn):
     """Land the downloaded scratch in the bind-mounted app-hosting share
     (C9k: usbflash1:iox_host_data_share, mounted into the container via
-    run-opts -v), then have IOS place it with an INTERNAL disk-to-disk
-    `copy /verify` — no scp, no control-plane punt path, no CoPP ceiling.
+    run-opts -v), then have IOS place it with an INTERNAL disk-to-disk plain
+    `copy` — no scp, no control-plane punt path, no CoPP ceiling.
 
     Everything IRIS writes lives at the share root under the reserved `iris-`
     filename prefix, so the orphan sweep below can never touch operator files
@@ -1570,7 +1818,7 @@ def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
     Returns None when the share cannot be used (unconfigured, not mounted,
     probe failed, or the local copy failed) so the caller falls back to the
     scp push. Otherwise returns copy_direct_fn's bool verdict: an IOS-side
-    `copy /verify` failure AFTER a good probe is FINAL — scp would push the
+    placement failure AFTER a good probe is FINAL — scp would push the
     same bytes. The transient share copy is always removed (the swarm seeds
     from the scratch under stage_dir, not from the share)."""
     if not (share_dir and share_ios_path and os.path.isdir(share_dir)):
@@ -1617,9 +1865,10 @@ def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
         _sweep()
         return None
     try:
-        # copy /verify reads the fixed staged name and writes the REAL image
-        # name to the target FS (the caller's dst); the Cisco signature is
-        # verified from the bytes, so the source name is cosmetic.
+        # The final copy reads the fixed staged name and writes the REAL
+        # image name to the target FS (the caller's dst) — the source name
+        # is cosmetic; the agent attests placement afterward by exact byte
+        # size against the catalog.
         return copy_direct_fn(
             lambda f, target_prefix: "%s/%s" % (share_ios_path, _SHARE_STAGE))
     finally:
@@ -1653,8 +1902,8 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
     # to the container is blocked, so the agent can't write the IOS-visible SD
     # directly. Instead it scp-PUSHES the downloaded scratch to sdflash:guest-share/
     # iris via the device's SCP server (container -> device, the proven direction —
-    # same as the SSH-to-self CLI), then the SSH vty runs
-    # `copy /verify sdflash:guest-share/iris/<img> sdflash:<img>` — byte-identical
+    # same as the SSH-to-self CLI), then the SSH vty runs a plain
+    # `copy sdflash:guest-share/iris/<img> sdflash:<img>` — byte-identical
     # to the C9300 flash:guest-share -> flash: flow. Guest Shell (C9300) writes its
     # scratch via the in-VM mount, so it pushes nothing here.
     _mode = (os.environ.get("IRIS_RUNTIME_MODE")
@@ -1663,8 +1912,8 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
 
     def _push_scratch(fname, target_prefix):
         # create the IOS-side scratch dir (idempotent; file prompt quiet => no
-        # prompt) then scp the downloaded file into it so `copy /verify` has a
-        # source IOS can read.
+        # prompt) then scp the downloaded file into it so the placement copy
+        # has a source IOS can read.
         for d in ("%sguest-share" % target_prefix,
                   "%sguest-share/iris" % target_prefix):
             try:
@@ -1674,10 +1923,12 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
         local = os.path.join(cfg["stage_dir"], fname)
         _transport.put(local, "%sguest-share/iris/%s" % (target_prefix, fname))
 
-    def copy_to_root(fname, target_prefix="flash:"):
+    def copy_to_root(fname, target_prefix="flash:", expected_size=None):
         # Thin wrapper — the actual flow lives in module-level impls so
         # behavioural tests can inject all callables and prove the success log
-        # is gated by _agent_reverify_root's pass.
+        # is gated by _agent_reverify_root's pass. expected_size is forwarded
+        # unchanged to whichever impl the platform branch below selects, and
+        # from there to _agent_reverify_root's presence + exact-size contract.
         running = running_image()
         if not running:
             emit("ROOTCOPY-REFUSED",
@@ -1691,9 +1942,14 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
             return ROOT_COPY_RUNNING_IMAGE_UNKNOWN
         if _ios_basename(running).casefold() == fname.casefold():
             emit("ROOTCOPY-REFUSED",
-                 "%s is the running image; refusing destructive replacement"
-                 % fname)
-            return False
+                 "%s is the running image; refusing destructive replacement "
+                 "(nothing was deleted — no IOS command ran)" % fname)
+            # NOT plain False: this refusal happens before any IOS command, so
+            # the delete-first never ran and the file at that name is the
+            # RUNNING IMAGE. A False here would authorise the terminal reclaim
+            # to delete it. Counts as an attempt all the same — see
+            # ROOT_COPY_NOT_ATTEMPTED.
+            return ROOT_COPY_NOT_ATTEMPTED
         # Freeze the confirmed value for this operation. Re-querying show version
         # after a 1.2 GB scratch transfer adds failure modes without improving the
         # basename safety decision made before any destructive command.
@@ -1701,8 +1957,8 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
         if _mode == "container" and _transport is not None:
             # C9k container: the SSD share (usbflash1:iox_host_data_share) is
             # bind-mounted at IRIS_SHARE_DIR, so the scratch lands there at
-            # disk speed and IOS places it with an internal disk-to-disk
-            # `copy /verify` — no scp, no CoPP-policed punt traffic. None =
+            # disk speed and IOS places it with an internal disk-to-disk plain
+            # `copy` — no scp, no CoPP-policed punt traffic. None =
             # share unusable -> fall through to the scp push below.
             share_dir, share_ios_path = _share_settings(cfg)
             if share_dir:
@@ -1711,32 +1967,39 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
                     lambda copy_source: _copy_to_root_direct_impl(
                         fname, target_prefix, cli_execute, emit,
                         copy_source=copy_source,
-                        running_image_fn=confirmed_running),
+                        running_image_fn=confirmed_running,
+                        expected_size=expected_size),
                     emit, cli_execute)
                 if shared is not None:
                     return shared
             # IE-3x00 / container fallback: push the scratch onto the
-            # IOS-visible SD, then `copy /verify` DIRECTLY over the SSH-to-self
-            # vty. The EEM applet offload is only needed for the C9300 Guest
-            # Shell cli module (can't drive interactive copy); a real vty runs
-            # copy fine, and the EEM `cli command "copy"` action is a no-op on
-            # this platform — so the direct path is both correct and necessary.
+            # IOS-visible SD, then run a plain `copy` DIRECTLY over the
+            # SSH-to-self vty. The EEM applet offload is only needed for the
+            # C9300 Guest Shell cli module (can't drive interactive copy); a
+            # real vty runs copy fine, and the EEM `cli command "copy"` action
+            # is a no-op on this platform — so the direct path is both correct
+            # and necessary.
             try:
                 _push_scratch(fname, target_prefix)
             except Exception as e:
+                # Pure container-side transfer failure: no IOS command ran, so
+                # no delete-first cleared the target name.
                 emit("ROOTCOPY-FAIL",
-                     "%s scp push to %s failed: %s" % (fname, target_prefix, e))
-                return False
+                     "%s scp push to %s failed before any IOS work: %s"
+                     % (fname, target_prefix, e))
+                return ROOT_COPY_NOT_ATTEMPTED
             # NOTE: like the Guest Shell path, placement transiently needs
             # ~2x the image on the target FS (scratch + root copy); the
             # verified-delete below reclaims the scratch afterwards.
             return _copy_to_root_direct_impl(fname, target_prefix,
                                              cli_execute, emit,
                                              delete_source_on_success=True,
-                                             running_image_fn=confirmed_running)
+                                             running_image_fn=confirmed_running,
+                                             expected_size=expected_size)
         return _copy_to_root_impl(fname, target_prefix,
                                   cli_configure, cli_execute, emit,
-                                  running_image_fn=confirmed_running)
+                                  running_image_fn=confirmed_running,
+                                  expected_size=expected_size)
 
     def reclaim():
         # Free flash with `install remove inactive` — the ONLY automated reclaim
@@ -1830,18 +2093,20 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
                 except OSError:
                     pass
 
-    def root_present(fname, prefix="flash:"):
+    def root_present(fname, prefix="flash:", expected_size=None):
         # Cheap existence check of the staged root copy (no hashing).
         # IOS says it's gone -> False (re-copy). cli_execute itself raised
         # (transient glitch) -> True, so one flaky tick doesn't trigger a full
         # 1.2 GB re-copy; a real loss still shows as "No such file" next tick.
+        # The verdict on the output itself lives in the module-level
+        # _root_present_from_dir so it's unit-testable off-box (including the
+        # present-but-unparseable case, which is tolerated for exactly the same
+        # reason as the raise above).
         try:
             out = cli_execute("dir %s%s" % (prefix, fname))
         except Exception:
             return True
-        if "%Error" in out or "No such file" in out:
-            return False
-        return fname in out
+        return _root_present_from_dir(out, fname, expected_size)
 
     def remove_stage(path):
         try:
@@ -1931,9 +2196,25 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
 
     def reclaim_bundle(target_prefix, names):
         # Thin wrapper — the applet templating lives in the module-level impl
-        # so it's unit-tested off-box. Serves both the bundle-mode download
-        # gate and the replaced-root cleanup in run_once (see the impl's
-        # docstring for each caller's safety guarantee).
+        # so it's unit-tested off-box. Serves the bundle-mode download gate,
+        # the replaced-root cleanup, and the failed-placement reclaim in
+        # run_once (see each caller's docstring for its safety guarantee).
+        #
+        # Platform split mirrors copy_to_root's. The EEM applet exists because
+        # the C9300 Guest Shell `cli` module can't drive privileged exec work,
+        # and a raw exec `delete` silently no-ops on AAA/TACACS-managed nodes
+        # without `authorization bypass`. The container / SSH-to-self platforms
+        # reach IOS over a real vty, where `delete /force` runs directly — the
+        # same command _copy_to_root_direct_impl already issues there before
+        # every copy. Best-effort per name so one failure can't strand the rest.
+        if _mode == "container" and _transport is not None:
+            for n in names:
+                try:
+                    cli_execute("delete /force %s%s" % (target_prefix, n))
+                except Exception as e:
+                    emit("RECLAIM-FAIL",
+                         "%s%s delete failed: %s" % (target_prefix, n, e))
+            return
         _reclaim_bundle_impl(target_prefix, names, cli_configure, cli_execute)
 
     def version():

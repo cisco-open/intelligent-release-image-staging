@@ -27,15 +27,18 @@ flowchart LR
     Swarm --> Scratch["Persistent /data/iris scratch"]
     Agent --> Scratch
     Scratch --> Hand["Hand-off: SSD share write (Catalyst 9300) or SCP push (IE-3400 / share fallback)"]
-    Hand --> Verify["IOS copy /verify"]
+    Hand --> Verify["Plain copy, byte-size attested"]
     Verify --> Target["Selected IOS filesystem root"]
 ```
 
 The final copy deliberately crosses back into IOS. The CAF persistent disk is
 available to the application (for example, as `/iox_data` on Catalyst 9300), but it is
 not an IOS filesystem root. The agent uses that disk for resumable swarm data,
-then hands the completed file to IOS for the signature-enforcing
-`copy /verify`. On Catalyst 9300 the app-hosting SSD share
+then hands the completed file to IOS for the final plain copy, attested by
+the agent afterward against the catalog's exact byte size — the file was
+already verified by sha256 against the catalog before the placement copy, and its
+authenticity was established at publish time on the server. On Catalyst 9300
+the app-hosting SSD share
 (`usbflash1:iox_host_data_share`) is bind-mounted into the container, so the
 hand-off is a disk-speed write followed by an IOS-internal copy onto
 bootflash. On IE-3400 (where IOx cannot bind-mount the SD card) — or on a
