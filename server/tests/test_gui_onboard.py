@@ -388,6 +388,186 @@ def test_resolve_platform_probe_returning_none_raises():
         assert "d1" in str(exc)
 
 
+def test_resolve_platform_xr_family_refuses_xe_recipe():
+    # ASR 9000 runs IOS-XR. ^ASR would otherwise map it to guestshell.
+    dev = {"device_id": "d1", "model": "ASR-9906"}
+    try:
+        gui_onboard.resolve_platform(dev, os_family="xr")
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "IOS-XR" in str(exc)
+        assert "d1" in str(exc)
+
+
+def test_resolve_platform_xr_family_refuses_even_explicit_xe_platform():
+    # An operator forcing platform=guestshell on an XR box is still wrong.
+    dev = {"device_id": "d1", "platform": "guestshell", "model": "ASR-9906"}
+    try:
+        gui_onboard.resolve_platform(dev, os_family="xr")
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "IOS-XR" in str(exc)
+
+
+def test_resolve_platform_refuses_xr_cached_on_device_record():
+    # No os_family= argument at all -- only the fleet-stored record carries
+    # the cached family. gui_server._plan calls resolve_platform(device) with
+    # no keyword, so the record itself must be enough to refuse.
+    dev = {"device_id": "d1", "model": "ASR-9906", "os_family": "xr"}
+    try:
+        gui_onboard.resolve_platform(dev)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "IOS-XR" in str(exc)
+        assert "d1" in str(exc)
+
+
+def test_resolve_platform_record_family_refuses_without_argument_for_explicit_platform():
+    # A cached record family must refuse even when the device also carries an
+    # explicit platform -- an explicit platform cannot bypass a cached family.
+    dev = {"device_id": "d1", "platform": "guestshell", "model": "ASR-9906",
+           "os_family": "xr"}
+    try:
+        gui_onboard.resolve_platform(dev)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "IOS-XR" in str(exc)
+
+
+def test_resolve_platform_xe_family_still_resolves_asr_to_guestshell():
+    # ASR 1000 IS IOS-XE and must keep working exactly as before.
+    dev = {"device_id": "d1", "model": "ASR1001-X"}
+    assert gui_onboard.resolve_platform(dev, os_family="xe") == "guestshell"
+
+
+def test_resolve_platform_unknown_family_behaves_as_before():
+    # os_family omitted or '' -> unchanged legacy behaviour.
+    dev = {"device_id": "d1", "model": "C9300-48UXM"}
+    assert gui_onboard.resolve_platform(dev) == "guestshell"
+    assert gui_onboard.resolve_platform(dev, os_family="") == "guestshell"
+
+
+def test_resolve_platform_refuses_xr_discovered_by_probe():
+    # First contact: nothing cached, so the entry guard sees os_family=None.
+    # The probe learns the family; resolution must refuse on THAT, not fall
+    # through to the model map (where ^ASR would return 'guestshell').
+    dev = {"device_id": "d1"}
+
+    def probe(d):
+        d["os_family"] = "xr"
+        return "ASR-9906"
+
+    try:
+        gui_onboard.resolve_platform(dev, probe=probe)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "IOS-XR" in str(exc)
+
+
+def test_resolve_platform_probes_ambiguous_model_for_family():
+    # A cached model with no os_family short-circuits on the model map on
+    # every later onboard. ^ASR spans both IOS-XE and IOS-XR, so a cached
+    # 'ASR-9906' with no classified family must not resolve to guestshell --
+    # it must consult the probe first and refuse once the probe learns 'xr'.
+    dev = {"device_id": "d1", "model": "ASR-9906"}
+
+    def probe(d):
+        d["os_family"] = "xr"
+
+    try:
+        gui_onboard.resolve_platform(dev, probe=probe)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "IOS-XR" in str(exc)
+
+
+def test_resolve_platform_unambiguous_model_does_not_probe():
+    # C9300 is never IOS-XR -- probing it would be a needless SSH round-trip
+    # on every onboard.
+    dev = {"device_id": "d1", "model": "C9300-48UXM"}
+    calls = []
+
+    def probe(d):
+        calls.append(d)
+
+    assert gui_onboard.resolve_platform(dev, probe=probe) == "guestshell"
+    assert calls == []
+
+
+# --- parse_os_family ----------------------------------------------------
+
+def test_parse_os_family_xe_banner():
+    text = "Cisco IOS XE Software, Version 17.09.04a\ncisco C9300-48UXM (X86) processor\n"
+    assert gui_onboard.parse_os_family(text) == "xe"
+
+
+def test_parse_os_family_xr_banner():
+    text = "Cisco IOS XR Software, Version 24.4.1\ncisco ASR9K (Intel 686 F6M14S4)\n"
+    assert gui_onboard.parse_os_family(text) == "xr"
+
+
+def test_parse_os_family_is_case_insensitive():
+    assert gui_onboard.parse_os_family("cisco ios xr software, version 25.1.1") == "xr"
+
+
+def test_parse_os_family_unknown_returns_empty():
+    assert gui_onboard.parse_os_family("Cisco Adaptive Security Appliance Software") == ""
+    assert gui_onboard.parse_os_family("") == ""
+
+
+def test_parse_os_family_xr_not_confused_by_xe_substring():
+    # 'IOS XE' and 'IOS XR' differ by one character; a loose match returns the
+    # wrong family and silently misroutes the device.
+    assert gui_onboard.parse_os_family("Cisco IOS XE Software") == "xe"
+    assert gui_onboard.parse_os_family("Cisco IOS XR Software") == "xr"
+
+
+def test_parse_os_family_classic_ios_is_xe_family():
+    # 12.x/15.x Catalysts print no 'XE' token but are driven by the same recipes.
+    assert gui_onboard.parse_os_family(
+        "Cisco IOS Software, C3750E Software (C3750E-UNIVERSALK9-M), Version 15.0(2)") == "xe"
+
+
+def test_parse_os_family_matches_virtual_xr_platforms():
+    # XRv9000 is a virtual platform whose banner spells the token 'XRv', not
+    # 'XR' followed by a boundary; a device that falls through here silently
+    # misroutes to the legacy code path instead of the XR one.
+    assert gui_onboard.parse_os_family(
+        "cisco IOS-XRv 9000 (VXR) processor") == "xr"
+    assert gui_onboard.parse_os_family("Cisco IOS XRv Software") == "xr"
+
+
+def test_parse_os_family_xrv_match_does_not_over_match_xe():
+    # Guard against the trailing-'v' allowance in the XR pattern bleeding
+    # into XE banners.
+    text = "Cisco IOS XE Software, Version 17.09.04a\ncisco C9300-48UXM (X86) processor\n"
+    assert gui_onboard.parse_os_family(text) == "xe"
+
+
+def test_parse_os_family_ignores_an_xr_shaped_hostname():
+    # lab/device-run.sh runs `ssh -tt`, so the text handed to the classifier is
+    # the whole transcript: MOTD, login banner and the prompt echoed with every
+    # command. A C9300 whose hostname happens to be 'ios-xr-lab-01' is IOS-XE,
+    # and a false 'xr' is UNRECOVERABLE -- _refuse_xr tells the operator that
+    # forcing 'platform' will not work, and the family is cached on the fleet
+    # row. Only a banner line may decide the family.
+    text = ("\r\nios-xr-lab-01#show version\r\n"
+            "Cisco IOS XE Software, Version 17.09.04a\r\n"
+            "cisco C9300-48UXM (X86) processor\r\n"
+            "ios-xr-lab-01#\r\n")
+    assert gui_onboard.parse_os_family(text) == "xe"
+
+
+def test_parse_os_family_ignores_an_xr_mention_in_the_login_banner():
+    # Same failure through the MOTD rather than the prompt: free prose naming
+    # the family is not a version banner.
+    text = ("*** lab pod 4 -- IOS XR gear lives on 10.9.0.0/24 ***\r\n"
+            "sw1#show version\r\n"
+            "Cisco IOS XE Software, Version 17.09.04a\r\n"
+            "cisco C9300-48UXM (X86) processor\r\n")
+    assert gui_onboard.parse_os_family(text) == "xe"
+
+
 # --- OnboardService: platform-aware recipe selection --------------------
 
 def _iox_fleet(platform=None, model=None):
@@ -440,6 +620,88 @@ def test_probe_resolves_iox_and_caches_model(tmp_path):
     assert any("platform: iox (model IE-3400)" in l for l in job["lines"])
 
 
+def test_probe_does_not_wipe_cached_os_family(tmp_path):
+    # A device previously classified "xr" (however that got recorded) must
+    # keep that classification when a LATER probe finds a model but can't
+    # parse a family from a truncated/unparseable banner. FleetStore.upsert
+    # filters None but keeps "" (server/gui_fleet.py:291), so writing
+    # os_family="" here would silently erase the "xr" tag on disk and
+    # reopen the ASR9k -> guestshell misroute this guard exists to close.
+    #
+    # Calls _resolve() directly rather than through svc.start(): once a
+    # device's os_family is cached as "xr", resolve_platform's entry guard
+    # refuses it before probe() ever runs again, so the full onboard flow
+    # can never exercise this closure a second time for that device. This
+    # isolates the closure's own invariant -- it must never overwrite a
+    # cached family with an empty one -- independent of that guard.
+    fleet = _iox_fleet()
+    fleet._d["d1"]["os_family"] = "xr"  # already known, from a prior probe
+    creds = _iox_creds()
+    # This call's dev has no cached model/family of its own -- the same
+    # shape probe() always receives on a device's first classification.
+    dev = {"device_id": "d1", "credential_profile_id": "lab"}
+    env = {"DEVICE_IP": "10.0.0.1"}
+
+    def fake_probe(d, e):
+        # Found a model, but the banner didn't parse to a family this time.
+        return "ASR-9906"
+
+    svc = gui_onboard.OnboardService(
+        fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
+        run_fn=lambda *a, **k: 0, probe_fn=fake_probe,
+        artifacts_dir=str(tmp_path))
+    svc._resolve("d1", dev, env, "onboard")
+    assert {"device_id": "d1", "model": "ASR-9906"} in fleet.upserts
+    assert not any("os_family" in u for u in fleet.upserts)
+    # The fake fleet's upsert merges onto the stored dict same as the real
+    # one (minus the None/"" filtering) -- the cached family must survive.
+    assert fleet._d["d1"]["os_family"] == "xr"
+
+
+# The console never calls start() bare: gui_server._plan() resolves the platform
+# up front, bakes it into plan["resolved"], and start() is handed that dict. So
+# _build_env copies platform onto the device, resolve_platform takes the
+# EXPLICIT branch, and every family check inside resolution -- the entry guard,
+# the ambiguous-model re-probe, the post-probe re-check -- is bypassed. These
+# two tests walk that production path; the resolution-level tests above cannot
+# see it.
+
+def _xr_probe(d, env):
+    """A live probe against an ASR 9000: reads the banner, records the family
+    (exactly what _default_probe does) and returns the model string."""
+    d["os_family"] = "xr"
+    return "ASR-9906"
+
+
+def test_preresolved_guestshell_platform_still_refuses_an_xr_device(tmp_path):
+    ran = []
+
+    def fake_run(install_path, env, on_line):
+        ran.append(install_path)
+        return 0
+
+    svc = _svc(fake_run, probe_fn=_xr_probe)
+    svc.fleet._d["d1"]["model"] = "ASR-9906"
+    job = _wait(svc, svc.start("d1", resolved={"platform": "guestshell"}))
+    assert job["state"] == "error"
+    assert any("IOS-XR" in line for line in job["lines"]), job["lines"]
+    # The whole point: device/device-install.sh must never be handed an
+    # IOS-XR box.
+    assert ran == []
+
+
+def test_preresolved_onboard_caches_the_family_it_just_learned(tmp_path):
+    # Nothing back-fills os_family onto existing fleet rows, so the refusal is
+    # only durable if the onboard that discovered the family writes it down.
+    # Without this the console re-probes (and re-refuses) on every attempt, and
+    # the devices table never shows why.
+    svc = _svc(lambda p, e, on: 0, probe_fn=_xr_probe)
+    svc.fleet._d["d1"]["model"] = "ASR-9906"
+    _wait(svc, svc.start("d1", resolved={"platform": "guestshell"}))
+    assert {"device_id": "d1", "os_family": "xr"} in svc.fleet.upserts
+    assert svc.fleet._d["d1"]["os_family"] == "xr"
+
+
 def test_probe_returning_none_errors_without_running(tmp_path):
     fleet = _iox_fleet()
     creds = _iox_creds()
@@ -456,6 +718,43 @@ def test_probe_returning_none_errors_without_running(tmp_path):
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "error"
     assert called == []
+
+
+def test_default_probe_records_os_family_on_dev(monkeypatch):
+    banner = ("Cisco IOS XR Software, Version 24.4.1\n"
+              "cisco ASR-9906 (Intel 686 F6M14S4)\n")
+
+    class _Out:
+        stdout = banner
+        returncode = 0
+
+    monkeypatch.setattr(gui_onboard.subprocess, "run", lambda *a, **k: _Out())
+    dev = {"device_id": "d1"}
+    model = gui_onboard._default_probe(dev, {"DEVICE_IP": "10.0.0.1"}, "/repo")
+    assert model == "ASR-9906"
+    assert dev["os_family"] == "xr"
+
+
+def test_default_probe_still_returns_falsy_when_unreachable(monkeypatch):
+    # The reachability check at gui_onboard.py:831 does `if not self._probe(...)`.
+    # The return value must stay falsy on failure or that check silently breaks.
+    def _boom(*a, **k):
+        raise OSError("unreachable")
+
+    monkeypatch.setattr(gui_onboard.subprocess, "run", _boom)
+    dev = {"device_id": "d1"}
+    assert not gui_onboard._default_probe(dev, {"DEVICE_IP": "10.0.0.1"}, "/repo")
+
+
+def test_default_probe_xe_device_records_xe(monkeypatch):
+    class _Out:
+        stdout = "Cisco IOS XE Software, Version 17.09.04a\ncisco C9300-48UXM (X86) processor\n"
+        returncode = 0
+
+    monkeypatch.setattr(gui_onboard.subprocess, "run", lambda *a, **k: _Out())
+    dev = {"device_id": "d1"}
+    assert gui_onboard._default_probe(dev, {"DEVICE_IP": "10.0.0.1"}, "/repo") == "C9300-48UXM"
+    assert dev["os_family"] == "xe"
 
 
 def test_iox_env_has_ssh_creds(tmp_path):
@@ -1842,11 +2141,12 @@ _IRIS_NAMED = [
 ]
 
 
-def _common_preflight_stub(monkeypatch, running="", apps="", files=""):
+def _common_preflight_stub(monkeypatch, running="", apps="", files="",
+                           version=None):
     """Feed a marker-delimited transcript to the shared preflight probe."""
     def run(argv, input=None, **kwargs):
         out = []
-        for name, body in (("VERSION", _iox_show_version()),
+        for name, body in (("VERSION", version or _iox_show_version()),
                            ("RUNNING", running), ("APPS", apps),
                            ("FILES", files)):
             out.append("__IRIS_PREFLIGHT_%s__\n%s" % (name, body))
@@ -1877,6 +2177,34 @@ def test_guestshell_preflight_passes_on_a_clean_device(monkeypatch):
         {}, {"DEVICE_IP": "192.0.2.20"}, {"platform": "guestshell"}, "/repo")
     assert evidence["status"] == "passed"
     assert evidence["device_identity"]
+
+
+def test_guestshell_preflight_refuses_an_ios_xr_device(monkeypatch):
+    """The preflight already holds 'show version', so it can classify without
+    another SSH round trip -- and it is the LAST gate before
+    device/device-install.sh touches the box. A console onboard arrives with
+    the platform already resolved, so nothing inside resolve_platform ever
+    looked at the family."""
+    _common_preflight_stub(
+        monkeypatch,
+        version=("Cisco IOS XR Software, Version 24.4.1\n"
+                 "cisco ASR-9906 (Intel 686 F6M14S4)\n"
+                 "Processor board ID FOX1234ABCD\n"),
+        running="hostname xr1\n", apps="No App found\n",
+        files="Directory of bootflash:/guest-share/\n\nNo files in directory\n")
+    dev = {"device_id": "xr1"}
+    with pytest.raises(ValueError, match="IOS-XR"):
+        _REAL_GUESTSHELL_PREFLIGHT(dev, {"DEVICE_IP": "192.0.2.20"},
+                                   {"platform": "guestshell"}, "/repo")
+
+
+def test_guestshell_preflight_records_the_family_it_read(monkeypatch):
+    _common_preflight_stub(monkeypatch, running="hostname sw1\n", apps="No App found\n",
+                           files="Directory of bootflash:/guest-share/\n\nNo files in directory\n")
+    dev = {"device_id": "sw1"}
+    _REAL_GUESTSHELL_PREFLIGHT(dev, {"DEVICE_IP": "192.0.2.20"},
+                               {"platform": "guestshell"}, "/repo")
+    assert dev["os_family"] == "xe"
 
 
 def test_iox_preflight_still_returns_the_identity_it_always_did(monkeypatch):

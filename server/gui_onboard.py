@@ -84,6 +84,11 @@ _MODEL_PLATFORMS = (          # first match wins; case-insensitive prefix regexe
     (r"^(ISR|ASR|CSR)", "guestshell"),  # legacy router mapping; not yet supported
 )
 
+# ASR1000/ISR/CSR are IOS-XE, but ASR9000 is IOS-XR: this prefix spans both
+# families, so a model match alone cannot decide which recipe applies. Only
+# the show version banner can.
+_FAMILY_AMBIGUOUS_MODEL = re.compile(r"^(ISR|ASR|CSR)", re.IGNORECASE)
+
 # Model families that take the arm64 IOx package (installer defaults: iris-arm64.tar,
 # AppGigabitEthernet1/1, sdflash:). Used ONLY after platform has resolved to iox.
 _ARM_IOX_MODELS = (r"^IE-?3", r"^IR1[018]")
@@ -118,15 +123,30 @@ def _iox_arch_env(device_id, model):
         % device_id)
 
 
-def resolve_platform(dev, probe=None):
+def _refuse_xr(device_id):
+    raise ValueError(
+        "%s runs IOS-XR, which IRIS cannot stage to yet: every onboarding "
+        "recipe here is IOS-XE. Remove the device or wait for XR support; "
+        "forcing 'platform' will not work." % device_id)
+
+
+def resolve_platform(dev, probe=None, os_family=None):
     """Resolve which onboarding platform drives a device.
 
-    Resolution order: (a) explicit dev['platform'] if it names a known recipe;
-    (b) dev['model'] matched against _MODEL_PLATFORMS; (c) if a probe callable
-    is given, call it with dev -- if it returns a model string, match that
-    (the CALLER is responsible for caching the probed model, e.g. into the
-    fleet store); (d) ValueError telling the operator how to unblock."""
+    Resolution order: (a) an IOS-XR device is refused outright -- every recipe
+    here is IOS-XE and no model prefix can tell the families apart; the family
+    is read from the os_family argument or, failing that, dev['os_family'];
+    (b) explicit dev['platform'] if it names a known recipe; (c) dev['model']
+    matched against _MODEL_PLATFORMS; (d) if a probe callable is given, call
+    it with dev -- if it returns a model string, match that (the CALLER is
+    responsible for caching the probed model, e.g. into the fleet store);
+    (e) ValueError telling the operator how to unblock."""
     device_id = dev.get("device_id", "?")
+    # The parameter supplements the record, it does not replace it: callers
+    # that pass a stored device (gui_server._plan) never pass os_family, and
+    # a cached family must refuse there too.
+    if (os_family or dev.get("os_family")) == "xr":
+        _refuse_xr(device_id)
     explicit = dev.get("platform")
     if explicit:
         if explicit not in _PLATFORM_RECIPES:
@@ -148,6 +168,14 @@ def resolve_platform(dev, probe=None):
     if model:
         platform = _match(model)
         if platform:
+            if not os_family and probe is not None \
+                    and _FAMILY_AMBIGUOUS_MODEL.match(model):
+                # A cached model short-circuits here on every later onboard, so
+                # a device whose family was never classified would stay
+                # misrouted forever. Ask the device before trusting the prefix.
+                probe(dev)
+                if dev.get("os_family") == "xr":
+                    _refuse_xr(device_id)
             return platform
         raise ValueError(
             "cannot determine platform for %s: unrecognized model %r -- set "
@@ -156,6 +184,12 @@ def resolve_platform(dev, probe=None):
 
     if probe is not None:
         probed_model = probe(dev)
+        # The probe is the first thing that can learn the family. A
+        # first-contact device had no cached os_family, so the guard at the
+        # top saw None -- re-check here or the very first onboard of an XR
+        # device still resolves to an IOS-XE recipe.
+        if dev.get("os_family") == "xr":
+            _refuse_xr(device_id)
         if probed_model:
             platform = _match(probed_model)
             if platform:
@@ -197,6 +231,38 @@ def _default_runner(install_path, env, on_line, on_proc=None):
 _MODEL_RE = re.compile(r"^cisco\s+(\S+)\s+\(", re.MULTILINE)
 _DEVICE_IDENTITY_RE = re.compile(r"(?im)^Processor board ID\s+(\S+)\s*$")
 
+# 'IOS XE' and 'IOS XR' differ by a single character, and no model prefix can
+# separate the families: ^ASR matches both an ASR 1000 (IOS-XE, Guest Shell
+# capable) and an ASR 9000 (IOS-XR, which has no Guest Shell at all). The
+# banner is the only authority, so match the whole token and never a prefix.
+#
+# Anchored to a BANNER LINE, not to free text. lab/device-run.sh runs `ssh -tt`,
+# so what reaches the classifier is the whole transcript -- MOTD, login banner,
+# and the prompt echoed with every command. A C9300 named 'ios-xr-lab-01' (or a
+# MOTD naming the family) would otherwise classify as 'xr', and that verdict is
+# unrecoverable: _refuse_xr tells the operator that forcing 'platform' will not
+# work, and the family is cached onto the fleet row. A version banner always
+# starts its line with 'cisco'; nothing else may decide the family.
+_OS_XR_RE = re.compile(r"(?im)^\s*cisco\s+IOS[\s-]*XRv?\b")
+_OS_XE_RE = re.compile(r"(?im)^\s*cisco\s+IOS[\s-]*XE\b")
+_OS_CLASSIC_RE = re.compile(r"(?im)^\s*cisco\s+IOS\s+Software\b")
+
+
+def parse_os_family(version_text):
+    """Classify 'show version' output as 'xe', 'xr', or '' (unknown).
+
+    Classic IOS (no XE/XR token) reports 'xe': it is driven by the same
+    recipes, and the distinction that matters here is XE-family vs XR-family,
+    not XE vs classic. XR is checked before XE, so a banner containing both
+    tokens is classified 'xr'; this precedence is intentional, not
+    incidental."""
+    text = version_text or ""
+    if _OS_XR_RE.search(text):
+        return "xr"
+    if _OS_XE_RE.search(text) or _OS_CLASSIC_RE.search(text):
+        return "xe"
+    return ""
+
 
 def _parse_show_version(version_text):
     """Extract (model, device_identity) from 'show version' output. Either
@@ -211,9 +277,14 @@ def _parse_show_version(version_text):
 
 def _default_probe(dev, env, repo_root):
     """Best-effort live 'show version' probe over lab/device-run.sh, using the
-    DEVICE_USER/DEVICE_PASS already resolved into env. ANY failure -> None
-    (never raises) -- an unreachable device just falls through to the
-    resolve_platform ValueError telling the operator to set platform/model."""
+    DEVICE_USER/DEVICE_PASS already resolved into env. Returns the model string
+    ('' when it cannot be read) and records the operating-system family on
+    ``dev['os_family']`` as a side effect -- the return value stays a plain
+    string because the reachability check in OnboardService.start()'s worker
+    uses it as a truthiness reachability test.
+    ANY failure -> '' (never raises) -- an unreachable device just falls
+    through to the resolve_platform ValueError telling the operator to set
+    platform/model."""
     device_ip = env.get("DEVICE_IP", "")
     try:
         out = subprocess.run(
@@ -221,9 +292,13 @@ def _default_probe(dev, env, repo_root):
             input="show version\n", capture_output=True, text=True, env=env,
             timeout=45)
     except Exception:
-        return None
-    m = _MODEL_RE.search(out.stdout or "")
-    return m.group(1) if m else None
+        return ""
+    text = out.stdout or ""
+    family = parse_os_family(text)
+    if family:
+        dev["os_family"] = family
+    m = _MODEL_RE.search(text)
+    return m.group(1) if m else ""
 
 
 # Collisions that mean the same thing on EVERY platform: each carries IRIS's
@@ -285,6 +360,15 @@ def _default_guestshell_preflight(dev, env, resolved, repo_root):
         ("apps", "show app-hosting list"),
         ("files", "dir bootflash:guest-share"),
     ), "guestshell")
+    # Classify from the banner already in hand -- no extra SSH round trip. The
+    # console resolves the platform before a job starts, so resolve_platform
+    # took its explicit branch and never saw the family; this preflight is the
+    # last gate before device-install.sh runs an IOS-XE recipe on the box.
+    family = parse_os_family(sections["version"])
+    if family:
+        dev["os_family"] = family
+    if family == "xr":
+        _refuse_xr(dev.get("device_id") or env.get("DEVICE_IP", "?"))
     model, device_identity = _parse_show_version(sections["version"])
     if not device_identity:
         raise ValueError("could not determine the device's processor board ID")
@@ -701,11 +785,20 @@ class OnboardService:
         def probe(d):
             model = self._probe(d, env)
             if model:
-                self.fleet.upsert({"device_id": device_id, "model": model})
+                # Only record a family we actually determined. Writing "" here
+                # would overwrite a previously cached family (upsert filters
+                # None, not empty strings) and silently reopen the misroute
+                # this guard exists to close.
+                record = {"device_id": device_id, "model": model}
+                family = d.get("os_family")
+                if family:
+                    record["os_family"] = family
+                self.fleet.upsert(record)
                 dev["model"] = model   # so the job line reports what was found
             return model
 
-        platform = resolve_platform(dev, probe=probe)
+        platform = resolve_platform(dev, probe=probe,
+                                    os_family=dev.get("os_family"))
         # For iox, derive the arch env (C9k->amd64, IE-3k/IR->arm defaults,
         # blank/unclassifiable -> raise). Runs for BOTH onboard and undeploy so
         # teardown deletes the RESOLVED package (iris-arm64.tar vs iris-amd64.tar).
@@ -833,6 +926,17 @@ class OnboardService:
                             "cannot reach device %s — ping/SSH probe "
                             "failed; check the device IP and credentials"
                             % env.get("DEVICE_IP", device_id))
+                    # That probe just read 'show version'. A console onboard
+                    # arrives with plan["resolved"]["platform"] already set, so
+                    # _build_env copied it onto the device and resolve_platform
+                    # returned from its EXPLICIT branch -- none of the family
+                    # checks inside resolution ran. This is the first place the
+                    # classification exists, and no existing fleet row carries
+                    # one. Cache it so later calls short-circuit at resolution.
+                    if dev.get("os_family") == "xr":
+                        self.fleet.upsert({"device_id": device_id,
+                                           "os_family": "xr"})
+                        _refuse_xr(device_id)
                     # Guest Shell used to stop there, so a device still
                     # carrying IRIS config was refused as a router and
                     # silently accepted here.
