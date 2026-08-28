@@ -1445,27 +1445,41 @@
       platform.innerHTML = FULL_INSTALL_OPTIONS_HTML;
       return;
     }
-    var r = await fetch('/api/install-options?model=' + encodeURIComponent(model));
-    if (gen !== installOptionsGen) return;   // a newer keystroke superseded this fetch
-    if (!r.ok) return;
-    var options = (await r.json()).options;
-    if (options === null) {
+    try {
+      var r = await fetch('/api/install-options?model=' + encodeURIComponent(model));
+      if (gen !== installOptionsGen) return;   // a newer keystroke superseded this fetch
+      if (!r.ok) {
+        // Restore to permissive default on server error: a valid choice must not
+        // be locked out by a transient failure. The server-side validate_record
+        // guard still refuses impossible platform+model combinations.
+        platform.disabled = false;
+        platform.innerHTML = FULL_INSTALL_OPTIONS_HTML;
+        return;
+      }
+      var options = (await r.json()).options;
+      if (options === null) {
+        platform.disabled = false;
+        platform.innerHTML = FULL_INSTALL_OPTIONS_HTML;
+        return;
+      }
+      if (options.length === 0) {
+        platform.innerHTML = '<option value="">IOS-XR — no agent install available yet</option>';
+        platform.disabled = true;
+        return;
+      }
+      var kept = platform.value;
+      platform.disabled = false;
+      platform.innerHTML = '<option value="">Agent install - auto by model</option>' +
+        options.map(function (o) {
+          return '<option value="' + esc(o) + '">' + esc(INSTALL_OPTION_LABELS[o] || o) + '</option>';
+        }).join('');
+      if (options.indexOf(kept) !== -1) platform.value = kept;
+    } catch (e) {
+      // Network failure or JSON parse error: restore permissive defaults so
+      // a transient blip never locks out a valid platform choice.
       platform.disabled = false;
       platform.innerHTML = FULL_INSTALL_OPTIONS_HTML;
-      return;
     }
-    if (options.length === 0) {
-      platform.innerHTML = '<option value="">IOS-XR — no agent install available yet</option>';
-      platform.disabled = true;
-      return;
-    }
-    var kept = platform.value;
-    platform.disabled = false;
-    platform.innerHTML = '<option value="">Agent install - auto by model</option>' +
-      options.map(function (o) {
-        return '<option value="' + esc(o) + '">' + esc(INSTALL_OPTION_LABELS[o] || o) + '</option>';
-      }).join('');
-    if (options.indexOf(kept) !== -1) platform.value = kept;
   }
   document.getElementById('df-model').addEventListener('input', refreshInstallOptions);
   document.getElementById('add-dev').addEventListener('click', function () {

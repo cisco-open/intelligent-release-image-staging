@@ -129,7 +129,14 @@ def install_options_for(model, os_family=None):
     explicit platform choice for hardware this table has no opinion on.
     Otherwise, the list is every platform _MODEL_INSTALL_TABLE names for that
     family (not just its auto-resolution default -- e.g. a C9xxx may run
-    guestshell OR iox, though guestshell alone is what Auto picks)."""
+    guestshell OR iox, though guestshell alone is what Auto picks).
+
+    Note: ASR1000/ASR9000 are distinguished only by 'show version' output; the
+    model prefix alone cannot tell them apart. An XR-family ASR (e.g. ASR9906)
+    passes this check deliberately and returns guestshell -- it is the onboard
+    probe's live classification (resolve_platform and/or the guestshell
+    preflight's family check) that refuses XR as a final guardrail. Keep both
+    rejection sites in sync."""
     model = (model or "").strip()
     if (os_family or "") == "xr":
         return []
@@ -422,6 +429,11 @@ def _default_guestshell_preflight(dev, env, resolved, repo_root):
     if family:
         dev["os_family"] = family
     if family == "xr":
+        # This is the guardrail of last resort for family-ambiguous models
+        # (e.g. ASR-9906) that install_options_for lets through deliberately.
+        # The console onboard path resolves the platform before probing, so
+        # resolve_platform never sees the family; this preflight is the first
+        # and final classification gate. Keep both rejection sites in sync.
         _refuse_xr(dev.get("device_id") or env.get("DEVICE_IP", "?"))
     model, device_identity = _parse_show_version(sections["version"])
     if not device_identity:
