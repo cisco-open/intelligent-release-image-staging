@@ -172,8 +172,16 @@ def _iox_arch_env(device_id, model):
     """Given a device that has ALREADY resolved to the iox platform, return the
     env overrides for its architecture. C9k -> the amd64 mapping; IE-3k/IR ->
     an EMPTY mapping (installer arm64 defaults apply); blank/unclassifiable ->
-    raise ValueError with guidance (NO silent arm fallback). No probe-for-arch."""
+    raise ValueError with guidance (NO silent arm fallback). No probe-for-arch.
+
+    An XR-shaped model (8xxx/8xxx-SYS, case-insensitive) refuses via
+    _refuse_xr instead of falling through to the generic guidance below --
+    the live incident this closes: an 8201 resolved to iox (no preflight
+    had run yet to catch it) and died on an XE-flavoured "needs a
+    recognized device model" arch error that never named IOS-XR."""
     model = (model or "").strip()
+    if model and re.match(_XR_MODEL_RE.pattern, model, re.IGNORECASE):
+        _refuse_xr(device_id)
     if model and re.match(_C9K_MODEL, model, re.IGNORECASE):
         return dict(_C9K_IOX_ENV)
     if model and any(re.match(p, model, re.IGNORECASE) for p in _ARM_IOX_MODELS):
@@ -238,6 +246,16 @@ def resolve_platform(dev, probe=None, os_family=None):
                 if dev.get("os_family") == "xr":
                     _refuse_xr(device_id)
             return platform
+        if dev.get("os_family") == "xr":
+            # A cached record can carry a family the entry guard above
+            # missed: that check is (os_family or dev.get("os_family")), so
+            # an explicit os_family= argument that disagrees with the
+            # record short-circuits it before dev's own field is ever read.
+            # A model this table does not recognize proves nothing either
+            # way, so the record's family is the only honest answer here --
+            # and "set 'platform' (guestshell|iox|router)" is advice no XR
+            # box could ever act on.
+            _refuse_xr(device_id)
         raise ValueError(
             "cannot determine platform for %s: unrecognized model %r -- set "
             "'platform' (guestshell|iox|router) or a recognized 'model' on the device"
@@ -429,11 +447,15 @@ def _default_guestshell_preflight(dev, env, resolved, repo_root):
     if family:
         dev["os_family"] = family
     if family == "xr":
-        # This is the guardrail of last resort for family-ambiguous models
-        # (e.g. ASR-9906) that install_options_for lets through deliberately.
-        # The console onboard path resolves the platform before probing, so
-        # resolve_platform never sees the family; this preflight is the first
-        # and final classification gate. Keep both rejection sites in sync.
+        # This used to be THE guardrail of last resort for family-ambiguous
+        # models (e.g. ASR-9906) that install_options_for lets through
+        # deliberately -- the console onboard path resolves the platform
+        # before probing, so resolve_platform never sees the family. It no
+        # longer stands alone: _default_router_preflight and
+        # _default_iox_preflight run this exact same check on their own
+        # already-fetched 'show version' section, and _iox_arch_env refuses
+        # an XR-shaped model number even when no preflight ran first. Keep
+        # all of them in sync.
         _refuse_xr(dev.get("device_id") or env.get("DEVICE_IP", "?"))
     model, device_identity = _parse_show_version(sections["version"])
     if not device_identity:
@@ -485,6 +507,15 @@ def _default_router_preflight(dev, env, resolved, repo_root):
         sections[name] = match.group(1)
 
     version = sections["version"]
+    # Classify from the banner already in hand, exactly like the Guest Shell
+    # preflight -- no extra SSH round trip. The router preflight never probed
+    # the family before, so a C8xxx-shaped model whose banner actually reads
+    # IOS-XR would fall through to device/router-install.sh unrefused.
+    family = parse_os_family(version)
+    if family:
+        dev["os_family"] = family
+    if family == "xr":
+        _refuse_xr(dev.get("device_id") or env.get("DEVICE_IP", "?"))
     model, device_identity = _parse_show_version(version)
     if not re.match(r"^C8[0-9]{3}", model, re.IGNORECASE):
         raise ValueError("router modes support the Catalyst 8000 family only; %s is not yet supported"
@@ -619,6 +650,16 @@ def _default_iox_preflight(dev, env, resolved, repo_root):
         ("running", "show running-config"),
         ("apps", "show app-hosting list"),
     ), "iox")
+    # Classify from the banner already in hand, exactly like the Guest Shell
+    # preflight -- no extra SSH round trip. This is the fix for the live
+    # incident: the IOx path never asked the device what it runs, so an XR
+    # 8201 sailed through this preflight and only failed later, deep inside
+    # _iox_arch_env, on an XE-flavoured package/architecture error.
+    family = parse_os_family(sections["version"])
+    if family:
+        dev["os_family"] = family
+    if family == "xr":
+        _refuse_xr(dev.get("device_id") or env.get("DEVICE_IP", "?"))
     model, device_identity = _parse_show_version(sections["version"])
     if not device_identity:
         raise ValueError("could not determine the device's processor board ID")

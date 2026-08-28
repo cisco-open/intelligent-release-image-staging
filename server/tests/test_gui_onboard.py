@@ -494,6 +494,18 @@ def test_resolve_platform_unambiguous_model_does_not_probe():
     assert calls == []
 
 
+def test_resolve_platform_unrecognized_model_refuses_when_record_carries_xr():
+    # The entry guard is (os_family or dev.get("os_family")) == "xr": an
+    # explicit os_family= argument that disagrees with the cached record
+    # short-circuits it before dev's own field is ever consulted. A model
+    # this table does not recognize must still refuse honestly instead of
+    # advising "set 'platform' (guestshell|iox|router)" -- advice no XR box
+    # could ever act on.
+    dev = {"device_id": "d1", "model": "N9K-C93180YC-EX", "os_family": "xr"}
+    with pytest.raises(ValueError, match="IOS-XR"):
+        gui_onboard.resolve_platform(dev, os_family="xe")
+
+
 # --- install_options_for / normalize_model -------------------------------
 
 def test_install_options_for_c9k_allows_guestshell_and_iox():
@@ -558,6 +570,22 @@ def test_normalize_model_strips_sys_suffix():
     assert gui_onboard.normalize_model("") == ""
     assert gui_onboard.normalize_model(None) == ""
     assert gui_onboard.normalize_model("  8201-SYS  ") == "8201"         # whitespace trimmed
+
+
+# --- _iox_arch_env ---------------------------------------------------------
+
+def test_iox_arch_env_refuses_an_8xxx_model():
+    # The live incident this closes: an 8201 resolved to iox (no preflight
+    # had run yet to catch it) and only failed here, with a confusing "needs
+    # a recognized device model" arch-selection error that never named
+    # IOS-XR.
+    with pytest.raises(ValueError, match="IOS-XR"):
+        gui_onboard._iox_arch_env("d1", "8201")
+
+
+def test_iox_arch_env_refuses_an_8xxx_sys_model_case_insensitively():
+    with pytest.raises(ValueError, match="IOS-XR"):
+        gui_onboard._iox_arch_env("d1", "8201-sys")
 
 
 # --- parse_os_family ----------------------------------------------------
@@ -1114,6 +1142,36 @@ def test_default_router_preflight_rejects_populated_guest_share(monkeypatch):
             _router_resolved("router-routed"), "/repo")
 
 
+def test_default_router_preflight_refuses_an_ios_xr_device(monkeypatch):
+    """The router preflight never probed the family before -- a C8xxx-shaped
+    device whose banner actually reads IOS-XR must refuse here (not with the
+    unrelated 'router modes support the Catalyst 8000 family only' message)
+    before device/router-install.sh ever runs."""
+    def run(_argv, input=None, **_kwargs):
+        return SimpleNamespace(returncode=0, stdout=(
+            "__IRIS_PREFLIGHT_VERSION__\n"
+            "Cisco IOS XR Software, Version 24.4.1\n"
+            "cisco ASR-9906 (Intel 686 F6M14S4)\n"
+            "Processor board ID FOX1234ABCD\n"
+            "__IRIS_PREFLIGHT_RUNNING__\nhostname xr1\n"
+            "__IRIS_PREFLIGHT_APPS__\nNo App found\n"
+            "__IRIS_PREFLIGHT_GUEST_SHARE__\n%Error opening\n"))
+    monkeypatch.setattr(gui_onboard.subprocess, "run", run)
+    dev = {"device_id": "xr1"}
+    with pytest.raises(ValueError, match="IOS-XR"):
+        gui_onboard._default_router_preflight(
+            dev, {"DEVICE_IP": "192.0.2.10"},
+            _router_resolved("router-routed"), "/repo")
+
+
+def test_default_router_preflight_records_the_family_it_read(monkeypatch):
+    _router_preflight_stub(monkeypatch, running="hostname r1\n", apps="No App found\n")
+    dev = {"device_id": "r1"}
+    gui_onboard._default_router_preflight(
+        dev, {"DEVICE_IP": "192.0.2.10"}, _router_resolved("router-routed"), "/repo")
+    assert dev["os_family"] == "xe"
+
+
 # --- IOx preflight: device/iox/install.sh hard-requires EXPECTED_DEVICE_
 # IDENTITY (and MODEL) via ':?' on every non-dry-run install -- a guard so a
 # typo'd DEVICE_IP can't tear down the app on the wrong switch. The console
@@ -1144,6 +1202,39 @@ def test_default_iox_preflight_extracts_identity_and_model(monkeypatch):
         {}, {"DEVICE_IP": "192.0.2.30"}, {}, "/repo")
     assert evidence == {"status": "passed", "device_identity": "9ABC123",
                         "detected_model": "IE-3400"}
+
+
+def test_default_iox_preflight_refuses_an_ios_xr_device(monkeypatch):
+    """The live incident: the IOx path never asked the device what it runs,
+    so an XR 8201 sailed through this preflight and only failed later, deep
+    inside _iox_arch_env, on a confusing XE-flavoured 'needs a recognized
+    device model' arch-selection error that never named IOS-XR."""
+    def run(argv, input=None, **kwargs):
+        return SimpleNamespace(returncode=0, stdout=(
+            "__IRIS_PREFLIGHT_VERSION__\n"
+            "Cisco IOS XR Software, Version 24.4.1\n"
+            "cisco 8201 (Intel 686 F6M14S4)\n"
+            "Processor board ID FOX1234ABCD\n"
+            "\n__IRIS_PREFLIGHT_RUNNING__\nhostname xr1\n"
+            "\n__IRIS_PREFLIGHT_APPS__\nNo App found\n"))
+    monkeypatch.setattr(gui_onboard.subprocess, "run", run)
+    dev = {"device_id": "xr1"}
+    with pytest.raises(ValueError, match="IOS-XR"):
+        gui_onboard._default_iox_preflight(
+            dev, {"DEVICE_IP": "192.0.2.30"}, {}, "/repo")
+
+
+def test_default_iox_preflight_records_the_family_it_read(monkeypatch):
+    def run(argv, input=None, **kwargs):
+        return SimpleNamespace(returncode=0, stdout=(
+            "__IRIS_PREFLIGHT_VERSION__\n" + _iox_show_version() +
+            "\n__IRIS_PREFLIGHT_RUNNING__\nhostname sw1\n"
+            "\n__IRIS_PREFLIGHT_APPS__\nNo App found\n"))
+    monkeypatch.setattr(gui_onboard.subprocess, "run", run)
+    dev = {"device_id": "sw1"}
+    gui_onboard._default_iox_preflight(
+        dev, {"DEVICE_IP": "192.0.2.30"}, {}, "/repo")
+    assert dev["os_family"] == "xe"
 
 
 def test_default_iox_preflight_raises_when_command_fails(monkeypatch):
