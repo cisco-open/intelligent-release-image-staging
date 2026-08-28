@@ -18,6 +18,11 @@ top-level `VERSION` file.
   telemetry reports its state as `not_run`.
 
 ### Fixed
+- A forced router undeploy now reclaims the VirtualPortGroup, NAT ACL, overload
+  rule and static mapping that IRIS itself created, identified by the description
+  IRIS writes into every VPG it creates and by IRIS's own name on the NAT objects.
+  Previously they were left on the device and onboarding refused the router until
+  an operator cleared them by hand. Anything not carrying IRIS's mark is untouched.
 - Device onboarding now reads the operating-system family from the `show version`
   banner. An IOS-XR device is refused with an explanatory error instead of being
   handed an IOS-XE recipe — previously an ASR 9000 matched the same `^ASR`
