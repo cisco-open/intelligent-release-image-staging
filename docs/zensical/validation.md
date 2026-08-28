@@ -89,4 +89,4 @@ Check these by hand when the map or its data source changes:
 
 ## Reporting bugs
 
-Include platform, IOS-XE version, boot mode, server host OS, Docker version, image id, agent report, relevant console audit lines, and whether the Guest Shell or IOx path is in use.
+Include platform, device software version, boot mode, server host OS, Docker version, image id, agent report, relevant console audit lines, and whether the Guest Shell or IOx path is in use.

@@ -22,7 +22,7 @@ This page explains where to make changes without changing the repository's core 
 
 ## Core invariant
 
-Do not add code or documentation that causes IRIS to install, activate, commit, change boot variables, or reload an IOS-XE device. Staging is the boundary.
+Do not add code or documentation that causes IRIS to install, activate, commit, change boot variables, or reload a device. Staging is the boundary.
 
 ## Local development loop
 

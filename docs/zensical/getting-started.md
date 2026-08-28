@@ -18,7 +18,7 @@ It uses the command line throughout because it starts from an empty host. Once t
 | Reachable server IP | Devices must reach the host on the published IRIS ports. |
 | Handed-in `aria2c` binary | Not downloaded or built by this repository. `tools/get-aria2c.sh amd64` installs the pinned static binary before the first build — the Dockerfile's `COPY bin/aria2c` step fails without it. |
 | `age` identity | Encrypts server secrets at rest. Keep the private identity outside the repository. |
-| IOS-XE image files | Store outside Git, normally under `/opt/images`. The tree must be readable and traversable by uid `10001`. The required IOS-XE license tier is outside IRIS's scope — check it at [cisco.com](https://www.cisco.com/) for the respective platform. |
+| Cisco image files | Store outside Git, normally under `/opt/images`. The tree must be readable and traversable by uid `10001`. The required license tier for the target platform is outside IRIS's scope — check [cisco.com](https://www.cisco.com/). |
 | Device credentials | Used only for installation or GUI-driven onboarding. Do not commit real credentials. |
 
 ## Configure the server

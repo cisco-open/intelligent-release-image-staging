@@ -199,6 +199,15 @@ and shown, never presented as this device's own history. Devices registered
 before IRIS started stamping registration time carry no stamp, and nothing is
 labelled for them.
 
+The Swarm Map's own device drawer lists images differently from the drawer
+above: its **Image staging** section is built from the device's last
+heartbeat (`staged_image_ids`, `errored_image_ids`, `current_image_id`), so it
+shows what the device last reported, not what is assigned. The Devices drawer
+above shows the full assigned set, including images still `queued` and not
+yet staged. A freshly assigned image therefore appears in the Devices drawer
+right away but does not show on the map until the device's next heartbeat
+reports it.
+
 An `abandoned` receipt is one that no longer describes a device IRIS manages:
 the device was deleted from the inventory, or a forced teardown stripped the
 agent without using the receipt as authority. It is kept as the record of what
@@ -229,15 +238,16 @@ device can read `deployed` and still have gone quiet.
 | Adopt selected | Records the ownership receipt for each device. | Yes — a dialog listing the selected devices |
 | Delete selected | Removes the inventory rows only. | Yes — a dialog listing the devices and warning that deletion is not an undeploy |
 | *credential for selected* + **Apply** | Assigns one credential profile to every checked device. Leaving the picker on either blank entry clears the credential instead. | No |
-| Assign images to selected | Opens the shared image picker for the whole checked selection — the bulk form of each row's own **Assigned images** button, and the reason the filter bar exists: filter to a platform or model, select all, assign. | Only when it would unassign every image |
+| Assign images to selected | Opens the shared image picker for the whole checked selection — the bulk form of each row's own control in the **Assigned images** column, and the reason the filter bar exists: filter to a platform or model, select all, assign. | Only when it would unassign every image |
 
 A device can have up to ten images assigned at once, staged and transferred in
-parallel; the per-row **Assigned images** button and the toolbar's **Assign
-images to *N* devices…** button open the same checkbox picker, reading `Choose
-images` with a live `checked/10` count — an eleventh box disables itself
-rather than waiting for a server-side rejection. Applying to a multi-device
-selection pre-checks the *intersection* of what the selection already has
-assigned — never the union — so **Apply** can never silently add an image to
+parallel; the per-row control in the **Assigned images** column (reading `N
+image(s)` when images are assigned, `— assign —` when none are) and the
+toolbar's **Assign images to *N* devices…** button open the same checkbox
+picker, reading `Choose images` with a live `n/10` count — an eleventh box
+disables itself rather than waiting for a server-side rejection. Applying to
+a multi-device selection pre-checks the *intersection* of what the selection
+already has assigned — never the union — so **Apply** can never silently add an image to
 one device or drop it from another; when the selection's assignments actually
 differ, a note says so before you apply. Applying an empty pick is a
 deliberate unassign and confirms first, whether for one device or for the

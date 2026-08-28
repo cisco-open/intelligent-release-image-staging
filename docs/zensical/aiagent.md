@@ -31,7 +31,7 @@ Gather these non-secret decisions before starting:
 | --- | --- |
 | Server runtime | Docker Compose for a single host, or Kubernetes for the single-replica alpha deployment. |
 | Stable server address | A device-reachable IPv4 address, used in the server certificate and tracker announces. |
-| Image source | A host path to the IOS-XE `.bin` file. |
+| Image source | A host path to the Cisco image (`.bin`) file. |
 | Device inventory | Management IP, VLAN, SVI/guest addressing, and model for every device. |
 | Catalyst 9300 hosting mode | Guest Shell, or IOx on an SSD-equipped Catalyst 9300. |
 | IOx package availability | `iris-arm64.tar` for IE-3400; `iris-amd64.tar` for Catalyst 9300 IOx. |
