@@ -72,10 +72,25 @@ def _bounded_int(value, cap):
     return value
 
 
+def _approved_ids(approved_image_id):
+    """Normalise the policy-check argument accepted by sanitize_sample /
+    sanitize_observation: either a single image id (the single-image-era
+    call shape, still used by legacy v1 devices and existing callers) or an
+    iterable of ids (a device's whole approved_image_ids set). Returns a set
+    for membership testing; None/empty means unassigned."""
+    if approved_image_id is None:
+        return set()
+    if isinstance(approved_image_id, str):
+        return {approved_image_id} if approved_image_id else set()
+    return set(approved_image_id)
+
+
 def sanitize_sample(data, approved_image_id):
     """Server-side re-validation of one legacy **v1** device sample (spec 6.1 /
     §10.1c). Whitelists the eight v1 fields, checks enums exactly, bounds every
-    numeric, validates image_id against SERVER truth (the policy assignment),
+    numeric, validates image_id against SERVER truth (the policy assignment --
+    *approved_image_id* may be a single id or an iterable of a device's whole
+    approved_image_ids set; either way the sample's image_id must be a member),
     and tags the result ``schema:"v1"`` so downstream never reinterprets a v1
     field as a v2 measurement. Raises ValueError."""
     if not isinstance(data, dict):
@@ -85,8 +100,8 @@ def sanitize_sample(data, approved_image_id):
     image_id = data.get("image_id")
     if not isinstance(image_id, str) or not _IMAGE_RE.match(image_id):
         raise ValueError("bad image_id")
-    if not approved_image_id or image_id != approved_image_id:
-        raise ValueError("image_id is not the device's assigned image")
+    if image_id not in _approved_ids(approved_image_id):
+        raise ValueError("image_id is not one of the device's assigned images")
     if data.get("phase") not in _PHASES:
         raise ValueError("bad phase")
     if data.get("tier") not in TIER_TICKS:
@@ -105,6 +120,10 @@ def sanitize_observation(data, approved_image_id, configured_max_peers):
     (spec §3A/§10.1). State-first: ``aria``/``peer_connections``/``sampling_class``
     exist ONLY under ``obs_state == observed``; a state-only envelope invents no
     transfer fields. Returns ``(clean, peer_connections_truncated)``.
+
+    *approved_image_id* is the SERVER-truth policy check (a single id, or an
+    iterable of a device's whole approved_image_ids set) -- when the envelope
+    carries an image_id it must be a member.
 
     Whole-envelope size is bounded at ``V2_ENVELOPE_MAX_BYTES`` (rejected, never
     partially parsed). ``peer_connections`` beyond ``LIVE_PEER_ROWS_MAX`` are
@@ -139,8 +158,8 @@ def sanitize_observation(data, approved_image_id, configured_max_peers):
     if image_id is not None:
         if not isinstance(image_id, str) or not _IMAGE_RE.match(image_id):
             raise ValueError("bad image_id")
-        if not approved_image_id or image_id != approved_image_id:
-            raise ValueError("image_id is not the device's assigned image")
+        if image_id not in _approved_ids(approved_image_id):
+            raise ValueError("image_id is not one of the device's assigned images")
         out["image_id"] = image_id
 
     seq = data.get("sample_seq")

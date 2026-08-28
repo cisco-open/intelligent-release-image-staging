@@ -203,6 +203,25 @@ def test_delete_image_blocked_when_assigned(tmp_path):
     assert store.get_image("img1") is not None         # nothing removed
 
 
+def test_delete_image_blocked_when_assigned_as_second_member(tmp_path):
+    # Every delete-guard test above assigns via the singular approved_image_id
+    # kwarg, so a regression to "check only approved_image_ids[0]" would pass
+    # the whole suite. Assign a multi-image set and prove BOTH members guard
+    # deletion, not just the first.
+    svc = gui_images.ImageService(str(tmp_path / "state"), str(tmp_path / "imgs"),
+                                  seeder_remove_fn=lambda ih: None)
+    store = svc._store()
+    store.save_image({"id": "img-a", "filename": "img-a.bin", "info_hash_hex": "a",
+                      "published_at": 1})
+    store.save_image({"id": "img-b", "filename": "img-b.bin", "info_hash_hex": "b",
+                      "published_at": 1})
+    store.set_policy("d1", approved_image_ids=["img-a", "img-b"])
+    assert svc.delete_image("img-a") == ["d1"]        # first member blocks
+    assert store.get_image("img-a") is not None
+    assert svc.delete_image("img-b") == ["d1"]        # second member blocks too
+    assert store.get_image("img-b") is not None
+
+
 def test_delete_image_ignores_stale_policy_with_live_fleet(tmp_path):
     svc = gui_images.ImageService(str(tmp_path / "state"), str(tmp_path / "imgs"),
                                   seeder_remove_fn=lambda ih: None)

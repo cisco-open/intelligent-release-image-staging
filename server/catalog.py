@@ -670,7 +670,11 @@ class CatalogStore:
         callers never see a field that means nothing. A row written by the
         single-image release carries only ``approved_image_id`` and reads
         back as its one-element list, with no migration step -- the row
-        rewrites itself in the new shape at the next set_policy."""
+        rewrites itself in the new shape at the next set_policy. When a row
+        carries BOTH keys (the shape set_policy now writes), the plural is
+        authoritative: ``approved_image_id`` is recomputed here as its first
+        element and never trusted from disk, so a raw edit or a stale write
+        that leaves the two keys disagreeing can't desync what callers see."""
         rec = self._read(self.policy_path).get(device_id)
         if not isinstance(rec, dict):
             return {"approved_image_id": None, "approved_image_ids": []}
@@ -1019,8 +1023,12 @@ class Catalog:
             # paused / unassigned / errored -> WITHDRAW the live value even if
             # an `observed` envelope arrived, without inventing transfer fields.
             if self.live_table is not None:
+                # Membership against the WHOLE assigned set, not just the
+                # first (singular) member -- a live sample for a device's
+                # 2nd+ assigned image must sanitize clean, matching the v2
+                # telemetry-report ingest check above.
                 approved = self.store.get_policy(parts[2]).get(
-                    "approved_image_id")
+                    "approved_image_ids") or []
                 every, paused = 1, False
                 if self.stream_settings is not None:
                     every, paused = self.stream_settings.read()
