@@ -73,6 +73,25 @@
     ['not-enrolled', 'not enrolled'],
     ['offline', 'offline (no recent heartbeat)']
   ];
+  // The device's approved image ids, ordered. assigned_image_ids is absent
+  // for a policy row that predates the ordered set (or simply unassigned),
+  // so fall back to the singular field it still carries -- mirrors the
+  // server's _row_assigned_ids exactly, so the two can never disagree about
+  // what "assigned" means.
+  function rowAssignedIds(d) {
+    var ids = d.assigned_image_ids;
+    if (ids && ids.length) return ids;
+    return d.assigned_image_id ? [d.assigned_image_id] : [];
+  }
+  // Whether *d*'s device has staged image *iid*: membership in the
+  // heartbeat's staged_image_ids when the agent reports it directly (Task
+  // 3), else the legacy current_image_id/stage_state=='ready' pair for an
+  // agent that predates the field. Mirrors the server's _row_has_staged.
+  function rowHasStaged(d, iid) {
+    var sids = d.staged_image_ids;
+    if (sids != null) return sids.indexOf(iid) !== -1;
+    return d.stage_state === 'ready' && d.current_image_id === iid;
+  }
   function deviceStatus(d, devNow) {
     // "no heartbeat since the job finished" — the job outcome is the freshest
     // truth we have about this device
@@ -92,9 +111,13 @@
         ? { key: 'undeploy-failed', label: 'undeploy failed', cls: 'badge badge-fail' }
         : { key: 'onboard-failed', label: 'onboard failed', cls: 'badge badge-fail' };
     }
-    // "deployed" = the assigned image is staged and verified on the box.
-    if (d.stage_state === 'ready' && d.current_image_id &&
-        d.current_image_id === d.assigned_image_id) {
+    // "deployed" = every image in the assigned SET is staged and verified on
+    // the box -- not just one of them. rowHasStaged() folds in the legacy
+    // fallback for an agent that predates staged_image_ids, so a one-image
+    // set on an old agent is exactly today's single-field check.
+    var assignedIds = rowAssignedIds(d);
+    if (assignedIds.length &&
+        assignedIds.every(function (iid) { return rowHasStaged(d, iid); })) {
       return { key: 'deployed', label: 'deployed', cls: 'badge badge-ok' };
     }
     if (d.stage_error) {
@@ -468,7 +491,6 @@
     credOpts = cr.ok ? ((await cr.json()).profiles || []) : [];
     if (mine !== devicesRefreshGeneration) return;
     syncCredSelected();
-    syncImageSelected();
     LAST_DEVICES = devs;
     LAST_DEV_NOW = devNow;
     syncDeviceFilterOptions();
@@ -501,9 +523,8 @@
       marked[cb.getAttribute('data-id')] = true;
     });
     document.getElementById('dev-rows').innerHTML = devs.map(function (d) {
-      var opts = ['<option value="">' + (d.assigned_image_id ? '— unassign —' : '— assign —') + '</option>'].concat(imageIds.map(function (id) {
-        return '<option value="' + esc(id) + '"' + (id === d.assigned_image_id ? ' selected' : '') + '>' + esc(id) + '</option>';
-      })).join('');
+      var rowIds = rowAssignedIds(d);
+      var assignLabel = rowIds.length ? (rowIds.length + ' image(s)') : '— assign —';
       var credSel = ['<option value="">— no credential —</option>'].concat(credOpts.map(function (c) {
         return '<option value="' + esc(c.id) + '"' + (c.id === d.credential_profile_id ? ' selected' : '') + '>' + esc(c.id) + '</option>';
       })).join('');
@@ -527,7 +548,7 @@
         '<td>' + esc(attachment + attachmentDetail) + '</td>' +
         '<td><select class="platform">' + platSel + '</select></td>' +
         '<td><select class="cred">' + credSel + '</select></td>' +
-        '<td><select class="assign">' + opts + '</select></td>' +
+        '<td><button type="button" class="linkish assign-btn">' + esc(assignLabel) + '</button></td>' +
         '<td>' + telemetryCell(d) + '</td>' +
         '<td><span class="peer-intent">' + (peerPolicyAssigned(d.device_id) ? 'Quarantined intent' : 'Not quarantined') +
         '</span> ' + peerPolicyStatus() + ' <button type="button" class="linkish peer-quarantine" ' +
@@ -538,13 +559,13 @@
         '<td>' + status +
         ' <button class="linkish dinfo" title="Deployment details">ⓘ</button></td></tr>';
     }).join('');
-    document.querySelectorAll('#dev-rows .assign').forEach(function (sel) {
-      sel.addEventListener('change', async function () {
-        var id = sel.closest('tr').getAttribute('data-id');
-        var r = await jpost('/api/devices/' + encodeURIComponent(id) + '/assign', { image_id: sel.value });
-        devStatus.textContent = r.ok
-          ? (sel.value ? ('Assigned ' + sel.value + ' to ' + id) : ('Unassigned ' + id))
-          : (sel.value ? 'Assign failed' : 'Unassign failed');
+    document.querySelectorAll('#dev-rows .assign-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var id = btn.closest('tr').getAttribute('data-id');
+        var d = LAST_DEVICES.filter(function (x) { return x.device_id === id; })[0] || {};
+        openImagePicker(rowAssignedIds(d), function (ids) {
+          assignImagesTo([id], ids);
+        });
       });
     });
     document.querySelectorAll('#dev-rows .cred').forEach(function (sel) {
@@ -628,12 +649,39 @@
       return '<tr><td class="muted">' + esc(kv[0]) + '</td><td>' + kv[1] + '</td></tr>';
     }).join('');
   }
+  // One row per assigned image: id + state. "ready" comes from
+  // rowHasStaged() (staged_image_ids membership, or the legacy
+  // current_image_id/stage_state pair for an agent that predates it); the
+  // one currently in flight shows the heartbeat's own stage_state, with
+  // stage_error appended when that is the one erroring; everything else
+  // still outstanding reads as queued. Parked is deliberately NOT a state
+  // shown here: an image the agent parked is no longer in the assigned set,
+  // so it never produces a row at all -- there is nothing to say about it.
+  function deployImageRows(d) {
+    var ids = rowAssignedIds(d);
+    if (!ids.length) {
+      return '<tr><td colspan="2" class="muted">No images assigned.</td></tr>';
+    }
+    return ids.map(function (iid) {
+      var state;
+      if (rowHasStaged(d, iid)) {
+        state = 'ready';
+      } else if (d.current_image_id === iid) {
+        state = (d.stage_state || 'staging') + (d.stage_error ? ' — ' + d.stage_error : '');
+      } else {
+        state = 'queued';
+      }
+      return '<tr><td class="mono">' + esc(iid) + '</td><td>' + esc(state) + '</td></tr>';
+    }).join('');
+  }
   async function openDeployInfo(id) {
     deployInfoDev = id;
     var note = document.getElementById('di-note');
     document.getElementById('di-dev').textContent = id;
     document.getElementById('di-rows').innerHTML = '';
     document.getElementById('di-log-rows').innerHTML = '';
+    var d = LAST_DEVICES.filter(function (x) { return x.device_id === id; })[0] || {};
+    document.getElementById('di-img-rows').innerHTML = deployImageRows(d);
     var lt = document.getElementById('di-log-text');
     lt.hidden = true; lt.textContent = '';
     note.textContent = 'Loading…';
@@ -841,6 +889,8 @@
     document.getElementById('sel-bar').hidden = n === 0;
     document.getElementById('sel-count').textContent = n + ' selected';
     document.getElementById('onboard-selected').textContent = 'Start onboard (' + n + ')';
+    document.getElementById('assign-images-selected').textContent =
+      'Assign images to ' + n + ' devices…';
     document.querySelectorAll('#dev-rows tr').forEach(function (tr) {
       var cb = tr.querySelector('.mark');
       tr.classList.toggle('sel', !!(cb && cb.checked));
@@ -1026,7 +1076,7 @@
   // running job — onboard/undeploy previously guarded only each other.
   var BULK_BTNS = ['onboard-selected', 'undeploy-selected', 'adopt-selected',
                    'delete-selected', 'apply-cred-selected',
-                   'apply-image-selected',
+                   'assign-images-selected',
                    'quarantine-selected', 'release-selected'];
   var bulkBusy = false;
   function setBulkBusy(busy) {
@@ -1059,23 +1109,59 @@
       }).join('');
     if (keep) sel.value = keep;
   }
-  // The bulk image picker is populated from the same imageIds the per-row
-  // "Assigned image" dropdowns use, so the two can never offer different
-  // catalogs. Assigning by selection is how an operator stages a filtered
-  // subset -- doing it row by row was the only way before, which does not
-  // scale past a handful of devices.
-  function syncImageSelected() {
-    var sel = document.getElementById('image-selected');
-    if (!sel) return;
-    var keep = sel.value;
-    sel.innerHTML = '<option value="">— image for selected —</option>' +
-      '<option value="__unassign">— unassign —</option>' +
-      imageIds.map(function (id) {
-        return '<option value="' + esc(id) + '">' + esc(id) + '</option>';
-      }).join('');
-    if (keep) sel.value = keep;
-    if (sel.value !== keep) sel.value = '';   // the kept image is gone
+  // ---- Image picker: one control shared by the per-row assign button and
+  // the bulk "Assign images to N devices…" toolbar action below. Both POST
+  // the checked ids, in the order the checked-first render placed them,
+  // through the SAME ordered-set body (image_ids) -- there is exactly one
+  // way to pick images in this console, whether for one device or many, so
+  // the row select and the bulk dropdown that used to do this separately
+  // cannot drift apart again.
+  var imgPickerOnApply = null;
+  function openImagePicker(currentIds, onApply) {
+    var overlay = document.getElementById('img-picker');
+    var rows = document.getElementById('img-picker-rows');
+    var counter = document.getElementById('img-picker-count');
+    var checkedSet = {};
+    (currentIds || []).forEach(function (id) { checkedSet[id] = true; });
+    // checked-first: the current set, in its own order, before every other
+    // catalog image -- so what is already assigned is never buried below
+    // the fold in a large catalog, and Apply's read order (top to bottom)
+    // preserves it.
+    var ordered = (currentIds || []).filter(function (id) { return imageIds.indexOf(id) !== -1; })
+      .concat(imageIds.filter(function (id) { return !checkedSet[id]; }));
+    rows.innerHTML = ordered.length ? ordered.map(function (id) {
+      return '<label class="img-pick-row"><input type="checkbox" class="img-pick" value="' +
+        esc(id) + '"' + (checkedSet[id] ? ' checked' : '') + '> ' + esc(id) + '</label>';
+    }).join('') : '<p class="muted">No images in the catalog yet.</p>';
+    function updateCount() {
+      var n = rows.querySelectorAll('input:checked').length;
+      counter.textContent = n + '/10';
+      // the 11th box is disabled, not just rejected server-side at Apply
+      rows.querySelectorAll('input:not(:checked)').forEach(function (cb) { cb.disabled = n >= 10; });
+    }
+    rows.querySelectorAll('input').forEach(function (cb) { cb.addEventListener('change', updateCount); });
+    updateCount();
+    imgPickerOnApply = function () {
+      var ids = Array.prototype.map.call(rows.querySelectorAll('input:checked'),
+        function (cb) { return cb.value; });
+      closeImagePicker();
+      onApply(ids);
+    };
+    overlay.hidden = false;
   }
+  function closeImagePicker() {
+    document.getElementById('img-picker').hidden = true;
+    imgPickerOnApply = null;
+  }
+  document.getElementById('img-picker-apply').addEventListener('click', function () {
+    if (imgPickerOnApply) imgPickerOnApply();
+  });
+  // Cancel closes without ever POSTing -- picking is a deliberate confirm.
+  document.getElementById('img-picker-cancel').addEventListener('click', closeImagePicker);
+  document.addEventListener('keydown', function (e) {
+    var overlay = document.getElementById('img-picker');
+    if (e.key === 'Escape' && overlay && !overlay.hidden) closeImagePicker();
+  });
   function delWarning(ids) {
     // Removing inventory does NOT undeploy: an onboarded device keeps running
     // its agent with no Console record of it, so say so before it happens.
@@ -1109,6 +1195,18 @@
     devStatus.textContent = label + ' ' + (ids.length - failed.length) + '/' +
       ids.length + ' device(s)' + (failed.length ? '; failed: ' + failed.join(', ') : '');
     refreshDevices();
+  }
+  // Shared by the per-row assign button and the bulk toolbar action: POST
+  // the SAME ordered image_ids body to every device id, sequentially,
+  // reporting per-device failures in the status line through forSelected --
+  // same shape as every other bulk action. An empty imgIds is a deliberate
+  // unassign, not the absence of a choice: the picker's Apply always POSTs
+  // whatever is checked, including nothing.
+  function assignImagesTo(ids, imgIds) {
+    var label = imgIds.length ? ('Assigned ' + imgIds.length + ' image(s) to') : 'Unassigned';
+    return forSelected(label, ids, function (id) {
+      return jpost('/api/devices/' + encodeURIComponent(id) + '/assign', { image_ids: imgIds });
+    });
   }
   document.getElementById('delete-selected').addEventListener('click', async function () {
     var ids = claimSelection();
@@ -1220,19 +1318,27 @@
                    { acknowledge_adopt: true });
     });
   });
-  document.getElementById('apply-image-selected').addEventListener('click', async function () {
-    var raw = document.getElementById('image-selected').value;
-    if (!raw) { devStatus.textContent = 'Pick an image for the selection first.'; return; }
-    var ids = claimSelection();
-    if (!ids) return;
-    // "— unassign —" is a distinct choice, not the empty placeholder: clearing
-    // an assignment is a real action and must not be what an unset picker does.
-    var imageId = raw === '__unassign' ? '' : raw;
-    await forSelected(imageId ? 'Assigned ' + imageId + ' to' : 'Unassigned', ids,
-      function (id) {
-        return jpost('/api/devices/' + encodeURIComponent(id) + '/assign',
-                     { image_id: imageId });
-      });
+  document.getElementById('assign-images-selected').addEventListener('click', function () {
+    var ids = selectedIds();
+    if (!ids.length) { devStatus.textContent = 'No devices selected.'; return; }
+    // Pre-check the INTERSECTION of the selection's current sets: pre-
+    // checking the UNION would silently ADD an image to a device that does
+    // not have it the moment ANY other selected device does; pre-checking
+    // just one device's set would silently DROP an image from the rest on
+    // Apply. The intersection is the only starting point Apply cannot
+    // change anyone's assignment by surprise from.
+    var sets = ids.map(function (id) {
+      var d = LAST_DEVICES.filter(function (x) { return x.device_id === id; })[0] || {};
+      return rowAssignedIds(d);
+    });
+    var intersection = sets.reduce(function (a, b) {
+      return a.filter(function (x) { return b.indexOf(x) !== -1; });
+    });
+    openImagePicker(intersection, function (imgIds) {
+      var claimed = claimSelection();
+      if (!claimed) return;
+      assignImagesTo(claimed, imgIds);
+    });
   });
   document.getElementById('apply-cred-selected').addEventListener('click', async function () {
     var ids = claimSelection();

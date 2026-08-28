@@ -187,7 +187,7 @@ def test_all_selected_actions_share_one_busy_lock():
     block = js.split("var BULK_BTNS = [")[1].split("]")[0]
     actions = re.findall(r"'([a-z-]+)'", block)
     for el in ("onboard-selected", "undeploy-selected", "adopt-selected",
-               "delete-selected", "apply-cred-selected", "apply-image-selected"):
+               "delete-selected", "apply-cred-selected", "assign-images-selected"):
         assert el in actions, "%s is not covered by the bulk busy lock" % el
     # Every action claims the lock rather than reading another button's state.
     # Counted against BULK_BTNS itself rather than a fixed number, so a new bulk
@@ -2648,6 +2648,86 @@ def test_overview_staging_excludes_stale_and_error_devices(tmp_path):
                              headers={"Cookie": ck})[2])
         # fresh + flash only: the stale stager is offline, error is terminal
         assert ov["staging_now"] == 2
+    finally:
+        srv.shutdown()
+
+
+def test_overview_staging_counts_one_errored_image_with_others_in_flight(tmp_path):
+    """Regression (Task 3 review finding): Task 3's set heartbeat
+    (_send_set_heartbeat) reports the single MOST ACTIONABLE stage_state
+    across every image in the tick, so one failed image pins the whole
+    heartbeat to "error" even while another assigned image is still
+    downloading. The old staging_now check treated any stage_state=="error"
+    as terminal and dropped a device like that out of the staging count
+    entirely, mid-transfer. A device holding a multi-image set is wholly
+    failed only once nothing else in the set is still outstanding -- here,
+    "a" errored but "b" is still going, so the device must still count."""
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
+    state = str(tmp_path / "state")
+    fleet = gui_fleet.FleetStore(state)
+    cat = catalog_mod.CatalogStore(state)
+    cat.save_image({"id": "a", "filename": "a.bin", "sha256": "aa",
+                    "published_at": 1})
+    cat.save_image({"id": "b", "filename": "b.bin", "sha256": "bb",
+                    "published_at": 2})
+    fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+    cat.set_policy("d1", approved_image_ids=["a", "b"])
+    # "a" errored, "b" is still downloading: the aggregate stage_state the
+    # agent sends is "error" (Task 3's priority order over "staging"),
+    # staged_image_ids is empty (neither image is done yet), and only one
+    # message rides stage_error.
+    cat.record_heartbeat("d1", {"stage_state": "error",
+                                "stage_error": "a: no space",
+                                "staged_image_ids": [],
+                                "current_image_id": "b"}, now=10)
+    srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, None, cat,
+                                 None, None, certfile=None,
+                                 now_fn=lambda: 100)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        ck, _csrf = _auth("127.0.0.1", port)
+        ov = json.loads(_req("127.0.0.1", port, "GET", "/api/overview",
+                             headers={"Cookie": ck})[2])
+        assert ov["staging_now"] == 1     # b is still in flight
+        assert ov["staged"] == 0          # not fully staged either
+    finally:
+        srv.shutdown()
+
+
+def test_overview_staging_excludes_error_when_nothing_else_is_outstanding(tmp_path):
+    """Companion to the above: once every OTHER assigned image is already
+    staged, the single remaining unstaged one IS the one that errored --
+    nothing else could still be in flight, so the device is wholly failed
+    and must not count as staging."""
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
+    state = str(tmp_path / "state")
+    fleet = gui_fleet.FleetStore(state)
+    cat = catalog_mod.CatalogStore(state)
+    cat.save_image({"id": "a", "filename": "a.bin", "sha256": "aa",
+                    "published_at": 1})
+    cat.save_image({"id": "b", "filename": "b.bin", "sha256": "bb",
+                    "published_at": 2})
+    fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+    cat.set_policy("d1", approved_image_ids=["a", "b"])
+    # "b" is already staged; "a" is the one and only outstanding image, and
+    # it errored -- nothing else this device could still be doing.
+    cat.record_heartbeat("d1", {"stage_state": "error",
+                                "stage_error": "a: no space",
+                                "staged_image_ids": ["b"],
+                                "current_image_id": "a"}, now=10)
+    srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, None, cat,
+                                 None, None, certfile=None,
+                                 now_fn=lambda: 100)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        ck, _csrf = _auth("127.0.0.1", port)
+        ov = json.loads(_req("127.0.0.1", port, "GET", "/api/overview",
+                             headers={"Cookie": ck})[2])
+        assert ov["staging_now"] == 0
     finally:
         srv.shutdown()
 
@@ -6530,19 +6610,111 @@ def test_every_status_the_cell_can_show_is_filterable():
 def test_image_can_be_assigned_to_the_selection():
     """Assigning an image was per-row only, which does not scale past a handful
     of devices -- and the devices table gained filters precisely so an operator
-    could act on a subset. The bulk picker shares the selected-action lock with
-    every other bulk action, or a delete could fire mid-assignment."""
+    could act on a subset. Bulk assignment now opens the SAME image picker the
+    per-row button uses (Task 4: an ordered multi-image set, not a single
+    <select>), and shares the selected-action lock with every other bulk
+    action, or a delete could fire mid-assignment.
+
+    NOTE: this test used to pin the single-image <select id="image-selected">
+    + <button id="apply-image-selected"> pair with an "__unassign" sentinel
+    value. Task 4 replaces that control with the shared image-set picker
+    (openImagePicker) per its own spec, which is why this test's assertions
+    changed rather than only gaining new ones -- the control it pinned no
+    longer exists by design, not by drift."""
     html = _webroot("index.html")
     app_js = _webroot("app.js")
-    assert 'id="image-selected"' in html
-    assert 'id="apply-image-selected"' in html
-    assert "'apply-image-selected'" in app_js.split("BULK_BTNS", 1)[1][:400], \
+    assert '<select id="image-selected"' not in html, \
+        "old single-image bulk picker still wired -- was it really replaced?"
+    assert 'id="apply-image-selected"' not in html
+    assert 'id="assign-images-selected"' in html
+    assert "'assign-images-selected'" in app_js.split("BULK_BTNS", 1)[1][:400], \
         "bulk image assign is not under the shared selected-action lock"
-    handler = app_js.split("getElementById('apply-image-selected')", 1)[1][:900]
+    # two occurrences of the bare getElementById() exist (updateSelBar's
+    # live label text, and the click handler below) -- split on the
+    # listener registration specifically so this pins the handler, not the
+    # label update.
+    handler = app_js.split(
+        "getElementById('assign-images-selected').addEventListener", 1)[1][:1400]
+    assert "openImagePicker(" in handler
     assert "claimSelection()" in handler
-    assert "'/assign'" in handler
-    # unassigning is a deliberate choice, not what an untouched picker does
-    assert "__unassign" in handler and "__unassign" in app_js
+    # the intersection of the selection's current sets, not the union of them
+    # (union would silently ADD an image to a device that lacks it) and not
+    # one device's set either (that would silently DROP one from the rest)
+    assert "reduce(" in handler and "indexOf(" in handler
+    apply_fn = app_js.split("function assignImagesTo", 1)[1][:500]
+    assert "'/assign'" in apply_fn
+    assert "image_ids:" in apply_fn
+
+
+def test_image_picker_is_one_function_shared_by_both_entry_points():
+    """The row select and the bulk dropdown used to be two separate ways to
+    assign the same thing, through two different code paths that could (and
+    did) drift apart. Task 4 replaces both with ONE picker function -- pin
+    that there is exactly one definition, that both the per-row button and
+    the bulk toolbar action call it, and that it enforces the 10-image cap
+    itself (the 11th checkbox disabled, not just the server's 400)."""
+    app_js = _webroot("app.js")
+    assert app_js.count("function openImagePicker(currentIds, onApply)") == 1
+    # definition + at least two call sites (per-row, bulk)
+    assert app_js.count("openImagePicker(") >= 3
+    picker = app_js.split("function openImagePicker(currentIds, onApply) {", 1)[1]
+    picker = picker.split("\n  function closeImagePicker", 1)[0]
+    assert ">= 10" in picker, "unchecked boxes are never disabled at the cap"
+    assert ".disabled = " in picker
+    # checked-first: the device's current set renders before the rest of the
+    # catalog, so it is never buried below the fold
+    assert "checked" in picker.lower()
+
+
+def test_row_assign_is_a_button_not_a_select():
+    """The per-row image control used to be a <select class="assign">: one
+    change event picked exactly one image. It cannot express an ORDERED SET,
+    so it is replaced by a button that opens the shared picker with the
+    row's current assigned set."""
+    html = _webroot("index.html")
+    app_js = _webroot("app.js")
+    assert '<select class="assign"' not in app_js
+    assert 'class="linkish assign-btn"' in app_js
+    assert "#dev-rows .assign-btn" in app_js
+    assert "openImagePicker(rowAssignedIds(d)" in app_js
+    assert 'id="mark-all"' in html   # the checkbox column stays untouched
+
+
+def test_deployed_badge_requires_every_assigned_image_staged():
+    """"Deployed" used to compare the single current_image_id/assigned_image_id
+    pair, so a device with two images assigned could read "deployed" the
+    moment just ONE of them finished. It must require every id in the
+    assigned set to be in the heartbeat's staged_image_ids; an agent that
+    predates the field (staged_image_ids absent) falls back to the old
+    single-image check, unchanged."""
+    app_js = _webroot("app.js")
+    body = app_js.split("function deviceStatus(d, devNow) {", 1)[1]
+    body = body.split("\n  function ", 1)[0]
+    assert "rowAssignedIds(d)" in body
+    assert "rowHasStaged" in body
+    staged_fn = app_js.split("function rowHasStaged", 1)[1][:300]
+    assert "staged_image_ids" in staged_fn
+    # the legacy fallback (no staged_image_ids on the heartbeat) is preserved
+    assert "stage_state" in staged_fn and "current_image_id" in staged_fn
+
+
+def test_deployment_drawer_lists_one_row_per_assigned_image():
+    """The drawer said nothing about which images were staged where. One row
+    per assigned image: id + state -- ready via staged_image_ids, the
+    in-flight one via current_image_id/stage_state with stage_error shown on
+    it, everything else outstanding read as queued. Parked is deliberately
+    NOT a console state: a parked image is simply absent from the assigned
+    set, so it never gets a row here at all."""
+    html = _webroot("index.html")
+    app_js = _webroot("app.js")
+    assert 'id="di-img-rows"' in html
+    assert "function deployImageRows(d)" in app_js
+    body = app_js.split("function deployImageRows(d) {", 1)[1][:700]
+    assert "rowAssignedIds(d)" in body
+    assert "rowHasStaged(d, iid)" in body
+    assert "current_image_id" in body and "stage_error" in body
+    assert "parked" not in body.lower()
+    assert "document.getElementById('di-img-rows').innerHTML = deployImageRows(d)" in app_js
 
 
 def test_deployment_details_open_in_a_right_hand_drawer():

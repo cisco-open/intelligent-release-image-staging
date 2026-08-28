@@ -192,10 +192,7 @@
             <select id="cred-selected"><option value="">— credential for selected —</option></select>
             <button class="btn ghost" id="apply-cred-selected">Apply</button>
           </span>
-          <span class="joined">
-            <select id="image-selected"><option value="">— image for selected —</option></select>
-            <button class="btn ghost" id="apply-image-selected">Apply</button>
-          </span>
+          <button class="btn ghost" id="assign-images-selected">Assign images to 0 devices…</button>
           <button class="btn danger push" id="delete-selected">Delete…</button>
         </div>
         <form class="inline-form" id="dev-form" hidden>
@@ -235,7 +232,7 @@
           </form>
         </div>
         <table class="tbl" id="devices">
-          <thead><tr><th><input type="checkbox" id="mark-all"></th><th>Device</th><th>IP</th><th>Model</th><th>Management type</th><th>Platform</th><th>Credential</th><th>Assigned image</th><th>Telemetry</th><th>Peer policy</th><th>Status</th></tr></thead>
+          <thead><tr><th><input type="checkbox" id="mark-all"></th><th>Device</th><th>IP</th><th>Model</th><th>Management type</th><th>Platform</th><th>Credential</th><th>Assigned images</th><th>Telemetry</th><th>Peer policy</th><th>Status</th></tr></thead>
           <tbody id="dev-rows"></tbody>
         </table>
         <!-- Slides in from the RIGHT, like the deployment-log drawer. It used
@@ -249,6 +246,11 @@
           </div>
           <div class="drawer-body">
             <p class="muted" id="di-note"></p>
+            <h3>Images</h3>
+            <table class="tbl" id="di-img-tbl">
+              <thead><tr><th>Image</th><th>State</th></tr></thead>
+              <tbody id="di-img-rows"></tbody>
+            </table>
             <table class="tbl" id="di-tbl"><tbody id="di-rows"></tbody></table>
             <h3>Deployment logs</h3>
             <table class="tbl" id="di-log-tbl">
@@ -256,6 +258,25 @@
               <tbody id="di-log-rows"></tbody>
             </table>
             <pre class="log" id="di-log-text" hidden></pre>
+          </div>
+        </div>
+        <!-- Image picker: one control shared by the per-row "assign" button
+             and the bulk "Assign images to N devices…" toolbar action
+             (openImagePicker in app.js). A centred modal, not a drawer -- it
+             is a choice to make and confirm, not a panel to read alongside
+             the table it was opened from. -->
+        <div id="img-picker" class="modal-backdrop" hidden aria-label="Choose images">
+          <div class="modal">
+            <div class="modal-head">
+              <span>Choose images <span id="img-picker-count" class="muted"></span></span>
+            </div>
+            <div class="modal-body">
+              <div id="img-picker-rows"></div>
+            </div>
+            <div class="modal-foot">
+              <button class="btn ghost" id="img-picker-cancel">Cancel</button>
+              <button class="btn" id="img-picker-apply">Apply</button>
+            </div>
           </div>
         </div>
         <div id="batch-panel" hidden>

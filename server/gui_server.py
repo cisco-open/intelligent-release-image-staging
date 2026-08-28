@@ -1408,6 +1408,33 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             return (row.get("stage_state") == "ready"
                     and row.get("current_image_id") == iid)
 
+        def _row_is_staging(self, row):
+            """Whether *row* is actively staging, given its last (fresh)
+            heartbeat.
+
+            For a one-image agent, "error" is a terminal stage_state and
+            everything else non-idle counts -- that check alone used to be
+            enough. Task 3's set heartbeat (_send_set_heartbeat) reports the
+            single MOST ACTIONABLE stage_state across every image in the
+            tick, so ONE failed image in a multi-image set pins the WHOLE
+            heartbeat to "error" even while another assigned image is still
+            downloading -- that device dropped out of "staging" entirely
+            under the old, single-field check. "error" is only a whole-set
+            failure when at most one assigned image remains unstaged: with
+            more than one still outstanding, at least one of them could be
+            the one actually still in flight, so the device stays counted as
+            staging."""
+            state = row.get("stage_state")
+            if state in (None, "", "unassigned", "ready"):
+                return False
+            if state != "error":
+                return True
+            ids = self._row_assigned_ids(row)
+            if len(ids) <= 1:
+                return False
+            staged = [iid for iid in ids if self._row_has_staged(row, iid)]
+            return (len(ids) - len(staged)) > 1
+
         def _overview(self):
             imgs = catalog.list_images() if catalog else []
             # the merged device rows already carry policy + heartbeat, so one
@@ -1455,8 +1482,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 1 for row in rows
                 if row.get("last_seen") is not None
                 and (now - row["last_seen"]) < _HEARTBEAT_FRESH
-                and row.get("stage_state") not in (None, "", "unassigned",
-                                                   "ready", "error"))
+                and self._row_is_staging(row))
             # devices freshly onboarded whose agent hasn't heartbeated yet —
             # surfaced so an operator doesn't read the gap as "undeployed"
             awaiting = sum(1 for row in rows

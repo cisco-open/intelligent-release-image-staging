@@ -238,6 +238,26 @@ body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-
   .drawer { transition:none; }
 }
 
+/* Image picker: a centred modal over a translucent backdrop, shared by the
+   per-row assign button and the bulk "Assign images to N devices…" action
+   (openImagePicker in app.js) -- a choice to make and confirm, not a panel
+   to read alongside the table, so it is a modal rather than a third drawer. */
+.modal-backdrop { position:fixed; inset:0; z-index:70; background:rgba(11,37,69,.35);
+  display:flex; align-items:center; justify-content:center; padding:24px; }
+.modal-backdrop[hidden] { display:none; }
+.modal { background:var(--panel, #fff); border-radius:10px;
+  box-shadow:0 12px 36px rgba(11,37,69,.28); width:min(480px, 100%);
+  max-height:min(640px, 90vh); display:flex; flex-direction:column; }
+.modal-head { display:flex; align-items:center; justify-content:space-between;
+  gap:10px; padding:12px 16px; border-bottom:1px solid var(--line, #d7dee8);
+  font-weight:600; }
+.modal-body { flex:1; overflow:auto; padding:8px 16px; }
+.modal-foot { display:flex; justify-content:flex-end; gap:8px; padding:12px 16px;
+  border-top:1px solid var(--line, #d7dee8); }
+.img-pick-row { display:flex; align-items:center; gap:8px; padding:7px 4px;
+  font-family:ui-monospace,Menlo,Consolas,monospace; font-size:13px; cursor:pointer; }
+.img-pick-row input:disabled { cursor:not-allowed; }
+
 /* Deployment-log drawer: slides in from the RIGHT so the list it was opened
    from stays where the operator left it, instead of being pushed off screen
    by a panel appended below the table. */
