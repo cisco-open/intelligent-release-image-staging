@@ -126,23 +126,85 @@ setup() {
   [[ "$output" == *"re-run this undeploy"* ]]
 }
 
-@test "force teardown removes the agent footprint but never the VPG or NAT" {
+@test "force teardown removes the agent footprint and reclaims only IRIS-marked network config" {
   # A router whose onboard died after enabling Guest Shell but before its
   # receipt was written cannot be undeployed (no receipt), cannot be adopted
   # (routers never can) and cannot be re-onboarded (preflight refuses an
-  # existing Guest Shell). Force mode is the only way out -- and because no
-  # receipt proves IRIS created the VPG/NAT, it must not touch them.
+  # existing VirtualPortGroup and an existing Guest Shell). Force mode is the
+  # only way out.
+  #
+  # It used to skip the VPG/NAT entirely, on the belief that without a receipt
+  # nothing proves IRIS created them. That was wrong, and it stranded routers:
+  # router-install.sh stamps every VPG it creates with a description, and the
+  # NAT objects carry IRIS's own name. Ownership is provable ON THE DEVICE, so
+  # force now reclaims exactly what carries IRIS's mark -- and nothing else.
+  #
+  # Dry-run cannot discover device state, so it still reports the reclaim as
+  # device-driven; the live tests below pin the actual behaviour.
   IRIS_FORCE_AGENT_ONLY=1 run bash "$UNINSTALL" --dry-run
   [ "$status" -eq 0 ]
-  # agent footprint IS removed
   [[ "$output" == *"no event manager applet IRIS-AGENT"* ]]
   [[ "$output" == *"guestshell destroy"* ]] || [[ "$output" == *"guestshell disable"* ]]
   [[ "$output" == *"delete /force /recursive bootflash:guest-share/iris"* ]]
-  # operator network is NOT touched
-  [[ "$output" != *"no interface VirtualPortGroup"* ]]
-  [[ "$output" != *"IRIS-NAT-"* ]]
-  [[ "$output" != *"ip nat inside source"* ]]
-  [[ "$output" == *"SKIPPED"* ]]
+  # Never a blind removal: force must not emit an unqualified VPG teardown.
+  [[ "$output" != *"no interface VirtualPortGroup"$'\n'* ]]
+}
+
+@test "force teardown removes a VPG carrying IRIS's own description" {
+  _router_uninstall_stub_setup
+  FAKE_RUNNING_IRIS_VPG=yes _router_uninstall_run_live_forced
+  # VirtualPortGroup7 is the one the stub marks with IRIS's description.
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no interface VirtualPortGroup7")" -ge 1 ]
+}
+
+@test "force teardown never removes a VPG that lacks IRIS's description" {
+  # THE safety property: an operator's own VirtualPortGroup carries no IRIS
+  # marker and must survive a force teardown untouched.
+  _router_uninstall_stub_setup
+  FAKE_RUNNING_OPERATOR_VPG=yes _router_uninstall_run_live_forced
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no interface VirtualPortGroup3")" -eq 0 ]
+}
+
+@test "force teardown reclaims the IRIS VPG while leaving the operator's alone" {
+  _router_uninstall_stub_setup
+  FAKE_RUNNING_IRIS_VPG=yes FAKE_RUNNING_OPERATOR_VPG=yes \
+    _router_uninstall_run_live_forced
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no interface VirtualPortGroup7")" -ge 1 ]
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no interface VirtualPortGroup3")" -eq 0 ]
+}
+
+@test "force teardown removes IRIS-named NAT objects it finds on the device" {
+  # ip access-list standard IRIS-NAT-5 / its overload rule carry IRIS's own
+  # name, so they are provably IRIS's exactly like the marked VPG.
+  _router_uninstall_stub_setup
+  FAKE_RUNNING_NAT=yes _router_uninstall_run_live_forced
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no ip access-list standard IRIS-NAT-5")" -ge 1 ]
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no ip nat inside source list IRIS-NAT-5 interface GigabitEthernet1 overload")" -ge 1 ]
+}
+
+@test "force teardown removes a static NAT mapping inside the IRIS VPG subnet" {
+  # gui_onboard router preflight also refuses when a leftover static mapping
+  # collides with the swarm port. The mapping is not IRIS-named, but its
+  # inside-local address lies inside the IRIS-marked VPG's own subnet, which
+  # is the same ownership proof the VPG itself carries.
+  _router_uninstall_stub_setup
+  FAKE_RUNNING_IRIS_VPG=yes FAKE_RUNNING_NAT=yes _router_uninstall_run_live_forced
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no ip nat inside source static tcp 100.90.171.2 6881 interface GigabitEthernet1 6881")" -ge 1 ]
+}
+
+@test "force teardown leaves a static NAT mapping outside any IRIS subnet alone" {
+  # Same shape of rule, but its inside-local is not in an IRIS VPG subnet --
+  # it is the operator's, and must survive.
+  _router_uninstall_stub_setup
+  FAKE_RUNNING_NAT=yes _router_uninstall_run_live_forced
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no ip nat inside source static tcp 100.90.171.2")" -eq 0 ]
+}
+
+@test "force teardown on a clean router removes no network config at all" {
+  _router_uninstall_stub_setup
+  _router_uninstall_run_live_forced
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no interface VirtualPortGroup")" -eq 0 ]
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "IRIS-NAT-")" -eq 0 ]
 }
 
 @test "force teardown does not require a receipt VPG number" {
@@ -238,6 +300,15 @@ case "$cmds" in
         if [ "${FAKE_RUNNING_OPERATOR_VPG:-no}" = "yes" ]; then
           echo "interface VirtualPortGroup3"
           echo " ip address 192.168.254.1 255.255.255.252"
+          echo "!"
+        fi
+        # A VPG carrying the description router-install.sh writes into every
+        # VPG IRIS creates -- on-device proof of IRIS ownership.
+        if [ "${FAKE_RUNNING_IRIS_VPG:-no}" = "yes" ]; then
+          echo "interface VirtualPortGroup7"
+          echo " description IRIS Guest Shell VPG"
+          echo " ip address 100.90.171.1 255.255.255.252"
+          echo "!"
         fi
         # What router-install.sh leaves on EVERY router it onboards and only
         # config_cleanup removes -- which force mode skips by design.
@@ -279,6 +350,26 @@ case "$cmds" in
     printf '%s\n' "${FAKE_NAT_TRANSLATIONS:-}"
     ;;
   *"show running-config"*)
+    # A real device returns the whole config here. The force path's ownership
+    # scan reads it, so the stub must be faithful; the NAT-drain retry loop
+    # only greps for its own rule, which natcheck_reply still supplies.
+    echo "hostname iris8kv-1"
+    if [ "${FAKE_RUNNING_OPERATOR_VPG:-no}" = "yes" ]; then
+      echo "interface VirtualPortGroup3"
+      echo " ip address 192.168.254.1 255.255.255.252"
+      echo "!"
+    fi
+    if [ "${FAKE_RUNNING_IRIS_VPG:-no}" = "yes" ]; then
+      echo "interface VirtualPortGroup7"
+      echo " description IRIS Guest Shell VPG"
+      echo " ip address 100.90.171.1 255.255.255.252"
+      echo "!"
+    fi
+    if [ "${FAKE_RUNNING_NAT:-no}" = "yes" ]; then
+      echo "ip access-list standard IRIS-NAT-5"
+      echo "ip nat inside source list IRIS-NAT-5 interface GigabitEthernet1 overload"
+      echo "ip nat inside source static tcp 100.90.171.2 6881 interface GigabitEthernet1 6881"
+    fi
     natcheck_reply
     ;;
   *"copy running-config startup-config"*)
@@ -421,14 +512,15 @@ PY2
   _router_uninstall_stub_setup
   run _router_uninstall_run_live_forced
   [[ "$output" != *"device identity mismatch"* ]] || return 1
-  [[ "$output" == *"SKIPPED (force)"* ]] || return 1
+  [[ "$output" == *"FORCE:"* ]] || return 1
   [ "$status" -eq 0 ]
 }
 
 @test "forced live teardown does not report the operator VirtualPortGroup as residue" {
-  # Force deliberately preserves the VPG. With no receipt VPG_NUMBER is empty,
-  # so scanning for a bare "interface VirtualPortGroup" matches the operator's
-  # own group and fails an undeploy that in fact succeeded.
+  # Force preserves any VPG that does not carry IRIS's description -- this one
+  # is the operator's. With no receipt VPG_NUMBER is empty, so scanning for a
+  # bare "interface VirtualPortGroup" matches the operator's own group and
+  # fails an undeploy that in fact succeeded.
   _router_uninstall_stub_setup
   FAKE_RUNNING_OPERATOR_VPG=yes run _router_uninstall_run_live_forced
   [[ "$output" != *"artifacts still present"* ]] || return 1

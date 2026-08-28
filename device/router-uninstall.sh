@@ -64,8 +64,9 @@ if [ "$DRY" -eq 0 ]; then
   if [ "$FORCE_AGENT_ONLY" = "1" ]; then
     echo "===== FORCE: agent-footprint-only teardown (no receipt) ====="
     echo "  Removing: IRIS EEM applets, Guest Shell, and $IRIS_DIR."
-    echo "  NOT touching VirtualPortGroup/NAT: without a receipt there is no"
-    echo "  proof IRIS created them, so they are left exactly as they are."
+    echo "  Reclaiming ONLY what carries IRIS's own mark: a VirtualPortGroup"
+    echo "  with IRIS's description, and IRIS-NAT-* objects. Anything unmarked"
+    echo "  is left exactly as it is."
   else
     : "${EXPECTED_DEVICE_IDENTITY:?set EXPECTED_DEVICE_IDENTITY from the deployment receipt}"
     [ "$ROUTER_RESOURCES_OWNED" = "1" ] \
@@ -134,6 +135,59 @@ EOF
 # it is present (see the collisions list in gui_onboard.py). Leaving it behind
 # left the device exactly as stranded as before the teardown ran, which is the
 # one thing force mode exists to prevent.
+# The description router-install.sh writes into every VirtualPortGroup IRIS
+# creates (see device/router-install.sh, "interface VirtualPortGroup" block).
+# It is on-device proof of ownership that survives the loss of a receipt --
+# which is what makes the force path able to reclaim its own network config
+# without ever guessing about an operator's.
+IRIS_VPG_DESCRIPTION="description IRIS Guest Shell VPG"
+
+# Echo the VPG numbers whose interface block carries IRIS's description, and
+# the IRIS-named NAT objects present, from ONE running-config read. Anything
+# not carrying IRIS's own mark or name is never reported and never touched.
+iris_owned_config() {
+  printf 'terminal width 512\nshow running-config\n' \
+    | "$RUN" "$DEVICE_IP" 2>/dev/null \
+    | python3 -c '
+import re, sys
+marker = sys.argv[1]
+text = sys.stdin.read()
+# An IOS interface block runs to the next line that starts in column 0.
+for m in re.finditer(r"(?ms)^interface VirtualPortGroup(\d+)\s*$\n(.*?)(?=^\S|\Z)", text):
+    if marker in m.group(2):
+        print("vpg %s" % m.group(1))
+for acl in sorted(set(re.findall(r"(?m)^ip access-list standard (IRIS-NAT-\d+)\s*$", text))):
+    print("acl %s" % acl)
+for acl, iface in re.findall(
+        r"(?m)^ip nat inside source list (IRIS-NAT-\d+) interface (\S+) overload\s*$", text):
+    print("overload %s %s" % (acl, iface))
+# A static mapping is not IRIS-named, but one whose inside-local address sits
+# inside an IRIS-marked VPG subnet is ours by the same proof the VPG carries --
+# and router preflight refuses to onboard while it collides with the swarm port.
+import ipaddress
+nets = []
+for m in re.finditer(r"(?ms)^interface VirtualPortGroup(\d+)\s*$\n(.*?)(?=^\S|\Z)", text):
+    if marker not in m.group(2):
+        continue
+    a = re.search(r"(?m)^\s*ip address\s+(\S+)\s+(\S+)\s*$", m.group(2))
+    if a:
+        try:
+            nets.append(ipaddress.IPv4Network("%s/%s" % a.groups(), strict=False))
+        except ValueError:
+            pass
+for line in re.findall(r"(?m)^ip nat inside source static tcp .*$", text):
+    f = line.split()
+    if len(f) < 8:
+        continue
+    try:
+        ip = ipaddress.IPv4Address(f[6])
+    except ValueError:
+        continue
+    if any(ip in n for n in nets):
+        print("static %s" % line)
+' "$IRIS_VPG_DESCRIPTION"
+}
+
 config_cleanup_force() {
 cat <<EOF
 no app-hosting appid guestshell
@@ -225,8 +279,51 @@ done
 [ -z "$st" ] || { echo "ERROR: guestshell still present after destroy: $st" >&2; exit 1; }
 
 if [ "$FORCE_AGENT_ONLY" = "1" ]; then
-  echo "[4/5] FORCE: IRIS app-hosting stanza removed; VPG/NAT SKIPPED (force) - no receipt proves IRIS created them"
+  echo "[4/5] FORCE: remove the IRIS app-hosting stanza and reclaim IRIS-marked network config"
   { echo "configure terminal"; config_cleanup_force; echo "end"; } | "$RUN" "$DEVICE_IP" >/dev/null
+  # Without a receipt the device itself is the evidence: a VirtualPortGroup
+  # carrying IRIS's description, and NAT objects carrying IRIS's own name, are
+  # provably ours. Reclaiming them is what lets a stranded router be onboarded
+  # again -- router preflight refuses an existing VPG, its subnet, and the
+  # IRIS-NAT ACL/overload rule. Anything unmarked is left exactly as it is.
+  OWNED="$(iris_owned_config || true)"
+  FORCE_RECLAIM=""
+  # Order matters: static mappings pin the address, the overload rule
+  # references its ACL, and the VPG owns the subnet -- unwind inwards out.
+  while IFS= read -r line; do
+    case "$line" in
+      "static "*)
+        rule="${line#static }"
+        echo "  reclaiming static NAT mapping inside the IRIS VPG subnet"
+        FORCE_RECLAIM="$FORCE_RECLAIM
+no $rule" ;;
+    esac
+  done <<< "$OWNED"
+  while IFS=' ' read -r kind a b; do
+    [ "$kind" = "overload" ] || continue
+    echo "  reclaiming NAT overload rule $a (interface $b)"
+    FORCE_RECLAIM="$FORCE_RECLAIM
+no ip nat inside source list $a interface $b overload"
+  done <<< "$OWNED"
+  while IFS=' ' read -r kind a b; do
+    [ "$kind" = "acl" ] || continue
+    echo "  reclaiming NAT ACL $a"
+    FORCE_RECLAIM="$FORCE_RECLAIM
+no ip access-list standard $a"
+  done <<< "$OWNED"
+  while IFS=' ' read -r kind a b; do
+    [ "$kind" = "vpg" ] || continue
+    echo "  reclaiming VirtualPortGroup$a (carries IRIS's description)"
+    FORCE_RECLAIM="$FORCE_RECLAIM
+no interface VirtualPortGroup$a"
+  done <<< "$OWNED"
+  if [ -n "$FORCE_RECLAIM" ]; then
+    { echo "configure terminal"; printf '%s\n' "$FORCE_RECLAIM"; echo "end"; } \
+      | "$RUN" "$DEVICE_IP" >/dev/null
+  else
+    echo "  no IRIS-marked VirtualPortGroup or IRIS-named NAT object found;" \
+         "operator network left untouched"
+  fi
 else
 echo "[4/5] remove receipt-owned VPG and NAT footprint"
 # IOS refuses to unconfigure a dynamic NAT mapping while translations still
