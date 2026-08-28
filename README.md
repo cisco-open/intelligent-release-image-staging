@@ -65,18 +65,20 @@ The public website source is in [docs/](docs/index.html). The GitHub Pages workf
 
 ## Platform support
 
-IRIS supports Catalyst 9300 Guest Shell, supported IE/Catalyst IOx paths, and
-router attachments designed for the Catalyst 8000 family, lab-tested on
-Catalyst 8000V. Catalyst 8000 routers use Guest Shell through an IRIS-managed
-VirtualPortGroup and stage to `bootflash:`. Both `router-routed` and
-`router-nat` have been lab-validated on Catalyst 8000V through onboarding, verified
-image staging, and receipt-backed undeploy; Swarm Map and OpenTelemetry (OTLP)
-export were also verified.
-Router onboarding repeats read-only preflight immediately before execution and
-before minting the enrollment token. Receipts bind management IP and
-processor-board identity; router adoption is refused, so re-onboard instead.
-Named globals and `guest-share` must be collision-free and are receipt-owned.
-NAT interfaces are canonicalized, and pre-existing `ip nat outside` is preserved.
+IRIS stages Cisco software on IOS-XE switches and routers today. The agent runs
+in Guest Shell or as an IOx application, depending on what the platform offers:
+Catalyst 9000 switches use Guest Shell, or IOx where app-hosting storage is
+available; Industrial Ethernet switches use IOx; Catalyst 8000 routers use
+Guest Shell behind an IRIS-managed VirtualPortGroup, in routed or NAT
+attachment. Cisco 8000 series routers running IOS-XR are supported at the
+image level: their software imports and distributes through the swarm, and an
+on-device agent is not yet available.
+
+Router onboarding re-runs its read-only preflight just before execution and
+before the enrollment token is minted. Receipts bind the management address
+and processor-board identity, and a router is never adopted in place —
+re-onboard it instead. The [validation](docs/zensical/validation.md) page
+lists what has been lab-validated, platform by platform.
 
 ## Quick Start
 
