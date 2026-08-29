@@ -45,7 +45,6 @@ top-level `VERSION` file.
   an operator releases it, either because the catalog's own sha512 now agrees
   or by typing the image's filename to override a mismatch that persists.
   See [Image verification](docs/zensical/operations.md#image-verification).
-
 - IOS-XR routers running the agent as an appmgr Docker container now have
   their own management type, `xr-host`, matching the platform's real
   networking: the container runs on the router's own network stack, so there
