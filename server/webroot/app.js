@@ -714,6 +714,7 @@
         : (' / ' + (d.inband_vlan || d.iris_vlan || ''));
       var attachmentLabel = (attachment === 'legacy_routed' || attachment === 'legacy')
         ? 'Inventory only — attachment not chosen'
+        : attachment === 'xr-host' ? 'XR host'
         : (attachment + attachmentDetail);
       return '<tr data-id="' + esc(d.device_id) + '">' +
         '<td><input type="checkbox" class="mark" data-id="' + esc(d.device_id) + '"' +
@@ -1724,15 +1725,36 @@
   function updateDeviceFields() {
     var attach = document.getElementById('df-attachment').value;
     var router = attach === 'router-routed' || attach === 'router-nat';
-    document.getElementById('df-vlan').hidden = router;
+    // xr-host runs the appmgr container on the router's own network stack:
+    // no VLAN, SVI, VPG, NAT interface, or app IP/mask/gateway. Those last
+    // three used to be visible for every attachment -- the core bug this
+    // hides.
+    var xrHost = attach === 'xr-host';
+    document.getElementById('df-vlan').hidden = router || xrHost;
     document.getElementById('df-svi').hidden = attach !== 'routed';
     document.getElementById('df-vpg').hidden = !router;
     document.getElementById('df-nat-interface').hidden = attach !== 'router-nat';
+    document.getElementById('df-guest').hidden = xrHost;
+    document.getElementById('df-mask').hidden = xrHost;
+    document.getElementById('df-gateway').hidden = xrHost;
     var platform = document.getElementById('df-platform');
     if (router && !platform.value) platform.value = 'router';
     if (!router && platform.value === 'router') platform.value = '';
+    if (xrHost && !platform.value) platform.value = 'xr-appmgr';
+    if (!xrHost && platform.value === 'xr-appmgr') platform.value = '';
   }
   document.getElementById('df-attachment').addEventListener('change', updateDeviceFields);
+  // xr-host <-> xr-appmgr is mutually required server-side, so picking the
+  // agent install directly should carry the operator into xr-host too --
+  // the same auto-select the model-driven path below performs, just from
+  // the other field. Never fight an operator already on xr-host.
+  document.getElementById('df-platform').addEventListener('change', function () {
+    if (this.value !== 'xr-appmgr') return;
+    var attachSel = document.getElementById('df-attachment');
+    if (attachSel.value === 'xr-host') return;
+    attachSel.value = 'xr-host';
+    updateDeviceFields();
+  });
   // Agent-install options depend on the model, so df-model sits ahead of
   // df-platform in the form and this repaints the select as the operator
   // types -- the same model-aware guardrail server-side validation enforces
@@ -1794,6 +1816,17 @@
           return '<option value="' + esc(o) + '">' + esc(INSTALL_OPTION_LABELS[o] || o) + '</option>';
         }).join('');
       if (options.indexOf(kept) !== -1) platform.value = kept;
+      // The install-options answer for an IOS-XR-shaped model is exactly
+      // ["xr-appmgr"] -- the one thing it can run, and nothing else ever
+      // returns just that. Drive the attachment auto-select off that
+      // server answer instead of re-implementing the model regex here.
+      if (options.length === 1 && options[0] === 'xr-appmgr') {
+        var attachSel = document.getElementById('df-attachment');
+        if (attachSel.value !== 'xr-host') {
+          attachSel.value = 'xr-host';
+          updateDeviceFields();
+        }
+      }
     } catch (e) {
       // Network failure or JSON parse error: restore permissive defaults so
       // a transient blip never locks out a valid platform choice.
@@ -1823,21 +1856,30 @@
       device_id: did,
       device_ip: document.getElementById('df-ip').value.trim() || did,
       management_type: attach,
-      app_ip: document.getElementById('df-guest').value.trim(),
-      app_mask: mask,
-      app_gateway: document.getElementById('df-gateway').value.trim(),
       model: document.getElementById('df-model').value.trim(),
       platform: document.getElementById('df-platform').value,
       credential_profile_id: document.getElementById('df-cred').value
     };
-    if (attach === 'inband') {
+    if (attach === 'xr-host') {
+      // XR host networking -- the agent shares the router's own network
+      // stack, so no app-network fields belong on this wire body.
+    } else if (attach === 'inband') {
+      body.app_ip = document.getElementById('df-guest').value.trim();
+      body.app_mask = mask;
+      body.app_gateway = document.getElementById('df-gateway').value.trim();
       body.inband_vlan = vlan;
     } else if (attach === 'router-routed' || attach === 'router-nat') {
+      body.app_ip = document.getElementById('df-guest').value.trim();
+      body.app_mask = mask;
+      body.app_gateway = document.getElementById('df-gateway').value.trim();
       body.vpg_number = document.getElementById('df-vpg').value.trim();
       if (attach === 'router-nat') {
         body.nat_interface = document.getElementById('df-nat-interface').value.trim();
       }
     } else {
+      body.app_ip = document.getElementById('df-guest').value.trim();
+      body.app_mask = mask;
+      body.app_gateway = document.getElementById('df-gateway').value.trim();
       body.iris_vlan = vlan;
       body.svi_ip = document.getElementById('df-svi').value.trim();
       body.svi_mask = mask;

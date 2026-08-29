@@ -154,6 +154,7 @@
             <option value="inband">inband</option>
             <option value="router-routed">router-routed</option>
             <option value="router-nat">router-nat</option>
+            <option value="xr-host">XR host</option>
             <option value="legacy">Inventory only — attachment not chosen</option>
           </select>
           <select id="dev-filter-platform" aria-label="Filter by agent install">
@@ -229,7 +230,7 @@
         <form class="inline-form" id="dev-form" hidden>
           <input id="df-id" placeholder="Device ID / IP">
           <input id="df-ip" placeholder="Management IP">
-          <select id="df-attachment"><option value="">Management type…</option><option value="routed">Routed - IRIS-managed app network</option><option value="inband">Inband - existing management VLAN</option><option value="router-routed">Router routed - IRIS-managed VPG subnet</option><option value="router-nat">Router NAT - VPG behind NAT</option></select>
+          <select id="df-attachment"><option value="">Management type…</option><option value="routed">Routed - IRIS-managed app network</option><option value="inband">Inband - existing management VLAN</option><option value="router-routed">Router routed - IRIS-managed VPG subnet</option><option value="router-nat">Router NAT - VPG behind NAT</option><option value="xr-host">XR host</option></select>
           <input id="df-vlan" placeholder="VLAN">
           <input id="df-svi" placeholder="SVI IP (routed only)">
           <input id="df-vpg" placeholder="VirtualPortGroup number (0-31)" title="IOS interface VirtualPortGroup<N>" hidden>

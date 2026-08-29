@@ -6703,6 +6703,97 @@ def test_add_device_form_filters_install_options_live_by_model():
     assert "refreshInstallOptions" in js
 
 
+def test_xr_host_attachment_option_added_to_both_selects():
+    """The xr-host management type needs to be choosable from the console:
+    the add-device form's df-attachment select and the devices-table
+    dev-filter-attachment select both gain the wire value xr-host with the
+    short honest label 'XR host' (the plan's longer vocabulary -- "XR host
+    networking -- the agent shares the router's own network stack; no
+    app-network fields" -- is prose, not what fits in a dropdown)."""
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    assert '<option value="xr-host">XR host</option>' in html
+    dev_filter = html.split('id="dev-filter-attachment"', 1)[1].split("</select>", 1)[0]
+    assert '<option value="xr-host">XR host</option>' in dev_filter
+    df_attach = html.split('id="df-attachment"', 1)[1].split("</select>", 1)[0]
+    assert '<option value="xr-host">XR host</option>' in df_attach
+
+
+def test_update_device_fields_hides_every_addressing_field_for_xr_host():
+    """xr-host runs the appmgr container on the router's own network stack:
+    no VLAN, SVI, VPG, NAT interface, or app IP/mask/gateway. Before this,
+    df-guest/df-mask/df-gateway were ALWAYS visible regardless of
+    attachment -- the core UX bug this task fixes, since an operator adding
+    an XR router saw three fields that mean nothing for it. updateDeviceFields
+    must hide all seven addressing fields for xr-host and set the agent
+    install to xr-appmgr, mirroring the pre-existing router auto-set/clear
+    pattern in both directions."""
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    fn = js.split("function updateDeviceFields() {", 1)[1].split("\n  }", 1)[0]
+    assert "var xrHost = attach === 'xr-host';" in fn
+    assert "df-vlan').hidden = router || xrHost;" in fn
+    assert "df-guest').hidden = xrHost;" in fn
+    assert "df-mask').hidden = xrHost;" in fn
+    assert "df-gateway').hidden = xrHost;" in fn
+    assert "if (xrHost && !platform.value) platform.value = 'xr-appmgr';" in fn
+    assert "if (!xrHost && platform.value === 'xr-appmgr') platform.value = '';" in fn
+
+
+def test_xr_host_auto_selected_from_model_and_from_platform_pick():
+    """Two paths into xr-host without ever asking the operator to notice an
+    addressing field: (1) the model looks IOS-XR shaped, which the client
+    learns not by reimplementing the server's model regex but by reading
+    the /api/install-options answer -- an XR model gets back exactly
+    ["xr-appmgr"], nothing else ever does -- and (2) the operator picks
+    Agent install = XR appmgr container directly. Either path auto-selects
+    df-attachment to xr-host and repaints the form, without fighting an
+    operator who is already there."""
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    refresh_fn = js.split("async function refreshInstallOptions() {", 1)[1].split(
+        "  document.getElementById('df-model').addEventListener('input', refreshInstallOptions);", 1)[0]
+    assert "options.length === 1 && options[0] === 'xr-appmgr'" in refresh_fn
+    assert "attachSel.value !== 'xr-host'" in refresh_fn
+    assert "attachSel.value = 'xr-host';" in refresh_fn
+    assert "updateDeviceFields();" in refresh_fn
+    assert "getElementById('df-platform').addEventListener('change'" in js
+    plat_fn = js.split(
+        "getElementById('df-platform').addEventListener('change', function () {", 1)[1].split(
+        "});", 1)[0]
+    assert "this.value !== 'xr-appmgr'" in plat_fn
+    assert "attachSel.value === 'xr-host'" in plat_fn
+    assert "attachSel.value = 'xr-host';" in plat_fn
+
+
+def test_device_form_submit_sends_no_addressing_fields_for_xr_host():
+    """The submit handler used to fall through to an 'else' branch that
+    sent iris_vlan/svi_ip/svi_mask for anything not inband or router-* --
+    an unhandled xr-host would have wrongly carried routed-mode addressing.
+    An explicit xr-host branch must send NONE of the addressing keys at
+    all: not the routed ones, not app_ip/app_mask/app_gateway either."""
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    assert "if (attach === 'xr-host') {" in js
+    xr_branch = js.split("if (attach === 'xr-host') {", 1)[1].split(
+        "} else if (attach === 'inband') {", 1)[0]
+    for key in ("iris_vlan", "svi_ip", "svi_mask", "app_ip", "app_mask",
+                "app_gateway", "vpg_number", "nat_interface", "inband_vlan"):
+        assert key not in xr_branch, "xr-host submit branch sends %s" % key
+
+
+def test_devices_table_renders_honest_xr_host_label():
+    """attachmentLabel must render xr-host as 'XR host' -- no VLAN/VPG
+    detail suffix appended, since xr-host carries neither -- while the
+    existing legacy/inventory-only branch stays untouched."""
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    assert "attachment === 'legacy_routed' || attachment === 'legacy'" in js
+    assert "'Inventory only — attachment not chosen'" in js
+    assert "attachment === 'xr-host'" in js
+    assert "'XR host'" in js
+
+
 def test_install_options_api_requires_auth_and_matches_model_matrix(tmp_path):
     host, port, _, stop = _serve(tmp_path)
     try:
