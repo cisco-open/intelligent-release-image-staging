@@ -152,12 +152,32 @@ def write_settings(path, mode, hour_utc, last_run):
 
 
 def _record_last_run(path, last_run):
-    """Best-effort last_run update, preserving whatever mode/hour_utc are
-    currently on record (a run must never clobber a concurrent schedule
-    edit, and must never invent settings a console save hasn't made yet)."""
+    """last_run update, preserving whatever mode/hour_utc are currently on
+    record (a run must never clobber a concurrent schedule edit, and must
+    never invent settings a console save hasn't made yet). NOT guarded --
+    write_settings's makedirs/mkstemp/json.dump/os.replace can all raise
+    (ENOSPC, a read-only state dir, ...); `_try_record_last_run` below is
+    the guarded call site every caller in this module actually uses."""
     with SETTINGS_LOCK:
         current = read_settings(path)
         write_settings(path, current["mode"], current["hour_utc"], last_run)
+
+
+def _try_record_last_run(path, last_run):
+    """Best-effort wrapper: persisting last_run must never itself take down
+    run_refresh (which promises it never raises) -- guarded the same way
+    the audit_fn calls right next to every caller of this are already
+    guarded. On the failure path this matters doubly: without this guard,
+    an I/O error here would REPLACE the original pipeline failure (the
+    exception run_refresh is already handling) and skip the audit_fn call
+    that follows it -- the real failure would be neither recorded nor
+    logged. Swallowing here means the in-memory result run_refresh returns
+    (and the audit_fn call) always reflect the true outcome even when
+    persisting it to disk did not stick."""
+    try:
+        _record_last_run(path, last_run)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -253,9 +273,9 @@ def _failure_detail(exc):
 
 def run_refresh(source, state_dir, catalog, tar_path=None, feed_url=FEED_URL,
                 cert_path=_CERT_PATH, timeout=_FETCH_TIMEOUT, audit_fn=None,
-                now_fn=time.time, fetch_fn=bulkhash.fetch,
-                verify_fn=bulkhash.verify_tar, parse_fn=bulkhash.parse,
-                reconcile_fn=bulkhash.reconcile):
+                now_fn=time.time, _fetch_fn=bulkhash.fetch,
+                _verify_fn=bulkhash.verify_tar, _parse_fn=bulkhash.parse,
+                _reconcile_fn=bulkhash.reconcile):
     """The single entry point for every Cisco Bulk Hash reconciliation run:
     scheduled (`bulkhash_refresh_loop`, source="scheduled"), manual (a
     console "Refresh now" route, source="manual" -- a later task), and
@@ -286,7 +306,13 @@ def run_refresh(source, state_dir, catalog, tar_path=None, feed_url=FEED_URL,
 
     Returns `{"outcome": "ok", "matched": int, "mismatched": int,
     "not_in_feed": int}` on success, or `{"outcome": "fail", "detail": str,
-    "matched": None, "mismatched": None, "not_in_feed": None}` on failure."""
+    "matched": None, "mismatched": None, "not_in_feed": None}` on failure --
+    genuinely never raises, including if persisting last_run itself fails
+    (see `_try_record_last_run`).
+
+    `_fetch_fn`/`_verify_fn`/`_parse_fn`/`_reconcile_fn` are test-only
+    injection seams (leading underscore: not part of this function's public
+    API -- Tasks 4/5 must not pass them)."""
     global _RUNNING
     with _RUN_LOCK:
         if _RUNNING:
@@ -296,8 +322,8 @@ def run_refresh(source, state_dir, catalog, tar_path=None, feed_url=FEED_URL,
         return _run_refresh_locked(
             source, state_dir, catalog, tar_path=tar_path, feed_url=feed_url,
             cert_path=cert_path, timeout=timeout, audit_fn=audit_fn,
-            now_fn=now_fn, fetch_fn=fetch_fn, verify_fn=verify_fn,
-            parse_fn=parse_fn, reconcile_fn=reconcile_fn)
+            now_fn=now_fn, fetch_fn=_fetch_fn, verify_fn=_verify_fn,
+            parse_fn=_parse_fn, reconcile_fn=_reconcile_fn)
     finally:
         with _RUN_LOCK:
             _RUNNING = False
@@ -328,7 +354,7 @@ def _run_refresh_locked(source, state_dir, catalog, tar_path, feed_url,
                                         now=now_fn())
     except Exception as exc:
         detail = _failure_detail(exc)
-        _record_last_run(spath, {
+        _try_record_last_run(spath, {
             "at": int(now_fn()), "source": source,
             "outcome": "fail: %s" % detail, "matched": None,
             "mismatched": None, "not_in_feed": None})
@@ -345,7 +371,7 @@ def _run_refresh_locked(source, state_dir, catalog, tar_path, feed_url,
         if tmp_dir is not None:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    _record_last_run(spath, {
+    _try_record_last_run(spath, {
         "at": int(now_fn()), "source": source, "outcome": "ok",
         "matched": matched, "mismatched": mismatched,
         "not_in_feed": not_in_feed})
@@ -387,7 +413,16 @@ def bulkhash_refresh_loop(stop_event, state_dir, catalog, audit_fn=None,
     reports its own failures, so this loop only guards against
     run_refresh_fn raising unexpectedly (it should not, by contract, but a
     daemon scheduler thread dying silently would be far worse than a
-    swallowed exception -- the ca_trust_refresh_loop precedent)."""
+    swallowed exception -- the ca_trust_refresh_loop precedent).
+
+    Stale-target guard: `target` is computed from the schedule BEFORE the
+    wait, so an operator edit made WHILE counting down to it (flipping
+    mode="off", or pushing hour_utc later) must not let that now-stale
+    target still fire once the wait elapses. After waking (not stopped),
+    the schedule is re-read; if mode/hour_utc changed from what `target`
+    was computed against, this cycle is skipped with no run -- the next
+    iteration reads the schedule fresh and recomputes correctly from
+    there (including, if still due under the NEW settings, promptly)."""
     run_refresh_fn = run_refresh_fn or run_refresh
     spath = settings_path(state_dir)
     while True:
@@ -400,7 +435,13 @@ def bulkhash_refresh_loop(stop_event, state_dir, catalog, audit_fn=None,
             delay = min(idle_recheck, max(0.0, target - now))
         if stop_event.wait(delay):
             return
-        if target is not None and now_fn() >= target:
+        if target is None:
+            continue    # was just an idle recheck; nothing was scheduled
+        fresh = read_settings(spath)
+        if (fresh["mode"] != settings["mode"]
+                or fresh["hour_utc"] != settings["hour_utc"]):
+            continue    # schedule changed mid-countdown -- target is stale
+        if now_fn() >= target:
             try:
                 run_refresh_fn("scheduled", state_dir, catalog,
                                audit_fn=audit_fn)

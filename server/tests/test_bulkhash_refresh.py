@@ -443,7 +443,7 @@ def test_run_refresh_unsigned_tar_never_reaches_parse_or_catalog(
         result = bulkhash_refresh.run_refresh(
             "scheduled", str(tmp_path / "state"), store,
             feed_url=_url_for(srv), cert_path=cert,
-            timeout=5, parse_fn=spy_parse)
+            timeout=5, _parse_fn=spy_parse)
         assert result["outcome"] == "fail"
         assert parse_calls == []
         assert "hash_verification" not in store.get_image("image1")
@@ -475,7 +475,7 @@ def test_run_refresh_verify_failure_with_wrong_signer_never_reaches_parse(
         result = bulkhash_refresh.run_refresh(
             "scheduled", str(tmp_path / "state"), store,
             feed_url=_url_for(srv), cert_path=cert, timeout=5,
-            parse_fn=spy_parse)
+            _parse_fn=spy_parse)
         assert result["outcome"] == "fail"
         assert parse_calls == []
     finally:
@@ -529,8 +529,152 @@ def test_run_refresh_parse_failure_leaves_catalog_untouched(
 
 
 # ---------------------------------------------------------------------------
-# run_refresh: offline source with a pre-downloaded tar_path -- fetch_fn is
-# never called at all.
+# run_refresh: reconcile failure -- apply must never run, catalog untouched.
+# ---------------------------------------------------------------------------
+
+def test_run_refresh_reconcile_failure_leaves_catalog_untouched(
+        tmp_path, signing_key):
+    cert, key = signing_key
+    fixture = _signed_fixture(tmp_path, REAL_ROW, key)
+    with open(fixture, "rb") as f:
+        payload = f.read()
+    srv = _http_server(payload)
+    events = []
+
+    def blowing_up_reconcile(rows, images):
+        raise bulkhash.BulkHashError("simulated reconcile failure")
+
+    try:
+        store = _store(tmp_path / "state")
+        store.save_image(_entry("image1", "image1.bin"))
+
+        result = bulkhash_refresh.run_refresh(
+            "scheduled", str(tmp_path / "state"), store,
+            feed_url=_url_for(srv), cert_path=cert, timeout=5,
+            _reconcile_fn=blowing_up_reconcile,
+            audit_fn=lambda **kw: events.append(kw))
+
+        assert result["outcome"] == "fail"
+        assert "hash_verification" not in store.get_image("image1")
+        settings = bulkhash_refresh.read_settings(
+            bulkhash_refresh.settings_path(str(tmp_path / "state")))
+        assert settings["last_run"]["outcome"].startswith("fail:")
+        assert len(events) == 1
+        assert events[0]["result"] == "fail"
+    finally:
+        srv.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# run_refresh: apply_hash_verification failure (an invalid `source`, its
+# own ValueError guard) -- caught by the SAME broad except as every other
+# pipeline stage; must not raise out of run_refresh, must still be
+# recorded and logged, and the catalog stays untouched (apply_hash_
+# verification raises before writing anything for a bad source).
+# ---------------------------------------------------------------------------
+
+def test_run_refresh_apply_failure_records_fail_without_raising(
+        tmp_path, signing_key):
+    cert, key = signing_key
+    fixture = _signed_fixture(tmp_path, REAL_ROW, key)
+    with open(fixture, "rb") as f:
+        payload = f.read()
+    srv = _http_server(payload)
+    events = []
+    try:
+        store = _store(tmp_path / "state")
+        store.save_image(_entry("image1", "image1.bin", size=5,
+                                sha512="aa" * 64))
+
+        result = bulkhash_refresh.run_refresh(
+            "not-a-real-source", str(tmp_path / "state"), store,
+            feed_url=_url_for(srv), cert_path=cert, timeout=5,
+            audit_fn=lambda **kw: events.append(kw))
+
+        assert result["outcome"] == "fail"
+        assert "hash_verification" not in store.get_image("image1")
+        assert len(events) == 1
+        assert events[0]["result"] == "fail"
+    finally:
+        srv.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# run_refresh: persisting last_run must never itself make run_refresh
+# raise, on EITHER the failure or the success path (Important 1 fix) --
+# and the true outcome (the original pipeline failure's detail, or the
+# real counts on success) must still come back and still reach audit_fn
+# even though the on-disk write is broken.
+# ---------------------------------------------------------------------------
+
+def test_run_refresh_failure_survives_a_broken_settings_write(
+        tmp_path, monkeypatch):
+    """A fetch failure whose OWN last_run write then also fails (e.g.
+    ENOSPC/read-only state dir): the ORIGINAL fetch failure's detail must
+    still be what's returned and audited -- not swallowed/replaced by the
+    write's own OSError, and above all run_refresh must not raise it."""
+    def broken_write(*a, **kw):
+        raise OSError("simulated disk failure")
+
+    monkeypatch.setattr(bulkhash_refresh, "write_settings", broken_write)
+    events = []
+    store = _store(tmp_path / "state")
+
+    result = bulkhash_refresh.run_refresh(
+        "scheduled", str(tmp_path / "state"), store,
+        feed_url="http://127.0.0.1:1/definitely-not-listening", timeout=2,
+        audit_fn=lambda **kw: events.append(kw))
+
+    assert result["outcome"] == "fail"
+    assert "simulated disk failure" not in result["detail"]
+    assert len(events) == 1
+    assert events[0]["result"] == "fail"
+    assert "simulated disk failure" not in events[0]["detail"]
+
+
+def test_run_refresh_success_survives_a_broken_settings_write(
+        tmp_path, signing_key, monkeypatch):
+    """Same guard on the success path: apply_hash_verification has ALREADY
+    mutated the catalog by the time last_run is recorded, so a broken
+    settings write here must not turn a genuinely successful run into a
+    raised exception -- the caller (a future console route) still gets a
+    clean "ok" result even though last_run itself didn't stick this time."""
+    cert, key = signing_key
+    fixture = _signed_fixture(tmp_path, REAL_ROW, key)
+    with open(fixture, "rb") as f:
+        payload = f.read()
+    srv = _http_server(payload)
+
+    def broken_write(*a, **kw):
+        raise OSError("simulated disk failure")
+
+    monkeypatch.setattr(bulkhash_refresh, "write_settings", broken_write)
+    events = []
+    try:
+        store = _store(tmp_path / "state")
+        store.save_image(_entry("image1", "image1.bin", size=5,
+                                sha512="aa" * 64))
+
+        result = bulkhash_refresh.run_refresh(
+            "scheduled", str(tmp_path / "state"), store,
+            feed_url=_url_for(srv), cert_path=cert, timeout=5,
+            audit_fn=lambda **kw: events.append(kw))
+
+        assert result == {"outcome": "ok", "matched": 1, "mismatched": 0,
+                          "not_in_feed": 0}
+        # the catalog write itself (apply_hash_verification) is unrelated
+        # to the settings-file write and must have gone through normally
+        assert store.get_image("image1")["hash_verification"]["state"] == \
+            "verified"
+        assert len(events) == 1
+        assert events[0]["result"] == "ok"
+    finally:
+        srv.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# run_refresh: offline source with a pre-downloaded tar_path -- _fetch_fn
+# is never called at all.
 # ---------------------------------------------------------------------------
 
 def test_run_refresh_offline_tar_path_skips_fetch(tmp_path, signing_key):
@@ -547,7 +691,7 @@ def test_run_refresh_offline_tar_path_skips_fetch(tmp_path, signing_key):
 
     result = bulkhash_refresh.run_refresh(
         "offline", str(tmp_path / "state"), store, tar_path=fixture,
-        cert_path=cert, fetch_fn=spy_fetch)
+        cert_path=cert, _fetch_fn=spy_fetch)
 
     assert fetch_calls == []
     assert result == {"outcome": "ok", "matched": 1, "mismatched": 0,
@@ -607,7 +751,7 @@ def test_run_refresh_concurrent_call_returns_already_running(tmp_path):
     def run_first():
         r = bulkhash_refresh.run_refresh(
             "scheduled", str(tmp_path / "state"), store,
-            fetch_fn=blocking_fetch)
+            _fetch_fn=blocking_fetch)
         results.append(r)
 
     t = threading.Thread(target=run_first)
@@ -727,6 +871,68 @@ def test_loop_mode_change_takes_effect_without_restart(tmp_path):
     stop.set()
     t.join(timeout=5)
     assert len(calls) >= 1
+
+
+def test_loop_mode_flipped_off_during_countdown_skips_the_stale_target(
+        tmp_path):
+    """The mirror image of the test above: mode flips OFF while a run is
+    already counting down to a target computed under the OLD (daily)
+    settings. Before the stale-target fix, the loop fired anyway once the
+    wait elapsed -- it only ever checked `now >= target` against the
+    settings read BEFORE the wait, never noticing the flip. A quarantine-
+    capable scheduled run must not fire from a schedule the operator has
+    since turned off."""
+    calls = []
+    spath = bulkhash_refresh.settings_path(str(tmp_path / "state"))
+    bulkhash_refresh.write_settings(
+        spath, "daily", 6, dict(bulkhash_refresh._DEFAULT_LAST_RUN))
+    stop = threading.Event()
+
+    def fake_next_run_at(mode, hour_utc, now):
+        return None if mode == "off" else now + 0.15
+
+    t = _run_loop(tmp_path, stop, lambda *a, **kw: calls.append((a, kw)),
+                 idle_recheck=0.5, next_run_at_fn=fake_next_run_at)
+    time.sleep(0.03)     # let it read mode="daily" and start the ~0.15s wait
+    bulkhash_refresh.write_settings(
+        spath, "off", 0, dict(bulkhash_refresh._DEFAULT_LAST_RUN))
+    time.sleep(0.3)      # past when the stale target would have fired
+    stop.set()
+    t.join(timeout=5)
+    assert not t.is_alive()
+    assert calls == []
+
+
+def test_loop_hour_utc_pushed_later_during_countdown_skips_the_stale_target(
+        tmp_path):
+    """Same guard, triggered by an hour_utc edit instead of a mode flip --
+    the schedule stayed "daily" but no longer means the same target. The
+    fake schedule fn treats hour_utc=6 as "due very soon" and any OTHER
+    hour_utc as "genuinely far off" -- modeling the edit as an operator
+    truly pushing the run later, not just re-arriving at a new near-term
+    target moments afterward (which would be legitimate, and is exercised
+    separately by test_loop_fires_when_next_run_at_reports_due)."""
+    calls = []
+    spath = bulkhash_refresh.settings_path(str(tmp_path / "state"))
+    bulkhash_refresh.write_settings(
+        spath, "daily", 6, dict(bulkhash_refresh._DEFAULT_LAST_RUN))
+    stop = threading.Event()
+
+    def fake_next_run_at(mode, hour_utc, now):
+        if mode == "off":
+            return None
+        return now + 0.15 if hour_utc == 6 else now + 100
+
+    t = _run_loop(tmp_path, stop, lambda *a, **kw: calls.append((a, kw)),
+                 idle_recheck=0.5, next_run_at_fn=fake_next_run_at)
+    time.sleep(0.03)     # let it read hour_utc=6 and start the ~0.15s wait
+    bulkhash_refresh.write_settings(
+        spath, "daily", 20, dict(bulkhash_refresh._DEFAULT_LAST_RUN))
+    time.sleep(0.3)      # past when the stale (hour_utc=6) target would fire
+    stop.set()
+    t.join(timeout=5)
+    assert not t.is_alive()
+    assert calls == []
 
 
 def test_loop_run_refresh_exception_does_not_kill_the_thread(tmp_path):
