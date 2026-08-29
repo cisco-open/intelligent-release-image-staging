@@ -151,10 +151,20 @@ XR_VERSION="$(printf '%s\n' "$VERSION_OUT" | tr -d '\r' \
   | sed -E 's/^.*[Vv]ersion[[:space:]]+//; s/[[:space:]]+$//')"
 _no_quotes_or_newlines XR_VERSION "$XR_VERSION"
 DIR_OUT="$(printf 'dir harddisk: | include bytes free\n' | RUN 2>/dev/null)"
-# Cisco 8000 dir output ends "<N> bytes total (<M> bytes free)" -- the SAME
-# "(N bytes free)" shape device/agent/flashcheck.py already parses for
-# IOS-XE (agentinfo/xr-support/research/xrfact-storage-and-filesystems.md).
-FREE_BYTES="$(printf '%s\n' "$DIR_OUT" | grep -oE '\([0-9]+ bytes free\)' | grep -oE '[0-9]+' | tail -1)"
+# Cisco 8000 dir output ends "<N> kbytes total (<M> kbytes free)" -- KBYTES,
+# hardware-proven ("41968752 kbytes total (37916076 kbytes free)",
+# agentinfo/xr-support/LAB-RESULTS-2026-08-27.md); some platforms say plain
+# bytes. Accept both and normalise to bytes. Every grep sits behind
+# "|| true": under pipefail a no-match grep would otherwise kill the script
+# AT THE ASSIGNMENT, before the honest diagnostic below ever prints (the
+# same failure shape the RPM build guard already had to close).
+FREE_RAW="$(printf '%s\n' "$DIR_OUT" | grep -oiE '\([0-9]+ k?bytes free\)' | tail -1 || true)"
+FREE_NUM="$(printf '%s\n' "$FREE_RAW" | grep -oE '[0-9]+' | head -1 || true)"
+if [ -n "$FREE_NUM" ] && printf '%s' "$FREE_RAW" | grep -qi 'kbytes'; then
+  FREE_BYTES=$((FREE_NUM * 1024))
+else
+  FREE_BYTES="$FREE_NUM"
+fi
 [ -n "$FREE_BYTES" ] || {
   echo "ERROR: could not determine free space on harddisk: (transport failure or unexpected 'dir' output); refusing to proceed" >&2
   exit 1
