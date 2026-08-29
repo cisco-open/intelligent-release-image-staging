@@ -1750,16 +1750,30 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             route, and the session/size checks happen before this ever
             touches the socket body, so an unauthenticated or oversized
             request never makes this server buffer or write anything.
-            run_refresh's own audit_fn call already covers the pipeline
-            outcome (actor "system", matching every other source) -- this
-            handler stays thin and does not layer a second audit entry on
-            top of it."""
+            run_refresh calls its audit_fn with the event fully formed as
+            keywords (including actor="system", the source-agnostic
+            default) -- relayed verbatim below but with actor overridden to
+            the console session that uploaded THIS tar, the same pattern
+            /api/settings/audit-export/run and /api/settings/ca-trust/
+            refresh use for their own completion audit."""
             info = self._require_session_csrf()
             if info is None:
                 return
+            actor = "console:" + info["username"]
             if catalog is None:
                 self._json(404, {"error": "not found"}); return
             if length <= 0 or length > _MAX_OFFLINE_TAR:
+                # rejected before ever touching the socket body -- audited
+                # the same way the PUT image-upload route audits its own
+                # oversize rejection, so a hostile/mistaken huge upload
+                # attempt still leaves a trail even though it never reaches
+                # run_refresh's own audit_fn call.
+                self._audit("bulkhash-offline-upload", "settings",
+                           action="upload", target="bulkhash", actor=actor,
+                           result="fail",
+                           detail="rejected: %s" % (
+                               "empty body" if length <= 0
+                               else "oversized (cap 256 MiB)"))
                 self._json(413, {"error": "missing or oversized body"}); return
             state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
             reader = self._body_reader(length)
@@ -1785,7 +1799,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     return
                 result = bulkhash_refresh.run_refresh(
                     "offline", state_dir, catalog, tar_path=tmp_path,
-                    audit_fn=self._audit)
+                    audit_fn=lambda **kw: self._audit(
+                        **dict(kw, actor=actor)))
                 self._json(_refresh_http_status(result), result)
             finally:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -2406,7 +2421,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     prev = bulkhash_refresh.read_settings(spath)
                     bulkhash_refresh.write_settings(
                         spath, mode, hour_utc, prev["last_run"])
-                self._audit("bulkhash_schedule_config", "settings",
+                self._audit("bulkhash-schedule-config", "settings",
                            action="set", target="bulkhash", actor=actor,
                            detail="mode %s -> %s, hour_utc %s -> %s"
                                   % (prev["mode"], mode, prev["hour_utc"],
@@ -2417,13 +2432,24 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 # this request's own thread (ThreadingHTTPServer -- a slow
                 # run blocks only this one connection) and hand back
                 # run_refresh's result dict verbatim; run_refresh's own
-                # single-flight lock and audit_fn call cover concurrency and
-                # logging, so this handler stays a thin pass-through.
+                # single-flight lock covers concurrency, so this handler
+                # stays a thin pass-through. run_refresh calls its audit_fn
+                # with the event fully formed as keywords (including
+                # actor="system", the source-agnostic default every caller
+                # gets) -- relay every field verbatim but override actor to
+                # the console session that asked for THIS run, the same
+                # pattern /api/settings/audit-export/run and
+                # /api/settings/ca-trust/refresh use for their own
+                # completion audit (scheduled runs, wired straight to
+                # _bg_audit in main(), are untouched and still record
+                # "system").
                 if catalog is None:
                     self._json(404, {"error": "not found"}); return
                 state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
                 result = bulkhash_refresh.run_refresh(
-                    "manual", state_dir, catalog, audit_fn=self._audit)
+                    "manual", state_dir, catalog,
+                    audit_fn=lambda **kw: self._audit(
+                        **dict(kw, actor=actor)))
                 self._json(_refresh_http_status(result), result); return
             if path.startswith("/api/images/") \
                     and path.endswith("/release-quarantine"):
@@ -2463,6 +2489,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 try:
                     result = catalog.release_quarantine(
                         image_id, actor, override=override)
+                except KeyError:
+                    # TOCTOU: deleted between the get_image() pre-check
+                    # above and this call -- answer the same 404 the
+                    # pre-check itself would have given, not a dropped
+                    # connection.
+                    self._json(404, {"error": "no such image"}); return
                 except ValueError as exc:
                     self._json(400, {"error": str(exc)}); return
                 except catalog_mod.QuarantineStillMismatched as exc:

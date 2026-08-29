@@ -243,7 +243,7 @@ def test_settings_get_defaults_when_unconfigured(tmp_path, monkeypatch):
 
 
 def test_settings_post_round_trip_then_get_reflects_it(tmp_path, monkeypatch):
-    host, port, _ctx, state_dir, _audit, stop = _serve(tmp_path)
+    host, port, _ctx, state_dir, audit_path, stop = _serve(tmp_path)
     monkeypatch.setenv("IRIS_STATE", state_dir)
     try:
         cookie, csrf = _auth(host, port)
@@ -260,6 +260,11 @@ def test_settings_post_round_trip_then_get_reflects_it(tmp_path, monkeypatch):
         assert status == 200
         got = json.loads(body)
         assert got["mode"] == "daily" and got["hour_utc"] == 3
+        # hyphenated, matching its siblings ca-trust-config/bulkhash-refresh
+        events = [e for e in _read_audit_lines(audit_path)
+                 if e.get("event") == "bulkhash-schedule-config"]
+        assert len(events) == 1
+        assert events[0]["actor"] == "console:admin"
     finally:
         stop()
 
@@ -403,6 +408,71 @@ def test_refresh_already_running_maps_to_409(tmp_path, monkeypatch):
         stop()
 
 
+def test_refresh_audit_uses_the_session_actor_not_system(tmp_path, monkeypatch):
+    """run_refresh calls its audit_fn with the event fully keyword-formed,
+    actor="system" included (bulkhash_refresh.py:363-365/:380-384) -- the
+    route must relay every other field verbatim but override actor to the
+    console session that triggered THIS run, the same pattern
+    /api/settings/audit-export/run and /api/settings/ca-trust/refresh use.
+    fake_run_refresh calls audit_fn exactly the way the real run_refresh
+    does (proving the WRAPPER, independent of whether the pipeline
+    underneath is real or faked -- real pipeline correctness is
+    test_bulkhash_refresh.py's job)."""
+    host, port, _ctx, state_dir, audit_path, stop = _serve(tmp_path)
+    monkeypatch.setenv("IRIS_STATE", state_dir)
+
+    def fake_run_refresh(source, sdir, catalog, tar_path=None,
+                         audit_fn=None):
+        audit_fn(event="bulkhash-refresh", category="settings",
+                 action="refresh", target="bulkhash", actor="system",
+                 result="ok", detail="matched=1 mismatched=0 not_in_feed=0")
+        return {"outcome": "ok", "matched": 1, "mismatched": 0,
+               "not_in_feed": 0}
+
+    monkeypatch.setattr(bulkhash_refresh, "run_refresh", fake_run_refresh)
+    try:
+        cookie, csrf = _auth(host, port)
+        headers = {"Cookie": cookie, "X-CSRF-Token": csrf}
+        status, _, _ = _req(host, port, "POST",
+                            "/api/image-verification/refresh",
+                            headers=headers)
+        assert status == 200
+        events = [e for e in _read_audit_lines(audit_path)
+                 if e.get("event") == "bulkhash-refresh"]
+        assert len(events) == 1
+        assert events[0]["actor"] == "console:admin"
+        assert events[0]["result"] == "ok"
+        assert events[0]["detail"] == "matched=1 mismatched=0 not_in_feed=0"
+    finally:
+        stop()
+
+
+def test_scheduled_run_refresh_still_audits_as_system(tmp_path):
+    """Regression guard for the actor-override fix above: this drives the
+    REAL bulkhash_refresh.run_refresh (hermetic -- the unsigned-tar fail
+    path needs no network and no real Cisco cert) with a PLAIN,
+    non-wrapping audit_fn -- exactly how bulkhash_refresh_loop/main() wires
+    scheduled runs via _bg_audit -- and confirms actor is still "system".
+    gui_server.py's routes are not exercised here at all; this proves the
+    HTTP-layer wrapping in the routes above cannot leak into (and Task 3's
+    bulkhash_refresh.py was not touched to make) every OTHER caller of
+    run_refresh keep seeing the source-agnostic "system" default."""
+    events = []
+
+    def plain_audit(**kw):
+        events.append(kw)
+
+    state_dir = str(tmp_path / "state")
+    cat = catalog_mod.CatalogStore(state_dir)
+    tar_path = _unsigned_fixture(tmp_path, REAL_ROW)
+    result = bulkhash_refresh.run_refresh(
+        "scheduled", state_dir, cat, tar_path=tar_path,
+        audit_fn=plain_audit)
+    assert result["outcome"] == "fail"
+    assert len(events) == 1
+    assert events[0]["actor"] == "system"
+
+
 # ---------------------------------------------------------------------------
 # POST /api/image-verification/offline
 # ---------------------------------------------------------------------------
@@ -440,6 +510,90 @@ def test_offline_ok_streams_body_to_a_temp_file_and_delegates(
         # the private temp dir is cleaned up once the request completes
         assert not os.path.exists(seen["path"])
         assert not os.path.exists(os.path.dirname(seen["path"]))
+    finally:
+        stop()
+
+
+def test_offline_audit_uses_the_session_actor_not_system(tmp_path, monkeypatch):
+    """Same fix as the /refresh route's own actor-override test above,
+    exercised through /offline's separate _handle_offline_refresh code
+    path."""
+    host, port, _ctx, state_dir, audit_path, stop = _serve(tmp_path)
+    monkeypatch.setenv("IRIS_STATE", state_dir)
+
+    def fake_run_refresh(source, sdir, catalog, tar_path=None,
+                         audit_fn=None):
+        audit_fn(event="bulkhash-refresh", category="settings",
+                 action="refresh", target="bulkhash", actor="system",
+                 result="ok", detail="matched=0 mismatched=0 not_in_feed=0")
+        return {"outcome": "ok", "matched": 0, "mismatched": 0,
+               "not_in_feed": 0}
+
+    monkeypatch.setattr(bulkhash_refresh, "run_refresh", fake_run_refresh)
+    try:
+        cookie, csrf = _auth(host, port)
+        headers = {"Cookie": cookie, "X-CSRF-Token": csrf}
+        status, _, _ = _req(host, port, "POST",
+                            "/api/image-verification/offline",
+                            headers=headers, raw=b"x")
+        assert status == 200
+        events = [e for e in _read_audit_lines(audit_path)
+                 if e.get("event") == "bulkhash-refresh"]
+        assert len(events) == 1
+        assert events[0]["actor"] == "console:admin"
+    finally:
+        stop()
+
+
+def test_offline_rejects_missing_csrf_403(tmp_path, monkeypatch):
+    """/offline self-gates via _require_session_csrf() BEFORE do_POST's
+    shared "every other POST requires a live session + CSRF" gate ever
+    runs (it is diverted out of do_POST entirely, ahead of that gate, so
+    it can stream the body instead of the generic eager-read) -- so its
+    own CSRF check is unique code, not exercised by the shared-gate test
+    for the OTHER routes."""
+    host, port, _ctx, state_dir, _audit, stop = _serve(tmp_path)
+    monkeypatch.setenv("IRIS_STATE", state_dir)
+    try:
+        cookie, _csrf = _auth(host, port)
+        status, _, body = _req(host, port, "POST",
+                               "/api/image-verification/offline",
+                               headers={"Cookie": cookie}, raw=b"x")
+        assert status == 403
+        assert "error" in json.loads(body)
+    finally:
+        stop()
+
+
+def test_offline_oversize_reject_is_audited(tmp_path, monkeypatch):
+    """Mirrors the PUT /api/images/upload/<name> precedent's own oversize
+    rejection audit: rejected before run_refresh is ever reached, so
+    without this the attempt would leave no trail at all."""
+    host, port, _ctx, state_dir, audit_path, stop = _serve(tmp_path)
+    monkeypatch.setenv("IRIS_STATE", state_dir)
+    try:
+        cookie, csrf = _auth(host, port)
+        s = socket.create_connection((host, port), timeout=5)
+        head = ("POST /api/image-verification/offline HTTP/1.0\r\n"
+                "Host: x\r\nCookie: %s\r\nX-CSRF-Token: %s\r\n"
+                "Content-Type: application/octet-stream\r\n"
+                "Content-Length: 999999999\r\n\r\n" % (cookie, csrf)).encode()
+        s.sendall(head + b"not-really-that-many-bytes")
+        s.shutdown(socket.SHUT_WR)
+        resp = b""
+        while True:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            resp += chunk
+        s.close()
+        assert b" 413 " in resp.split(b"\r\n", 1)[0]
+        events = [e for e in _read_audit_lines(audit_path)
+                 if e.get("event") == "bulkhash-offline-upload"]
+        assert len(events) == 1
+        assert events[0]["result"] == "fail"
+        assert events[0]["actor"] == "console:admin"
+        assert "oversized" in events[0]["detail"]
     finally:
         stop()
 
@@ -664,6 +818,33 @@ def test_release_quarantine_unknown_image_404(tmp_path):
         assert status == 404
         # the route-specific message, not the generic do_POST 404 fallback
         # every unmatched path also returns
+        assert json.loads(body)["error"] == "no such image"
+    finally:
+        stop()
+
+
+def test_release_quarantine_toctou_delete_returns_404(tmp_path, monkeypatch):
+    """catalog.release_quarantine() raises KeyError when the image is gone
+    (catalog.py:1126-1127) -- reachable in production as a genuine TOCTOU
+    between this route's own get_image() pre-check and the call (another
+    request deletes the image in between). Simulated directly rather than
+    racing real threads: the route must answer a clean 404, not let the
+    exception escape and drop the connection."""
+    host, port, (_, _, _, cat), state_dir, _audit, stop = _serve(tmp_path)
+    try:
+        cat.save_image(_entry())
+        _quarantine(cat, feed_sha512="bb" * 64)
+
+        def _raise_keyerror(image_id, actor, override=False):
+            raise KeyError(image_id)
+
+        monkeypatch.setattr(cat, "release_quarantine", _raise_keyerror)
+        cookie, csrf = _auth(host, port)
+        headers = {"Cookie": cookie, "X-CSRF-Token": csrf}
+        status, _, body = _req(host, port, "POST",
+                               "/api/images/img1/release-quarantine",
+                               {"override": False}, headers)
+        assert status == 404
         assert json.loads(body)["error"] == "no such image"
     finally:
         stop()
