@@ -2894,3 +2894,38 @@ def test_persist_failure_still_finishes_the_job(tmp_path):
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done"
     assert job["returncode"] == 0
+
+
+def test_probe_sections_survive_an_input_echoing_transport(monkeypatch):
+    """An ssh -tt runner (the XR transport) echoes the whole piped request at
+    the TOP of the transcript before any command runs, so every marker appears
+    twice: once in the input-echo blob (whose 'section' is just the next typed
+    line) and once where it actually executed. Section extraction must read
+    the EXECUTED one — first-match returned the typed text and made the XR
+    preflight classify an empty banner on the first live onboard."""
+    transcript = (
+        "echo __IRIS_PREFLIGHT_VERSION__\n"
+        "show version\n"
+        "echo __IRIS_PREFLIGHT_APPS__\n"
+        "show appmgr application-table\n"
+        "\n"
+        "RP/0/RP0/CPU0:r1#echo __IRIS_PREFLIGHT_VERSION__\n"
+        "% Invalid input detected at '^' marker.\n"
+        "RP/0/RP0/CPU0:r1#show version\n"
+        "Cisco IOS XR Software, Version 25.4.2 LNT\n"
+        "RP/0/RP0/CPU0:r1#echo __IRIS_PREFLIGHT_APPS__\n"
+        "% Invalid input detected at '^' marker.\n"
+        "RP/0/RP0/CPU0:r1#show appmgr application-table\n"
+    )
+
+    class _Out:
+        returncode = 0
+        stdout = transcript
+
+    monkeypatch.setattr(gui_onboard.subprocess, "run", lambda *a, **k: _Out())
+    sections = gui_onboard._probe_sections(
+        "runner.sh", {"DEVICE_IP": "10.0.0.1"},
+        (("version", "show version"), ("apps", "show appmgr application-table")),
+        "xr")
+    assert "Cisco IOS XR Software" in sections["version"]
+    assert gui_onboard.parse_os_family(sections["version"]) == "xr"

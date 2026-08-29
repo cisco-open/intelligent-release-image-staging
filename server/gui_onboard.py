@@ -478,12 +478,19 @@ def _probe_sections(runner, env, commands, label):
     sections = {}
     for name, _command in commands:
         start = "%s%s__" % (marker, name.upper())
-        match = re.search(re.escape(start) + r"\r?\n?(.*?)(?=" +
-                          re.escape(marker) + r"[A-Z_]+__|\Z)",
-                          out.stdout or "", re.DOTALL)
-        if not match:
+        # Take the LAST occurrence of each marker. An ssh -tt transport (the
+        # XR runner) echoes the ENTIRE piped request at the top of the
+        # transcript before any command executes, so the first occurrence of
+        # every marker sits in that input-echo blob and its "section" is just
+        # the next typed line. The executed marker is always the final one.
+        # XE transcripts carry no upfront echo, so last == only there and
+        # this is behaviour-identical for every existing caller.
+        matches = list(re.finditer(re.escape(start) + r"\r?\n?(.*?)(?=" +
+                                   re.escape(marker) + r"[A-Z_]+__|\Z)",
+                                   out.stdout or "", re.DOTALL))
+        if not matches:
             raise ValueError("%s preflight did not return %s" % (label, name))
-        sections[name] = match.group(1)
+        sections[name] = matches[-1].group(1)
     return sections
 
 
