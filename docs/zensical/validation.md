@@ -35,7 +35,7 @@ For the commands and the pinned Zensical and Python versions, see
 | Catalyst 9300 | Guest Shell | Lab-validated |
 | Catalyst 8000V | Guest Shell (router, VirtualPortGroup) | Lab-validated |
 | IE-3400 | IOx | Lab-validated |
-| Cisco 8000 series (IOS-XR) | appmgr container (stages to `harddisk:`) | Not yet validated end to end |
+| Cisco 8000 series (IOS-XR) | appmgr container (stages to `harddisk:`) | Lab-validated on a Cisco 8201 (IOS-XR 25.4.2): console onboard, direct-to-`harddisk:` staging with sha256 verification against the catalog, telemetry reporting, and receipt-driven teardown |
 
 The IOS-XR staging agent exists: a device set to the `xr-appmgr` agent
 install onboards from the Console, runs as an appmgr Docker application, and
