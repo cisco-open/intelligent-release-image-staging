@@ -51,7 +51,7 @@ setup() {
 @test "never trusts appmgr_build's exit status alone -- the RPM check runs regardless" {
   # The build is invoked with "|| true" specifically so a non-zero exit does
   # not short-circuit past the RPMS/ verification below it.
-  run grep -F '$APPMGR_BUILD_CMD ) >"$LOG" 2>&1 || true' "$HELPER"
+  run grep -F '$APPMGR_BUILD_CMD -b build.yaml ) >"$LOG" 2>&1 || true' "$HELPER"
   [ "$status" -eq 0 ]
 }
 

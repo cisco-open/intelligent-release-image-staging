@@ -183,7 +183,7 @@ release: $APPMGR_RELEASE
 arch: x86_64
 type: docker
 image: $IMAGE_TAR_NAME
->> [dry-run] would run: (cd $APPMGR_BUILD_DIR && $APPMGR_BUILD_CMD)
+>> [dry-run] would run: (cd $APPMGR_BUILD_DIR && $APPMGR_BUILD_CMD -b build.yaml)
 >> [dry-run] would verify an RPM landed under $APPMGR_BUILD_DIR/RPMS/*.rpm -- its own
    "Done building" message is not trusted, on either exit code or output --
    and copy that RPM to $OUT/iris-xr.rpm
@@ -301,8 +301,8 @@ rm -rf "$APPMGR_BUILD_DIR/RPMS"
 mkdir -p "$APPMGR_BUILD_DIR/RPMS"
 
 LOG="$APPMGR_BUILD_DIR/.iris-appmgr-build.log"
-echo ">> running $APPMGR_BUILD_CMD in $APPMGR_BUILD_DIR"
-( cd "$APPMGR_BUILD_DIR" && $APPMGR_BUILD_CMD ) >"$LOG" 2>&1 || true
+echo ">> running $APPMGR_BUILD_CMD -b build.yaml in $APPMGR_BUILD_DIR"
+( cd "$APPMGR_BUILD_DIR" && $APPMGR_BUILD_CMD -b build.yaml ) >"$LOG" 2>&1 || true
 cat "$LOG"
 
 # xr-appmgr-build prints "Done building" EVEN ON FAILURE (lab-confirmed on
