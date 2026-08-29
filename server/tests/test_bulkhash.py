@@ -390,11 +390,20 @@ class TestParse:
         just missing the size column; it must be KEPT (image_size=None,
         a size wildcard for reconcile()'s join), not dropped, or every
         catalog image whose only feed row happens to be blank-size can
-        never be reconciled at all."""
+        never be reconciled at all.
+
+        A row with BOTH a blank IMAGE_SIZE and a blank SHA512_CHECKSUM
+        must still be dropped -- this is the invariant that keeps the
+        original empty-hash fail-open closed (reconcile()'s "" == ""
+        false-verified bug) now that the size guard alone no longer drops
+        every blank-size row: only the sha512 guard does, so this case is
+        load-bearing, not redundant with the size-wildcard change above."""
         _cert, key = signing_key
         rows_text = (
             "isr4300-universalk9.16.03.01.SPA.bin,D949B99A104B23B2129718220"
             "C78F28E,2E0D4932,August 03 2016 00:00:00 PDT-0700,,\r\n"
+            "totally-blank-image.bin,D949B99A104B23B2129718220C78F28E,,"
+            "August 03 2016 00:00:00 PDT-0700,,\r\n"
             + REAL_ROW)
         tar_path = _signed_fixture(tmp_path, rows_text, key)
         rows = list(bulkhash.parse(tar_path))
@@ -402,6 +411,8 @@ class TestParse:
         assert rows[0].image_size is None
         assert rows[0].sha512 == "2e0d4932"
         assert rows[1].image_size == 12345
+        assert all(r.file_name != "totally-blank-image.bin" for r in rows)
+        assert all(r.sha512 for r in rows)
 
     def test_row_with_garbage_non_blank_image_size_is_still_skipped(
             self, tmp_path, signing_key):
@@ -616,11 +627,11 @@ class TestReconcile:
         row and a blank-size duplicate for the same image; either one
         carrying the right sha512 must verify."""
         rows = [
-            _row("c8000v-universalk9.17.12.04.SPA.bin", "real-hash", 555),
-            _row("c8000v-universalk9.17.12.04.SPA.bin", "real-hash", None),
+            _row("c9800-universalk9.17.12.04.SPA.bin", "real-hash", 555),
+            _row("c9800-universalk9.17.12.04.SPA.bin", "real-hash", None),
         ]
         images = [{"image_id": "img-1",
-                   "filename": "c8000v-universalk9.17.12.04.SPA.bin",
+                   "filename": "c9800-universalk9.17.12.04.SPA.bin",
                    "size": 555, "sha512": "real-hash"}]
         verdicts = bulkhash.reconcile(rows, images)
         assert verdicts["img-1"]["state"] == "verified"
