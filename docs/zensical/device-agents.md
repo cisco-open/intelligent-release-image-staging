@@ -8,9 +8,10 @@ SPDX-License-Identifier: Apache-2.0
 
 Device agents are the only part of IRIS that runs on the device. Their job is intentionally narrow: discover the approved image, download it, verify it, place it on the platform storage root, and report status. Most run on IOS-XE; the IOS-XR agent runs in an appmgr container, described under [IOS-XR: what the installer pushes](#ios-xr-what-the-installer-pushes).
 
-A device attaches through one of four management types: a dedicated IRIS-managed
+A device attaches through one of five management types: a dedicated IRIS-managed
 VLAN/SVI (**routed**), an existing operator-owned management VLAN (**inband**),
-or an IRIS-managed VirtualPortGroup (**router-routed** or **router-nat**).
+an IRIS-managed VirtualPortGroup (**router-routed** or **router-nat**), or the
+router's own network stack with no app-network fields (**xr-host**).
 The management-type choice governs what the installer and uninstaller may configure
 and remove; see
 [Management Type and VLAN Ownership](network-attachment.md).

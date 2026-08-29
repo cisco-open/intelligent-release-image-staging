@@ -156,9 +156,11 @@ device table shows each device's management type rather than a bare VLAN/SVI val
   routed app subnet; the operator provides routes to IRIS and peers.
 - **Router NAT - VPG behind NAT** — adds overload NAT and static TCP PAT for
   port 6881. The receipt preserves a pre-existing `ip nat outside` marking.
+- **XR host - router's own network stack** — the appmgr container runs on
+  the router's own network stack; there are no app-network fields to set.
 
 A device with no attachment chosen yet — imported from an older positional CSV,
-or added without picking one of the four types above — reads **Inventory only —
+or added without picking one of the five types above — reads **Inventory only —
 attachment not chosen** in that column instead. See
 [Older positional CSVs](fleet-workflows.md#inventory).
 
