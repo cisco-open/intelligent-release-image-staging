@@ -130,11 +130,13 @@ def _artifacts(tmp_path, arm_pem, amd_pem, served_pem=CERT_A,
 
 def _call(d, served, admin="admin", stage_host=None,
          telemetry_override_endpoint=None, telemetry_override_enabled=None,
-         telemetry_env_endpoint="", telemetry_env_enabled=False):
+         telemetry_env_endpoint="", telemetry_env_enabled=False,
+         image_verification_last_run=None):
     return setup_status.build_status(
         d, served, os.path.join(d, "iris-catalog.pem"), admin, stage_host,
         telemetry_override_endpoint, telemetry_override_enabled,
-        telemetry_env_endpoint, telemetry_env_enabled)
+        telemetry_env_endpoint, telemetry_env_enabled,
+        image_verification_last_run=image_verification_last_run)
 
 
 def test_all_ok(tmp_path):
@@ -151,6 +153,51 @@ def test_stage_host_unset(tmp_path):
     d, served = _artifacts(tmp_path, CERT_A, CERT_A)
     st = _call(d, served, stage_host={"configured": False, "username": ""})
     assert st["stage_host"]["state"] == "unset"
+
+
+# --- image verification card (KGV / Cisco Bulk Hash reconciler, Task 5) ---
+
+def test_image_verification_unset_when_never_run(tmp_path):
+    d, served = _artifacts(tmp_path, CERT_A, CERT_A)
+    st = _call(d, served, image_verification_last_run=None)
+    assert st["image_verification"]["state"] == "unset"
+
+
+def test_image_verification_unset_on_empty_last_run(tmp_path):
+    d, served = _artifacts(tmp_path, CERT_A, CERT_A)
+    st = _call(d, served, image_verification_last_run={})
+    assert st["image_verification"]["state"] == "unset"
+
+
+def test_image_verification_ok_after_a_successful_run(tmp_path):
+    d, served = _artifacts(tmp_path, CERT_A, CERT_A)
+    st = _call(d, served, image_verification_last_run={
+        "at": 1735689600, "source": "manual", "outcome": "ok",
+        "matched": 3, "mismatched": 0, "not_in_feed": 0})
+    assert st["image_verification"]["state"] == "ok"
+
+
+def test_image_verification_stays_unset_on_a_failed_run(tmp_path):
+    """A run that actually happened but FAILED (fetch/verify/parse/reconcile
+    error) must not read as done -- only a genuine "ok" outcome does. The
+    detail suffix varies, so this must never be an equality check against a
+    literal "fail" (same rule as the console's own last_run rendering)."""
+    d, served = _artifacts(tmp_path, CERT_A, CERT_A)
+    st = _call(d, served, image_verification_last_run={
+        "at": 1735689600, "source": "scheduled",
+        "outcome": "fail: signature verification failed",
+        "matched": None, "mismatched": None, "not_in_feed": None})
+    assert st["image_verification"]["state"] == "unset"
+
+
+def test_image_verification_unset_when_at_is_missing_even_if_outcome_says_ok(tmp_path):
+    """Defensive: a garbled/partial record must not read as done just
+    because outcome happens to say "ok" -- at is the evidence that a run
+    genuinely completed."""
+    d, served = _artifacts(tmp_path, CERT_A, CERT_A)
+    st = _call(d, served, image_verification_last_run={
+        "at": None, "source": "manual", "outcome": "ok"})
+    assert st["image_verification"]["state"] == "unset"
 
 
 # --- telemetry destination card --------------------------------------
@@ -352,6 +399,26 @@ def test_setup_pane_telemetry_card_funnels_into_the_setup_flow():
     assert "setupTelemetryNote" in js
 
 
+def test_setup_pane_image_verification_card_links_to_settings_not_the_wizard():
+    """Unlike telemetry/stage-host/packages, Image verification is NOT a
+    first-run wizard step (a scheduled/manual/offline check cannot be
+    completed in the wizard's two form steps any more than it could be
+    squeezed into 'first-run setup') -- its card mirrors the admin card's
+    own precedent instead: report status here, but send the operator
+    straight to the Settings pane that owns the feature."""
+    html = _webroot("index.html")
+    js = _webroot("app.js")
+    assert 'id="setup-iv-chip"' in html
+    card = html.split('id="setup-iv-chip"', 1)[1].split("</div>", 1)[0]
+    assert 'href="#settings/bulkhash"' in card
+    assert 'href="#setup"' not in card
+    assert "cisco" in card.lower()
+    assert "s.image_verification.state" in js
+    # never added as a fifth wizard step
+    assert "image_verification" not in js.split(
+        "var WIZARD_STEPS = [", 1)[1].split("];", 1)[0]
+
+
 # --- console pane: packages.reason must not produce the wrong remedy ------
 #
 # app.js has no runtime test harness in this repo (no node/jsdom driver
@@ -417,7 +484,7 @@ def test_refresh_setup_paints_unknown_on_failed_or_thrown_fetch():
     """A failed status fetch (non-ok response) or a thrown/network error
     must never leave the PREVIOUS render on screen -- that would be
     evidence-free chips still reading "done". Both paths must route
-    through the same reset, which must paint all three chips unknown and
+    through the same reset, which must paint all five chips unknown and
     clear the package table and remedy line (spec: never silently render a
     stale/empty checklist as if it were healthy)."""
     js = _webroot("app.js")
@@ -436,9 +503,9 @@ def test_refresh_setup_paints_unknown_on_failed_or_thrown_fetch():
     reset = js.split("function setupShowUnknown() {", 1)[1].split(
         "\n  }", 1)[0]
     for chip_id in ("setup-admin-chip", "setup-td-chip", "setup-sh-chip",
-                    "setup-pkg-chip"):
+                    "setup-pkg-chip", "setup-iv-chip"):
         assert ("getElementById('%s')" % chip_id) in reset
-    assert reset.count("setupChip('unknown')") == 4
+    assert reset.count("setupChip('unknown')") == 5
     assert "#setup-pkg-table tbody" in reset
     assert "setup-pkg-remedy" in reset
 

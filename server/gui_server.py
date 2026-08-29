@@ -88,6 +88,15 @@ def _telemetry_status_args():
     return (dest["endpoint"], dest["enabled"],
             os.environ.get("IRIS_OTLP_ENDPOINT", "").strip(),
             telemetry.observability_enabled())
+def _image_verification_last_run():
+    """last_run for setup_status.build_status's Image verification card
+    (KGV / Cisco Bulk Hash reconciler, console Task 5) -- read fresh at
+    request time from the same settings file the /api/settings/
+    image-verification GET route reads, so the setup checklist never
+    disagrees with the Settings pane."""
+    state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
+    return bulkhash_refresh.read_settings(
+        bulkhash_refresh.settings_path(state_dir))["last_run"]
 _CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".js": "application/javascript",
@@ -1364,7 +1373,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     os.path.join(artifacts_dir, "iris-catalog.pem"),
                     info["username"],
                     creds.get_stage_host() if creds is not None else None,
-                    *_telemetry_status_args()))
+                    *_telemetry_status_args(),
+                    image_verification_last_run=_image_verification_last_run()))
                 return
             if path == "/api/settings/image-verification":
                 # KGV reconciler Task 4: schedule config + last_run, its own

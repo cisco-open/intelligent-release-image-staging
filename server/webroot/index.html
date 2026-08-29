@@ -44,6 +44,7 @@
         <a href="#settings/tls" class="nav subsub" id="nav-settings-tls">TLS &amp; trust</a>
         <a href="#settings/telemetry" class="nav subsub" id="nav-settings-telemetry">Telemetry</a>
         <a href="#settings/audit" class="nav subsub" id="nav-settings-audit">Audit export</a>
+        <a href="#settings/bulkhash" class="nav subsub" id="nav-settings-bulkhash">Image verification</a>
       </div>
       <a href="#monitoring" class="nav sub" id="nav-monitoring">Monitoring</a>
       <div id="monitoring-submenu" hidden>
@@ -94,9 +95,38 @@
           </table>
         </div>
         <table class="tbl" id="images">
-          <thead><tr><th>Image ID</th><th>File</th><th>Size</th><th>SHA-256</th><th>Published</th><th></th></tr></thead>
+          <thead><tr><th>Image ID</th><th>File</th><th>Size</th><th>SHA-256</th><th>Published</th><th>Verification</th><th></th></tr></thead>
           <tbody id="rows"></tbody>
         </table>
+        <!-- Slides in from the RIGHT, like the deployment-details drawer --
+             a panel to read alongside the table it was opened from, not a
+             choice to confirm, so a drawer rather than a modal. -->
+        <div id="img-info-panel" class="drawer" hidden aria-label="Image details">
+          <div class="drawer-head">
+            <span>Image details <span id="ii-id" class="mono"></span></span>
+            <button class="btn ghost" id="ii-close" aria-label="Close image details">✕</button>
+          </div>
+          <div class="drawer-body">
+            <p class="muted" id="ii-file"></p>
+            <h3>Cisco Bulk Hash verification</h3>
+            <p id="ii-verdict"></p>
+            <p class="muted" id="ii-verdict-detail"></p>
+            <div id="ii-release-block" hidden>
+              <h3>Release from quarantine</h3>
+              <p class="muted">This image's hash did not match Cisco's feed.
+                Releasing it allows it to be assigned to devices again.</p>
+              <button class="btn" type="button" id="ii-release">Release</button>
+              <div id="ii-override-block" hidden>
+                <p class="err" id="ii-override-note"></p>
+                <p class="muted">Type the exact filename below to confirm the
+                  override and release it anyway.</p>
+                <input id="ii-confirm-text" placeholder="Exact filename" spellcheck="false">
+                <button class="btn danger" type="button" id="ii-release-override">Release anyway (override)</button>
+              </div>
+              <p class="err" id="ii-release-msg"></p>
+            </div>
+          </div>
+        </div>
       </section>
       <section id="view-devices" hidden>
         <h2>Devices</h2>
@@ -384,6 +414,13 @@
             re-fetch the certificate on every onboard and are not affected.</p>
           <table class="tbl" id="setup-pkg-table"><tbody></tbody></table>
           <p class="muted" id="setup-pkg-remedy"></p>
+
+          <h3>Image verification <span id="setup-iv-chip"></span></h3>
+          <p class="muted">Confirms every staged image's hash against Cisco's
+            Bulk Hash feed before it is trusted. Without at least one
+            successful check, IRIS cannot vouch that a staged image is the
+            genuine, untampered Cisco release.</p>
+          <p><a href="#settings/bulkhash" class="btn ghost">Configure in Settings</a></p>
         </div>
         <div id="settings-pane-general">
           <h3>Server &amp; build</h3>
@@ -505,6 +542,43 @@
             <button class="linkish danger-link" type="button" id="ae-clear">Clear</button>
             <span class="err" id="ae-msg"></span>
           </form>
+        </div>
+        <div id="settings-pane-bulkhash" hidden>
+          <h3>Schedule</h3>
+          <p class="muted">Cisco's Bulk Hash feed lists the sha512 of every
+            genuine Cisco release image. A scheduled or manual check compares
+            it against every image in this catalog and quarantines any that
+            mismatch, blocking new device assignments until the mismatch is
+            resolved or an operator explicitly overrides it.</p>
+          <form class="inline-form" id="iv-schedule-form">
+            <select id="iv-mode">
+              <option value="off">Off</option>
+              <option value="daily">Daily (UTC)</option>
+              <option value="weekly">Weekly (Mondays, UTC)</option>
+            </select>
+            <select id="iv-hour" aria-label="Hour (UTC)"></select>
+            <button class="btn" type="submit">Save</button>
+            <span class="err" id="iv-schedule-msg"></span>
+          </form>
+          <h3>Refresh now</h3>
+          <p class="muted">Runs the check immediately against Cisco's live
+            feed, outside the schedule above.</p>
+          <p>
+            <button class="btn ghost" type="button" id="iv-refresh">Refresh now</button>
+            <span class="err" id="iv-refresh-msg"></span>
+          </p>
+          <p class="muted" id="iv-last-run">Never run.</p>
+          <h3>Offline check</h3>
+          <p class="muted">No route to Cisco? Upload a Bulk Hash feed tar
+            obtained another way and it is verified and reconciled exactly
+            like a live fetch.</p>
+          <div class="dropzone" id="iv-offline-dropzone" tabindex="0" role="button"
+              aria-label="Drop a Cisco Bulk Hash feed tar file, or press Enter to browse for files">
+            <input type="file" id="iv-offline-dropzone-input" accept=".tar" hidden>
+            <p>Drop the feed tar here<span class="hint">or click / press Enter to browse</span></p>
+          </div>
+          <div class="progress" id="iv-offline-progress" hidden><div class="bar" id="iv-offline-bar"></div></div>
+          <p class="err" id="iv-offline-msg"></p>
         </div>
       </section>
       <section id="view-monitoring" hidden>

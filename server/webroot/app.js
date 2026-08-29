@@ -245,14 +245,50 @@
   var prog = document.getElementById('prog');
   var bar = document.getElementById('bar');
   var imageJobGen = 0;
+  // The full last-fetched /api/images rows, kept for the image-detail drawer
+  // (KGV / Cisco Bulk Hash reconciler, Task 5) -- refreshImages() only ever
+  // wrote row HTML before, with nowhere to read a single image's verdict
+  // back out of once the drawer needed one.
+  var LAST_IMAGES = [];
+  // Verdict badge shared by the Images table, the image-detail drawer and
+  // the image picker: null state (never checked) reads as neutral, a
+  // mismatch reads as quarantined only while quarantined is actually still
+  // true (an override-released mismatch stays a mismatch verdict forever --
+  // release_quarantine() deliberately never rewrites hash_verification.state
+  // -- but it is no longer BLOCKING anything, so it must not keep claiming
+  // "quarantined"). Deferral is an orthogonal warning that can accompany any
+  // state, per the spec.
+  function bulkhashVerdictBadge(hv, quarantined) {
+    var state = hv && hv.state;
+    var html;
+    if (!state) {
+      html = '<span class="badge badge-queued">Not checked</span>';
+    } else if (state === 'verified') {
+      html = '<span class="badge badge-ok">Verified</span>';
+    } else if (state === 'mismatch') {
+      html = quarantined
+        ? '<span class="badge badge-fail">MISMATCH — quarantined</span>'
+        : '<span class="badge badge-fail">MISMATCH — released</span>';
+    } else {
+      html = '<span class="badge badge-queued">Not in Cisco\'s feed</span>';
+    }
+    if (hv && hv.deferral) {
+      html += ' <span class="badge badge-cancelled" title="Deferred by Cisco">⚠ Deferred by Cisco</span>';
+    }
+    return html;
+  }
   async function refreshImages() {
     var r = await fetch('/api/images'); if (!r.ok) return;
     var imgs = (await r.json()).images || [];
     imgs.sort(function (a, b) { return (b.published_at || 0) - (a.published_at || 0); });
+    LAST_IMAGES = imgs;
     document.getElementById('rows').innerHTML = imgs.map(function (i) {
       return '<tr data-id="' + esc(i.id) + '"><td>' + esc(i.id) + '</td><td>' + esc(i.filename || '') + '</td><td>' +
         esc(fmtSize(i.size)) + '</td><td>' + esc((i.sha256 || '').slice(0, 16)) + '…</td><td>' +
-        esc(fmtDate(i.published_at)) + '</td><td><button class="linkish danger-link del-img">delete</button></td></tr>';
+        esc(fmtDate(i.published_at)) + '</td><td>' + bulkhashVerdictBadge(i.hash_verification, i.quarantined) +
+        '</td><td><button class="linkish img-info" title="Image details" aria-label="' +
+        'Image details for ' + esc(i.id) + '">ⓘ</button> ' +
+        '<button class="linkish danger-link del-img">delete</button></td></tr>';
     }).join('');
     document.querySelectorAll('#rows .del-img').forEach(function (btn) {
       btn.addEventListener('click', async function () {
@@ -263,7 +299,74 @@
         refreshImages(); refreshImportable();
       });
     });
+    document.querySelectorAll('#rows .img-info').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        openImageInfo(btn.closest('tr').getAttribute('data-id'));
+      });
+    });
   }
+  // ---- Image detail drawer: verdict + release-from-quarantine, with the
+  // typed-confirm override path (KGV / Cisco Bulk Hash reconciler, Task 5).
+  // Mirrors openDeployInfo/closeDeployInfo's drawer pattern below.
+  var imgInfoId = null;
+  function imageVerdictDetailText(hv) {
+    if (!hv || !hv.checked_at) return 'Never checked against the Cisco Bulk Hash feed.';
+    var text = 'Checked ' + fmtDate(hv.checked_at) + ' (source: ' + (hv.source || 'unknown') + ')';
+    if (hv.feed_published_at) text += '; feed published ' + fmtDate(hv.feed_published_at);
+    return text + '.';
+  }
+  function openImageInfo(id) {
+    imgInfoId = id;
+    var img = LAST_IMAGES.filter(function (x) { return x.id === id; })[0] || {};
+    document.getElementById('ii-id').textContent = id;
+    document.getElementById('ii-file').textContent = img.filename || '';
+    document.getElementById('ii-verdict').innerHTML = bulkhashVerdictBadge(img.hash_verification, img.quarantined);
+    document.getElementById('ii-verdict-detail').textContent = imageVerdictDetailText(img.hash_verification);
+    // The release action only makes sense while an image is ACTUALLY
+    // quarantined -- an override-released mismatch keeps its "mismatch"
+    // verdict (see bulkhashVerdictBadge) but is not blocking anything, so
+    // there is nothing left here to release.
+    document.getElementById('ii-release-block').hidden = !img.quarantined;
+    document.getElementById('ii-override-block').hidden = true;
+    document.getElementById('ii-override-note').textContent = '';
+    document.getElementById('ii-confirm-text').value = '';
+    document.getElementById('ii-release-msg').textContent = '';
+    document.getElementById('img-info-panel').hidden = false;
+  }
+  function closeImageInfo() {
+    imgInfoId = null;
+    document.getElementById('img-info-panel').hidden = true;
+  }
+  document.getElementById('ii-close').addEventListener('click', closeImageInfo);
+  document.addEventListener('keydown', function (e) {
+    var panel = document.getElementById('img-info-panel');
+    if (e.key === 'Escape' && panel && !panel.hidden) closeImageInfo();
+  });
+  // Normal release first; the API answers 409 quarantine_still_mismatched
+  // when the stored sha512 still disagrees, which is when the override path
+  // (typed filename confirmation) appears. Every other failure is surfaced
+  // via the API's own error message, honestly, rather than a made-up one.
+  async function attemptReleaseQuarantine(override, confirmText) {
+    var msg = document.getElementById('ii-release-msg'); msg.textContent = '';
+    var r = await jpost('/api/images/' + encodeURIComponent(imgInfoId) + '/release-quarantine',
+      { override: override, confirm_text: confirmText });
+    var body = {};
+    try { body = await r.json(); } catch (e) { }
+    if (r.ok) { closeImageInfo(); refreshImages(); return; }
+    if (r.status === 409 && body.error === 'quarantine_still_mismatched') {
+      document.getElementById('ii-override-block').hidden = false;
+      document.getElementById('ii-override-note').textContent =
+        'Still mismatching the Cisco feed — type the exact filename below to override.';
+      return;
+    }
+    msg.textContent = body.error || ('Release failed (' + r.status + ').');
+  }
+  document.getElementById('ii-release').addEventListener('click', function () {
+    attemptReleaseQuarantine(false, '');
+  });
+  document.getElementById('ii-release-override').addEventListener('click', function () {
+    attemptReleaseQuarantine(true, document.getElementById('ii-confirm-text').value);
+  });
   function pollJob(jobId) {
     var gen = ++imageJobGen;
     function next() { setTimeout(poll, 1000); }
@@ -422,6 +525,11 @@
   // id -> filename, refreshed alongside imageIds -- so a picker/drawer row
   // can show which file an id actually is, the way the catalog list does.
   var imageFilenames = {};
+  // id -> quarantined bool, refreshed alongside imageIds (KGV / Cisco Bulk
+  // Hash reconciler, Task 5) -- so the picker can visibly block a
+  // quarantined image instead of only relying on the server's own
+  // set_policy() refusal, which the operator would only discover at Apply.
+  var imageQuarantined = {};
   var credOpts = [];
   var peerPolicy = { revision: null, quarantine_assignments: [], enforcement: {} };
   var peerPolicyBusy = {};
@@ -523,7 +631,11 @@
     imageListOk = ir.ok;
     imageIds = imgs.map(function (i) { return i.id; });
     imageFilenames = {};
-    imgs.forEach(function (i) { imageFilenames[i.id] = i.filename || ''; });
+    imageQuarantined = {};
+    imgs.forEach(function (i) {
+      imageFilenames[i.id] = i.filename || '';
+      imageQuarantined[i.id] = !!i.quarantined;
+    });
     credOpts = cr.ok ? ((await cr.json()).profiles || []) : [];
     if (mine !== devicesRefreshGeneration) return;
     syncCredSelected();
@@ -1238,17 +1350,32 @@
       .concat(imageIds.filter(function (id) { return !checkedSet[id]; }));
     rows.innerHTML = ordered.length ? ordered.map(function (id) {
       var unknown = imageIds.indexOf(id) === -1;
+      // Quarantined images are visibly blocked here rather than silently
+      // hidden (KGV / Cisco Bulk Hash reconciler, Task 5) -- but only from
+      // being NEWLY checked. One already checked (assigned before it was
+      // quarantined) stays togglable so the operator can still uncheck it
+      // to remove the bad assignment; the server's own set_policy() refusal
+      // (QuarantinedImage -> 400) is the backstop if it is ever re-checked.
+      var blocked = !!imageQuarantined[id] && !checkedSet[id];
       return '<label class="img-pick-row"><input type="checkbox" class="img-pick" value="' +
         esc(id) + '"' + (checkedSet[id] ? ' checked' : '') + (unknown ? ' disabled' : '') +
+        (blocked && !unknown ? ' disabled data-blocked="1"' : '') +
         '> ' + imageLabel(id) +
+        (imageQuarantined[id] ? ' <span class="badge badge-fail" title="Hash mismatch — ' +
+          'quarantined by the Cisco Bulk Hash reconciler">quarantined</span>' : '') +
         (unknown ? ' <span class="muted">— not in the catalog; kept as assigned</span>' : '') +
+        (blocked ? ' <span class="muted">— quarantined; cannot be newly assigned</span>' : '') +
         '</label>';
     }).join('') : '<p class="muted">No images in the catalog yet.</p>';
     function updateCount() {
       var n = rows.querySelectorAll('input:checked').length;
       counter.textContent = n + '/10';
-      // the 11th box is disabled, not just rejected server-side at Apply
-      rows.querySelectorAll('input:not(:checked)').forEach(function (cb) { cb.disabled = n >= 10; });
+      // the 11th box is disabled, not just rejected server-side at Apply;
+      // a quarantined-blocked box (data-blocked) stays disabled regardless
+      // of count, never re-enabled just because the selection dropped.
+      rows.querySelectorAll('input:not(:checked)').forEach(function (cb) {
+        cb.disabled = n >= 10 || cb.dataset.blocked === '1';
+      });
     }
     rows.querySelectorAll('input').forEach(function (cb) { cb.addEventListener('change', updateCount); });
     updateCount();
@@ -1901,6 +2028,7 @@
     document.getElementById('setup-pkg-chip').innerHTML = setupChip('unknown');
     document.querySelector('#setup-pkg-table tbody').innerHTML = '';
     document.getElementById('setup-pkg-remedy').textContent = '';
+    document.getElementById('setup-iv-chip').innerHTML = setupChip('unknown');
   }
 
   // ---- First-run setup wizard -------------------------------------------
@@ -2088,6 +2216,8 @@
       }).join('');
     document.getElementById('setup-pkg-remedy').textContent =
       setupPkgRemedyText(s.packages);
+    document.getElementById('setup-iv-chip').innerHTML =
+      setupChip(s.image_verification.state);
   }
 
   async function refreshSettings() {
@@ -2229,7 +2359,133 @@
         esc((ae.user || '?') + '@' + ae.host + ':' + (ae.path || '')) +
         (ae.auto ? ' · daily' : ' · manual only') + last;
     }
+    // --- Image verification (KGV / Cisco Bulk Hash reconciler, Task 5) ---
+    // Its own dedicated GET, unlike the panes above -- not part of the big
+    // /api/settings blob (see the endpoint contract in Task 4's report).
+    await refreshImageVerificationSettings();
   }
+  // ---- Settings: Image verification (KGV / Cisco Bulk Hash reconciler) ----
+  // Schedule select + hour, Refresh now, offline .tar upload. Its own
+  // dedicated GET/POST at /api/settings/image-verification and
+  // /api/image-verification/{refresh,offline} -- see Task 4's endpoint
+  // contracts. Factored out of refreshSettings (rather than inlined like the
+  // ae-/cert- panes above) because the Refresh now button and the offline
+  // upload both need to re-render just the last-run line afterward, without
+  // re-fetching the whole /api/settings blob.
+  //
+  // last_run.outcome is "ok" or "fail: <detail>" -- NEVER compared with
+  // equality against "fail" (the detail suffix always differs); this
+  // function and its caller only ever test the "fail" PREFIX.
+  function bulkhashOutcomeFailed(outcome) {
+    return String(outcome || '').slice(0, 4) === 'fail';
+  }
+  function fmtBulkhashLastRun(lr) {
+    if (!lr || !lr.at) return 'Never run.';
+    var failed = bulkhashOutcomeFailed(lr.outcome);
+    var badge = failed ? '<span class="badge badge-fail">fail</span>'
+                       : '<span class="badge badge-ok">ok</span>';
+    var counts = lr.matched == null ? ''
+      : (' · ' + lr.matched + ' matched, ' + lr.mismatched + ' mismatched, ' +
+         lr.not_in_feed + ' not in feed');
+    var detail = failed && String(lr.outcome).indexOf(':') > -1
+      ? (' · ' + esc(String(lr.outcome).slice(String(lr.outcome).indexOf(':') + 1).trim())) : '';
+    return esc(fmtDate(lr.at)) + ' · ' + esc(lr.source || 'unknown') + ' ' + badge + counts + detail;
+  }
+  async function refreshImageVerificationSettings() {
+    var r = await fetch('/api/settings/image-verification');
+    if (!r.ok) return;
+    var iv = await r.json();
+    document.getElementById('iv-mode').value = iv.mode || 'off';
+    document.getElementById('iv-hour').value = String(iv.hour_utc == null ? 0 : iv.hour_utc);
+    document.getElementById('iv-last-run').innerHTML = fmtBulkhashLastRun(iv.last_run);
+  }
+  // Hour select is built once here (00:00-23:00 UTC) rather than spelled out
+  // as 24 <option> elements in index.html.
+  (function () {
+    var sel = document.getElementById('iv-hour');
+    if (!sel) return;
+    var opts = [];
+    for (var h = 0; h < 24; h++) {
+      opts.push('<option value="' + h + '">' + (h < 10 ? '0' : '') + h + ':00</option>');
+    }
+    sel.innerHTML = opts.join('');
+  })();
+  document.getElementById('iv-schedule-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var msg = document.getElementById('iv-schedule-msg'); msg.textContent = ''; msg.classList.remove('ok');
+    var mode = document.getElementById('iv-mode').value;
+    var hour = parseInt(document.getElementById('iv-hour').value, 10);
+    var r = await jpost('/api/settings/image-verification', { mode: mode, hour_utc: hour });
+    if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
+    msg.textContent = 'Schedule saved.'; msg.classList.add('ok');
+    refreshImageVerificationSettings();
+  });
+  document.getElementById('iv-refresh').addEventListener('click', async function () {
+    var btn = this;
+    var msg = document.getElementById('iv-refresh-msg'); msg.textContent = ''; msg.classList.remove('ok');
+    btn.disabled = true;
+    try {
+      var r = await jpost('/api/image-verification/refresh', {});
+      var body = {};
+      try { body = await r.json(); } catch (e) { }
+      if (r.status === 409) {
+        msg.textContent = 'A refresh is already in progress.';
+      } else if (r.ok) {
+        msg.textContent = 'Refresh complete: ' + body.matched + ' matched, ' +
+          body.mismatched + ' mismatched, ' + body.not_in_feed + ' not in feed.';
+        msg.classList.add('ok');
+      } else {
+        msg.textContent = 'Refresh failed: ' + (body.detail || ('status ' + r.status));
+      }
+    } finally {
+      btn.disabled = false;
+      refreshImageVerificationSettings();
+      refreshImages().catch(function () { });
+    }
+  });
+  // Offline upload: a raw-body POST of the tar bytes (not multipart, not
+  // form-encoded -- see Task 4's endpoint contract), streamed via XHR the
+  // same way the image-upload PUT route sends a raw File body. Reuses the
+  // TLS pane's wireDropzone for the drag-drop mechanics; unlike the TLS
+  // dropzones (which read the file as text into a textarea) this one sends
+  // the file's raw bytes straight to the server.
+  var ivOfflineBusy = false;
+  function uploadOfflineTar(file) {
+    if (!file || ivOfflineBusy) return;
+    ivOfflineBusy = true;
+    var msg = document.getElementById('iv-offline-msg'); msg.textContent = ''; msg.classList.remove('ok');
+    var prog = document.getElementById('iv-offline-progress');
+    var bar = document.getElementById('iv-offline-bar');
+    prog.hidden = false; bar.style.width = '0%';
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/image-verification/offline');
+    xhr.setRequestHeader('X-CSRF-Token', info.csrf);
+    xhr.upload.onprogress = function (e) { if (e.lengthComputable) bar.style.width = (e.loaded / e.total * 100) + '%'; };
+    function finish(text, ok) {
+      ivOfflineBusy = false;
+      prog.hidden = true;
+      msg.textContent = text;
+      if (ok) msg.classList.add('ok');
+      refreshImageVerificationSettings();
+      refreshImages().catch(function () { });
+    }
+    xhr.onload = function () {
+      var body = {};
+      try { body = JSON.parse(xhr.responseText); } catch (e) { }
+      if (xhr.status === 409) {
+        finish('A refresh is already in progress.', false);
+      } else if (xhr.status === 200) {
+        finish('Offline check complete: ' + body.matched + ' matched, ' +
+          body.mismatched + ' mismatched, ' + body.not_in_feed + ' not in feed.', true);
+      } else {
+        finish('Offline check failed: ' + (body.detail || body.error || ('status ' + xhr.status)), false);
+      }
+    };
+    xhr.onerror = function () { finish('Upload error.', false); };
+    xhr.send(file);
+  }
+  wireDropzone(document.getElementById('iv-offline-dropzone'), document.getElementById('iv-offline-dropzone-input'),
+    function (files) { uploadOfflineTar(files[0]); });
   document.getElementById('pw-form').addEventListener('submit', async function (e) {
     e.preventDefault();
     var msg = document.getElementById('pw-msg'); msg.textContent = ''; msg.classList.remove('ok');
@@ -2643,6 +2899,9 @@
   // The setup pane rides the same pane/nav id pattern; appended for the
   // same reason (keeps the original trio a literal for the source guard).
   SETTINGS_SUBS.push('setup');
+  // The Image verification (KGV / Cisco Bulk Hash reconciler) pane rides the
+  // same pane/nav id pattern; appended for the same reason.
+  SETTINGS_SUBS.push('bulkhash');
   function showSettingsSub(sub) {
     if (SETTINGS_SUBS.indexOf(sub) < 0) sub = 'general';
     SETTINGS_SUBS.forEach(function (t) {

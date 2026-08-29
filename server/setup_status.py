@@ -174,11 +174,25 @@ def _telemetry_status(override_endpoint, override_enabled,
     }
 
 
+def _image_verification_status(last_run):
+    """Resolve the Image verification setup card (KGV / Cisco Bulk Hash
+    reconciler, console Task 5). ``ok`` only once a run has actually
+    SUCCEEDED (``last_run.at`` set and ``outcome`` exactly ``"ok"``) -- a
+    scheduled-but-never-run config, or a run that failed, both stay
+    ``unset``: the operator cannot yet trust that staged images have been
+    checked against Cisco's feed (same governing rule as every other card
+    here: never report ok on missing evidence)."""
+    last_run = last_run or {}
+    ok = bool(last_run.get("at")) and last_run.get("outcome") == "ok"
+    return {"state": "ok" if ok else "unset"}
+
+
 def build_status(artifacts_dir, served_cert_path, distributed_cert_path,
                  admin_username, stage_host,
                  telemetry_override_endpoint=None, telemetry_override_enabled=None,
-                 telemetry_env_endpoint="", telemetry_env_enabled=False):
-    """Assemble the four-card setup status. Pure: all inputs are supplied."""
+                 telemetry_env_endpoint="", telemetry_env_enabled=False,
+                 image_verification_last_run=None):
+    """Assemble the five-card setup status. Pure: all inputs are supplied."""
     reference = read_pem_fingerprint(served_cert_path)
     distributed = read_pem_fingerprint(distributed_cert_path)
     # A disagreement here is worse than a stale package: every NEW onboard is
@@ -240,4 +254,5 @@ def build_status(artifacts_dir, served_cert_path, distributed_cert_path,
             "username": stage_host.get("username", ""),
         },
         "packages": packages,
+        "image_verification": _image_verification_status(image_verification_last_run),
     }

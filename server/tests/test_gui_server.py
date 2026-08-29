@@ -3473,6 +3473,48 @@ def test_setup_status_route_returns_documented_shape(tmp_path, monkeypatch):
         stop()
 
 
+import bulkhash_refresh
+
+
+def test_setup_status_route_carries_the_image_verification_card(tmp_path, monkeypatch):
+    """The route's image_verification card (KGV / Cisco Bulk Hash reconciler,
+    console Task 5) must actually be wired to the real bulkhash settings
+    file on IRIS_STATE, not just present in setup_status.build_status's pure
+    unit tests -- unset with no recorded run, ok once one succeeded, and
+    still unset after one that failed (never an equality check against the
+    literal "fail", since the detail suffix always differs)."""
+    monkeypatch.setenv("IRIS_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
+    state_dir = str(tmp_path / "state")
+    monkeypatch.setenv("IRIS_STATE", state_dir)
+    host, port, _ctx, stop = _serve_full(tmp_path)
+    try:
+        ck, _csrf = _auth(host, port)
+        status, _, body = _req(host, port, "GET", "/api/settings/setup-status",
+                               headers={"Cookie": ck})
+        assert status == 200
+        assert json.loads(body)["image_verification"]["state"] == "unset"
+
+        spath = bulkhash_refresh.settings_path(state_dir)
+        bulkhash_refresh.write_settings(
+            spath, "off", 0, {"at": 1735689600, "source": "scheduled",
+                              "outcome": "fail: signature verification failed",
+                              "matched": None, "mismatched": None,
+                              "not_in_feed": None})
+        status, _, body = _req(host, port, "GET", "/api/settings/setup-status",
+                               headers={"Cookie": ck})
+        assert json.loads(body)["image_verification"]["state"] == "unset"
+
+        bulkhash_refresh.write_settings(
+            spath, "off", 0, {"at": 1735689600, "source": "manual",
+                              "outcome": "ok", "matched": 3, "mismatched": 0,
+                              "not_in_feed": 0})
+        status, _, body = _req(host, port, "GET", "/api/settings/setup-status",
+                               headers={"Cookie": ck})
+        assert json.loads(body)["image_verification"]["state"] == "ok"
+    finally:
+        stop()
+
+
 def test_setup_status_route_response_has_no_secret_material(tmp_path, monkeypatch):
     """The card exists to be trustworthy about system state; it must never
     leak stage-host credentials onto the wire, even after a real stage-host
