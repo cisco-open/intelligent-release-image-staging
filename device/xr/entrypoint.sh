@@ -113,6 +113,22 @@ reconcile_conf_key telemetry_stream "${IRIS_TELEMETRY_STREAM:-}"
 # The baked VERSION file wins on every start (same rule as IOx).
 reconcile_conf_key agent_version \
   "$(cat /opt/iris/agent/VERSION 2>/dev/null || echo unknown)"
+# target_fs/stage_dir are facts about THIS PLATFORM, not operator-tunable
+# state (same rationale as agent_version, above) -- and they must be
+# force-reconciled every boot for a different reason too: agent_config.py's
+# DEFAULTS dict is tuned for IOx (stage_dir="/flash/guest-share/iris",
+# target_fs="" = auto-detect), and agent_config.load() silently backfills
+# any key missing from an on-disk conf with that IOx default, then the
+# unconditional agent_version reconcile just above rewrites the WHOLE file
+# via write_conf() -- persisting the backfilled IOx value to disk. A
+# minimal dropped conf that omits target_fs/stage_dir (both documented
+# "optional" by agent_config.py, and exactly the shape the dropped-conf-wins
+# bats fixture below uses) would otherwise have its forced
+# "target_fs = harddisk:" silently undone on the very next boot. Forcing
+# both here, unconditionally, closes that loop the same way agent_version
+# does.
+reconcile_conf_key target_fs harddisk:
+reconcile_conf_key stage_dir "$STAGE_DIR"
 
 # --- 2/3. aria2c supervisor + agent tick loop ----------------------------------
 read_secret() {

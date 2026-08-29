@@ -201,6 +201,87 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Real reconcile pass (target_fs/stage_dir force -- xr-task1-review.md Finding 1)
+#
+# _run_entrypoint above deliberately runs with no PYTHONPATH: the first
+# reconcile_conf_key call's `import agent_config` then fails and `set -eu`
+# kills the script right there, before it ever reaches its infinite
+# aria2c/tick loop -- convenient for the synthesis-only tests above, but it
+# also means none of them ever observe what reconcile_conf_key actually
+# writes. That blind spot is exactly how the target_fs/stage_dir corruption
+# this section guards against went undetected: with a dropped conf that
+# omits those two ("optional" per agent_config.py's own docstring, and the
+# exact shape the dropped-conf-wins test above uses), agent_config.load()
+# used to backfill them from its IOx-tuned DEFAULTS and the (previously
+# unconditional-only-for-agent_version) write-back would persist that onto
+# disk, silently undoing the "target_fs=harddisk: forced" platform
+# invariant. These tests set a REAL PYTHONPATH (the actual device/agent/)
+# so reconcile_conf_key's import genuinely succeeds and its read-modify-
+# write runs for real. That means the script no longer dies at reconcile --
+# it falls through into the infinite tick loop (aria2c missing from this
+# fixture doesn't abort it either: that failure sits on the non-last side
+# of a "cmd && cur=val" list, which set -e does not treat as fatal). So we
+# bound the run and kill it, the same portable timeout idiom already used
+# by device/iox/tests/test_iox_install_output.bats and
+# device/tests/test_device_install.bats for the same reason (a process that
+# legitimately keeps running past the point under test).
+# ---------------------------------------------------------------------------
+
+_run_entrypoint_real_reconcile_impl() {
+  local outfile pid waited=0 secs=5
+  outfile="$(mktemp)"
+  ( env -i PATH="$PATH" PYTHONPATH="$REPO/device/agent" \
+        IRIS_AGENT_CONF="$CONF" IRIS_STAGE_DIR="$STAGE" IRIS_TICK_SECONDS=1 \
+        "$@" \
+        bash "$ENTRYPOINT" >"$outfile" 2>&1 ) &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$secs" ]; do
+    sleep 1; waited=$((waited + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -9 "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null
+  else
+    wait "$pid" 2>/dev/null
+  fi
+  cat "$outfile"
+  rm -f "$outfile"
+}
+
+_run_entrypoint_real_reconcile() {
+  run _run_entrypoint_real_reconcile_impl "$@"
+}
+
+# Shared dropped-conf shape for both tests below: the review's exact repro --
+# catalog_url/catalog_token/device_id/mode present, target_fs and stage_dir
+# both OMITTED (both documented "optional" by agent_config.py).
+_drop_conf_missing_target_fs_and_stage_dir() {
+  mkdir -p "$(dirname "$CONF")"
+  cat > "$CONF" <<'EOF'
+catalog_url = https://sentinel.example:8443
+catalog_token = sentinel-token
+device_id = sentinel-device
+mode = xr
+EOF
+  chmod 600 "$CONF"
+}
+
+@test "real reconcile: a dropped conf missing target_fs is force-corrected to harddisk:, not wiped by agent_config's IOx default" {
+  _drop_conf_missing_target_fs_and_stage_dir
+  _run_entrypoint_real_reconcile
+  run grep -c '^target_fs = ' "$CONF"
+  [ "$output" -eq 1 ]
+  grep -q '^target_fs = harddisk:$' "$CONF"
+}
+
+@test "real reconcile: a dropped conf missing stage_dir is force-corrected to the mounted stage dir, not backfilled to IOx's default path" {
+  _drop_conf_missing_target_fs_and_stage_dir
+  _run_entrypoint_real_reconcile
+  ! grep -q '^stage_dir = /flash/guest-share/iris$' "$CONF"
+  grep -qF "stage_dir = $STAGE" "$CONF"
+}
+
+# ---------------------------------------------------------------------------
 # No secrets baked into the Dockerfile (static, no docker needed)
 # ---------------------------------------------------------------------------
 
@@ -236,6 +317,12 @@ _stage_build_context() {
   mkdir -p "$CTX/agent" "$CTX/agent_bin"
   cp "$REPO"/device/agent/*.py "$CTX/agent/"
   cp "$REPO/device/agent/peer-receipt-hook.sh" "$CTX/agent/"
+  # verify_image.py lives in device/, not device/agent/ -- iris_agent.py
+  # imports it, so a build context missing it builds fine (Docker doesn't
+  # care that a wildcard COPY missed a file it never expected) but the
+  # container dies on `import verify_image` at the agent's first tick. Same
+  # staging step tools/build-xr-package.sh and device/iox/build.sh use.
+  cp "$REPO"/device/verify_image.py "$CTX/agent/verify_image.py"
   cp "$REPO/VERSION" "$CTX/agent/VERSION"
   # docker build only chmods this file, never executes it -- content is moot.
   printf '#!/bin/sh\nexit 0\n' > "$CTX/agent_bin/aria2c"
