@@ -116,8 +116,9 @@ from the read-only image root survives. See
 
 On an IOx device, `/data/iris` is persistent application scratch rather than an
 IOS-visible image destination. The agent checks the staged file's sha256
-against the catalog's known-good value before hand-off — image authenticity
-itself is established at publish time on the server. The app then hands the
+against the catalog's known-good value before hand-off — the catalog's
+images can separately be checked for authenticity against Cisco's signed
+Bulk Hash feed, and a mismatch quarantines the image. The app then hands the
 file to IOS — a disk-speed write through the bind-mounted share where
 available, an scp push on IE-3400 or as the fallback — and IOS performs the
 final placement as a plain copy, which the agent attests by polling for the

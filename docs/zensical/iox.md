@@ -51,8 +51,9 @@ scratch file to IOS depends on the platform:
   copy that restores the real image name, and the agent attests the
   placement by polling for the file and confirming it matches the catalog's
   declared byte size exactly. The image was already verified by sha256
-  against the catalog before the placement copy, and its authenticity was established
-  at publish time on the server. IRIS never creates a subdirectory in the
+  against the catalog before the placement copy; the catalog can separately
+  verify authenticity against Cisco's signed Bulk Hash feed, and a mismatch
+  quarantines the image. IRIS never creates a subdirectory in the
   share (a container-created subdir becomes inaccessible to the container
   itself on this platform) and confines
   itself to `iris-` prefixed filenames: each attempt sweeps only its own
