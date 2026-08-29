@@ -15,6 +15,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import ssl
 import tempfile
 import threading
@@ -100,6 +101,12 @@ _SSE_IDLE = 600   # close an onboard log stream after this long with NO progress
 _SSE_KEEPALIVE = 15  # comment-frame interval so proxies don't reap a quiet stream
 _MAX_CSV = 8 * 1024 * 1024  # 8 MiB — bulk devices.csv import (all-or-nothing, held in memory)
 _MAX_UPLOAD = 4 * 1024 * 1024 * 1024  # 4 GiB — streamed image uploads (not the JSON cap)
+# 256 MiB — streamed offline Cisco Bulk Hash tar upload (KGV reconciler
+# Task 4). The real feed tar was ~46 MB on 2026-08-29 (bulkhash_refresh.py's
+# FEED_URL provenance note); this stays a comfortable multiple of that while
+# matching bulkhash._MAX_CSV_BYTES's own 256 MiB per-member structural cap —
+# a bigger HTTP body could never produce a tar verify_tar/parse would accept.
+_MAX_OFFLINE_TAR = 256 * 1024 * 1024
 _SECURITY_HEADERS = [
     ("X-Content-Type-Options", "nosniff"),
     ("X-Frame-Options", "DENY"),
@@ -204,6 +211,44 @@ def _fmt_bytes(n):
         n /= 1024.0
         if n < 1024 or unit == "TiB":
             return "%s %s" % (("%.1f" % n).rstrip("0").rstrip("."), unit)
+
+
+def _refresh_http_status(result):
+    """HTTP status for a bulkhash_refresh.run_refresh() result dict (KGV
+    reconciler Task 4), returned to the caller verbatim as the body: "ok" is
+    200, the single-flight guard's "already_running" is 409 (a real,
+    resolvable conflict -- another run is genuinely in flight right now,
+    matching the peer-policy revision-conflict precedent's use of 409), and
+    "fail" (fetch/verify/parse/reconcile/apply all fail closed the same way,
+    per run_refresh's own contract) is 502 -- the reconciler acting as a
+    client of an upstream feed/artifact that this run could not use, the
+    Bad Gateway reading fits better than a 500 this server did not itself
+    cause."""
+    outcome = result.get("outcome")
+    if outcome == "ok":
+        return 200
+    if outcome == "already_running":
+        return 409
+    return 502
+
+
+def _image_view(entry):
+    """Console/API-safe projection of one catalog image entry (KGV
+    reconciler Task 4): every field the entry already carries, PLUS a
+    guaranteed-present top-level `quarantined` bool and `hash_verification`
+    verdict (both default to falsy/None for an image the reconciler has
+    never touched -- apply_hash_verification()/release_quarantine() only
+    ever set them, never pre-seed them), MINUS the two fields that exist
+    purely for catalog.py's own internal bookkeeping
+    (quarantine_actions_complete -- convergence-retry state;
+    quarantine_override_sha512 -- the re-quarantine-suppression ack) and
+    were never meant to be wire-visible."""
+    view = {k: v for k, v in entry.items()
+           if k not in ("quarantine_actions_complete",
+                        "quarantine_override_sha512")}
+    view["quarantined"] = bool(entry.get("quarantined"))
+    view["hash_verification"] = entry.get("hash_verification")
+    return view
 
 
 def _csrf_ok(provided, expected):
@@ -1066,7 +1111,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 elif images is None:
                     self._json(200, {"images": []})
                 else:
-                    self._json(200, {"images": images.list_images()})
+                    self._json(200, {"images": [_image_view(e)
+                                                for e in images.list_images()]})
                 return
             if path == "/api/images/importable":
                 if app.session_info(self._sid()) is None:
@@ -1319,6 +1365,17 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     info["username"],
                     creds.get_stage_host() if creds is not None else None,
                     *_telemetry_status_args()))
+                return
+            if path == "/api/settings/image-verification":
+                # KGV reconciler Task 4: schedule config + last_run, its own
+                # dedicated GET (unlike audit-export/ca-trust, which are read
+                # only via the big /api/settings blob above) -- the brief
+                # calls for GET+POST at this exact path.
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
+                self._json(200, bulkhash_refresh.read_settings(
+                    bulkhash_refresh.settings_path(state_dir)))
                 return
             if path == "/api/settings":
                 info = app.session_info(self._sid())
@@ -1681,6 +1738,58 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             except (BrokenPipeError, ConnectionError):
                 return
 
+        def _handle_offline_refresh(self, length):
+            """POST /api/image-verification/offline (KGV reconciler Task 4):
+            a size-capped tar upload, streamed straight to a private temp
+            file in bounded chunks (the image-upload PUT route's
+            _body_reader idiom -- never held whole in memory, even though
+            _MAX_OFFLINE_TAR allows tens of MB), then run through the exact
+            same fetch-less pipeline a scheduled/manual run uses
+            (bulkhash_refresh.run_refresh with tar_path=..., source=
+            "offline"). Session+CSRF gated like every other state-changing
+            route, and the session/size checks happen before this ever
+            touches the socket body, so an unauthenticated or oversized
+            request never makes this server buffer or write anything.
+            run_refresh's own audit_fn call already covers the pipeline
+            outcome (actor "system", matching every other source) -- this
+            handler stays thin and does not layer a second audit entry on
+            top of it."""
+            info = self._require_session_csrf()
+            if info is None:
+                return
+            if catalog is None:
+                self._json(404, {"error": "not found"}); return
+            if length <= 0 or length > _MAX_OFFLINE_TAR:
+                self._json(413, {"error": "missing or oversized body"}); return
+            state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
+            reader = self._body_reader(length)
+            tmp_dir = tempfile.mkdtemp(prefix="bulkhash-offline-")
+            try:
+                tmp_path = os.path.join(tmp_dir, "offline-feed.tar")
+                total = 0
+                try:
+                    with open(tmp_path, "wb") as f:
+                        while True:
+                            chunk = reader()
+                            if not chunk:
+                                break
+                            total += len(chunk)
+                            f.write(chunk)
+                except (TimeoutError, ConnectionError):
+                    self._json(408, {"error":
+                               "upload timed out or connection dropped"})
+                    return
+                if total != length:
+                    self._json(408, {"error":
+                               "upload timed out or connection dropped"})
+                    return
+                result = bulkhash_refresh.run_refresh(
+                    "offline", state_dir, catalog, tar_path=tmp_path,
+                    audit_fn=self._audit)
+                self._json(_refresh_http_status(result), result)
+            finally:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+
         def do_PUT(self):
             path = self.path.split("?", 1)[0]
             quarantine_prefix = "/api/peer-policy/quarantine/"
@@ -1790,6 +1899,14 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 length = int(self.headers.get("Content-Length", "0") or 0)
             except ValueError:
                 self._json(400, {"error": "bad content-length"})
+                return
+            if path == "/api/image-verification/offline":
+                # KGV reconciler Task 4: a large (tens-of-MB) tar upload --
+                # diverted before the generic cap/eager-read below (sized and
+                # built for small JSON bodies) so it is streamed to a private
+                # temp file in bounded chunks (the image-upload PUT idiom)
+                # rather than held whole in memory.
+                self._handle_offline_refresh(length)
                 return
             cap = _MAX_CSV if path == "/api/devices/import-csv" else _MAX_BODY
             if length > cap:
@@ -2264,6 +2381,96 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                      entry["subject"], entry["fingerprint_sha256"]),
                            src_ip=self.client_address[0])
                 self._json(200, {"entry": entry}); return
+            if path == "/api/settings/image-verification":
+                # KGV reconciler Task 4: schedule config (mode/hour_utc). A
+                # full replace like every other settings-write route above
+                # (ca-trust, telemetry-destination) -- last_run is system-
+                # managed (only run_refresh ever writes it) and is preserved
+                # here, never accepted from the request body.
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                mode = data.get("mode")
+                if mode not in bulkhash_refresh.MODES:
+                    self._json(400, {"error": "mode must be one of %s"
+                                     % (", ".join(bulkhash_refresh.MODES))})
+                    return
+                hour_utc = data.get("hour_utc", 0)
+                if not isinstance(hour_utc, int) or isinstance(hour_utc, bool) \
+                        or not 0 <= hour_utc <= 23:
+                    self._json(400, {"error": "hour_utc must be an integer 0-23"})
+                    return
+                state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
+                spath = bulkhash_refresh.settings_path(state_dir)
+                with bulkhash_refresh.SETTINGS_LOCK:
+                    prev = bulkhash_refresh.read_settings(spath)
+                    bulkhash_refresh.write_settings(
+                        spath, mode, hour_utc, prev["last_run"])
+                self._audit("bulkhash_schedule_config", "settings",
+                           action="set", target="bulkhash", actor=actor,
+                           detail="mode %s -> %s, hour_utc %s -> %s"
+                                  % (prev["mode"], mode, prev["hour_utc"],
+                                     hour_utc))
+                self._json(200, bulkhash_refresh.read_settings(spath)); return
+            if path == "/api/image-verification/refresh":
+                # KGV reconciler Task 4: run the reconciler synchronously on
+                # this request's own thread (ThreadingHTTPServer -- a slow
+                # run blocks only this one connection) and hand back
+                # run_refresh's result dict verbatim; run_refresh's own
+                # single-flight lock and audit_fn call cover concurrency and
+                # logging, so this handler stays a thin pass-through.
+                if catalog is None:
+                    self._json(404, {"error": "not found"}); return
+                state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
+                result = bulkhash_refresh.run_refresh(
+                    "manual", state_dir, catalog, audit_fn=self._audit)
+                self._json(_refresh_http_status(result), result); return
+            if path.startswith("/api/images/") \
+                    and path.endswith("/release-quarantine"):
+                # KGV reconciler Task 4: lift an active Cisco Bulk Hash
+                # quarantine. override=False re-runs the sha512 comparison
+                # (catalog.release_quarantine's job) and 409s with the
+                # stored verdict if it still disagrees; override=True
+                # requires a typed confirmation (confirm_text == the
+                # image's own filename) BEFORE catalog is ever touched --
+                # catalog.release_quarantine() already audits with the real
+                # actor, so this handler does not audit a second time.
+                if catalog is None:
+                    self._json(404, {"error": "not found"}); return
+                image_id = unquote(path[len("/api/images/"):
+                                        -len("/release-quarantine")])
+                if not image_id or "/" in image_id:
+                    self._json(400, {"error": "bad image id"}); return
+                body = self._json_body(raw)
+                if body is None:
+                    return
+                override = body.get("override", False)
+                if not isinstance(override, bool):
+                    self._json(400, {"error": "override must be a bool"})
+                    return
+                confirm_text = body.get("confirm_text", "")
+                if not isinstance(confirm_text, str):
+                    self._json(400, {"error": "confirm_text must be a string"})
+                    return
+                entry = catalog.get_image(image_id)
+                if entry is None:
+                    self._json(404, {"error": "no such image"}); return
+                if override and confirm_text != (entry.get("filename") or ""):
+                    self._json(400, {"error": "confirm_text must exactly "
+                                              "match the image filename to "
+                                              "confirm the override"})
+                    return
+                try:
+                    result = catalog.release_quarantine(
+                        image_id, actor, override=override)
+                except ValueError as exc:
+                    self._json(400, {"error": str(exc)}); return
+                except catalog_mod.QuarantineStillMismatched as exc:
+                    self._json(409, {"error": "quarantine_still_mismatched",
+                                     "image_id": exc.image_id,
+                                     "verdict": exc.hash_verification})
+                    return
+                self._json(200, result); return
             if path == "/api/devices":
                 if fleet is None:
                     self._json(404, {"error": "not found"}); return
