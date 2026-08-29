@@ -80,6 +80,10 @@ _no_quotes_or_newlines() {
       echo "ERROR: $1 must not contain a double quote or newline" >&2
       exit 1 ;;
   esac
+  case "$2" in *[[:space:]]*)
+    echo "ERROR: $1 contains whitespace, which would split the quoted docker-run-opts string" >&2
+    exit 1 ;;
+  esac
 }
 _no_quotes_or_newlines CATALOG_URL "$CATALOG_URL"
 _no_quotes_or_newlines CATALOG_TOKEN "$CATALOG_TOKEN"
@@ -149,6 +153,12 @@ fi
 XR_VERSION="$(printf '%s\n' "$VERSION_OUT" | tr -d '\r' \
   | grep -m1 -iE '^[[:space:]]*cisco[[:space:]]+ios[[:space:]-]*xr' \
   | sed -E 's/^.*[Vv]ersion[[:space:]]+//; s/[[:space:]]+$//')"
+# First token only ("25.4.2", dropping a trailing label like "LNT"): the
+# value rides INSIDE the quoted docker-run-opts string, where any embedded
+# space splits the opts and the validator rejects the stray token -- a
+# silent semantic commit failure (hardware-reproduced: '--env X=25.4.2 LNT'
+# fails the whole pseudo-atomic commit).
+XR_VERSION="${XR_VERSION%% *}"
 _no_quotes_or_newlines XR_VERSION "$XR_VERSION"
 DIR_OUT="$(printf 'dir harddisk: | include bytes free\n' | RUN 2>/dev/null)"
 # Cisco 8000 dir output ends "<N> kbytes total (<M> kbytes free)" -- KBYTES,

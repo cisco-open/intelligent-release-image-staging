@@ -223,8 +223,13 @@ _xr_install_run_live() {
   # itself from the same probe that already classifies the box as IOS-XR.
   _xr_install_stub_setup
   run _xr_install_run_live
-  [ "$status" -eq 0 ]
-  grep -q -- '--env IRIS_VERSION=25.4.2 LNT' "$FAKE_COMMAND_LOG"
+  [ "$status" -eq 0 ] || return 1
+  # First token only: "25.4.2 LNT" carries a space, and a space inside the
+  # quoted docker-run-opts splits the opts -- the validator rejects the stray
+  # token and the WHOLE pseudo-atomic commit fails (hardware-reproduced on
+  # 8010-R1). The delimiter grep pins the token boundary.
+  grep -q -- '--env IRIS_VERSION=25.4.2 --env' "$FAKE_COMMAND_LOG" || return 1
+  ! grep -q -- 'IRIS_VERSION=25.4.2 LNT' "$FAKE_COMMAND_LOG"
 }
 
 @test "live: forwards MODEL through to the activate line sent to the device" {
