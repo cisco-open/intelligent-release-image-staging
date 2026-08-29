@@ -113,8 +113,9 @@ def validate_record(record, allow_legacy=False):
     attachment = result.get("management_type", "")
     if attachment == "legacy_routed" and allow_legacy:
         return result
-    if attachment not in ("routed", "inband", "router-routed", "router-nat"):
-        raise ValueError("management_type must be routed, inband, router-routed, or router-nat")
+    if attachment not in ("routed", "inband", "router-routed", "router-nat", "xr-host"):
+        raise ValueError("management_type must be routed, inband, router-routed, "
+                         "router-nat, or xr-host")
     platform = result.get("platform", "")
     if platform not in ("", "guestshell", "iox", "router", "xr-appmgr"):
         raise ValueError(
@@ -160,6 +161,19 @@ def validate_record(record, allow_legacy=False):
         if allowed is not None and platform not in allowed:
             raise ValueError("model %s cannot run %s; allowed: %s"
                              % (model, platform, ", ".join(allowed) or "none"))
+    # xr-host <-> xr-appmgr is a mutual requirement on any fully-validated
+    # record: the appmgr container is the only agent that runs against
+    # xr-host's bare network stack, and xr-appmgr is the only platform that
+    # ever means that. Before this, no such pairing existed anywhere, which
+    # is how an XR router ended up recorded as 'inband' with a made-up
+    # VLAN. The legacy short-circuit above (allow_legacy) is untouched, so
+    # an inventory-only device may still carry platform xr-appmgr before an
+    # attachment is chosen.
+    if attachment == "xr-host":
+        if platform != "xr-appmgr":
+            raise ValueError("management_type xr-host requires platform xr-appmgr")
+    elif platform == "xr-appmgr":
+        raise ValueError("platform xr-appmgr requires management_type xr-host")
     result["schema_version"] = 2
     result["management_type"] = attachment
     if attachment == "routed":
@@ -187,6 +201,17 @@ def validate_record(record, allow_legacy=False):
         # Guest Shell never uses it.
         if result.get("ios_ssh_host"):
             result["ios_ssh_host"] = _ipv4(result.get("ios_ssh_host"), "ios_ssh_host")
+    elif attachment == "xr-host":
+        # The appmgr container runs on the router's own network stack -- no
+        # VLAN, SVI, app IP/mask/gateway, VPG, or NAT interface exists to
+        # configure, so a non-empty one is a caller mistake, not silently
+        # tolerated garbage.
+        for key in ("iris_vlan", "svi_ip", "svi_mask", "app_ip", "app_mask",
+                    "app_gateway", "inband_vlan", "ios_ssh_host", "vpg_number",
+                    "nat_interface"):
+            if result.get(key):
+                raise ValueError(
+                    "xr-host needs no app-network fields; remove %s" % key)
     else:
         result["vpg_number"] = str(_vpg(result.get("vpg_number")))
         app_ip, app_mask, app_gateway = _static_network(
@@ -305,7 +330,17 @@ class FleetStore:
                 # family and then fail validation (or, worse, retarget a plan).
                 old_router = previous_record.get("management_type") in _ROUTER_TYPES
                 new_router = incoming_attachment in _ROUTER_TYPES
-                if old_router and new_router:
+                old_xr = previous_record.get("management_type") == "xr-host"
+                new_xr = incoming_attachment == "xr-host"
+                if old_xr or new_xr:
+                    # xr-host carries none of the XE addressing fields, and no
+                    # XE attachment carries xr-host's (none); either direction
+                    # of this swap must not let a stale one survive.
+                    for key in ("iris_vlan", "svi_ip", "svi_mask", "app_ip",
+                                "app_mask", "app_gateway", "inband_vlan",
+                                "ios_ssh_host", "vpg_number", "nat_interface"):
+                        merged.pop(key, None)
+                elif old_router and new_router:
                     # VPG and app addressing are shared by both router modes;
                     # only the NAT outside field is mode-specific.
                     if incoming_attachment == "router-routed":
@@ -325,13 +360,13 @@ class FleetStore:
             # are stored as legacy_routed and must pick an attachment before
             # deployment -- OnboardService/plan enforce that at onboard time.
             if merged.get("management_type") in (
-                    "routed", "inband", "router-routed", "router-nat"):
+                    "routed", "inband", "router-routed", "router-nat", "xr-host"):
                 normalized = validate_record(merged)
             elif merged.get("management_type", "") in ("", "legacy_routed"):
                 normalized = _legacy_like(merged)
             else:
                 raise ValueError("management_type must be routed, inband, router-routed, "
-                                 "router-nat, or legacy_routed")
+                                 "router-nat, xr-host, or legacy_routed")
             normalized["registered_at"] = self._registration_stamp(previous)
             data["devices"][did] = normalized
             data["revision"] += 1

@@ -3990,8 +3990,11 @@ def test_device_platform_invalid_value_400(tmp_path):
 
 def test_device_platform_accepts_the_xr_agent_on_xr_hardware(tmp_path):
     """The devices table lets an operator change a row's agent install. It
-    must be able to SET xr-appmgr on an IOS-XR box -- and the fleet guard
-    still refuses it on hardware that is not IOS-XR."""
+    must be able to SET xr-appmgr on an IOS-XR box before its attachment is
+    classified (the legacy short-circuit; platform xr-appmgr is now
+    mutually bound to management_type xr-host on any fully-validated row,
+    so xr1 stays unclassified here) -- and the fleet guard still refuses
+    xr-appmgr on hardware that is not IOS-XR."""
     host, port, deps, stop = _serve_full(tmp_path)
     _app, fleet, _creds, _cat = deps
     try:
@@ -3999,8 +4002,7 @@ def test_device_platform_accepts_the_xr_agent_on_xr_hardware(tmp_path):
                   "svi_ip": "10.20.0.1", "svi_mask": "255.255.255.252",
                   "app_ip": "10.20.0.2", "app_mask": "255.255.255.252",
                   "app_gateway": "10.20.0.1"}
-        fleet.upsert(dict(routed, device_id="xr1", device_ip="10.0.0.9",
-                          model="8201"))
+        fleet.upsert({"device_id": "xr1", "device_ip": "10.0.0.9", "model": "8201"})
         fleet.upsert(dict(routed, device_id="sw1", device_ip="10.0.0.8",
                           model="C9300-48UXM"))
         ck, csrf = _auth(host, port)

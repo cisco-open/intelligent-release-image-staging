@@ -20,6 +20,14 @@ _ROUTER = {"device_id": "r1", "device_ip": "192.0.2.10",
            "management_type": "router-routed", "vpg_number": "10",
            "app_ip": "10.8.0.2", "app_mask": "255.255.255.252",
            "app_gateway": "10.8.0.1", "model": "C8000V", "platform": "router"}
+_XRHOST = {"device_id": "xr1", "device_ip": "10.0.0.9",
+           "management_type": "xr-host", "model": "8201", "platform": "xr-appmgr"}
+_XR_FORBIDDEN_FIELDS = {
+    "iris_vlan": "100", "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
+    "app_ip": "10.0.0.3", "app_mask": "255.255.255.252", "app_gateway": "10.0.0.4",
+    "inband_vlan": "100", "ios_ssh_host": "10.0.0.5", "vpg_number": "5",
+    "nat_interface": "GigabitEthernet1",
+}
 
 
 def test_upsert_get_list_delete(tmp_path):
@@ -161,7 +169,7 @@ def test_validate_record_model_guardrail_matrix(tmp_path):
         dict(_ROUTED, device_id="asr-gs", model="ASR1001", platform="guestshell"),
         dict(_ROUTED, device_id="csr-gs", model="CSR1000v", platform="guestshell"),
         dict(_ROUTER, device_id="c8-router", model="C8000V", platform="router"),
-        dict(_ROUTED, device_id="xr-8201", model="8201", platform="xr-appmgr"),
+        dict(_XRHOST, device_id="xr-8201"),
     ]
     for record in ok:
         saved = fs.upsert(record)
@@ -196,13 +204,16 @@ def test_validate_record_accepts_the_xr_platform_on_xr_hardware(tmp_path):
     device may carry a platform now -- the one that is IOS-XR. v1 is
     validated on the Cisco 8000 series only, so this is the one model shape
     that qualifies (see the refusal test below for a family-ambiguous model
-    that does NOT, even once os_family classifies it as XR)."""
+    that does NOT, even once os_family classifies it as XR). xr-appmgr is
+    mutually bound to management_type xr-host (see the bidirectional tests
+    below), so acceptance is exercised through that pairing rather than the
+    fabricated 'routed' attachment this used to (incorrectly) accept."""
     fs = _fs(tmp_path)
-    saved = fs.upsert(dict(_ROUTED, device_id="xr-8201", model="8201",
+    saved = fs.upsert(dict(_XRHOST, device_id="xr-8201", model="8201",
                            platform="xr-appmgr"))
     assert saved["platform"] == "xr-appmgr"
     # and with no model recorded yet, where only the classified family knows
-    saved = fs.upsert(dict(_ROUTED, device_id="xr-nomodel", model="",
+    saved = fs.upsert(dict(_XRHOST, device_id="xr-nomodel", model="",
                            platform="xr-appmgr", os_family="xr"))
     assert saved["platform"] == "xr-appmgr"
 
@@ -260,6 +271,112 @@ def test_validate_record_normalizes_sys_suffix_on_import(tmp_path):
     fs = _fs(tmp_path)
     with pytest.raises(ValueError, match="cannot run"):
         fs.upsert(dict(_ROUTED, device_id="d2", model="8201-SYS", platform="guestshell"))
+
+
+def test_xr_host_accepted_and_prunes_old_addressing_fields_on_upsert(tmp_path):
+    """The matrix's core positive case: xr-host + xr-appmgr + 8201 is
+    accepted, and switching an existing XE-attached device to xr-host prunes
+    every stale app-network field rather than carrying it forward silently
+    -- the exact fabrication risk this task closes (a live run had to
+    fabricate an 'inband' row for an XR router because nothing honest
+    existed)."""
+    fs = _fs(tmp_path)
+    fs.upsert(dict(_ROUTED, device_id="was-routed"))
+    saved = fs.upsert({"device_id": "was-routed", "management_type": "xr-host",
+                       "model": "8201", "platform": "xr-appmgr"})
+    assert saved["management_type"] == "xr-host" and saved["platform"] == "xr-appmgr"
+    for field in _XR_FORBIDDEN_FIELDS:
+        assert not saved.get(field), field
+
+    # and a fresh xr-host row, with no prior state to prune
+    fresh = fs.upsert(dict(_XRHOST, device_id="fresh-xr"))
+    assert fresh["management_type"] == "xr-host" and fresh["platform"] == "xr-appmgr"
+    for field in _XR_FORBIDDEN_FIELDS:
+        assert not fresh.get(field), field
+
+
+def test_xr_host_rejects_every_app_network_field(tmp_path):
+    """XR host networking shares the router's own network stack -- no VLAN,
+    SVI, app IP/mask/gateway, VPG, or NAT interface exists to configure, so
+    a non-empty one is refused by name, not silently dropped."""
+    fs = _fs(tmp_path)
+    for field, value in _XR_FORBIDDEN_FIELDS.items():
+        with pytest.raises(ValueError, match=field):
+            fs.upsert(dict(_XRHOST, device_id="xr-forbidden-" + field, **{field: value}))
+
+
+def test_xr_host_requires_xr_appmgr_platform(tmp_path):
+    """One direction of the mutual coupling: management_type xr-host demands
+    platform xr-appmgr -- no other platform value (including blank) may
+    pair with it. Model is blanked here so the pre-existing model<->platform
+    ladder (which would otherwise catch guestshell/iox on an 8201 first, via
+    a different, equally valid message) abstains and this check is the one
+    that fires."""
+    fs = _fs(tmp_path)
+    for platform in ("", "guestshell", "iox"):
+        with pytest.raises(ValueError,
+                           match="management_type xr-host requires platform xr-appmgr"):
+            fs.upsert(dict(_XRHOST, device_id="xr-bad-platform", model="",
+                           platform=platform))
+    # platform=router hits the pre-existing router<->platform coupling
+    # first, but xr-host is refused all the same.
+    with pytest.raises(ValueError, match="platform router requires"):
+        fs.upsert(dict(_XRHOST, device_id="xr-bad-router-platform", platform="router"))
+
+
+def test_xr_appmgr_platform_requires_xr_host_management_type(tmp_path):
+    """The other direction: a fully-validated record naming platform
+    xr-appmgr with any XE management_type is refused -- this closes the gap
+    that let an XR router get recorded as 'inband' with a made-up VLAN.
+    router-routed/router-nat additionally trip the pre-existing
+    router<->platform coupling (an XR model is never platform router), so
+    only routed/inband exercise the new message text; all four are
+    refused."""
+    fs = _fs(tmp_path)
+    with pytest.raises(ValueError,
+                       match="platform xr-appmgr requires management_type xr-host"):
+        fs.upsert(dict(_XRHOST, device_id="xr-bad-routed", management_type="routed"))
+    with pytest.raises(ValueError,
+                       match="platform xr-appmgr requires management_type xr-host"):
+        fs.upsert(dict(_XRHOST, device_id="xr-bad-inband", management_type="inband"))
+    for attachment in ("router-routed", "router-nat"):
+        with pytest.raises(ValueError):
+            fs.upsert(dict(_XRHOST, device_id="xr-bad-" + attachment,
+                           management_type=attachment))
+
+
+def test_xr_host_still_refused_by_model_platform_ladder(tmp_path):
+    """xr-host + xr-appmgr composes with the pre-existing model<->platform
+    guardrail rather than bypassing it -- a switch model must still be
+    refused even once it carries an otherwise-valid xr-host/xr-appmgr
+    pairing."""
+    fs = _fs(tmp_path)
+    with pytest.raises(ValueError, match="IOS-XR"):
+        fs.upsert(dict(_XRHOST, device_id="xr-on-a-switch", model="C9300-48UXM"))
+
+
+def test_legacy_upsert_accepts_xr_appmgr_platform_without_attachment(tmp_path):
+    """The legacy short-circuit stays untouched: an inventory-only device may
+    carry platform xr-appmgr before an attachment is chosen (the console
+    records the live probe's platform before the operator picks xr-host)."""
+    fs = _fs(tmp_path)
+    saved = fs.upsert({"device_id": "xr-inventory", "device_ip": "10.0.0.9",
+                       "model": "8201", "platform": "xr-appmgr"})
+    assert saved["platform"] == "xr-appmgr"
+    assert saved["management_type"] == "legacy_routed"
+
+
+def test_management_type_enum_error_mentions_xr_host():
+    with pytest.raises(ValueError, match="xr-host"):
+        gui_fleet.validate_record({"device_id": "d1", "device_ip": "10.0.0.1",
+                                   "management_type": "bogus"})
+
+
+def test_upsert_management_type_enum_error_mentions_xr_host(tmp_path):
+    fs = _fs(tmp_path)
+    with pytest.raises(ValueError, match="xr-host"):
+        fs.upsert({"device_id": "d1", "device_ip": "10.0.0.1",
+                  "management_type": "bogus"})
 
 
 def test_management_type_transitions_clear_only_incompatible_fields(tmp_path):
