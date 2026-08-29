@@ -382,13 +382,37 @@ class TestParse:
         tar_path = _signed_fixture(tmp_path, "", key)
         assert list(bulkhash.parse(tar_path)) == []
 
-    def test_row_missing_image_size_is_skipped_not_fatal(self, tmp_path,
-                                                          signing_key):
+    def test_row_with_blank_image_size_is_kept_as_wildcard(self, tmp_path,
+                                                            signing_key):
+        """Live-feed finding (2026-08-29): ~17% of real rows -- including
+        exact duplicates of otherwise-sized rows -- publish a blank
+        IMAGE_SIZE. Such a row is real, hashed data (non-blank sha512),
+        just missing the size column; it must be KEPT (image_size=None,
+        a size wildcard for reconcile()'s join), not dropped, or every
+        catalog image whose only feed row happens to be blank-size can
+        never be reconciled at all."""
         _cert, key = signing_key
         rows_text = (
             "isr4300-universalk9.16.03.01.SPA.bin,D949B99A104B23B2129718220"
             "C78F28E,2E0D4932,August 03 2016 00:00:00 PDT-0700,,\r\n"
             + REAL_ROW)
+        tar_path = _signed_fixture(tmp_path, rows_text, key)
+        rows = list(bulkhash.parse(tar_path))
+        assert len(rows) == 2
+        assert rows[0].image_size is None
+        assert rows[0].sha512 == "2e0d4932"
+        assert rows[1].image_size == 12345
+
+    def test_row_with_garbage_non_blank_image_size_is_still_skipped(
+            self, tmp_path, signing_key):
+        """Only a BLANK IMAGE_SIZE becomes a wildcard; a non-numeric,
+        non-blank value is still genuinely malformed data and is skipped
+        exactly as before."""
+        _cert, key = signing_key
+        rows_text = (
+            "isr4300-universalk9.16.03.01.SPA.bin,D949B99A104B23B2129718220"
+            "C78F28E,2E0D4932,August 03 2016 00:00:00 PDT-0700,,not-a-size"
+            "\r\n" + REAL_ROW)
         tar_path = _signed_fixture(tmp_path, rows_text, key)
         rows = list(bulkhash.parse(tar_path))
         assert len(rows) == 1
@@ -551,16 +575,95 @@ class TestReconcile:
         verdicts = bulkhash.reconcile(rows, images)
         assert verdicts["img-1"]["deferral"] is False
 
-    def test_duplicate_file_name_and_size_last_row_wins(self):
+    def test_duplicate_rows_any_match_wins_not_last_row_wins(self):
+        """The old last-wins dict-overwrite could fabricate a false
+        mismatch: with two same-name/same-size rows, whichever was built
+        into the join dict LAST silently discarded the other, so an image
+        whose real sha512 matched the FIRST (discarded) row read as
+        mismatch. any-match-wins fixes this: a match anywhere among the
+        candidates is verified, regardless of position."""
         rows = [
             _row("image.bin", "first-hash", 100),
             _row("image.bin", "second-hash", 100),
         ]
         images = [{"image_id": "img-1", "filename": "image.bin",
-                   "size": 100, "sha512": "second-hash"}]
+                   "size": 100, "sha512": "first-hash"}]
         verdicts = bulkhash.reconcile(rows, images)
         assert verdicts["img-1"]["state"] == "verified"
-        assert verdicts["img-1"]["feed_sha512"] == "second-hash"
+        assert verdicts["img-1"]["feed_sha512"] == "first-hash"
+
+    # -- live-feed finding (2026-08-29): wildcard (blank/None) IMAGE_SIZE
+    # -- rows must still join and reconcile correctly
+    def test_blank_size_row_verifies_a_matching_image(self):
+        rows = [_row("cat9k_iosxe.17.12.04.SPA.bin", "real-hash", None)]
+        images = [{"image_id": "img-1",
+                   "filename": "cat9k_iosxe.17.12.04.SPA.bin",
+                   "size": 123456, "sha512": "real-hash"}]
+        verdicts = bulkhash.reconcile(rows, images)
+        assert verdicts["img-1"]["state"] == "verified"
+        assert verdicts["img-1"]["feed_sha512"] == "real-hash"
+
+    def test_blank_size_candidate_with_differing_sha512_is_mismatch(self):
+        rows = [_row("image.bin", "feed-hash", None)]
+        images = [{"image_id": "img-1", "filename": "image.bin",
+                   "size": 100, "sha512": "catalog-hash"}]
+        verdicts = bulkhash.reconcile(rows, images)
+        assert verdicts["img-1"]["state"] == "mismatch"
+        assert verdicts["img-1"]["feed_sha512"] == "feed-hash"
+
+    def test_duplicate_sized_and_blank_rows_either_matching_verifies(self):
+        """The C9800 shape observed live: Cisco published both a sized
+        row and a blank-size duplicate for the same image; either one
+        carrying the right sha512 must verify."""
+        rows = [
+            _row("c8000v-universalk9.17.12.04.SPA.bin", "real-hash", 555),
+            _row("c8000v-universalk9.17.12.04.SPA.bin", "real-hash", None),
+        ]
+        images = [{"image_id": "img-1",
+                   "filename": "c8000v-universalk9.17.12.04.SPA.bin",
+                   "size": 555, "sha512": "real-hash"}]
+        verdicts = bulkhash.reconcile(rows, images)
+        assert verdicts["img-1"]["state"] == "verified"
+
+    def test_no_same_name_rows_is_not_in_feed_even_with_other_names(self):
+        rows = [_row("other.bin", "hash", None),
+                _row("another.bin", "hash", 100)]
+        images = [{"image_id": "img-1", "filename": "image.bin",
+                   "size": 100, "sha512": "hash"}]
+        verdicts = bulkhash.reconcile(rows, images)
+        assert verdicts["img-1"]["state"] == "not_in_feed"
+
+    def test_mismatch_metadata_prefers_exact_size_over_blank_size_candidate(
+            self):
+        """On mismatch, the verdict's feed_sha512/publish_date/deferral
+        must come from the exact-size candidate when one exists, not an
+        arbitrary/blank-size one -- the exact-size row is the more
+        specific, more trustworthy match for reporting."""
+        rows = [
+            _row("image.bin", "blank-row-hash", None,
+                 publish_date="Blank Pub Date", deferral="Deferred"),
+            _row("image.bin", "exact-row-hash", 100,
+                 publish_date="Exact Pub Date", deferral="Active"),
+        ]
+        images = [{"image_id": "img-1", "filename": "image.bin",
+                   "size": 100, "sha512": "catalog-hash"}]
+        verdicts = bulkhash.reconcile(rows, images)
+        assert verdicts["img-1"]["state"] == "mismatch"
+        assert verdicts["img-1"]["feed_sha512"] == "exact-row-hash"
+        assert verdicts["img-1"]["publish_date"] == "Exact Pub Date"
+        assert verdicts["img-1"]["deferral"] is False
+
+    def test_mismatch_metadata_falls_back_to_blank_size_candidate(self):
+        """When NO exact-size candidate exists, mismatch metadata falls
+        back to the (first) blank-size candidate."""
+        rows = [_row("image.bin", "blank-row-hash", None,
+                     publish_date="Blank Pub Date")]
+        images = [{"image_id": "img-1", "filename": "image.bin",
+                   "size": 999, "sha512": "catalog-hash"}]
+        verdicts = bulkhash.reconcile(rows, images)
+        assert verdicts["img-1"]["state"] == "mismatch"
+        assert verdicts["img-1"]["feed_sha512"] == "blank-row-hash"
+        assert verdicts["img-1"]["publish_date"] == "Blank Pub Date"
 
     def test_multiple_images_independent_verdicts(self):
         rows = [_row("a.bin", "hash-a", 10), _row("b.bin", "hash-b", 20)]

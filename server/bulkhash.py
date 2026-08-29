@@ -15,6 +15,15 @@ untouched -- a broken feed can never quarantine anything):
     parse(tar_path)                    -- extract+parse the CSV (raises)
     reconcile(rows, images)            -- pure join -> per-image verdicts
 
+A live run against the real feed (2026-08-29) found Cisco publishes a
+blank IMAGE_SIZE on a measured ~17% of rows -- including exact duplicates
+of otherwise-sized rows for the same image (observed live: a C9800
+image). ``parse()`` keeps such rows (``Row.image_size = None``, a size
+wildcard) instead of dropping them, and ``reconcile()`` joins each image
+against every same-filename row whose size matches OR is that wildcard,
+verifying on ANY candidate's sha512 match -- see ``reconcile()``'s own
+docstring for the exact semantics and the metadata tie-break on mismatch.
+
 The feed (confirmed by a live download, 2026-08-29): a gzip tar containing
 one timestamped directory holding ``<name>.csv`` (comma-separated, CRLF
 line endings, header ``FILE_NAME,MD5_CHECKSUM,SHA512_CHECKSUM,PUBLISH_DATE,
@@ -298,10 +307,20 @@ def _parse_csv_rows(text):
         if len(fields) < 6:
             continue  # malformed data row -- skip rather than fail the feed
         file_name, md5, sha512, publish_date, deferral, size_s = fields[:6]
-        try:
-            size = int(size_s.strip())
-        except ValueError:
-            continue  # e.g. IMAGE_SIZE blank on some older feed rows
+        size_s = size_s.strip()
+        if size_s:
+            try:
+                size = int(size_s)
+            except ValueError:
+                continue  # genuinely non-numeric IMAGE_SIZE -- malformed
+        else:
+            # A blank IMAGE_SIZE is real on the live feed (~17% of rows,
+            # 2026-08-29 measurement, including exact duplicates of
+            # otherwise-sized rows) -- kept as a size WILDCARD (None) so
+            # reconcile() can still join it by filename alone, rather than
+            # silently losing every image whose only feed row happens to
+            # be blank-size.
+            size = None
         sha512 = sha512.strip().lower()
         if not sha512:
             # A blank SHA512_CHECKSUM (real, observed on the live feed) is
@@ -323,11 +342,15 @@ def parse(tar_path):
     caller either gets a complete result or an exception -- never a partial
     iteration that dies partway through. Blank lines and
     `##START_DATE##`/`##END_DATE##`-style sentinel/batch-marker rows are
-    skipped; a data row with a blank/non-numeric IMAGE_SIZE, or a blank
-    SHA512_CHECKSUM, is skipped (both real, observed on the live feed for
-    some older entries) rather than failing the whole feed -- a row this
-    module can never usefully compare against a catalog image's own
-    sha512 must never be joinable by `reconcile()` in the first place."""
+    skipped. A blank IMAGE_SIZE is real on the live feed (~17% of rows,
+    2026-08-29 measurement, including exact duplicates of otherwise-sized
+    rows) and is KEPT, with `Row.image_size` set to `None` -- a size
+    wildcard `reconcile()` joins on filename alone, so an image whose
+    only feed row happens to be blank-size can still be reconciled. A
+    genuinely non-numeric (not blank) IMAGE_SIZE, or a blank
+    SHA512_CHECKSUM, is skipped instead of failing the whole feed -- a
+    row with no usable sha512 to compare against a catalog image's own
+    must never be joinable by `reconcile()` at all."""
     tf, members = _open_and_scan(tar_path)
     with tf:
         csv_name = _find_csv_member_name(members)
@@ -372,21 +395,39 @@ def reconcile(rows, images):
     IRIS catalog entries, each either a dict with `image_id`, `filename`,
     `size`, `sha512` keys or a `(image_id, filename, size, sha512)` tuple.
 
-    Joins on `(FILE_NAME == filename) AND (IMAGE_SIZE == size)`, then
-    compares `SHA512_CHECKSUM` (case-insensitively) to the image's own
-    sha512:
+    A feed row is a CANDIDATE for an image when `FILE_NAME == filename`
+    AND (`IMAGE_SIZE == size` OR `IMAGE_SIZE` is the wildcard `None` --
+    see `parse()`/`_parse_csv_rows`: a blank IMAGE_SIZE, real on the live
+    feed, is kept as `None` rather than dropped, specifically so a
+    blank-size row can still join). `SHA512_CHECKSUM` is then compared
+    (case-insensitively) against every candidate, ANY-MATCH-WINS:
 
-    - "verified": a feed row matched by name+size and the sha512 agrees.
-    - "mismatch": a feed row matched by name+size but the sha512 disagrees.
-    - "not_in_feed": no feed row matches by name+size -- the expected,
-      non-alarming state for a customer-built image Cisco never published.
+    - "verified": at least one candidate's sha512 agrees. This was a
+      real live-feed gap (2026-08-29): three of six catalog images
+      verified against Cisco's real, hash-identical published row only
+      after this fix, because that row happened to carry a blank
+      IMAGE_SIZE and the old strict (name, size) join could never match
+      it at all.
+    - "mismatch": candidates exist, but NONE of their sha512s agree.
+    - "not_in_feed": no candidates at all (no feed row shares the
+      filename, or none of the same-name rows has a matching/wildcard
+      size) -- the expected, non-alarming state for a customer-built
+      image Cisco never published.
 
-    `deferral` reflects the matched row's DEFERRAL_STATUS (True whenever
-    it is present and not "Active"); it never affects `state` -- deferral
-    is a separate, non-quarantining signal. A duplicate (FILE_NAME,
-    IMAGE_SIZE) key across `rows` is not expected from Cisco's feed; if it
-    happens, the LAST such row wins (plain dict build in iteration order)
-    -- deterministic, not an error.
+    The verdict's `feed_sha512`/`publish_date`/`deferral` come from ONE
+    representative row: on "verified", whichever candidate matched (the
+    first, in `rows` iteration order, if more than one does -- any real
+    match is equally authoritative). On "mismatch", the exact-size
+    candidate is preferred when one exists (a more specific match than a
+    wildcard row), else the first blank-size candidate.
+
+    Duplicate feed rows for the same (FILE_NAME, IMAGE_SIZE) -- observed
+    live, e.g. Cisco publishing both a sized row and a blank-size
+    duplicate for the same image -- are NOT deduplicated or overwritten:
+    every one is a candidate, and any-match-wins reads all of them. This
+    replaces an earlier last-row-wins dict-overwrite design, which could
+    fabricate a false mismatch whenever the real matching row was not the
+    last duplicate seen.
 
     Every `Row` in `rows` is guaranteed a non-blank `sha512` (`parse()`
     skips any feed row with a blank SHA512_CHECKSUM before it ever gets
@@ -396,9 +437,9 @@ def reconcile(rows, images):
     published image is hashed at publish time) raises `BulkHashError`
     immediately: it must never silently produce "verified" by comparing
     two blank strings, nor any other verdict."""
-    by_key = {}
+    rows_by_name = {}
     for row in rows:
-        by_key[(row.file_name, row.image_size)] = row
+        rows_by_name.setdefault(row.file_name, []).append(row)
 
     verdicts = {}
     for image in images:
@@ -407,17 +448,28 @@ def reconcile(rows, images):
         if not image_sha512:
             raise BulkHashError(
                 "image %r has no sha512 to reconcile against" % (image_id,))
-        row = by_key.get((filename, size))
-        if row is None:
+
+        candidates = [r for r in rows_by_name.get(filename, ())
+                     if r.image_size == size or r.image_size is None]
+        if not candidates:
             verdicts[image_id] = {
                 "state": STATE_NOT_IN_FEED, "feed_sha512": None,
                 "publish_date": None, "deferral": False}
             continue
-        matches = row.sha512 == image_sha512
+
+        matched = next(
+            (r for r in candidates if r.sha512 == image_sha512), None)
+        if matched is not None:
+            state, row = STATE_VERIFIED, matched
+        else:
+            exact = [r for r in candidates if r.image_size == size]
+            state, row = STATE_MISMATCH, (exact[0] if exact else
+                                          candidates[0])
+
         deferral = bool(row.deferral_status) and \
             row.deferral_status.lower() != "active"
         verdicts[image_id] = {
-            "state": STATE_VERIFIED if matches else STATE_MISMATCH,
+            "state": state,
             "feed_sha512": row.sha512,
             "publish_date": row.publish_date,
             "deferral": deferral,
