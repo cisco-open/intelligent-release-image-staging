@@ -31,19 +31,43 @@ def test_missing_required_key_raises(tmp_path):
         agent_config.load(str(p))
 
 
-def test_catalog_ca_defaults_empty_when_absent(tmp_path):
-    # An old config with no catalog_ca still loads; the key defaults to "" (falsy),
-    # which the agent treats as "TLS not pinned" (verify-if-present off). Required
-    # keys + concrete IP stay green.
+def test_catalog_ca_absent_from_conf_stays_absent_after_load(tmp_path):
+    # SECURITY: catalog_ca is deliberately NOT in DEFAULTS. A conf that omits
+    # it must load with the key still absent -- never backfilled to "" -- or
+    # make_catalog_context's fail-closed check can't tell "operator genuinely
+    # never configured this" apart from "the backfill invented an empty
+    # string", and (worse) an invented "" would get re-persisted to disk by
+    # the very next write_conf() round-trip (e.g. any reconcile_conf_key call
+    # in an entrypoint), permanently baking the omission into the file.
+    # Required keys + concrete IP stay green.
     p = tmp_path / "agent.conf"
     p.write_text(
         "catalog_url = https://100.90.168.20:8443\n"
         "catalog_token = deadbeef\n"
         "device_id = 100.92.9.3\n")
     cfg = agent_config.load(str(p))
-    assert cfg["catalog_ca"] == ""
+    assert "catalog_ca" not in cfg
+    assert cfg.get("catalog_ca") is None
     assert cfg["catalog_url"] == "https://100.90.168.20:8443"
     assert cfg["device_id"] == "100.92.9.3"
+
+
+def test_catalog_ca_omission_survives_a_write_conf_round_trip(tmp_path):
+    # Reproduces the entrypoint.sh reconcile_conf_key pattern that used to
+    # persist the invented "": load() a dropped conf that omits catalog_ca,
+    # touch an unrelated key, write_conf() the whole cfg back. catalog_ca
+    # must never appear on disk afterward.
+    p = tmp_path / "agent.conf"
+    p.write_text(
+        "catalog_url = https://100.90.168.20:8443\n"
+        "catalog_token = deadbeef\n"
+        "device_id = 100.92.9.3\n")
+    cfg = agent_config.load(str(p))
+    cfg["agent_version"] = "2026.08.29"
+    agent_config.write_conf(str(p), cfg)
+    assert "catalog_ca" not in p.read_text()
+    reloaded = agent_config.load(str(p))
+    assert "catalog_ca" not in reloaded
 
 
 def test_catalog_ca_parsed_when_present(tmp_path):

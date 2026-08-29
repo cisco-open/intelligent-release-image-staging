@@ -1520,29 +1520,46 @@ def run_once(cfg, deps, state):
     return "multi:" + ",".join(statuses)
 
 
-# ---- catalog TLS context selection (#12: verify-if-present) ----
-# Pure + unit-tested (test_catalog_tls.py) so the verify/warn branch is covered
-# off-box even though build_deps itself is `# pragma: no cover`.
+# ---- catalog TLS context selection (#12: FAIL CLOSED on an unpinned CA) ----
+# Pure + unit-tested (test_catalog_tls.py) so the verify/refuse branch is
+# covered off-box even though build_deps itself is `# pragma: no cover`.
 
-def make_catalog_context(cfg, warn):
+class CatalogTLSConfigError(Exception):
+    """Raised by make_catalog_context() when catalog_ca is unset or its file
+    is missing. Never caught to fall back to an unverified connection: the
+    previous "verify-if-present" behavior silently downgraded to
+    ssl._create_unverified_context() (no chain or hostname validation at all)
+    whenever a dropped conf happened to omit catalog_ca -- a real
+    MITM-exploitable TLS downgrade on the device's control-plane channel,
+    logged only by a single warn() call nobody was watching for. Every
+    platform entrypoint bakes/synthesizes a real catalog_ca on first boot, so
+    a device that raises this has a genuine misconfiguration, not a
+    legitimate legacy state."""
+
+
+def make_catalog_context(cfg, error):
     """Return the ssl.SSLContext for the catalog connection.
 
-    verify-if-present (LOCKED back-compat, spec §4.6):
+    FAIL CLOSED (security fix; replaces the old "verify-if-present", spec
+    §4.6 back-compat fallback):
       * catalog_ca set AND the file exists -> a VERIFYING context
         (ssl.create_default_context(cafile=...) does full chain + hostname/IP-SAN
         validation; catalog_url uses the SAN IP so the match succeeds);
-      * otherwise -> today's UNVERIFIED context, but call warn(msg) once so an
-        agent-only upgrade (new bundle, old config with no catalog_ca) does NOT
-        break the running fleet — it just logs that TLS is not pinned.
-    `warn` is the agent's syslog emit (injected so this is testable off-box)."""
+      * otherwise -> call error(msg) once, then raise CatalogTLSConfigError.
+        The connection attempt fails outright -- an operator sees a device
+        that cannot reach the catalog, never one silently exposed over an
+        unverified TLS connection. This function must NEVER return
+        ssl._create_unverified_context().
+    `error` is the agent's syslog emit (injected so this is testable off-box)."""
     import os
     import ssl
     ca = cfg.get("catalog_ca")
     if ca and os.path.exists(ca):
         return ssl.create_default_context(cafile=ca)
-    warn("catalog_ca not set or file missing - TLS NOT verified (legacy); "
-         "re-run installer to pin")
-    return ssl._create_unverified_context()
+    msg = ("catalog_ca is not set; refusing an unverified TLS connection - "
+           "set catalog_ca in the agent conf")
+    error(msg)
+    raise CatalogTLSConfigError(msg)
 
 
 # ---- Phase 2: catalog token self-refresh (half-life, stdlib only) ----
@@ -2294,7 +2311,25 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
     import urllib.request
     import catalog_client
 
-    ctx = make_catalog_context(cfg, lambda m: emit("TLS-WARN", m))
+    # Runtime-mode seam: Guest Shell `cli` on the C9300 (default, unchanged) or
+    # an SSH-to-self transport in a plain IOx Docker app on the IE-3400. Gated by
+    # IRIS_RUNTIME_MODE / conf `runtime_mode`; see cli_ssh.select_cli. Bound
+    # (and `emit` defined) BEFORE make_catalog_context below: its fail-closed
+    # path calls the error callback SYNCHRONOUSLY, unlike copy_to_root/reclaim
+    # further down whose closures over `emit`/`cli_execute` aren't invoked
+    # until well after build_deps has returned. Calling make_catalog_context
+    # first (as this used to) reached that callback before `emit` -- itself
+    # relying on `cli_execute` -- had been assigned in this scope at all,
+    # which is a NameError, not a warning: only ever missed because build_deps
+    # is `# pragma: no cover` and the unit tests exercise make_catalog_context
+    # directly (test_catalog_tls.py), bypassing this wiring entirely.
+    import cli_ssh
+    cli_execute, cli_configure = cli_ssh.select_cli(cfg)
+
+    def emit(mnemonic, msg):
+        _emit_impl(cli_execute, mnemonic, msg)
+
+    ctx = make_catalog_context(cfg, lambda m: emit("TLS-ERROR", m))
     catalog = catalog_client.CatalogClient(
         cfg["catalog_url"], cfg["catalog_token"], context=ctx)
 
@@ -2303,12 +2338,6 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
         # module-level _refresh_impl so it's unit-testable. Returns the reloaded
         # cfg or None (best-effort).
         return _refresh_impl(cfg, conf_path, catalog.refresh_token, emit)
-
-    # Runtime-mode seam: Guest Shell `cli` on the C9300 (default, unchanged) or
-    # an SSH-to-self transport in a plain IOx Docker app on the IE-3400. Gated by
-    # IRIS_RUNTIME_MODE / conf `runtime_mode`; see cli_ssh.select_cli.
-    import cli_ssh
-    cli_execute, cli_configure = cli_ssh.select_cli(cfg)
 
     # IE3x00 IOx app: IOx can't bind-mount sdflash: into the container, and inbound
     # to the container is blocked, so the agent can't write the IOS-visible SD
@@ -2441,9 +2470,6 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
             'action 030 cli command "y"',
         ])
         cli_execute("event manager run IRIS-RECLAIM")
-
-    def emit(mnemonic, msg):
-        _emit_impl(cli_execute, mnemonic, msg)
 
     def ios(cmd):
         return cli_execute(cmd)

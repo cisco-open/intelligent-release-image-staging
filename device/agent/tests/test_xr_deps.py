@@ -19,6 +19,8 @@ than using one.
 
 import json
 import os
+import subprocess
+import tempfile
 import time as _time
 
 import iris_agent
@@ -35,11 +37,26 @@ def _mnemonics(lines):
     return [m for m, _ in lines]
 
 
+# A real (throwaway, self-signed) CA file so _cfg()'s default catalog_ca takes
+# make_catalog_context's VERIFYING branch instead of its fail-closed one (#12):
+# these tests exercise xr_deps' own wiring, not catalog TLS itself (that's
+# test_catalog_tls.py's job). Generated once, outside any tmp_path a test
+# might assert exact directory contents against (_cfg's `mount` doubles as
+# stage_dir for several tests).
+_CA_DIR = tempfile.mkdtemp(prefix="iris-xr-deps-test-ca-")
+_CA_FILE = os.path.join(_CA_DIR, "iris-catalog.pem")
+subprocess.run(
+    ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
+     "-keyout", os.path.join(_CA_DIR, "key.pem"), "-out", _CA_FILE,
+     "-subj", "/CN=iris-xr-deps-tests"],
+    check=True, capture_output=True)
+
+
 def _cfg(mount, **extra):
     cfg = {"device_id": "8010-R1", "catalog_url": "https://10.0.0.1:8443",
            "catalog_token": "t", "stage_dir": str(mount),
            "target_fs": "harddisk:", "mode": "xr", "rpc_port": "6800",
-           "rpc_secret": "s", "max_peers": "10", "catalog_ca": "",
+           "rpc_secret": "s", "max_peers": "10", "catalog_ca": _CA_FILE,
            "token_expires_at": str(int(_time.time()) + 604_800)}
     cfg.update(extra)
     return cfg

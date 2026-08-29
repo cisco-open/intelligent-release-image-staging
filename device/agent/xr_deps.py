@@ -249,10 +249,12 @@ def build_deps(cfg, conf_path, state_path=None):
     def emit(mnemonic, msg):
         emit_impl(mnemonic, msg)
 
-    # Defined before the catalog context, whose verify-if-present warning
-    # calls straight back into emit.
+    # Defined before the catalog context, whose fail-closed path (#12) calls
+    # straight back into emit -- synchronously, if catalog_ca is unset -- so
+    # emit must already exist in this scope (see iris_agent.build_deps' own
+    # fix for the NameError this ordering avoids).
     import catalog_client
-    ctx = iris_agent.make_catalog_context(cfg, lambda m: emit("TLS-WARN", m))
+    ctx = iris_agent.make_catalog_context(cfg, lambda m: emit("TLS-ERROR", m))
     catalog = catalog_client.CatalogClient(
         cfg["catalog_url"], cfg["catalog_token"], context=ctx)
 

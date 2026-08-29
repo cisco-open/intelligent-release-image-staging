@@ -57,3 +57,11 @@ teardown() { rm -rf "$TMPDIR_T"; }
 @test "entrypoint reconciles agent_version from the baked VERSION file" {
   grep -q 'reconcile_conf_key agent_version' "$BATS_TEST_DIRNAME/../entrypoint.sh"
 }
+
+@test "entrypoint synthesizes catalog_ca defaulting to the baked-in cert path" {
+  # #12 fail-closed fix: every entrypoint must hand a real, non-empty
+  # catalog_ca to a first-boot conf, or a fresh container would immediately
+  # hit make_catalog_context's refusal instead of a verified connection.
+  grep -q 'catalog_ca = \${IRIS_CATALOG_CA:-/opt/iris/iris-catalog.pem}' \
+    "$BATS_TEST_DIRNAME/../entrypoint.sh"
+}
