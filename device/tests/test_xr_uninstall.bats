@@ -63,6 +63,21 @@ setup() {
   [[ "$output" == *"run rm -f /misc/disk1/probe-xr.rpm"* ]]
 }
 
+@test "dry-run's [1/5] describes the probe-first, retry-once, fail-closed shape" {
+  run bash "$UNINSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"show appmgr application-table"* ]] || return 1
+  [[ "$output" == *"already absent"* ]] || return 1
+  [[ "$output" == *"retry deactivate once"* ]] || return 1
+  [[ "$output" == *"fail-closed"* ]]
+}
+
+@test "xr-uninstall.sh never sends the invalid 'appmgr application summary' form" {
+  if grep -q 'application summary' "$UNINSTALL"; then
+    return 1
+  fi
+}
+
 @test "FORCE dry-run and receipted dry-run touch the identical IRIS-named footprint" {
   run bash "$UNINSTALL" --dry-run
   [ "$status" -eq 0 ]
@@ -75,7 +90,8 @@ setup() {
   # what gets touched (see the script header: XR activation is --net=host
   # only, so nothing here is ever ambiguously operator-owned the way a
   # router's VirtualPortGroup/NAT can be).
-  for line in "no appmgr application iris" "appmgr package uninstall source iris-xr" \
+  for line in "show appmgr application-table" "no appmgr application iris" \
+              "appmgr package uninstall source iris-xr" \
               "run rm -f /misc/disk1/iris-xr.rpm" "run rm -rf /misc/disk1/iris-work"; do
     [[ "$plain" == *"$line"* ]] || return 1
     [[ "$forced" == *"$line"* ]] || return 1
@@ -129,8 +145,28 @@ if [ -n "${FAKE_COMMAND_LOG:-}" ]; then
 fi
 case "$cmds" in
   *"__IRIS_XR_VERIFY_APPS__"*)
-    echo "__IRIS_XR_VERIFY_APPS__"
-    printf '%s\n' "${FAKE_APP_ROW-}"
+    # xr-uninstall.sh now asks for the application-table marker from THREE
+    # places against a single stub setup: step [1/5]'s initial probe, its
+    # re-probe(s) after a deactivate attempt, and [5/5]'s final verify. A
+    # call counter lets one test script "present, then absent" (deactivate
+    # took) or "present every time" (deactivate never takes) across that
+    # sequence via FAKE_APP_ROW_<n> (1-indexed); an index with no override
+    # falls back to the flat FAKE_APP_ROW (itself defaulting to "" -- app
+    # absent). FAKE_VERIFY_OMIT_APPS simulates a probe that never gets an
+    # APPS section back at all (wedged/failed transport), independent of
+    # FAKE_VERIFY_OMIT_FILES which only ever gated the final verify's FILES
+    # section.
+    if [ "${FAKE_VERIFY_OMIT_APPS:-no}" != "yes" ]; then
+      countfile="${BATS_TEST_TMPDIR:-.}/probe-count"
+      n=0
+      [ -f "$countfile" ] && n="$(cat "$countfile")"
+      n=$((n + 1))
+      printf '%s' "$n" > "$countfile"
+      indexed_var="FAKE_APP_ROW_$n"
+      row="$(eval "printf '%s' \"\${$indexed_var-\$FAKE_APP_ROW}\"")"
+      echo "__IRIS_XR_VERIFY_APPS__"
+      printf '%s\n' "$row"
+    fi
     echo "__IRIS_XR_VERIFY_SOURCES__"
     printf '%s\n' "${FAKE_SOURCE_ROW-}"
     if [ "${FAKE_VERIFY_OMIT_FILES:-no}" != "yes" ]; then
@@ -153,6 +189,11 @@ STUB
 }
 
 _xr_uninstall_run_live() {
+  # Fresh probe-call counter per script invocation -- two separate runs
+  # against the same stub setup (the FORCE parity test below) must each see
+  # call index 1 on their own first application-table probe, not inherit
+  # the previous run's count.
+  rm -f "$BATS_TEST_TMPDIR/probe-count"
   env DEVICE_IP=192.0.2.10 DEVICE_USER=admin DEVICE_PASS=pw \
     bash "$STUBDIR/device/xr-uninstall.sh"
 }
@@ -164,10 +205,74 @@ _xr_uninstall_run_live() {
   [[ "$output" == *"undeploy complete"* ]]
 }
 
-@test "live: fails when the app is still listed after teardown" {
+@test "live: [1/5] probes app-table, deactivates once, and continues once the re-probe shows it gone" {
+  _xr_uninstall_stub_setup
+  FAKE_APP_ROW_1="iris  docker  iris-xr  Up  app_manager" run _xr_uninstall_run_live
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"undeploy complete"* ]] || return 1
+  log="$(cat "$FAKE_COMMAND_LOG")"
+  # deactivate was actually submitted -- exactly once, since the re-probe
+  # (call 2, absent by the flat FAKE_APP_ROW fallback) already shows it gone
+  count="$(printf '%s\n' "$log" | grep -c '^no appmgr application iris$')"
+  [ "$count" -eq 1 ] || return 1
+  [[ "$log" == *"appmgr package uninstall source iris-xr"* ]]
+}
+
+@test "live: a second run against an already-deactivated app logs already-absent and still converges" {
+  _xr_uninstall_stub_setup
+  # FAKE_APP_ROW left unset: the app is absent at every probe, modeling a
+  # second run after a partial teardown (app already gone, rpm/work dir
+  # possibly still present -- those steps keep their own || true tolerance).
+  run _xr_uninstall_run_live
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"already deactivated/absent"* ]] || return 1
+  [[ "$output" == *"undeploy complete"* ]] || return 1
+  log="$(cat "$FAKE_COMMAND_LOG")"
+  if printf '%s\n' "$log" | grep -q '^no appmgr application iris$'; then
+    return 1
+  fi
+}
+
+@test "live: refuses to continue teardown when the app is still active after two deactivate attempts" {
   _xr_uninstall_stub_setup
   FAKE_APP_ROW="iris  docker  iris-xr  Up  app_manager" run _xr_uninstall_run_live
-  [ "$status" -ne 0 ]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"refusing to continue teardown while application iris is still active"* ]] || return 1
+  log="$(cat "$FAKE_COMMAND_LOG")"
+  # exactly two deactivate submissions (the try, then the one retry) and
+  # NOTHING from later steps -- teardown must stop dead, never uninstall
+  # the source or rm files out from under a possibly-running app.
+  count="$(printf '%s\n' "$log" | grep -c '^no appmgr application iris$')"
+  [ "$count" -eq 2 ] || return 1
+  if printf '%s\n' "$log" | grep -qE 'appmgr package uninstall source|run rm'; then
+    return 1
+  fi
+}
+
+@test "live: a deactivate probe transport failure is a hard error, never read as absent" {
+  _xr_uninstall_stub_setup
+  FAKE_VERIFY_OMIT_APPS=yes run _xr_uninstall_run_live
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"deactivate probe did not return the appmgr application-table"* ]] || return 1
+  log="$(cat "$FAKE_COMMAND_LOG")"
+  # fails closed on the very first probe -- no deactivate config was ever
+  # submitted and no later step ran
+  if printf '%s\n' "$log" | grep -qE 'no appmgr application iris|appmgr package uninstall source|run rm'; then
+    return 1
+  fi
+}
+
+@test "live: [5/5] still independently catches the app reappearing after a successful deactivate" {
+  _xr_uninstall_stub_setup
+  # call 1 (initial probe): present. call 2 (re-probe after deactivate):
+  # absent -- deactivate is accepted as having worked and [1/5] proceeds.
+  # call 3 (the final [5/5] verify's own app-table read): present again,
+  # e.g. a flapping app -- [5/5]'s own independent check (unchanged by
+  # this task) is still the last line of defense.
+  FAKE_APP_ROW_1="iris  docker  iris-xr  Up  app_manager" \
+    FAKE_APP_ROW_3="iris  docker  iris-xr  Up  app_manager" \
+    run _xr_uninstall_run_live
+  [ "$status" -ne 0 ] || return 1
   [[ "$output" == *"artifacts still present"* ]] || return 1
   [[ "$output" == *"appmgr application iris"* ]]
 }
@@ -257,6 +362,12 @@ iris-work" run _xr_uninstall_run_live
   _xr_uninstall_run_live >/dev/null
   plain_log="$(cat "$FAKE_COMMAND_LOG")"
   : > "$FAKE_COMMAND_LOG"
+  # Same probe-count reset _xr_uninstall_run_live does for the plain run
+  # above -- the forced run below is invoked directly (it needs
+  # IRIS_FORCE_AGENT_ONLY set), so it must reset its own counter too, or it
+  # would inherit the plain run's leftover call index and see a different
+  # FAKE_APP_ROW_<n> sequence than the plain run just did.
+  rm -f "$BATS_TEST_TMPDIR/probe-count"
   env DEVICE_IP=192.0.2.10 DEVICE_USER=admin DEVICE_PASS=pw IRIS_FORCE_AGENT_ONLY=1 \
     bash "$STUBDIR/device/xr-uninstall.sh" >/dev/null
   forced_log="$(cat "$FAKE_COMMAND_LOG")"

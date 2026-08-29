@@ -65,10 +65,12 @@ if [ "$DRY" -eq 1 ]; then
     echo "  XR activation (--net=host only) never creates anything else IRIS"
     echo "  would need a receipt to prove ownership of."
   fi
-  echo "===== [1/5] deactivate: no appmgr application $APPID (config; commit guarded by lab/xr-run.sh) ====="
+  echo "===== [1/5] deactivate: probe app-table first; skip if $APPID is already absent (idempotent second run) ====="
+  echo "show appmgr application-table"
   echo "configure"
   echo "no appmgr application $APPID"
   echo "commit"
+  echo "  (re-probe app-table; retry deactivate once if still present; exit 1 fail-closed if still active after retry)"
   echo "===== [2/5] appmgr package uninstall source $SOURCE_NAME (Cisco 8000 form) ====="
   echo "appmgr package uninstall source $SOURCE_NAME"
   echo "===== [3/5] remove IRIS files under harddisk: (Linux layer, proven write-through) ====="
@@ -111,11 +113,49 @@ if [ "$FORCE_AGENT_ONLY" = "1" ]; then
 fi
 
 echo "[1/5] deactivate: no appmgr application $APPID on $DEVICE_IP"
-{
-  echo "configure"
-  echo "no appmgr application $APPID"
-  echo "commit"
-} | RUN >/dev/null 2>&1 || true
+# Honest and idempotent: probe app-table BEFORE touching config (a second
+# run against an already-torn-down device must converge, not resubmit a
+# deactivate the router has nothing left to deactivate), then verify the
+# submission actually took by re-probing rather than trusting the piped
+# config call's own exit status. A rejected/failed commit that this script
+# never read back is exactly the live-incident failure mode this guards
+# against (step header comment above). Retries once, then fails closed --
+# every later step is skipped, never run against a possibly-still-active
+# app.
+probe_app_request() {
+cat <<EOF
+echo ${VERIFY_MARKER}APPS__
+show appmgr application-table
+EOF
+}
+app_present() {
+  local probe_out apps
+  probe_out="$(probe_app_request | RUN 2>/dev/null || true)"
+  apps="$(printf '%s' "$probe_out" | verify_section APPS)" \
+    || { echo "ERROR: deactivate probe did not return the appmgr application-table; refusing to continue teardown on $DEVICE_IP" >&2; exit 1; }
+  case "$apps" in *"$APPID"*) return 0 ;; esac
+  return 1
+}
+deactivate_request() {
+cat <<EOF
+configure
+no appmgr application $APPID
+commit
+EOF
+}
+if app_present; then
+  deactivate_request | RUN >/dev/null 2>&1 || true
+  if app_present; then
+    echo "  $APPID still active after deactivate; retrying once"
+    deactivate_request | RUN >/dev/null 2>&1 || true
+    if app_present; then
+      echo "ERROR: refusing to continue teardown while application $APPID is still active on $DEVICE_IP" >&2
+      exit 1
+    fi
+  fi
+else
+  echo "  $APPID already deactivated/absent; skipping"
+fi
 
 echo "[2/5] appmgr package uninstall source $SOURCE_NAME"
 printf 'appmgr package uninstall source %s\n' "$SOURCE_NAME" | RUN >/dev/null 2>&1 || true
