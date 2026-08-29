@@ -302,8 +302,15 @@ def _parse_csv_rows(text):
             size = int(size_s.strip())
         except ValueError:
             continue  # e.g. IMAGE_SIZE blank on some older feed rows
-        yield Row(file_name=name, md5=md5.strip().lower(),
-                  sha512=sha512.strip().lower(),
+        sha512 = sha512.strip().lower()
+        if not sha512:
+            # A blank SHA512_CHECKSUM (real, observed on the live feed) is
+            # nothing to compare a catalog image's sha512 against -- skip
+            # the row so it can never be joined against by reconcile(),
+            # rather than risk a false "verified" if a broken catalog
+            # entry also carries a blank sha512.
+            continue
+        yield Row(file_name=name, md5=md5.strip().lower(), sha512=sha512,
                   publish_date=publish_date.strip(),
                   deferral_status=deferral.strip(), image_size=size)
 
@@ -316,9 +323,11 @@ def parse(tar_path):
     caller either gets a complete result or an exception -- never a partial
     iteration that dies partway through. Blank lines and
     `##START_DATE##`/`##END_DATE##`-style sentinel/batch-marker rows are
-    skipped; a data row with a blank/non-numeric IMAGE_SIZE is skipped
-    (real, observed on the live feed for some older entries) rather than
-    failing the whole feed."""
+    skipped; a data row with a blank/non-numeric IMAGE_SIZE, or a blank
+    SHA512_CHECKSUM, is skipped (both real, observed on the live feed for
+    some older entries) rather than failing the whole feed -- a row this
+    module can never usefully compare against a catalog image's own
+    sha512 must never be joinable by `reconcile()` in the first place."""
     tf, members = _open_and_scan(tar_path)
     with tf:
         csv_name = _find_csv_member_name(members)
@@ -334,11 +343,25 @@ def parse(tar_path):
 
 def _image_fields(image):
     """(image_id, filename, size, sha512) from one `images` entry -- a dict
-    with those keys, or a plain 4-tuple in that order."""
+    with those keys, or a plain 4-tuple in that order. `size` is coerced
+    to `int` (Task 2's catalog entries may come from JSON, where an int
+    can round-trip as a numeric string) so it joins correctly against
+    `Row.image_size`, which is always a real int -- a `size` that cannot
+    be coerced (None, "not-a-number", ...) raises `BulkHashError` rather
+    than silently failing every join and reporting the whole catalog as
+    not_in_feed."""
     if isinstance(image, dict):
-        return (image["image_id"], image["filename"], image["size"],
-                image.get("sha512"))
-    image_id, filename, size, sha512 = image
+        image_id, filename, size, sha512 = (
+            image["image_id"], image["filename"], image["size"],
+            image.get("sha512"))
+    else:
+        image_id, filename, size, sha512 = image
+    try:
+        size = int(size)
+    except (TypeError, ValueError) as exc:
+        raise BulkHashError(
+            "image %r has a non-integer size: %r" % (image_id, size)
+        ) from exc
     return image_id, filename, size, sha512
 
 
@@ -363,7 +386,16 @@ def reconcile(rows, images):
     is a separate, non-quarantining signal. A duplicate (FILE_NAME,
     IMAGE_SIZE) key across `rows` is not expected from Cisco's feed; if it
     happens, the LAST such row wins (plain dict build in iteration order)
-    -- deterministic, not an error."""
+    -- deterministic, not an error.
+
+    Every `Row` in `rows` is guaranteed a non-blank `sha512` (`parse()`
+    skips any feed row with a blank SHA512_CHECKSUM before it ever gets
+    here) -- but `rows` need not have come from `parse()`, so that is not
+    relied on. An `images` entry with a falsy/missing `sha512` (an
+    unhashed catalog entry -- a data-integrity bug elsewhere, since every
+    published image is hashed at publish time) raises `BulkHashError`
+    immediately: it must never silently produce "verified" by comparing
+    two blank strings, nor any other verdict."""
     by_key = {}
     for row in rows:
         by_key[(row.file_name, row.image_size)] = row
@@ -371,13 +403,16 @@ def reconcile(rows, images):
     verdicts = {}
     for image in images:
         image_id, filename, size, sha512 = _image_fields(image)
+        image_sha512 = (sha512 or "").strip().lower()
+        if not image_sha512:
+            raise BulkHashError(
+                "image %r has no sha512 to reconcile against" % (image_id,))
         row = by_key.get((filename, size))
         if row is None:
             verdicts[image_id] = {
                 "state": STATE_NOT_IN_FEED, "feed_sha512": None,
                 "publish_date": None, "deferral": False}
             continue
-        image_sha512 = (sha512 or "").strip().lower()
         matches = row.sha512 == image_sha512
         deferral = bool(row.deferral_status) and \
             row.deferral_status.lower() != "active"

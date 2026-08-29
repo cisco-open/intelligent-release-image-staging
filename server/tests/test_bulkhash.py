@@ -394,6 +394,23 @@ class TestParse:
         assert len(rows) == 1
         assert rows[0].image_size == 12345
 
+    def test_row_with_blank_sha512_is_skipped_not_fatal(self, tmp_path,
+                                                         signing_key):
+        """A feed row with a blank SHA512_CHECKSUM must never reach
+        reconcile() -- there is nothing to compare a catalog image's own
+        sha512 against, and letting it through risks a false "verified"
+        when an unhashed image also has a blank sha512 (both sides empty
+        string == empty string)."""
+        _cert, key = signing_key
+        rows_text = (
+            "blank-hash-image.bin,D949B99A104B23B2129718220C78F28E,,"
+            "August 03 2016 00:00:00 PDT-0700,,100\r\n"
+            + REAL_ROW)
+        tar_path = _signed_fixture(tmp_path, rows_text, key)
+        rows = list(bulkhash.parse(tar_path))
+        assert len(rows) == 1
+        assert rows[0].file_name == "isr4300-universalk9.16.03.01.SPA.bin"
+
     def test_sentinel_marker_rows_are_skipped(self, tmp_path, signing_key):
         _cert, key = signing_key
         rows_text = "##START_DATE##   FEB 14 2000,,,,,\r\n" + REAL_ROW + \
@@ -591,6 +608,66 @@ class TestReconcile:
         rows2 = [_row("image.bin", "abc123", 100)]
         second = bulkhash.reconcile(rows2, images)
         assert first == second
+
+    # -- fail-open regressions: blank sha512 on either side must never
+    # -- produce "verified" (empty string == empty string is not a match)
+    def test_raises_when_image_sha512_is_missing(self):
+        rows = [_row("image.bin", "abc123", 100)]
+        images = [{"image_id": "img-1", "filename": "image.bin",
+                   "size": 100}]  # no "sha512" key at all
+        with pytest.raises(bulkhash.BulkHashError):
+            bulkhash.reconcile(rows, images)
+
+    def test_raises_when_image_sha512_is_blank(self):
+        rows = [_row("image.bin", "abc123", 100)]
+        images = [{"image_id": "img-1", "filename": "image.bin",
+                   "size": 100, "sha512": ""}]
+        with pytest.raises(bulkhash.BulkHashError):
+            bulkhash.reconcile(rows, images)
+
+    def test_raises_when_both_feed_and_image_sha512_are_blank(self):
+        """The exact fail-open scenario: a directly-constructed Row with a
+        blank sha512 (parse() itself now refuses to ever produce one, but
+        reconcile() must not rely on that -- it is called with `rows` from
+        callers other than parse() too) paired with an unhashed catalog
+        image must raise, never silently report "verified" via "" == ""."""
+        rows = [_row("image.bin", "", 100)]
+        images = [{"image_id": "img-1", "filename": "image.bin",
+                   "size": 100, "sha512": ""}]
+        with pytest.raises(bulkhash.BulkHashError):
+            bulkhash.reconcile(rows, images)
+
+    def test_raises_when_image_sha512_is_none(self):
+        rows = [_row("image.bin", "abc123", 100)]
+        images = [("img-1", "image.bin", 100, None)]
+        with pytest.raises(bulkhash.BulkHashError):
+            bulkhash.reconcile(rows, images)
+
+    # -- fail-open regression: a non-int catalog `size` must never
+    # -- silently degrade every image to not_in_feed
+    def test_accepts_a_numeric_string_size_and_still_matches(self):
+        """Task 2's catalog entries may come from JSON, where an integer
+        can round-trip as a numeric string; that must still join correctly
+        against the feed's int image_size, not silently miss every match."""
+        rows = [_row("image.bin", "abc123", 100)]
+        images = [{"image_id": "img-1", "filename": "image.bin",
+                   "size": "100", "sha512": "abc123"}]
+        verdicts = bulkhash.reconcile(rows, images)
+        assert verdicts["img-1"]["state"] == "verified"
+
+    def test_raises_when_image_size_is_not_coercible_to_int(self):
+        rows = [_row("image.bin", "abc123", 100)]
+        images = [{"image_id": "img-1", "filename": "image.bin",
+                   "size": "not-a-number", "sha512": "abc123"}]
+        with pytest.raises(bulkhash.BulkHashError):
+            bulkhash.reconcile(rows, images)
+
+    def test_raises_when_image_size_is_none(self):
+        rows = [_row("image.bin", "abc123", 100)]
+        images = [{"image_id": "img-1", "filename": "image.bin",
+                   "size": None, "sha512": "abc123"}]
+        with pytest.raises(bulkhash.BulkHashError):
+            bulkhash.reconcile(rows, images)
 
 
 # ---------------------------------------------------------------------------
