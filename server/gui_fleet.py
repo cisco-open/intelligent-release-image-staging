@@ -485,10 +485,13 @@ class FleetStore:
             "# Inband supports static IPv4 Guest Shell and IOx (IE-3x00, C9300); DHCP is not",
             "# supported. Inband IOx SSHes to the switch mgmt IP by default (ios_ssh_host overrides).",
             "# Router modes use a VirtualPortGroup; router-nat also needs an outside interface.",
+            "# XR host (xr-host, platform xr-appmgr) runs on the router's own network stack --",
+            "# no VLAN, SVI, app IP/mask/gateway, VPG, or NAT interface; leave those columns empty.",
             "# Uncomment and edit the example rows below to import your devices.",
             ",".join(CSV_V2_COLS),
             "# edge-routed,192.0.2.10,routed,666,192.0.2.9,255.255.255.252,192.0.2.10,255.255.255.252,192.0.2.9,,,C9300-48UXM,,,guestshell",
             "# edge-inband,192.0.2.20,inband,,,,192.0.2.21,255.255.255.0,192.0.2.1,120,,C9300-48UXM,,,guestshell",
             "# ie-inband-iox,192.0.2.30,inband,,,,192.0.2.31,255.255.255.0,192.0.2.1,120,192.0.2.1,IE-3400,,,iox",
             "# edge-c8kv,192.0.2.40,router-nat,,,,10.8.0.2,255.255.255.252,10.8.0.1,,,C8000V,10,GigabitEthernet1,router",
+            "# edge-xr,192.0.2.50,xr-host,,,,,,,,,8201,,,xr-appmgr",
         ]) + "\n"

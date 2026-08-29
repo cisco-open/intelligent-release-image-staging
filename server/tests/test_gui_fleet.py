@@ -557,6 +557,7 @@ def test_example_csv_is_a_safe_importable_template(tmp_path):
     assert "inband" in tpl.lower()                       # both attachment modes documented
     assert "routed" in tpl.lower()
     assert "router-nat" in tpl.lower()
+    assert "xr-host" in tpl.lower()
 
 
 def test_revision_increments_on_write(tmp_path):
@@ -572,6 +573,95 @@ def test_platform_is_last_csv_column():
     assert gui_fleet.CSV_V2_COLS[-1] == "platform"
     assert gui_fleet.CSV_V2_COLS[0] == "device_id"
     assert "management_type" in gui_fleet.CSV_V2_COLS
+
+
+# ---------------------------------------------------------------------------
+# xr-host CSV v2 round trip
+# ---------------------------------------------------------------------------
+
+def test_xr_host_csv_roundtrip_addressing_columns_stay_empty(tmp_path):
+    """An xr-host record exports with management_type xr-host, platform
+    xr-appmgr in the last column, and every addressing column empty (not the
+    string 'None') -- and reimporting that export reproduces the same
+    record, the round trip this management type has to survive."""
+    fs = _fs(tmp_path)
+    fs.upsert(dict(_XRHOST))
+    out = fs.export_csv()
+    row = next(line for line in out.splitlines() if line.startswith("xr1,"))
+    fields = row.split(",")
+    assert fields[2] == "xr-host"
+    assert fields[-1] == "xr-appmgr"          # platform is the last CSV column
+    for field in _XR_FORBIDDEN_FIELDS:
+        assert fields[gui_fleet.CSV_V2_COLS.index(field)] == ""
+    fs2 = gui_fleet.FleetStore(str(tmp_path / "b"))
+    assert fs2.import_csv(out)["imported"] == 1
+    reimported = fs2.get_device("xr1")
+    assert reimported["management_type"] == "xr-host"
+    assert reimported["platform"] == "xr-appmgr"
+    assert reimported["model"] == "8201"
+    for field in _XR_FORBIDDEN_FIELDS:
+        assert not reimported.get(field)
+
+
+def test_import_csv_rejects_xr_host_row_with_app_ip_atomically(tmp_path):
+    """XR host networking has no app_ip to carry; a CSV row that fills it in
+    anyway is rejected, and -- matching the existing bad-IP atomic reject --
+    the whole import aborts, including an otherwise-good row ahead of it."""
+    fs = _fs(tmp_path)
+    header = ",".join(gui_fleet.CSV_V2_COLS)
+    good = ("d1,10.0.0.1,routed,666,10.0.0.2,255.255.255.252,10.0.0.1,"
+            "255.255.255.252,10.0.0.2,,,C9300,,,guestshell")
+    bad = "xr1,10.0.0.9,xr-host,,,,192.0.2.99,,,,,8201,,,xr-appmgr"
+    with pytest.raises(ValueError, match="app_ip"):
+        fs.import_csv(header + "\n" + good + "\n" + bad + "\n")
+    assert fs.list_devices() == []   # atomic: the good row is rejected too
+
+
+def test_network_attachment_header_alias_imports_xr_host_row(tmp_path):
+    """The pre-rename v2 header (network_attachment instead of
+    management_type) still imports an xr-host row."""
+    fs = _fs(tmp_path)
+    alias_header = ",".join(
+        col if col != "management_type" else "network_attachment"
+        for col in gui_fleet.CSV_V2_COLS)
+    row = "xr1,10.0.0.9,xr-host,,,,,,,,,8201,,,xr-appmgr"
+    assert fs.import_csv(alias_header + "\n" + row + "\n")["imported"] == 1
+    dev = fs.get_device("xr1")
+    assert dev["management_type"] == "xr-host" and dev["platform"] == "xr-appmgr"
+
+
+def test_pre_router_v2_header_still_imports_xr_host_row(tmp_path):
+    """The pre-router-fields v2 header (no vpg_number/nat_interface columns)
+    still imports an xr-host row -- it never carried those columns either."""
+    fs = _fs(tmp_path)
+    old_header = ("device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,"
+                  "app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,platform")
+    row = "old-v2-xr,10.0.0.9,xr-host,,,,,,,,,8201,xr-appmgr"
+    assert fs.import_csv(old_header + "\n" + row + "\n")["imported"] == 1
+    dev = fs.get_device("old-v2-xr")
+    assert dev["management_type"] == "xr-host" and dev["platform"] == "xr-appmgr"
+    assert fs.export_csv().splitlines()[0] == ",".join(gui_fleet.CSV_V2_COLS)
+
+
+def test_example_csv_xr_host_row_is_importable_and_validates(tmp_path):
+    """example_csv documents the xr-host shape: model 8201, platform
+    xr-appmgr, every addressing column empty -- uncommenting that one row
+    imports a clean, fully-validated xr-host device."""
+    tpl = gui_fleet.FleetStore.example_csv()
+    assert "xr-host" in tpl
+    assert "xr-appmgr" in tpl
+    xr_line = next(line for line in tpl.splitlines() if ",xr-host," in line)
+    uncommented = xr_line.lstrip("#").strip()
+    header = ",".join(gui_fleet.CSV_V2_COLS)
+    fs = _fs(tmp_path)
+    assert fs.import_csv(header + "\n" + uncommented + "\n")["imported"] == 1
+    devices = fs.list_devices()
+    assert len(devices) == 1
+    dev = devices[0]
+    assert dev["management_type"] == "xr-host" and dev["platform"] == "xr-appmgr"
+    assert dev["model"] == "8201"
+    for field in _XR_FORBIDDEN_FIELDS:
+        assert not dev.get(field)
 
 
 # ---------------------------------------------------------------------------
