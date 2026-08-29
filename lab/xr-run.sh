@@ -58,6 +58,19 @@ HOST="${1:?usage: xr-run.sh <device-ip>  (commands on stdin)}"
 DEVICE_USER="${DEVICE_USER:?set DEVICE_USER (device login user; export it or 'source' creds/)}"
 export SSHPASS="${DEVICE_PASS:?set DEVICE_PASS (export it or 'source' your gitignored creds file)}"
 SESSION_TIMEOUT="${IRIS_XR_SESSION_TIMEOUT:-900}"
+# A garbage value here must fall back to the default, never turn into an
+# instant kill: `sleep abc` or `sleep -5` fails immediately, and a naive
+# watchdog would read that failed sleep as "the bound already elapsed" and
+# fire rc 124 on every single session at t=0. Empty/unset already became
+# "900" via the ${:-900} default above and is intentionally silent; only a
+# genuinely-set-but-invalid value (non-digits, a leading '-', embedded
+# whitespace) warns and falls back.
+case "$SESSION_TIMEOUT" in
+  *[!0-9]*)
+    echo "xr-run.sh: IRIS_XR_SESSION_TIMEOUT='$SESSION_TIMEOUT' is not a non-negative integer -- using the 900s default instead" >&2
+    SESSION_TIMEOUT=900
+    ;;
+esac
 
 CMDS="$(cat)"
 # Insert the recovery pair after every literal "commit" line (own line, no
@@ -92,23 +105,58 @@ run_bounded_ssh() {
     return $?
   fi
 
-  local fired_marker
-  fired_marker="$(mktemp "${TMPDIR:-/tmp}/iris-xr-run-timeout.XXXXXX")"
+  # Deliberately NOT `local`: this function is the entire content of a
+  # pipe stage, so bash runs it in its own subshell and that subshell
+  # exits right when the function returns -- which is exactly when the
+  # EXIT trap below fires, i.e. after the `local` scope that declared this
+  # variable has already ended. Under `set -u` that turned into a stray
+  # "unbound variable" on every single normal run (caught by actually
+  # running it, not by inspection).
+  fired_marker="$(mktemp "${TMPDIR:-/tmp}/iris-xr-run-timeout.XXXXXX")" || {
+    echo "xr-run.sh: mktemp failed creating the session-timeout marker -- refusing to run without the bound in place" >&2
+    return 1
+  }
+  # Belt-and-suspenders: the explicit `rm -f` at the end of this function
+  # covers the normal-return case. The EXIT trap alone does NOT cover
+  # xr-run.sh being killed from outside while blocked in the `wait` below
+  # -- verified by sending it a TERM there: an untrapped fatal signal
+  # terminates bash immediately at the point of delivery and never reaches
+  # the EXIT trap at all. TERM/INT are trapped explicitly so that case runs
+  # the same cleanup before exiting (128+signum), which in turn fires the
+  # EXIT trap too. Scope, also verified directly: this function's `trap`
+  # calls only apply to the specific process running it, and this is a
+  # non-last pipe stage, so bash runs it in its own forked subshell,
+  # distinct from xr-run.sh's top-level process. A kill of only the
+  # single outermost PID a caller happens to have captured will NOT reach
+  # this subshell and the marker will NOT be cleaned up; a kill that
+  # reaches every process in the tree (`pkill -f xr-run.sh`, a container
+  # teardown killing its whole process tree, the pattern the original
+  # incident's "container restart" actually used) does reach it and does
+  # clean up correctly. Full coverage of every possible way to signal a
+  # multi-process pipeline is out of scope here; a few leaked bytes in
+  # TMPDIR in the uncovered case is a cosmetic nit, not a correctness one.
+  trap 'rm -f "$fired_marker" 2>/dev/null' EXIT
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
   printf '0' > "$fired_marker"
 
-  # `sshpass` wraps `ssh` (a child process of its own, feeding it the
-  # password over a pty); a plain `kill $ssh_pid` on timeout would only
-  # reach sshpass itself, and if sshpass has no SIGTERM handler of its own
-  # (typical for a small wrapper) the kernel terminates it immediately even
-  # mid-syscall, orphaning the ssh child rather than killing it. An orphan
-  # holding the router's still-open socket -- and this pipeline's stdout --
-  # would recreate the exact unbounded hang this task exists to close.
-  # `set -m` for just this one background launch puts the whole sshpass+ssh
-  # job in its own process group, so a negative-PID kill below reaches every
-  # descendant, not only the direct child; job control is switched back off
+  # `sshpass` wraps `ssh`, feeding it the password over a pty it allocates
+  # and holds open as the pty master. `set -m` for this one background
+  # launch puts sshpass into its own process group, and the negative-PID
+  # kill below correctly reaches sshpass itself plus any child that does
+  # NOT detach into a session of its own -- but sshpass's `ssh` child does:
+  # sshpass calls setsid() on it, so `ssh` actually ends up OUTSIDE this
+  # process group (measured), and the group-kill does not reach it
+  # directly. What kills `ssh` in practice is the pty master closing once
+  # sshpass dies: `ssh` holds the pty slave as its controlling terminal and
+  # gets a hangup once nothing holds the master open any more. That is
+  # reliable in the cases this task cares about, but it is a step removed
+  # from the signal delivery itself -- a `ssh` that is somehow blocked
+  # where it would not observe the hangup promptly is a residual case the
+  # group-kill alone does not cover. Job control is switched back off
   # immediately after so it doesn't affect anything else in the script.
   set -m
-  xr_run_ssh &
+  xr_run_ssh <&0 &
   local ssh_pid=$!
   set +m
 
@@ -134,7 +182,11 @@ run_bounded_ssh() {
   local watchdog_pid=$!
   set +m
 
-  wait "$ssh_pid"
+  # 2>/dev/null here (and below) swallows bash's own job-control
+  # "Terminated: 15  xr_run_ssh" notice for the job we just killed -- pure
+  # cosmetic noise on this script's stderr, not a masked error, since $?
+  # is captured from `wait` itself regardless of its stderr.
+  wait "$ssh_pid" 2>/dev/null
   local ssh_rc=$?
 
   kill -TERM -"$watchdog_pid" 2>/dev/null

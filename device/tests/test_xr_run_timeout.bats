@@ -20,19 +20,24 @@ setup() {
   STUB="$BATS_TEST_TMPDIR/bin"; mkdir -p "$STUB"
   ARGV_LOG="$BATS_TEST_TMPDIR/argv.log"; : > "$ARGV_LOG"
   SLEEP_LOG="$BATS_TEST_TMPDIR/sleep.log"; : > "$SLEEP_LOG"
-  export ARGV_LOG SLEEP_LOG
+  STDIN_LOG="$BATS_TEST_TMPDIR/stdin.log"; : > "$STDIN_LOG"
+  export ARGV_LOG SLEEP_LOG STDIN_LOG
   export TMPDIR="$BATS_TEST_TMPDIR"
   export DEVICE_USER=admin DEVICE_PASS=zzsecretzz
 
-  # Fake sshpass: logs the argv it was invoked with, drains stdin (as the
-  # real ssh session would), optionally sleeps to simulate a wedged router
-  # (FAKE_SLEEP), then emits FAKE_OUTPUT and exits FAKE_SSHPASS_STATUS.
+  # Fake sshpass: logs the argv it was invoked with, captures whatever
+  # bytes actually reach its stdin (this is the load-bearing assertion for
+  # the whole task -- a stub that only drained stdin into /dev/null could
+  # not distinguish "the real request arrived" from "ssh was launched with
+  # stdin already redirected from /dev/null before a single byte got
+  # there"), optionally sleeps to simulate a wedged router (FAKE_SLEEP),
+  # then emits FAKE_OUTPUT and exits FAKE_SSHPASS_STATUS.
   cat > "$STUB/sshpass" <<'STUBEOF'
 #!/usr/bin/env bash
 if [ -n "${ARGV_LOG:-}" ]; then
   printf '%s\n' "$*" >> "$ARGV_LOG"
 fi
-cat > /dev/null
+cat > "${STDIN_LOG:-/dev/null}"
 if [ -n "${FAKE_SLEEP:-}" ]; then
   /bin/sleep "$FAKE_SLEEP"
 fi
@@ -59,16 +64,59 @@ STUBEOF
 
 @test "fast path is unchanged: rc 0, stub output flows through, password still redacted" {
   run env bash -c "printf 'show version\n' | bash '$RUN' 192.0.2.10"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   [[ "$output" == *"sw1#ok"* ]] || return 1
   [[ "$output" != *"zzsecretzz"* ]]
 }
 
 @test "ServerAlive options are present in the ssh invocation" {
   run env bash -c "printf 'show version\n' | bash '$RUN' 192.0.2.10"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   grep -q -- '-o ServerAliveInterval=15' "$ARGV_LOG" || return 1
   grep -q -- '-o ServerAliveCountMax=4' "$ARGV_LOG"
+}
+
+# ---------------------------------------------------------------------------
+# CRITICAL: the bounded path must actually deliver the request. `xr_run_ssh
+# &` is an asynchronous command; per POSIX/bash, an asynchronous command
+# with no explicit stdin redirection of its own has its stdin redirected
+# from /dev/null when job control is not the interactive default -- so
+# without an explicit `<&0` on that background launch, every bounded
+# session logs in and sends nothing at all. These pin the exact request
+# text (terminal length 0 / commands / commit guard / exit), in order, on
+# BOTH the default (bounded) path and the IRIS_XR_SESSION_TIMEOUT=0 path.
+# ---------------------------------------------------------------------------
+
+_assert_full_request_delivered() {
+  local tl0 cfg host commit failed abort exitline
+  tl0="$(grep -n '^terminal length 0$' "$STDIN_LOG" | head -1 | cut -d: -f1)"
+  cfg="$(grep -n '^configure$' "$STDIN_LOG" | head -1 | cut -d: -f1)"
+  host="$(grep -n '^hostname foo$' "$STDIN_LOG" | head -1 | cut -d: -f1)"
+  commit="$(grep -n '^commit$' "$STDIN_LOG" | head -1 | cut -d: -f1)"
+  failed="$(grep -n '^show configuration failed$' "$STDIN_LOG" | head -1 | cut -d: -f1)"
+  abort="$(grep -n '^abort$' "$STDIN_LOG" | head -1 | cut -d: -f1)"
+  exitline="$(grep -n '^exit$' "$STDIN_LOG" | head -1 | cut -d: -f1)"
+  [ -n "$tl0" ] && [ -n "$cfg" ] && [ -n "$host" ] && [ -n "$commit" ] \
+    && [ -n "$failed" ] && [ -n "$abort" ] && [ -n "$exitline" ] || return 1
+  [ "$tl0" -lt "$cfg" ] || return 1
+  [ "$cfg" -lt "$host" ] || return 1
+  [ "$host" -lt "$commit" ] || return 1
+  [ "$commit" -lt "$failed" ] || return 1
+  [ "$failed" -lt "$abort" ] || return 1
+  [ "$abort" -lt "$exitline" ]
+}
+
+@test "the default bounded path delivers the full request to ssh (terminal length 0 / commands / commit guard / exit)" {
+  run env bash -c "printf 'configure\nhostname foo\ncommit\n' | bash '$RUN' 192.0.2.10"
+  [ "$status" -eq 0 ] || return 1
+  _assert_full_request_delivered
+}
+
+@test "IRIS_XR_SESSION_TIMEOUT=0 also delivers the full request to ssh" {
+  run env IRIS_XR_SESSION_TIMEOUT=0 \
+    bash -c "printf 'configure\nhostname foo\ncommit\n' | bash '$RUN' 192.0.2.10"
+  [ "$status" -eq 0 ] || return 1
+  _assert_full_request_delivered
 }
 
 @test "a wedged session is killed at the bound: rc 124, well inside the sleep it was killed out of" {
@@ -107,4 +155,72 @@ STUBEOF
     bash -c "printf 'show version\n' | bash '$RUN' 192.0.2.10"
   [ "$status" -eq 0 ] || return 1
   grep -q '^37$' "$SLEEP_LOG"
+}
+
+# ---------------------------------------------------------------------------
+# IMPORTANT: a garbage IRIS_XR_SESSION_TIMEOUT must never turn into an
+# instant kill (`sleep abc`/`sleep -5` fail immediately, and a naive
+# watchdog would read that as "the bound already elapsed" and fire rc 124
+# at t=0 for every session) or into a silently-unbounded session. Invalid
+# values fall back to the 900s default with one stderr warning; empty/unset
+# stays exactly as before (900s default, no warning).
+# ---------------------------------------------------------------------------
+
+@test "IRIS_XR_SESSION_TIMEOUT=abc falls back to the 900s default with a warning, not an instant kill" {
+  run env IRIS_XR_SESSION_TIMEOUT=abc FAKE_SLEEP=1 \
+    bash -c "printf 'show version\n' | bash '$RUN' 192.0.2.10"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"IRIS_XR_SESSION_TIMEOUT"* ]] || return 1
+  grep -q '^900$' "$SLEEP_LOG"
+}
+
+@test "IRIS_XR_SESSION_TIMEOUT=-5 falls back to the 900s default with a warning, not an instant kill" {
+  run env IRIS_XR_SESSION_TIMEOUT=-5 FAKE_SLEEP=1 \
+    bash -c "printf 'show version\n' | bash '$RUN' 192.0.2.10"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"IRIS_XR_SESSION_TIMEOUT"* ]] || return 1
+  grep -q '^900$' "$SLEEP_LOG"
+}
+
+@test "IRIS_XR_SESSION_TIMEOUT with embedded whitespace falls back to the 900s default with a warning" {
+  run env IRIS_XR_SESSION_TIMEOUT=" 5 " FAKE_SLEEP=1 \
+    bash -c "printf 'show version\n' | bash '$RUN' 192.0.2.10"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"IRIS_XR_SESSION_TIMEOUT"* ]] || return 1
+  grep -q '^900$' "$SLEEP_LOG"
+}
+
+@test "empty IRIS_XR_SESSION_TIMEOUT behaves exactly like unset: 900s default, no warning" {
+  run env IRIS_XR_SESSION_TIMEOUT= FAKE_SLEEP=1 \
+    bash -c "printf 'show version\n' | bash '$RUN' 192.0.2.10"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"IRIS_XR_SESSION_TIMEOUT"* ]] || return 1
+  grep -q '^900$' "$SLEEP_LOG"
+}
+
+@test "unset IRIS_XR_SESSION_TIMEOUT behaves as the 900s default, no warning" {
+  run env FAKE_SLEEP=1 \
+    bash -c "printf 'show version\n' | bash '$RUN' 192.0.2.10"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"IRIS_XR_SESSION_TIMEOUT"* ]] || return 1
+  grep -q '^900$' "$SLEEP_LOG"
+}
+
+@test "IRIS_XR_SESSION_TIMEOUT=0 stays valid: no warning, bound disabled" {
+  run env IRIS_XR_SESSION_TIMEOUT=0 \
+    bash -c "printf 'show version\n' | bash '$RUN' 192.0.2.10"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"IRIS_XR_SESSION_TIMEOUT"* ]] || return 1
+  [ ! -s "$SLEEP_LOG" ]
+}
+
+@test "a failing mktemp is refused loudly, not silently run unbounded" {
+  cat > "$STUB/mktemp" <<'STUBEOF'
+#!/usr/bin/env bash
+exit 1
+STUBEOF
+  chmod +x "$STUB/mktemp"
+  run env bash -c "printf 'show version\n' | bash '$RUN' 192.0.2.10"
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"mktemp"* ]]
 }
