@@ -2294,6 +2294,37 @@ def test_xr_host_plan_carries_no_addressing_fields(tmp_path):
         stop()
 
 
+def test_plan_refuses_xr_appmgr_platform_without_xr_host_attachment(tmp_path):
+    """The mutual xr-host <-> xr-appmgr requirement (Task 1's
+    validate_record) is enforced only on a fully-classified record --
+    fleet.upsert on a bare {"platform": ...} payload (the /platform route;
+    also reachable via legacy CSV import) leaves management_type at
+    legacy_routed, which _plan converts straight to 'routed' before this
+    fix ever consulted platform again. That let an IOS-XR box plan as a
+    plain IOS-XE routed device: 10 XE addressing keys, a VLAN/SVI ownership
+    narrative, and owned resources [vlan, svi, guestshell] -- on hardware
+    that has none of those. _plan must gate on the RESOLVED platform vs.
+    attachment directly, the same way it already gates 'router'."""
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, _cat = deps
+    try:
+        fleet.upsert({"device_id": "xr1", "device_ip": "10.0.0.9",
+                      "model": "8201", "credential_profile_id": "lab"})
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, _ = _req(host, port, "POST", "/api/devices/xr1/platform",
+                        {"platform": "xr-appmgr"}, headers=hh)
+        assert st == 200
+        status, _, body = _req(host, port, "GET", "/api/devices/xr1/plan",
+                               headers={"Cookie": ck})
+        assert status == 409, body
+        assert json.loads(body)["error"] == (
+            "platform xr-appmgr requires management_type xr-host "
+            "(the two are mutually required)")
+    finally:
+        stop()
+
+
 def test_owned_resources_for_xr_host_matches_the_uninstall_recipe(tmp_path):
     """_owned_resources must claim exactly what device/xr-uninstall.sh
     actually removes: the appmgr application, its registered package
@@ -2313,6 +2344,11 @@ def test_owned_resources_for_xr_host_matches_the_uninstall_recipe(tmp_path):
                           "agent-rpm", "agent-work-dir"]
         assert "guestshell" not in kinds
         assert all(r["ownership"] == "iris-created" for r in resources)
+        # Names are gui_onboard's own constants, not re-hardcoded here, so a
+        # rename of APPID/SOURCE_NAME cannot silently drift the receipt.
+        by_kind = {r["kind"]: r for r in resources}
+        assert by_kind["appmgr-application"]["name"] == gui_onboard._XR_APPID
+        assert by_kind["appmgr-source"]["name"] == gui_onboard._XR_SOURCE_NAME
     finally:
         srv.server_close()
 

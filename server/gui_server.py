@@ -757,6 +757,18 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     r"^C8[0-9]{3}", device["model"], re.IGNORECASE):
                 raise ValueError("router modes support the Catalyst 8000 family only; "
                                  "%s is not yet supported" % device["model"])
+            # xr-host <-> xr-appmgr is mutually required (gui_fleet.validate_record
+            # enforces this on any FULLY-CLASSIFIED record), but a record reaching
+            # this platform-only, e.g. the /platform route or legacy CSV import
+            # (fleet.upsert with just {"platform": ...}) stays management_type
+            # legacy_routed, which never runs that check. Left ungated here, such
+            # a row planned straight through as 'routed': XE addressing keys, a
+            # VLAN/SVI ownership narrative, and vlan/svi/guestshell owned
+            # resources on an IOS-XR box. Gate on the RESOLVED platform, the same
+            # way the 'router' coupling above already does.
+            if (platform == "xr-appmgr") != (attachment == "xr-host"):
+                raise ValueError("platform xr-appmgr requires management_type "
+                                 "xr-host (the two are mutually required)")
             if attachment == "xr-host":
                 # The appmgr container runs on the router's own network stack
                 # (--net=host): no VLAN, SVI, app IP/mask/gateway, VPG, or NAT
@@ -833,16 +845,21 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             exactly what device/xr-uninstall.sh removes: the appmgr
             application, its registered package source, the RPM staged at
             harddisk: root, and the agent's iris-work/ control-file
-            directory -- it must NOT claim a guestshell, which XR hardware
-            (IOS-XR, appmgr Docker apps) has no such feature at all, unlike
-            every other attachment here (IOS-XE)."""
+            directory. Every other attachment here is IOS-XE and runs its
+            agent inside a guestshell resource; IOS-XR has no such feature,
+            so xr-host must NOT claim one."""
             attachment = resolved.get("attachment")
             if attachment == "xr-host":
+                # Sidecar files (*.torrent/*.aria2/*.peers.json at harddisk:
+                # root) are also part of xr-uninstall.sh's sweep, but are
+                # deliberately NOT claimed as an owned resource here --
+                # sidecar ownership/provenance is being reworked in the
+                # Directive 2 teardown-provenance work.
                 return [
                     {"kind": "appmgr-application", "ownership": "iris-created",
-                     "name": "iris"},
+                     "name": gui_onboard._XR_APPID},
                     {"kind": "appmgr-source", "ownership": "iris-created",
-                     "name": "iris-xr"},
+                     "name": gui_onboard._XR_SOURCE_NAME},
                     {"kind": "agent-rpm", "ownership": "iris-created",
                      "path": "harddisk:iris-xr.rpm"},
                     {"kind": "agent-work-dir", "ownership": "iris-created",
