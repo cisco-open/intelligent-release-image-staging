@@ -26,6 +26,7 @@ from urllib.parse import unquote, parse_qs, urlsplit
 
 import audit
 import audit_export
+import bulkhash_refresh
 # aliased: `catalog` is the injected STORE everywhere below
 import catalog as catalog_mod
 import gui_app
@@ -3201,6 +3202,12 @@ def main():
     ca_stop = threading.Event()     # never set in production; loop dies with us
     threading.Thread(target=ca_trust_refresh_loop,
                      args=(ca_stop, state_dir, _bg_audit),
+                     daemon=True).start()
+    # Cisco Bulk Hash reconciliation schedule (KGV reconciler Task 3): same
+    # daemon-thread idiom as ca_trust_refresh_loop, immediately above.
+    bulkhash_stop = threading.Event()  # never set in production either
+    threading.Thread(target=bulkhash_refresh.bulkhash_refresh_loop,
+                     args=(bulkhash_stop, state_dir, catalog, _bg_audit),
                      daemon=True).start()
     # Daily audit-trail export (F5): same daemon-thread idiom. The password
     # accessor is passed as a callable so each run reads the current secret.
