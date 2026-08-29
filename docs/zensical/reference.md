@@ -192,7 +192,8 @@ on the authenticated routes additionally require the session's CSRF token in an
 `X-CSRF-Token` header (double submit); without it the request is rejected with
 403. The two pre-auth routes carry no CSRF token, because there is no session
 yet. JSON request bodies are capped at 64 KiB — the exceptions are the CSV import
-at 8 MiB and the streamed image upload at 4 GiB.
+at 8 MiB, the streamed image upload at 4 GiB, and the offline Bulk Hash feed
+upload at 256 MiB.
 
 ### Session and settings
 
@@ -247,6 +248,31 @@ the file vanished between listing and import, and 409 if a publish of the same
 catalog id is already in flight. Every outcome writes an `image_import` audit
 event, with `result=fail` and the reason on a rejection.
 
+### Image verification
+
+| Route | Body / result |
+| --- | --- |
+| `GET /api/settings/image-verification` | `{mode, hour_utc, last_run}` — the Cisco Bulk Hash reconciliation schedule and the outcome of its most recent run. |
+| `POST /api/settings/image-verification` | `{mode, hour_utc}` — a full replace of the schedule; `mode` is `off`, `daily`, or `weekly` (weekly always anchors to Monday UTC — there is no day-of-week field), `hour_utc` is 0-23. `last_run` is server-managed and cannot be set here. |
+| `POST /api/image-verification/refresh` | Runs the reconciler now (`source=manual`), synchronously on this request. `{outcome: "ok", matched, mismatched, not_in_feed}` (200); `{outcome: "already_running"}` (409, another run is already in flight); `{outcome: "fail", detail}` (502 — fetch, signature, parse, or reconcile failed, and the catalog is left untouched). |
+| `POST /api/image-verification/offline` | Raw `.tar` body (256 MiB cap), for air-gapped servers — runs the identical verify-then-parse pipeline against the uploaded file instead of fetching one (`source=offline`); same result shape and status codes as refresh. |
+| `POST /api/images/<id>/release-quarantine` | `{override, confirm_text}` — lifts an active quarantine. `override=false` re-checks the image's sha512 against the stored feed verdict and releases it if that now agrees, else 409 `quarantine_still_mismatched` with the verdict. `override=true` requires `confirm_text` to exactly match the image's filename (400 otherwise) and releases regardless of the mismatch, recorded as a distinct `release_override` audit action; the stored verdict itself is left as `mismatch`. 404 if the image does not exist; 400 if it is not currently quarantined. |
+
+Each catalog entry in `GET /api/images` carries a `quarantined` bool and a
+`hash_verification` object — `{state, checked_at, feed_published_at, source,
+deferral}` — once at least one reconciliation run has covered it; both are
+absent/falsy on an entry the reconciler has never touched. `state` is
+`verified`, `mismatch`, or `not_in_feed` (the image's file name and size have
+no match in Cisco's feed — the expected state for a customer-built image
+Cisco never published); `source` is `scheduled`, `manual`, or `offline`,
+whichever run last produced the verdict; `deferral` is `true` when the
+matched feed row's `DEFERRAL_STATUS` is present and not `Active` — a
+Cisco-side warning that never affects `state`. `checked_at` is the Unix
+timestamp of that run; `feed_published_at` is Cisco's own `PUBLISH_DATE`
+string from the feed row, carried through unparsed. See [Cisco Bulk Hash
+verification](security.md#cisco-bulk-hash-verification) and [Image
+verification](operations.md#image-verification).
+
 ### Devices
 
 | Route | Body / result |
@@ -259,7 +285,7 @@ event, with `result=fail` and the reason on a rejection.
 | `GET /api/devices/<id>/plan` | `{plan}` — the resolved deployment plan; 409 when it cannot resolve. |
 | `GET /api/devices/<id>/reports` | `{reports: [...]}` — the device's stored telemetry ring. |
 | `GET /api/devices/<id>/deployment` | `{receipt, total}` — the receipt that best describes the device (the active one, else the teardown-authorizing one, else the newest) plus the stored-receipt count; `receipt` is `null` when none exists. Read-only — feeds the deployment-details panel. |
-| `POST /api/devices/<id>/assign` | `{image_ids: [...]}` sets the device's ordered, up-to-ten-image approved set (an empty array unassigns); the singular `{image_id: <id or null>}` is the pre-multi-image compat shape and always means a one-element set. 400 for more than ten ids, a duplicate, or an id not in the catalog. See [Policy schema](#policy-schema). |
+| `POST /api/devices/<id>/assign` | `{image_ids: [...]}` sets the device's ordered, up-to-ten-image approved set (an empty array unassigns); the singular `{image_id: <id or null>}` is the pre-multi-image compat shape and always means a one-element set. 400 for more than ten ids, a duplicate, or an id not in the catalog; 400 `image_quarantined` with the blocking verdict if one of the ids is currently quarantined by the Cisco Bulk Hash reconciler (see [Image verification](#image-verification)). See [Policy schema](#policy-schema). |
 | `POST /api/devices/<id>/credential`, `.../platform` | Sets the credential profile, or the platform (Agent install choice) and storage target; each returns `{ok: true}`. |
 | `POST /api/devices/<id>/request-report` | Requests a fresh telemetry report; `{ok: true, expires_at}`, or 429 while one is already pending. |
 | `POST /api/devices/<id>/adopt` | Requires `{"acknowledge_adopt": true}`; returns `{receipt_id}`. 409 when the device already has an active receipt; routers cannot be adopted. |
@@ -338,8 +364,10 @@ written to `<state>/torrents/<image_id>.torrent`, never next to the image itself
 | `source_dir` | Absolute directory the image is seeded from. Set by `publish()`. |
 | `size` | Image size in bytes. What the agent attests the placed copy against. |
 | `sha256` | Checked by the agent against the staged file. |
-| `sha512` | Recorded at publish time and never recomputed on a device. It is the join key to Cisco's published bulk-hash data, which is what an authenticity claim about this file rests on. |
-| `cisco_signature_verified` | Whether the Cisco signature was verified elsewhere. The server does not check it. Authenticity is a publish-time property of the catalog entry; on the device the check is the agent's sha256 of the staged file against this entry's `sha256`, and nothing re-hashes the placed copy. |
+| `sha512` | Recorded at publish time and never recomputed on a device. It is the join key into Cisco's published Bulk Hash feed — see [Image verification](#image-verification). |
+| `cisco_signature_verified` | `True` exactly when this entry's `hash_verification.state` is `verified` — kept in sync by the Cisco Bulk Hash reconciler on every run that covers this image. `False` for `mismatch`, `not_in_feed`, or before the first run ever covers it. On the device, the check is still the agent's sha256 of the staged file against this entry's `sha256`; nothing re-hashes the placed copy. |
+| `hash_verification` | `{state, checked_at, feed_published_at, source, deferral}` — the reconciler's most recent verdict for this image; absent until the first reconciliation run covers this entry. See [Image verification](#image-verification). |
+| `quarantined` | `True` once a `mismatch` verdict has quarantined this image. Only `POST /api/images/<id>/release-quarantine` clears it — a later `verified` verdict alone does not. See [Releasing a quarantine](operations.md#releasing-a-quarantine). |
 | `info_hash_hex` | Torrent info hash, used to stop seeding on delete. |
 | `published_at` | Unix timestamp of the publish. |
 

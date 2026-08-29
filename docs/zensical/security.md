@@ -294,6 +294,30 @@ The operator walkthrough is in
 and the refusal reasons are in
 [Import skip reasons](reference.md#import-skip-reasons).
 
+## Cisco Bulk Hash verification
+
+The catalog can check a published image's sha512 against Cisco's own Bulk
+Hash feed — the authenticity half of the trust story that the "Device-side
+content check" guardrail above does not cover: that check proves a device
+received what the catalog holds, not that the catalog holds a genuine Cisco
+file.
+
+Before anything in a downloaded feed is parsed, its X.509 signature is
+verified against a Cisco certificate pinned in-repo
+(`server/certs/cisco_bulkhash_verify.pem`; the file's own header records its
+provenance and fingerprint) — never a certificate found inside the feed
+itself. Any fetch, signature, or parse failure leaves every stored
+verification verdict untouched: a broken or tampered feed can never
+quarantine an image.
+
+A sha512 mismatch quarantines the image: seeding stops, it can no longer be
+newly assigned, and it is auto-unassigned from every device that already had
+it approved. `DEFERRAL_STATUS` on a matched feed row surfaces as a console
+warning and never quarantines — an image Cisco has deferred is not treated
+as tampered. See [Image verification](operations.md#image-verification) for
+the schedule, the offline path for air-gapped servers, and how an operator
+releases a quarantine.
+
 ## TLS and certificates
 
 The catalog and artifact server use HTTPS. The generated device installer installs the catalog certificate into the device trust path so the bootstrap and catalog calls can validate the server identity.

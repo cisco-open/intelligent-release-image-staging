@@ -182,6 +182,50 @@ records it in a known-hosts file under the server state directory
 changes. Verify the fingerprint out of band where the destination warrants
 it, and remove that file after an intentional host rebuild.
 
+## Image verification
+
+*Settings → Image verification* checks the catalog's images against Cisco's
+published Bulk Hash feed and quarantines a sha512 mismatch — see [Cisco Bulk
+Hash verification](security.md#cisco-bulk-hash-verification) for what the
+check does and what a quarantine changes.
+
+The schedule has three modes: **off** (the default), **daily**, and
+**weekly** — both timed modes fire at a configured `hour_utc` (0-23), and
+weekly always anchors to Monday UTC; there is no day-of-week setting. A slot
+the server was down for is skipped, not made up: the next scheduled slot
+runs normally, and nothing catches up for the one that was missed. **Refresh
+now** in the same pane runs the check immediately; if a run is already in
+progress, the button and the API both answer "already in progress" rather
+than starting a second one.
+
+Air-gapped servers can upload the feed tar directly instead of the server
+fetching it: the same pane's offline upload takes a raw `.tar` (256 MiB cap)
+and runs it through the identical signature-verification-then-parse
+pipeline, recorded as `source=offline`. A scheduled run is
+`source=scheduled`; **Refresh now** is `source=manual`.
+
+The pane's status line shows the last run's time, source, outcome, and
+matched/mismatched/not_in_feed counts. Every run is audited as
+`bulkhash-refresh` — scheduled runs record `actor=system`, a manual refresh
+or offline upload records the console operator who triggered it; a schedule
+change is audited separately as `bulkhash-schedule-config`, and an offline
+upload additionally as `bulkhash-offline-upload`.
+
+### Releasing a quarantine
+
+An image quarantined by a sha512 mismatch cannot be newly assigned to a
+device — an assignment attempt is refused with the verdict that blocked it.
+From the image's detail view, **Release** re-runs the sha512 comparison
+against the stored feed verdict: if the catalog's own sha512 now agrees
+(the file was replaced with a corrected copy), the quarantine lifts and the
+verdict updates to verified. If it still disagrees, the release is refused
+unless the operator types the image's own filename to confirm an override,
+recorded as a distinct `release_override` audit action rather than a plain
+release. An override does not change the recorded verdict back to verified —
+it only permits assignment despite the mismatch — and re-running the check
+later and getting that same mismatch again does not re-quarantine an
+overridden image; a genuinely different mismatch does.
+
 ## Scaling notes
 
 Private BitTorrent reduces server load by letting devices exchange pieces after the seeder introduces the content. The server remains important for tracker announces, catalog policy, initial seeding, and telemetry. Watch the seeder data port, tracker health, and device storage pressure during large network waves.

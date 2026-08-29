@@ -29,6 +29,7 @@ IRIS also measures that distribution rather than only performing it. Every rollo
 | Network tools | CSV-driven inventory, per-device installers, assignments, and release packaging. |
 | Measured distribution | Per-image accounting of origin-served versus peer-served bytes, plus per-device peer receipts naming which peers supplied the image. The portion the origin-side sampler could not trace to a device is published as its own counter -- untraced bytes did leave the origin, only the recipient is unknown -- rather than folded into the totals. |
 | Observability | Swarm map, health endpoint, metrics (Prometheus exposition format), optional OTLP export, peer-distribution counters, and structured audit trail. |
+| Image verification | Compares catalog images against Cisco's published Bulk Hash feed by sha512 and quarantines a mismatch until an operator resolves it. |
 
 ## Release model
 

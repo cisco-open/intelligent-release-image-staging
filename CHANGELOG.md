@@ -32,6 +32,18 @@ top-level `VERSION` file.
   its package source, the staged RPM, and the agent's own working directory.
   This platform is not lab-validated yet — see
   [Validation](docs/zensical/validation.md#validated-platforms).
+- Catalog images can now be checked against Cisco's published Bulk Hash feed:
+  a scheduled run (off/daily/weekly, weekly anchored to Monday UTC), a manual
+  "Refresh now" in the console, or an offline upload of the feed tar for
+  air-gapped servers all join each image by file name and size and compare
+  its sha512. The feed tar's X.509 signature is verified against a
+  certificate pinned in-repo before anything in it is parsed, and any fetch,
+  signature, or parse failure leaves every prior verdict untouched. A sha512
+  mismatch quarantines the image — seeding stops, it is auto-unassigned from
+  every device that had it approved, and it cannot be newly assigned — until
+  an operator releases it, either because the catalog's own sha512 now agrees
+  or by typing the image's filename to override a mismatch that persists.
+  See [Image verification](docs/zensical/operations.md#image-verification).
 
 ### Changed
 - Image verification is now the same on every platform: the agent proves integrity by
