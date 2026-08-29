@@ -169,6 +169,19 @@ def test_complete_and_verified_emits_done_once():
     assert copied == ["img1.bin"]              # still only once
 
 
+def test_placement_via_a_real_copy_always_records_origin_downloaded():
+    # copy_in_place=False (every IOS-XE platform) always WRITES the root
+    # bytes itself via a real copy — there is no attest-only/adoption path
+    # here, so every successful placement is unconditionally "downloaded".
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 5,
+                       "sha256": "abc"})
+    deps, _, _, _, _, _, _, _ = make_deps(cat, {"/stage/img1.bin": 5})
+    state = {}
+    assert iris_agent.run_once(CFG, deps, state) == "complete"
+    assert state["img1"]["origin"] == "downloaded"
+
+
 def test_steady_state_never_rehashes():
     # once done+copied, ticks must NOT re-verify (hashing 1.2GB > the 60s timer
     # caused overlapping runs that double-fired the root copy)
@@ -215,7 +228,10 @@ def test_replaced_image_cleanup_claim_gated_on_actual_absence():
     # applets exist for exactly that reason) — so the delete must run through
     # the authorization-bypass applet, and the CLEANUP log and root_file
     # bookkeeping must be gated on the file actually being gone, else the
-    # replaced image is stranded on flash while IRIS claims otherwise
+    # replaced image is stranded on flash while IRIS claims otherwise.
+    # old.bin is explicitly IRIS's own DOWNLOAD (origin="downloaded"): a
+    # provenance-unknown/adopted entry is covered by the adopted-file tests
+    # below and never reaches the delete applet at all.
     cat = FakeCatalog({"approved_image_id": "img2"},
                       {"id": "img2", "filename": "img2.bin", "size": 7,
                        "sha256": "def"})
@@ -224,7 +240,9 @@ def test_replaced_image_cleanup_claim_gated_on_actual_absence():
     deps = deps._replace(                       # the old root REFUSES to die
         root_present=lambda fname, prefix="flash:", expected_size=None: fname == "old.bin")
     state = {"schema_version": iris_agent._STATE_SCHEMA,
-             "image_id": "img2", "pending_root_deletes": ["old.bin"]}
+             "image_id": "img2", "pending_root_deletes": ["old.bin"],
+             "old-img": {"root_file": "old.bin", "copied": True,
+                        "origin": "downloaded"}}
     iris_agent.run_once(CFG, deps, state)
     assert bundle_reclaimed == [("flash:", ["old.bin"])]   # via the bypass applet
     assert all("delete" not in c for c in ios_cmds)        # never a raw exec delete
@@ -246,7 +264,9 @@ def test_replaced_image_cleanup_retry_refires_bypass_applet():
     deps = deps._replace(                       # the old root REFUSES to die
         root_present=lambda fname, prefix="flash:", expected_size=None: fname == "old.bin")
     state = {"schema_version": iris_agent._STATE_SCHEMA,
-             "image_id": "img2", "pending_root_deletes": ["old.bin"]}
+             "image_id": "img2", "pending_root_deletes": ["old.bin"],
+             "old-img": {"root_file": "old.bin", "copied": True,
+                        "origin": "downloaded"}}
     iris_agent.run_once(CFG, deps, state)
     iris_agent.run_once(CFG, deps, state)
     assert bundle_reclaimed == [("flash:", ["old.bin"]),
@@ -264,11 +284,71 @@ def test_replaced_image_cleanup_confirmed_when_gone():
     deps = deps._replace(                        # old root really deleted
         root_present=lambda fname, prefix="flash:", expected_size=None: fname != "old.bin")
     state = {"schema_version": iris_agent._STATE_SCHEMA,
-             "image_id": "img2", "pending_root_deletes": ["old.bin"]}
+             "image_id": "img2", "pending_root_deletes": ["old.bin"],
+             "old-img": {"root_file": "old.bin", "copied": True,
+                        "origin": "downloaded"}}
     iris_agent.run_once(CFG, deps, state)
     assert bundle_reclaimed == [("flash:", ["old.bin"])]
     assert "pending_root_deletes" not in state
     assert any(m == "CLEANUP" and "old.bin" in msg for m, msg in emitted)
+
+
+def test_pending_delete_of_an_adopted_file_is_skipped_and_cleared():
+    # The Directive-2 incident: attest-in-place ADOPTED an operator's
+    # pre-existing file as IRIS's staged copy; the OLD pending-delete queue
+    # must never be allowed to delete it. Skipped, logged, and the queue
+    # entry is resolved (cleared) rather than retried forever.
+    cat = FakeCatalog({"approved_image_id": "img2"},
+                      {"id": "img2", "filename": "img2.bin", "size": 7,
+                       "sha256": "def"})
+    deps, emitted, ios_cmds, _, _, _, _, bundle_reclaimed = make_deps(
+        cat, {"/stage/img2.bin": 7}, verify_ok=True)
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "image_id": "img2", "pending_root_deletes": ["old.bin"],
+             "old-img": {"root_file": "old.bin", "copied": True,
+                        "origin": "adopted"}}
+    iris_agent.run_once(CFG, deps, state)
+    assert bundle_reclaimed == []                # delete never attempted
+    assert all("delete" not in c for c in ios_cmds)
+    assert "pending_root_deletes" not in state   # resolved, not retried forever
+    kept = [msg for m, msg in emitted if m == "ROOTCOPY-KEPT"]
+    assert kept and "old.bin" in kept[0] and "operator-adopted" in kept[0]
+
+
+def test_pending_delete_of_a_legacy_missing_origin_file_is_never_deleted():
+    # No per-image record at all claims old.bin's provenance (a state file
+    # from before this feature existed). Missing/unknown origin is the
+    # fail-safe default: treated exactly like "adopted".
+    cat = FakeCatalog({"approved_image_id": "img2"},
+                      {"id": "img2", "filename": "img2.bin", "size": 7,
+                       "sha256": "def"})
+    deps, emitted, ios_cmds, _, _, _, _, bundle_reclaimed = make_deps(
+        cat, {"/stage/img2.bin": 7}, verify_ok=True)
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "image_id": "img2", "pending_root_deletes": ["old.bin"]}
+    iris_agent.run_once(CFG, deps, state)
+    assert bundle_reclaimed == []
+    assert "pending_root_deletes" not in state
+    assert any(m == "ROOTCOPY-KEPT" and "old.bin" in msg for m, msg in emitted)
+
+
+def test_pending_delete_mixed_queue_only_deletes_the_downloaded_entry():
+    cat = FakeCatalog({"approved_image_id": "img3"},
+                      {"id": "img3", "filename": "img3.bin", "size": 7,
+                       "sha256": "xyz"})
+    deps, emitted, ios_cmds, _, _, _, _, bundle_reclaimed = make_deps(
+        cat, {"/stage/img3.bin": 7}, verify_ok=True)
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "image_id": "img3",
+             "pending_root_deletes": ["adopted.bin", "downloaded.bin"],
+             "old-a": {"root_file": "adopted.bin", "copied": True,
+                      "origin": "adopted"},
+             "old-b": {"root_file": "downloaded.bin", "copied": True,
+                      "origin": "downloaded"}}
+    iris_agent.run_once(CFG, deps, state)
+    assert bundle_reclaimed == [("flash:", ["downloaded.bin"])]
+    assert any(m == "ROOTCOPY-KEPT" and "adopted.bin" in msg
+              for m, msg in emitted)
 
 
 def test_replaced_image_cleanup_whitelists_names_before_applet():
@@ -547,7 +627,9 @@ def test_queued_root_delete_uses_cached_stage_fs():
         cat, {"/stage/img2.bin": 5}, mode="bundle")
     deps = deps._replace(target_fs=lambda: ("sdflash:", 9_000_000_000))
     state = {"image_id": "img2", "stage_fs": "sdflash:",
-             "pending_root_deletes": ["img1.bin"]}
+             "pending_root_deletes": ["img1.bin"],
+             "old-img": {"root_file": "img1.bin", "copied": True,
+                        "origin": "downloaded"}}
     iris_agent.run_once(CFG, deps, state)
     assert bundle_reclaimed == [("sdflash:", ["img1.bin"])]
 
@@ -559,7 +641,9 @@ def test_queued_root_delete_defaults_to_flash_for_legacy_state():
                        "sha256": "abc"})
     deps, _, _, _, _, _, _, bundle_reclaimed = make_deps(
         cat, {"/stage/img2.bin": 5}, mode="bundle")
-    state = {"image_id": "img2", "pending_root_deletes": ["img1.bin"]}
+    state = {"image_id": "img2", "pending_root_deletes": ["img1.bin"],
+             "old-img": {"root_file": "img1.bin", "copied": True,
+                        "origin": "downloaded"}}
     iris_agent.run_once(CFG, deps, state)
     assert bundle_reclaimed == [("flash:", ["img1.bin"])]
 
@@ -707,7 +791,9 @@ def test_old_root_cleanup_root_present_no_catalog_size():
     deps, _, _, _, _, _, _, _ = make_deps(cat, {}, verify_ok=True)
     deps = deps._replace(root_present=root_present)
     state = {"schema_version": iris_agent._STATE_SCHEMA,
-             "image_id": "img2", "pending_root_deletes": ["old.bin"]}
+             "image_id": "img2", "pending_root_deletes": ["old.bin"],
+             "old-img": {"root_file": "old.bin", "copied": True,
+                        "origin": "downloaded"}}
     iris_agent.run_once(CFG, deps, state)
     assert ("old.bin", "flash:", None) in calls
 

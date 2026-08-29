@@ -462,6 +462,10 @@ class _Catalog:
     def get_image(self, image_id):
         return self.image if image_id == self.image["id"] else None
 
+    def download_torrent(self, image_id, dest):
+        with open(dest, "wb") as f:
+            f.write(b"fake-torrent")
+
     def heartbeat(self, _sid, payload):
         self.heartbeats.append(payload)
         return {}
@@ -470,7 +474,12 @@ class _Catalog:
 def test_run_once_completes_a_tick_against_the_real_xr_deps(tmp_path):
     """End to end over the actual module: a fully downloaded image sitting on
     the mount is hashed, attested in place, and reported ready — with no copy
-    step, no CLI, and harddisk: as the target filesystem."""
+    step, no CLI, and harddisk: as the target filesystem.
+
+    This agent's aria2 session never touches the file (it is already
+    complete before run_once's first tick), which is exactly the
+    operator-pre-staged shape the 2026-08-29 incident hinged on: origin must
+    record 'adopted', not 'downloaded' (Directive 2 provenance)."""
     import hashlib
     body = b"y" * 256
     _write(tmp_path / "8000-x64-26.2.1.iso", 256, b"y")
@@ -484,7 +493,52 @@ def test_run_once_completes_a_tick_against_the_real_xr_deps(tmp_path):
     assert iris_agent.run_once(cfg, deps, state) == "complete"
     assert state["img-1"]["copied"] is True
     assert state["stage_fs"] == "harddisk:"
+    assert state["img-1"]["origin"] == "adopted"
     hb = catalog.heartbeats[-1]
     assert hb["stage_state"] == "ready"
     assert hb["target_fs"] == "harddisk:"
     assert hb["free_flash_bytes"] > 0
+
+
+def test_run_once_records_origin_downloaded_when_this_agent_fetched_it(
+        tmp_path):
+    """The counterpart: when THIS agent's own aria2 session is what deposits
+    the bytes (a genuine download, faked here since no aria2 daemon runs in
+    unit tests), attest-in-place's eventual True is 'downloaded' provenance,
+    not 'adopted' — the distinguishing fact is which side wrote the file."""
+    import hashlib
+    body = b"z" * 256
+    image = {"id": "img-1", "filename": "8000-x64-26.2.1.iso", "size": 256,
+             "sha256": hashlib.sha256(body).hexdigest()}
+    catalog = _Catalog(image)
+    cfg, deps = _build(tmp_path)
+
+    def fake_aria_add(torrent_path, dest_dir):
+        # Simulate aria2 finishing the write-through instantly.
+        _write(tmp_path / image["filename"], 256, b"z")
+
+    deps = deps._replace(catalog=catalog, aria_stats=lambda p: None,
+                         aria_peers=lambda p: [], aria_session=lambda: None,
+                         aria_remove=lambda fname: None,
+                         aria_add=fake_aria_add)
+    state = {}
+    # tick 1: file absent -> this agent's own aria2 session starts the fetch
+    assert iris_agent.run_once(cfg, deps, state) == "downloading"
+    # tick 2: the (faked) download landed whole on tick 1
+    assert iris_agent.run_once(cfg, deps, state) == "complete"
+    assert state["img-1"]["copied"] is True
+    assert state["img-1"]["origin"] == "downloaded"
+
+
+def test_state_round_trips_origin_through_atomic_write_and_load(tmp_path):
+    """origin is a plain per-image state field: it must survive exactly the
+    same save/reload path every other per-image fact does."""
+    state_path = str(tmp_path / "iris-agent.state")
+    state = {"img-a": {"root_file": "img-a.iso", "copied": True,
+                       "origin": "adopted"},
+             "img-b": {"root_file": "img-b.iso", "copied": True,
+                       "origin": "downloaded"}}
+    iris_agent._atomic_write_state(state_path, state)
+    loaded = xr_deps._load_state(state_path)
+    assert loaded["img-a"]["origin"] == "adopted"
+    assert loaded["img-b"]["origin"] == "downloaded"

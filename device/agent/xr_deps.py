@@ -29,6 +29,24 @@ aria2c therefore downloads each image STRAIGHT to its final location, so:
     facts a CLI used to supply (model, version, running image) are recorded
     by the onboard into the agent conf, and an unrecorded fact stays
     honestly unknown rather than being guessed.
+  * attest_in_place succeeding proves nothing about WHO wrote the bytes —
+    the mount is the operator's `harddisk:` root, and a byte-identical file
+    the operator staged there before IRIS was ever assigned this image
+    attests exactly the same as one this agent's own aria2 session just
+    finished writing. `run_once` (iris_agent.py) is what tells the two
+    apart: it records a per-image 'origin' of "downloaded" only when ITS OWN
+    download machinery is what fetched the file, and "adopted" otherwise —
+    the file was already there; attest_in_place merely confirmed it. A
+    missing/legacy 'origin' (a state file from before this field existed)
+    is treated exactly like "adopted": fail-safe, so an unproven placement
+    is never the thing IRIS deletes. Every agent-side deletion of a root
+    image file — the pending_root_deletes drain and park's stage-copy
+    delete, which on THIS platform (stage IS root) is a root delete —
+    consults it before touching anything (see their docstrings in
+    iris_agent.py). This is the fix for the 2026-08-29 incident: an
+    operator's pre-existing ISO, adopted by attest-in-place, was deleted by
+    a later unassign/teardown because nothing recorded that IRIS never
+    wrote it.
 
 Deliberate parity deviations, each with its reason:
 
@@ -39,7 +57,11 @@ Deliberate parity deviations, each with its reason:
   * `reclaim` does nothing and `reclaimable` offers only files the agent's
     own state proves IRIS placed. The mount is the operator's `harddisk:`
     root, shared with the XR install manager, so no filename pattern there
-    is provably IRIS's. v1 reclaims nothing automatically.
+    is provably IRIS's. v1 reclaims nothing automatically. (Neither is
+    reachable today — see reclaimable()'s own docstring — but if a future
+    mode addition ever wires reclaim_bundle to reclaimable()'s answer, that
+    answer must ALSO be origin-aware before it does: root_file proves IRIS
+    PLACED a file, not that IRIS may delete it.)
 
 Stdlib only, like every other agent module.
 """
@@ -87,7 +109,14 @@ def attest_in_place(stage_dir, fname, expected_size, emit,
     and no destructive command to refuse.
 
     A short file is LEFT ALONE. aria2 resumes it on the next tick; throwing
-    away bytes the swarm already delivered would be pure loss."""
+    away bytes the swarm already delivered would be pure loss.
+
+    A True here does NOT mean this agent downloaded the file — a stat can't
+    tell an operator's pre-existing byte-identical copy from one this
+    agent's own aria2 session just finished writing, and this function does
+    not try. The caller (iris_agent.py's copy-success site) is what decides
+    'downloaded' vs 'adopted' provenance, from whether ITS OWN download
+    machinery ever ran for this image — see the module docstring."""
     path = os.path.join(stage_dir, fname)
     try:
         observed = stat_fn(path).st_size
@@ -171,12 +200,22 @@ def reclaimable(stage_dir, protect, state):
     the caller's protect set does not spare it. Written to the general
     parked-aware `_protect_set` contract — offering a PARKED image's copy on
     purpose — but on THIS platform that almost never has anything to find:
-    stage IS root here, so `_reconcile_set`'s park already deletes a parked
-    image's file outright via `remove_stage` (iris_agent.py) on the very
-    next tick, the OPPOSITE of the general contract's "kept until another
-    image needs the room." See the parity review (adjudicated, no fix) for
-    why that makes reclaim-none safe rather than a gap: an enabled reclaim
-    would have nothing left to do.
+    stage IS root here, so `_reconcile_set`'s park (iris_agent.py) already
+    frees a parked image's file itself, via `remove_stage`, on the very next
+    tick — the OPPOSITE of the general contract's "kept until another image
+    needs the room" — for every placement park can PROVE this agent
+    downloaded (origin='downloaded'). An adopted/provenance-unknown parked
+    placement is left alone by park exactly as this function's own
+    ownership proof would leave it alone, so there is still nothing of
+    substance left for an enabled reclaim to do; see the parity review
+    (adjudicated, no fix) for the original reasoning.
+
+    NOT ORIGIN-AWARE ITSELF: `root_file` proves IRIS placed a file, not that
+    IRIS may delete it — an adopted placement has a root_file too. Currently
+    safe only because nothing calls this (see NOTE below); if a future mode
+    addition ever makes it reachable, it must filter its candidates by
+    origin=='downloaded' first, the same rule every other deletion path in
+    this feature applies (see the module docstring).
 
     NOTE: run_once's `_reclaim_for_mode` acts on modes "install" and
     "bundle" only, and detect_mode() answers "xr", so nothing calls this
@@ -322,6 +361,12 @@ def build_deps(cfg, conf_path, state_path=None):
         free_bytes=lambda prefix=TARGET_FS: free_bytes(stage_dir),
         version=lambda: _conf_fact("device_version", "IRIS_VERSION")
                         or "unknown",
+        # This return value is ALL run_once sees: True/False, no provenance.
+        # It records 'downloaded' vs 'adopted' itself, from whether its own
+        # aria_add ever ran for this image — see attest_in_place's and the
+        # module's docstrings. Nothing here needs to change for that: this
+        # wiring only has to keep answering the plain presence-and-size
+        # question honestly.
         copy_to_root=lambda fname, target=TARGET_FS, expected_size=None:
             attest_in_place(stage_dir, fname, expected_size, emit),
         purge_others=lambda keep_filenames, keep_ids:

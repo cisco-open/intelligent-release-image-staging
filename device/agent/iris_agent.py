@@ -761,10 +761,24 @@ _RESERVED_STATE_KEYS = frozenset((
 # Fields only a per-image record carries. Membership in the assigned set is
 # not enough to recognise one: the park pass has to find records for images
 # that are no longer assigned at all.
+#
+# 'origin' (Directive 2 / XR teardown hardening): how THIS placement's bytes
+# reached the target-FS root — "downloaded" (this agent's own transfer wrote
+# them) or "adopted" (attest-in-place confirmed bytes that were already
+# there; nothing of ours moved them). Written once, at the same site that
+# sets 'copied'/'root_file' on a successful copy_to_root. ADDITIVE: a state
+# file from before this field existed simply lacks it, and every deletion
+# path below treats a missing origin exactly like "adopted" — fail-safe, so
+# an unproven placement is never the thing IRIS deletes.
+# 'download_started' is origin's own bookkeeping, not a fact anyone outside
+# this module reads: it is set the moment THIS agent's aria2 session is
+# asked to fetch an image (see the aria_add call site) and is what lets the
+# copy-success site tell a genuine download apart from attest-in-place
+# finding bytes it never touched.
 _IMAGE_ENTRY_FIELDS = ("done", "copied", "sha", "tele", "root_file", "parked",
                        "copy_attempts", "copy_terminal", "copy_reclaim_tried",
                        "ios_copy_started", "reclaim_tried", "blocked_no_space",
-                       "stage_error")
+                       "stage_error", "origin", "download_started")
 
 
 def _is_image_entry(value):
@@ -789,6 +803,34 @@ def _image_filename(deps, entry, img_id):
     return fname if fname and _FILENAME_RE.match(fname) else None
 
 
+def _root_file_origin(state, fname):
+    """The recorded provenance of the per-image record that placed `fname`
+    at the target-FS root, or None when no record claims it.
+
+    pending_root_deletes carries bare filenames (not image ids), so the
+    owning record has to be found by its root_file field rather than looked
+    up directly. None here means exactly what a found record's missing
+    'origin' means: unproven — every deletion site treats it as adopted."""
+    for value in state.values():
+        if _is_image_entry(value) and value.get("root_file") == fname:
+            return value.get("origin")
+    return None
+
+
+def _protect_adopted_root(deps, entry):
+    """True when `entry` names a root-FS placement that must never be
+    agent-deleted: a platform whose copy_to_root is attest-in-place
+    (deps.copy_in_place) succeeded WITHOUT this agent writing anything —
+    origin 'adopted', or missing/legacy (fail-safe). Only a SUCCESSFULLY
+    placed entry (`copied`) has any provenance to protect at all; an
+    in-progress or failed placement is ordinary cleanup, unaffected. A
+    platform that physically writes its own root copy (copy_in_place=False)
+    has no adoption path — see xr_deps' module docstring — so it is never
+    protected here."""
+    return bool(deps.copy_in_place and entry.get("copied")
+               and entry.get("origin") != "downloaded")
+
+
 def _reconcile_set(deps, state, ids, stage_dir):
     """Reconcile what is on the device against the assigned set, before staging.
 
@@ -801,6 +843,13 @@ def _reconcile_set(deps, state, ids, stage_dir):
     old root copy for deletion — the opposite call. (pending_root_deletes
     itself stays: state files written by that agent can still carry a queue,
     and the drain + its whitelist re-check still run.)
+
+    On a platform whose stage dir IS the target-FS root (deps.copy_in_place,
+    e.g. XR), "delete its stage copy" above and "the root copy is kept" are
+    in direct conflict — there is only one file. _protect_adopted_root
+    resolves that: an origin-'adopted' (or provenance-unknown) placement is
+    left in place exactly like every other platform's root copy; only a
+    placement this agent proved it downloaded is freed on park.
 
     UN-PARK — a parked image back in the set: clear the flag and the placement
     retry gate, then let the normal path re-confirm it.
@@ -876,13 +925,29 @@ def _reconcile_set(deps, state, ids, stage_dir):
             # the purge sweep below drops the download once the RPC is
             # back — a parked torrent must never stall the tick.
             pass
-        try:
-            deps.remove_stage(os.path.join(stage_dir, fname))
-        except OSError:
-            # Best-effort for the same reason: a stage copy that cannot be
-            # deleted this tick still leaves a record whose torrent IS stopped,
-            # and the purge sweep collects the file later.
-            pass
+        # On every IOS-XE platform the stage dir is IRIS's own directory and
+        # the root copy lives elsewhere entirely, so deleting the stage copy
+        # here is always safe — that separation is the whole reason park can
+        # promise to KEEP the root copy. A platform whose stage dir IS the
+        # root (deps.copy_in_place, e.g. XR: attest_in_place writes no new
+        # bytes because there is nowhere else to write them) has no such
+        # separation: THIS delete would be a root delete, so an adopted (or
+        # provenance-unknown) placement must be left exactly where it is —
+        # the 2026-08-29 incident was an unassign doing this to an
+        # operator-staged ISO. Only a copy this agent proved it downloaded is
+        # still fair game; an in-progress/failed placement was never proven
+        # to be anyone's root copy at all and is cleaned up as always.
+        if _protect_adopted_root(deps, entry):
+            deps.emit("ROOTCOPY-KEPT",
+                      "left in place: operator-adopted %s" % fname)
+        else:
+            try:
+                deps.remove_stage(os.path.join(stage_dir, fname))
+            except OSError:
+                # Best-effort for the same reason: a stage copy that cannot be
+                # deleted this tick still leaves a record whose torrent IS stopped,
+                # and the purge sweep collects the file later.
+                pass
         # BOTH park actions have now been attempted for this entry, which is
         # exactly what the flag asserts. A park interrupted before this point
         # (anything later in the tick raising) leaves the record unflagged and
@@ -1065,11 +1130,26 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
         deps.emit("RECHECK", "%s re-acquiring (content=%s staged=%s root=%s)"
                   % (image["filename"], content_ok, staged_ok, root_ok))
         if staged_ok and not content_ok:
+            # A republished image under the SAME id is a normal catalog
+            # event this agent must still converge on — unlike an
+            # unassign/teardown, refusing this delete would leave the
+            # device stuck on stale content forever with no path back to
+            # the current catalog target. (An adopted file that happens to
+            # be replaced this way was, by construction, byte-identical to
+            # the OLD content; the operator's own file is gone the moment
+            # content changed under it either way.)
             deps.remove_stage(stage)      # stale content on disk -> drop, re-download
             staged_ok = False
             # Same catalog id with new content is a genuine image change, so a
             # previous terminal placement failure must not poison the new bytes.
             _reset_copy_failures(done_st)
+            # A fresh acquisition cycle starts here: whatever provenance the
+            # OLD content had must not leak into the verdict for the NEW
+            # content (e.g. a genuine download's leftover flag wrongly
+            # marking a subsequent operator-adopted replacement as
+            # 'downloaded'). aria_add re-sets it later THIS SAME tick if the
+            # file really is gone and a fresh download starts.
+            done_st.pop("download_started", None)
         # 'copied' is a fact about the FLASH-ROOT copy, and root_present()
         # above just checked THAT copy by presence AND exact catalog size.
         # Clearing it unconditionally threw that answer away and re-ran a
@@ -1108,15 +1188,29 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
     # parked and its root copy deliberately kept (_reconcile_set). The drain
     # stays for state files written by the agent that did queue replaced root
     # copies — those deletes were promised to an operator and must still land.
+    #
+    # Provenance gate (Directive 2): pending_root_deletes names a FILE, not
+    # the per-image record that placed it, so its origin is looked up by
+    # root_file. A name whose owning record says 'downloaded' is deleted
+    # exactly as before; 'adopted' or unproven (no owning record at all, or
+    # one with no origin — a state file older than this field) is left in
+    # place, logged once, and resolved out of the queue immediately rather
+    # than retried forever — there is nothing a retry could ever change.
     pending = state.get("pending_root_deletes") or []
     if pending:
         fs = state.get("stage_fs", "flash:")
         doomed = [n for n in pending
                   if n != image["filename"] and _FILENAME_RE.match(n)]
-        if doomed:
-            deps.reclaim_bundle(fs, doomed)
+        deletable = [n for n in doomed
+                    if _root_file_origin(state, n) == "downloaded"]
+        for protected in doomed:
+            if protected not in deletable:
+                deps.emit("ROOTCOPY-KEPT",
+                          "left in place: operator-adopted %s" % protected)
+        if deletable:
+            deps.reclaim_bundle(fs, deletable)
         still = []
-        for old_root in doomed:
+        for old_root in deletable:
             if deps.root_present(old_root, fs):
                 still.append(old_root)
                 deps.emit("CLEANUP-PENDING",
@@ -1266,6 +1360,24 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
                         st["root_file"] = image["filename"]
                         if state.get("image_id") == img_id:
                             state["root_file"] = image["filename"]
+                        # Provenance (Directive 2): a platform whose
+                        # copy_to_root PHYSICALLY writes the root copy
+                        # (copy_in_place=False, every IOS-XE platform) has no
+                        # adoption path at all — this agent's own copy/scp
+                        # wrote those bytes, full stop. A platform whose
+                        # copy_to_root is attest-in-place can succeed WITHOUT
+                        # this agent ever transferring anything, so its
+                        # verdict depends on whether THIS agent's aria2
+                        # session is what fetched the file
+                        # (download_started, set at the aria_add call site) —
+                        # absent means attest_in_place adopted bytes that
+                        # were already at the mount. Every deletion path
+                        # keyed on 'origin' treats anything but 'downloaded'
+                        # as adopted, including a missing origin (legacy
+                        # state), fail-safe by construction.
+                        st["origin"] = ("downloaded" if not deps.copy_in_place
+                                       or st.get("download_started")
+                                       else "adopted")
                         _reset_copy_failures(st)
                     else:
                         if attempted:
@@ -1399,6 +1511,12 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
         try:
             deps.aria_remove(image["filename"])
             deps.aria_add(torrent, stage_dir)
+            # Provenance (Directive 2): proof, for the eventual origin
+            # verdict, that THIS agent's own aria2 session is what is
+            # fetching this image — recorded only once the call actually
+            # went through (an RPC failure below re-tries the whole thing,
+            # including this, next tick).
+            state.setdefault(img_id, {})["download_started"] = True
         except OSError as e:
             deps.emit("ARIA2-DOWN",
                       "aria2c RPC unreachable; cannot stage %s: %s"

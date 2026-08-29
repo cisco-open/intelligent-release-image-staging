@@ -204,6 +204,81 @@ def test_unchecked_image_is_parked_not_deleted():
     assert any("img-a" in msg for msg in _emits(rec, "PARKED"))
 
 
+# --- park on a stage==root platform (copy_in_place, e.g. XR) --------------
+# park's "delete the stage copy, keep the root copy" promise above assumes
+# separate directories (every IOS-XE platform). On a platform whose staging
+# dir IS the root (deps.copy_in_place=True — XR's attest-in-place), deleting
+# the "stage" copy IS deleting the root copy, so an unassign must never do
+# that to a file this agent did not prove it downloaded (Directive 2: the
+# 2026-08-29 XR incident was exactly this — an operator-adopted ISO deleted
+# by an unassign/teardown).
+
+
+def test_park_keeps_an_adopted_root_copy_when_stage_is_root():
+    cat = MultiCatalog([_img("img-a"), _img("img-b")], ids=["img-a"])
+    deps, rec = make_deps(cat, {"/stage/img-a.bin": 5})
+    deps = deps._replace(copy_in_place=True)
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "img-a": {"done": True, "copied": True, "root_file": "img-a.bin",
+                       "origin": "adopted"}}
+
+    cat.ids = ["img-b"]                            # img-a dropped from the set
+    iris_agent.run_once(CFG, deps, state)
+
+    assert "/stage/img-a.bin" not in rec["removed"]     # never deleted
+    assert state["img-a"]["parked"] is True             # still parked
+    kept = _emits(rec, "ROOTCOPY-KEPT")
+    assert any("img-a.bin" in msg and "operator-adopted" in msg for msg in kept)
+
+
+def test_park_keeps_a_legacy_missing_origin_root_copy_when_stage_is_root():
+    # No 'origin' at all (a state file predating this feature) is the
+    # fail-safe default: treated exactly like "adopted".
+    cat = MultiCatalog([_img("img-a"), _img("img-b")], ids=["img-a"])
+    deps, rec = make_deps(cat, {"/stage/img-a.bin": 5})
+    deps = deps._replace(copy_in_place=True)
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "img-a": {"done": True, "copied": True, "root_file": "img-a.bin"}}
+
+    cat.ids = ["img-b"]
+    iris_agent.run_once(CFG, deps, state)
+
+    assert "/stage/img-a.bin" not in rec["removed"]
+    assert state["img-a"]["parked"] is True
+
+
+def test_park_still_deletes_a_downloaded_root_copy_when_stage_is_root():
+    cat = MultiCatalog([_img("img-a"), _img("img-b")], ids=["img-a"])
+    deps, rec = make_deps(cat, {"/stage/img-a.bin": 5})
+    deps = deps._replace(copy_in_place=True)
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "img-a": {"done": True, "copied": True, "root_file": "img-a.bin",
+                       "origin": "downloaded"}}
+
+    cat.ids = ["img-b"]
+    iris_agent.run_once(CFG, deps, state)
+
+    assert "/stage/img-a.bin" in rec["removed"]         # IRIS's own file: freed
+    assert state["img-a"]["parked"] is True
+
+
+def test_park_deletes_an_uncopied_partial_regardless_of_origin_when_stage_is_root():
+    # An in-progress (never successfully attested) download has no placement
+    # to have provenance about — park's ordinary cleanup of an abandoned
+    # partial must be unaffected by the adopted-file guard.
+    cat = MultiCatalog([_img("img-a"), _img("img-b")], ids=["img-a"])
+    deps, rec = make_deps(cat, {"/stage/img-a.bin": 3})   # short: still mid-transfer
+    deps = deps._replace(copy_in_place=True)
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "img-a": {"done": False, "copied": False}}
+
+    cat.ids = ["img-b"]
+    iris_agent.run_once(CFG, deps, state)
+
+    assert "/stage/img-a.bin" in rec["removed"]
+    assert state["img-a"]["parked"] is True
+
+
 def test_park_then_unpark_reuses_the_surviving_root_copy():
     # Park -> un-park driven through REAL ticks (a park deletes the stage copy,
     # so a state with parked=True AND the stage file still present is a state
