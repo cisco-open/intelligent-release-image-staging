@@ -158,6 +158,50 @@ _run_entrypoint() {
   [[ "$output" == *"catalog_ca = /opt/iris/iris-catalog.pem"* ]]
 }
 
+@test "conf synthesis writes device_model from the installer's env" {
+  # device/xr-install.sh's --env IRIS_MODEL (the fleet row); xr_deps.py's
+  # _conf_fact() reads this exact conf key for the heartbeat's model field --
+  # there is no CLI on this platform to ask instead.
+  _run_entrypoint \
+    IRIS_CATALOG_URL=https://198.51.100.1:8443 \
+    IRIS_CATALOG_TOKEN=tok123 \
+    IRIS_DEVICE_ID=8010-r1 \
+    IRIS_MODEL=8201
+  run cat "$CONF"
+  [[ "$output" == *"device_model = 8201"* ]]
+}
+
+@test "conf synthesis writes device_version from the installer's env" {
+  # device/xr-install.sh's --env IRIS_VERSION (parsed from its own preflight
+  # show version); xr_deps.py's _conf_fact() reads this exact conf key for
+  # the heartbeat's version field.
+  _run_entrypoint \
+    IRIS_CATALOG_URL=https://198.51.100.1:8443 \
+    IRIS_CATALOG_TOKEN=tok123 \
+    IRIS_DEVICE_ID=8010-r1 \
+    IRIS_VERSION="25.4.2 LNT"
+  run cat "$CONF"
+  [[ "$output" == *"device_version = 25.4.2 LNT"* ]]
+}
+
+@test "conf synthesis leaves device_model blank when the installer sent none" {
+  _run_entrypoint \
+    IRIS_CATALOG_URL=https://198.51.100.1:8443 \
+    IRIS_CATALOG_TOKEN=tok123 \
+    IRIS_DEVICE_ID=8010-r1
+  run grep -E '^device_model = $' "$CONF"
+  [ "$status" -eq 0 ]
+}
+
+@test "conf synthesis leaves device_version blank when the installer sent none" {
+  _run_entrypoint \
+    IRIS_CATALOG_URL=https://198.51.100.1:8443 \
+    IRIS_CATALOG_TOKEN=tok123 \
+    IRIS_DEVICE_ID=8010-r1
+  run grep -E '^device_version = $' "$CONF"
+  [ "$status" -eq 0 ]
+}
+
 @test "conf synthesis writes exactly the caller-supplied catalog_token, once" {
   _run_entrypoint \
     IRIS_CATALOG_URL=https://198.51.100.1:8443 \

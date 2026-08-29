@@ -20,7 +20,21 @@ setup() {
 @test "dry-run renders the hardware-proven activate line with the three secrets" {
   run bash "$INSTALL" --dry-run
   [ "$status" -eq 0 ]
-  [[ "$output" == *'appmgr application iris activate type docker source iris-xr docker-run-opts "-td --net=host -v /misc/disk1:/hostmount --env IRIS_CATALOG_URL=https://192.0.2.20:8443 --env IRIS_CATALOG_TOKEN=deadbeefcafe --env IRIS_DEVICE_ID=8010-r1 --env IRIS_TELEMETRY=on --env IRIS_TELEMETRY_STREAM=off"'* ]]
+  [[ "$output" == *'appmgr application iris activate type docker source iris-xr docker-run-opts "-td --net=host -v /misc/disk1:/hostmount --env IRIS_CATALOG_URL=https://192.0.2.20:8443 --env IRIS_CATALOG_TOKEN=deadbeefcafe --env IRIS_DEVICE_ID=8010-r1 --env IRIS_MODEL= --env IRIS_VERSION= --env IRIS_TELEMETRY=on --env IRIS_TELEMETRY_STREAM=off"'* ]]
+}
+
+@test "dry-run forwards MODEL from the caller's env contract (fleet row) as IRIS_MODEL" {
+  # No live probe in --dry-run, so IRIS_VERSION stays empty here -- it's
+  # parsed from the real preflight "show version" in the live path below.
+  MODEL=8201 run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--env IRIS_MODEL=8201 --env IRIS_VERSION="* ]]
+}
+
+@test "installer refuses a MODEL value that would break out of the docker-run-opts quoting" {
+  MODEL='bad"value' run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"MODEL must not contain a double quote"* ]]
 }
 
 @test "dry-run never emits --name" {
@@ -201,6 +215,23 @@ _xr_install_run_live() {
   run _xr_install_run_live
   [ "$status" -eq 0 ]
   [[ "$output" == *"'iris' is Up"* ]]
+}
+
+@test "live: parses the running version out of its own preflight show version" {
+  # No env for this -- unlike MODEL (the fleet row), there is nowhere else on
+  # this CLI-less platform to learn it, so the installer must extract it
+  # itself from the same probe that already classifies the box as IOS-XR.
+  _xr_install_stub_setup
+  run _xr_install_run_live
+  [ "$status" -eq 0 ]
+  grep -q -- '--env IRIS_VERSION=25.4.2 LNT' "$FAKE_COMMAND_LOG"
+}
+
+@test "live: forwards MODEL through to the activate line sent to the device" {
+  _xr_install_stub_setup
+  MODEL=8201 run _xr_install_run_live
+  [ "$status" -eq 0 ]
+  grep -q -- '--env IRIS_MODEL=8201' "$FAKE_COMMAND_LOG"
 }
 
 @test "live: refuses a device whose show version is not IOS-XR" {

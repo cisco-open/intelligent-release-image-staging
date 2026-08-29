@@ -67,6 +67,14 @@ if [ ! -f "$CONF" ]; then
     echo "catalog_url = ${IRIS_CATALOG_URL}"
     echo "catalog_token = ${IRIS_CATALOG_TOKEN}"
     echo "device_id = ${IRIS_DEVICE_ID}"
+    # No CLI on this platform to ask show version for these (that's the whole
+    # reason XR is a container, not a Guest Shell) -- xr_deps.py's
+    # _conf_fact() reads them straight from the conf instead. Set by the
+    # onboard flow (device/xr-install.sh: MODEL from the fleet row, VERSION
+    # parsed from its own preflight "show version"); an empty value here
+    # keeps xr_deps.py's honest model=None/version="unknown" default.
+    echo "device_model = ${IRIS_MODEL:-}"
+    echo "device_version = ${IRIS_VERSION:-}"
     echo "stage_dir = ${STAGE_DIR}"
     # Fixed for this platform: /hostmount IS harddisk: (the bind mount), and
     # there is no other writable target on an XR appmgr container.

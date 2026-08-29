@@ -40,6 +40,12 @@
 #   XR_MIN_FREE_BYTES=2147483648 (2 GiB headroom floor on harddisk: -- raise
 #     it for a larger assigned image set; one proven full image is 1.8GB)
 #   IRIS_TELEMETRY=on  IRIS_TELEMETRY_STREAM=off
+#   MODEL -- hardware model from the fleet row, when known (same env contract
+#     as DEVICE_ID; server/gui_onboard.py's OnboardService._build_env sets it).
+#     Forwarded verbatim as IRIS_MODEL so heartbeats report it. The running
+#     software version needs no such env: this script parses it itself, in
+#     [1/5] below, from the same "show version" preflight probe that
+#     classifies the box as IOS-XR.
 #   ACTIVATE_TIMEOUT=300  ACTIVATE_POLL=10  (seconds; the appmgr application-table poll)
 set -euo pipefail
 
@@ -78,6 +84,11 @@ _no_quotes_or_newlines() {
 _no_quotes_or_newlines CATALOG_URL "$CATALOG_URL"
 _no_quotes_or_newlines CATALOG_TOKEN "$CATALOG_TOKEN"
 _no_quotes_or_newlines DEVICE_ID "$DEVICE_ID"
+# MODEL: optional, set by the caller's env contract the same way DEVICE_ID is
+# (server/gui_onboard.py's OnboardService._build_env exports it from the
+# fleet row when known). Forwarded to the container so XR heartbeats report a
+# real model instead of the "no CLI to ask" default -- see xr_deps.py.
+_no_quotes_or_newlines MODEL "${MODEL:-}"
 
 if [ "$DRY" -eq 0 ]; then
   : "${DEVICE_USER:?set DEVICE_USER}"; : "${DEVICE_PASS:?set DEVICE_PASS}"
@@ -94,8 +105,9 @@ fi
 # itself). No docker-run-cmd override: the image's own ENTRYPOINT
 # (device/xr/entrypoint.sh) is what should run.
 docker_run_opts() {
-  printf -- '-td --net=host -v /misc/disk1:/hostmount --env IRIS_CATALOG_URL=%s --env IRIS_CATALOG_TOKEN=%s --env IRIS_DEVICE_ID=%s --env IRIS_TELEMETRY=%s --env IRIS_TELEMETRY_STREAM=%s' \
-    "$CATALOG_URL" "$CATALOG_TOKEN" "$DEVICE_ID" "$IRIS_TELEMETRY" "$IRIS_TELEMETRY_STREAM"
+  printf -- '-td --net=host -v /misc/disk1:/hostmount --env IRIS_CATALOG_URL=%s --env IRIS_CATALOG_TOKEN=%s --env IRIS_DEVICE_ID=%s --env IRIS_MODEL=%s --env IRIS_VERSION=%s --env IRIS_TELEMETRY=%s --env IRIS_TELEMETRY_STREAM=%s' \
+    "$CATALOG_URL" "$CATALOG_TOKEN" "$DEVICE_ID" "${MODEL:-}" "${XR_VERSION:-}" \
+    "$IRIS_TELEMETRY" "$IRIS_TELEMETRY_STREAM"
 }
 
 activate_line() {
@@ -127,6 +139,17 @@ if ! printf '%s\n' "$VERSION_OUT" | grep -qiE '^[[:space:]]*cisco[[:space:]]+ios
   echo "ERROR: $DEVICE_IP does not report an IOS-XR banner; refusing to install the XR agent" >&2
   exit 1
 fi
+# The XR container has no CLI to ask (that's the whole reason it's a
+# container, not a Guest Shell -- see xr_deps.py's _conf_fact), so this
+# preflight banner is the ONLY place the running software version is ever
+# known; captured now and carried into the container's env so heartbeats
+# report it instead of "unknown". Same banner line the classification check
+# above just matched; strip everything through "Version " to leave "25.4.2
+# LNT" (whatever trails the version number, unparsed -- not just the digits).
+XR_VERSION="$(printf '%s\n' "$VERSION_OUT" | tr -d '\r' \
+  | grep -m1 -iE '^[[:space:]]*cisco[[:space:]]+ios[[:space:]-]*xr' \
+  | sed -E 's/^.*[Vv]ersion[[:space:]]+//; s/[[:space:]]+$//')"
+_no_quotes_or_newlines XR_VERSION "$XR_VERSION"
 DIR_OUT="$(printf 'dir harddisk: | include bytes free\n' | RUN 2>/dev/null)"
 # Cisco 8000 dir output ends "<N> bytes total (<M> bytes free)" -- the SAME
 # "(N bytes free)" shape device/agent/flashcheck.py already parses for
