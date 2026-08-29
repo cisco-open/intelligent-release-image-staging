@@ -349,7 +349,8 @@ class FleetStore:
                     for key in ("iris_vlan", "svi_ip", "svi_mask", "inband_vlan",
                                 "ios_ssh_host", "vpg_number", "nat_interface"):
                         merged.pop(key, None)
-                if old_router != new_router and "platform" not in record:
+                if (old_router != new_router or old_xr != new_xr) and \
+                        "platform" not in record:
                     merged.pop("platform", None)
             merged.update({key: value for key, value in record.items() if value is not None})
             if "network_attachment" in merged and "management_type" not in merged:

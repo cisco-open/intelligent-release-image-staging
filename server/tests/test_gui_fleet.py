@@ -295,6 +295,62 @@ def test_xr_host_accepted_and_prunes_old_addressing_fields_on_upsert(tmp_path):
         assert not fresh.get(field), field
 
 
+def test_xr_host_upsert_prunes_a_fabricated_inband_rows_addressing_in_one_shot(tmp_path):
+    """The exact .20 healing shape: a router fabricated as an inband row
+    (full XE addressing, no platform override) is corrected to
+    xr-host/xr-appmgr in a single upsert. All ten addressing fields -- the
+    ones this fabricated shape actually carried -- are pruned, not
+    partially retained; pinning the OUT-of-fabrication direction the
+    pruning branch's own comment claims ('either direction')."""
+    fs = _fs(tmp_path)
+    fs.upsert({"device_id": "r1", "device_ip": "10.0.0.9",
+               "management_type": "inband", "inband_vlan": "120",
+               "ios_ssh_host": "10.0.0.8", "app_ip": "192.0.2.11",
+               "app_mask": "255.255.255.0", "app_gateway": "192.0.2.1",
+               "model": "8201"})
+    saved = fs.upsert({"device_id": "r1", "management_type": "xr-host",
+                       "platform": "xr-appmgr"})
+    assert saved["management_type"] == "xr-host" and saved["platform"] == "xr-appmgr"
+    for field in _XR_FORBIDDEN_FIELDS:
+        assert not saved.get(field), field
+
+
+def test_xr_host_to_inband_transition_drops_stale_platform(tmp_path):
+    """The platform-clear guard (originally keyed on old_router != new_router
+    alone) must also fire when only one side of the swap is xr-host: routed
+    and inband are both non-router, so that XOR alone is False, and without
+    tracking the xr side too a stale platform=xr-appmgr would survive the
+    swap and surface 'platform xr-appmgr requires management_type xr-host'
+    about a field the operator never sent. Moving an established xr-host
+    device to inband with fresh addressing and no explicit platform must
+    drop the stale platform and validate cleanly -- the same clean drop the
+    router family already gets."""
+    fs = _fs(tmp_path)
+    fs.upsert(dict(_XRHOST, device_id="d1"))
+    saved = fs.upsert({"device_id": "d1", "management_type": "inband",
+                       "inband_vlan": "120", "app_ip": "192.0.2.11",
+                       "app_mask": "255.255.255.0", "app_gateway": "192.0.2.1"})
+    assert saved["management_type"] == "inband"
+    assert saved.get("platform", "") == ""
+    assert saved["inband_vlan"] == "120" and saved["app_ip"] == "192.0.2.11"
+
+
+def test_inband_to_xr_host_transition_without_platform_fails_honestly(tmp_path):
+    """The inverse direction: an established inband/XE device moved to
+    xr-host without an explicit platform=xr-appmgr fails with the
+    mutual-requirement message -- the honest outcome, since the swap also
+    drops the stale XE platform rather than silently keeping it (which
+    would let an xr-host row sit with a non-xr-appmgr platform)."""
+    fs = _fs(tmp_path)
+    fs.upsert({"device_id": "d1", "device_ip": "192.0.2.10",
+               "management_type": "inband", "inband_vlan": "120",
+               "app_ip": "192.0.2.11", "app_mask": "255.255.255.0",
+               "app_gateway": "192.0.2.1", "platform": "guestshell"})
+    with pytest.raises(ValueError,
+                       match="management_type xr-host requires platform xr-appmgr"):
+        fs.upsert({"device_id": "d1", "management_type": "xr-host", "model": "8201"})
+
+
 def test_xr_host_rejects_every_app_network_field(tmp_path):
     """XR host networking shares the router's own network stack -- no VLAN,
     SVI, app IP/mask/gateway, VPG, or NAT interface exists to configure, so
