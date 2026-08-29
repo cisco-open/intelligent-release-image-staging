@@ -227,11 +227,19 @@ def _refuse_xr(device_id):
     IRIS stages to IOS-XR now, so this no longer says "wait for XR support"
     -- it names the one thing that works. Every OTHER platform value in
     _PLATFORM_RECIPES is an IOS-XE recipe, and no model prefix can tell the
-    families apart, so this refusal stands for all of them."""
+    families apart, so this refusal stands for all of them.
+
+    xr-host <-> xr-appmgr is now a mutual requirement on any fully-validated
+    fleet record (gui_fleet.validate_record), so naming the platform alone
+    is incomplete advice: a device with platform=xr-appmgr but no
+    management_type stays unclassified (legacy_routed) and cannot plan or
+    deploy. Both settings are named so the operator does the whole job in
+    one edit."""
     raise ValueError(
         "%s runs IOS-XR: every other agent install here is IOS-XE. Set the "
         "device's platform to 'xr-appmgr' (the appmgr container agent, which "
-        "stages straight to harddisk:) -- no IOS-XE recipe will work on it."
+        "stages straight to harddisk:) and its management type to 'xr-host' "
+        "(the two are mutually required) -- no IOS-XE recipe will work on it."
         % device_id)
 
 

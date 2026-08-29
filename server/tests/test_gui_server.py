@@ -2252,6 +2252,71 @@ def test_plan_refuses_device_with_cached_xr_family(tmp_path):
         srv.shutdown()
 
 
+def test_xr_host_plan_carries_no_addressing_fields(tmp_path):
+    """A fully-validated xr-host record (Task 1: xr-host <-> xr-appmgr is
+    mutually required) must plan cleanly -- the enum gate at gui_server._plan
+    accepts xr-host, and the resolved network dict carries ONLY device_ip/
+    model/platform plus the handful of non-addressing keys every plan
+    carries (attachment, swarm_port, renderer). Every XE addressing key
+    (iris_vlan/svi_*/app_*/inband_vlan/vpg_number/nat_interface/ios_ssh_host)
+    must be ABSENT -- not even present with an empty string -- because
+    xr-host's appmgr container uses the router's own network stack.
+
+    This also proves the router-coupling checks (gui_server.py:746-758) do
+    not fire for xr-host: model 8201 is not a Catalyst 8000 shape and the
+    resolved platform is 'xr-appmgr', not 'router', so none of the three
+    router-only gates raise, and the route returns 200 rather than 409."""
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, _cat = deps
+    try:
+        fleet.upsert({"device_id": "xr1", "device_ip": "10.0.0.9",
+                      "model": "8201", "os_family": "xr",
+                      "platform": "xr-appmgr", "management_type": "xr-host",
+                      "credential_profile_id": "lab"})
+        ck, csrf = _auth(host, port)
+        status, _, body = _req(host, port, "GET", "/api/devices/xr1/plan",
+                               headers={"Cookie": ck})
+        assert status == 200, body
+        plan = json.loads(body)["plan"]
+        assert plan["resolved"] == {
+            "attachment": "xr-host", "device_ip": "10.0.0.9",
+            "swarm_port": "6881", "model": "8201", "platform": "xr-appmgr",
+            "renderer": "v1"}
+        for key in ("iris_vlan", "svi_ip", "svi_mask", "app_ip", "app_mask",
+                    "app_gateway", "inband_vlan", "vpg_number",
+                    "nat_interface", "ios_ssh_host"):
+            assert key not in plan["resolved"], key
+        assert plan["ownership"] == (
+            "XR host networking — the agent shares the router's own "
+            "network stack; no app-network fields")
+        assert isinstance(plan["plan_hash"], str) and len(plan["plan_hash"]) == 64
+    finally:
+        stop()
+
+
+def test_owned_resources_for_xr_host_matches_the_uninstall_recipe(tmp_path):
+    """_owned_resources must claim exactly what device/xr-uninstall.sh
+    actually removes: the appmgr application, its registered package
+    source, the RPM staged at harddisk: root, and the agent's iris-work/
+    control-file directory -- and it must NOT claim a guestshell resource,
+    which XR hardware has no such thing as (the bug the unconditional
+    guestshell entry at gui_server.py:813 introduced for every attachment
+    before this branch existed)."""
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path)
+    srv = gui_server.make_server("127.0.0.1", 0, app, certfile=None)
+    try:
+        resources = srv.RequestHandlerClass._owned_resources(
+            {"attachment": "xr-host"})
+        kinds = [r["kind"] for r in resources]
+        assert kinds == ["appmgr-application", "appmgr-source",
+                          "agent-rpm", "agent-work-dir"]
+        assert "guestshell" not in kinds
+        assert all(r["ownership"] == "iris-created" for r in resources)
+    finally:
+        srv.server_close()
+
+
 def _serve_inband(tmp_path, run_fn, device=None):
     import deployment_receipts
     secrets_path = str(tmp_path / "secrets.json")

@@ -532,11 +532,16 @@ def test_resolve_platform_xr_without_an_explicit_platform_still_refuses():
 
 def test_refuse_xr_message_names_the_platform_to_set():
     """The old message said to wait for XR support. That is no longer true,
-    and 'forcing platform will not work' is now actively wrong advice."""
+    and 'forcing platform will not work' is now actively wrong advice. Since
+    xr-host <-> xr-appmgr is now a mutual requirement (gui_fleet.validate_record),
+    the operator needs BOTH settings named, not just the platform -- setting
+    platform alone still leaves the record unclassified (legacy_routed) and
+    unable to plan/deploy."""
     with pytest.raises(ValueError) as exc:
         gui_onboard._refuse_xr("d1")
     message = str(exc.value)
     assert "d1" in message and "IOS-XR" in message and "xr-appmgr" in message
+    assert "xr-host" in message and "management type" in message
     assert "wait for" not in message
 
 

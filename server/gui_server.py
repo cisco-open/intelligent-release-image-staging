@@ -740,7 +740,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                     device.get("network_attachment", "legacy_routed"))
             if attachment == "legacy_routed":
                 attachment = "routed"
-            if attachment not in ("routed", "inband", "router-routed", "router-nat"):
+            if attachment not in ("routed", "inband", "router-routed", "router-nat",
+                                  "xr-host"):
                 raise ValueError("unknown network attachment")
             platform = gui_onboard.resolve_platform(device)
             router_attachment = attachment in ("router-routed", "router-nat")
@@ -756,28 +757,45 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     r"^C8[0-9]{3}", device["model"], re.IGNORECASE):
                 raise ValueError("router modes support the Catalyst 8000 family only; "
                                  "%s is not yet supported" % device["model"])
-            network = {
-                "attachment": attachment,
-                "device_ip": device.get("device_ip", ""),
-                "iris_vlan": device.get("iris_vlan", device.get("vlan", "")),
-                "svi_ip": device.get("svi_ip", ""),
-                "svi_mask": device.get("svi_mask", ""),
-                "app_ip": device.get("app_ip", device.get("guest_ip", "")),
-                "app_mask": device.get("app_mask", device.get("svi_mask", "")),
-                "app_gateway": device.get("app_gateway", device.get("svi_ip", "")),
-                "inband_vlan": device.get("inband_vlan", ""),
-                "vpg_number": device.get("vpg_number", ""),
-                "nat_interface": device.get("nat_interface", ""),
-                "swarm_port": "6881",
-                # The inband IOx app reaches IOS at the switch's management IP
-                # (which is on the same existing management VLAN); ios_ssh_host is
-                # an optional advanced override for asymmetric topologies.
-                "ios_ssh_host": (device.get("ios_ssh_host")
-                                 or (device.get("device_ip", "") if attachment == "inband" else "")),
-                "model": device.get("model", ""),
-                "platform": platform,
-                "renderer": "v1",
-            }
+            if attachment == "xr-host":
+                # The appmgr container runs on the router's own network stack
+                # (--net=host): no VLAN, SVI, app IP/mask/gateway, VPG, or NAT
+                # interface is ever configured, so this dict must not carry
+                # any of those keys -- not even with an empty-string value.
+                # validate_record already rejects a non-empty one on the
+                # stored record (gui_fleet.py); this is the same honesty
+                # requirement applied to the plan a caller actually reads.
+                network = {
+                    "attachment": attachment,
+                    "device_ip": device.get("device_ip", ""),
+                    "swarm_port": "6881",
+                    "model": device.get("model", ""),
+                    "platform": platform,
+                    "renderer": "v1",
+                }
+            else:
+                network = {
+                    "attachment": attachment,
+                    "device_ip": device.get("device_ip", ""),
+                    "iris_vlan": device.get("iris_vlan", device.get("vlan", "")),
+                    "svi_ip": device.get("svi_ip", ""),
+                    "svi_mask": device.get("svi_mask", ""),
+                    "app_ip": device.get("app_ip", device.get("guest_ip", "")),
+                    "app_mask": device.get("app_mask", device.get("svi_mask", "")),
+                    "app_gateway": device.get("app_gateway", device.get("svi_ip", "")),
+                    "inband_vlan": device.get("inband_vlan", ""),
+                    "vpg_number": device.get("vpg_number", ""),
+                    "nat_interface": device.get("nat_interface", ""),
+                    "swarm_port": "6881",
+                    # The inband IOx app reaches IOS at the switch's management IP
+                    # (which is on the same existing management VLAN); ios_ssh_host is
+                    # an optional advanced override for asymmetric topologies.
+                    "ios_ssh_host": (device.get("ios_ssh_host")
+                                     or (device.get("device_ip", "") if attachment == "inband" else "")),
+                    "model": device.get("model", ""),
+                    "platform": platform,
+                    "renderer": "v1",
+                }
             if attachment == "inband":
                 ownership = "preserves existing VLAN, SVI, gateway, routes, and VRF"
             elif attachment == "routed":
@@ -785,6 +803,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             elif attachment == "router-nat":
                 ownership = ("creates an IRIS-owned VPG and NAT rules; preserves the "
                              "outside interface except for a receipt-owned NAT marking")
+            elif attachment == "xr-host":
+                ownership = ("XR host networking — the agent shares the router's "
+                             "own network stack; no app-network fields")
             else:
                 ownership = "creates only a clean IRIS-owned VirtualPortGroup"
             plan = {"device_id": device_id, "inventory_revision": fleet.revision(),
@@ -808,8 +829,25 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
         @staticmethod
         def _owned_resources(resolved):
             """Resources IRIS may later remove, per attachment. Inband owns only
-            the app; it never claims the operator's VLAN/SVI."""
+            the app; it never claims the operator's VLAN/SVI. XR host owns
+            exactly what device/xr-uninstall.sh removes: the appmgr
+            application, its registered package source, the RPM staged at
+            harddisk: root, and the agent's iris-work/ control-file
+            directory -- it must NOT claim a guestshell, which XR hardware
+            (IOS-XR, appmgr Docker apps) has no such feature at all, unlike
+            every other attachment here (IOS-XE)."""
             attachment = resolved.get("attachment")
+            if attachment == "xr-host":
+                return [
+                    {"kind": "appmgr-application", "ownership": "iris-created",
+                     "name": "iris"},
+                    {"kind": "appmgr-source", "ownership": "iris-created",
+                     "name": "iris-xr"},
+                    {"kind": "agent-rpm", "ownership": "iris-created",
+                     "path": "harddisk:iris-xr.rpm"},
+                    {"kind": "agent-work-dir", "ownership": "iris-created",
+                     "path": "harddisk:iris-work"},
+                ]
             resources = [{"kind": "guestshell", "ownership": "iris-created"}]
             if attachment == "routed":
                 resources = [
