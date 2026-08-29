@@ -262,9 +262,10 @@ Each catalog entry in `GET /api/images` carries a `quarantined` bool and a
 `hash_verification` object — `{state, checked_at, feed_published_at, source,
 deferral}` — once at least one reconciliation run has covered it; both are
 absent/falsy on an entry the reconciler has never touched. `state` is
-`verified`, `mismatch`, or `not_in_feed` (the image's file name and size have
-no match in Cisco's feed — the expected state for a customer-built image
-Cisco never published); `source` is `scheduled`, `manual`, or `offline`,
+`verified`, `mismatch`, or `not_in_feed` (no feed row matches the image by
+file name and size, or by file name alone against a feed row publishing no
+size — the expected state for a customer-built image Cisco never
+published); `source` is `scheduled`, `manual`, or `offline`,
 whichever run last produced the verdict; `deferral` is `true` when the
 matched feed row's `DEFERRAL_STATUS` is present and not `Active` — a
 Cisco-side warning that never affects `state`. `checked_at` is the Unix
@@ -364,7 +365,7 @@ written to `<state>/torrents/<image_id>.torrent`, never next to the image itself
 | `source_dir` | Absolute directory the image is seeded from. Set by `publish()`. |
 | `size` | Image size in bytes. What the agent attests the placed copy against. |
 | `sha256` | Checked by the agent against the staged file. |
-| `sha512` | Recorded at publish time and never recomputed on a device. It is the join key into Cisco's published Bulk Hash feed — see [Image verification](#image-verification). |
+| `sha512` | Recorded at publish time and never recomputed on a device. Once this image is joined to a Cisco Bulk Hash feed row (by file name and size), this is the value compared against that row's published sha512 — see [Image verification](#image-verification). |
 | `cisco_signature_verified` | `True` exactly when this entry's `hash_verification.state` is `verified` — kept in sync by the Cisco Bulk Hash reconciler on every run that covers this image. `False` for `mismatch`, `not_in_feed`, or before the first run ever covers it. On the device, the check is still the agent's sha256 of the staged file against this entry's `sha256`; nothing re-hashes the placed copy. |
 | `hash_verification` | `{state, checked_at, feed_published_at, source, deferral}` — the reconciler's most recent verdict for this image; absent until the first reconciliation run covers this entry. See [Image verification](#image-verification). |
 | `quarantined` | `True` once a `mismatch` verdict has quarantined this image. Only `POST /api/images/<id>/release-quarantine` clears it — a later `verified` verdict alone does not. See [Releasing a quarantine](operations.md#releasing-a-quarantine). |

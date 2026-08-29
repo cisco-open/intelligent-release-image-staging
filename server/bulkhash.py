@@ -66,6 +66,12 @@ _OPENSSL_TIMEOUT = 60
 _MAX_CSV_BYTES = 256 * 1024 * 1024
 # An RSA (even 4096-bit) detached signature is at most a few KB.
 _MAX_SIGNATURE_BYTES = 16 * 1024
+# `fetch` streams the *outer* tar (CSV + signature + Cisco's cert/README/
+# verify scripts) before anything inside it has been hardened by
+# `_validated_members`, so it needs its own cap. Mirrors `_MAX_CSV_BYTES`:
+# the tar is a little larger than the CSV alone, but the same headroom
+# applies. Tests monkeypatch this down to exercise the cutoff cheaply.
+_MAX_DOWNLOAD_BYTES = _MAX_CSV_BYTES
 
 _EXPECTED_CSV_HEADER = [
     "FILE_NAME", "MD5_CHECKSUM", "SHA512_CHECKSUM", "PUBLISH_DATE",
@@ -90,25 +96,58 @@ Row = collections.namedtuple(
 # fetch
 # ---------------------------------------------------------------------------
 
+def _refuse_downgrade(from_url, to_url):
+    """Raise `BulkHashError` if following a redirect from `from_url` to
+    `to_url` would drop an https request to a non-https target -- a
+    redirect is otherwise a ready-made MITM downgrade. A request that
+    itself started as http (the local plain-HTTP test fixtures) is left
+    alone: only an https -> http transition is refused, never http ->
+    http, so those fixtures keep working unchanged."""
+    if from_url.startswith("https://") and not to_url.startswith("https://"):
+        raise BulkHashError(
+            "download failed: refusing an https redirect to a non-https "
+            "URL")
+
+
+class _NoDowngradeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Same as the default redirect handler, plus `_refuse_downgrade`."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _refuse_downgrade(req.get_full_url(), newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def fetch(url, timeout, out_path):
     """Stream-download `url` to `out_path`, atomically: a temp file in the
     same directory is renamed into place only once every byte has arrived,
     so a failed or partial download never clobbers a prior good file at
     `out_path`. Raises `BulkHashError` on ANY failure (HTTP error,
-    network/timeout error, short read); returns `out_path` on success."""
+    network/timeout error, short read, the response exceeding
+    `_MAX_DOWNLOAD_BYTES`, or a redirect that would downgrade an https
+    request to a non-https URL -- see `_refuse_downgrade`); returns
+    `out_path` on success."""
     dest_dir = os.path.dirname(os.path.abspath(out_path)) or "."
     os.makedirs(dest_dir, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(dir=dest_dir, prefix=".bulkhash-",
                                     suffix=".tmp")
+    opener = urllib.request.build_opener(_NoDowngradeRedirectHandler)
     try:
         with os.fdopen(fd, "wb") as f:
             try:
-                with urllib.request.urlopen(url, timeout=timeout) as resp:
+                with opener.open(url, timeout=timeout) as resp:
+                    total = 0
                     while True:
                         chunk = resp.read(_DOWNLOAD_CHUNK)
                         if not chunk:
                             break
+                        total += len(chunk)
+                        if total > _MAX_DOWNLOAD_BYTES:
+                            raise BulkHashError(
+                                "download failed: exceeds maximum size of "
+                                "%d bytes" % _MAX_DOWNLOAD_BYTES)
                         f.write(chunk)
+            except BulkHashError:
+                raise
             except urllib.error.HTTPError as exc:
                 raise BulkHashError(
                     "download failed: HTTP %d" % exc.code) from exc
@@ -458,7 +497,8 @@ def reconcile(rows, images):
             continue
 
         matched = next(
-            (r for r in candidates if r.sha512 == image_sha512), None)
+            (r for r in candidates
+             if r.sha512.strip().lower() == image_sha512), None)
         if matched is not None:
             state, row = STATE_VERIFIED, matched
         else:

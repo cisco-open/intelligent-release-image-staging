@@ -187,7 +187,10 @@ it, and remove that file after an intentional host rebuild.
 *Settings → Image verification* checks the catalog's images against Cisco's
 published Bulk Hash feed and quarantines a sha512 mismatch — see [Cisco Bulk
 Hash verification](security.md#cisco-bulk-hash-verification) for what the
-check does and what a quarantine changes.
+check does and what a quarantine changes. A locally-rebuilt image that
+reuses a Cisco filename mismatches and quarantines on its next verification
+run; the check has no way to distinguish that from tampering, which is the
+point.
 
 The schedule has three modes: **off** (the default), **daily**, and
 **weekly** — both timed modes fire at a configured `hour_utc` (0-23), and

@@ -35,8 +35,9 @@ top-level `VERSION` file.
 - Catalog images can now be checked against Cisco's published Bulk Hash feed:
   a scheduled run (off/daily/weekly, weekly anchored to Monday UTC), a manual
   "Refresh now" in the console, or an offline upload of the feed tar for
-  air-gapped servers all join each image by file name and size and compare
-  its sha512. The feed tar's X.509 signature is verified against a
+  air-gapped servers all join each image by file name and size — or by file
+  name alone when a feed row publishes no size, a real gap seen on Cisco's
+  live feed — and compare its sha512. The feed tar's X.509 signature is verified against a
   certificate pinned in-repo before anything in it is parsed, and any fetch,
   signature, or parse failure leaves every prior verdict untouched. A sha512
   mismatch quarantines the image — seeding stops, it is auto-unassigned from

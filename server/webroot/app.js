@@ -363,7 +363,15 @@
         { override: override, confirm_text: confirmText });
       var body = {};
       try { body = await r.json(); } catch (e) { }
-      if (r.ok) { closeImageInfo(); refreshImages(); return; }
+      if (r.ok) {
+        closeImageInfo(); refreshImages();
+        // Same reason as the Refresh now / offline upload handlers below:
+        // keeps imageQuarantined (the picker's block list) from lagging
+        // this release by up to one periodic devices-view poll interval,
+        // during which the just-released image would stay unpickable.
+        refreshDevices().catch(function () { });
+        return;
+      }
       if (r.status === 409 && body.error === 'quarantine_still_mismatched') {
         document.getElementById('ii-override-block').hidden = false;
         document.getElementById('ii-override-note').textContent =
@@ -2421,12 +2429,23 @@
     return esc(fmtDate(lr.at)) + ' · ' + esc(lr.source || 'unknown') + ' ' + badge + counts + detail;
   }
   async function refreshImageVerificationSettings() {
-    var r = await fetch('/api/settings/image-verification');
-    if (!r.ok) return;
+    // Setup pane's never-render-stale-as-healthy pattern (setupShowUnknown):
+    // a failed GET must not silently leave whatever was already in
+    // #iv-last-run (the static "Never run." markup on first load, or a
+    // stale prior successful render) standing in as if it were current.
+    var lastRun = document.getElementById('iv-last-run');
+    var r;
+    try {
+      r = await fetch('/api/settings/image-verification');
+    } catch (e) {
+      lastRun.textContent = 'Could not load status.';
+      return;
+    }
+    if (!r.ok) { lastRun.textContent = 'Could not load status.'; return; }
     var iv = await r.json();
     document.getElementById('iv-mode').value = iv.mode || 'off';
     document.getElementById('iv-hour').value = String(iv.hour_utc == null ? 0 : iv.hour_utc);
-    document.getElementById('iv-last-run').innerHTML = fmtBulkhashLastRun(iv.last_run);
+    lastRun.innerHTML = fmtBulkhashLastRun(iv.last_run);
   }
   // Hour select is built once here (00:00-23:00 UTC) rather than spelled out
   // as 24 <option> elements in index.html.

@@ -46,7 +46,16 @@ def main(argv=None):
         print("error: image '%s' is not published. Published: %s"
               % (image_id, published), file=sys.stderr)
         return 1
-    store.set_policy(device_id, approved_image_id=image_id)
+    try:
+        store.set_policy(device_id, approved_image_id=image_id)
+    except catalog.QuarantinedImage as exc:
+        hv = exc.hash_verification or {}
+        reason = hv.get("state") or "unknown"
+        if hv.get("deferral"):
+            reason += ", deferred by Cisco"
+        print("error: image '%s' is quarantined (%s)"
+              % (exc.image_id, reason), file=sys.stderr)
+        return 1
     print("assigned %s -> %s  (the device picks it up within ~60s; if it had a "
           "different image, it cleans that up first)" % (device_id, image_id))
     return 0

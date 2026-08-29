@@ -390,6 +390,43 @@ def test_list_and_get_image(tmp_path):
         srv.shutdown()
 
 
+def test_device_wire_strips_internal_quarantine_bookkeeping_fields(tmp_path):
+    """The device-facing /v1/images and /v1/images/<id> routes must not leak
+    catalog.py's own internal bookkeeping fields to agents --
+    quarantine_actions_complete (convergence-retry state) and
+    quarantine_override_sha512 (the re-quarantine-suppression ack). Mirrors
+    gui_server._image_view's console-side projection rationale;
+    hash_verification and quarantined stay wire-visible -- an agent
+    benefits from knowing its own image's verification state."""
+    srv, port = _serve(tmp_path, "tok")
+    try:
+        store = catalog.CatalogStore(str(tmp_path))
+        entry = store.get_image("img1")
+        entry["quarantined"] = True
+        entry["quarantine_actions_complete"] = False
+        entry["quarantine_override_sha512"] = "aa" * 64
+        entry["hash_verification"] = {
+            "state": "mismatch", "checked_at": 1, "feed_published_at": None,
+            "source": "scheduled", "deferral": False}
+        store.save_image(entry)
+
+        status, _, body = _req(port, "GET", "/v1/images", token="tok")
+        img = json.loads(body)["images"][0]
+        assert img["quarantined"] is True
+        assert img["hash_verification"]["state"] == "mismatch"
+        assert "quarantine_actions_complete" not in img
+        assert "quarantine_override_sha512" not in img
+
+        status, _, body = _req(port, "GET", "/v1/images/img1", token="tok")
+        img2 = json.loads(body)
+        assert img2["quarantined"] is True
+        assert img2["hash_verification"]["state"] == "mismatch"
+        assert "quarantine_actions_complete" not in img2
+        assert "quarantine_override_sha512" not in img2
+    finally:
+        srv.shutdown()
+
+
 def test_torrent_download_device_without_announce_fails_closed(tmp_path):
     # A device catalog principal with NO announce credential must fail CLOSED
     # (spec §6) — never a canonical/seeder-token fallback. The _store fixture's

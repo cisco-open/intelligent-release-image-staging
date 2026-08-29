@@ -1338,6 +1338,22 @@ def _id_list(value, cap=16):
     return [i for i in value[:cap] if i]
 
 
+def _device_image_view(entry):
+    """Wire projection of one catalog image entry served to devices by
+    Catalog.route_get (KGV / Cisco Bulk Hash reconciler review wave):
+    every field the entry carries MINUS the two that exist purely for
+    catalog.py's own internal bookkeeping (quarantine_actions_complete --
+    convergence-retry state; quarantine_override_sha512 -- the
+    re-quarantine-suppression ack) and were never meant to be wire-visible
+    -- mirrors gui_server._image_view's console-side projection rationale.
+    hash_verification and quarantined stay: an agent benefits from knowing
+    its own assigned image's verification state same as a console operator
+    does."""
+    return {k: v for k, v in entry.items()
+           if k not in ("quarantine_actions_complete",
+                        "quarantine_override_sha512")}
+
+
 class Catalog:
     def __init__(self, store, secrets_path,
                  audit_path=None, live_table=None, stream_settings=None,
@@ -1413,10 +1429,11 @@ class Catalog:
     def route_get(self, path, auth_ctx=None, store_dict=None):
         parts = path.strip("/").split("/")
         if parts == ["v1", "images"]:
-            return self._json(200, {"images": self.store.list_images()})
+            return self._json(200, {"images": [
+                _device_image_view(i) for i in self.store.list_images()]})
         if len(parts) == 3 and parts[:2] == ["v1", "images"]:
             img = self.store.get_image(parts[2])
-            return self._json(200, img) if img else \
+            return self._json(200, _device_image_view(img)) if img else \
                 self._json(404, {"error": "no such image"})
         if len(parts) == 3 and parts[:2] == ["v1", "torrents"]:
             image_id = parts[2][:-len(".torrent")] \

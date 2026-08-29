@@ -137,6 +137,20 @@ def test_refresh_now_disables_while_in_flight_and_handles_already_running():
     assert "'/api/image-verification/refresh'" in fn
 
 
+def test_failed_status_get_shows_could_not_load_not_stale_never_run():
+    """Setup pane's never-render-stale-as-healthy pattern (setupShowUnknown
+    in this same file): a failed GET must not silently leave whatever text
+    was already in #iv-last-run standing in as current -- neither the
+    static "Never run." markup index.html ships on first load, nor a stale
+    prior successful render."""
+    js = _read("app.js")
+    fn = js.split(
+        "async function refreshImageVerificationSettings() {", 1)[1].split(
+        "\n  // Hour select is built once here", 1)[0]
+    assert fn.count("Could not load status.") == 2   # !r.ok AND catch(e)
+    assert "catch (e)" in fn
+
+
 def test_success_messages_render_in_the_ok_color_outside_inline_form():
     """Important 2 fix: #iv-refresh-msg and #iv-offline-msg sit outside any
     .inline-form (unlike every other -msg span in this pane), so the
@@ -393,6 +407,21 @@ def test_normal_release_first_then_override_path_on_409_still_mismatching():
     assert "quarantine_still_mismatched" in fn
     # every other failure surfaces the API's own message, not a made-up one
     assert "body.error ||" in fn
+
+
+def test_successful_release_also_refreshes_devices():
+    """Same reason as the Refresh now / offline upload handlers
+    (refreshDevices().catch(...) alongside refreshImages()): without it,
+    imageQuarantined (the picker's block list) lagged a successful release
+    by up to one periodic devices-view poll interval, during which the
+    just-released image stayed unpickable."""
+    js = _read("app.js")
+    fn = js.split("async function attemptReleaseQuarantine(override, confirmText) {", 1)[1].split(
+        "\n  document.getElementById('ii-release')", 1)[0]
+    ok_block = fn.split("if (r.ok) {", 1)[1].split("}", 1)[0]
+    assert "closeImageInfo()" in ok_block
+    assert "refreshImages()" in ok_block
+    assert "refreshDevices().catch(" in ok_block
 
 
 def test_release_button_sends_no_override_the_override_button_sends_the_typed_text():

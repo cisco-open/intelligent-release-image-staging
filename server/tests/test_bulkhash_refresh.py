@@ -16,10 +16,12 @@ test_bulkhash.py idiom, replicated here since test files in this repo do not
 import helpers from one another), and a REAL CatalogStore/tmp_path so
 "catalog untouched on failure" is a real assertion, not a mock call count."""
 import calendar
+import hashlib
 import http.server
 import io
 import json
 import os
+import re
 import subprocess
 import tarfile
 import threading
@@ -43,6 +45,37 @@ REAL_ROW = (
     "image1.bin,D949B99A104B23B2129718220C78F28E,"
     + ("aa" * 64).upper() +
     ",August 03 2016 00:00:00 PDT-0700,,5\r\n")
+
+
+# ---------------------------------------------------------------------------
+# The pinned cert itself -- server/certs/cisco_bulkhash_verify.pem, NEVER a
+# throwaway one -- must match its own provenance header.
+# ---------------------------------------------------------------------------
+
+_CERT_HEADER_FINGERPRINT_RE = re.compile(
+    r"SHA-256 fingerprint \(of the DER bytes\): ([0-9a-f]{64})")
+
+
+def test_pinned_cert_matches_its_own_provenance_fingerprint():
+    """server/certs/cisco_bulkhash_verify.pem's provenance header (the
+    comment block above the certificate) documents the SHA-256 fingerprint
+    of the DER bytes of the certificate it pins for verify_tar. Parse that
+    documented value out of the header, hash the certificate body actually
+    on disk, and compare -- a silent swap of the certificate bytes (without
+    also editing the header to match) must fail this test, not just be a
+    comment someone forgot to update."""
+    with open(bulkhash_refresh._CERT_PATH) as f:
+        header_text = f.read()
+    match = _CERT_HEADER_FINGERPRINT_RE.search(header_text)
+    assert match, "provenance header fingerprint line not found"
+    documented_fingerprint = match.group(1)
+
+    der = subprocess.run(
+        ["openssl", "x509", "-in", bulkhash_refresh._CERT_PATH,
+         "-outform", "der"],
+        capture_output=True, check=True).stdout
+    actual_fingerprint = hashlib.sha256(der).hexdigest()
+    assert actual_fingerprint == documented_fingerprint
 
 
 def _throwaway_keypair(dirpath, cn):
@@ -881,22 +914,36 @@ def test_loop_mode_flipped_off_during_countdown_skips_the_stale_target(
     wait elapsed -- it only ever checked `now >= target` against the
     settings read BEFORE the wait, never noticing the flip. A quarantine-
     capable scheduled run must not fire from a schedule the operator has
-    since turned off."""
+    since turned off.
+
+    Deterministic by construction, not by sleep-racing the thread: the
+    injected next_run_at_fn signals `computed_target` on its FIRST call (so
+    the write below is guaranteed to land only after the loop has read the
+    original "daily" settings and started counting down) and `reentered` on
+    its SECOND call (which only happens once the loop has re-read settings
+    post-wait and either fired or correctly skipped -- so by the time that
+    fires, `calls` is settled and safe to assert on)."""
     calls = []
     spath = bulkhash_refresh.settings_path(str(tmp_path / "state"))
     bulkhash_refresh.write_settings(
         spath, "daily", 6, dict(bulkhash_refresh._DEFAULT_LAST_RUN))
     stop = threading.Event()
+    computed_target = threading.Event()
+    reentered = threading.Event()
 
     def fake_next_run_at(mode, hour_utc, now):
+        if not computed_target.is_set():
+            computed_target.set()
+        elif not reentered.is_set():
+            reentered.set()
         return None if mode == "off" else now + 0.15
 
     t = _run_loop(tmp_path, stop, lambda *a, **kw: calls.append((a, kw)),
                  idle_recheck=0.5, next_run_at_fn=fake_next_run_at)
-    time.sleep(0.03)     # let it read mode="daily" and start the ~0.15s wait
+    assert computed_target.wait(timeout=5)
     bulkhash_refresh.write_settings(
         spath, "off", 0, dict(bulkhash_refresh._DEFAULT_LAST_RUN))
-    time.sleep(0.3)      # past when the stale target would have fired
+    assert reentered.wait(timeout=5)
     stop.set()
     t.join(timeout=5)
     assert not t.is_alive()
@@ -911,24 +958,33 @@ def test_loop_hour_utc_pushed_later_during_countdown_skips_the_stale_target(
     hour_utc as "genuinely far off" -- modeling the edit as an operator
     truly pushing the run later, not just re-arriving at a new near-term
     target moments afterward (which would be legitimate, and is exercised
-    separately by test_loop_fires_when_next_run_at_reports_due)."""
+    separately by test_loop_fires_when_next_run_at_reports_due).
+
+    Same `computed_target`/`reentered` event handshake as the mode-flip test
+    above, in place of sleep-racing the thread."""
     calls = []
     spath = bulkhash_refresh.settings_path(str(tmp_path / "state"))
     bulkhash_refresh.write_settings(
         spath, "daily", 6, dict(bulkhash_refresh._DEFAULT_LAST_RUN))
     stop = threading.Event()
+    computed_target = threading.Event()
+    reentered = threading.Event()
 
     def fake_next_run_at(mode, hour_utc, now):
+        if not computed_target.is_set():
+            computed_target.set()
+        elif not reentered.is_set():
+            reentered.set()
         if mode == "off":
             return None
         return now + 0.15 if hour_utc == 6 else now + 100
 
     t = _run_loop(tmp_path, stop, lambda *a, **kw: calls.append((a, kw)),
                  idle_recheck=0.5, next_run_at_fn=fake_next_run_at)
-    time.sleep(0.03)     # let it read hour_utc=6 and start the ~0.15s wait
+    assert computed_target.wait(timeout=5)
     bulkhash_refresh.write_settings(
         spath, "daily", 20, dict(bulkhash_refresh._DEFAULT_LAST_RUN))
-    time.sleep(0.3)      # past when the stale (hour_utc=6) target would fire
+    assert reentered.wait(timeout=5)
     stop.set()
     t.join(timeout=5)
     assert not t.is_alive()

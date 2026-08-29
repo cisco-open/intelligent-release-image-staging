@@ -205,6 +205,50 @@ class TestFetch:
                            out_path=out_path)
         assert not os.path.exists(out_path)
 
+    def test_oversize_stream_rejected_mid_download(self, tmp_path,
+                                                     monkeypatch):
+        # Small chunk size + small cap so the cutoff fires after a few
+        # chunks rather than on the very first read -- proves the check
+        # runs mid-stream, not just once the whole body is buffered.
+        monkeypatch.setattr(bulkhash, "_DOWNLOAD_CHUNK", 10)
+        monkeypatch.setattr(bulkhash, "_MAX_DOWNLOAD_BYTES", 25)
+        payload = b"x" * 100
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *a):
+                pass
+
+        srv = _http_server(Handler)
+        try:
+            out_path = os.path.join(str(tmp_path), "out.tar")
+            url = "http://127.0.0.1:%d/big" % srv.server_address[1]
+            with pytest.raises(bulkhash.BulkHashError):
+                bulkhash.fetch(url, timeout=5, out_path=out_path)
+            assert not os.path.exists(out_path)
+        finally:
+            srv.shutdown()
+
+    def test_https_to_http_redirect_is_refused(self):
+        with pytest.raises(bulkhash.BulkHashError):
+            bulkhash._refuse_downgrade("https://example.com/first",
+                                        "http://example.com/second")
+
+    def test_http_to_http_redirect_is_not_refused(self):
+        # The local test fixtures above redirect http -> http; only an
+        # https -> http downgrade is refused, so this must be a no-op.
+        bulkhash._refuse_downgrade("http://example.com/first",
+                                    "http://example.com/second")
+
+    def test_https_to_https_redirect_is_not_refused(self):
+        bulkhash._refuse_downgrade("https://example.com/first",
+                                    "https://example.com/second")
+
 
 # ---------------------------------------------------------------------------
 # verify_tar()
@@ -711,6 +755,20 @@ class TestReconcile:
         rows = [_row("image.bin", "abcdef", 100)]
         images = [{"image_id": "img-1", "filename": "image.bin",
                    "size": 100, "sha512": "ABCDEF"}]
+        verdicts = bulkhash.reconcile(rows, images)
+        assert verdicts["img-1"]["state"] == "verified"
+
+    def test_case_insensitive_sha512_comparison_on_the_feed_side(self):
+        """The comparison must be case-insensitive regardless of WHICH side
+        carries the differing case. parse() happens to already lowercase
+        SHA512_CHECKSUM, but reconcile()'s own docstring promises
+        case-insensitivity unconditionally and does not rely on rows
+        having come from parse() -- an uppercase feed-side sha512 (an
+        `_row(...)` built by hand, exactly as a non-parse() caller might)
+        must still verify."""
+        rows = [_row("image.bin", "ABCDEF", 100)]
+        images = [{"image_id": "img-1", "filename": "image.bin",
+                   "size": 100, "sha512": "abcdef"}]
         verdicts = bulkhash.reconcile(rows, images)
         assert verdicts["img-1"]["state"] == "verified"
 
