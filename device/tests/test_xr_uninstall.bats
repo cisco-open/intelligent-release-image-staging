@@ -235,6 +235,16 @@ case "$cmds" in
       row="$(eval "printf '%s' \"\${$indexed_var-\$FAKE_APP_ROW}\"")"
       echo "__IRIS_XR_VERIFY_APPS__"
       printf '%s\n' "$row"
+      # FAKE_TRUNCATE_AFTER_APPS simulates the transport dying (rc 0) right
+      # after the REAL start marker + row -- before its own end marker or
+      # ANY later section (unlike FAKE_VERIFY_OMIT_APPS_END, which still
+      # lets SOURCES/FILES print for real afterward and so would still
+      # naturally bound the APPS section). This is the only way to
+      # reproduce a truncation the echoed upfront blob's own literal copy
+      # of the end marker text can mask from a plain substring test.
+      if [ "${FAKE_TRUNCATE_AFTER_APPS:-no}" = "yes" ]; then
+        exit 0
+      fi
       if [ "${FAKE_VERIFY_OMIT_APPS_END:-no}" != "yes" ]; then
         echo "__IRIS_XR_VERIFY_APPS_END__"
       fi
@@ -410,6 +420,23 @@ iris-work" run _xr_uninstall_run_live
   [ "$status" -ne 0 ] || return 1
   [[ "$output" == *"artifacts still present"* ]] || return 1
   [[ "$output" == *"iris-xr.rpm"* ]]
+}
+
+@test "live [echoing transport]: truncated after the executed start marker (rc 0) is a hard error, never absent" {
+  # The transport dies right after the REAL app-table marker -- rc 0, no
+  # end marker of its own, and no later section at all. The upfront
+  # echoed-blob still contains a literal copy of the end marker's text (it
+  # is part of what was piped in), so a plain substring check for that text
+  # would wrongly conclude "found" and let this read as an absent app; only
+  # a positional (last-end-after-last-start) check catches it.
+  _xr_uninstall_echoing_stub_setup
+  FAKE_TRUNCATE_AFTER_APPS=yes run _xr_uninstall_run_live
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"truncated before its end marker"* ]] || return 1
+  log="$(cat "$FAKE_COMMAND_LOG")"
+  if printf '%s\n' "$log" | grep -qE 'no appmgr application iris|appmgr package uninstall source|run rm'; then
+    return 1
+  fi
 }
 
 @test "live: fails when the source is still listed after teardown" {

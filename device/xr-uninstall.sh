@@ -117,6 +117,24 @@ if not matches:
 sys.stdout.write(matches[-1].group(1))' "$1"
 }
 
+# Positional end-after-start check: a plain substring test for an end
+# marker (`case "$text" in *"$end_marker"*)`) is USELESS against the same
+# echoing transport verify_section guards against above -- the upfront
+# echoed blob already contains a literal copy of the end marker's own text
+# (it is part of what was piped in), so the substring is always "found"
+# starting from the very first byte, whether or not the REAL execution ever
+# reached it. This must compare byte positions instead: the executed end
+# marker is only real if its LAST occurrence in the transcript comes AFTER
+# the start marker's LAST (executed) occurrence.
+end_after_start() {
+  python3 -c 'import sys
+text = sys.stdin.read()
+start_marker, end_marker = sys.argv[1], sys.argv[2]
+si = text.rfind(start_marker)
+ei = text.rfind(end_marker)
+sys.exit(0 if (si != -1 and ei != -1 and ei > si) else 1)' "$1" "$2"
+}
+
 if [ "$FORCE_AGENT_ONLY" = "1" ]; then
   echo "===== FORCE: reclaiming only IRIS-marked artifacts on $DEVICE_IP (no receipt) ====="
   echo "  Removing: app '$APPID', source '$SOURCE_NAME', $RPM_PATH, $WORK_DIR_PATH."
@@ -163,13 +181,10 @@ app_present() {
   # surface as a transport error) is caught by requiring the trailing end
   # marker too -- a truncated-after-marker read is a hard error, never
   # silently treated as absent.
-  case "$probe_out" in
-    *"${VERIFY_MARKER}APPS_END__"*) : ;;
-    *)
-      echo "ERROR: deactivate probe was truncated before its end marker; refusing to continue teardown on $DEVICE_IP" >&2
-      exit 1
-      ;;
-  esac
+  if ! printf '%s' "$probe_out" | end_after_start "${VERIFY_MARKER}APPS__" "${VERIFY_MARKER}APPS_END__"; then
+    echo "ERROR: deactivate probe was truncated before its end marker; refusing to continue teardown on $DEVICE_IP" >&2
+    exit 1
+  fi
   case "$apps" in *"$APPID"*) return 0 ;; esac
   return 1
 }
