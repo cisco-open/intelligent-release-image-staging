@@ -6748,7 +6748,15 @@ def test_xr_host_auto_selected_from_model_and_from_platform_pick():
     ["xr-appmgr"], nothing else ever does -- and (2) the operator picks
     Agent install = XR appmgr container directly. Either path auto-selects
     df-attachment to xr-host and repaints the form, without fighting an
-    operator who is already there."""
+    operator who is already there.
+
+    Symmetric exit: correcting the model away from an XR shape (e.g. 8201
+    -> C9300-48UXM) must reset an auto-entered xr-host attachment back to
+    the unset/default option and repaint. Without this, df-guest/df-mask/
+    df-gateway stay hidden for a non-XR device with no visible cause and
+    the form cannot be completed. Scoped to the same model-driven repaint
+    -- it must not reach for any of the operator's own explicit attachment
+    changes elsewhere in the form."""
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
     refresh_fn = js.split("async function refreshInstallOptions() {", 1)[1].split(
@@ -6757,6 +6765,11 @@ def test_xr_host_auto_selected_from_model_and_from_platform_pick():
     assert "attachSel.value !== 'xr-host'" in refresh_fn
     assert "attachSel.value = 'xr-host';" in refresh_fn
     assert "updateDeviceFields();" in refresh_fn
+    assert "} else if (attachSel.value === 'xr-host') {" in refresh_fn
+    exit_arm = refresh_fn.split("} else if (attachSel.value === 'xr-host') {", 1)[1].split(
+        "}", 1)[0]
+    assert "attachSel.value = '';" in exit_arm
+    assert "updateDeviceFields();" in exit_arm
     assert "getElementById('df-platform').addEventListener('change'" in js
     plat_fn = js.split(
         "getElementById('df-platform').addEventListener('change', function () {", 1)[1].split(
@@ -6785,13 +6798,27 @@ def test_device_form_submit_sends_no_addressing_fields_for_xr_host():
 def test_devices_table_renders_honest_xr_host_label():
     """attachmentLabel must render xr-host as 'XR host' -- no VLAN/VPG
     detail suffix appended, since xr-host carries neither -- while the
-    existing legacy/inventory-only branch stays untouched."""
+    existing legacy/inventory-only branch stays untouched. Scoped to the
+    attachmentLabel assignment itself (a bare substring search would pass
+    on ANY occurrence of these tokens anywhere in app.js and would never
+    notice a xr-host arm that accidentally referenced attachmentDetail),
+    so this also pins that the xr-host arm precedes the generic
+    'attachment + attachmentDetail' fallback and never reads
+    attachmentDetail."""
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
-    assert "attachment === 'legacy_routed' || attachment === 'legacy'" in js
-    assert "'Inventory only — attachment not chosen'" in js
-    assert "attachment === 'xr-host'" in js
-    assert "'XR host'" in js
+    label = js.split("var attachmentLabel = ", 1)[1].split(";\n", 1)[0]
+    assert "attachment === 'legacy_routed' || attachment === 'legacy'" in label
+    assert "'Inventory only — attachment not chosen'" in label
+    assert "attachment === 'xr-host'" in label
+    assert "'XR host'" in label
+    fallback_marker = "(attachment + attachmentDetail)"
+    assert fallback_marker in label
+    xr_idx = label.index("attachment === 'xr-host'")
+    fallback_idx = label.index(fallback_marker)
+    assert xr_idx < fallback_idx, "xr-host arm must precede the generic fallback"
+    xr_arm = label[xr_idx:fallback_idx]
+    assert "attachmentDetail" not in xr_arm
 
 
 def test_install_options_api_requires_auth_and_matches_model_matrix(tmp_path):

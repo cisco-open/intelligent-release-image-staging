@@ -1819,13 +1819,19 @@
       // The install-options answer for an IOS-XR-shaped model is exactly
       // ["xr-appmgr"] -- the one thing it can run, and nothing else ever
       // returns just that. Drive the attachment auto-select off that
-      // server answer instead of re-implementing the model regex here.
+      // server answer instead of re-implementing the model regex here,
+      // and symmetrically exit xr-host when a corrected model no longer
+      // answers that way -- otherwise the addressing fields stay hidden
+      // for a non-XR device with no visible cause.
+      var attachSel = document.getElementById('df-attachment');
       if (options.length === 1 && options[0] === 'xr-appmgr') {
-        var attachSel = document.getElementById('df-attachment');
         if (attachSel.value !== 'xr-host') {
           attachSel.value = 'xr-host';
           updateDeviceFields();
         }
+      } else if (attachSel.value === 'xr-host') {
+        attachSel.value = '';
+        updateDeviceFields();
       }
     } catch (e) {
       // Network failure or JSON parse error: restore permissive defaults so
