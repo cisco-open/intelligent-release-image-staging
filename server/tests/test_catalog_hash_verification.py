@@ -12,12 +12,15 @@ none of that runs here. Every test builds verdict dicts by hand, in
 exactly the shape bulkhash.reconcile() returns: {image_id: {state,
 feed_sha512, publish_date, deferral}}."""
 import json
+import threading
+import time
 
 import pytest
 
 import audit
 import bulkhash
 import catalog
+import secrets_store
 
 
 # ---------------------------------------------------------------------------
@@ -529,3 +532,225 @@ def test_quarantine_state_survives_a_fresh_store_reload(tmp_path):
     assert entry["hash_verification"]["state"] == "mismatch"
     with pytest.raises(catalog.QuarantinedImage):
         s2.set_policy("d1", approved_image_ids=["img1"])
+
+
+# ---------------------------------------------------------------------------
+# Reviewer fix 1: an override release must not be undone by re-applying the
+# byte-identical verdict; a genuinely NEW/different mismatch must still fire.
+# ---------------------------------------------------------------------------
+
+def test_override_release_survives_reapplying_the_identical_verdict(tmp_path):
+    """A NEW mismatch quarantines and blocks assignment; the operator
+    overrides to permit assignment despite the (unchanged) sha512 mismatch.
+    Before the fix, re-applying the BYTE-IDENTICAL verdict on the next
+    scheduled run silently re-quarantined the image -- an override would
+    then survive only until the next tick of Task 3's scheduler."""
+    s = _store(tmp_path)
+    _seed(s, sha512="aa" * 64)
+    s.apply_hash_verification(
+        {"img1": _verdict(bulkhash.STATE_MISMATCH, feed_sha512="bb" * 64)},
+        source="scheduled")
+    s.release_quarantine("img1", actor="console:admin", override=True)
+    s.set_policy("d1", approved_image_ids=["img1"])   # the override unblocked it
+    removed_before = list(s.removed)
+
+    s.apply_hash_verification(
+        {"img1": _verdict(bulkhash.STATE_MISMATCH, feed_sha512="bb" * 64)},
+        source="scheduled")
+
+    entry = s.get_image("img1")
+    assert entry["quarantined"] is False
+    assert s.get_policy("d1")["approved_image_ids"] == ["img1"]   # still assigned
+    assert s.removed == removed_before                            # no repeat stop-seeding
+    s.set_policy("d2", approved_image_ids=["img1"])                # still not blocked
+
+
+def test_override_release_does_not_suppress_a_different_mismatch(tmp_path):
+    """A genuinely different mismatch (a different feed_sha512) after an
+    override must still fire -- the override acknowledges ONE specific
+    reported value, not "never quarantine this image again"."""
+    s = _store(tmp_path)
+    _seed(s, sha512="aa" * 64)
+    s.apply_hash_verification(
+        {"img1": _verdict(bulkhash.STATE_MISMATCH, feed_sha512="bb" * 64)},
+        source="scheduled")
+    s.release_quarantine("img1", actor="console:admin", override=True)
+    s.set_policy("d1", approved_image_ids=["img1"])
+
+    s.apply_hash_verification(
+        {"img1": _verdict(bulkhash.STATE_MISMATCH, feed_sha512="ff" * 64)},
+        source="scheduled")
+
+    entry = s.get_image("img1")
+    assert entry["quarantined"] is True
+    assert s.get_policy("d1")["approved_image_ids"] == []   # auto-unassigned again
+    with pytest.raises(catalog.QuarantinedImage):
+        s.set_policy("d2", approved_image_ids=["img1"])
+
+
+def test_override_ack_is_cleared_once_the_feed_reports_verified(tmp_path):
+    """Defensive: once a later verdict reports the image genuinely
+    verified, the override acknowledgement must not linger to silently
+    suppress a LATER, unrelated regression back to that same feed_sha512
+    value."""
+    s = _store(tmp_path)
+    _seed(s, sha512="aa" * 64)
+    s.apply_hash_verification(
+        {"img1": _verdict(bulkhash.STATE_MISMATCH, feed_sha512="bb" * 64)},
+        source="scheduled")
+    s.release_quarantine("img1", actor="console:admin", override=True)
+    s.apply_hash_verification(
+        {"img1": _verdict(bulkhash.STATE_VERIFIED, feed_sha512="aa" * 64)},
+        source="scheduled")
+    # the feed regresses to the SAME value that was overridden before
+    s.apply_hash_verification(
+        {"img1": _verdict(bulkhash.STATE_MISMATCH, feed_sha512="bb" * 64)},
+        source="scheduled")
+    assert s.get_image("img1")["quarantined"] is True
+
+
+# ---------------------------------------------------------------------------
+# Reviewer fix 2: quarantine must converge -- a crash between the durable
+# quarantined=True write and the side effects, or a per-device set_policy
+# failure, must not leave the image permanently stuck half-remediated.
+# ---------------------------------------------------------------------------
+
+def test_convergence_retries_after_a_simulated_mid_fire_crash(tmp_path):
+    """A crash between apply_hash_verification's durable
+    quarantined=True/quarantine_actions_complete=False write and
+    _fire_quarantine ever running leaves an image durably marked
+    quarantined (blocking new assignment) but STILL actively assigned and
+    seeding. The NEXT apply run -- even one whose verdicts say nothing new
+    about this image at all -- must notice the incomplete marker and
+    finish the job, not treat quarantined=True as "nothing to do"."""
+    s = _store(tmp_path)
+    _seed(s, sha512="aa" * 64, info_hash_hex="deadbeef" * 5)
+    s.set_policy("d1", approved_image_ids=["img1"])
+    # Simulate the crash: write EXACTLY the durable state
+    # apply_hash_verification's write phase would have produced, without
+    # ever calling _fire_quarantine (as if the process died right there).
+    entry = s.get_image("img1")
+    entry["hash_verification"] = {"state": "mismatch", "checked_at": 1000,
+                                  "feed_published_at": "2026-08-01",
+                                  "source": "scheduled", "deferral": False}
+    entry["cisco_signature_verified"] = False
+    entry["quarantined"] = True
+    entry["quarantine_actions_complete"] = False
+    s.save_image(entry)
+
+    assert s.removed == []                                    # never stopped
+    assert s.get_policy("d1")["approved_image_ids"] == ["img1"]   # still assigned
+
+    # the next scheduled run -- even with verdicts naming nothing new
+    s.apply_hash_verification({}, source="scheduled")
+
+    assert s.removed == ["deadbeef" * 5]
+    assert s.get_policy("d1")["approved_image_ids"] == []
+    assert s.get_image("img1")["quarantine_actions_complete"] is True
+
+
+def test_convergence_retries_after_a_transient_set_policy_failure(tmp_path, monkeypatch):
+    """A per-device set_policy failure during auto-unassign must be
+    AUDITED as a failure (not silently swallowed) and must leave
+    quarantine_actions_complete False so the NEXT apply run retries it --
+    and once the transient condition clears, that retry must actually
+    finish the job."""
+    s = _store(tmp_path)
+    _seed(s, sha512="aa" * 64)
+    s.set_policy("d1", approved_image_ids=["img1"])
+
+    real_set_policy = s.set_policy
+    calls = {"n": 0}
+
+    def flaky_set_policy(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated transient failure")
+        return real_set_policy(*a, **kw)
+
+    monkeypatch.setattr(s, "set_policy", flaky_set_policy)
+    s.apply_hash_verification(
+        {"img1": _verdict(bulkhash.STATE_MISMATCH, feed_sha512="bb" * 64)},
+        source="scheduled")
+
+    # first attempt: the device is still assigned, the marker is incomplete,
+    # and the failure is on the record -- not silently dropped.
+    assert s.get_policy("d1")["approved_image_ids"] == ["img1"]
+    entry = s.get_image("img1")
+    assert entry["quarantined"] is True
+    assert entry["quarantine_actions_complete"] is False
+    fail_events = [e for e in _audit_events(s)
+                   if e.get("action") == "unassign" and e.get("result") == "fail"]
+    assert len(fail_events) == 1
+    assert fail_events[0]["target"] == "d1"
+
+    # the transient condition has cleared; a later apply run retries and
+    # this time finishes the job.
+    s.apply_hash_verification(
+        {"img1": _verdict(bulkhash.STATE_MISMATCH, feed_sha512="bb" * 64)},
+        source="scheduled")
+    assert s.get_policy("d1")["approved_image_ids"] == []
+    assert s.get_image("img1")["quarantine_actions_complete"] is True
+    ok_events = [e for e in _audit_events(s)
+                if e.get("action") == "unassign" and e.get("result") == "ok"]
+    assert len(ok_events) == 1
+
+
+# ---------------------------------------------------------------------------
+# Reviewer fix 3: catalog.json read-modify-write must nest
+# secrets_store.store_lock(catalog_path) INSIDE image_policy_lock(), the
+# same lock save_image/delete_image/iris-publish use, or a concurrent
+# writer from a SEPARATE process can interleave and drop a write.
+# ---------------------------------------------------------------------------
+
+def test_apply_hash_verification_serializes_with_a_concurrent_catalog_writer(tmp_path):
+    """Played the way test_set_policy_serializes_with_image_deletion_across_
+    processes (test_catalog.py) does: hold secrets_store.store_lock(
+    catalog_path) externally -- standing in for a separate iris-publish/
+    save_image process, which takes ONLY that lock, never
+    image_policy_lock() -- fire apply_hash_verification on a thread, and
+    confirm it BLOCKS until the lock is released rather than racing
+    straight through. Before the fix, apply_hash_verification never took
+    this lock at all, so it would complete near-instantly even while held."""
+    s = _store(tmp_path)
+    _seed(s, sha512="aa" * 64)
+    done = []
+
+    def apply():
+        s.apply_hash_verification(
+            {"img1": _verdict(bulkhash.STATE_MISMATCH, feed_sha512="bb" * 64)},
+            source="scheduled")
+        done.append(True)
+
+    with secrets_store.store_lock(s.catalog_path):
+        t = threading.Thread(target=apply)
+        t.start()
+        time.sleep(0.3)             # let it reach (and block on) the lock
+        assert done == []
+    t.join(timeout=5)
+
+    assert done == [True]
+    assert s.get_image("img1")["quarantined"] is True   # and it still lands correctly
+
+
+def test_release_quarantine_serializes_with_a_concurrent_catalog_writer(tmp_path):
+    s = _store(tmp_path)
+    _seed(s, sha512="aa" * 64)
+    s.apply_hash_verification(
+        {"img1": _verdict(bulkhash.STATE_MISMATCH, feed_sha512="bb" * 64)},
+        source="scheduled")
+    done = []
+
+    def release():
+        s.release_quarantine("img1", actor="console:admin", override=True)
+        done.append(True)
+
+    with secrets_store.store_lock(s.catalog_path):
+        t = threading.Thread(target=release)
+        t.start()
+        time.sleep(0.3)
+        assert done == []
+    t.join(timeout=5)
+
+    assert done == [True]
+    assert s.get_image("img1")["quarantined"] is False
