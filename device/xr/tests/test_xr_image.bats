@@ -221,6 +221,51 @@ _run_entrypoint() {
   [ -d "$STAGE/iris-work" ]
 }
 
+# F3: the conf must default under the PERSISTENT mount (iris-work/, same
+# directory the state file already lives in), never a container-local path
+# like /etc/iris -- a recreated container starts with an empty container
+# filesystem but the SAME /hostmount, so a conf that only ever existed at a
+# container-local path re-synthesizes from the activation env (the original
+# enrollment token) and 401s forever once that token is past its TTL.
+@test "conf defaults under iris-work/ on the persistent mount, not a container-local path" {
+  run env -i PATH="$PATH" \
+    IRIS_STAGE_DIR="$STAGE" \
+    IRIS_CATALOG_URL=https://198.51.100.1:8443 \
+    IRIS_CATALOG_TOKEN=tok123 \
+    IRIS_DEVICE_ID=8010-r1 \
+    bash "$ENTRYPOINT"
+  [ -f "$STAGE/iris-work/iris-agent.conf" ]
+}
+
+@test "a conf synthesized at the default path survives a from-scratch container recreation" {
+  # First boot: no conf anywhere, synthesize from the activation env (the
+  # original enrollment token) at the default path.
+  run env -i PATH="$PATH" \
+    IRIS_STAGE_DIR="$STAGE" \
+    IRIS_CATALOG_URL=https://198.51.100.1:8443 \
+    IRIS_CATALOG_TOKEN=enrollment-token \
+    IRIS_DEVICE_ID=8010-r1 \
+    bash "$ENTRYPOINT"
+  DEFAULT_CONF="$STAGE/iris-work/iris-agent.conf"
+  [ -f "$DEFAULT_CONF" ] || return 1
+  # Simulate the agent rotating its token in place (write_conf round-trip),
+  # exactly what a live token refresh does.
+  sed -i.bak 's/^catalog_token = .*/catalog_token = rotated-token/' "$DEFAULT_CONF"
+  # Second boot: a brand-new container -- same activation env (still the
+  # ORIGINAL enrollment token, the only thing appmgr ever hands the
+  # container), but the SAME persistent mount. dropped-conf-wins must see
+  # the conf already at the default path and keep the rotated token.
+  run env -i PATH="$PATH" \
+    IRIS_STAGE_DIR="$STAGE" \
+    IRIS_CATALOG_URL=https://198.51.100.1:8443 \
+    IRIS_CATALOG_TOKEN=enrollment-token \
+    IRIS_DEVICE_ID=8010-r1 \
+    bash "$ENTRYPOINT"
+  run cat "$DEFAULT_CONF"
+  [[ "$output" == *"rotated-token"* ]] || return 1
+  [[ "$output" != *"enrollment-token"* ]]
+}
+
 # ---------------------------------------------------------------------------
 # Dropped-conf-wins
 # ---------------------------------------------------------------------------

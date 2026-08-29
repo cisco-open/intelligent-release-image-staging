@@ -26,7 +26,20 @@ umask 077
 # sidecar alongside (removed by aria2 on completion).
 STAGE_DIR="${IRIS_STAGE_DIR:-/hostmount}"
 WORK_DIR="${IRIS_WORK_DIR:-$STAGE_DIR/iris-work}"
-CONF="${IRIS_AGENT_CONF:-/etc/iris/iris-agent.conf}"
+# CONF defaults under WORK_DIR -- the PERSISTENT mount, same directory STATE
+# already lives in -- never a container-local path. appmgr recreates the
+# container's own filesystem (a redeploy, a crash restart, a package
+# upgrade) while /hostmount survives untouched; a conf that only ever
+# existed at a container-local path would vanish with it, and the very next
+# boot re-synthesizes from the activation --env, i.e. the ORIGINAL
+# enrollment token appmgr still has recorded, not whatever the agent
+# rotated it to since. Past that token's TTL the agent 401s permanently and
+# needs a full re-onboard. Pointing CONF here means dropped-conf-wins (the
+# very next block) finds the rotated conf still in place and rotation
+# survives recreation -- the trade-off is that the token now sits in a 0600
+# file on harddisk: instead of only in running-config (like router-install.sh
+# et al already do for the XE agent conf).
+CONF="${IRIS_AGENT_CONF:-$WORK_DIR/iris-agent.conf}"
 STATE="${IRIS_AGENT_STATE:-$WORK_DIR/iris-agent.state}"
 RPC_PORT="${IRIS_RPC_PORT:-6800}"
 TICK="${IRIS_TICK_SECONDS:-60}"
