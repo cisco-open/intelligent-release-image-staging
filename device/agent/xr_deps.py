@@ -19,7 +19,11 @@ aria2c therefore downloads each image STRAIGHT to its final location, so:
     exact size. Nothing is copied, so nothing can be half-copied, and no
     running image can be overwritten by it.
   * `io_transfer` is False: one image needs one image's worth of room, not
-    two.
+    two, at the pre-download staging gate.
+  * `copy_in_place` is True: the flash-root copy gate must not charge a
+    SECOND image's worth of headroom either — attest_in_place writes no new
+    bytes, so a device with room for exactly one image must not sit in
+    flash_full_seeding_only forever waiting for room that was never needed.
   * every device fact is a filesystem call. There is NO CLI transport on this
     platform — no Guest Shell `cli`, no SSH-to-self, no EEM applets. The
     facts a CLI used to supply (model, version, running image) are recorded
@@ -233,7 +237,7 @@ def emit_impl(mnemonic, msg, stream=None):
 
 
 def build_deps(cfg, conf_path, state_path=None):
-    """Assemble the 26-field Deps for the XR container.
+    """Assemble the 27-field Deps for the XR container.
 
     Catalog, aria2, telemetry and checkpoint wiring is the same work the
     IOS-XE builder does — the module-level impls it already factored out are
@@ -338,7 +342,13 @@ def build_deps(cfg, conf_path, state_path=None):
         io_transfer=False,
         checkpoint=lambda state: iris_agent._atomic_write_state(state_path,
                                                                 state),
-        aria_session=lambda: iris_agent._aria_session_impl(_rpc))
+        aria_session=lambda: iris_agent._aria_session_impl(_rpc),
+        # attest_in_place stats the bytes already at stage_dir -- the copy
+        # gate must not charge headroom for a root copy this platform never
+        # writes (see the gate's comment in iris_agent.py for the incident
+        # this closes: a device that fit exactly one image sat in
+        # flash_full_seeding_only forever).
+        copy_in_place=True)
 
 
 def _remove_stage(path):

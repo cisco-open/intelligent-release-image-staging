@@ -64,6 +64,7 @@ def _deps(cat, sizes, **over):
         reclaimable=lambda pre, pro: [], reclaim_bundle=lambda pre, n: None,
         model=lambda: "C9300", refresh=lambda: None,
         aria_stats=lambda p: None, aria_peers=lambda p: [], io_transfer=False,
+        copy_in_place=False,
         checkpoint=lambda s: None, aria_session=lambda: None)
     base.update(over)
     return iris_agent.Deps(**base)

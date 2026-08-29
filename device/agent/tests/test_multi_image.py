@@ -111,6 +111,7 @@ def make_deps(catalog, sizes, free=9_000_000_000, root_ok=True,
         io_transfer=False,
         checkpoint=lambda state: None,
         aria_session=lambda: None,
+        copy_in_place=False,
     )
     return deps, rec
 

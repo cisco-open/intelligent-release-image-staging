@@ -69,7 +69,7 @@ def _deps(cat, sizes, state_path, **over):
         aria_stats=lambda p: {"gid": "g", "completedLength": "5",
                               "totalLength": "5", "downloadSpeed": "0",
                               "uploadSpeed": "0", "connections": "0"},
-        aria_peers=lambda p: [], io_transfer=False,
+        aria_peers=lambda p: [], io_transfer=False, copy_in_place=False,
         checkpoint=checkpoint, aria_session=lambda: None)
     base.update(over)
     return iris_agent.Deps(**base)

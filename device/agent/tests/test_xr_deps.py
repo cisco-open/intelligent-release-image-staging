@@ -284,10 +284,10 @@ def _build(tmp_path, **extra):
 
 
 def test_build_deps_fills_every_field_of_the_deps_contract(tmp_path):
-    """All 26 fields, or run_once dies mid-tick on an attribute nobody
+    """All 27 fields, or run_once dies mid-tick on an attribute nobody
     noticed was missing."""
     _cfg_out, deps = _build(tmp_path)
-    assert len(iris_agent.Deps._fields) == 26
+    assert len(iris_agent.Deps._fields) == 27
     for field in iris_agent.Deps._fields:
         assert getattr(deps, field) is not None, field
 
@@ -310,6 +310,15 @@ def test_build_deps_never_doubles_the_space_requirement(tmp_path):
     image needs one image's worth of room."""
     _cfg_out, deps = _build(tmp_path)
     assert deps.io_transfer is False
+
+
+def test_build_deps_charges_nothing_for_the_root_copy_gate(tmp_path):
+    """copy_in_place=True: attest_in_place writes no new bytes, so the
+    flash-root copy gate (iris_agent.py) must not charge XR a second
+    image's worth of headroom it never needs (F2 -- a device with room for
+    exactly one image must not sit in flash_full_seeding_only forever)."""
+    _cfg_out, deps = _build(tmp_path)
+    assert deps.copy_in_place is True
 
 
 def test_build_deps_reads_identity_from_conf_and_never_guesses(tmp_path):

@@ -111,6 +111,7 @@ def make_deps(catalog, sizes, verify_ok=True, free=9_000_000_000,
         checkpoint=lambda state: checkpoints.append(
             __import__("copy").deepcopy(state)),
         aria_session=lambda: None,
+        copy_in_place=False,
     )
     return (deps, emitted, ios_cmds, aria_calls, copied, purged, reclaimed,
             bundle_reclaimed)
@@ -372,6 +373,28 @@ def test_copy_gate_room_for_one_copy_downloads_seeds_but_blocks_root_copy():
     assert copied == []                                  # root copy NOT placed
     assert state.get("img1", {}).get("blocked_no_space") is True
     assert any(m == "FLASH-FULL" for m, _ in emitted)
+
+
+def test_copy_gate_charges_nothing_for_attest_in_place_platforms():
+    # F2: same tight-free-space scenario as the test above (free covers
+    # exactly the staged copy, nothing more), but copy_in_place=True (XR:
+    # attest_in_place stats the bytes already at stage_dir, it writes
+    # nothing new). The gate must charge ZERO extra headroom and complete,
+    # not degrade to seeding-only -- a device that fits exactly one image
+    # must not sit blocked forever waiting for room it never needed.
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 500_000_000,
+                       "sha256": "abc"})
+    deps, emitted, _, _, copied, _, _, _ = make_deps(
+        cat, {"/stage/img1.bin": 500_000_000}, free=300_000_000,
+        mode="bundle", reclaimables=[])
+    deps = deps._replace(copy_in_place=True)
+    state = {}
+    result = iris_agent.run_once(CFG, deps, state)
+    assert result == "complete"
+    assert copied == ["img1.bin"]                        # root copy WAS placed
+    assert not state.get("img1", {}).get("blocked_no_space")
+    assert not any(m == "FLASH-FULL" for m, _ in emitted)
 
 
 def test_copy_gate_room_for_two_copies_completes():
@@ -2895,14 +2918,15 @@ def test_deps_gains_telemetry_and_io_transfer_fields_appended_at_end():
     # Contract: these fields are appended (so pre-existing positional
     # construction and index-based code stay valid). The defaults keep legacy
     # test scenarios on the Guest Shell path unchanged.
-    assert iris_agent.Deps._fields[-5:] == (
+    assert iris_agent.Deps._fields[-6:] == (
         "aria_stats", "aria_peers", "io_transfer", "checkpoint",
-        "aria_session")
+        "aria_session", "copy_in_place")
     cat = FakeCatalog({"approved_image_id": None}, None)
     deps, _, _, _, _, _, _, _ = make_deps(cat, {})
     assert deps.aria_stats("/stage/img1.bin") is None
     assert deps.aria_peers("/stage/img1.bin") == []
     assert deps.io_transfer is False
+    assert deps.copy_in_place is False
 
 
 # ---------------------------------------------------------------------------

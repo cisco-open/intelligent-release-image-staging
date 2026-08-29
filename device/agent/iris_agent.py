@@ -81,7 +81,7 @@ Deps = collections.namedtuple(
             "copy_to_root purge_others reclaim root_present remove_stage "
              "aria_remove detect_mode target_fs running_image reclaimable "
              "reclaim_bundle model refresh aria_stats aria_peers io_transfer "
-             "checkpoint aria_session")
+             "checkpoint aria_session copy_in_place")
 
 
 def _atomic_write_state(state_path, state):
@@ -1168,17 +1168,24 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
             # never reaches the expected size -> st['copied'] stays False so
             # the next tick retries.
             # Copy gate: placing the flash-root copy needs room for a SECOND
-            # full-size image alongside the staged/seeding scratch. On a tight
-            # device that fit one image but not two, degrade to keep-seeding-only
-            # — the staged file keeps feeding the swarm, the running image is
-            # untouched, and we surface the shortfall instead of failing a copy.
+            # full-size image alongside the staged/seeding scratch — UNLESS
+            # copy_to_root never duplicates bytes at all (deps.copy_in_place,
+            # e.g. XR's attest_in_place: stage_dir IS the root, so "placing"
+            # the copy is just a stat of the file already staged there). On a
+            # tight device that fit one image but not two, degrade to
+            # keep-seeding-only — the staged file keeps feeding the swarm,
+            # the running image is untouched, and we surface the shortfall
+            # instead of failing a copy.
             if not st.get("copied"):
                 mode = deps.detect_mode()
                 target_prefix, free = deps.target_fs()
                 state["stage_fs"] = target_prefix
                 # Container placement first creates an IOS-visible scratch and
-                # then the root copy, so it transiently consumes two full images.
-                copy_bytes = size * (2 if deps.io_transfer else 1)
+                # then the root copy, so it transiently consumes two full
+                # images; a platform whose root copy IS the staged file (no
+                # new bytes written) needs no additional headroom at all.
+                copy_bytes = (0 if deps.copy_in_place else
+                              size * (2 if deps.io_transfer else 1))
                 if not flashcheck.has_room(free, copy_bytes):
                     # Only burn the once-guard when reclaim ACTUALLY ran — a
                     # transient mode=None (or unconfirmable running image) does
@@ -2303,7 +2310,7 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
     # CLI. An IOS-XR appmgr container has no CLI at all — it bind-mounts
     # harddisk: and every device fact is a filesystem call — so conf
     # `mode = xr` (written by device/xr/entrypoint.sh) selects that builder
-    # wholesale instead. Same 26-field Deps, same run_once.
+    # wholesale instead. Same 27-field Deps, same run_once.
     if (cfg.get("mode") or "").strip() == "xr":
         import xr_deps
         return xr_deps.build_deps(cfg, conf_path, state_path)
@@ -2694,7 +2701,8 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
                 reclaim_bundle=reclaim_bundle, model=model, refresh=refresh,
                 aria_stats=aria_stats, aria_peers=aria_peers,
                 io_transfer=(_mode == "container"),
-                checkpoint=checkpoint, aria_session=aria_session)
+                checkpoint=checkpoint, aria_session=aria_session,
+                copy_in_place=False)
 
 
 def main():  # pragma: no cover
