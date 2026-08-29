@@ -16,6 +16,10 @@ rpc-secret
 *.crt
 *.p12
 id_rsa*
+# the pinned Cisco Bulk Hash verify cert is public material (no private
+# key) and must be tracked -- see server/certs/cisco_bulkhash_verify.pem
+# for its provenance/fingerprint documentation
+!server/certs/*.pem
 
 # --- device images / large firmware binaries ---
 *.bin
