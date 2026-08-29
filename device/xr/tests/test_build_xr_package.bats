@@ -124,10 +124,10 @@ _cert_combined() {
   _cert_only
   run env -u ARIA2C_BIN CATALOG_PEM="$CERT_DIR/cert-only.pem" bash "$HELPER" --dry-run
   [ "$status" -eq 0 ]
-  [[ "$output" == *"name: iris-xr"* ]]
-  [[ "$output" == *"release: ThinXR_7.3.15"* ]]
-  [[ "$output" == *"arch: x86_64"* ]]
-  [[ "$output" == *"type: docker"* ]]
+  [[ "$output" == *"packages:"* ]] || return 1
+  [[ "$output" == *'name: "iris-xr"'* ]] || return 1
+  [[ "$output" == *'release: "ThinXR_7.3.15"'* ]] || return 1
+  [[ "$output" == *"file: iris-src/iris-xr.tar.gz"* ]]
 }
 
 @test "dry-run never invokes docker or git" {
@@ -382,8 +382,9 @@ EOF
   _run_real
   [ "$status" -eq 0 ]
   run cat "$APPMGR_DIR/build.yaml"
-  [[ "$output" == *"name: iris-xr"* ]]
-  [[ "$output" == *"release: ThinXR_7.3.15"* ]]
+  [[ "$output" == *"packages:"* ]] || return 1
+  [[ "$output" == *'name: "iris-xr"'* ]] || return 1
+  [[ "$output" == *'release: "ThinXR_7.3.15"'* ]]
 }
 
 @test "real run: an existing clone (appmgr_build present) is reused -- git is never invoked" {

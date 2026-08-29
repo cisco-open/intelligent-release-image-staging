@@ -167,7 +167,7 @@ EOF
   exit 1
 fi
 
-IMAGE_TAR_NAME="${RPM_NAME}.docker.tar"
+IMAGE_TAR_NAME="${RPM_NAME}.tar.gz"
 
 if [ "$DRY_RUN" -eq 1 ]; then
   cat <<PLAN
@@ -177,12 +177,15 @@ if [ "$DRY_RUN" -eq 1 ]; then
    or clone $APPMGR_BUILD_REPO_URL @ $APPMGR_BUILD_COMMIT there
 >> [dry-run] would run: docker save $IMAGE_TAG -o $APPMGR_BUILD_DIR/$IMAGE_TAR_NAME
 >> [dry-run] would clear $APPMGR_BUILD_DIR/RPMS/ and write $APPMGR_BUILD_DIR/build.yaml:
-name: $RPM_NAME
-version: "$PKG_VERSION"
-release: $APPMGR_RELEASE
-arch: x86_64
-type: docker
-image: $IMAGE_TAR_NAME
+packages:
+- name: "$RPM_NAME"
+  release: "$APPMGR_RELEASE"
+  target-release: "$APPMGR_RELEASE"
+  version: "$PKG_VERSION"
+  sources:
+    - name: $RPM_NAME
+      file: iris-src/$IMAGE_TAR_NAME
+
 >> [dry-run] would run: (cd $APPMGR_BUILD_DIR && $APPMGR_BUILD_CMD -b build.yaml)
 >> [dry-run] would verify an RPM landed under $APPMGR_BUILD_DIR/RPMS/*.rpm -- its own
    "Done building" message is not trusted, on either exit code or output --
@@ -269,19 +272,30 @@ else
   fi
 fi
 
-echo ">> docker save $IMAGE_TAG -> $APPMGR_BUILD_DIR/$IMAGE_TAR_NAME"
-docker save "$IMAGE_TAG" -o "$APPMGR_BUILD_DIR/$IMAGE_TAR_NAME"
+echo ">> docker save $IMAGE_TAG -> $APPMGR_BUILD_DIR/iris-src/$IMAGE_TAR_NAME"
+mkdir -p "$APPMGR_BUILD_DIR/iris-src/config" "$APPMGR_BUILD_DIR/iris-src/data"
+docker save "$IMAGE_TAG" | gzip > "$APPMGR_BUILD_DIR/iris-src/$IMAGE_TAR_NAME"
 
 BUILD_YAML="$APPMGR_BUILD_DIR/build.yaml"
 cat > "$BUILD_YAML" <<EOF
 # Written by tools/build-xr-package.sh -- regenerated on every build, do not
-# hand-edit.
-name: $RPM_NAME
-version: "$PKG_VERSION"
-release: $APPMGR_RELEASE
-arch: x86_64
-type: docker
-image: $IMAGE_TAR_NAME
+# hand-edit. Schema is the one hardware-proven by the 2026-08-28 spike
+# (probe-build.yaml): a top-level packages list; the source name MUST equal
+# the tar.gz file's stem; paths are relative to the xr-appmgr-build root.
+packages:
+- name: "$RPM_NAME"
+  release: "$APPMGR_RELEASE"
+  target-release: "$APPMGR_RELEASE"
+  version: "$PKG_VERSION"
+  sources:
+    - name: $RPM_NAME
+      file: iris-src/$IMAGE_TAR_NAME
+  config-dir:
+    - dir: iris-src/config
+  data-dir:
+    - dir: iris-src/data
+  copy_hostname: false
+  copy_ems_cert: false
 EOF
 echo ">> wrote $BUILD_YAML"
 
