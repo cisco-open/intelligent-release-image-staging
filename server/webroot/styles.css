@@ -44,6 +44,11 @@ body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-
 .login-card input { width:100%; padding:9px; border:1px solid #c7d0e0; border-radius:6px; font-size:14px; }
 .login-card .btn { width:100%; margin-top:18px; }
 .err { color:#c0362c; font-size:13px; margin-top:12px; min-height:18px; }
+/* A success message reuses the .err slot (same element, same layout) rather
+   than a second status element -- global so it works outside .inline-form
+   too (the Image verification pane's Refresh now / offline-upload status
+   lines are not form fields, so they were never wrapped in one). */
+.err.ok { color:#1a7f43; }
 #logout { margin-left:14px; }
 .upload { border:2px dashed #c7d0e0; border-radius:10px; padding:22px; text-align:center; margin:8px 0 20px; color:#334; }
 .upload.drag { border-color:var(--blue); background:#f2f7ff; }
@@ -76,7 +81,6 @@ body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-
 .inline-form .err { color:#c0362c; font-size:13px; }
 #cred-panel:not([hidden]) { display:block; }
 #cred-rows td { padding:6px 10px; }
-.inline-form .err.ok { color:#1a7f43; }
 .swarm-frame { width:100%; height:clamp(680px,78vh,980px); border:1px solid #243049; border-radius:10px; background:#0b0f17; }
 #settings-info td:first-child { width:160px; }
 #audit-timeline { margin:4px 0 16px; }

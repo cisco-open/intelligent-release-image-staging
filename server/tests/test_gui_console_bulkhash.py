@@ -137,6 +137,39 @@ def test_refresh_now_disables_while_in_flight_and_handles_already_running():
     assert "'/api/image-verification/refresh'" in fn
 
 
+def test_success_messages_render_in_the_ok_color_outside_inline_form():
+    """Important 2 fix: #iv-refresh-msg and #iv-offline-msg sit outside any
+    .inline-form (unlike every other -msg span in this pane), so the
+    pre-existing '.inline-form .err.ok' scoped rule never matched them --
+    classList.add('ok') was a silent no-op and "Refresh complete: ..."
+    painted in the error red (#c0362c). The fix must be a rule that matches
+    .err.ok regardless of ancestor."""
+    css = _read("styles.css")
+    html = _read("index.html")
+    pane = _bulkhash_pane(html)
+    form = _slice(pane, '<form class="inline-form" id="iv-schedule-form">', "</form>")
+    assert "iv-refresh-msg" not in form
+    assert "iv-offline-msg" not in form
+    assert ".err.ok" in css
+    assert ".inline-form .err.ok" not in css, \
+        "the scoped rule must be replaced by (or joined with) a global one, " \
+        "not left as the only source of the green color"
+
+
+def test_refresh_now_and_offline_upload_also_refresh_the_devices_view():
+    """Adjacent fix (e): imageQuarantined -- the picker's block list -- is
+    populated by refreshDevices(), not refreshImages(). Without also
+    calling refreshDevices() after a run, a freshly-quarantined image
+    stayed pickable until the next periodic devices-view poll interval."""
+    js = _read("app.js")
+    refresh_fn = js.split(
+        "document.getElementById('iv-refresh').addEventListener('click'", 1)[1].split(
+        "\n  });\n  // Offline upload:", 1)[0]
+    assert "refreshDevices().catch" in refresh_fn
+    finish_fn = js.split("function finish(text, ok) {", 1)[1].split("\n    }", 1)[0]
+    assert "refreshDevices().catch" in finish_fn
+
+
 def test_last_run_rendering_never_equals_fail_it_checks_the_prefix():
     """Binding rule from the endpoint contract: last_run.outcome is "ok" or
     "fail: <detail>" -- an equality check against the literal "fail" would
@@ -186,6 +219,42 @@ def test_null_verdict_state_reads_as_not_checked_not_hidden():
     assert "if (!state) {" in fn
 
 
+def test_mismatch_badge_ternary_keys_off_the_live_quarantined_flag():
+    """Regression guard: a mismatch verdict must only say "quarantined" while
+    it actually still is (quarantined=true); an override-released mismatch
+    (quarantined=false, hash_verification.state still "mismatch" forever --
+    release_quarantine() never rewrites it) must say "released" instead, or
+    the badge lies about still blocking something it no longer blocks. A
+    regression that always renders "MISMATCH — quarantined" regardless of
+    the quarantined flag must fail this."""
+    js = _read("app.js")
+    fn = js.split("function bulkhashVerdictBadge(hv, quarantined) {", 1)[1].split(
+        "\n  }", 1)[0]
+    assert ("quarantined\n        ? '<span class=\"badge badge-fail\">"
+            "MISMATCH — quarantined</span>'\n        : "
+            "'<span class=\"badge badge-fail\">MISMATCH — released</span>'") in fn
+
+
+def test_not_in_feed_is_an_explicit_branch_with_a_neutral_unknown_fallback():
+    """Regression guard: not_in_feed must be matched explicitly, not by a
+    catch-all else -- a garbage/unrecognized state (a future bulkhash.py
+    state this badge hasn't been taught, or corrupted data) must render as
+    an admitted-unknown, not be silently mislabeled as the specific,
+    plausible-sounding "Not in Cisco's feed" verdict it may not actually be."""
+    js = _read("app.js")
+    fn = js.split("function bulkhashVerdictBadge(hv, quarantined) {", 1)[1].split(
+        "\n  }", 1)[0]
+    assert "state === 'not_in_feed'" in fn
+    assert "Unknown verification state" in fn
+    # the not_in_feed branch and the neutral fallback are two DIFFERENT
+    # branches, not the same string reused -- a regression that collapses
+    # them back into one catch-all (dropping the explicit not_in_feed
+    # check) must fail this
+    assert fn.count("else if (state === 'not_in_feed')") == 1
+    assert "Not in Cisco" not in fn.split("else if (state === 'not_in_feed')", 1)[0], \
+        "the 'not in Cisco's feed' text must live in the not_in_feed branch, not earlier"
+
+
 def test_deferral_warning_is_additive_to_whatever_state_is_shown():
     js = _read("app.js")
     fn = js.split("function bulkhashVerdictBadge(hv, quarantined) {", 1)[1].split(
@@ -224,20 +293,47 @@ def test_picker_disables_a_quarantined_id_only_when_not_already_assigned():
     before it became quarantined -- that removal must stay possible."""
     js = _read("app.js")
     picker = _picker_body(js)
-    assert "var blocked = !!imageQuarantined[id] && !checkedSet[id]" in picker
+    assert "var quarantined = !!imageQuarantined[id]" in picker
+    assert "var blocked = quarantined && !checkedSet[id]" in picker
     assert "data-blocked=\"1\"" in picker
     # the pinned "unknown" disabling stays intact, untouched by this addition
     assert "unknown ? ' disabled' : ''" in picker
 
 
+def test_picker_tags_every_quarantined_row_not_just_ones_blocked_at_render_time():
+    """Regression: an already-CHECKED quarantined row (assigned before it
+    became quarantined) must still carry data-blocked="1", even though it
+    is not `disabled` at render time (the operator can uncheck it to remove
+    the bad assignment). Gating data-blocked on the same render-time
+    `blocked` expression as `disabled` -- true only while UNCHECKED -- was
+    the actual bug: unchecking such a row produced a plain, undisabled
+    checkbox indistinguishable from any other image, so it could be
+    re-checked and Apply would POST the quarantined id right back in.
+    `disabled` stays render-time (blocked && !unknown); `data-blocked`
+    must be unconditional on `quarantined` alone, so updateCount's sweep
+    (input:not(:checked) -> disabled) catches it the instant it is
+    unchecked."""
+    js = _read("app.js")
+    picker = _picker_body(js)
+    assert "(blocked && !unknown ? ' disabled' : '')" in picker
+    assert "(quarantined ? ' data-blocked=\"1\"' : '')" in picker
+    # the regression this guards: data-blocked gated on `blocked` (render-
+    # time-unchecked-only) instead of `quarantined` (every quarantined row)
+    assert "blocked ? ' data-blocked" not in picker
+    assert "blocked && !unknown ? ' disabled data-blocked" not in picker
+
+
 def test_picker_cap_logic_never_re_enables_a_blocked_checkbox():
     """updateCount() re-evaluates every unchecked box's disabled state on
     every change (for the 10-image cap) -- it must never blanket-clear the
-    quarantine block just because the count dropped."""
+    quarantine block just because the count dropped, and it is what must
+    disable a quarantined row the moment it is unchecked (see the
+    render-time-tagging test above)."""
     js = _read("app.js")
     picker = _picker_body(js)
     fn = picker.split("function updateCount() {", 1)[1].split("\n    }", 1)[0]
-    assert "cb.dataset.blocked === '1'" in fn
+    assert "cb.disabled = n >= 10 || cb.dataset.blocked === '1'" in fn
+    assert "input:not(:checked)" in fn
 
 
 def test_images_list_populates_the_quarantine_map_alongside_imageIds():
@@ -291,6 +387,26 @@ def test_release_button_sends_no_override_the_override_button_sends_the_typed_te
     assert "attemptReleaseQuarantine(true, document.getElementById('ii-confirm-text').value)" in override
 
 
+def test_release_disables_its_buttons_in_flight_and_surfaces_network_failure():
+    """Adjacent fix (a): mirrors the Refresh now handler's try/finally shape
+    -- both release buttons are disabled for the duration of the request
+    (re-enabled in a finally, so a thrown/network failure never leaves them
+    stuck disabled) and a thrown fetch/json error surfaces a message rather
+    than becoming a silent unhandled rejection."""
+    js = _read("app.js")
+    fn = js.split("async function attemptReleaseQuarantine(override, confirmText) {", 1)[1].split(
+        "\n  document.getElementById('ii-release')", 1)[0]
+    assert "releaseBtn.disabled = true" in fn
+    assert "overrideBtn.disabled = true" in fn
+    assert "try {" in fn
+    assert "catch (e) {" in fn
+    finally_block = fn.split("} finally {", 1)[1]
+    assert "releaseBtn.disabled = false" in finally_block
+    assert "overrideBtn.disabled = false" in finally_block
+    catch_block = fn.split("} catch (e) {", 1)[1].split("} finally {", 1)[0]
+    assert "msg.textContent" in catch_block
+
+
 def test_confirm_text_input_is_never_prefilled_with_the_filename():
     """Typed-confirm means the OPERATOR types it -- pre-filling the input
     with the expected value would defeat the point of the confirmation."""
@@ -298,4 +414,7 @@ def test_confirm_text_input_is_never_prefilled_with_the_filename():
     fn = js.split("function openImageInfo(id) {", 1)[1].split(
         "\n  function closeImageInfo", 1)[0]
     assert "getElementById('ii-confirm-text').value = ''" in fn
-    assert "img.filename" not in fn.split("getElementById('ii-confirm-text')", 1)[1][:5]
+    # the bug this guards against: prefilling the confirm box with the
+    # expected answer defeats the point of a TYPED confirmation
+    assert "ii-confirm-text').value = img.filename" not in js
+    assert "ii-confirm-text').value = img" not in js

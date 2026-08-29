@@ -269,8 +269,15 @@
       html = quarantined
         ? '<span class="badge badge-fail">MISMATCH — quarantined</span>'
         : '<span class="badge badge-fail">MISMATCH — released</span>';
-    } else {
+    } else if (state === 'not_in_feed') {
       html = '<span class="badge badge-queued">Not in Cisco\'s feed</span>';
+    } else {
+      // Defensive: bulkhash.py only ever writes verified/mismatch/
+      // not_in_feed, but a catch-all that silently relabeled anything else
+      // as "Not in Cisco's feed" would misreport a genuinely unrecognized
+      // state as a specific, wrong verdict instead of admitting it doesn't
+      // know.
+      html = '<span class="badge badge-queued">Unknown verification state</span>';
     }
     if (hv && hv.deferral) {
       html += ' <span class="badge badge-cancelled" title="Deferred by Cisco">⚠ Deferred by Cisco</span>';
@@ -348,18 +355,27 @@
   // via the API's own error message, honestly, rather than a made-up one.
   async function attemptReleaseQuarantine(override, confirmText) {
     var msg = document.getElementById('ii-release-msg'); msg.textContent = '';
-    var r = await jpost('/api/images/' + encodeURIComponent(imgInfoId) + '/release-quarantine',
-      { override: override, confirm_text: confirmText });
-    var body = {};
-    try { body = await r.json(); } catch (e) { }
-    if (r.ok) { closeImageInfo(); refreshImages(); return; }
-    if (r.status === 409 && body.error === 'quarantine_still_mismatched') {
-      document.getElementById('ii-override-block').hidden = false;
-      document.getElementById('ii-override-note').textContent =
-        'Still mismatching the Cisco feed — type the exact filename below to override.';
-      return;
+    var releaseBtn = document.getElementById('ii-release');
+    var overrideBtn = document.getElementById('ii-release-override');
+    releaseBtn.disabled = true; overrideBtn.disabled = true;
+    try {
+      var r = await jpost('/api/images/' + encodeURIComponent(imgInfoId) + '/release-quarantine',
+        { override: override, confirm_text: confirmText });
+      var body = {};
+      try { body = await r.json(); } catch (e) { }
+      if (r.ok) { closeImageInfo(); refreshImages(); return; }
+      if (r.status === 409 && body.error === 'quarantine_still_mismatched') {
+        document.getElementById('ii-override-block').hidden = false;
+        document.getElementById('ii-override-note').textContent =
+          'Still mismatching the Cisco feed — type the exact filename below to override.';
+        return;
+      }
+      msg.textContent = body.error || ('Release failed (' + r.status + ').');
+    } catch (e) {
+      msg.textContent = 'Network error — release request failed.';
+    } finally {
+      releaseBtn.disabled = false; overrideBtn.disabled = false;
     }
-    msg.textContent = body.error || ('Release failed (' + r.status + ').');
   }
   document.getElementById('ii-release').addEventListener('click', function () {
     attemptReleaseQuarantine(false, '');
@@ -1353,15 +1369,24 @@
       // Quarantined images are visibly blocked here rather than silently
       // hidden (KGV / Cisco Bulk Hash reconciler, Task 5) -- but only from
       // being NEWLY checked. One already checked (assigned before it was
-      // quarantined) stays togglable so the operator can still uncheck it
-      // to remove the bad assignment; the server's own set_policy() refusal
-      // (QuarantinedImage -> 400) is the backstop if it is ever re-checked.
-      var blocked = !!imageQuarantined[id] && !checkedSet[id];
+      // quarantined) stays togglable at RENDER time so the operator can
+      // still uncheck it to remove the bad assignment -- but every
+      // quarantined row (checked or not) carries data-blocked="1" so that
+      // the moment it IS unchecked, updateCount's own disable sweep below
+      // catches it and it cannot be re-checked. Without data-blocked on the
+      // checked row too, unchecking it produced a plain unchecked-and-
+      // enabled box indistinguishable from any other image, and the
+      // operator could tick it straight back. The server's own
+      // set_policy() refusal (QuarantinedImage -> 400) stays the backstop
+      // either way.
+      var quarantined = !!imageQuarantined[id];
+      var blocked = quarantined && !checkedSet[id];
       return '<label class="img-pick-row"><input type="checkbox" class="img-pick" value="' +
         esc(id) + '"' + (checkedSet[id] ? ' checked' : '') + (unknown ? ' disabled' : '') +
-        (blocked && !unknown ? ' disabled data-blocked="1"' : '') +
+        (blocked && !unknown ? ' disabled' : '') +
+        (quarantined ? ' data-blocked="1"' : '') +
         '> ' + imageLabel(id) +
-        (imageQuarantined[id] ? ' <span class="badge badge-fail" title="Hash mismatch — ' +
+        (quarantined ? ' <span class="badge badge-fail" title="Hash mismatch — ' +
           'quarantined by the Cisco Bulk Hash reconciler">quarantined</span>' : '') +
         (unknown ? ' <span class="muted">— not in the catalog; kept as assigned</span>' : '') +
         (blocked ? ' <span class="muted">— quarantined; cannot be newly assigned</span>' : '') +
@@ -1371,8 +1396,12 @@
       var n = rows.querySelectorAll('input:checked').length;
       counter.textContent = n + '/10';
       // the 11th box is disabled, not just rejected server-side at Apply;
-      // a quarantined-blocked box (data-blocked) stays disabled regardless
-      // of count, never re-enabled just because the selection dropped.
+      // a quarantined row (data-blocked) stays disabled regardless of
+      // count, never re-enabled just because the selection dropped -- and
+      // this sweep is what catches a quarantined row the MOMENT it is
+      // unchecked (see the render-time comment above), since every
+      // quarantined row carries data-blocked="1" whether or not it started
+      // checked.
       rows.querySelectorAll('input:not(:checked)').forEach(function (cb) {
         cb.disabled = n >= 10 || cb.dataset.blocked === '1';
       });
@@ -2441,6 +2470,10 @@
       btn.disabled = false;
       refreshImageVerificationSettings();
       refreshImages().catch(function () { });
+      // Also refreshes imageQuarantined (the picker's block list) -- without
+      // this it lagged the run by up to one periodic devices-view poll
+      // interval, during which a freshly-quarantined image stayed pickable.
+      refreshDevices().catch(function () { });
     }
   });
   // Offline upload: a raw-body POST of the tar bytes (not multipart, not
@@ -2468,6 +2501,9 @@
       if (ok) msg.classList.add('ok');
       refreshImageVerificationSettings();
       refreshImages().catch(function () { });
+      // See the Refresh now handler's comment: keeps imageQuarantined (the
+      // picker's block list) from lagging this run by a poll interval.
+      refreshDevices().catch(function () { });
     }
     xhr.onload = function () {
       var body = {};
