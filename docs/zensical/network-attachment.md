@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Management type and VLAN ownership
 
-IRIS supports four explicit management type models for the staging agent. The
+IRIS supports five explicit management type models for the staging agent. The
 choice is per device, recorded in inventory, and — critically — determines what
 IRIS is allowed to create and remove on the device.
 
@@ -57,6 +57,7 @@ The supported management-type cells:
 | Inband | DHCP | any | rejected — separate capability gate |
 | `router-routed` | static | Guest Shell (Catalyst 8000) | supported, lab-tested on Catalyst 8000V |
 | `router-nat` | static | Guest Shell (Catalyst 8000) | supported, lab-tested on Catalyst 8000V |
+| `xr-host` | none | XR appmgr container (Cisco 8000 series, IOS-XR) | supported |
 
 Inband install and teardown command streams never contain `vlan`,
 `interface Vlan`, `no vlan`, `no interface Vlan`, VRF, `ip route`, IS-IS, or
@@ -130,6 +131,22 @@ Both modes stage only to `bootflash:`. Allow roughly **2× the image size + 200
 MB** of free bootflash (about 4.2 GB for a 2 GB image); the agent safely
 refuses to stage when space is insufficient.
 
+## XR host — the router's own network stack
+
+`xr-host` is for Cisco 8000 series (IOS-XR) routers, where the agent runs as
+an appmgr Docker container on the router's own network stack: there is no
+VLAN, SVI, app IP/mask/gateway, VPG, or NAT interface, and IRIS never touches
+the router's networking configuration. `xr-host` and platform `xr-appmgr` are
+mutually required on any fully-classified device; an inventory-only device
+may carry platform `xr-appmgr` before its attachment is chosen, but planning
+or deploying refuses the half-classified state.
+
+Onboarding creates the appmgr application `iris`, registers the package
+source `iris-xr`, stages the agent RPM at `harddisk:iris-xr.rpm`, and creates
+the working directory `harddisk:iris-work`. Undeploy removes exactly those
+four resources from its receipt; every other router setting, including its
+networking configuration, is preserved.
+
 ## Inventory (CSV v2)
 
 Inventory is a management-type-aware, named-header CSV. The header is required and
@@ -147,6 +164,8 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
   `vpg_number`; router fields cannot be combined with switch VLAN/SVI fields.
 - **router-nat** rows additionally fill `nat_interface`. `platform=router` is
   required (and selected automatically for a known Catalyst 8000 (C8xxx) model).
+- **xr-host** rows fill only `model` and `platform` (`xr-appmgr`, required);
+  every addressing column stays empty.
 - `ios_ssh_host` is an OPTIONAL advanced override: the IOS endpoint the inband
   IOx app SSHes to for the placement copy. It defaults to the device's management IP
   (`device_ip`), which is on the same existing management VLAN. Only set it for an
@@ -221,9 +240,11 @@ token is minted or router configuration is applied.
 
 ## Console and CLI
 
-The Console Add Device flow offers **Routed**, **Inband**, **Router routed**, and
-**Router NAT** management types. Router choices show VPG number and app
-addressing; Router NAT also shows the outside interface. The device table shows
+The Console Add Device flow offers **Routed**, **Inband**, **Router routed**,
+**Router NAT**, and **XR host** management types. Router choices show VPG number
+and app addressing; Router NAT also shows the outside interface. XR host hides
+every addressing field and is auto-selected for a Cisco 8000 series router
+model or the XR appmgr container agent install. The device table shows
 each device's **Management type**, not a bare VLAN/SVI value. Onboarding is
 receipt-backed. See
 [Web Console](console.md).

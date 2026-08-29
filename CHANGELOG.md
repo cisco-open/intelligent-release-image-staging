@@ -46,6 +46,20 @@ top-level `VERSION` file.
   or by typing the image's filename to override a mismatch that persists.
   See [Image verification](docs/zensical/operations.md#image-verification).
 
+- IOS-XR routers running the agent as an appmgr Docker container now have
+  their own management type, `xr-host`, matching the platform's real
+  networking: the container runs on the router's own network stack, so there
+  is no VLAN, SVI, app IP/mask/gateway, VPG, or NAT interface, and `xr-host`
+  and the XR appmgr container agent install are mutually required on any
+  fully-classified device. The console auto-selects XR host for a Cisco 8000
+  series router model or that agent install and hides every addressing field
+  for it; the devices table, its filter, and CSV v2 (no new columns; the
+  addressing columns stay empty) carry the same value, and the example CSV
+  template documents it. Plans, receipts, and undeploy describe exactly what
+  IRIS owns on the router — the appmgr application, its registered package
+  source, the staged RPM, and the agent's working directory — and leave
+  everything else, including the router's networking configuration, alone.
+
 ### Changed
 - Image verification is now the same on every platform: the agent proves integrity by
   sha256 against the catalog's published value, and placement onto the boot filesystem
