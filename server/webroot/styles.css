@@ -44,11 +44,6 @@ body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-
 .login-card input { width:100%; padding:9px; border:1px solid #c7d0e0; border-radius:6px; font-size:14px; }
 .login-card .btn { width:100%; margin-top:18px; }
 .err { color:#c0362c; font-size:13px; margin-top:12px; min-height:18px; }
-/* A success message reuses the .err slot (same element, same layout) rather
-   than a second status element -- global so it works outside .inline-form
-   too (the Image verification pane's Refresh now / offline-upload status
-   lines are not form fields, so they were never wrapped in one). */
-.err.ok { color:#1a7f43; }
 #logout { margin-left:14px; }
 .upload { border:2px dashed #c7d0e0; border-radius:10px; padding:22px; text-align:center; margin:8px 0 20px; color:#334; }
 .upload.drag { border-color:var(--blue); background:#f2f7ff; }
@@ -79,6 +74,17 @@ body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-
 .inline-form:not([hidden]) { display:flex; flex-wrap:wrap; gap:8px; align-items:center; background:#f7f9fc; border:1px solid var(--line); border-radius:8px; padding:12px; margin:0 0 16px; }
 .inline-form input, .inline-form select { padding:7px 9px; border:1px solid #c7d0e0; border-radius:6px; font-size:13px; }
 .inline-form .err { color:#c0362c; font-size:13px; }
+/* A success message reuses the .err slot (same element, same layout)
+   rather than a second status element. Must come AFTER .inline-form .err
+   above: both are two-class selectors (equal specificity), so source order
+   decides the tie -- this rule needs to win inside a form (an in-form
+   success message) as well as outside one (the Image verification pane's
+   Refresh now / offline-upload status lines are not form fields, so they
+   were never wrapped in one; there .err.ok's higher specificity than the
+   bare .err rule wins regardless of order). Putting it earlier, as a
+   previous pass did, let the .inline-form .err red rule win the tie inside
+   every form and repainted eight previously-working success messages red. */
+.err.ok { color:#1a7f43; }
 #cred-panel:not([hidden]) { display:block; }
 #cred-rows td { padding:6px 10px; }
 .swarm-frame { width:100%; height:clamp(680px,78vh,980px); border:1px solid #243049; border-radius:10px; background:#0b0f17; }

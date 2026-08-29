@@ -1811,7 +1811,15 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     "offline", state_dir, catalog, tar_path=tmp_path,
                     audit_fn=lambda **kw: self._audit(
                         **dict(kw, actor=actor)))
-                self._json(_refresh_http_status(result), result)
+                status = _refresh_http_status(result)
+                # Remove the temp dir BEFORE responding, not after: a test
+                # (or any other caller) that reads this response and
+                # immediately asserts the temp dir is gone must never race
+                # the client's own read against this cleanup -- the finally
+                # below is a best-effort backstop for the early-return paths
+                # above, not the primary cleanup for the success path.
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                self._json(status, result)
             finally:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 

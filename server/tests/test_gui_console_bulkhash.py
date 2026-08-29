@@ -144,16 +144,34 @@ def test_success_messages_render_in_the_ok_color_outside_inline_form():
     classList.add('ok') was a silent no-op and "Refresh complete: ..."
     painted in the error red (#c0362c). The fix must be a rule that matches
     .err.ok regardless of ancestor."""
-    css = _read("styles.css")
     html = _read("index.html")
     pane = _bulkhash_pane(html)
     form = _slice(pane, '<form class="inline-form" id="iv-schedule-form">', "</form>")
     assert "iv-refresh-msg" not in form
     assert "iv-offline-msg" not in form
-    assert ".err.ok" in css
-    assert ".inline-form .err.ok" not in css, \
-        "the scoped rule must be replaced by (or joined with) a global one, " \
-        "not left as the only source of the green color"
+
+
+def test_success_message_css_wins_the_cascade_both_inside_and_outside_forms():
+    """Important 2, round 2: a global `.err.ok` rule alone is not enough --
+    `.inline-form .err` and `.err.ok` are BOTH two-class selectors (equal
+    0-2-0 specificity), and same-specificity ties resolve by SOURCE ORDER,
+    not by which selector reads as more specific to a human. A `.err.ok`
+    declared BEFORE `.inline-form .err` loses that tie: the plain `.err`
+    (red) rule wins inside every form, repainting eight previously-working
+    success messages (ae-msg, ca-msg, cert-msg, iv-schedule-msg, pw-msg,
+    sh-msg, td-msg, trust-msg) red on success. `.err.ok` must appear
+    strictly AFTER the last `.inline-form .err` rule in the stylesheet.
+    Outside a form this ordering doesn't matter -- `.err.ok` (0-2-0)
+    already outranks the bare `.err` (0-1-0) by specificity alone -- so
+    this pins the case that actually depends on order."""
+    css = _read("styles.css")
+    assert ".err.ok {" in css
+    inline_form_err_idx = css.rindex(".inline-form .err {")
+    err_ok_idx = css.index(".err.ok {")
+    assert err_ok_idx > inline_form_err_idx, (
+        ".err.ok must be declared textually AFTER .inline-form .err -- "
+        "equal specificity means source order decides which one wins "
+        "inside a form")
 
 
 def test_refresh_now_and_offline_upload_also_refresh_the_devices_view():
