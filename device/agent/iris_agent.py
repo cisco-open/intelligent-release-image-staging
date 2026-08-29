@@ -2281,6 +2281,15 @@ def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
 # ---- on-box wiring (not exercised by unit tests) ----
 
 def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
+    # Platform seam. Everything below wires the IOS-XE families (Guest Shell
+    # and the SSH-to-self container), all of which reach the device through a
+    # CLI. An IOS-XR appmgr container has no CLI at all — it bind-mounts
+    # harddisk: and every device fact is a filesystem call — so conf
+    # `mode = xr` (written by device/xr/entrypoint.sh) selects that builder
+    # wholesale instead. Same 26-field Deps, same run_once.
+    if (cfg.get("mode") or "").strip() == "xr":
+        import xr_deps
+        return xr_deps.build_deps(cfg, conf_path, state_path)
     import base64
     import urllib.request
     import catalog_client
