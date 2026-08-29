@@ -244,6 +244,7 @@ cp "$REPO"/device/agent/*.py "$CTX/agent/"
 cp "$REPO/device/agent/peer-receipt-hook.sh" "$CTX/agent/" \
   || { echo "!! missing device/agent/peer-receipt-hook.sh (the aria2"
        echo "   --on-bt-download-complete program the Dockerfile COPYs)"; exit 1; } >&2
+cp "$REPO"/device/verify_image.py "$CTX/agent/verify_image.py"   # lives in device/, agent imports it
 cp "$REPO/VERSION" "$CTX/agent/VERSION"
 cp "$DOCKERFILE" "$ENTRYPOINT" "$CTX/"
 
@@ -287,7 +288,17 @@ echo ">> wrote $BUILD_YAML"
 # Clear any RPM left by a previous (possibly failed) run FIRST, so the
 # presence check below can only ever be satisfied by an RPM this run
 # actually produced -- a stale artifact must never read as success.
+# Recreated immediately (empty, not absent): under `set -euo pipefail`,
+# `find` on a MISSING directory exits 1, and since the pipeline below sits
+# on the RHS of a plain assignment (not an `if` condition), pipefail+set -e
+# would kill the script right there -- BEFORE the honest "did not produce
+# an RPM" diagnostic + log tail ever print. That is exactly the scenario
+# this script exists to guard (every failure mode leaves RPMS/ absent,
+# since it's only ever recreated by a successful RPM build). An empty
+# existing directory makes `find` exit 0 with no matches, so the
+# `[ -z "$RPM_FILE" ]` check below is what actually decides success.
 rm -rf "$APPMGR_BUILD_DIR/RPMS"
+mkdir -p "$APPMGR_BUILD_DIR/RPMS"
 
 LOG="$APPMGR_BUILD_DIR/.iris-appmgr-build.log"
 echo ">> running $APPMGR_BUILD_CMD in $APPMGR_BUILD_DIR"

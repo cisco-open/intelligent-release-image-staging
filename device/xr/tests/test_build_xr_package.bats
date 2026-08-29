@@ -162,6 +162,10 @@ _xr_stub_setup() {
   echo "# dummy" > "$STUBDIR/device/agent/dummy.py"
   printf '#!/bin/sh\nexit 0\n' > "$STUBDIR/device/agent/peer-receipt-hook.sh"
   chmod +x "$STUBDIR/device/agent/peer-receipt-hook.sh"
+  # device/verify_image.py lives one level up from device/agent/ -- the real
+  # script stages it into agent/verify_image.py (iris_agent.py imports it).
+  # Missing here would fail the staging cp before appmgr_build ever runs.
+  echo "# dummy" > "$STUBDIR/device/verify_image.py"
   echo "0.0.0-test" > "$STUBDIR/VERSION"
 
   echo "fake aria2c bytes" > "$STUBDIR/aria2c-stub"
@@ -209,7 +213,18 @@ _run_real() {
     bash "$STUBDIR/tools/build-xr-package.sh" --out "$OUT_DIR"
 }
 
-@test "real run: appmgr_build reporting success (Done building, exit 0) with no RPM is still a failure" {
+# NOTE on structure: this sandbox's bash 3.2 + bats-core 1.13 combination
+# does not reliably fail a multi-line @test body on a non-final failing
+# assertion -- only the test's LAST statement is enforced (see
+# .superpowers/sdd/xr-xr2-review.md Finding 2). The "no RPM produced"
+# scenarios below are exactly the case Finding 1 was hiding behind: the
+# critical, bug-discriminating assertion (that the honest "did not produce
+# an RPM" diagnostic actually prints, rather than the script dying earlier
+# on the RPMS/ find pipeline under set -e+pipefail) is therefore split into
+# its own @test with that assertion as the final line, instead of being
+# buried as a non-final line inside a longer test.
+
+@test "real run: appmgr_build reporting success (Done building, exit 0) with no RPM exits non-zero" {
   _xr_stub_setup
   cat > "$APPMGR_DIR/appmgr_build" <<'EOF'
 #!/usr/bin/env bash
@@ -220,12 +235,48 @@ EOF
   chmod +x "$APPMGR_DIR/appmgr_build"
   _run_real
   [ "$status" -ne 0 ]
+}
+
+@test "real run: appmgr_build reporting success (Done building, exit 0) with no RPM prints the honest diagnostic" {
+  _xr_stub_setup
+  cat > "$APPMGR_DIR/appmgr_build" <<'EOF'
+#!/usr/bin/env bash
+echo "Building app..."
+echo "Done building"
+exit 0
+EOF
+  chmod +x "$APPMGR_DIR/appmgr_build"
+  _run_real
   [[ "$output" == *"did not produce an RPM"* ]]
+}
+
+@test "real run: appmgr_build reporting success (Done building, exit 0) with no RPM explains Done building is not proof" {
+  _xr_stub_setup
+  cat > "$APPMGR_DIR/appmgr_build" <<'EOF'
+#!/usr/bin/env bash
+echo "Building app..."
+echo "Done building"
+exit 0
+EOF
+  chmod +x "$APPMGR_DIR/appmgr_build"
+  _run_real
   [[ "$output" == *"not proof of success"* ]]
+}
+
+@test "real run: appmgr_build reporting success (Done building, exit 0) with no RPM copies nothing to OUT" {
+  _xr_stub_setup
+  cat > "$APPMGR_DIR/appmgr_build" <<'EOF'
+#!/usr/bin/env bash
+echo "Building app..."
+echo "Done building"
+exit 0
+EOF
+  chmod +x "$APPMGR_DIR/appmgr_build"
+  _run_real
   [ ! -f "$OUT_DIR/iris-xr.rpm" ]
 }
 
-@test "real run: appmgr_build crashing (nonzero exit) with no RPM fails with the same honest message" {
+@test "real run: appmgr_build crashing (nonzero exit) with no RPM exits non-zero" {
   _xr_stub_setup
   cat > "$APPMGR_DIR/appmgr_build" <<'EOF'
 #!/usr/bin/env bash
@@ -235,11 +286,33 @@ EOF
   chmod +x "$APPMGR_DIR/appmgr_build"
   _run_real
   [ "$status" -ne 0 ]
+}
+
+@test "real run: appmgr_build crashing (nonzero exit) with no RPM prints the honest diagnostic" {
+  _xr_stub_setup
+  cat > "$APPMGR_DIR/appmgr_build" <<'EOF'
+#!/usr/bin/env bash
+echo "some fatal rpmbuild error" >&2
+exit 1
+EOF
+  chmod +x "$APPMGR_DIR/appmgr_build"
+  _run_real
   [[ "$output" == *"did not produce an RPM"* ]]
+}
+
+@test "real run: appmgr_build crashing (nonzero exit) with no RPM includes the tool's own log tail" {
+  _xr_stub_setup
+  cat > "$APPMGR_DIR/appmgr_build" <<'EOF'
+#!/usr/bin/env bash
+echo "some fatal rpmbuild error" >&2
+exit 1
+EOF
+  chmod +x "$APPMGR_DIR/appmgr_build"
+  _run_real
   [[ "$output" == *"some fatal rpmbuild error"* ]]
 }
 
-@test "real run: a stale RPM left over from a previous run is not mistaken for this run's output" {
+@test "real run: a stale RPM left over from a previous run does not read as success" {
   _xr_stub_setup
   mkdir -p "$APPMGR_DIR/RPMS"
   echo "stale bytes from a previous run" > "$APPMGR_DIR/RPMS/iris-xr-old.x86_64.rpm"
@@ -251,7 +324,33 @@ EOF
   chmod +x "$APPMGR_DIR/appmgr_build"
   _run_real
   [ "$status" -ne 0 ]
+}
+
+@test "real run: a stale RPM left over from a previous run -- the honest diagnostic still prints" {
+  _xr_stub_setup
+  mkdir -p "$APPMGR_DIR/RPMS"
+  echo "stale bytes from a previous run" > "$APPMGR_DIR/RPMS/iris-xr-old.x86_64.rpm"
+  cat > "$APPMGR_DIR/appmgr_build" <<'EOF'
+#!/usr/bin/env bash
+echo "Done building"
+exit 0
+EOF
+  chmod +x "$APPMGR_DIR/appmgr_build"
+  _run_real
   [[ "$output" == *"did not produce an RPM"* ]]
+}
+
+@test "real run: a stale RPM left over from a previous run is not copied to OUT" {
+  _xr_stub_setup
+  mkdir -p "$APPMGR_DIR/RPMS"
+  echo "stale bytes from a previous run" > "$APPMGR_DIR/RPMS/iris-xr-old.x86_64.rpm"
+  cat > "$APPMGR_DIR/appmgr_build" <<'EOF'
+#!/usr/bin/env bash
+echo "Done building"
+exit 0
+EOF
+  chmod +x "$APPMGR_DIR/appmgr_build"
+  _run_real
   [ ! -f "$OUT_DIR/iris-xr.rpm" ]
 }
 
