@@ -2401,6 +2401,14 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     self._json(409, {"error": "assignment_conflict",
                                      "assigned_image_ids": exc.current_ids})
                     return
+                except catalog_mod.QuarantinedImage as exc:
+                    # a Cisco Bulk Hash sha512 mismatch blocked this id --
+                    # surface the verdict so the operator sees WHY, not just
+                    # a bare 400 (KGV reconciler).
+                    self._json(400, {"error": "image_quarantined",
+                                     "image_id": exc.image_id,
+                                     "verdict": exc.hash_verification})
+                    return
                 except ValueError as exc:
                     self._json(400, {"error": str(exc)}); return
                 if plural:
@@ -3149,6 +3157,7 @@ def main():
     import gui_creds
     import deployment_receipts
     import catalog as catalog_mod
+    import publish as publish_mod
     host = os.environ.get("IRIS_GUI_HOST", "0.0.0.0")
     port = int(os.environ.get("IRIS_GUI_PORT", "8080"))
     secrets_path = os.environ.get("IRIS_SECRETS", "/run/iris/secrets.json")
@@ -3172,7 +3181,13 @@ def main():
     fleet = gui_fleet.FleetStore(state_dir)
     creds = gui_creds.CredentialStore(secrets_path, recipients_csv=recipients,
                                       secrets_enc=secrets_enc)
-    catalog = catalog_mod.CatalogStore(state_dir)
+    # audit_path + seeder_remove_fn: the Cisco Bulk Hash quarantine path
+    # (KGV reconciler) stops seeding and writes audit entries through THIS
+    # instance -- mirrors exactly how `images` (gui_images.ImageService,
+    # above) is wired for the identical seeder-teardown + audit concern.
+    catalog = catalog_mod.CatalogStore(
+        state_dir, audit_path=audit_path,
+        seeder_remove_fn=publish_mod.remove_torrent_rpc)
     receipts = deployment_receipts.ReceiptStore(state_dir)
     receipts.recover_interrupted()
     onboard = gui_onboard.OnboardService(

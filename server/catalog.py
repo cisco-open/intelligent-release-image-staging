@@ -25,6 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import audit
 import auth
+import bulkhash
 import live_samples
 import secretfs
 import secrets_store
@@ -34,6 +35,14 @@ import torrent_personalize
 # image assignment); this bounds the set so policy.json rows and the console
 # stay a fixed, glanceable size rather than an unbounded list.
 MAX_ASSIGNED_IMAGES = 10
+
+# Cisco Bulk Hash reconciliation (KGV reconciler): the only three
+# provenances apply_hash_verification() accepts, matching the pipeline call
+# sites later tasks wire in -- a periodic scheduler, an operator-triggered
+# manual recheck, and an offline/air-gapped import. An unrecognised source
+# is refused rather than silently accepted, so a typo in a caller can never
+# masquerade as a real provenance in the audit trail.
+HASH_VERIFICATION_SOURCES = ("scheduled", "manual", "offline")
 
 
 def _audit_id(value):
@@ -512,12 +521,43 @@ class PolicyConflict(Exception):
         self.current_ids = list(current_ids)
 
 
+class QuarantinedImage(Exception):
+    """Raised by set_policy() when the requested assignment set names an
+    image currently quarantined by the Cisco Bulk Hash reconciler -- a NEW
+    apply_hash_verification() mismatch, or one release_quarantine() has not
+    (yet, or successfully) lifted. Carries the image's current
+    ``hash_verification`` so an HTTP caller can surface WHY the assign was
+    refused (state/checked_at/feed_published_at/source/deferral) rather
+    than a bare 400."""
+
+    def __init__(self, image_id, hash_verification):
+        super().__init__("image %s is quarantined" % image_id)
+        self.image_id = image_id
+        self.hash_verification = hash_verification
+
+
+class QuarantineStillMismatched(Exception):
+    """Raised by release_quarantine() when the image's CURRENT sha512 still
+    disagrees with the feed sha512 recorded by the last
+    apply_hash_verification() call and the caller did not pass
+    override=True. Carries the same ``hash_verification`` shape as
+    QuarantinedImage so a caller can show the operator what still fails
+    before deciding to force it."""
+
+    def __init__(self, image_id, hash_verification):
+        super().__init__(
+            "image %s still fails hash verification; override required"
+            % image_id)
+        self.image_id = image_id
+        self.hash_verification = hash_verification
+
+
 class CatalogStore:
     TELEMETRY_RING = 5      # newest reports kept per device (hard disk bound)
     SEEN_REPORT_IDS = 256   # durable per-device seen v2 report_id ledger bound
     PULL_TTL = 600          # seconds a console pull directive stays pending
 
-    def __init__(self, state_dir):
+    def __init__(self, state_dir, audit_path=None, seeder_remove_fn=None):
         self.state_dir = state_dir
         self.torrents_dir = os.path.join(state_dir, "torrents")
         os.makedirs(self.torrents_dir, exist_ok=True)
@@ -534,6 +574,28 @@ class CatalogStore:
         # oldest purged FIFO) and is purged with the device.
         self.report_ledger_path = os.path.join(state_dir,
                                                 "report_ledger.json")
+        # Cisco Bulk Hash reconciliation (KGV reconciler): the FULL last
+        # verdict reconcile() produced for each image, keyed by image_id --
+        # {state, feed_sha512, publish_date, deferral, checked_at, source}.
+        # This is deliberately a separate store from the narrower wire-compat
+        # `hash_verification` projection written onto the catalog entry
+        # itself (state/checked_at/feed_published_at/source/deferral):
+        # release_quarantine() needs feed_sha512 to re-run the sha512
+        # comparison later without re-fetching the feed, and keeping that
+        # internal-bookkeeping-only field off the wire-facing entry means
+        # nothing downstream ever has to know it exists.
+        self.hash_verdicts_path = os.path.join(state_dir, "hash_verdicts.json")
+        # Both None by default: a CatalogStore constructed for anything
+        # OTHER than the Bulk Hash quarantine path (most existing callers
+        # and tests) must never attempt a real audit write or seeder call it
+        # was never asked to make. gui_server.py's main() injects both
+        # explicitly, mirroring exactly how gui_images.ImageService is
+        # already wired for the identical seeder-teardown + audit concern
+        # (this module cannot default seeder_remove_fn to publish.py itself
+        # -- publish.py imports this module, so importing it back here would
+        # be a cycle; the caller that wants the side effect injects it).
+        self.audit_path = audit_path
+        self._seeder_remove = seeder_remove_fn
 
     def _read(self, path):
         try:
@@ -655,7 +717,13 @@ class CatalogStore:
         comparison is by sequence, since applying rewrites order as well as
         membership, and an empty list is a real expectation ("I saw nothing
         assigned"), distinct from None ("I am not checking"). Passing None
-        keeps the unconditional write every existing caller relies on."""
+        keeps the unconditional write every existing caller relies on.
+
+        Raises QuarantinedImage if *ids* names an image the Cisco Bulk Hash
+        reconciler currently has quarantined (see apply_hash_verification()/
+        release_quarantine()) -- unassigning (an *ids* that DROPS a
+        quarantined id, or an empty *ids*) is always allowed; only naming
+        one in the set being written is refused."""
         if approved_image_id is not None and approved_image_ids is not None:
             raise ValueError(
                 "pass approved_image_id or approved_image_ids, not both")
@@ -670,10 +738,18 @@ class CatalogStore:
         with self.image_policy_lock():
             # Re-check at persistence time. Missing catalog.json remains valid
             # for legacy bootstrap callers; an existing catalog fails closed.
+            # This is also the single enforcement point for "a quarantined
+            # image may never be assigned" (KGV reconciler): every caller --
+            # the console's /assign route, the iris-assign CLI, and this
+            # class's own quarantine auto-unassign below -- goes through
+            # set_policy, so the rule can only be gotten wrong in one place.
             if ids and os.path.exists(self.catalog_path):
                 for iid in ids:
-                    if self.get_image(iid) is None:
+                    entry = self.get_image(iid)
+                    if entry is None:
                         raise ValueError("no such image")
+                    if entry.get("quarantined"):
+                        raise QuarantinedImage(iid, entry.get("hash_verification"))
             with secrets_store.store_lock(self.policy_path):
                 # Inside the same lock the write takes: a check outside it
                 # would be a compare-and-set with a gap wide enough for the
@@ -719,6 +795,260 @@ class CatalogStore:
 
     def list_policies(self):
         return self._read(self.policy_path)
+
+    # --- Cisco Bulk Hash reconciliation: verdict storage + quarantine ---
+    # (KGV reconciler). apply_hash_verification() is the only writer of
+    # hash_verification/cisco_signature_verified and the only place a NEW
+    # mismatch can START a quarantine; release_quarantine() is the only
+    # place one can END. set_policy() (above) is the single enforcement
+    # point for "a quarantined image may never be assigned".
+
+    def _audit_event(self, **kwargs):
+        """Best-effort audit emit for the quarantine path. self.audit_path
+        is None for any CatalogStore not explicitly wired for it (most
+        existing callers/tests) -- silently skip rather than fall back to a
+        real on-disk path nothing asked for. A logging failure must never
+        undo or block an action that has already taken effect on disk."""
+        if self.audit_path is None:
+            return
+        try:
+            audit.append_event(self.audit_path, **kwargs)
+        except Exception:
+            pass
+
+    def _stop_seeding(self, entry):
+        """Best-effort seeder teardown for *entry* -- the same call
+        gui_images.ImageService.delete_image() makes, reused here so a
+        quarantined image stops being served WITHOUT touching the catalog
+        entry itself. self._seeder_remove is None for any CatalogStore not
+        wired with one (most existing callers/tests): a no-op then, not a
+        forced import of publish.py (see __init__)."""
+        if self._seeder_remove is None:
+            return
+        try:
+            self._seeder_remove(entry.get("info_hash_hex"))
+        except Exception:   # seeder unreachable is non-fatal
+            pass
+
+    def apply_hash_verification(self, verdicts, source, now=None):
+        """Apply Cisco Bulk Hash reconciliation *verdicts* -- Task 1's
+        bulkhash.reconcile() output, ``{image_id: {state, feed_sha512,
+        publish_date, deferral}}`` -- from *source* (one of
+        HASH_VERIFICATION_SOURCES) onto the catalog.
+
+        For every image_id present in BOTH *verdicts* and the catalog,
+        writes the wire-compat ``hash_verification`` field onto its entry --
+        ``{state, checked_at, feed_published_at, source, deferral}`` -- and
+        keeps ``cisco_signature_verified = (state == "verified")`` in sync.
+        An image_id in *verdicts* with no catalog entry is skipped (nothing
+        to update, not an error); an image with no verdict entry in this
+        call is left completely untouched -- this is a partial update, never
+        a full resync.
+
+        Quarantine -- stop seeding (the delete-image path's teardown,
+        WITHOUT deleting the entry), block future assignment (enforced in
+        set_policy(), above), and auto-unassign from every device currently
+        holding it (one audit entry per affected device) -- fires iff, for a
+        given image, its new state is "mismatch", it is NOT deferred, AND it
+        is not ALREADY quarantined. That last condition (not raw
+        prior-state-changed) is what makes this idempotent AND handles
+        deferral correctly:
+
+        - re-applying the same (or a different, still-mismatching) verdict
+          never re-fires: the image is already quarantined.
+        - not_in_feed and a deferred mismatch never quarantine at all.
+        - a mismatch that WAS suppressed by deferral=True still fires the
+          moment a LATER verdict reports the same mismatch with
+          deferral=False -- it was never actually acted on, so "deferral
+          flapping" cannot be used to dodge quarantine forever.
+
+        Once quarantined, only release_quarantine() clears the block: a
+        LATER verdict reporting "verified" here still updates
+        hash_verification/cisco_signature_verified (the informational feed
+        comparison is always kept truthful) but never silently lifts an
+        active quarantine -- that would let the feed's own churn undo an
+        operator-visible gate without anyone deciding to.
+
+        Raises ValueError, before writing anything, if *source* is not one
+        of HASH_VERIFICATION_SOURCES or if any verdict's state is not one of
+        bulkhash.STATE_VERIFIED/STATE_MISMATCH/STATE_NOT_IN_FEED -- an
+        all-or-nothing validation pass, so a malformed call can never
+        quarantine (or fail to record) only SOME of the images it names.
+
+        Returns ``{"quarantined": [image_id, ...]}`` -- the ids quarantine
+        actions fired for in THIS call, in verdict-dict iteration order."""
+        if source not in HASH_VERIFICATION_SOURCES:
+            raise ValueError(
+                "source must be one of %s" % (HASH_VERIFICATION_SOURCES,))
+        valid_states = (bulkhash.STATE_VERIFIED, bulkhash.STATE_MISMATCH,
+                        bulkhash.STATE_NOT_IN_FEED)
+        for image_id, v in verdicts.items():
+            if v.get("state") not in valid_states:
+                raise ValueError("verdict for %r has an unknown state: %r"
+                                 % (image_id, v.get("state")))
+        now = time.time() if now is None else now
+        to_fire = []
+        with self.image_policy_lock():
+            cat = self._read(self.catalog_path)
+            images = cat.get("images", {})
+            verdict_store = self._read(self.hash_verdicts_path)
+            touched = False
+            for image_id, v in verdicts.items():
+                entry = images.get(image_id)
+                if entry is None:
+                    continue
+                state = v["state"]
+                deferral = bool(v.get("deferral"))
+                entry["hash_verification"] = {
+                    "state": state,
+                    "checked_at": int(now),
+                    "feed_published_at": v.get("publish_date"),
+                    "source": source,
+                    "deferral": deferral,
+                }
+                entry["cisco_signature_verified"] = (
+                    state == bulkhash.STATE_VERIFIED)
+                if (state == bulkhash.STATE_MISMATCH and not deferral
+                        and not entry.get("quarantined")):
+                    entry["quarantined"] = True
+                    to_fire.append(image_id)
+                images[image_id] = entry
+                verdict_store[image_id] = {
+                    "state": state, "feed_sha512": v.get("feed_sha512"),
+                    "publish_date": v.get("publish_date"),
+                    "deferral": deferral, "checked_at": int(now),
+                    "source": source,
+                }
+                touched = True
+            if touched:
+                cat["images"] = images
+                _atomic_write_json(self.catalog_path, cat)
+                _atomic_write_json(self.hash_verdicts_path, verdict_store)
+        # Quarantine side effects run OUTSIDE image_policy_lock (fired for
+        # ids the write above has ALREADY made durable -- the block-
+        # assignment rule in set_policy() is live from that write onward,
+        # before any of this runs) because _fire_quarantine() calls
+        # set_policy() itself, which takes the same lock; flock is not
+        # reentrant within one process, so nesting it here would deadlock.
+        for image_id in to_fire:
+            self._fire_quarantine(image_id)
+        return {"quarantined": to_fire}
+
+    def _fire_quarantine(self, image_id):
+        """Quarantine side effects for image_id, which
+        apply_hash_verification() has ALREADY marked quarantined=True on
+        disk. Stop seeding, then auto-unassign the image from every device
+        that currently has it approved (set_policy minus the id, minus any
+        OTHER already-quarantined id also sitting in that device's set --
+        set_policy refuses to write a set containing any quarantined id at
+        all, so leaving a second one in would make this very cleanup call
+        refuse itself), one audit entry per affected device."""
+        entry = self.get_image(image_id)
+        if entry is None:
+            return
+        self._stop_seeding(entry)
+        pol = self.list_policies()
+        affected = sorted(
+            did for did, p in pol.items()
+            if image_id in (p.get("approved_image_ids") or
+                            ([p["approved_image_id"]]
+                             if p.get("approved_image_id") else [])))
+        for did in affected:
+            current = self.get_policy(did)["approved_image_ids"]
+            remaining = [i for i in current
+                        if not (self.get_image(i) or {}).get("quarantined")]
+            try:
+                self.set_policy(did, approved_image_ids=remaining)
+            except Exception:
+                continue   # best effort -- the assign-time block still
+                          # covers this device going forward regardless
+            self._audit_event(
+                event="image_quarantine_auto_unassign", category="device",
+                action="unassign", target=did, actor="system", result="ok",
+                detail="auto-unassigned %s: failed Cisco Bulk Hash "
+                       "verification" % image_id)
+        self._audit_event(
+            event="image_quarantine", category="image", action="quarantine",
+            target=image_id, actor="system", result="ok",
+            detail=("quarantined: sha512 mismatch against Cisco Bulk Hash "
+                    "feed" + (" (auto-unassigned from %d device(s): %s)"
+                              % (len(affected), ", ".join(affected))
+                              if affected else "")))
+
+    def release_quarantine(self, image_id, actor, override=False):
+        """Lift an active quarantine on image_id -- the ONLY way one is
+        lifted (apply_hash_verification() never auto-clears one; see its
+        docstring).
+
+        Re-runs the sha512 comparison against the STORED last feed verdict
+        (from the most recent apply_hash_verification() call -- this never
+        re-fetches or re-parses the feed itself, which is the pipeline's job
+        and out of this module's reach) rather than trusting whatever
+        hash_verification.state currently says, so an operator who has since
+        corrected the catalog's own sha512 (replaced the bad file, fixed a
+        publish-time error) sees that reflected immediately:
+
+        - still mismatching -- including when no feed sha512 was ever
+          recorded, e.g. a durably corrupted verdict record; that fails
+          CLOSED, never treated as an implicit match -- requires
+          override=True; without it, raises QuarantineStillMismatched and
+          changes nothing. WITH it, the quarantine is lifted but
+          hash_verification.state is left exactly as apply_hash_verification
+          last wrote it ("mismatch" stays "mismatch"): overriding is a
+          deliberate operator decision to permit assignment despite that,
+          never a claim that it now verifies.
+        - now matching: a clean release. hash_verification.state and
+          cisco_signature_verified are updated to "verified" (untouched
+          since the quarantining apply_hash_verification() call), and the
+          stored verdict is updated too, so a later call reads a consistent
+          record rather than re-deriving "still mismatching" from a state
+          that is no longer true.
+
+        Either path is audited, with the override flag STRUCTURAL
+        (action="release_override" vs "release"), not just prose in the
+        detail, so it can be queried/alerted on.
+
+        Raises KeyError if image_id is not in the catalog; ValueError if it
+        is not currently quarantined (release is only ever a response to an
+        active quarantine)."""
+        with self.image_policy_lock():
+            cat = self._read(self.catalog_path)
+            images = cat.get("images", {})
+            entry = images.get(image_id)
+            if entry is None:
+                raise KeyError(image_id)
+            if not entry.get("quarantined"):
+                raise ValueError("image %r is not quarantined" % image_id)
+            verdict_store = self._read(self.hash_verdicts_path)
+            stored = verdict_store.get(image_id) or {}
+            feed_sha512 = (stored.get("feed_sha512") or "").strip().lower()
+            current_sha512 = (entry.get("sha512") or "").strip().lower()
+            still_mismatching = (not feed_sha512) or feed_sha512 != current_sha512
+            if still_mismatching and not override:
+                raise QuarantineStillMismatched(
+                    image_id, entry.get("hash_verification"))
+            entry["quarantined"] = False
+            if not still_mismatching:
+                hv = dict(entry.get("hash_verification") or {})
+                hv["state"] = bulkhash.STATE_VERIFIED
+                entry["hash_verification"] = hv
+                entry["cisco_signature_verified"] = True
+                if stored:
+                    verdict_store[image_id] = dict(
+                        stored, state=bulkhash.STATE_VERIFIED)
+            images[image_id] = entry
+            cat["images"] = images
+            _atomic_write_json(self.catalog_path, cat)
+            _atomic_write_json(self.hash_verdicts_path, verdict_store)
+        self._audit_event(
+            event="image_quarantine_release", category="image",
+            action="release_override" if still_mismatching else "release",
+            target=image_id, actor=actor, result="ok",
+            detail=("override: sha512 still does not match the Cisco Bulk "
+                    "Hash feed" if still_mismatching else
+                    "released: sha512 now matches the Cisco Bulk Hash feed"))
+        return {"released": True, "override": still_mismatching,
+                "state": entry["hash_verification"]["state"]}
 
     # --- device telemetry reports (bounded ring, issue #13) ---
     def record_telemetry(self, device_id, report):

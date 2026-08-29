@@ -1572,6 +1572,42 @@ def test_assign_audit_detail_pins_plural_wording(tmp_path):
         stop()
 
 
+def test_assign_refuses_a_quarantined_image_with_the_verdict_in_the_400(tmp_path):
+    """KGV reconciler: an image the Cisco Bulk Hash reconciler has
+    quarantined (a NEW sha512 mismatch) must be refused at the /assign
+    route, with the verdict that caused it surfaced in the 400 body so the
+    operator sees why -- not just a bare error string."""
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, cat = deps
+    try:
+        cat.apply_hash_verification(
+            {"img1": {"state": "mismatch", "feed_sha512": "b" * 128,
+                      "publish_date": "2026-08-01", "deferral": False}},
+            source="scheduled", now=1000)
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        _req(host, port, "POST", "/api/devices",
+             {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_id": "img1"}, headers=hh)
+        assert st == 400
+        body = json.loads(b)
+        assert body["error"] == "image_quarantined"
+        assert body["image_id"] == "img1"
+        assert body["verdict"] == {
+            "state": "mismatch", "checked_at": 1000,
+            "feed_published_at": "2026-08-01", "source": "scheduled",
+            "deferral": False}
+        assert cat.get_policy("d1")["approved_image_ids"] == []
+        # the plural (image_ids) shape is refused the same way
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_ids": ["img1"]}, headers=hh)
+        assert st == 400
+        assert json.loads(b)["error"] == "image_quarantined"
+    finally:
+        stop()
+
+
 def test_device_rows_carry_the_list(tmp_path):
     host, port, deps, stop = _serve_full(tmp_path)
     _app, fleet, _creds, cat = deps
