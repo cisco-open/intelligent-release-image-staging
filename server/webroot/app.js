@@ -567,7 +567,7 @@
       var platVal = d.platform || '';
       var platSel = [
         ['', '— auto —'], ['guestshell', 'Guest Shell'], ['iox', 'IOx'],
-        ['router', 'Router (VPG)']
+        ['router', 'Router (VPG)'], ['xr-appmgr', 'XR appmgr container']
       ].map(function (o) {
         return '<option value="' + esc(o[0]) + '"' + (o[0] === platVal ? ' selected' : '') + '>' + esc(o[1]) + '</option>';
       }).join('');
@@ -1575,9 +1575,16 @@
   // (gui_fleet.validate_record / gui_onboard.install_options_for), surfaced
   // before submit instead of as a rejection after it.
   var INSTALL_OPTION_LABELS = { guestshell: 'Guest Shell', iox: 'IOx',
-                                router: 'Router (Guest Shell via VirtualPortGroup)' };
+                                router: 'Router (Guest Shell via VirtualPortGroup)',
+                                'xr-appmgr': 'XR appmgr container' };
+  // Offered when the model is blank or unrecognized -- i.e. when nobody has
+  // established what the hardware is. 'xr-appmgr' is deliberately NOT in
+  // that permissive set: validate_record refuses it without an IOS-XR model,
+  // so offering it here would only produce a rejection after submit. It
+  // appears the moment the model says IOS-XR, from the fetched options below.
+  var AUTO_INSTALL_OPTIONS = ['guestshell', 'iox', 'router'];
   var FULL_INSTALL_OPTIONS_HTML = '<option value="">Agent install - auto by model</option>' +
-    Object.keys(INSTALL_OPTION_LABELS).map(function (k) {
+    AUTO_INSTALL_OPTIONS.map(function (k) {
       return '<option value="' + esc(k) + '">' + esc(INSTALL_OPTION_LABELS[k]) + '</option>';
     }).join('');
   var installOptionsGen = 0;
@@ -1608,7 +1615,11 @@
         return;
       }
       if (options.length === 0) {
-        platform.innerHTML = '<option value="">IOS-XR — no agent install available yet</option>';
+        // No family answers this today: every model the server has an
+        // opinion about can run something (IOS-XR included, since the appmgr
+        // container agent shipped). Kept as an honest dead end rather than a
+        // silent fall-through to the permissive list.
+        platform.innerHTML = '<option value="">No agent install available for this model</option>';
         platform.disabled = true;
         return;
       }

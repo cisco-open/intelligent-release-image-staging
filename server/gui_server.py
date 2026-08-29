@@ -2461,9 +2461,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if body is None:
                     return
                 plat = str(body.get("platform", "")).strip()
-                if plat and plat not in ("guestshell", "iox", "router"):
-                    self._json(400, {"error": "platform must be empty, "
-                                     "guestshell, iox, or router"}); return
+                if plat and plat not in gui_onboard._PLATFORM_RECIPES:
+                    self._json(400, {"error": "platform must be empty or one "
+                                     "of: %s" % ", ".join(sorted(
+                                         gui_onboard._PLATFORM_RECIPES))}); return
                 old = dev.get("platform") or ""
                 # Empty value CLEARS the override (falls back to Auto/model).
                 try:

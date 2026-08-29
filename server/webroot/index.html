@@ -131,6 +131,7 @@
             <option value="guestshell">Guest Shell</option>
             <option value="iox">IOx</option>
             <option value="router">Router</option>
+            <option value="xr-appmgr">XR appmgr container</option>
             <option value="__none">— unset —</option>
           </select>
           <select id="dev-filter-cred" aria-label="Filter by credential profile">
@@ -207,7 +208,7 @@
           <input id="df-mask" placeholder="App mask">
           <input id="df-gateway" placeholder="App gateway (VPG IP for routers)" title="For router modes, this is the IP configured on VirtualPortGroup<N>">
           <input id="df-model" placeholder="model (e.g. C9300-48UXM / IE-3400 / C8000V) — optional">
-          <select id="df-platform"><option value="">Agent install - auto by model</option><option value="guestshell">Guest Shell</option><option value="iox">IOx</option><option value="router">Router (Guest Shell via VirtualPortGroup)</option></select>
+          <select id="df-platform"><option value="">Agent install - auto by model</option><option value="guestshell">Guest Shell</option><option value="iox">IOx</option><option value="router">Router (Guest Shell via VirtualPortGroup)</option><option value="xr-appmgr">XR appmgr container</option></select>
           <select id="df-cred"><option value="">— no credential —</option></select>
           <button class="btn" type="submit">Save device</button>
           <button class="btn ghost" type="button" id="df-cancel">Cancel</button>

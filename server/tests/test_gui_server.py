@@ -3910,6 +3910,36 @@ def test_device_platform_invalid_value_400(tmp_path):
         stop()
 
 
+def test_device_platform_accepts_the_xr_agent_on_xr_hardware(tmp_path):
+    """The devices table lets an operator change a row's agent install. It
+    must be able to SET xr-appmgr on an IOS-XR box -- and the fleet guard
+    still refuses it on hardware that is not IOS-XR."""
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, _cat = deps
+    try:
+        routed = {"management_type": "routed", "iris_vlan": "120",
+                  "svi_ip": "10.20.0.1", "svi_mask": "255.255.255.252",
+                  "app_ip": "10.20.0.2", "app_mask": "255.255.255.252",
+                  "app_gateway": "10.20.0.1"}
+        fleet.upsert(dict(routed, device_id="xr1", device_ip="10.0.0.9",
+                          model="8201"))
+        fleet.upsert(dict(routed, device_id="sw1", device_ip="10.0.0.8",
+                          model="C9300-48UXM"))
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, _ = _req(host, port, "POST", "/api/devices/xr1/platform",
+                        {"platform": "xr-appmgr"}, headers=hh)
+        assert st == 200
+        st, _, b = _req(host, port, "GET", "/api/devices", headers={"Cookie": ck})
+        rows = {d["device_id"]: d for d in json.loads(b)["devices"]}
+        assert rows["xr1"]["platform"] == "xr-appmgr"
+        st, _, _ = _req(host, port, "POST", "/api/devices/sw1/platform",
+                        {"platform": "xr-appmgr"}, headers=hh)
+        assert st == 400
+    finally:
+        stop()
+
+
 def test_device_platform_happy_path_and_clear(tmp_path):
     host, port, deps, stop = _serve_full(tmp_path)
     _app, fleet, _creds, _cat = deps
@@ -6453,7 +6483,7 @@ def test_agent_install_rename_and_inventory_only_label():
     # the field id, its values, and the attachment values are untouched
     assert 'id="df-platform"' in html and 'id="dev-filter-platform"' in html
     assert 'value="guestshell"' in html and 'value="iox"' in html
-    assert 'value="router"' in html
+    assert 'value="router"' in html and 'value="xr-appmgr"' in html
     assert '<option value="legacy"' in html
 
     # app.js: the row-attachment display and the status/detail lines
@@ -6479,14 +6509,16 @@ def test_add_device_form_model_field_precedes_agent_install_select():
 def test_add_device_form_filters_install_options_live_by_model():
     """Source guard for the /api/install-options wiring: as the operator
     types a model, the agent-install select is refetched and repainted --
-    disabled with explanatory text when the model has no valid install
-    option (IOS-XR today), reset to the full set when the model is blank or
-    unrecognized."""
+    to the one option an IOS-XR model can run, and back to the full set when
+    the model is blank or unrecognized. The select used to be DISABLED for
+    IOS-XR with "no agent install available yet"; the XR appmgr container
+    agent exists now, so that text is gone and the option is real."""
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
     assert "getElementById('df-model').addEventListener('input'" in js
     assert "/api/install-options?model=" in js
-    assert "IOS-XR — no agent install available yet" in js
+    assert "no agent install available yet" not in js
+    assert "'xr-appmgr'" in js and "XR appmgr container" in js
     assert "refreshInstallOptions" in js
 
 
@@ -6503,11 +6535,12 @@ def test_install_options_api_requires_auth_and_matches_model_matrix(tmp_path):
         assert st == 200
         assert json.loads(b)["options"] == ["guestshell", "iox"]
 
-        # the 8201 incident: an IOS-XR model gets an empty list, not null
+        # the 8201 incident: an IOS-XR model gets the ONE install it can run
+        # (never an IOS-XE one), not null
         st, _, b = _req(host, port, "GET", "/api/install-options?model=8201",
                         headers=headers)
         assert st == 200
-        assert json.loads(b)["options"] == []
+        assert json.loads(b)["options"] == ["xr-appmgr"]
 
         # blank/unrecognized model -> None ("auto only", no guardrail opinion)
         st, _, b = _req(host, port, "GET", "/api/install-options?model=",

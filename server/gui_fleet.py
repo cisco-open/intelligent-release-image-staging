@@ -116,8 +116,9 @@ def validate_record(record, allow_legacy=False):
     if attachment not in ("routed", "inband", "router-routed", "router-nat"):
         raise ValueError("management_type must be routed, inband, router-routed, or router-nat")
     platform = result.get("platform", "")
-    if platform not in ("", "guestshell", "iox", "router"):
-        raise ValueError("platform must be guestshell, iox, or router")
+    if platform not in ("", "guestshell", "iox", "router", "xr-appmgr"):
+        raise ValueError(
+            "platform must be guestshell, iox, router, or xr-appmgr")
     model = result.get("model", "")
     if model:
         # '8201-SYS' and '8201' must read identically wherever a model is
@@ -147,6 +148,15 @@ def validate_record(record, allow_legacy=False):
         # is nothing to check against; the c8k-specific rules above already
         # cover Catalyst 8000.
         allowed = gui_onboard.install_options_for(model, result.get("os_family", ""))
+        if platform == "xr-appmgr" and allowed != ["xr-appmgr"]:
+            # The inverse of that guardrail, and it must fail closed where the
+            # generic one abstains: 'None' (blank or unrecognized model) is
+            # exactly the case where nobody has established this is IOS-XR,
+            # and device/xr-install.sh speaks appmgr and IOS-XR config mode.
+            raise ValueError(
+                "platform xr-appmgr is the IOS-XR agent; %s needs an IOS-XR "
+                "model (e.g. 8201) or a device already classified os_family=xr"
+                % (("model %s" % model) if model else "a device with no model"))
         if allowed is not None and platform not in allowed:
             raise ValueError("model %s cannot run %s; allowed: %s"
                              % (model, platform, ", ".join(allowed) or "none"))

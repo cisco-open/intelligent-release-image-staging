@@ -68,6 +68,10 @@ _PLATFORM_RECIPES = {
     "guestshell": "device/device-install.sh",
     "iox": "device/iox/install.sh",
     "router": "device/router-install.sh",
+    # The only IOS-XR recipe: an appmgr Docker app bind-mounting harddisk:.
+    # Every other value in this table is IOS-XE, which is why os_family
+    # decides between them (see _refuse_xr / resolve_platform).
+    "xr-appmgr": "device/xr-install.sh",
 }
 # Teardown recipe per platform — the inverse of _PLATFORM_RECIPES, so undeploy
 # is fleet-wide (Guest Shell C9300/ISR/ASR AND IOx IE-3x00/IR1101/IR18xx).
@@ -75,6 +79,7 @@ _UNINSTALL_RECIPES = {
     "guestshell": "device/device-uninstall.sh",
     "iox": "device/iox/uninstall.sh",
     "router": "device/router-uninstall.sh",
+    "xr-appmgr": "device/xr-uninstall.sh",
 }
 # One shared table drives both auto-resolution (_MODEL_PLATFORMS, a single
 # default platform per family) and the install-options guardrail
@@ -104,6 +109,8 @@ _FAMILY_AMBIGUOUS_MODEL = re.compile(r"^(ISR|ASR|CSR)", re.IGNORECASE)
 # os_family was never probed -- the incident this closes: an 8201 offered iox
 # and dying on an XE-flavoured arch error.
 _XR_MODEL_RE = re.compile(r"^8[0-9]{2,3}(-SYS)?$")
+# The one platform value that is IOS-XR rather than IOS-XE.
+_XR_PLATFORM = "xr-appmgr"
 # Some contexts report the '-SYS' suffix on that same model number
 # ('8201-SYS'), others just the bare number ('8201'). Normalized to the bare
 # number so the fleet's stored model reads consistently regardless of which
@@ -122,14 +129,22 @@ def install_options_for(model, os_family=None):
     """Return the agent-install platform values ``model``/``os_family`` may
     explicitly run.
 
-    [] means none can: IOS-XR, whether known via ``os_family`` or inferred
-    from an XR-shaped 8xxx/8xxx-SYS model number. None means the model is
-    blank or not a family this table recognizes, so no guardrail applies --
-    the console still offers Auto, and validate_record does not restrict the
-    explicit platform choice for hardware this table has no opinion on.
-    Otherwise, the list is every platform _MODEL_INSTALL_TABLE names for that
-    family (not just its auto-resolution default -- e.g. a C9xxx may run
-    guestshell OR iox, though guestshell alone is what Auto picks).
+    ``["xr-appmgr"]`` -- the appmgr container agent, and nothing else -- is
+    the answer for IOS-XR, whether that is known via ``os_family`` or inferred
+    from an XR-shaped 8xxx/8xxx-SYS model number. It is the one platform in
+    this table that is not IOS-XE, so it is offered EXCLUSIVELY: no XR device
+    may run an IOS-XE recipe, and no IOS-XE device may run this one (the
+    inverse guard lives in resolve_platform). Unlike the model-table families
+    below, it is never an auto-resolution default -- an XR model number
+    matches no _MODEL_PLATFORMS row, so the operator picks it explicitly.
+
+    None means the model is blank or not a family this table recognizes, so no
+    guardrail applies -- the console still offers Auto, and validate_record
+    does not restrict the explicit platform choice for hardware this table has
+    no opinion on. Otherwise, the list is every platform _MODEL_INSTALL_TABLE
+    names for that family (not just its auto-resolution default -- e.g. a
+    C9xxx may run guestshell OR iox, though guestshell alone is what Auto
+    picks).
 
     Note: ASR1000/ASR9000 are distinguished only by 'show version' output; the
     model prefix alone cannot tell them apart. An XR-family ASR (e.g. ASR9906)
@@ -139,9 +154,9 @@ def install_options_for(model, os_family=None):
     rejection sites in sync."""
     model = (model or "").strip()
     if (os_family or "") == "xr":
-        return []
+        return [_XR_PLATFORM]
     if model and _XR_MODEL_RE.match(model):
-        return []
+        return [_XR_PLATFORM]
     if not model:
         return None
     for pattern, options in _MODEL_INSTALL_TABLE:
@@ -193,28 +208,56 @@ def _iox_arch_env(device_id, model):
 
 
 def _refuse_xr(device_id):
+    """Refuse an IOS-XR device that is not set to the IOS-XR platform.
+
+    IRIS stages to IOS-XR now, so this no longer says "wait for XR support"
+    -- it names the one thing that works. Every OTHER platform value in
+    _PLATFORM_RECIPES is an IOS-XE recipe, and no model prefix can tell the
+    families apart, so this refusal stands for all of them."""
     raise ValueError(
-        "%s runs IOS-XR, which IRIS cannot stage to yet: every onboarding "
-        "recipe here is IOS-XE. Remove the device or wait for XR support; "
-        "forcing 'platform' will not work." % device_id)
+        "%s runs IOS-XR: every other agent install here is IOS-XE. Set the "
+        "device's platform to 'xr-appmgr' (the appmgr container agent, which "
+        "stages straight to harddisk:) -- no IOS-XE recipe will work on it."
+        % device_id)
+
+
+def _refuse_xr_platform_on_xe(device_id):
+    """The inverse guard: device/xr-install.sh speaks appmgr and IOS-XR
+    config mode, so it must never be pointed at an IOS-XE box."""
+    raise ValueError(
+        "%s runs IOS-XE: platform 'xr-appmgr' is the IOS-XR agent. Pick an "
+        "IOS-XE agent install (%s)."
+        % (device_id, ", ".join(sorted(p for p in _PLATFORM_RECIPES
+                                       if p != _XR_PLATFORM))))
 
 
 def resolve_platform(dev, probe=None, os_family=None):
     """Resolve which onboarding platform drives a device.
 
-    Resolution order: (a) an IOS-XR device is refused outright -- every recipe
-    here is IOS-XE and no model prefix can tell the families apart; the family
-    is read from the os_family argument or, failing that, dev['os_family'];
-    (b) explicit dev['platform'] if it names a known recipe; (c) dev['model']
-    matched against _MODEL_PLATFORMS; (d) if a probe callable is given, call
-    it with dev -- if it returns a model string, match that (the CALLER is
-    responsible for caching the probed model, e.g. into the fleet store);
-    (e) ValueError telling the operator how to unblock."""
+    Resolution order: (a) an IOS-XR device resolves to 'xr-appmgr' when that
+    is what its record explicitly asks for, and is refused otherwise -- every
+    OTHER recipe here is IOS-XE and no model prefix can tell the families
+    apart; the family is read from the os_family argument or, failing that,
+    dev['os_family']; (b) explicit dev['platform'] if it names a known recipe
+    (and 'xr-appmgr' is refused on a device already classified IOS-XE);
+    (c) dev['model'] matched against _MODEL_PLATFORMS; (d) if a probe callable
+    is given, call it with dev -- if it returns a model string, match that (the
+    CALLER is responsible for caching the probed model, e.g. into the fleet
+    store); (e) ValueError telling the operator how to unblock.
+
+    Auto-resolution never picks 'xr-appmgr': an XR model number is bare digits
+    and matches no _MODEL_PLATFORMS row, so an XR device that has not been set
+    to the XR platform is refused with advice naming it."""
     device_id = dev.get("device_id", "?")
     # The parameter supplements the record, it does not replace it: callers
     # that pass a stored device (gui_server._plan) never pass os_family, and
     # a cached family must refuse there too.
-    if (os_family or dev.get("os_family")) == "xr":
+    family = os_family or dev.get("os_family")
+    if family == "xr":
+        # The ONE platform an IOS-XR device may run. Anything else -- an
+        # IOS-XE recipe, or no choice at all -- is refused exactly as before.
+        if dev.get("platform") == _XR_PLATFORM:
+            return _XR_PLATFORM
         _refuse_xr(device_id)
     explicit = dev.get("platform")
     if explicit:
@@ -222,6 +265,8 @@ def resolve_platform(dev, probe=None, os_family=None):
             raise ValueError(
                 "unknown platform %r for %s: valid platforms are %s"
                 % (explicit, device_id, ", ".join(sorted(_PLATFORM_RECIPES))))
+        if explicit == _XR_PLATFORM and family == "xe":
+            _refuse_xr_platform_on_xe(device_id)
         if re.match(r"^C8[0-9]{3}", dev.get("model") or "", re.IGNORECASE) \
                 and explicit != "router":
             raise ValueError("Catalyst 8000 models require platform router")
@@ -694,6 +739,69 @@ def apply_iox_preflight(resolved, evidence):
     return result
 
 
+# The names device/xr-install.sh gives IRIS's two artifacts on the router
+# (its APPID and SOURCE_NAME defaults). The console never overrides them, so
+# finding either already there means a previous deployment is still on the
+# box -- the XR spelling of the IRIS-named collision check every other
+# platform runs.
+_XR_APPID = "iris"
+_XR_SOURCE_NAME = "iris-xr"
+
+
+def _default_xr_preflight(dev, env, resolved, repo_root):
+    """Read-only collision check for an IOS-XR appmgr deployment.
+
+    Driven over lab/xr-run.sh, not lab/device-run.sh: XR has no enable dance
+    and a different config model, and this is the same transport the recipe
+    itself uses.
+
+    Two things it deliberately does NOT do:
+
+      * probe free space. device/xr-install.sh's own step [1/5] reads
+        `dir harddisk:` and refuses below XR_MIN_FREE_BYTES moments later;
+        asking here would be a second SSH login per device for a number the
+        recipe re-reads anyway (and would be staler than the one it acts on).
+      * demand a processor board ID. The XE recipes hard-require
+        EXPECTED_DEVICE_IDENTITY as a wrong-device guard; xr-install.sh does
+        not consume one, and inventing a requirement the recipe ignores would
+        refuse good devices for nothing.
+
+    Fails closed on a banner it cannot classify: the recipe about to run
+    speaks appmgr and IOS-XR config mode, so "probably XR" is not good
+    enough."""
+    runner = os.path.join(repo_root, "lab", "xr-run.sh")
+    sections = _probe_sections(runner, env, (
+        ("version", "show version"),
+        ("apps", "show appmgr application-table"),
+        ("sources", "show appmgr source-table"),
+    ), "xr")
+    family = parse_os_family(sections["version"])
+    if family:
+        dev["os_family"] = family
+    device_id = dev.get("device_id") or env.get("DEVICE_IP", "?")
+    if family == "xe":
+        _refuse_xr_platform_on_xe(device_id)
+    if family != "xr":
+        raise ValueError(
+            "could not confirm %s runs IOS-XR from its 'show version' banner; "
+            "refusing to run the IOS-XR agent install against it" % device_id)
+    # Each table's rows START with the name, so anchor there: it is what
+    # keeps the lab's leftover 'irisprobe' source (and any operator app whose
+    # name merely contains ours) from reading as a collision.
+    for section, name, description in (
+            ("apps", _XR_APPID, "the appmgr application %r" % _XR_APPID),
+            ("sources", _XR_SOURCE_NAME,
+             "the appmgr package source %r" % _XR_SOURCE_NAME)):
+        if re.search(r"(?im)^\s*%s(?:\s|$)" % re.escape(name),
+                     sections[section]):
+            raise ValueError("%s already exists" % description)
+    evidence = {"status": "passed"}
+    model = normalize_model(_parse_show_version(sections["version"])[0])
+    if model:
+        evidence["detected_model"] = model
+    return evidence
+
+
 class OnboardService:
     def __init__(self, fleet, creds, server_dir=None, device_install=None,
                  crt_public=None, host_ip=None, catalog_url=None,
@@ -701,7 +809,7 @@ class OnboardService:
                  probe_fn=None, artifacts_dir=None, audit_fn=None,
                  max_concurrent=None, clear_state_fn=None, receipts=None,
                  preflight_fn=None, iox_preflight_fn=None, log_dir=None,
-                 guestshell_preflight_fn=None):
+                 guestshell_preflight_fn=None, xr_preflight_fn=None):
         self.fleet = fleet
         self.creds = creds
         self.server_dir = server_dir or os.path.dirname(os.path.abspath(__file__))
@@ -729,6 +837,9 @@ class OnboardService:
                 dev, env, resolved, self.repo_root))
         self._iox_preflight = iox_preflight_fn or (
             lambda dev, env, resolved: _default_iox_preflight(
+                dev, env, resolved, self.repo_root))
+        self._xr_preflight = xr_preflight_fn or (
+            lambda dev, env, resolved: _default_xr_preflight(
                 dev, env, resolved, self.repo_root))
         self.artifacts_dir = artifacts_dir or os.environ.get("IRIS_ARTIFACTS_DIR", "/srv/artifacts")
         self._audit = audit_fn
@@ -877,6 +988,8 @@ class OnboardService:
             return self._iox_preflight(dev, env, resolved)
         if platform == "guestshell":
             return self._guestshell_preflight(dev, env, resolved)
+        if platform == _XR_PLATFORM:
+            return self._xr_preflight(dev, env, resolved)
         return {"status": "not-required"}
 
     def _resolve(self, device_id, dev, env, action="onboard"):
@@ -1105,6 +1218,21 @@ class OnboardService:
                             env_extra=j.get("env_extra"))
                         platform, script = self._resolve(
                             device_id, dev, env, action)
+                elif action == "onboard" and platform == _XR_PLATFORM:
+                    # The XR collision check, and the last gate that can tell
+                    # this really is an IOS-XR box before an appmgr recipe
+                    # runs against it: the console resolved the platform from
+                    # the operator's explicit choice, so resolution took its
+                    # EXPLICIT branch and no family check inside it ran.
+                    # Persist the classification on both paths, exactly like
+                    # the router/iox flows -- see _persist_os_family.
+                    prior_family = dev.get("os_family")
+                    try:
+                        self._xr_preflight(dev, env, j.get("resolved") or dev)
+                    except Exception as exc:
+                        self._persist_os_family(device_id, dev, prior_family)
+                        raise ValueError("preflight failed: %s" % exc)
+                    self._persist_os_family(device_id, dev, prior_family)
                 elif action == "onboard" and platform == "iox":
                     # The console never supplies device_identity for IOx
                     # devices (unlike router, there is no separate

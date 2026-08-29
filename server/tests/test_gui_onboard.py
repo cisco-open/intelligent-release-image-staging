@@ -506,6 +506,241 @@ def test_resolve_platform_unrecognized_model_refuses_when_record_carries_xr():
         gui_onboard.resolve_platform(dev, os_family="xe")
 
 
+# --- IOS-XR: the appmgr container agent ----------------------------------
+# IRIS stages to IOS-XR now (a Docker app under appmgr, writing straight to
+# harddisk: through a bind mount). The family refusal therefore stops being
+# absolute: 'xr-appmgr' is the ONE platform an XR device may run, and every
+# IOS-XE recipe stays refused for it.
+
+def test_resolve_platform_xr_resolves_the_appmgr_container():
+    dev = {"device_id": "d1", "platform": "xr-appmgr", "model": "8201"}
+    assert gui_onboard.resolve_platform(dev, os_family="xr") == "xr-appmgr"
+    # and from a cached family, with no os_family argument at all
+    cached = {"device_id": "d1", "platform": "xr-appmgr", "model": "8201",
+              "os_family": "xr"}
+    assert gui_onboard.resolve_platform(cached) == "xr-appmgr"
+
+
+def test_resolve_platform_xr_without_an_explicit_platform_still_refuses():
+    """Auto-resolution cannot pick the XR recipe: the model table is keyed on
+    IOS-XE prefixes and an XR box's model is bare digits. The operator sets
+    the platform, and the refusal has to say so."""
+    dev = {"device_id": "d1", "model": "8201"}
+    with pytest.raises(ValueError, match="xr-appmgr"):
+        gui_onboard.resolve_platform(dev, os_family="xr")
+
+
+def test_refuse_xr_message_names_the_platform_to_set():
+    """The old message said to wait for XR support. That is no longer true,
+    and 'forcing platform will not work' is now actively wrong advice."""
+    with pytest.raises(ValueError) as exc:
+        gui_onboard._refuse_xr("d1")
+    message = str(exc.value)
+    assert "d1" in message and "IOS-XR" in message and "xr-appmgr" in message
+    assert "wait for" not in message
+
+
+def test_resolve_platform_refuses_the_xr_recipe_on_an_ios_xe_device():
+    """The inverse guardrail: device/xr-install.sh speaks appmgr and IOS-XR
+    config mode. Handing it an IOS-XE box is the same class of mistake as
+    handing device-install.sh an ASR 9000."""
+    dev = {"device_id": "d1", "platform": "xr-appmgr", "model": "C9300-48UXM",
+           "os_family": "xe"}
+    with pytest.raises(ValueError, match="IOS-XE"):
+        gui_onboard.resolve_platform(dev)
+
+
+def test_xr_recipes_are_registered_and_present():
+    assert gui_onboard._PLATFORM_RECIPES["xr-appmgr"] == "device/xr-install.sh"
+    assert gui_onboard._UNINSTALL_RECIPES["xr-appmgr"] == "device/xr-uninstall.sh"
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(
+        gui_onboard.__file__)))
+    for relative in (gui_onboard._PLATFORM_RECIPES["xr-appmgr"],
+                     gui_onboard._UNINSTALL_RECIPES["xr-appmgr"]):
+        assert os.path.exists(os.path.join(repo_root, relative)), relative
+
+
+def _xr_show_version(model="8000"):
+    return ("Cisco IOS XR Software, Version 25.4.2 LNT\n"
+            "cisco %s (VXR)\ncisco 8201-SYS (VXR) processor\n" % model)
+
+
+def _xr_preflight_stub(monkeypatch, version=None, apps="", sources="",
+                       returncode=0, seen=None):
+    def run(argv, input=None, **kwargs):
+        if seen is not None:
+            seen["argv"] = argv
+            seen["input"] = input
+        return SimpleNamespace(returncode=returncode, stdout=(
+            "__IRIS_PREFLIGHT_VERSION__\n"
+            + (version if version is not None else _xr_show_version())
+            + "\n__IRIS_PREFLIGHT_APPS__\n" + apps
+            + "\n__IRIS_PREFLIGHT_SOURCES__\n" + sources))
+    monkeypatch.setattr(gui_onboard.subprocess, "run", run)
+
+
+def test_default_xr_preflight_passes_a_clean_router(monkeypatch):
+    seen = {}
+    _xr_preflight_stub(monkeypatch, apps="No entries found\n",
+                       sources="No entries found\n", seen=seen)
+    dev = {"device_id": "8010-R1"}
+    evidence = gui_onboard._default_xr_preflight(
+        dev, {"DEVICE_IP": "100.90.170.81"}, {}, "/repo")
+    assert evidence == {"status": "passed", "detected_model": "8000"}
+    assert dev["os_family"] == "xr"
+    # driven over the XR transport, not the IOS-XE one
+    assert seen["argv"][1].endswith("lab/xr-run.sh")
+
+
+def test_default_xr_preflight_does_not_reprobe_free_space(monkeypatch):
+    """device/xr-install.sh's own step [1/5] reads `dir harddisk:` and refuses
+    below its headroom floor. Asking again here would be a second SSH login
+    per device to learn a number the recipe re-reads anyway, moments later."""
+    seen = {}
+    _xr_preflight_stub(monkeypatch, seen=seen)
+    gui_onboard._default_xr_preflight({}, {"DEVICE_IP": "10.0.0.1"}, {}, "/repo")
+    assert "dir harddisk:" not in seen["input"]
+
+
+def test_default_xr_preflight_refuses_an_ios_xe_device(monkeypatch):
+    _xr_preflight_stub(monkeypatch, version=(
+        "Cisco IOS XE Software, Version 17.9.4\n"
+        "cisco C9300-48UXM (X86) processor\n"))
+    dev = {"device_id": "sw1"}
+    with pytest.raises(ValueError, match="IOS-XE"):
+        gui_onboard._default_xr_preflight(
+            dev, {"DEVICE_IP": "10.0.0.1"}, {}, "/repo")
+    assert dev["os_family"] == "xe"
+
+
+def test_default_xr_preflight_refuses_an_unclassifiable_banner(monkeypatch):
+    """Fail closed: an unreadable banner is not proof of anything, and the
+    recipe about to run speaks IOS-XR config mode."""
+    _xr_preflight_stub(monkeypatch, version="garbage\n")
+    with pytest.raises(ValueError, match="could not"):
+        gui_onboard._default_xr_preflight(
+            {}, {"DEVICE_IP": "10.0.0.1"}, {}, "/repo")
+
+
+def test_default_xr_preflight_refuses_a_router_that_still_carries_iris(monkeypatch):
+    """The IRIS-named collision check every platform runs, in XR's own
+    vocabulary: the application and the registered package source."""
+    _xr_preflight_stub(monkeypatch,
+                       apps="iris  docker  iris-xr  Up  app_manager\n")
+    with pytest.raises(ValueError, match="already"):
+        gui_onboard._default_xr_preflight(
+            {}, {"DEVICE_IP": "10.0.0.1"}, {}, "/repo")
+
+    _xr_preflight_stub(monkeypatch,
+                       sources="iris-xr  0.1.0  ThinXR_7.3.15  app_manager\n")
+    with pytest.raises(ValueError, match="already"):
+        gui_onboard._default_xr_preflight(
+            {}, {"DEVICE_IP": "10.0.0.1"}, {}, "/repo")
+
+
+def test_default_xr_preflight_ignores_a_foreign_app_of_its_own(monkeypatch):
+    """Only IRIS's own names are collisions. Another operator app -- or the
+    lab's leftover 'irisprobe' source -- is none of IRIS's business."""
+    _xr_preflight_stub(monkeypatch,
+                       apps="telemetry-agent  docker  ta  Up  app_manager\n",
+                       sources="irisprobe  0.1.0  ThinXR_7.3.15  app_manager\n")
+    evidence = gui_onboard._default_xr_preflight(
+        {}, {"DEVICE_IP": "10.0.0.1"}, {}, "/repo")
+    assert evidence["status"] == "passed"
+
+
+def test_default_xr_preflight_raises_when_the_transport_fails(monkeypatch):
+    _xr_preflight_stub(monkeypatch, returncode=1)
+    with pytest.raises(ValueError, match="could not run"):
+        gui_onboard._default_xr_preflight(
+            {}, {"DEVICE_IP": "10.0.0.1"}, {}, "/repo")
+
+
+def _xr_svc(run_fn, **kw):
+    fleet = _Fleet({"d1": {"device_id": "d1", "device_ip": "100.90.170.81",
+                           "vlan": "666", "svi_ip": "10.0.0.2",
+                           "svi_mask": "255.255.255.252",
+                           "guest_ip": "10.0.0.3", "model": "8010",
+                           "os_family": "xr", "platform": "xr-appmgr",
+                           "credential_profile_id": "lab"}})
+    creds = _Creds({"lab": {"device_user": "admin", "device_pass": "s3cret"}})
+    kw.setdefault("probe_fn", lambda dev, env: "8010")
+    kw.setdefault("xr_preflight_fn",
+                  lambda dev, env, resolved: {"status": "passed",
+                                              "detected_model": "8010"})
+    kw.setdefault("mint_fn", lambda did: "TOK-" + did)
+    return gui_onboard.OnboardService(
+        fleet, creds, crt_public="/fake/crt.pem", host_ip="10.9.9.9",
+        run_fn=run_fn, **kw)
+
+
+def test_xr_onboard_runs_the_xr_recipe_with_the_env_it_documents(tmp_path):
+    """The whole point of the wiring: an XR device onboards from the console
+    with the same env every other recipe gets -- device/xr-install.sh reads
+    DEVICE_IP/DEVICE_ID/CATALOG_URL/CATALOG_TOKEN/DEVICE_USER/DEVICE_PASS and
+    finds its RPM under IRIS_ARTIFACTS_DIR."""
+    seen = {}
+
+    def fake_run(install_path, env, on_line):
+        seen["path"] = install_path
+        seen["env"] = env
+        return 0
+
+    svc = _xr_svc(fake_run, artifacts_dir=str(tmp_path))
+    job = _wait(svc, svc.start("d1", resolved={"platform": "xr-appmgr"}))
+    assert job["state"] == "done", job["lines"]
+    assert seen["path"].endswith("device/xr-install.sh")
+    env = seen["env"]
+    assert env["DEVICE_IP"] == "100.90.170.81"
+    assert env["DEVICE_ID"] == "d1"
+    assert env["CATALOG_TOKEN"] == "TOK-d1"
+    assert env["CATALOG_URL"] == "https://10.9.9.9:8443"
+    assert env["DEVICE_USER"] == "admin" and env["DEVICE_PASS"] == "s3cret"
+    assert env["IRIS_ARTIFACTS_DIR"]
+
+
+def test_xr_undeploy_runs_the_xr_teardown_recipe(tmp_path):
+    seen = {}
+
+    def fake_run(install_path, env, on_line):
+        seen["path"] = install_path
+        return 0
+
+    svc = _xr_svc(fake_run, artifacts_dir=str(tmp_path))
+    job = _wait(svc, svc.start("d1", action="undeploy"))
+    assert job["state"] == "done", job["lines"]
+    assert seen["path"].endswith("device/xr-uninstall.sh")
+
+
+def test_xr_onboard_refuses_when_the_preflight_refuses(tmp_path):
+    ran = []
+
+    def fake_run(install_path, env, on_line):
+        ran.append(install_path)
+        return 0
+
+    def refuse(dev, env, resolved):
+        dev["os_family"] = "xe"
+        raise ValueError("100.90.170.81 reports IOS-XE, not IOS-XR")
+
+    svc = _xr_svc(fake_run, artifacts_dir=str(tmp_path),
+                  xr_preflight_fn=refuse)
+    job = _wait(svc, svc.start("d1", resolved={"platform": "xr-appmgr"}))
+    assert job["state"] == "error"
+    assert any("IOS-XE" in line for line in job["lines"]), job["lines"]
+    assert ran == []
+    # the classification it just learned is cached, like every other platform
+    assert svc.fleet._d["d1"]["os_family"] == "xe"
+
+
+def test_service_preflight_dispatches_the_xr_platform(tmp_path):
+    svc = _xr_svc(lambda p, e, on: 0, artifacts_dir=str(tmp_path),
+                  xr_preflight_fn=lambda dev, env, resolved: {
+                      "status": "passed", "detected_model": "8010"})
+    evidence = svc.preflight("d1", {"platform": "xr-appmgr"})
+    assert evidence == {"status": "passed", "detected_model": "8010"}
+
+
 # --- install_options_for / normalize_model -------------------------------
 
 def test_install_options_for_c9k_allows_guestshell_and_iox():
@@ -528,22 +763,25 @@ def test_install_options_for_legacy_router_family_guestshell():
         assert gui_onboard.install_options_for(model, "") == ["guestshell"], model
 
 
-def test_install_options_for_xr_os_family_refuses_everything():
+def test_install_options_for_xr_os_family_offers_only_the_appmgr_container():
     # os_family alone is authoritative, independent of what the model prefix
     # would otherwise suggest -- e.g. ASR-9906 matches the ISR/ASR/CSR prefix
-    # but is IOS-XR hardware, the exact misroute this guardrail closes.
-    assert gui_onboard.install_options_for("ASR-9906", "xr") == []
-    assert gui_onboard.install_options_for("C9300-48UXM", "xr") == []
+    # but is IOS-XR hardware, the exact misroute this guardrail closes. The
+    # XR agent exists now, so the answer is the one recipe that IS IOS-XR --
+    # never one of the IOS-XE three.
+    assert gui_onboard.install_options_for("ASR-9906", "xr") == ["xr-appmgr"]
+    assert gui_onboard.install_options_for("C9300-48UXM", "xr") == ["xr-appmgr"]
 
 
-def test_install_options_for_8xxx_model_refuses_even_without_os_family():
-    # Belt-and-suspenders: an XR-shaped model number refuses on its own, even
+def test_install_options_for_8xxx_model_offers_xr_even_without_os_family():
+    # Belt-and-suspenders: an XR-shaped model number decides on its own, even
     # when os_family was never probed/cached -- the 8201 incident this
     # guardrail closes (an 8201 offered iox and died on an XE-flavoured arch
     # error).
     for model in ("8201", "8201-SYS", "820", "8999"):
-        assert gui_onboard.install_options_for(model, "") == [], model
-    assert gui_onboard.install_options_for("8201") == []   # os_family omitted entirely
+        assert gui_onboard.install_options_for(model, "") == ["xr-appmgr"], model
+    # os_family omitted entirely
+    assert gui_onboard.install_options_for("8201") == ["xr-appmgr"]
 
 
 def test_install_options_for_unknown_or_blank_model_returns_none():

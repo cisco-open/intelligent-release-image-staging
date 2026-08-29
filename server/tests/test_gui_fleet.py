@@ -161,6 +161,7 @@ def test_validate_record_model_guardrail_matrix(tmp_path):
         dict(_ROUTED, device_id="asr-gs", model="ASR1001", platform="guestshell"),
         dict(_ROUTED, device_id="csr-gs", model="CSR1000v", platform="guestshell"),
         dict(_ROUTER, device_id="c8-router", model="C8000V", platform="router"),
+        dict(_ROUTED, device_id="xr-8201", model="8201", platform="xr-appmgr"),
     ]
     for record in ok:
         saved = fs.upsert(record)
@@ -188,6 +189,30 @@ def test_validate_record_refuses_8201_guestshell_explicitly():
         gui_fleet.validate_record(dict(_ROUTED, device_id="d1", model="8201",
                                        platform="guestshell"))
     assert "8201" in str(exc.value) and "guestshell" in str(exc.value)
+
+
+def test_validate_record_accepts_the_xr_platform_on_xr_hardware(tmp_path):
+    """IRIS stages to IOS-XR through the appmgr container agent, so an XR
+    device may carry a platform now -- the one that is IOS-XR."""
+    fs = _fs(tmp_path)
+    saved = fs.upsert(dict(_ROUTED, device_id="xr-8201", model="8201",
+                           platform="xr-appmgr"))
+    assert saved["platform"] == "xr-appmgr"
+    # and on a family-ambiguous model, where only the classified family knows
+    saved = fs.upsert(dict(_ROUTED, device_id="asr9k", model="ASR-9906",
+                           platform="xr-appmgr", os_family="xr"))
+    assert saved["platform"] == "xr-appmgr"
+
+
+def test_validate_record_refuses_the_xr_platform_on_non_xr_hardware(tmp_path):
+    """The inverse guardrail. It fails closed on a blank/unrecognized model
+    too: 'nobody has established this is IOS-XR' is not permission to run an
+    appmgr recipe against it."""
+    fs = _fs(tmp_path)
+    for model in ("C9300-48UXM", "IE-3400", "WS-C2960", ""):
+        with pytest.raises(ValueError, match="IOS-XR"):
+            fs.upsert(dict(_ROUTED, device_id="d-xr", model=model,
+                           platform="xr-appmgr"))
 
 
 def test_validate_record_xr_os_family_refuses_explicit_platform():
