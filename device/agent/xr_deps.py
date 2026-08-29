@@ -168,9 +168,15 @@ def reclaimable(stage_dir, protect, state):
     and the XR install manager may reference files in it. The agent's own
     state is the only proof of ownership, so a file qualifies only when
     state records IRIS as having placed it, it is really on the mount, and
-    the caller's protect set does not spare it. A PARKED image's copy is
-    offered on purpose — that is the parked-aware `_protect_set` contract:
-    an unchecked image's file is kept until another image needs the room.
+    the caller's protect set does not spare it. Written to the general
+    parked-aware `_protect_set` contract — offering a PARKED image's copy on
+    purpose — but on THIS platform that almost never has anything to find:
+    stage IS root here, so `_reconcile_set`'s park already deletes a parked
+    image's file outright via `remove_stage` (iris_agent.py) on the very
+    next tick, the OPPOSITE of the general contract's "kept until another
+    image needs the room." See the parity review (adjudicated, no fix) for
+    why that makes reclaim-none safe rather than a gap: an enabled reclaim
+    would have nothing left to do.
 
     NOTE: run_once's `_reclaim_for_mode` acts on modes "install" and
     "bundle" only, and detect_mode() answers "xr", so nothing calls this
@@ -314,7 +320,7 @@ def build_deps(cfg, conf_path, state_path=None):
         file_size=lambda p: os.path.getsize(p) if os.path.exists(p) else None,
         verify=lambda p, sha: verify_image.sha256_matches(p, sha),
         free_bytes=lambda prefix=TARGET_FS: free_bytes(stage_dir),
-        version=lambda: _conf_fact("device_version", "IRIS_DEVICE_VERSION")
+        version=lambda: _conf_fact("device_version", "IRIS_VERSION")
                         or "unknown",
         copy_to_root=lambda fname, target=TARGET_FS, expected_size=None:
             attest_in_place(stage_dir, fname, expected_size, emit),
@@ -333,7 +339,7 @@ def build_deps(cfg, conf_path, state_path=None):
             stage_dir, protect, _load_state(state_path)),
         reclaim_bundle=lambda target, names: reclaim_bundle(stage_dir, names,
                                                             emit),
-        model=lambda: _conf_fact("device_model", "IRIS_DEVICE_MODEL") or None,
+        model=lambda: _conf_fact("device_model", "IRIS_MODEL") or None,
         refresh=refresh,
         aria_stats=lambda stage_path: iris_agent._aria_stats_impl(_rpc,
                                                                   stage_path),

@@ -127,8 +127,10 @@ device id are passed as `--env` options on the activation line and are never
 baked into the image; `device/xr/entrypoint.sh` writes them into
 `iris-agent.conf` on first boot, and is its own supervisor loop the same way
 the IOx entrypoint is. `device/xr-uninstall.sh` is the receipt-driven
-inverse: deactivate, uninstall the source, and remove the RPM and the agent's
-`iris-work/` directory.
+inverse: deactivate, uninstall the source, remove the RPM and the agent's
+`iris-work/` directory, and sweep any `*.torrent`/`*.aria2`/`*.peers.json`
+sidecar the agent left at `harddisk:` root — this platform has no placement
+step, so those land next to any staged image, not inside `iris-work/`.
 
 Nothing is installed or activated on the device's *software*: as on every
 other platform, IRIS distributes, verifies, and stages an image, and stops

@@ -338,6 +338,21 @@ def test_build_deps_reads_identity_from_conf_and_never_guesses(tmp_path):
     assert blank.running_image() is None
 
 
+def test_build_deps_model_version_env_fallback_matches_activation(tmp_path, monkeypatch):
+    """F9: the env fallback must read the SAME names activation actually sets
+    (IRIS_MODEL/IRIS_VERSION, device/xr-install.sh's --env keys), not
+    IRIS_DEVICE_MODEL/IRIS_DEVICE_VERSION -- a name nothing ever sets. The
+    entrypoint maps activation env into the conf on FIRST boot only, so this
+    fallback is the only thing that can recover model/version for a dropped
+    conf that is missing those two keys (they are not force-reconciled every
+    boot the way target_fs/stage_dir are)."""
+    monkeypatch.setenv("IRIS_MODEL", "8201")
+    monkeypatch.setenv("IRIS_VERSION", "25.4.2 LNT")
+    _cfg_out, deps = _build(tmp_path)   # no device_model/device_version in cfg
+    assert deps.model() == "8201"
+    assert deps.version() == "25.4.2 LNT"
+
+
 def test_build_deps_labels_its_telemetry_runtime_mode(tmp_path):
     """telemetry_report reads runtime_mode straight from cfg and defaults to
     'guestshell'. An XR container reporting 'guestshell' would be a lie in

@@ -765,12 +765,24 @@ def test_install_options_for_legacy_router_family_guestshell():
 
 def test_install_options_for_xr_os_family_offers_only_the_appmgr_container():
     # os_family alone is authoritative, independent of what the model prefix
-    # would otherwise suggest -- e.g. ASR-9906 matches the ISR/ASR/CSR prefix
-    # but is IOS-XR hardware, the exact misroute this guardrail closes. The
-    # XR agent exists now, so the answer is the one recipe that IS IOS-XR --
-    # never one of the IOS-XE three.
-    assert gui_onboard.install_options_for("ASR-9906", "xr") == ["xr-appmgr"]
-    assert gui_onboard.install_options_for("C9300-48UXM", "xr") == ["xr-appmgr"]
+    # would otherwise suggest -- e.g. an 8000-series device matches no
+    # IOS-XE row in the table -- so a blank or XR-shaped model gets the one
+    # recipe that IS IOS-XR, never one of the IOS-XE three.
+    assert gui_onboard.install_options_for("8201", "xr") == ["xr-appmgr"]
+    assert gui_onboard.install_options_for("", "xr") == ["xr-appmgr"]
+
+
+def test_install_options_for_xr_os_family_refuses_non_8000_models():
+    # v1 is validated on the Cisco 8000 series only (agentinfo plan scope:
+    # "8000-series first, capability-gated"). os_family is still
+    # authoritative -- neither of these falls through to an IOS-XE recipe
+    # (ASR-9906 matches the ISR/ASR/CSR prefix, C9300-48UXM matches the C9k
+    # prefix, and both would otherwise misroute exactly the way the 8201
+    # incident did) -- but a non-8000 XR device is refused outright ([]),
+    # never left as "no opinion" (None) for validate_record to wave through.
+    assert gui_onboard.install_options_for("ASR-9906", "xr") == []
+    assert gui_onboard.install_options_for("C9300-48UXM", "xr") == []
+    assert gui_onboard.install_options_for("NCS-5501", "xr") == []
 
 
 def test_install_options_for_8xxx_model_offers_xr_even_without_os_family():

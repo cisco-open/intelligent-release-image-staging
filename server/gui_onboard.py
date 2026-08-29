@@ -130,13 +130,25 @@ def install_options_for(model, os_family=None):
     explicitly run.
 
     ``["xr-appmgr"]`` -- the appmgr container agent, and nothing else -- is
-    the answer for IOS-XR, whether that is known via ``os_family`` or inferred
-    from an XR-shaped 8xxx/8xxx-SYS model number. It is the one platform in
-    this table that is not IOS-XE, so it is offered EXCLUSIVELY: no XR device
-    may run an IOS-XE recipe, and no IOS-XE device may run this one (the
-    inverse guard lives in resolve_platform). Unlike the model-table families
-    below, it is never an auto-resolution default -- an XR model number
-    matches no _MODEL_PLATFORMS row, so the operator picks it explicitly.
+    the answer for IOS-XR, but ONLY for the Cisco 8000 series: v1 is
+    validated on that hardware alone (agentinfo plan scope: "8000-series
+    first, capability-gated"), so a blank model (nothing to check yet) or an
+    XR-shaped 8xxx/8xxx-SYS number gets it, whether XR-ness is known via
+    ``os_family`` or inferred from the model number alone. It is the one
+    platform in this table that is not IOS-XE, so it is offered
+    EXCLUSIVELY: no XR device may run an IOS-XE recipe, and no IOS-XE device
+    may run this one (the inverse guard lives in resolve_platform). Unlike
+    the model-table families below, it is never an auto-resolution default
+    -- an XR model number matches no _MODEL_PLATFORMS row, so the operator
+    picks it explicitly.
+
+    An ``os_family == "xr"`` device whose model does NOT match the 8xxx
+    shape (an ASR-9906, an NCS box) is refused outright -- ``[]``, never a
+    fall-through to an IOS-XE recipe (os_family is authoritative regardless
+    of what the model prefix would otherwise suggest) and never ``None``
+    (which would read as "no opinion" and let validate_record wave it
+    through). Widening past the 8000 series is a v2 change to this one
+    branch, not a rewrite of the guardrail.
 
     None means the model is blank or not a family this table recognizes, so no
     guardrail applies -- the console still offers Auto, and validate_record
@@ -154,7 +166,9 @@ def install_options_for(model, os_family=None):
     rejection sites in sync."""
     model = (model or "").strip()
     if (os_family or "") == "xr":
-        return [_XR_PLATFORM]
+        if not model or _XR_MODEL_RE.match(model):
+            return [_XR_PLATFORM]
+        return []
     if model and _XR_MODEL_RE.match(model):
         return [_XR_PLATFORM]
     if not model:
