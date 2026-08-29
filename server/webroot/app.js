@@ -790,6 +790,12 @@
     var ts = rec.timestamps || {};
     var pf = rec.preflight || {};
     var attach = res.attachment || '';
+    // xr-host carries none of the four addressing rows below -- the
+    // appmgr container runs on the router's own network stack -- so they
+    // are dropped from the table entirely rather than shown as dashes,
+    // which would read as "unknown" instead of "not applicable".
+    var xrHost = attach === 'xr-host';
+    var attachLabel = xrHost ? 'XR host' : attach;
     var mgmt = attach.indexOf('router-') === 0
       ? (res.vpg_number ? 'VPG' + res.vpg_number : '')
       : ((res.inband_vlan || res.iris_vlan) ? 'VLAN ' + (res.inband_vlan || res.iris_vlan) : '');
@@ -807,16 +813,22 @@
       ['Planned', esc(fmtDate(ts.planned_at) || '—')],
       ['Finished', esc(fmtDate(ts.finished_at) || '—')],
       ['Preflight', esc(pf.status || '—')],
-      ['Attachment', esc(attach || '—')],
-      ['Management VLAN / VPG', esc(mgmt || '—')],
-      ['SVI', esc(svi || '—')],
-      ['App IP', esc(app || '—')],
-      ['NAT interface', esc(res.nat_interface || '—')],
+      ['Attachment', esc(attachLabel || '—')]
+    ];
+    if (!xrHost) {
+      pairs.push(
+        ['Management VLAN / VPG', esc(mgmt || '—')],
+        ['SVI', esc(svi || '—')],
+        ['App IP', esc(app || '—')],
+        ['NAT interface', esc(res.nat_interface || '—')]
+      );
+    }
+    pairs.push(
       ['Swarm port', esc(res.swarm_port || '—')],
       ['Model', esc(res.model || '—')],
       ['Agent install', esc(res.platform || '—')],
       ['Device identity', esc(res.device_identity || '—')]
-    ];
+    );
     return pairs.map(function (kv) {
       return '<tr><td class="muted">' + esc(kv[0]) + '</td><td>' + kv[1] + '</td></tr>';
     }).join('');
@@ -1777,10 +1789,27 @@
   async function refreshInstallOptions() {
     var model = document.getElementById('df-model').value.trim();
     var platform = document.getElementById('df-platform');
+    var attachSel = document.getElementById('df-attachment');
     var gen = ++installOptionsGen;
+    // The install-options answer for an IOS-XR-shaped model is exactly
+    // ["xr-appmgr"] -- the one thing it can run, and nothing else ever
+    // returns just that -- so ANY other repaint of the platform select
+    // (blank model, a server/network error, a null or empty answer, or a
+    // real answer that isn't that exact singleton) must exit an
+    // auto-entered xr-host attachment. Left stuck on xr-host, the
+    // addressing fields stay hidden for a non-XR device with no visible
+    // cause and the platform select no longer even offers xr-appmgr to
+    // undo it with. Every one of those paths below calls this helper.
+    function exitXrHostIfStale() {
+      if (attachSel.value === 'xr-host') {
+        attachSel.value = '';
+        updateDeviceFields();
+      }
+    }
     if (!model) {
       platform.disabled = false;
       platform.innerHTML = FULL_INSTALL_OPTIONS_HTML;
+      exitXrHostIfStale();
       return;
     }
     try {
@@ -1792,12 +1821,14 @@
         // guard still refuses impossible platform+model combinations.
         platform.disabled = false;
         platform.innerHTML = FULL_INSTALL_OPTIONS_HTML;
+        exitXrHostIfStale();
         return;
       }
       var options = (await r.json()).options;
       if (options === null) {
         platform.disabled = false;
         platform.innerHTML = FULL_INSTALL_OPTIONS_HTML;
+        exitXrHostIfStale();
         return;
       }
       if (options.length === 0) {
@@ -1807,6 +1838,7 @@
         // silent fall-through to the permissive list.
         platform.innerHTML = '<option value="">No agent install available for this model</option>';
         platform.disabled = true;
+        exitXrHostIfStale();
         return;
       }
       var kept = platform.value;
@@ -1816,28 +1848,22 @@
           return '<option value="' + esc(o) + '">' + esc(INSTALL_OPTION_LABELS[o] || o) + '</option>';
         }).join('');
       if (options.indexOf(kept) !== -1) platform.value = kept;
-      // The install-options answer for an IOS-XR-shaped model is exactly
-      // ["xr-appmgr"] -- the one thing it can run, and nothing else ever
-      // returns just that. Drive the attachment auto-select off that
-      // server answer instead of re-implementing the model regex here,
-      // and symmetrically exit xr-host when a corrected model no longer
-      // answers that way -- otherwise the addressing fields stay hidden
-      // for a non-XR device with no visible cause.
-      var attachSel = document.getElementById('df-attachment');
+      // Drive the attachment auto-select off the server answer instead of
+      // re-implementing the model regex here.
       if (options.length === 1 && options[0] === 'xr-appmgr') {
         if (attachSel.value !== 'xr-host') {
           attachSel.value = 'xr-host';
           updateDeviceFields();
         }
-      } else if (attachSel.value === 'xr-host') {
-        attachSel.value = '';
-        updateDeviceFields();
+      } else {
+        exitXrHostIfStale();
       }
     } catch (e) {
       // Network failure or JSON parse error: restore permissive defaults so
       // a transient blip never locks out a valid platform choice.
       platform.disabled = false;
       platform.innerHTML = FULL_INSTALL_OPTIONS_HTML;
+      exitXrHostIfStale();
     }
   }
   document.getElementById('df-model').addEventListener('input', refreshInstallOptions);

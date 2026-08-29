@@ -2787,7 +2787,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                      "of: %s" % ", ".join(sorted(
                                          gui_onboard._PLATFORM_RECIPES))}); return
                 old = dev.get("platform") or ""
-                # Empty value CLEARS the override (falls back to Auto/model).
+                # Empty value CLEARS the override (falls back to Auto/model)
+                # -- except on a classified xr-host row, where platform
+                # xr-appmgr is mutually required and clearing it is refused
+                # below with that mutual-requirement message instead.
                 try:
                     fleet.upsert({"device_id": did, "platform": plat})
                 except (ValueError, KeyError) as exc:

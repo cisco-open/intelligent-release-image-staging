@@ -58,6 +58,9 @@ top-level `VERSION` file.
   IRIS owns on the router — the appmgr application, its registered package
   source, the staged RPM, and the agent's working directory — and leave
   everything else, including the router's networking configuration, alone.
+  Hardening that teardown against a run interrupted partway through, and
+  recording provenance for files an operator adopted rather than IRIS
+  staged, is tracked as follow-up work.
 
 ### Changed
 - Image verification is now the same on every platform: the agent proves integrity by

@@ -4737,6 +4737,40 @@ def test_device_upsert_create_and_update_details(tmp_path):
         stop()
 
 
+def test_device_form_xr_host_body_creates_a_clean_record_with_honest_audit(tmp_path):
+    """Wire-path coverage for the console's xr-host submit branch: POST the
+    EXACT body app.js's devForm submit handler builds for xr-host --
+    device_id, device_ip, management_type, model, platform,
+    credential_profile_id, nothing else, no addressing keys at all --
+    straight to the same /api/devices endpoint the form posts to. The
+    device must come back as a clean xr-host/xr-appmgr record with none of
+    the ten addressing fields, and the create audit line -- whose detail
+    reports vlan by falling back through iris_vlan/inband_vlan/vlan --
+    must show '-' honestly rather than fabricating one."""
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        body = {"device_id": "xr1", "device_ip": "10.0.0.9",
+                "management_type": "xr-host", "model": "8201",
+                "platform": "xr-appmgr", "credential_profile_id": ""}
+        st, _, b = _req(host, port, "POST", "/api/devices", body, headers=hh)
+        assert st == 200, b
+        saved = json.loads(b)["device"]
+        assert saved["management_type"] == "xr-host"
+        assert saved["platform"] == "xr-appmgr"
+        for key in ("iris_vlan", "svi_ip", "svi_mask", "app_ip", "app_mask",
+                    "app_gateway", "vpg_number", "nat_interface", "inband_vlan"):
+            assert not saved.get(key), "%s should be absent/empty, got %r" % (
+                key, saved.get(key))
+        ups = [e for e in _read_audit_lines(audit_path)
+               if e.get("event") == "device_upsert"]
+        assert ups and ups[-1]["action"] == "create"
+        assert ups[-1]["detail"] == "ip 10.0.0.9, vlan -, model 8201"
+    finally:
+        stop()
+
+
 def test_csv_import_route_stats_and_detail(tmp_path):
     host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
     try:
@@ -6706,17 +6740,19 @@ def test_add_device_form_filters_install_options_live_by_model():
 def test_xr_host_attachment_option_added_to_both_selects():
     """The xr-host management type needs to be choosable from the console:
     the add-device form's df-attachment select and the devices-table
-    dev-filter-attachment select both gain the wire value xr-host with the
-    short honest label 'XR host' (the plan's longer vocabulary -- "XR host
-    networking -- the agent shares the router's own network stack; no
-    app-network fields" -- is prose, not what fits in a dropdown)."""
+    dev-filter-attachment select both gain the wire value xr-host. The
+    filter (whose siblings are bare wire-value labels like "routed") gets
+    the short honest label 'XR host'; the add-device form (whose siblings
+    are each "Label - one-line description", e.g. "Routed - IRIS-managed
+    app network") gets the matching descriptive form so xr-host doesn't
+    stand out as the one option with no explanation."""
     with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
         html = f.read()
-    assert '<option value="xr-host">XR host</option>' in html
     dev_filter = html.split('id="dev-filter-attachment"', 1)[1].split("</select>", 1)[0]
     assert '<option value="xr-host">XR host</option>' in dev_filter
     df_attach = html.split('id="df-attachment"', 1)[1].split("</select>", 1)[0]
-    assert '<option value="xr-host">XR host</option>' in df_attach
+    assert ('<option value="xr-host">XR host - router\'s own network '
+            'stack</option>') in df_attach
 
 
 def test_update_device_fields_hides_every_addressing_field_for_xr_host():
@@ -6756,7 +6792,18 @@ def test_xr_host_auto_selected_from_model_and_from_platform_pick():
     df-gateway stay hidden for a non-XR device with no visible cause and
     the form cannot be completed. Scoped to the same model-driven repaint
     -- it must not reach for any of the operator's own explicit attachment
-    changes elsewhere in the form."""
+    changes elsewhere in the form.
+
+    Regression closed here: a first pass only wired the exit into the
+    fetched-non-XR-answer branch. Every OTHER path that repaints the
+    platform select away from offering xr-appmgr -- the blank-model early
+    return, the !r.ok error path, a null options answer, the zero-options
+    dead end, and the catch block -- painted FULL_INSTALL_OPTIONS_HTML
+    (which does not even list xr-appmgr) while leaving df-attachment
+    stuck on xr-host, so the addressing fields stayed hidden with the
+    agent-install select silently offering no way back to xr-appmgr
+    either. The exit must be a single helper invoked from every one of
+    those paths, not re-implemented ad hoc per branch."""
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
     refresh_fn = js.split("async function refreshInstallOptions() {", 1)[1].split(
@@ -6765,11 +6812,20 @@ def test_xr_host_auto_selected_from_model_and_from_platform_pick():
     assert "attachSel.value !== 'xr-host'" in refresh_fn
     assert "attachSel.value = 'xr-host';" in refresh_fn
     assert "updateDeviceFields();" in refresh_fn
-    assert "} else if (attachSel.value === 'xr-host') {" in refresh_fn
-    exit_arm = refresh_fn.split("} else if (attachSel.value === 'xr-host') {", 1)[1].split(
-        "}", 1)[0]
-    assert "attachSel.value = '';" in exit_arm
-    assert "updateDeviceFields();" in exit_arm
+    assert "function exitXrHostIfStale() {" in refresh_fn
+    helper = refresh_fn.split("function exitXrHostIfStale() {", 1)[1].split("}", 1)[0]
+    assert "attachSel.value === 'xr-host'" in helper
+    assert "attachSel.value = '';" in helper
+    assert "updateDeviceFields();" in helper
+    # every non-XR repaint path calls the helper -- six calls: blank model,
+    # !r.ok, options === null, options.length === 0, the fetched-non-XR
+    # answer, and the catch block
+    assert refresh_fn.count("exitXrHostIfStale();") == 6
+    blank_model_block = refresh_fn.split("if (!model) {", 1)[1].split("}", 1)[0]
+    assert "exitXrHostIfStale();" in blank_model_block, \
+        "blank-model early return must exit a stale xr-host attachment too"
+    catch_block = refresh_fn.split("} catch (e) {", 1)[1]
+    assert "exitXrHostIfStale();" in catch_block
     assert "getElementById('df-platform').addEventListener('change'" in js
     plat_fn = js.split(
         "getElementById('df-platform').addEventListener('change', function () {", 1)[1].split(
@@ -6819,6 +6875,35 @@ def test_devices_table_renders_honest_xr_host_label():
     assert xr_idx < fallback_idx, "xr-host arm must precede the generic fallback"
     xr_arm = label[xr_idx:fallback_idx]
     assert "attachmentDetail" not in xr_arm
+
+
+def test_deploy_info_panel_hides_meaningless_rows_and_labels_xr_host():
+    """The per-row (i) deployment-details panel rendered raw 'xr-host' as
+    the Attachment value and four rows of dashes -- Management VLAN / VPG,
+    SVI, App IP, NAT interface -- that mean nothing for an xr-host receipt,
+    since the appmgr container carries none of them. xr-host now renders
+    the honest 'XR host' label, and the four addressing rows are dropped
+    from the table entirely for it rather than shown as em-dashes (which
+    read as "unknown", not "not applicable")."""
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    fn = js.split("function deployReceiptRows(rec, total) {", 1)[1].split(
+        "\n  }", 1)[0]
+    assert "var xrHost = attach === 'xr-host';" in fn
+    assert "'XR host'" in fn
+    assert "if (!xrHost) {" in fn
+    guarded = fn.split("if (!xrHost) {", 1)[1].split("}", 1)[0]
+    for row in ("Management VLAN / VPG", "SVI", "App IP", "NAT interface"):
+        assert row in guarded, "%r must be inside the !xrHost guard" % row
+    # State/Receipt/Planned/Finished/Preflight/Attachment stay unconditional
+    # (every receipt has them); so do Swarm port/Model/Agent install/Device
+    # identity, which are outside the guard, after it closes
+    unguarded = fn.split("if (!xrHost) {", 1)[0]
+    for row in ("State", "Receipt", "Planned", "Finished", "Preflight", "Attachment"):
+        assert row in unguarded
+    after_guard = fn.split("if (!xrHost) {", 1)[1].split("}", 1)[1]
+    for row in ("Swarm port", "Model", "Agent install", "Device identity"):
+        assert row in after_guard
 
 
 def test_install_options_api_requires_auth_and_matches_model_matrix(tmp_path):

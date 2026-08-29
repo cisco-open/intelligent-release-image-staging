@@ -145,7 +145,10 @@ Onboarding creates the appmgr application `iris`, registers the package
 source `iris-xr`, stages the agent RPM at `harddisk:iris-xr.rpm`, and creates
 the working directory `harddisk:iris-work`. Undeploy removes exactly those
 four resources from its receipt; every other router setting, including its
-networking configuration, is preserved.
+networking configuration, is preserved. Teardown hardening for a run that
+is interrupted partway through (which can leave `harddisk:iris-work`
+behind) and provenance for files an operator adopted rather than IRIS
+staged is tracked as follow-up work.
 
 ## Inventory (CSV v2)
 
