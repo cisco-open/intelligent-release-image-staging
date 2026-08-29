@@ -73,9 +73,9 @@ setup() {
 }
 
 @test "xr-uninstall.sh never sends the invalid 'appmgr application summary' form" {
-  if grep -q 'application summary' "$UNINSTALL"; then
-    return 1
-  fi
+  [ -r "$UNINSTALL" ] || return 1
+  count="$(grep -c 'application summary' "$UNINSTALL" || true)"
+  [ "$count" -eq 0 ]
 }
 
 @test "FORCE dry-run and receipted dry-run touch the identical IRIS-named footprint" {
@@ -166,6 +166,78 @@ case "$cmds" in
       row="$(eval "printf '%s' \"\${$indexed_var-\$FAKE_APP_ROW}\"")"
       echo "__IRIS_XR_VERIFY_APPS__"
       printf '%s\n' "$row"
+      # probe_app_request() now asks for a trailing end marker too -- a
+      # truncated-after-marker stream must be a hard error, never read as
+      # absent. FAKE_VERIFY_OMIT_APPS_END drops just this line so a test
+      # can simulate that truncation with the start marker/row intact.
+      if [ "${FAKE_VERIFY_OMIT_APPS_END:-no}" != "yes" ]; then
+        echo "__IRIS_XR_VERIFY_APPS_END__"
+      fi
+      # FAKE_PROBE_RC simulates the probe's own transport call dying with a
+      # nonzero exit (e.g. rc 124 from Task 1's session bound) after
+      # whatever partial output already made it out above.
+      if [ -n "${FAKE_PROBE_RC:-}" ] && [ "${FAKE_PROBE_RC}" != "0" ]; then
+        exit "$FAKE_PROBE_RC"
+      fi
+    fi
+    echo "__IRIS_XR_VERIFY_SOURCES__"
+    printf '%s\n' "${FAKE_SOURCE_ROW-}"
+    if [ "${FAKE_VERIFY_OMIT_FILES:-no}" != "yes" ]; then
+      echo "__IRIS_XR_VERIFY_FILES__"
+      printf '%s\n' "${FAKE_DIR_HARDDISK-Directory of harddisk:/}"
+    fi
+    ;;
+  *"__IRIS_XR_VERIFY_SIDECARS__"*)
+    echo "__IRIS_XR_VERIFY_SIDECARS__"
+    printf '%s\n' "${FAKE_ROOT_LISTING-}"
+    echo "__IRIS_XR_VERIFY_SIDECARS_END__"
+    ;;
+  *)
+    echo "ok"
+    ;;
+esac
+STUB
+  chmod +x "$STUBDIR/lab/xr-run.sh"
+  ln -sf "$UNINSTALL" "$STUBDIR/device/xr-uninstall.sh"
+}
+
+# CRITICAL fix pin: a fake lab/xr-run.sh shaped like the REAL ssh -tt
+# transport (commit 6fd43db transcript shape) -- it echoes the ENTIRE piped
+# request back verbatim as one upfront blob BEFORE anything executes, then
+# appends the real (executed) section for whatever was actually asked for,
+# same as the plain stub above. Every marker therefore appears at least
+# twice in the transcript: once inside the echoed blob (whose "section" is
+# just the next typed line, never real output) and once for real.
+# verify_section must read the LAST occurrence, not the first.
+_xr_uninstall_echoing_stub_setup() {
+  STUBDIR="$BATS_TEST_TMPDIR/stub"
+  mkdir -p "$STUBDIR/lab" "$STUBDIR/device"
+  FAKE_COMMAND_LOG="$BATS_TEST_TMPDIR/xr-commands.log"
+  : > "$FAKE_COMMAND_LOG"
+  export FAKE_COMMAND_LOG
+
+  cat > "$STUBDIR/lab/xr-run.sh" <<'STUB'
+#!/usr/bin/env bash
+cmds="$(cat)"
+if [ -n "${FAKE_COMMAND_LOG:-}" ]; then
+  { echo "=== CALL START ==="; printf '%s\n' "$cmds"; echo "=== CALL END ==="; } >> "$FAKE_COMMAND_LOG"
+fi
+printf '%s\n' "$cmds"
+case "$cmds" in
+  *"__IRIS_XR_VERIFY_APPS__"*)
+    if [ "${FAKE_VERIFY_OMIT_APPS:-no}" != "yes" ]; then
+      countfile="${BATS_TEST_TMPDIR:-.}/probe-count"
+      n=0
+      [ -f "$countfile" ] && n="$(cat "$countfile")"
+      n=$((n + 1))
+      printf '%s' "$n" > "$countfile"
+      indexed_var="FAKE_APP_ROW_$n"
+      row="$(eval "printf '%s' \"\${$indexed_var-\$FAKE_APP_ROW}\"")"
+      echo "__IRIS_XR_VERIFY_APPS__"
+      printf '%s\n' "$row"
+      if [ "${FAKE_VERIFY_OMIT_APPS_END:-no}" != "yes" ]; then
+        echo "__IRIS_XR_VERIFY_APPS_END__"
+      fi
     fi
     echo "__IRIS_XR_VERIFY_SOURCES__"
     printf '%s\n' "${FAKE_SOURCE_ROW-}"
@@ -262,6 +334,28 @@ _xr_uninstall_run_live() {
   fi
 }
 
+@test "live: a probe transport that exits nonzero is a hard error, never read as absent" {
+  _xr_uninstall_stub_setup
+  FAKE_PROBE_RC=124 run _xr_uninstall_run_live
+  [ "$status" -ne 0 ] || return 1
+  log="$(cat "$FAKE_COMMAND_LOG")"
+  # fails closed before any later step -- no deactivate config, no source
+  # uninstall, no rm
+  if printf '%s\n' "$log" | grep -qE 'no appmgr application iris|appmgr package uninstall source|run rm'; then
+    return 1
+  fi
+}
+
+@test "live: a probe truncated after its start marker (missing end marker) is a hard error, never absent" {
+  _xr_uninstall_stub_setup
+  FAKE_VERIFY_OMIT_APPS_END=yes run _xr_uninstall_run_live
+  [ "$status" -ne 0 ] || return 1
+  log="$(cat "$FAKE_COMMAND_LOG")"
+  if printf '%s\n' "$log" | grep -qE 'no appmgr application iris|appmgr package uninstall source|run rm'; then
+    return 1
+  fi
+}
+
 @test "live: [5/5] still independently catches the app reappearing after a successful deactivate" {
   _xr_uninstall_stub_setup
   # call 1 (initial probe): present. call 2 (re-probe after deactivate):
@@ -275,6 +369,47 @@ _xr_uninstall_run_live() {
   [ "$status" -ne 0 ] || return 1
   [[ "$output" == *"artifacts still present"* ]] || return 1
   [[ "$output" == *"appmgr application iris"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# CRITICAL: verify_section must read the EXECUTED marker, not the transport's
+# own echo of what was piped in. ssh -tt (the real XR transport) echoes the
+# WHOLE piped request as one upfront blob before anything runs, so every
+# marker's first occurrence sits in that blob -- first-match section
+# extraction returned the literal next typed line instead of real command
+# output (commit 6fd43db fixed the identical bug in the Python XR preflight
+# probe; this pins the same fix here, against the same transcript shape).
+# ---------------------------------------------------------------------------
+
+@test "live [echoing transport]: a running app is probed correctly and deactivated, not misread as absent" {
+  _xr_uninstall_echoing_stub_setup
+  FAKE_APP_ROW_1="iris  docker  iris-xr  Up  app_manager" run _xr_uninstall_run_live
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"undeploy complete"* ]] || return 1
+  log="$(cat "$FAKE_COMMAND_LOG")"
+  count="$(printf '%s\n' "$log" | grep -c '^no appmgr application iris$')"
+  [ "$count" -eq 1 ] || return 1
+}
+
+@test "live [echoing transport]: the sidecar sweep still issues its rm commands" {
+  _xr_uninstall_echoing_stub_setup
+  FAKE_ROOT_LISTING="8000-x64-26.2.1.iso
+8000-x64-26.2.1.iso.torrent
+notes.txt
+iris-work" run _xr_uninstall_run_live
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"undeploy complete"* ]] || return 1
+  log="$(cat "$FAKE_COMMAND_LOG")"
+  [[ "$log" == *"run rm -f /misc/disk1/8000-x64-26.2.1.iso.torrent"* ]]
+}
+
+@test "live [echoing transport]: [5/5] still catches a planted forbidden artifact" {
+  _xr_uninstall_echoing_stub_setup
+  FAKE_DIR_HARDDISK="Directory of harddisk:/
+    12345 -rw-------. 1 root root 1024 Aug 27 12:00 iris-xr.rpm" run _xr_uninstall_run_live
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"artifacts still present"* ]] || return 1
+  [[ "$output" == *"iris-xr.rpm"* ]]
 }
 
 @test "live: fails when the source is still listed after teardown" {

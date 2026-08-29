@@ -89,11 +89,21 @@ fi
 : "${DEVICE_PASS:?set DEVICE_PASS}"
 RUN() { "$HERE/../lab/xr-run.sh" "$DEVICE_IP"; }   # XR commands on stdin
 
-# Shared marker-section reader: every read-only probe below (the sidecar
-# listing and the final three-way verify) rides this SAME family of
-# `echo __IRIS_XR_VERIFY_<NAME>__` markers, so a missing marker is always a
-# hard transport error, never silently read as "nothing there" the way an
-# empty section otherwise could be.
+# Shared marker-section reader: every read-only probe below (the app-table
+# probe, the sidecar listing, and the final three-way verify) rides this
+# SAME family of `echo __IRIS_XR_VERIFY_<NAME>__` markers, so a missing
+# marker is always a hard transport error, never silently read as "nothing
+# there" the way an empty section otherwise could be.
+#
+# LAST match, not first: the real transport (ssh -tt via lab/xr-run.sh)
+# echoes the ENTIRE piped request back as one upfront blob before anything
+# actually executes, so every marker's FIRST occurrence sits inside that
+# echoed blob -- its "section" there is just the next TYPED line, never
+# real command output. The identical bug was found live in the Python XR
+# preflight probe (commit 6fd43db, server/gui_onboard.py) and fixed the
+# same way there: take the LAST occurrence, which is always the executed
+# one. A stub transport with no upfront echo (bats) has exactly one
+# occurrence per marker, so this is behavior-identical there.
 VERIFY_MARKER="__IRIS_XR_VERIFY_"
 verify_section() {
   python3 -c 'import re, sys
@@ -101,10 +111,10 @@ marker = "__IRIS_XR_VERIFY_"
 name = sys.argv[1]
 text = sys.stdin.read()
 start = marker + name + "__"
-match = re.search(re.escape(start) + r"\r?\n?(.*?)(?=" + re.escape(marker) + r"[A-Z_]+__|\Z)", text, re.DOTALL)
-if not match:
+matches = list(re.finditer(re.escape(start) + r"\r?\n?(.*?)(?=" + re.escape(marker) + r"[A-Z_]+__|\Z)", text, re.DOTALL))
+if not matches:
     sys.exit(1)
-sys.stdout.write(match.group(1))' "$1"
+sys.stdout.write(matches[-1].group(1))' "$1"
 }
 
 if [ "$FORCE_AGENT_ONLY" = "1" ]; then
@@ -126,13 +136,40 @@ probe_app_request() {
 cat <<EOF
 echo ${VERIFY_MARKER}APPS__
 show appmgr application-table
+echo ${VERIFY_MARKER}APPS_END__
 EOF
 }
 app_present() {
-  local probe_out apps
-  probe_out="$(probe_app_request | RUN 2>/dev/null || true)"
+  local probe_out probe_rc apps
+  # The transport's own exit status matters here in a way it does not for
+  # [2/5]-[4/5]'s best-effort steps: a wedged session that Task 1's bound
+  # kills (rc 124) or any other nonzero transport failure must never be
+  # read as "app absent" just because the captured text happens to be
+  # empty -- it is captured and checked explicitly instead of the usual
+  # `|| true`.
+  probe_out="$(probe_app_request | RUN 2>/dev/null)"
+  probe_rc=$?
+  if [ "$probe_rc" -ne 0 ]; then
+    echo "ERROR: deactivate probe's transport exited $probe_rc; refusing to continue teardown on $DEVICE_IP" >&2
+    exit 1
+  fi
   apps="$(printf '%s' "$probe_out" | verify_section APPS)" \
     || { echo "ERROR: deactivate probe did not return the appmgr application-table; refusing to continue teardown on $DEVICE_IP" >&2; exit 1; }
+  # Belt and suspenders beyond the rc check above, checked AFTER the section
+  # itself was confirmed found (so a stream missing the start marker
+  # entirely still reports the clearer "did not return the appmgr
+  # application-table" above, not this one): a stream that dies right after
+  # flushing the start marker (rc 0, or a failure that otherwise doesn't
+  # surface as a transport error) is caught by requiring the trailing end
+  # marker too -- a truncated-after-marker read is a hard error, never
+  # silently treated as absent.
+  case "$probe_out" in
+    *"${VERIFY_MARKER}APPS_END__"*) : ;;
+    *)
+      echo "ERROR: deactivate probe was truncated before its end marker; refusing to continue teardown on $DEVICE_IP" >&2
+      exit 1
+      ;;
+  esac
   case "$apps" in *"$APPID"*) return 0 ;; esac
   return 1
 }
