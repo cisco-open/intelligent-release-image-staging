@@ -7,11 +7,17 @@
 # Receipt-driven inverse of device/xr-install.sh. IRIS on a Cisco 8000-series
 # IOS-XR router is: the appmgr application '$APPID' (default iris), its
 # registered package source '$SOURCE_NAME' (default iris-xr), the RPM staged
-# at harddisk: root, and the agent's own iris-work/ control-file directory
+# at harddisk: root, the agent's own iris-work/ control-file directory
 # under the bind-mounted harddisk: (agentinfo/plans/2026-08-28-xr-agent.md,
-# Task 3). Unlike the router/IOx twins, XR activation uses ONLY --net=host --
-# no VirtualPortGroup, VLAN, SVI, or NAT is ever created, so there is no
-# operator-owned network config an undeploy could accidentally touch.
+# Task 3), and any *.torrent/*.aria2/*.peers.json sidecar aria2 or the agent
+# left at harddisk: ROOT. Sidecars land there, not inside iris-work/, because
+# this platform has no placement step -- aria2 downloads each image straight
+# to its final harddisk: location (xr_deps.py module docstring), so the
+# metadata/progress/receipt files that ride alongside it never leave that
+# same directory either. Unlike the router/IOx twins, XR activation uses
+# ONLY --net=host -- no VirtualPortGroup, VLAN, SVI, or NAT is ever created,
+# so there is no operator-owned network config an undeploy could
+# accidentally touch.
 # EVERY artifact IRIS ever creates here already carries its own name, so
 # receipted and IRIS_FORCE_AGENT_ONLY=1 teardown remove exactly the same
 # footprint -- FORCE exists for interface parity with the router/IOx
@@ -59,16 +65,19 @@ if [ "$DRY" -eq 1 ]; then
     echo "  XR activation (--net=host only) never creates anything else IRIS"
     echo "  would need a receipt to prove ownership of."
   fi
-  echo "===== [1/4] deactivate: no appmgr application $APPID (config; commit guarded by lab/xr-run.sh) ====="
+  echo "===== [1/5] deactivate: no appmgr application $APPID (config; commit guarded by lab/xr-run.sh) ====="
   echo "configure"
   echo "no appmgr application $APPID"
   echo "commit"
-  echo "===== [2/4] appmgr package uninstall source $SOURCE_NAME (Cisco 8000 form) ====="
+  echo "===== [2/5] appmgr package uninstall source $SOURCE_NAME (Cisco 8000 form) ====="
   echo "appmgr package uninstall source $SOURCE_NAME"
-  echo "===== [3/4] remove IRIS files under harddisk: (Linux layer, proven write-through) ====="
+  echo "===== [3/5] remove IRIS files under harddisk: (Linux layer, proven write-through) ====="
   echo "run rm -f $RPM_PATH"
   echo "run rm -rf $WORK_DIR_PATH"
-  echo "===== [4/4] verify no '$APPID' app, '$SOURCE_NAME' source, or IRIS file remains (dir harddisk:) ====="
+  echo "===== [4/5] sweep leftover IRIS sidecars (*.torrent, *.aria2, *.peers.json) at harddisk: root ====="
+  echo "run ls -1 /misc/disk1"
+  echo "run rm -f /misc/disk1/<name>   # one call per matched sidecar name, never a glob"
+  echo "===== [5/5] verify no '$APPID' app, '$SOURCE_NAME' source, IRIS file, or sidecar remains (dir harddisk:) ====="
   echo "===== NOT DONE: no 'copy running-config startup-config' -- XR commit IS the persisted state ====="
   echo "===== LEFT IN PLACE: any operator-staged image already on harddisk: ====="
   exit 0
@@ -78,47 +87,12 @@ fi
 : "${DEVICE_PASS:?set DEVICE_PASS}"
 RUN() { "$HERE/../lab/xr-run.sh" "$DEVICE_IP"; }   # XR commands on stdin
 
-if [ "$FORCE_AGENT_ONLY" = "1" ]; then
-  echo "===== FORCE: reclaiming only IRIS-marked artifacts on $DEVICE_IP (no receipt) ====="
-  echo "  Removing: app '$APPID', source '$SOURCE_NAME', $RPM_PATH, $WORK_DIR_PATH."
-fi
-
-echo "[1/4] deactivate: no appmgr application $APPID on $DEVICE_IP"
-{
-  echo "configure"
-  echo "no appmgr application $APPID"
-  echo "commit"
-} | RUN >/dev/null 2>&1 || true
-
-echo "[2/4] appmgr package uninstall source $SOURCE_NAME"
-printf 'appmgr package uninstall source %s\n' "$SOURCE_NAME" | RUN >/dev/null 2>&1 || true
-
-echo "[3/4] remove IRIS files under harddisk:"
-printf 'run rm -f %s\n' "$RPM_PATH" | RUN >/dev/null 2>&1 || true
-printf 'run rm -rf %s\n' "$WORK_DIR_PATH" | RUN >/dev/null 2>&1 || true
-
-echo "[4/4] verify no '$APPID' app, '$SOURCE_NAME' source, or IRIS file remains"
-# One login for all three read-only verify checks, same consolidation
-# _default_router_preflight/router-uninstall.sh's own verify pass use --
-# each command's answer is delimited by a marker this device echoes back
-# verbatim, so a missing marker is a hard error (transport failure), never
-# read as "nothing left" the way an empty section otherwise could be.
-# FILES reads the harddisk: root listing exactly the way the lab probe
-# verified file removal (agentinfo/xr-support/LAB-RESULTS-2026-08-27.md
-# section 1.3: "dir harddisk:" listed, then, after removal, "verified
-# gone") -- proven, unlike guessing at 'run test -e ... &&' semantics or a
-# missing-file error string 'dir' was never hardware-exercised against.
+# Shared marker-section reader: every read-only probe below (the sidecar
+# listing and the final three-way verify) rides this SAME family of
+# `echo __IRIS_XR_VERIFY_<NAME>__` markers, so a missing marker is always a
+# hard transport error, never silently read as "nothing there" the way an
+# empty section otherwise could be.
 VERIFY_MARKER="__IRIS_XR_VERIFY_"
-verify_request() {
-cat <<EOF
-echo ${VERIFY_MARKER}APPS__
-show appmgr application-table
-echo ${VERIFY_MARKER}SOURCES__
-show appmgr source-table
-echo ${VERIFY_MARKER}FILES__
-dir harddisk:
-EOF
-}
 verify_section() {
   python3 -c 'import re, sys
 marker = "__IRIS_XR_VERIFY_"
@@ -129,6 +103,72 @@ match = re.search(re.escape(start) + r"\r?\n?(.*?)(?=" + re.escape(marker) + r"[
 if not match:
     sys.exit(1)
 sys.stdout.write(match.group(1))' "$1"
+}
+
+if [ "$FORCE_AGENT_ONLY" = "1" ]; then
+  echo "===== FORCE: reclaiming only IRIS-marked artifacts on $DEVICE_IP (no receipt) ====="
+  echo "  Removing: app '$APPID', source '$SOURCE_NAME', $RPM_PATH, $WORK_DIR_PATH."
+fi
+
+echo "[1/5] deactivate: no appmgr application $APPID on $DEVICE_IP"
+{
+  echo "configure"
+  echo "no appmgr application $APPID"
+  echo "commit"
+} | RUN >/dev/null 2>&1 || true
+
+echo "[2/5] appmgr package uninstall source $SOURCE_NAME"
+printf 'appmgr package uninstall source %s\n' "$SOURCE_NAME" | RUN >/dev/null 2>&1 || true
+
+echo "[3/5] remove IRIS files under harddisk:"
+printf 'run rm -f %s\n' "$RPM_PATH" | RUN >/dev/null 2>&1 || true
+printf 'run rm -rf %s\n' "$WORK_DIR_PATH" | RUN >/dev/null 2>&1 || true
+
+echo "[4/5] sweep leftover IRIS sidecars (*.torrent, *.aria2, *.peers.json) at harddisk: root"
+# aria2 downloads straight to harddisk: root on this platform (no placement
+# step, xr_deps.py module docstring), so its own control sidecars -- the
+# .torrent metadata iris_agent.py stages before addTorrent, aria2's own
+# .aria2 progress file, and the per-peer .peers.json receipt
+# telemetry_report.py writes next to the staged image -- land at the SAME
+# root as any operator-staged image, never inside iris-work/. Names alone
+# prove IRIS wrote them (the same _OWNED_SUFFIXES rule xr_deps.purge_others
+# uses at runtime); nothing here ever touches a bare image filename.
+# Listing rides 'run ls -1 /misc/disk1' (one name per line -- avoids the
+# multi-column layout a ttyed 'ls' can fall back to) so THIS SCRIPT decides
+# what matches, never the device; deletion is still one 'run rm -f' per
+# bare path, NEVER a glob handed to 'run' (unproven quote/glob handling,
+# same trap as IOS-XE Guest Shell).
+sidecar_list_request() {
+cat <<EOF
+echo ${VERIFY_MARKER}SIDECARS__
+run ls -1 /misc/disk1
+echo ${VERIFY_MARKER}SIDECARS_END__
+EOF
+}
+SIDECAR_OUT="$(sidecar_list_request | RUN 2>/dev/null || true)"
+SIDECAR_NAMES="$(printf '%s' "$SIDECAR_OUT" | verify_section SIDECARS 2>/dev/null \
+  | grep -E '\.(torrent|aria2|peers\.json)$' || true)"
+if [ -n "$SIDECAR_NAMES" ]; then
+  printf '%s\n' "$SIDECAR_NAMES" | sed 's#^#run rm -f /misc/disk1/#' | RUN >/dev/null 2>&1 || true
+fi
+
+echo "[5/5] verify no '$APPID' app, '$SOURCE_NAME' source, IRIS file, or sidecar remains"
+# One login for all three read-only verify checks, same consolidation
+# _default_router_preflight/router-uninstall.sh's own verify pass use.
+# FILES reads the harddisk: root listing exactly the way the lab probe
+# verified file removal (agentinfo/xr-support/LAB-RESULTS-2026-08-27.md
+# section 1.3: "dir harddisk:" listed, then, after removal, "verified
+# gone") -- proven, unlike guessing at 'run test -e ... &&' semantics or a
+# missing-file error string 'dir' was never hardware-exercised against.
+verify_request() {
+cat <<EOF
+echo ${VERIFY_MARKER}APPS__
+show appmgr application-table
+echo ${VERIFY_MARKER}SOURCES__
+show appmgr source-table
+echo ${VERIFY_MARKER}FILES__
+dir harddisk:
+EOF
 }
 VERIFY_OUT="$(verify_request | RUN 2>/dev/null || true)"
 APPS="$(printf '%s' "$VERIFY_OUT" | verify_section APPS)" \
@@ -143,6 +183,9 @@ case "$APPS" in *"$APPID"*) forbidden="${forbidden}${forbidden:+, }appmgr applic
 case "$SOURCES" in *"$SOURCE_NAME"*) forbidden="${forbidden}${forbidden:+, }appmgr source $SOURCE_NAME" ;; esac
 case "$FILES" in *"$SOURCE_NAME.rpm"*) forbidden="${forbidden}${forbidden:+, }$RPM_PATH" ;; esac
 case "$FILES" in *"iris-work"*) forbidden="${forbidden}${forbidden:+, }$WORK_DIR_PATH" ;; esac
+case "$FILES" in *".torrent"*) forbidden="${forbidden}${forbidden:+, }leftover *.torrent sidecar on harddisk:" ;; esac
+case "$FILES" in *".aria2"*) forbidden="${forbidden}${forbidden:+, }leftover *.aria2 sidecar on harddisk:" ;; esac
+case "$FILES" in *".peers.json"*) forbidden="${forbidden}${forbidden:+, }leftover *.peers.json sidecar on harddisk:" ;; esac
 
 if [ -n "$forbidden" ]; then
   echo "ERROR: artifacts still present after undeploy: $forbidden" >&2
