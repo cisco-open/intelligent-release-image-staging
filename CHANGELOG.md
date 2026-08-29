@@ -18,7 +18,20 @@ top-level `VERSION` file.
   staging copy while leaving the staged file on the boot filesystem, still
   tracked by IRIS. The console now says "Agent install" instead of "platform",
   labels bare inventory honestly, only offers installs the device model can run,
-  and refuses IOS-XR devices with the same clear message on every path.
+  and refuses an IOS-XE install on an IOS-XR device with the same clear message
+  on every path.
+- IOS-XR staging, for Cisco 8000 series routers. A device set to the new
+  "XR appmgr container" agent install onboards from the console, runs the agent
+  as an appmgr Docker application, and downloads its assigned images straight
+  onto `harddisk:` through a bind mount — there is no separate copy step, so the
+  bytes the device verifies and seeds are the bytes already at their final
+  location. As on every other platform IRIS distributes, verifies, and stages:
+  nothing is installed, activated, or reloaded, and no boot variable is touched.
+  Onboarding refuses a router whose banner does not read IOS-XR, or one that
+  still carries a previous IRIS deployment; undeploy removes the application,
+  its package source, the staged RPM, and the agent's own working directory.
+  This platform is not lab-validated yet — see
+  [Validation](docs/zensical/validation.md#validated-platforms).
 
 ### Changed
 - Image verification is now the same on every platform: the agent proves integrity by

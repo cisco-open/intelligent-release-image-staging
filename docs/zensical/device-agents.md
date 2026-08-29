@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Device Agents
 
-Device agents are the only part of IRIS that runs on IOS-XE devices. Their job is intentionally narrow: discover the approved image, download it, verify it, copy it to the platform storage root, and report status.
+Device agents are the only part of IRIS that runs on the device. Their job is intentionally narrow: discover the approved image, download it, verify it, place it on the platform storage root, and report status. Most run on IOS-XE; the IOS-XR agent runs in an appmgr container, described under [IOS-XR: what the installer pushes](#ios-xr-what-the-installer-pushes).
 
 A device attaches through one of four management types: a dedicated IRIS-managed
 VLAN/SVI (**routed**), an existing operator-owned management VLAN (**inband**),
@@ -18,7 +18,8 @@ and remove; see
 After a successful Guest Shell or IOx onboarding or cleanup lifecycle, IRIS runs
 `copy running-config startup-config`. This persists the IRIS app-hosting,
 networking, trustpoint, and cleanup state across a reload. Failed or partial
-onboarding is not saved.
+onboarding is not saved. IOS-XR has no running/startup split to bridge — a
+`commit` is already the persisted state — so the XR recipes never issue one.
 
 ## Guest Shell path
 
@@ -114,6 +115,25 @@ that still has the `iris` app-hosting stanza or any other IRIS-named config.
 `device/iox/uninstall.sh`
 performs the same teardown standalone, for a clean removal with no reinstall.
 
+### IOS-XR: what the installer pushes
+
+`device/xr-install.sh` deploys the agent to a Cisco 8000-series router
+running IOS-XR as an **appmgr Docker application**. It pushes the pre-built
+`iris-xr.rpm` to `harddisk:` over scp, registers it (`appmgr package install
+rpm`), and activates it in config mode with host networking and one bind
+mount: `-v /misc/disk1:/hostmount`. `/misc/disk1` **is** `harddisk:`, so the
+container writes straight to the router's own filesystem. Secrets and the
+device id are passed as `--env` options on the activation line and are never
+baked into the image; `device/xr/entrypoint.sh` writes them into
+`iris-agent.conf` on first boot, and is its own supervisor loop the same way
+the IOx entrypoint is. `device/xr-uninstall.sh` is the receipt-driven
+inverse: deactivate, uninstall the source, and remove the RPM and the agent's
+`iris-work/` directory.
+
+Nothing is installed or activated on the device's *software*: as on every
+other platform, IRIS distributes, verifies, and stages an image, and stops
+there.
+
 ### Confirming it worked
 
 Assignment only gates staging, not presence: an unassigned device still
@@ -155,7 +175,9 @@ The agent loop is deliberately boring:
 4. Skip work when the approved image is already staged and verified.
 5. Download missing content through `aria2c`.
 6. Verify the downloaded file hash.
-7. Copy to the IOS storage root and attest placement by exact byte size.
+7. Place the image at the storage root and attest it by exact byte size. On
+   IOS-XE that is a copy; on IOS-XR the download already landed there through
+   the bind mount, so the agent only attests it.
 8. Report health, progress, and errors.
 
 ## Verification gates
@@ -165,7 +187,7 @@ IRIS uses two checks because the server and device have different capabilities:
 | Check | Where | Why |
 | --- | --- | --- |
 | `sha256` | Agent Python code | Confirms the downloaded file matches the catalog's known-good value — the same value established at publish time on the server — before the IOS copy runs. |
-| Byte size at the storage root | Agent Python code, polling IOS `dir` | The IOS copy to the storage root is a plain copy with no in-band signature check; the agent attests it landed correctly by polling for the file and confirming its size matches the catalog exactly. |
+| Byte size at the storage root | Agent Python code, polling IOS `dir` (IOS-XE) or a `stat` on the mount (IOS-XR) | Placement carries no in-band signature check on any platform; the agent attests the file landed correctly by confirming its size matches the catalog exactly. On IOS-XR there is nothing to copy — the image was downloaded to its final location — so the same check runs against the file already there. |
 
 If verification fails, the agent reports the failure and leaves installation decisions untouched. It does not change boot variables and does not reload the device.
 
@@ -207,10 +229,11 @@ it exists for operators who want the connection pinned.
 | Catalyst 9300 IOx | `flash:` when console-onboarded (via the SSD share); the CLI installer defaults to `sdflash:` | IOx Docker app and SSH-to-self IOS commands. |
 | IE-3400 IOx | `sdflash:` | IOx Docker app and SSH-to-self IOS commands. |
 | Catalyst 8000 Guest Shell | `bootflash:` | Guest Shell through a VirtualPortGroup. |
+| Cisco 8000 series (IOS-XR) | `harddisk:` | appmgr Docker app; no CLI — the container bind-mounts `harddisk:` and stages directly onto it. |
 
 The router path targets the Catalyst 8000 family and is lab-tested on Catalyst 8000V; see
 [Router routed and router NAT](network-attachment.md#router-routed-and-router-nat-iris-managed-virtualportgroup).
 
-For the lab-validation status behind this table, and where Cisco 8000 series /
-IOS-XR fits today — image import and swarm distribution work, no device
-agent yet — see [Validation: Validated platforms](validation.md#validated-platforms).
+For the lab-validation status behind this table — including which of these
+platforms have been exercised end to end on real hardware and which have not
+— see [Validation: Validated platforms](validation.md#validated-platforms).

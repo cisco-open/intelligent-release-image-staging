@@ -35,13 +35,24 @@ For the commands and the pinned Zensical and Python versions, see
 | Catalyst 9300 | Guest Shell | Lab-validated |
 | Catalyst 8000V | Guest Shell (router, VirtualPortGroup) | Lab-validated |
 | IE-3400 | IOx | Lab-validated |
-| Cisco 8000 series (IOS-XR) | none | On-device agent not yet available |
+| Cisco 8000 series (IOS-XR) | appmgr container (stages to `harddisk:`) | Not yet validated end to end |
 
-Image import and swarm distribution work today for Cisco 8000 series / IOS-XR:
-`.iso`, `.tar`, and `.rpm` artifacts publish to the catalog and distribute
-through the swarm like any other image. What is not available yet is a
-device-side staging agent for IOS-XR, so an IOS-XR device does not stage or
-verify an image the way the platforms above do.
+The IOS-XR staging agent exists: a device set to the `xr-appmgr` agent
+install onboards from the Console, runs as an appmgr Docker application, and
+downloads its assigned images straight onto `harddisk:` through a bind mount,
+verifying each against the catalog's sha256 and seeding it to the swarm like
+any other device.
+
+It is **not yet lab-validated**. Its delivery pipeline was proven end to end
+on real hardware — package build, scp to `harddisk:`, `appmgr package
+install`, activation, container write-through to `harddisk:`, and
+container-to-server HTTPS — but a full onboard-stage-verify-undeploy cycle on
+a live router has not yet been recorded. Until it has, treat the row above as
+"expected to work, unproven" rather than as a validated platform.
+
+Image import and swarm distribution have always worked for Cisco 8000 series
+images regardless: `.iso`, `.tar`, and `.rpm` artifacts publish to the catalog
+and distribute through the swarm like any other image.
 
 ## Lab checklist
 
