@@ -175,7 +175,7 @@ rather than hidden, and they explain most surprising readings:
   panel reads "no data" only for an image with no catalog entry.
 
 The exact and the estimated per-peer figures are kept in separate OTLP record
-names on purpose — `iris.device.peer_receipt` (exact, device-reported) versus
+names on purpose — `iris.device.peer_transfer_record` (exact, device-reported) versus
 `iris.swarm.peer_bytes` (sampled, origin-side estimate) — so a backend `sum`
 cannot silently mix them. Do not merge the two record names in a custom panel.
 

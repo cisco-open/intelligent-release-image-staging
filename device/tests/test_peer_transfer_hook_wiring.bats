@@ -25,7 +25,7 @@ setup() {
   REPO="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   DEVICE="$REPO/device"
   ENTRYPOINT="$DEVICE/iox/entrypoint.sh"
-  HOOK_SRC="$DEVICE/agent/peer-receipt-hook.sh"
+  HOOK_SRC="$DEVICE/agent/peer-transfer-hook.sh"
   TMPD="$BATS_TEST_TMPDIR/w"
   mkdir -p "$TMPD/bin" "$TMPD/stage"
   # a recording aria2c, plus stubs so the supervisor's process management does
@@ -55,9 +55,9 @@ run_start_aria2c() {
 # ---------------------------------------------------------------------------
 
 @test "entrypoint launches aria2c with the hook baked into the image" {
-  run run_start_aria2c "/opt/iris/agent/peer-receipt-hook.sh"
+  run run_start_aria2c "/opt/iris/agent/peer-transfer-hook.sh"
   [ "$status" -eq 0 ]
-  [[ "$(cat "$TMPD/launched.txt")" == *"--on-bt-download-complete=/opt/iris/agent/peer-receipt-hook.sh"* ]]
+  [[ "$(cat "$TMPD/launched.txt")" == *"--on-bt-download-complete=/opt/iris/agent/peer-transfer-hook.sh"* ]]
 }
 
 @test "entrypoint omits the flag entirely when the image has no hook" {
@@ -71,7 +71,7 @@ run_start_aria2c() {
 }
 
 @test "entrypoint still passes the private-swarm flags alongside the hook" {
-  run run_start_aria2c "/opt/iris/agent/peer-receipt-hook.sh"
+  run run_start_aria2c "/opt/iris/agent/peer-transfer-hook.sh"
   out="$(cat "$TMPD/launched.txt")"
   [[ "$out" == *"--enable-dht=false"* ]]
   [[ "$out" == *"--bt-seed-unverified=true"* ]]
@@ -83,7 +83,7 @@ run_start_aria2c() {
   # By inheritance through aria2c's fork, never by re-reading the conf: the
   # agent rewrites that file on token refresh, and a hook holding a secret the
   # daemon has moved off is the file-vs-daemon skew of the 2026-08-20 incident.
-  run run_start_aria2c "/opt/iris/agent/peer-receipt-hook.sh"
+  run run_start_aria2c "/opt/iris/agent/peer-transfer-hook.sh"
   [ "$status" -eq 0 ]
   grep -qx "IRIS_RPC_SECRET=supervisorsecret" "$TMPD/env.txt"
 }
@@ -93,7 +93,7 @@ run_start_aria2c() {
 }
 
 @test "entrypoint resolves the hook path once and checks it is executable" {
-  grep -q 'HOOK="/opt/iris/agent/peer-receipt-hook.sh"' "$ENTRYPOINT"
+  grep -q 'HOOK="/opt/iris/agent/peer-transfer-hook.sh"' "$ENTRYPOINT"
   grep -q '\[ -x "\$HOOK" \] || HOOK=""' "$ENTRYPOINT"
 }
 
@@ -104,15 +104,15 @@ run_start_aria2c() {
 @test "the IOx image copies the hook in and gives it the exec bit" {
   # aria2 execs the value with execlp -- no shell, no PATH search fallback for
   # a non-executable file. Without the bit the hook is silently never run.
-  grep -q '^COPY agent/peer-receipt-hook.sh /opt/iris/agent/peer-receipt-hook.sh$' \
+  grep -q '^COPY agent/peer-transfer-hook.sh /opt/iris/agent/peer-transfer-hook.sh$' \
     "$DEVICE/iox/Dockerfile"
-  grep -q 'chmod +x .*/opt/iris/agent/peer-receipt-hook.sh' "$DEVICE/iox/Dockerfile"
+  grep -q 'chmod +x .*/opt/iris/agent/peer-transfer-hook.sh' "$DEVICE/iox/Dockerfile"
 }
 
 @test "the IOx build stages the hook into the docker context" {
   # It is not *.py, so the agent glob does not carry it; the Dockerfile COPYs
   # it by name, so a missing line here fails the build on a missing source.
-  grep -q 'cp "\$REPO/device/agent/peer-receipt-hook.sh" "\$CTX/agent/"' \
+  grep -q 'cp "\$REPO/device/agent/peer-transfer-hook.sh" "\$CTX/agent/"' \
     "$DEVICE/iox/build.sh"
 }
 
@@ -123,16 +123,16 @@ run_start_aria2c() {
   printf 'fake-aria2c\n' > "$BATS_TEST_TMPDIR/aria2c"
   run bash "$REPO/server/pack-agent-bundle.sh" "$DEVICE" "$BATS_TEST_TMPDIR/aria2c" "$out"
   [ "$status" -eq 0 ]
-  tar tzf "$out" | grep -qx "agent/peer-receipt-hook.sh"
+  tar tzf "$out" | grep -qx "agent/peer-transfer-hook.sh"
   x="$BATS_TEST_TMPDIR/x"; mkdir -p "$x"
-  tar xzf "$out" -C "$x" agent/peer-receipt-hook.sh
-  [ -x "$x/agent/peer-receipt-hook.sh" ]
+  tar xzf "$out" -C "$x" agent/peer-transfer-hook.sh
+  [ -x "$x/agent/peer-transfer-hook.sh" ]
 }
 
 @test "the bundled hook is the file both launchers point at" {
-  # guestshell-start.sh resolves $STAGE_DIR/agent/peer-receipt-hook.sh, which
+  # guestshell-start.sh resolves $STAGE_DIR/agent/peer-transfer-hook.sh, which
   # is exactly where bootstrap.sh's tar extraction puts the bundled copy.
-  grep -q 'HOOK_SRC="\${HOOK_SRC:-\$STAGE_DIR/agent/peer-receipt-hook.sh}"' \
+  grep -q 'HOOK_SRC="\${HOOK_SRC:-\$STAGE_DIR/agent/peer-transfer-hook.sh}"' \
     "$DEVICE/guestshell-start.sh"
   [ -f "$HOOK_SRC" ]
 }
@@ -150,7 +150,7 @@ run_start_aria2c() {
 # directory's root -- which is the property these tests exist to keep true. An
 # orphan left at guest-share root is exactly what the collision preflight
 # refuses on the next onboard.
-#   1. the staged hook source   -> <stage>/agent/peer-receipt-hook.sh
+#   1. the staged hook source   -> <stage>/agent/peer-transfer-hook.sh
 #   2. the exec-capable copy    -> /home/guestshell (Guest Shell) or the image
 #   3. the snapshots it writes  -> <stage>/<image>.peers.json
 # aria2 is always launched with --dir=<stage>, and the agent's aria_add always

@@ -444,16 +444,16 @@ def _metric_points(rows, extras, now, export_signals=None, peer_status=None,
     return pts
 
 
-RECEIPT_SOURCE_CLASSES = ("origin", "device", "unknown")
+TRANSFER_RECORD_SOURCE_CLASSES = ("origin", "device", "unknown")
 
 
-def receipt_source_class(ip, origin_ips, device_by_ip):
-    """Who sent the bytes in one ``peer_receipts`` row: ``"origin"`` (the
+def transfer_record_source_class(ip, origin_ips, device_by_ip):
+    """Who sent the bytes in one ``peer_transfer_records`` row: ``"origin"`` (the
     authenticated ``service:seeder``), ``"device"`` (a device whose heartbeat
     claims that swarm address), or ``"unknown"``.
 
     THREE answers, never two. The origin seeder is an ordinary BitTorrent peer
-    of every device, so it owns a receipt row like anyone else; an address that
+    of every device, so it owns a transfer-record row like anyone else; an address that
     resolves to neither the origin nor a known device is UNKNOWN and stays
     unknown -- folding it into either side would be inventing the very
     attribution this function exists to establish. (Unknown is normal, not a
@@ -478,8 +478,8 @@ def receipt_source_class(ip, origin_ips, device_by_ip):
     return "unknown"
 
 
-def classify_peer_receipts(block, origin_ips, device_by_ip):
-    """Aggregate one stored ``peer_receipts`` block by sender class, or None
+def classify_peer_transfer_records(block, origin_ips, device_by_ip):
+    """Aggregate one stored ``peer_transfer_records`` block by sender class, or None
     when there is no block to classify (NOT MEASURED -- never a zeroed answer).
 
     The device measured exact bytes per BitTorrent peer and, correctly, made no
@@ -511,7 +511,7 @@ def classify_peer_receipts(block, origin_ips, device_by_ip):
     for row in rows:
         if not isinstance(row, dict):
             continue
-        cls = receipt_source_class(row.get("ip"), origin_ips, device_by_ip)
+        cls = transfer_record_source_class(row.get("ip"), origin_ips, device_by_ip)
         got = _int(row.get("session_bytes_from_peer"))
         out[cls + "_rows"] += 1
         out[cls + "_bytes"] += got
@@ -1061,14 +1061,14 @@ class Telemetry:
             for rep in ring:
                 if not isinstance(rep, dict):
                     continue
-                # peer_receipts is per REPORT, not per device, so its
+                # peer_transfer_records is per REPORT, not per device, so its
                 # origin/device/unknown split rides with the report it
                 # describes. Absent block -> absent key: not measured is not
                 # zero, and an all-zero split would read as "no peer bytes".
-                split = classify_peer_receipts(
-                    rep.get("peer_receipts"), origin_ips, device_by_ip)
+                split = classify_peer_transfer_records(
+                    rep.get("peer_transfer_records"), origin_ips, device_by_ip)
                 rep_enrich = enrich if split is None else dict(
-                    enrich, peer_receipt_attribution=split)
+                    enrich, peer_transfer_record_attribution=split)
                 event_id, record = _report_event_id(rep, str(device_id))
                 ring_event_ids.add(event_id)
                 try:
@@ -1087,7 +1087,7 @@ class Telemetry:
                     and not self.log_queue.contains(event_id)):
                 self.log_queue.emit(otlp.build_report_record(
                     report, device_id, enrich=enrich))
-                # Fan the receipt block out into one record per peer. Without
+                # Fan the transfer-record block out into one record per peer. Without
                 # this the exact device-side measurement stops in the catalog
                 # and only the per-transfer rollups leave the server -- the
                 # lossy sampled estimate (iris.swarm.peer_bytes) would be the
@@ -1095,9 +1095,9 @@ class Telemetry:
                 # round. classify is bound here, not inside otlp: a second copy
                 # of the origin/device identity rule would drift, and the copy
                 # that drifts is the one an operator reads a peer share off.
-                for peer_record in otlp.build_peer_receipt_records(
+                for peer_record in otlp.build_peer_transfer_records(
                         report, device_id, enrich=enrich,
-                        classify=lambda ip: receipt_source_class(
+                        classify=lambda ip: transfer_record_source_class(
                             ip, origin_ips, device_by_ip)):
                     self.log_queue.emit(peer_record)
 
@@ -1119,7 +1119,7 @@ class Telemetry:
 
         Identity comes from the authenticated principal, never from an address
         list or a peer's own seeder flag. Never breaks: an unreadable registry
-        yields an empty set, which sends every receipt row to ``unknown``
+        yields an empty set, which sends every transfer-record row to ``unknown``
         rather than quietly promoting the origin's bytes to peer-delivered."""
         ips = set()
         try:

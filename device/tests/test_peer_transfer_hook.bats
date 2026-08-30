@@ -4,10 +4,10 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# Behaviour of device/agent/peer-receipt-hook.sh itself, run as aria2 runs it:
+# Behaviour of device/agent/peer-transfer-hook.sh itself, run as aria2 runs it:
 # a bare execlp with (gid, numFiles, firstFilename) and no shell in between
 # (util.cc:2320-2342). The wiring that gets it onto a device is a different
-# file -- test_peer_receipt_hook_wiring.bats.
+# file -- test_peer_transfer_hook_wiring.bats.
 #
 # What these tests defend:
 #   * the snapshot the agent reads is bounded BEFORE it touches flash. The hook
@@ -21,7 +21,7 @@
 
 setup() {
   REPO="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-  HOOK="$REPO/device/agent/peer-receipt-hook.sh"
+  HOOK="$REPO/device/agent/peer-transfer-hook.sh"
   TMPD="$BATS_TEST_TMPDIR/w"
   STAGE="$TMPD/stage"
   mkdir -p "$TMPD/bin" "$STAGE"
@@ -55,7 +55,7 @@ run_hook() {
 }
 
 @test "the size bound leaves room for the envelope under the reader's cap" {
-  # telemetry_report.RECEIPT_MAX_BYTES refuses a sidecar over 1 MiB. The hook
+  # telemetry_report.PEER_TRANSFER_MAX_BYTES refuses a sidecar over 1 MiB. The hook
   # wraps the body in a fixed envelope, so the bound on the BODY has to sit
   # below that cap by at least the envelope -- otherwise the hook can write a
   # file the agent will always throw away.
@@ -64,7 +64,7 @@ run_hook() {
   cap="$(python3 - "$REPO" <<'PY'
 import re, sys
 src = open(sys.argv[1] + "/device/agent/telemetry_report.py").read()
-m = re.search(r"RECEIPT_MAX_BYTES\s*=\s*(.+?)\s*#", src)
+m = re.search(r"PEER_TRANSFER_MAX_BYTES\s*=\s*(.+?)\s*#", src)
 print(eval(m.group(1)))
 PY
 )"

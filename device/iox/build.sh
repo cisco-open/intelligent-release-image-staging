@@ -99,8 +99,8 @@ echo ">> staging agent python (incl. cli_ssh.py, verify_image.py)"
 cp "$REPO"/device/agent/*.py "$CTX/agent/"
 # the aria2 completion hook: not *.py, and the Dockerfile COPYs it by name,
 # so a missing line here fails the build on a missing COPY source.
-cp "$REPO/device/agent/peer-receipt-hook.sh" "$CTX/agent/" \
-  || { echo "!! missing device/agent/peer-receipt-hook.sh (the aria2"
+cp "$REPO/device/agent/peer-transfer-hook.sh" "$CTX/agent/" \
+  || { echo "!! missing device/agent/peer-transfer-hook.sh (the aria2"
        echo "   --on-bt-download-complete program the Dockerfile COPYs)"; exit 1; } >&2
 cp "$REPO"/device/verify_image.py "$CTX/agent/verify_image.py"   # lives in device/, agent imports it
 cp "$REPO/VERSION" "$CTX/agent/VERSION"   # telemetry reports the packaged release

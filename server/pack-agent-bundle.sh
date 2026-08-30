@@ -34,12 +34,12 @@ cp "$DEVICE"/agent/*.py "$STAGE/agent/"        # iris_agent + catalog_client + f
 # the agent because the agent is the only thing that reads what it writes.
 # guestshell-start.sh copies it out of here onto an exec-capable filesystem at
 # launch -- /flash denies chmod, so the staged copy can never be executable.
-cp "$DEVICE/agent/peer-receipt-hook.sh" "$STAGE/agent/"
+cp "$DEVICE/agent/peer-transfer-hook.sh" "$STAGE/agent/"
 cp "$DEVICE/verify_image.py" "$STAGE/agent/"    # so the agent's "import verify_image" works
 cp "$DEVICE/bootstrap.sh" "$DEVICE/guestshell-start.sh" "$DEVICE/rotate-logs.sh" "$STAGE/"
 cp "$ARIA2" "$STAGE/aria2c"
 chmod +x "$STAGE/aria2c" "$STAGE/bootstrap.sh" "$STAGE/guestshell-start.sh" \
-         "$STAGE/rotate-logs.sh" "$STAGE/agent/peer-receipt-hook.sh" 2>/dev/null || true
+         "$STAGE/rotate-logs.sh" "$STAGE/agent/peer-transfer-hook.sh" 2>/dev/null || true
 # Tar an explicit file list (NOT '.') so there's no './' top-dir entry. On the
 # device, guest-share is SELinux-labeled and denies chmod/utime even to the
 # owner, so extracting a './' entry fails. Extract on-box with:

@@ -92,7 +92,7 @@ RUNTIME_MODE = "xr-container"
 
 # Sidecars whose NAME proves IRIS (or its aria2) wrote them. Everything else
 # at the mount is presumed to be the operator's.
-_OWNED_SUFFIXES = (".torrent", ".aria2", telemetry_report.RECEIPT_SIDECAR_SUFFIX)
+_OWNED_SUFFIXES = (".torrent", ".aria2", telemetry_report.PEER_TRANSFER_SIDECAR_SUFFIX)
 
 
 def attest_in_place(stage_dir, fname, expected_size, emit,
@@ -242,7 +242,7 @@ def purge_others(stage_dir, keep_filenames, keep_ids, rpc=None):
     Divergence from the IOS-XE sweep, and the reason for it: there the stage
     dir is IRIS's own directory, so dropping stale `*.bin` files is safe.
     Here the stage dir IS `harddisk:` — full of operator files — and only the
-    torrent/aria2/receipt sidecars carry proof of IRIS ownership. Image files
+    torrent/aria2/peer-transfer sidecars carry proof of IRIS ownership. Image files
     are therefore never swept by name; the one IRIS itself placed is removed
     through run_once's state-tracked pending_root_deletes, which knows it was
     ours."""
@@ -254,7 +254,7 @@ def purge_others(stage_dir, keep_filenames, keep_ids, rpc=None):
     keep = set()
     for keep_filename in keep_filenames:
         keep.update((keep_filename, keep_filename + ".aria2",
-                     keep_filename + telemetry_report.RECEIPT_SIDECAR_SUFFIX))
+                     keep_filename + telemetry_report.PEER_TRANSFER_SIDECAR_SUFFIX))
     keep.update(keep_id + ".torrent" for keep_id in keep_ids)
     for path in glob.glob(os.path.join(stage_dir, "*")):
         base = os.path.basename(path)

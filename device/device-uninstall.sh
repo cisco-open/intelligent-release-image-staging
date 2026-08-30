@@ -11,7 +11,7 @@
 #     - EEM applets IRIS-AGENT + IRIS-COPYROOT (FIRST, so the 60s timer can't
 #       relaunch bootstrap mid-teardown)
 #     - the guestshell instance (disable -> destroy) + its app-hosting config
-#       (this is also what removes /home/guestshell/iris-peer-receipt-hook --
+#       (this is also what removes /home/guestshell/iris-peer-transfer-hook --
 #        the exec-capable copy guestshell-start.sh makes because /flash
 #        denies chmod. Nothing the hook installs sits outside these two.)
 #     - interface Vlan$VLAN + vlan $VLAN
@@ -19,7 +19,7 @@
 #       attachments (EXPLICIT-name no-forms)
 #     - crypto pki trustpoint IRIS + ip http client secure-trustpoint IRIS
 #     - <fs>guest-share (agent, conf, bundle, staged seeding copy, and the
-#       peer-receipt hook's staged source + its <image>.peers.json snapshots)
+#       peer-transfer hook's staged source + its <image>.peers.json snapshots)
 #   inband preserves the operator-owned VLAN/SVI/routes/VRF, which existed
 #     before IRIS and which no deployment record proves IRIS created. It still
 #     removes everything carrying IRIS's own name -- the EEM applets, guestshell/

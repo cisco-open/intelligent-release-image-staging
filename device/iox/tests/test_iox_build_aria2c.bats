@@ -58,21 +58,21 @@ _build_stub_setup() {
   echo "# dummy" > "$STUBDIR/device/agent/dummy.py"
   # the aria2 completion hook is staged alongside the agent python and the
   # Dockerfile COPYs it by name, so the build refuses to proceed without it
-  printf '#!/bin/sh\nexit 0\n' > "$STUBDIR/device/agent/peer-receipt-hook.sh"
+  printf '#!/bin/sh\nexit 0\n' > "$STUBDIR/device/agent/peer-transfer-hook.sh"
   touch "$STUBDIR/device/verify_image.py"
   echo "0.0.0-test" > "$STUBDIR/VERSION"
   BUILD="$STUBDIR/device/iox/build.sh"
 }
 
 @test "a build context without the aria2 completion hook fails closed" {
-  # The Dockerfile COPYs agent/peer-receipt-hook.sh by name. Letting the stage
+  # The Dockerfile COPYs agent/peer-transfer-hook.sh by name. Letting the stage
   # step skip it would push the failure into `docker build` as an opaque
   # missing-COPY-source error, long after the useful context is gone.
   _build_stub_setup
-  rm -f "$STUBDIR/device/agent/peer-receipt-hook.sh"
+  rm -f "$STUBDIR/device/agent/peer-transfer-hook.sh"
   run env -u ARIA2C_BIN bash "$BUILD" --arm64
   [ "$status" -ne 0 ]
-  [[ "$output" == *"peer-receipt-hook.sh"* ]]
+  [[ "$output" == *"peer-transfer-hook.sh"* ]]
 }
 
 @test "missing deliverable + unset ARIA2C_BIN fails closed with a clear error (arm64)" {

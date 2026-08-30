@@ -82,21 +82,21 @@ a panel does not blank out when the swarm goes idle.
 | Record name | Source | Nature |
 | ----------- | ------ | ------ |
 | `iris.swarm.peer_bytes` | Server-side peer ledger | Origin-side **sampled estimate** of one edge's bytes |
-| `iris.device.peer_receipt` | Device-side completion hook | Device-**measured exact** bytes received from one peer |
+| `iris.device.peer_transfer_record` | Device-side completion hook | Device-**measured exact** bytes received from one peer |
 | `iris.device.report` | Device agent | Terminal per-device transfer report |
 | `iris.swarm.start` / `.complete` / `.stop` / `.stale` | Server | Swarm lifecycle events |
 
 !!! danger "Never sum the two peer record names together"
-    `iris.swarm.peer_bytes` and `iris.device.peer_receipt` describe the *same
+    `iris.swarm.peer_bytes` and `iris.device.peer_transfer_record` describe the *same
     bytes* from opposite ends of the wire — one badly, one exactly. They carry
     different record names for exactly this reason. A backend query that sums
     both counts every transfer twice. Pick one name per panel, and prefer
-    `iris.device.peer_receipt` where you need a number you can defend.
+    `iris.device.peer_transfer_record` where you need a number you can defend.
 
 Key attributes on the peer records: `iris.image.id`, `iris.torrent.info_hash`,
 `network.peer.address`, `device.id`, `iris.peer.device.id`,
 `iris.peer.attribution`, `iris.transfer.session_bytes_from_peer`,
-`iris.receipt.capture_complete`.
+`iris.transfer_record.capture_complete`.
 
 `iris.peer.attribution` is `origin` | `device` | `unknown`. The origin seeder
 is an ordinary BitTorrent peer of every device, so its bytes sit in a device's
@@ -393,7 +393,7 @@ log records, one row per edge, keyed on `network.peer.address` and
 `iris.image.id`. This is the origin's sampled view.
 
 **Per-device receipts (device view).** A table built from
-`iris.device.peer_receipt`, split by `iris.peer.attribution` into `origin`,
+`iris.device.peer_transfer_record`, split by `iris.peer.attribution` into `origin`,
 `device` and `unknown`. This is the panel family that answers "did this device
 get its image from a peer or from the origin?" — and the one to quote.
 
@@ -408,7 +408,7 @@ quotes a number in a meeting.
 | Figure | Status | Why |
 | ------ | ------ | --- |
 | `iris_origin_sent_bytes_total` | **Measured** | The origin seeder's own upload counter, banked across counter resets |
-| `iris.device.peer_receipt` byte values | **Measured** | The receiving device's own cumulative per-peer counter, read once at the instant the last piece landed |
+| `iris.device.peer_transfer_record` byte values | **Measured** | The receiving device's own cumulative per-peer counter, read once at the instant the last piece landed |
 | `iris.peer.attribution` (`origin`/`device`/`unknown`) | **Derived** | A server-side join of peer address against the device address map — authoritative, but a join |
 | `iris_peer_attributed_bytes_total` (bytes traced to a device) | **Derived (sampled)** | Sum of per-edge deltas observed by periodic `getPeers` sampling; lossy by construction |
 | `iris_peer_unattributed_bytes_total` (untraced bytes) | **Derived** | Origin sent minus traced. A real published quantity, not an error bar |
@@ -440,7 +440,7 @@ hidden; it is published as the untraced counter,
 **A device receipt is a floor, not a census.** `DefaultPeerStorage` erases a
 peer on disconnect, so even the completion-instant snapshot only sees peers
 still connected at that moment. Peers that disconnected mid-download are gone
-from the receipt. `iris.receipt.capture_complete = false` on the block is the
+from the receipt. `iris.transfer_record.capture_complete = false` on the block is the
 flag that says so — the individual rows are still exact either way.
 
 **Absence of a receipt is not zero.** A device that reported no receipts emits
@@ -500,7 +500,7 @@ curl -s http://203.0.113.10:8888/metrics \
 
 ```
 index=iris_logs earliest=-24h | stats count by sourcetype
-index=iris_logs earliest=-24h "iris.device.peer_receipt" | stats count by device.id
+index=iris_logs earliest=-24h "iris.device.peer_transfer_record" | stats count by device.id
 ```
 
 The first query separates "no log export" (zero rows) from "no traffic" (rows

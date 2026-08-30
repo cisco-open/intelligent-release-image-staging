@@ -242,10 +242,10 @@ EOF
 fi
 chmod +x "$CTX/agent_bin/aria2c"
 
-echo ">> staging agent python (incl. cli_ssh.py) + peer-receipt hook + VERSION"
+echo ">> staging agent python (incl. cli_ssh.py) + peer-transfer hook + VERSION"
 cp "$REPO"/device/agent/*.py "$CTX/agent/"
-cp "$REPO/device/agent/peer-receipt-hook.sh" "$CTX/agent/" \
-  || { echo "!! missing device/agent/peer-receipt-hook.sh (the aria2"
+cp "$REPO/device/agent/peer-transfer-hook.sh" "$CTX/agent/" \
+  || { echo "!! missing device/agent/peer-transfer-hook.sh (the aria2"
        echo "   --on-bt-download-complete program the Dockerfile COPYs)"; exit 1; } >&2
 cp "$REPO"/device/verify_image.py "$CTX/agent/verify_image.py"   # lives in device/, agent imports it
 cp "$REPO/VERSION" "$CTX/agent/VERSION"

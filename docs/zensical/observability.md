@@ -222,7 +222,7 @@ names. Event identity is the top-level `eventName` field:
 `iris.device.transfer.report` (v2 reports), `iris.device.report` (legacy v1
 reports), `iris.tracker.peer` (tracker lifecycle), `iris.peer.policy`,
 `iris.swarm.peer_rate`, `iris.swarm.peer_bytes` (origin-side traced bytes)
-and `iris.device.peer_receipt` (device-side exact per-peer bytes).
+and `iris.device.peer_transfer_record` (device-side exact per-peer bytes).
 
 Key attributes per event. `iris.device.transfer.report`: `device.id`,
 `iris.image.id`, `iris.transfer.id`, `iris.report.event`,
@@ -257,7 +257,7 @@ aria2-next 2.5.6 keeps a **cumulative per-peer session counter** of its own
 rather than integrated. Two records carry it, and they measure different things
 — never sum them together.
 
-`iris.device.peer_receipt` is the exact one, emitted once per peer per completed
+`iris.device.peer_transfer_record` is the exact one, emitted once per peer per completed
 device transfer. An `--on-bt-download-complete` hook on the device reads the
 counters at the instant the last piece lands, before aria2 flips the download to
 seed-only and the connections drain. Attributes: `device.id` (the *receiving*
@@ -265,7 +265,7 @@ device), `iris.image.id`, `iris.transfer.id`, `network.peer.address`,
 `network.peer.port`, `iris.transfer.session_bytes_from_peer` /
 `iris.transfer.session_bytes_to_peer`, `iris.peer.attribution`,
 `iris.peer.device.id`, `iris.peer.has_complete_file` and
-`iris.receipt.capture_complete`.
+`iris.transfer_record.capture_complete`.
 
 `iris.peer.attribution` is the attribute that makes the number mean anything.
 The origin seeder is an ordinary BitTorrent peer of every device, so it appears
@@ -302,9 +302,9 @@ even split would be arithmetic presented as observation.
     what the device received, and it will not reconcile with
     `iris.transfer.completed_content_bytes`. Rows the device or the server
     dropped at a cap *are* accounted for, in
-    `iris.transfer.peer_receipts.rows_omitted` and
+    `iris.transfer.peer_records.rows_omitted` and
     `iris.transfer.bytes_from_all_senders_omitted`;
-    `iris.transfer.peer_receipts.capture_complete` goes false when the capture
+    `iris.transfer.peer_records.capture_complete` goes false when the capture
     itself was lossy. A transfer with no usable snapshot carries no peer-receipt
     attributes at all rather than a zeroed set.
 

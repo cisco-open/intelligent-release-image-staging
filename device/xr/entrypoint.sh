@@ -46,11 +46,11 @@ TICK="${IRIS_TICK_SECONDS:-60}"
 MAX_PEERS="${IRIS_MAX_PEERS:-10}"
 ARIA2="/opt/iris/bin/aria2c"
 AGENT="/opt/iris/agent/iris_agent.py"
-# --on-bt-download-complete: the per-peer receipt hook. Baked into the image
+# --on-bt-download-complete: the per-peer transfer-record hook. Baked into the image
 # by the Dockerfile (already executable). Checked once: an image built
 # before this existed simply runs without it, and aria2c must not be handed
 # an empty option value (Aria2 Next rejects those outright).
-HOOK="/opt/iris/agent/peer-receipt-hook.sh"
+HOOK="/opt/iris/agent/peer-transfer-hook.sh"
 [ -x "$HOOK" ] || HOOK=""
 
 export IRIS_STAGE_DIR="$STAGE_DIR"

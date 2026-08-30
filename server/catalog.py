@@ -101,16 +101,16 @@ _REPORT_STORE_MAX = 16384       # bytes STORED per report (transport stays 64K)
 _V2_PEER_CAP = 64
 _STATE_PEER_SET_CAP = 512
 _CONTENT_CAP = 2 ** 53
-# Exact per-peer received bytes (``peer_receipts``, hook contract section 1).
+# Exact per-peer received bytes (``peer_transfer_records``, hook contract section 1).
 # The device hook reads aria2-next's own cumulative per-peer session counters
 # ONCE, at --on-bt-download-complete: the instant the last piece lands, before
 # enableSeedOnly(), while the peers that fed us are still connected. These are
 # NOT the 2026.08.20 rx_bytes/tx_bytes/avg_bps numbers, which were integrated
 # from instantaneous rates and were removed for being estimates; nothing here
 # is integrated, estimated or split evenly.
-_V2_PEER_RECEIPT_ROWS = 32      # named receipt rows STORED per report
-_RECEIPT_SOURCES = ("aria2_session_counters",)
-_RECEIPT_ROWS_CAP = 512         # bound on the declared receipt row counts
+_V2_PEER_TRANSFER_ROWS = 32      # named transfer-record rows STORED per report
+_PEER_TRANSFER_SOURCES = ("aria2_session_counters",)
+_PEER_TRANSFER_ROWS_CAP = 512         # bound on the declared transfer-record row counts
 _PORT_CAP = 65535
 
 
@@ -130,8 +130,8 @@ def _strict_bool(value, field):
     return value
 
 
-def _sanitize_peer_receipts(block, win_start, created):
-    """Strict re-validation of the optional v2 ``peer_receipts`` block: exact
+def _sanitize_peer_transfer_records(block, win_start, created):
+    """Strict re-validation of the optional v2 ``peer_transfer_records`` block: exact
     per-peer bytes RECEIVED by the reporting device, measured on the device.
 
     Provenance, stated so no reader has to guess which kind of number this is:
@@ -172,7 +172,7 @@ def _sanitize_peer_receipts(block, win_start, created):
     peer-delivered and reported ~100% peer-to-peer for a wave that was 28.9%.
     Splitting origin from device is a SERVER-side question (only the server
     knows which address is the authenticated ``service:seeder`` principal) and
-    is answered by ``telemetry.classify_peer_receipts``, not here: this
+    is answered by ``telemetry.classify_peer_transfer_records``, not here: this
     function stores the device's measurement verbatim.
 
     No cross-check against ``content.completed_content_bytes``: aria2 counts
@@ -181,40 +181,40 @@ def _sanitize_peer_receipts(block, win_start, created):
     would discard the entire measurement.
     """
     if not isinstance(block, dict):
-        raise ValueError("bad peer_receipts")
-    if block.get("source") not in _RECEIPT_SOURCES:
-        raise ValueError("bad peer_receipts.source")
+        raise ValueError("bad peer_transfer_records")
+    if block.get("source") not in _PEER_TRANSFER_SOURCES:
+        raise ValueError("bad peer_transfer_records.source")
     captured = block.get("captured_at")
     if isinstance(captured, bool) or not isinstance(captured, (int, float)):
-        raise ValueError("bad peer_receipts.captured_at")
+        raise ValueError("bad peer_transfer_records.captured_at")
     if not math.isfinite(captured) or captured < 0:
-        raise ValueError("bad peer_receipts.captured_at")
+        raise ValueError("bad peer_transfer_records.captured_at")
     # The capture instant is the hook's, minutes before the one-shot agent tick
     # that assembles the report -- but it can never precede the transfer window
     # or postdate the report that carries it.
     if not win_start <= captured <= created:
-        raise ValueError("bad peer_receipts.captured_at range")
-    complete = _strict_bool(block.get("complete"), "peer_receipts.complete")
+        raise ValueError("bad peer_transfer_records.captured_at range")
+    complete = _strict_bool(block.get("complete"), "peer_transfer_records.complete")
 
     rows_in = block.get("rows")
     if not isinstance(rows_in, list):
-        raise ValueError("bad peer_receipts.rows")
+        raise ValueError("bad peer_transfer_records.rows")
     rows = []
     seen = set()
     for row in rows_in:
         if not isinstance(row, dict):
-            raise ValueError("bad peer_receipts row")
+            raise ValueError("bad peer_transfer_records row")
         ip = row.get("ip")
         if not isinstance(ip, str) or not ip or len(ip) > 64:
-            raise ValueError("bad peer_receipts ip")
+            raise ValueError("bad peer_transfer_records ip")
         try:
             ipaddress.ip_address(ip)
         except ValueError:
-            raise ValueError("bad peer_receipts ip")
+            raise ValueError("bad peer_transfer_records ip")
         if ip in seen:
-            # Two receipts for one peer have no defined meaning: summing them
+            # Two transfer records for one peer have no defined meaning: summing them
             # would invent bytes, picking one would discard measured ones.
-            raise ValueError("duplicate peer_receipts ip")
+            raise ValueError("duplicate peer_transfer_records ip")
         seen.add(ip)
         clean = {"ip": ip,
                  "session_bytes_from_peer": _bounded_report_int(
@@ -229,30 +229,30 @@ def _sanitize_peer_receipts(block, win_start, created):
             # aria2's peer->isSeeder(): this peer holds the whole file. That is
             # NOT "this peer is the origin" -- in a multi-device wave every
             # device that finishes early raises it. Origin identification is
-            # telemetry.classify_peer_receipts's job, off the authenticated
+            # telemetry.classify_peer_transfer_records's job, off the authenticated
             # service:seeder principal.
             clean["has_complete_file"] = _strict_bool(
-                row.get("has_complete_file"), "peer_receipts has_complete_file")
+                row.get("has_complete_file"), "peer_transfer_records has_complete_file")
         rows.append(clean)
 
     rows_total = _bounded_report_int(block.get("rows_total"),
-                                     _RECEIPT_ROWS_CAP)
+                                     _PEER_TRANSFER_ROWS_CAP)
     rows_omitted = _bounded_report_int(block.get("rows_omitted"),
-                                       _RECEIPT_ROWS_CAP)
+                                       _PEER_TRANSFER_ROWS_CAP)
     if rows_total != len(rows) + rows_omitted:
-        raise ValueError("peer_receipts rows do not sum to rows_total")
+        raise ValueError("peer_transfer_records rows do not sum to rows_total")
     total = _bounded_report_int(block.get("bytes_from_all_senders_total"),
                                 _CONTENT_CAP)
     omitted = _bounded_report_int(block.get("bytes_from_all_senders_omitted"),
                                   _CONTENT_CAP)
     if sum(r["session_bytes_from_peer"] for r in rows) + omitted != total:
-        raise ValueError("peer_receipts bytes do not sum to total")
+        raise ValueError("peer_transfer_records bytes do not sum to total")
 
     # Canonical stored order, and the order the server's own cap trims from:
     # bytes descending, ip as the tiebreak so the result is deterministic.
     rows.sort(key=lambda r: (-r["session_bytes_from_peer"], r["ip"]))
-    extra = rows[_V2_PEER_RECEIPT_ROWS:]
-    rows = rows[:_V2_PEER_RECEIPT_ROWS]
+    extra = rows[_V2_PEER_TRANSFER_ROWS:]
+    rows = rows[:_V2_PEER_TRANSFER_ROWS]
     rows_omitted += len(extra)
     omitted += sum(r["session_bytes_from_peer"] for r in extra)
     # rows_omitted counts transport loss; ``complete`` describes the capture.
@@ -271,8 +271,8 @@ def _sanitize_report_v2(data):
 
     Exact types/enums/ids/timestamps; content/verification/sampling/stage/peer
     caps; stored body bounded at _REPORT_STORE_MAX. Tags ``schema:"v2"``.
-    The optional ``peer_receipts`` block (exact device-measured per-peer
-    received bytes) is validated by _sanitize_peer_receipts and stored only
+    The optional ``peer_transfer_records`` block (exact device-measured per-peer
+    received bytes) is validated by _sanitize_peer_transfer_records and stored only
     when it was sent -- absent means not measured, never zero.
     ``report_id`` is the ring dedupe key. No token/secret ever appears in a
     raised message (a report carries none, but the discipline is explicit)."""
@@ -413,12 +413,12 @@ def _sanitize_report_v2(data):
               "peers_rows_dropped": peers_dropped,
               "peers_truncated": data["peers_truncated"] or peers_dropped > 0,
               "peers_saturated": data["peers_saturated"]}
-    receipts = data.get("peer_receipts")
-    if receipts is not None:
+    transfer_records = data.get("peer_transfer_records")
+    if transfer_records is not None:
         # Optional and stored only when sent: an absent block means NOT
         # MEASURED and must stay absent all the way to the reader.
-        report["peer_receipts"] = _sanitize_peer_receipts(
-            receipts, float(win["start"]), float(created))
+        report["peer_transfer_records"] = _sanitize_peer_transfer_records(
+            transfer_records, float(win["start"]), float(created))
     agent = data.get("agent")
     if isinstance(agent, dict):
         report["agent"] = _cap_strings(agent)

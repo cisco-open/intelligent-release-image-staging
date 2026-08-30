@@ -105,8 +105,8 @@ def _enrich_int(value):
 
 _SCHEMA_ATTR = "iris.telemetry.schema.version"
 
-# Who sent the bytes in one receipt row, mirroring
-# telemetry.RECEIPT_SOURCE_CLASSES:
+# Who sent the bytes in one transfer-record row, mirroring
+# telemetry.TRANSFER_RECORD_SOURCE_CLASSES:
 #   origin  -- the authenticated service:seeder.
 #   device  -- a device whose heartbeat claims that swarm address.
 #   unknown -- neither, or nobody classified the row at all.
@@ -120,8 +120,8 @@ def _peer_attribution(value):
     return value if value in _PEER_ATTRIBUTIONS else "unknown"
 
 
-def _receipt_split_pairs(enrich):
-    """Attribute pairs for ``telemetry.classify_peer_receipts``'s four figures,
+def _transfer_record_split_pairs(enrich):
+    """Attribute pairs for ``telemetry.classify_peer_transfer_records``'s four figures,
     or [] when the block was never classified.
 
     The four are exported as four. ``bytes_from_devices_total`` is the only one
@@ -132,7 +132,7 @@ def _receipt_split_pairs(enrich):
     ends up counted as a peer."""
     if not isinstance(enrich, dict):
         return []
-    split = enrich.get("peer_receipt_attribution")
+    split = enrich.get("peer_transfer_record_attribution")
     if not isinstance(split, dict):
         return []
     return [
@@ -144,11 +144,11 @@ def _receipt_split_pairs(enrich):
          _enrich_int(split.get("unknown_bytes"))),
         ("iris.transfer.bytes_unattributed_omitted",
          _enrich_int(split.get("unattributed_omitted_bytes"))),
-        ("iris.transfer.peer_receipts.origin_rows",
+        ("iris.transfer.peer_records.origin_rows",
          _enrich_int(split.get("origin_rows"))),
-        ("iris.transfer.peer_receipts.device_rows",
+        ("iris.transfer.peer_records.device_rows",
          _enrich_int(split.get("device_rows"))),
-        ("iris.transfer.peer_receipts.unknown_rows",
+        ("iris.transfer.peer_records.unknown_rows",
          _enrich_int(split.get("unknown_rows"))),
     ]
 
@@ -187,8 +187,8 @@ def _build_v2_report_record(report, device_id, enrich=None):
         report.get("content_sha256"), dict) else {}
     ios = report.get("ios_copy_verify") if isinstance(
         report.get("ios_copy_verify"), dict) else {}
-    receipts = report.get("peer_receipts") if isinstance(
-        report.get("peer_receipts"), dict) else {}
+    transfer_records = report.get("peer_transfer_records") if isinstance(
+        report.get("peer_transfer_records"), dict) else {}
     pairs = [
         ("otel.log.name", "iris.device.transfer.report"),
         (_SCHEMA_ATTR, 2),
@@ -201,26 +201,26 @@ def _build_v2_report_record(report, device_id, enrich=None):
         ("iris.transfer.completed_content_bytes",
          _enrich_int(content.get("completed_content_bytes"))),
         ("iris.transfer.peers_total", _enrich_int(report.get("peers_total"))),
-        # Summary of the device-measured receipts block; the per-peer detail is
-        # its own event (build_peer_receipt_records). All None-skipped, so a
-        # report that carries no receipts adds nothing -- absent means NOT
+        # Summary of the device-measured transfer-record block; the per-peer detail is
+        # its own event (build_peer_transfer_records). All None-skipped, so a
+        # report that carries no transfer records adds nothing -- absent means NOT
         # MEASURED, and a zero here would claim a measurement nobody made.
-        ("iris.transfer.peer_receipts.capture_complete",
-         receipts.get("complete")),
-        ("iris.transfer.peer_receipts.rows_total",
-         _enrich_int(receipts.get("rows_total"))),
-        ("iris.transfer.peer_receipts.rows_omitted",
-         _enrich_int(receipts.get("rows_omitted"))),
-        ("iris.transfer.peer_receipts.rows_dropped_by_server",
-         _enrich_int(receipts.get("rows_dropped_by_server"))),
+        ("iris.transfer.peer_records.capture_complete",
+         transfer_records.get("complete")),
+        ("iris.transfer.peer_records.rows_total",
+         _enrich_int(transfer_records.get("rows_total"))),
+        ("iris.transfer.peer_records.rows_omitted",
+         _enrich_int(transfer_records.get("rows_omitted"))),
+        ("iris.transfer.peer_records.rows_dropped_by_server",
+         _enrich_int(transfer_records.get("rows_dropped_by_server"))),
         # Keeps the device's own name: this total counts EVERY sender the
         # device received from, the origin seeder included, because the origin
         # is an ordinary BitTorrent peer of every device. Nothing in this
         # record may call it bytes "from peers".
         ("iris.transfer.bytes_from_all_senders_total",
-         _enrich_int(receipts.get("bytes_from_all_senders_total"))),
+         _enrich_int(transfer_records.get("bytes_from_all_senders_total"))),
         ("iris.transfer.bytes_from_all_senders_omitted",
-         _enrich_int(receipts.get("bytes_from_all_senders_omitted"))),
+         _enrich_int(transfer_records.get("bytes_from_all_senders_omitted"))),
         # A cap the SERVER applied to the participation table. It used to be
         # invisible (the stored report kept the device's own truncation flag),
         # and an invisible trim reads as a complete list.
@@ -228,11 +228,11 @@ def _build_v2_report_record(report, device_id, enrich=None):
          _enrich_int(report.get("peers_rows_dropped"))),
     ]
     # The origin/device/unknown split of that total, when the sampler has run
-    # telemetry.classify_peer_receipts over the block. It is the ONLY thing
+    # telemetry.classify_peer_transfer_records over the block. It is the ONLY thing
     # taken out of `enrich`: everything else there is high-cardinality device
     # detail that was deliberately dropped from this event. The four figures
     # stay four -- an absent split adds nothing rather than zeroing a bucket.
-    pairs.extend(_receipt_split_pairs(enrich))
+    pairs.extend(_transfer_record_split_pairs(enrich))
     attrs = [_attr(k, v) for k, v in pairs if v is not None]
     window = report.get("window") if isinstance(report.get("window"), dict) \
         else {}
@@ -287,8 +287,8 @@ def build_report_record(report, device_id, enrich=None):
     on report schema: a v2 report (``report_id`` present, or ``schema=="v2"``)
     exports the typed ``iris.device.transfer.report``; anything else is treated
     as a legacy v1 projection under ``iris.device.report`` with a safe subset.
-    Of ``enrich`` only ``peer_receipt_attribution`` is folded in (the
-    origin/device/unknown split of the receipts block, which the record cannot
+    Of ``enrich`` only ``peer_transfer_record_attribution`` is folded in (the
+    origin/device/unknown split of the transfer-record block, which the record cannot
     compute for itself); the high-cardinality model/flash/stage detail stays
     out of the canonical report event. Garbage-tolerant throughout."""
     if not isinstance(report, dict):
@@ -413,10 +413,10 @@ def build_peer_bytes_record(row):
                    event_id=row.get("event_id"), body="attributed peer bytes")
 
 
-def build_peer_receipt_record(row):
-    """Device-MEASURED per-peer received bytes -> ``iris.device.peer_receipt``.
+def build_peer_transfer_record(row):
+    """Device-MEASURED per-peer received bytes -> ``iris.device.peer_transfer_record``.
 
-    One record per row of a v2 report's ``peer_receipts`` block. The value is
+    One record per row of a v2 report's ``peer_transfer_records`` block. The value is
     aria2-next's own cumulative per-peer session counter
     (``peer->getSessionDownloadLength()``), read ONCE by the
     ``--on-bt-download-complete`` hook at the instant the last piece landed and
@@ -429,7 +429,7 @@ def build_peer_receipt_record(row):
     Summing the two names together counts one transfer twice, once exactly and
     once badly; a query picks one, and this is the exact one.
 
-    ``iris.peer.attribution`` is what keeps the record honest. A receipt row is
+    ``iris.peer.attribution`` is what keeps the record honest. A transfer-record row is
     bytes from A PEER — not evidence that the bytes came from a peer DEVICE.
     The origin seeder is an ordinary peer of every device, so its bytes sit in
     this list like any other peer's, and only the server can tell them apart
@@ -446,7 +446,7 @@ def build_peer_receipt_record(row):
     finished early. It answers "complete vs partial", a different question, and
     is named for the answer it gives.
 
-    Absence of a record is NOT zero: a device that reported no receipts emits
+    Absence of a record is NOT zero: a device that reported no transfer records emits
     nothing here, while a measured zero appears as an explicit 0. Both byte
     attributes are int64 and so ride the OTLP/JSON wire as STRINGS (see
     ``_any_value``); a backend that sums them must coerce.
@@ -454,7 +454,7 @@ def build_peer_receipt_record(row):
     if not isinstance(row, dict):
         row = {}
     pairs = [
-        ("otel.log.name", "iris.device.peer_receipt"),
+        ("otel.log.name", "iris.device.peer_transfer_record"),
         (_SCHEMA_ATTR, 2),
         # The RECEIVING device -- the one that measured these bytes.
         ("device.id", _enrich_str(row.get("device_id"))),
@@ -471,30 +471,30 @@ def build_peer_receipt_record(row):
          _enrich_int(row.get("session_bytes_from_peer"))),
         ("iris.transfer.session_bytes_to_peer",
          _enrich_int(row.get("session_bytes_to_peer"))),
-        ("iris.receipt.source", _enrich_str(row.get("source"))),
+        ("iris.transfer_record.source", _enrich_str(row.get("source"))),
         # About the CAPTURE, not this row: False means a peer disconnected
         # before the snapshot, so the block is a floor. The row itself is exact
         # either way.
-        ("iris.receipt.capture_complete", row.get("capture_complete")),
+        ("iris.transfer_record.capture_complete", row.get("capture_complete")),
     ]
     attrs = [_attr(k, v) for k, v in pairs if v is not None]
-    return _record("iris.device.peer_receipt",
+    return _record("iris.device.peer_transfer_record",
                    _ts_nano(row.get("captured_at")), attrs,
-                   event_id=row.get("event_id"), body="device peer receipt")
+                   event_id=row.get("event_id"), body="device peer transfer record")
 
 
-def build_peer_receipt_records(report, device_id=None, enrich=None,
+def build_peer_transfer_records(report, device_id=None, enrich=None,
                                classify=None):
-    """Fan a stored report's ``peer_receipts`` block out into one
-    ``iris.device.peer_receipt`` record per row, so the exact measurement
+    """Fan a stored report's ``peer_transfer_records`` block out into one
+    ``iris.device.peer_transfer_record`` record per row, so the exact measurement
     reaches a collector instead of stopping in the catalog.
 
-    Returns [] for any report without a receipts block. The sanitizer never
+    Returns [] for any report without a transfer-record block. The sanitizer never
     synthesizes an empty block, so "no block" means NOT MEASURED and an empty
     list is how that stays distinguishable from a measured zero.
 
     ``classify(ip) -> "origin"|"device"|"unknown"`` supplies the sender class;
-    pass ``telemetry.receipt_source_class`` bound to the current origin
+    pass ``telemetry.transfer_record_source_class`` bound to the current origin
     addresses and swarm-IP join. Without it every row goes out ``unknown``:
     this module does not re-implement that identity rule, because a second copy
     of it drifts and the copy that drifts is the one an operator reads a peer
@@ -510,7 +510,7 @@ def build_peer_receipt_records(report, device_id=None, enrich=None,
     """
     if not isinstance(report, dict):
         return []
-    block = report.get("peer_receipts")
+    block = report.get("peer_transfer_records")
     if not isinstance(block, dict):
         return []
     rows = block.get("rows")
@@ -545,7 +545,7 @@ def build_peer_receipt_records(report, device_id=None, enrich=None,
             else None
         if report_id is not None and ip is not None:
             ctx["event_id"] = "%s:%s" % (report_id, ip)
-        records.append(build_peer_receipt_record(ctx))
+        records.append(build_peer_transfer_record(ctx))
     return records
 
 

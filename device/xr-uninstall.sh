@@ -13,7 +13,7 @@
 # left at harddisk: ROOT. Sidecars land there, not inside iris-work/, because
 # this platform has no placement step -- aria2 downloads each image straight
 # to its final harddisk: location (xr_deps.py module docstring), so the
-# metadata/progress/receipt files that ride alongside it never leave that
+# metadata/progress/transfer-record files that ride alongside it never leave that
 # same directory either. Unlike the router/IOx twins, XR activation uses
 # ONLY --net=host -- no VirtualPortGroup, VLAN, SVI, or NAT is ever created,
 # so there is no operator-owned network config an undeploy could
@@ -243,7 +243,7 @@ echo "[4/5] sweep leftover IRIS sidecars (*.torrent, *.aria2, *.peers.json) at h
 # aria2 downloads straight to harddisk: root on this platform (no placement
 # step, xr_deps.py module docstring), so its own control sidecars -- the
 # .torrent metadata iris_agent.py stages before addTorrent, aria2's own
-# .aria2 progress file, and the per-peer .peers.json receipt
+# .aria2 progress file, and the per-peer .peers.json transfer record
 # telemetry_report.py writes next to the staged image -- land at the SAME
 # root as any operator-staged image, never inside iris-work/. Names alone
 # prove IRIS wrote them (the same _OWNED_SUFFIXES rule xr_deps.purge_others

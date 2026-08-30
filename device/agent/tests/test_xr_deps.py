@@ -236,14 +236,14 @@ def test_reclaimable_is_empty_without_state(tmp_path):
 def test_purge_others_deletes_only_iris_sidecars_outside_the_assigned_set(tmp_path):
     """On IOS-XE the stage dir is IRIS's own directory, so the sweep may drop
     stale `.bin` files. Here the stage dir IS `harddisk:` — the operator's
-    root — and only the aria2/torrent/receipt sidecars carry proof of IRIS
+    root — and only the aria2/torrent/peer-transfer sidecars carry proof of IRIS
     ownership. A bare image file is never swept: the one IRIS placed is
     removed through run_once's state-tracked pending_root_deletes instead."""
     keep = "keep.iso"
     _write(tmp_path / keep, 10)
     _write(tmp_path / (keep + ".aria2"), 1)
     _write(tmp_path / "keep-id.torrent", 1)
-    _write(tmp_path / ("stale.iso" + telemetry_report.RECEIPT_SIDECAR_SUFFIX), 1)
+    _write(tmp_path / ("stale.iso" + telemetry_report.PEER_TRANSFER_SIDECAR_SUFFIX), 1)
     _write(tmp_path / "stale.iso.aria2", 1)
     _write(tmp_path / "stale-id.torrent", 1)
     operator = _write(tmp_path / "operator-8000-x64.iso", 10)

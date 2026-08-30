@@ -34,8 +34,8 @@ APP_IP="${APP_IP:-}"
 IOS_ROOT="bootflash:guest-share"
 # Everything under IRIS_DIR goes recursively; guest-share itself is a
 # preserved platform directory where only the named files below are removed.
-# The peer-receipt hook adds nothing to that root: its staged source lives at
-# iris/agent/peer-receipt-hook.sh, its snapshots at iris/<image>.peers.json,
+# The peer-transfer hook adds nothing to that root: its staged source lives at
+# iris/agent/peer-transfer-hook.sh, its snapshots at iris/<image>.peers.json,
 # and its exec-capable copy inside the guest at /home/guestshell (which goes
 # with `guestshell destroy`). Keep it that way -- a stray name at this root is
 # exactly what the collision preflight refuses on the next onboard.

@@ -99,7 +99,7 @@
 }
 
 # ---------------------------------------------------------------------------
-# --on-bt-download-complete: the per-peer receipt hook
+# --on-bt-download-complete: the per-peer transfer-record hook
 #
 # aria2 execs the option value directly (execlp, no shell), so the value must
 # be a real executable FILE. /flash denies chmod, which is why the launcher
@@ -116,7 +116,7 @@ _gs_fixture() {           # $1 = tmpdir; stages a hook unless $2 = "nohook"
     "$1" "$1" > "$1/aria2c-stub"
   chmod +x "$1/aria2c-stub"
   if [ "${2:-}" != "nohook" ]; then
-    printf '#!/bin/sh\nexit 0\n' > "$1/stage/agent/peer-receipt-hook.sh"
+    printf '#!/bin/sh\nexit 0\n' > "$1/stage/agent/peer-transfer-hook.sh"
   fi
 }
 
@@ -126,7 +126,7 @@ _gs_fixture() {           # $1 = tmpdir; stages a hook unless $2 = "nohook"
       RPC_SECRET_FILE="$tmp/stage/rpc-secret" SKIP_RPC_PROBE=1 \
       bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
   [ "$status" -eq 0 ]
-  [[ "$(cat "$tmp/launched.txt")" == *"--on-bt-download-complete=$tmp/home/iris-peer-receipt-hook"* ]]
+  [[ "$(cat "$tmp/launched.txt")" == *"--on-bt-download-complete=$tmp/home/iris-peer-transfer-hook"* ]]
 }
 
 @test "the hook is installed on an exec-capable fs with the exec bit" {
@@ -138,7 +138,7 @@ _gs_fixture() {           # $1 = tmpdir; stages a hook unless $2 = "nohook"
       RPC_SECRET_FILE="$tmp/stage/rpc-secret" SKIP_RPC_PROBE=1 \
       bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
   [ "$status" -eq 0 ]
-  [ -x "$tmp/home/iris-peer-receipt-hook" ]
+  [ -x "$tmp/home/iris-peer-transfer-hook" ]
 }
 
 @test "no staged hook means NO --on-bt-download-complete flag at all" {
@@ -157,15 +157,15 @@ _gs_fixture() {           # $1 = tmpdir; stages a hook unless $2 = "nohook"
 
 @test "a hook that cannot be installed is reported but never blocks the launch" {
   # Telemetry must not be able to silence a device. Without the hook the report
-  # simply omits the receipts ("not measured") and the transfer is unaffected.
+  # simply omits the transfer records ("not measured") and the transfer is unaffected.
   tmp="$(mktemp -d)"; _gs_fixture "$tmp"
   # an undeliverable destination: the copy fails, nothing else does
   run env STAGE_DIR="$tmp/stage" EXEC_DIR="$tmp/home" ARIA2_SRC="$tmp/aria2c-stub" \
       RPC_SECRET_FILE="$tmp/stage/rpc-secret" SKIP_RPC_PROBE=1 \
-      HOOK_DST="$tmp/no-such-dir/iris-peer-receipt-hook" \
+      HOOK_DST="$tmp/no-such-dir/iris-peer-transfer-hook" \
       bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"peer-receipt hook"* ]]
+  [[ "$output" == *"peer-transfer hook"* ]]
   [ -f "$tmp/launched.txt" ]
   [[ "$(cat "$tmp/launched.txt")" != *"--on-bt-download-complete"* ]]
 }
@@ -176,7 +176,7 @@ _gs_fixture() {           # $1 = tmpdir; stages a hook unless $2 = "nohook"
   # 'already up?' early exit or an upgraded hook could never reach the path the
   # running daemon already holds.
   tmp="$(mktemp -d)"; _gs_fixture "$tmp"
-  printf '#!/bin/sh\n# v2\nexit 0\n' > "$tmp/stage/agent/peer-receipt-hook.sh"
+  printf '#!/bin/sh\n# v2\nexit 0\n' > "$tmp/stage/agent/peer-transfer-hook.sh"
   mkdir -p "$tmp/bin"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/bin/curl"     # RPC answers: already up
   chmod +x "$tmp/bin/curl"
@@ -186,7 +186,7 @@ _gs_fixture() {           # $1 = tmpdir; stages a hook unless $2 = "nohook"
   [ "$status" -eq 0 ]
   [[ "$output" == *"already up"* ]]        # took the early exit
   [ ! -f "$tmp/launched.txt" ]             # and did NOT relaunch aria2c
-  grep -q "v2" "$tmp/home/iris-peer-receipt-hook"
+  grep -q "v2" "$tmp/home/iris-peer-transfer-hook"
 }
 
 @test "the hook inherits the secret the daemon is actually launched with" {

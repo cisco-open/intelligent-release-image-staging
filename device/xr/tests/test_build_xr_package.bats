@@ -160,8 +160,8 @@ _xr_stub_setup() {
   cp "$BATS_TEST_DIRNAME/../Dockerfile" "$STUBDIR/device/xr/Dockerfile"
   cp "$BATS_TEST_DIRNAME/../entrypoint.sh" "$STUBDIR/device/xr/entrypoint.sh"
   echo "# dummy" > "$STUBDIR/device/agent/dummy.py"
-  printf '#!/bin/sh\nexit 0\n' > "$STUBDIR/device/agent/peer-receipt-hook.sh"
-  chmod +x "$STUBDIR/device/agent/peer-receipt-hook.sh"
+  printf '#!/bin/sh\nexit 0\n' > "$STUBDIR/device/agent/peer-transfer-hook.sh"
+  chmod +x "$STUBDIR/device/agent/peer-transfer-hook.sh"
   # device/verify_image.py lives one level up from device/agent/ -- the real
   # script stages it into agent/verify_image.py (iris_agent.py imports it).
   # Missing here would fail the staging cp before appmgr_build ever runs.
@@ -401,10 +401,10 @@ EOF
   [[ "$output" == *"reusing existing xr-appmgr-build"* ]]
 }
 
-@test "real run: a missing peer-receipt-hook.sh fails closed before docker is invoked" {
+@test "real run: a missing peer-transfer-hook.sh fails closed before docker is invoked" {
   _xr_stub_setup
-  rm -f "$STUBDIR/device/agent/peer-receipt-hook.sh"
+  rm -f "$STUBDIR/device/agent/peer-transfer-hook.sh"
   _run_real
   [ "$status" -ne 0 ]
-  [[ "$output" == *"peer-receipt-hook.sh"* ]]
+  [[ "$output" == *"peer-transfer-hook.sh"* ]]
 }

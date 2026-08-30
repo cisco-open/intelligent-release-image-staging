@@ -456,7 +456,7 @@ def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now,
             # measurement the sampler above structurally cannot make: a peer
             # that connected and dropped between two 60 s ticks is invisible
             # to it, whatever keys it asks for.
-            _ingest_peer_receipts(deps, tele, stage, now)
+            _ingest_peer_transfer_records(deps, tele, stage, now)
             tele["done_ts"] = now
             stats = deps.aria_stats(stage)
             if stats:
@@ -1576,10 +1576,10 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
         # the device never heartbeats and is invisible exactly while broken.
         # OSError covers the whole family (URLError subclasses it). Degrade to
         # an error heartbeat; the next tick retries after bootstrap relaunches.
-        # A fresh download of this image starts here: drop any peer-receipt
+        # A fresh download of this image starts here: drop any peer-transfer
         # snapshot left by a PREVIOUS transfer of the same file, which is the
         # only thing that shares its sidecar name.
-        _discard_peer_receipts(stage)
+        _discard_peer_transfer_records(stage)
         try:
             deps.aria_remove(image["filename"])
             deps.aria_add(torrent, stage_dir)
@@ -1889,15 +1889,15 @@ def _find_aria_gid(rpc, stage_path):
     return None
 
 
-def _take_peer_receipt_sidecar(path):
-    """Read AND remove the hook's peer-receipt snapshot at `path`; returns the
+def _take_peer_transfer_sidecar(path):
+    """Read AND remove the hook's peer-transfer snapshot at `path`; returns the
     raw bytes, or None when there is nothing usable there. NEVER raises.
 
     Removal is unconditional, including when the document turns out to be
     garbage: this agent is one-shot, so a snapshot that cannot be used now
     never becomes usable later, and a leftover file keyed by staged FILENAME
     would be a candidate for folding into the next transfer of the same image.
-    Bounded by RECEIPT_MAX_BYTES — the hook writes a few hundred bytes per
+    Bounded by PEER_TRANSFER_MAX_BYTES — the hook writes a few hundred bytes per
     peer, so anything larger is not a snapshot and is not worth reading into a
     CPU-capped Guest Shell."""
     try:
@@ -1906,9 +1906,9 @@ def _take_peer_receipt_sidecar(path):
         return None                 # absent is the ordinary case: no hook ran
     raw = None
     try:
-        if size <= telemetry_report.RECEIPT_MAX_BYTES:
+        if size <= telemetry_report.PEER_TRANSFER_MAX_BYTES:
             with open(path, "rb") as f:
-                raw = f.read(telemetry_report.RECEIPT_MAX_BYTES)
+                raw = f.read(telemetry_report.PEER_TRANSFER_MAX_BYTES)
     except OSError:
         raw = None
     try:
@@ -1918,19 +1918,19 @@ def _take_peer_receipt_sidecar(path):
     return raw
 
 
-def _discard_peer_receipts(stage_path):
+def _discard_peer_transfer_records(stage_path):
     """Drop any snapshot left next to `stage_path` before a NEW download of the
     same image starts. The sidecar is keyed by staged filename, so this is what
-    keeps a previous transfer's receipts from ever being in a position to be
-    attributed to this one (telemetry_report.fold_peer_receipts' started_ts
+    keeps a previous transfer's transfer records from ever being in a position to be
+    attributed to this one (telemetry_report.fold_peer_transfer_records' started_ts
     check is the second, independent line of defence). Never raises."""
     try:
-        os.remove(telemetry_report.receipt_sidecar_path(stage_path))
+        os.remove(telemetry_report.peer_transfer_sidecar_path(stage_path))
     except OSError:
         pass
 
 
-def _ingest_peer_receipts(deps, tele, stage_path, now):
+def _ingest_peer_transfer_records(deps, tele, stage_path, now):
     """Fold the hook's exact per-peer byte snapshot into `tele`, then delete it.
 
     Called once per transfer, at the completion tick, BEFORE done_ts freezes
@@ -1942,15 +1942,15 @@ def _ingest_peer_receipts(deps, tele, stage_path, now):
     (daemon-mode stderr is /dev/null), so this must never be able to fail a
     tick. Returns True only when a snapshot was accepted."""
     try:
-        raw = _take_peer_receipt_sidecar(
-            telemetry_report.receipt_sidecar_path(stage_path))
+        raw = _take_peer_transfer_sidecar(
+            telemetry_report.peer_transfer_sidecar_path(stage_path))
         if raw is None:
             return False
-        block = telemetry_report.parse_receipt_snapshot(raw)
-        if not telemetry_report.fold_peer_receipts(tele, block, now):
+        block = telemetry_report.parse_peer_transfer_snapshot(raw)
+        if not telemetry_report.fold_peer_transfer_records(tele, block, now):
             return False
         deps.emit("TELEMETRY",
-                  "peer receipts: %d peers, %d bytes from peers (measured)"
+                  "peer transfer records: %d peers, %d bytes from peers (measured)"
                   % (block.get("rows_total", 0),
                      block.get("bytes_from_all_senders_total", 0)))
         return True
@@ -2721,18 +2721,18 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
         keep = set()
         for keep_filename in keep_filenames:
             keep.update((keep_filename, keep_filename + ".aria2",
-                         # this image's own peer-receipt snapshot: it may be
+                         # this image's own peer-transfer snapshot: it may be
                          # sitting here waiting for the completion tick to fold
                          # it in
                          keep_filename
-                         + telemetry_report.RECEIPT_SIDECAR_SUFFIX))
+                         + telemetry_report.PEER_TRANSFER_SIDECAR_SUFFIX))
         keep.update(keep_id + ".torrent" for keep_id in keep_ids)
         for path in glob.glob(os.path.join(cfg["stage_dir"], "*")):
             base = os.path.basename(path)
             if base in keep:
                 continue
             if base.endswith((".bin", ".torrent", ".aria2",
-                              telemetry_report.RECEIPT_SIDECAR_SUFFIX)):
+                              telemetry_report.PEER_TRANSFER_SIDECAR_SUFFIX)):
                 try:
                     os.remove(path)
                 except OSError:

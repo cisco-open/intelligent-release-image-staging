@@ -2033,7 +2033,7 @@ def test_service_principal_receives_canonical_bytes(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# v2 peer_receipts: exact device-measured per-peer received bytes
+# v2 peer_transfer_records: exact device-measured per-peer received bytes
 #
 # These are aria2-next session counters read ONCE by the
 # --on-bt-download-complete hook, not the rates-integrated rx_bytes/tx_bytes
@@ -2061,7 +2061,7 @@ def _v2(**over):
     return rep
 
 
-def _receipts(rows=None, **over):
+def _transfer_records(rows=None, **over):
     rows = [{"ip": "10.0.0.7", "port": 6881,
              "session_bytes_from_peer": 41943040,
              "session_bytes_to_peer": 1048576, "has_complete_file": True}] \
@@ -2078,12 +2078,12 @@ def _receipts(rows=None, **over):
     return block
 
 
-def test_peer_receipts_total_includes_the_origin_and_says_so():
+def test_peer_transfer_records_total_includes_the_origin_and_says_so():
     """The origin seeder is an ordinary BitTorrent peer of the device, so its
-    row is in the receipts and its bytes are in the total. The field is named
+    row is in the transfer records and its bytes are in the total. The field is named
     bytes_from_all_senders_total for exactly that reason: a "from peers" total
     here would have read as peer-delivered. Splitting origin from device is
-    telemetry.classify_peer_receipts's job, off the authenticated
+    telemetry.classify_peer_transfer_records's job, off the authenticated
     service:seeder principal -- the sanitizer stores the measurement as made
     and adds no attribution of its own."""
     rows = [{"ip": "100.90.168.20", "session_bytes_from_peer": 7110,
@@ -2091,7 +2091,7 @@ def test_peer_receipts_total_includes_the_origin_and_says_so():
             {"ip": "10.0.0.7", "session_bytes_from_peer": 2890,
              "session_bytes_to_peer": 0, "has_complete_file": True}]
     block = catalog._sanitize_report(
-        _v2(peer_receipts=_receipts(rows=rows)))["peer_receipts"]
+        _v2(peer_transfer_records=_transfer_records(rows=rows)))["peer_transfer_records"]
     assert block["bytes_from_all_senders_total"] == 10000
     assert {r["ip"] for r in block["rows"]} == {"100.90.168.20", "10.0.0.7"}
     # has_complete_file is aria2's isSeeder(): "holds the whole file", true for
@@ -2101,28 +2101,42 @@ def test_peer_receipts_total_includes_the_origin_and_says_so():
     assert not any(k.startswith(("origin", "peer_bytes")) for k in block)
 
 
-def test_peer_receipts_absent_stays_absent():
+def test_peer_transfer_records_absent_stays_absent():
     """Absent means NOT MEASURED — the sanitizer must not invent an empty
     block or a zero total, because 0 bytes from peers is a real, different
     answer (origin served everything)."""
     out = catalog._sanitize_report(_v2())
-    assert "peer_receipts" not in out
+    assert "peer_transfer_records" not in out
     # ... and a measured zero survives as a measured zero
-    zero = _receipts(rows=[{"ip": "10.0.0.7", "session_bytes_from_peer": 0,
+    zero = _transfer_records(rows=[{"ip": "10.0.0.7", "session_bytes_from_peer": 0,
                             "session_bytes_to_peer": 0}])
-    out = catalog._sanitize_report(_v2(peer_receipts=zero))
-    assert out["peer_receipts"]["rows"][0]["session_bytes_from_peer"] == 0
-    assert out["peer_receipts"]["bytes_from_all_senders_total"] == 0
+    out = catalog._sanitize_report(_v2(peer_transfer_records=zero))
+    assert out["peer_transfer_records"]["rows"][0]["session_bytes_from_peer"] == 0
+    assert out["peer_transfer_records"]["bytes_from_all_senders_total"] == 0
 
 
-def test_peer_receipts_round_trip_whitelisted():
+def test_old_agent_peer_receipts_key_is_dropped_not_rejected():
+    """The rename retired the wire key `peer_receipts` in favour of
+    `peer_transfer_records` with no compatibility alias (declared break 6): an
+    old, not-yet-redeployed agent still sends the OLD key. The allow-list
+    reconstruction in _sanitize_report_v2 only ever reads the NEW key, so the
+    old one is silently absent from the stored report -- exactly like a device
+    that measured nothing -- rather than raising and losing the whole report
+    over one obsolete field."""
+    stale = _v2(peer_receipts=_transfer_records())
+    out = catalog._sanitize_report(stale)          # must not raise
+    assert "peer_transfer_records" not in out
+    assert "peer_receipts" not in out
+
+
+def test_peer_transfer_records_round_trip_whitelisted():
     """Rows are rebuilt from a whitelist: the exact byte counters, ip, and the
     optional port/has_complete_file survive; anything else the device sends is dropped."""
     rows = [{"ip": "10.0.0.7", "port": 6881, "session_bytes_from_peer": 41943040,
              "session_bytes_to_peer": 1048576, "has_complete_file": True,
              "rx_bytes": 999, "peerClientName": "<script>"}]
-    out = catalog._sanitize_report(_v2(peer_receipts=_receipts(rows=rows)))
-    block = out["peer_receipts"]
+    out = catalog._sanitize_report(_v2(peer_transfer_records=_transfer_records(rows=rows)))
+    block = out["peer_transfer_records"]
     assert block["source"] == "aria2_session_counters"
     assert block["captured_at"] == 50.0
     assert block["complete"] is True
@@ -2139,33 +2153,33 @@ def test_peer_receipts_round_trip_whitelisted():
     assert out["peers"] == []
 
 
-def test_peer_receipts_optional_row_fields_stay_absent():
+def test_peer_transfer_records_optional_row_fields_stay_absent():
     """port/has_complete_file absent must not materialize as 0/False — an unknown port is
     not port 0 and an unknown role is not "leecher"."""
     rows = [{"ip": "10.0.0.7", "session_bytes_from_peer": 5,
              "session_bytes_to_peer": 0}]
     block = catalog._sanitize_report(
-        _v2(peer_receipts=_receipts(rows=rows)))["peer_receipts"]
+        _v2(peer_transfer_records=_transfer_records(rows=rows)))["peer_transfer_records"]
     assert block["rows"][0] == {"ip": "10.0.0.7", "session_bytes_from_peer": 5,
                                 "session_bytes_to_peer": 0}
 
 
-def test_peer_receipts_device_omission_preserved():
+def test_peer_transfer_records_device_omission_preserved():
     """The device's own cap already omitted rows: their count AND their byte
     mass arrive as numbers, and the server stores both verbatim."""
     rows = [{"ip": "10.0.0.7", "session_bytes_from_peer": 100,
              "session_bytes_to_peer": 0}]
-    block = catalog._sanitize_report(_v2(peer_receipts=_receipts(
+    block = catalog._sanitize_report(_v2(peer_transfer_records=_transfer_records(
         rows=rows, rows_total=9, rows_omitted=8,
         bytes_from_all_senders_total=1100,
-        bytes_from_all_senders_omitted=1000)))["peer_receipts"]
+        bytes_from_all_senders_omitted=1000)))["peer_transfer_records"]
     assert block["rows_total"] == 9 and block["rows_omitted"] == 8
     assert block["bytes_from_all_senders_total"] == 1100
     assert block["bytes_from_all_senders_omitted"] == 1000
     assert block["rows_dropped_by_server"] == 0
 
 
-def test_peer_receipts_server_truncation_is_lossless_and_counted():
+def test_peer_transfer_records_server_truncation_is_lossless_and_counted():
     """The server's own 32-row cap keeps the LARGEST contributors, moves the
     dropped tail into the omitted counters (never discarding its bytes), and
     reports its own drop as an explicit count."""
@@ -2173,7 +2187,7 @@ def test_peer_receipts_server_truncation_is_lossless_and_counted():
              "session_bytes_to_peer": 0} for i in range(50)]
     total = sum(r["session_bytes_from_peer"] for r in rows)
     block = catalog._sanitize_report(
-        _v2(peer_receipts=_receipts(rows=rows)))["peer_receipts"]
+        _v2(peer_transfer_records=_transfer_records(rows=rows)))["peer_transfer_records"]
     assert len(block["rows"]) == 32
     assert block["rows_dropped_by_server"] == 18
     # kept rows are the biggest, sorted descending — what is lost is the tail
@@ -2187,15 +2201,15 @@ def test_peer_receipts_server_truncation_is_lossless_and_counted():
     assert block["rows_total"] == len(block["rows"]) + block["rows_omitted"]
 
 
-def test_peer_receipts_server_truncation_adds_to_device_omission():
+def test_peer_transfer_records_server_truncation_adds_to_device_omission():
     """Device-omitted and server-omitted mass accumulate in the same counters
     rather than either one overwriting the other."""
     rows = [{"ip": "10.0.1.%d" % i, "session_bytes_from_peer": 1000,
              "session_bytes_to_peer": 0} for i in range(40)]
-    block = catalog._sanitize_report(_v2(peer_receipts=_receipts(
+    block = catalog._sanitize_report(_v2(peer_transfer_records=_transfer_records(
         rows=rows, rows_total=45, rows_omitted=5,
         bytes_from_all_senders_total=40000 + 77,
-        bytes_from_all_senders_omitted=77)))["peer_receipts"]
+        bytes_from_all_senders_omitted=77)))["peer_transfer_records"]
     assert block["rows_omitted"] == 5 + 8
     assert block["bytes_from_all_senders_omitted"] == 77 + 8000
     assert block["rows_dropped_by_server"] == 8
@@ -2204,88 +2218,88 @@ def test_peer_receipts_server_truncation_adds_to_device_omission():
             == block["bytes_from_all_senders_total"] == 40077)
 
 
-def test_peer_receipts_incomplete_capture_is_carried_not_repaired():
+def test_peer_transfer_records_incomplete_capture_is_carried_not_repaired():
     """complete:false says the hook could not read the whole peer list, so the
     total is a floor.  The server stores that fact; it never patches it up."""
-    block = catalog._sanitize_report(_v2(peer_receipts=_receipts(
-        complete=False)))["peer_receipts"]
+    block = catalog._sanitize_report(_v2(peer_transfer_records=_transfer_records(
+        complete=False)))["peer_transfer_records"]
     assert block["complete"] is False
     assert block["bytes_from_all_senders_total"] == 41943040
 
 
-def test_peer_receipts_bytes_may_exceed_content_bytes():
+def test_peer_transfer_records_bytes_may_exceed_content_bytes():
     """aria2 counts WIRE bytes, so hashfailed/duplicate pieces can push the
     peer sum above the content length.  Rejecting the report over that would
     throw away the whole measurement — it is explicitly allowed."""
     rows = [{"ip": "10.0.0.7", "session_bytes_from_peer": 10 ** 6,
              "session_bytes_to_peer": 0}]
-    out = catalog._sanitize_report(_v2(peer_receipts=_receipts(rows=rows)))
+    out = catalog._sanitize_report(_v2(peer_transfer_records=_transfer_records(rows=rows)))
     assert out["content"]["completed_content_bytes"] == 10
-    assert out["peer_receipts"]["bytes_from_all_senders_total"] == 10 ** 6
+    assert out["peer_transfer_records"]["bytes_from_all_senders_total"] == 10 ** 6
 
 
-def test_peer_receipts_rejects_malformed_block():
+def test_peer_transfer_records_rejects_malformed_block():
     """A malformed block is a device bug and must raise, never be dropped —
     a silently missing block would be indistinguishable from "not measured"."""
     bad = [
-        _receipts(source="guesswork"),                     # unknown provenance
-        _receipts(source=None),
+        _transfer_records(source="guesswork"),                     # unknown provenance
+        _transfer_records(source=None),
         {"captured_at": 50.0, "complete": True, "rows": []},   # no source
-        _receipts(complete="true"),                        # not a strict bool
-        _receipts(captured_at="50"),
-        _receipts(captured_at=float("inf")),
-        _receipts(captured_at=0.5),        # before window.start
-        _receipts(captured_at=101.0),      # after report_created_at
-        _receipts(rows="nope"),
-        _receipts(rows=[{"ip": "not-an-ip", "session_bytes_from_peer": 1,
+        _transfer_records(complete="true"),                        # not a strict bool
+        _transfer_records(captured_at="50"),
+        _transfer_records(captured_at=float("inf")),
+        _transfer_records(captured_at=0.5),        # before window.start
+        _transfer_records(captured_at=101.0),      # after report_created_at
+        _transfer_records(rows="nope"),
+        _transfer_records(rows=[{"ip": "not-an-ip", "session_bytes_from_peer": 1,
                          "session_bytes_to_peer": 0}]),
-        _receipts(rows=["junk"]),
-        _receipts(rows=[{"session_bytes_from_peer": 1,
+        _transfer_records(rows=["junk"]),
+        _transfer_records(rows=[{"session_bytes_from_peer": 1,
                          "session_bytes_to_peer": 0}]),     # no ip
-        _receipts(rows=[{"ip": "10.0.0.7", "session_bytes_from_peer": -1,
+        _transfer_records(rows=[{"ip": "10.0.0.7", "session_bytes_from_peer": -1,
                          "session_bytes_to_peer": 0}]),
-        _receipts(rows=[{"ip": "10.0.0.7", "session_bytes_from_peer": True,
+        _transfer_records(rows=[{"ip": "10.0.0.7", "session_bytes_from_peer": True,
                          "session_bytes_to_peer": 0}]),     # bool is not a count
-        _receipts(rows=[{"ip": "10.0.0.7", "session_bytes_from_peer": 2 ** 53 + 1,
+        _transfer_records(rows=[{"ip": "10.0.0.7", "session_bytes_from_peer": 2 ** 53 + 1,
                          "session_bytes_to_peer": 0}]),
-        _receipts(rows=[{"ip": "10.0.0.7", "session_bytes_from_peer": 1,
+        _transfer_records(rows=[{"ip": "10.0.0.7", "session_bytes_from_peer": 1,
                          "session_bytes_to_peer": 0, "port": 70000}]),
-        _receipts(rows=[{"ip": "10.0.0.7", "session_bytes_from_peer": 1,
+        _transfer_records(rows=[{"ip": "10.0.0.7", "session_bytes_from_peer": 1,
                          "session_bytes_to_peer": 0, "has_complete_file": 1}]),
     ]
     for block in bad:
         with pytest.raises(ValueError):
-            catalog._sanitize_report(_v2(peer_receipts=block))
+            catalog._sanitize_report(_v2(peer_transfer_records=block))
     for block in ("nope", 5, ["rows"]):
         with pytest.raises(ValueError):
-            catalog._sanitize_report(_v2(peer_receipts=block))
+            catalog._sanitize_report(_v2(peer_transfer_records=block))
 
 
-def test_peer_receipts_rejects_duplicate_peer_ip():
-    """Two receipts for one peer have no defined meaning: summing them would
+def test_peer_transfer_records_rejects_duplicate_peer_ip():
+    """Two transfer records for one peer have no defined meaning: summing them would
     invent bytes, choosing one would discard measured bytes."""
     rows = [{"ip": "10.0.0.7", "session_bytes_from_peer": 5,
              "session_bytes_to_peer": 0},
             {"ip": "10.0.0.7", "session_bytes_from_peer": 7,
              "session_bytes_to_peer": 0}]
     with pytest.raises(ValueError):
-        catalog._sanitize_report(_v2(peer_receipts=_receipts(rows=rows)))
+        catalog._sanitize_report(_v2(peer_transfer_records=_transfer_records(rows=rows)))
 
 
-def test_peer_receipts_rejects_broken_arithmetic():
+def test_peer_transfer_records_rejects_broken_arithmetic():
     """The aggregate identities are the whole point: a total that does not
     account for its rows is not a measurement."""
     rows = [{"ip": "10.0.0.7", "session_bytes_from_peer": 100,
              "session_bytes_to_peer": 0}]
     with pytest.raises(ValueError):        # bytes do not add up
-        catalog._sanitize_report(_v2(peer_receipts=_receipts(
+        catalog._sanitize_report(_v2(peer_transfer_records=_transfer_records(
             rows=rows, bytes_from_all_senders_total=999,
             bytes_from_all_senders_omitted=0)))
     with pytest.raises(ValueError):        # rows do not add up
-        catalog._sanitize_report(_v2(peer_receipts=_receipts(
+        catalog._sanitize_report(_v2(peer_transfer_records=_transfer_records(
             rows=rows, rows_total=9, rows_omitted=0)))
     with pytest.raises(ValueError):        # rows_total below named rows
-        catalog._sanitize_report(_v2(peer_receipts=_receipts(
+        catalog._sanitize_report(_v2(peer_transfer_records=_transfer_records(
             rows=rows, rows_total=0, rows_omitted=0)))
 
 
@@ -2315,8 +2329,8 @@ def test_v2_peers_total_checked_before_truncation():
         catalog._sanitize_report(_v2(peers=rows, peers_total=64))
 
 
-def test_peer_receipts_survives_the_store_bound(tmp_path):
-    """A full report — 64 participation rows plus 32 receipt rows — still fits
+def test_peer_transfer_records_survives_the_store_bound(tmp_path):
+    """A full report — 64 participation rows plus 32 transfer-record rows — still fits
     the per-report store bound, and is stored and read back intact."""
     peers = [{"ip": "10.0.3.%d" % i, "first_observed": 1.0,
               "last_observed": 2.0, "observations": 3} for i in range(64)]
@@ -2324,11 +2338,11 @@ def test_peer_receipts_survives_the_store_bound(tmp_path):
              "session_bytes_from_peer": (i + 1) * 4096,
              "session_bytes_to_peer": 512, "has_complete_file": bool(i % 2)}
             for i in range(32)]
-    rep = _v2(peers=peers, peers_total=64, peer_receipts=_receipts(rows=rows))
+    rep = _v2(peers=peers, peers_total=64, peer_transfer_records=_transfer_records(rows=rows))
     s = catalog.CatalogStore(str(tmp_path))
     s.record_telemetry("d1", catalog._sanitize_report(rep))
     stored = s.get_telemetry("d1")[0]
     assert len(stored["peers"]) == 64
-    assert len(stored["peer_receipts"]["rows"]) == 32
-    assert stored["peer_receipts"]["bytes_from_all_senders_total"] == sum(
+    assert len(stored["peer_transfer_records"]["rows"]) == 32
+    assert stored["peer_transfer_records"]["bytes_from_all_senders_total"] == sum(
         r["session_bytes_from_peer"] for r in rows)

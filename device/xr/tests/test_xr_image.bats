@@ -405,7 +405,7 @@ _stage_build_context() {
   CTX="$BATS_TEST_TMPDIR/ctx"
   mkdir -p "$CTX/agent" "$CTX/agent_bin"
   cp "$REPO"/device/agent/*.py "$CTX/agent/"
-  cp "$REPO/device/agent/peer-receipt-hook.sh" "$CTX/agent/"
+  cp "$REPO/device/agent/peer-transfer-hook.sh" "$CTX/agent/"
   # verify_image.py lives in device/, not device/agent/ -- iris_agent.py
   # imports it, so a build context missing it builds fine (Docker doesn't
   # care that a wildcard COPY missed a file it never expected) but the

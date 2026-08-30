@@ -26,15 +26,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY agent_bin/aria2c /opt/iris/bin/aria2c
 # the agent control plane (includes cli_ssh.py — the container CLI transport)
 COPY agent/*.py /opt/iris/agent/
-# the aria2 --on-bt-download-complete program (peer-receipt capture). aria2c
+# the aria2 --on-bt-download-complete program (peer-transfer capture). aria2c
 # execs it directly -- execlp, no shell -- so it needs the exec bit below.
-COPY agent/peer-receipt-hook.sh /opt/iris/agent/peer-receipt-hook.sh
+COPY agent/peer-transfer-hook.sh /opt/iris/agent/peer-transfer-hook.sh
 COPY agent/VERSION /opt/iris/agent/VERSION
 # pinned catalog server cert (public; used to VERIFY catalog TLS)
 COPY iris-catalog.pem /opt/iris/iris-catalog.pem
 COPY entrypoint.sh /entrypoint.sh
 COPY reconcile.sh /reconcile.sh
-RUN chmod +x /entrypoint.sh /opt/iris/bin/aria2c /opt/iris/agent/peer-receipt-hook.sh
+RUN chmod +x /entrypoint.sh /opt/iris/bin/aria2c /opt/iris/agent/peer-transfer-hook.sh
 
 ENV PATH="/opt/iris/bin:${PATH}" \
     PYTHONPATH="/opt/iris/agent" \

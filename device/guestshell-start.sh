@@ -17,8 +17,8 @@ EXEC_DIR="${EXEC_DIR:-/home/guestshell}"
 ARIA2_SRC="${ARIA2_SRC:-$STAGE_DIR/aria2c}"
 RPC_PORT="${RPC_PORT:-6800}"
 RPC_SECRET_FILE="${RPC_SECRET_FILE:-$STAGE_DIR/rpc-secret}"
-HOOK_SRC="${HOOK_SRC:-$STAGE_DIR/agent/peer-receipt-hook.sh}"
-HOOK_DST="${HOOK_DST:-$EXEC_DIR/iris-peer-receipt-hook}"
+HOOK_SRC="${HOOK_SRC:-$STAGE_DIR/agent/peer-transfer-hook.sh}"
+HOOK_DST="${HOOK_DST:-$EXEC_DIR/iris-peer-transfer-hook}"
 LOG="${LOG:-$STAGE_DIR/aria2c.log}"
 MAX_PEERS="${MAX_PEERS:-10}"     # cap BT peer connections per torrent on a device
 BT_LISTEN_PORT="${BT_LISTEN_PORT:-}"
@@ -42,7 +42,7 @@ fi
 RPC_SECRET="$(tr -d '[:space:]' < "$RPC_SECRET_FILE" 2>/dev/null || true)"
 RPC_SECRET="${RPC_SECRET:-iris}"
 
-# The per-peer receipt hook (--on-bt-download-complete, appended below).
+# The per-peer transfer-record hook (--on-bt-download-complete, appended below).
 # aria2 execs the value directly -- execlp with no shell (util.cc:2328) -- so
 # it must be a real file with the exec bit, exactly like aria2c itself. /flash
 # denies chmod, which is why aria2c is copied to $EXEC_DIR; a hook left in the
@@ -66,10 +66,10 @@ if [ -f "$HOOK_SRC" ]; then
   else
     rm -f "$_hook_tmp" 2>/dev/null || true
     # Not fatal, and deliberately so: without the hook a transfer still
-    # completes and the report simply omits the per-peer receipts ("not
-    # measured"). Aborting the launcher over telemetry would silence the
-    # device, which is the 2026-08-20 failure mode.
-    echo "cannot install the peer-receipt hook at $HOOK_DST; transfers will run without per-peer receipts" >&2
+    # completes and the report simply omits the per-peer transfer records
+    # ("not measured"). Aborting the launcher over telemetry would silence
+    # the device, which is the 2026-08-20 failure mode.
+    echo "cannot install the peer-transfer hook at $HOOK_DST; transfers will run without per-peer transfer records" >&2
   fi
   unset _hook_tmp
 fi
