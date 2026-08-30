@@ -32,7 +32,7 @@ Start at the [documentation overview](docs/zensical/index.md), or jump to a sect
 **Onboard devices**
 
 - [Device agents](docs/zensical/device-agents.md) — Guest Shell and IOx behavior on the device
-- [Management type and VLAN ownership](docs/zensical/network-attachment.md) — attachments, VPG/NAT ownership, receipts
+- [Management type and VLAN ownership](docs/zensical/management-type.md) — management types, VPG/NAT ownership, deployment records
 - [IOx app](docs/zensical/iox.md) — building, staging, and transfer paths
 
 **Operate**
@@ -41,7 +41,7 @@ Start at the [documentation overview](docs/zensical/index.md), or jump to a sect
 - [Network workflows](docs/zensical/fleet-workflows.md) — CSV inventory, assignments, batch operations
 - [Operations](docs/zensical/operations.md) — day-two commands, backups, cleanup
 - [Observability](docs/zensical/observability.md) — metrics, swarm map, OTLP export
-- [Telemetry export](docs/zensical/telemetry-export.md) — peer-distribution accounting: origin versus peer bytes, per-device peer receipts, and the limits of each figure
+- [Telemetry export](docs/zensical/telemetry-export.md) — peer-distribution accounting: origin versus peer bytes, per-device peer transfer records, and the limits of each figure
 
 **Reference and development**
 
