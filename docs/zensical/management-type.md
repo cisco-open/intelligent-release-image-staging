@@ -16,17 +16,17 @@ IRIS is allowed to create and remove on the device.
 
 ## Routed — IRIS-managed app network
 
-Routed attachment uses a **dedicated IRIS VLAN and SVI**. Onboarding is
-create-only: the applied receipt records the resources IRIS created, and
+The routed management type uses a **dedicated IRIS VLAN and SVI**. Onboarding is
+create-only: the applied deployment record captures the resources IRIS created, and
 teardown removes exactly those.
 Choose a VLAN and SVI that do not already exist on the device: the installer
-applies them as IRIS-created, the receipt records them as IRIS-owned, and
+applies them as IRIS-created, the deployment record marks them as IRIS-owned, and
 routed teardown removes them.
 
 Global `ip routing` is a switch-wide setting IRIS never enables on the
 operator's behalf — it is an operator decision. Both installers
 (`device/device-install.sh`, `device/iox/install.sh`) check for it before
-applying any config on a routed attachment. The check is semantic, not a grep
+applying any config on a device using the routed management type. The check is semantic, not a grep
 for a positive `ip routing` line: that line is absent whenever routing is the
 platform default (seen on IE-3x00), which used to false-fail a healthy switch.
 Instead the installers treat an explicit `no ip routing` line, or a route
@@ -41,7 +41,7 @@ invisible until traffic is debugged.
 
 ## Inband — existing management VLAN
 
-Inband attachment connects the staging agent — Guest Shell or an IOx app — to an
+The inband management type connects the staging agent — Guest Shell or an IOx app — to an
 **existing management VLAN**. IRIS
 does not create, configure, select, claim ownership of, or delete that VLAN, its
 SVI, gateway, routes, or VRF. The operator-owned SVI (and any VRF it belongs to)
@@ -51,7 +51,7 @@ The supported management-type cells:
 
 | Management type | Addressing | Platform | Status |
 | --- | --- | --- | --- |
-| Routed | static | Guest Shell / IOx | supported (receipt/preflight hardened) |
+| Routed | static | Guest Shell / IOx | supported (record/preflight hardened) |
 | Inband | static | Guest Shell | supported |
 | Inband | static | IOx (IE-3400, Catalyst 9300) | supported |
 | Inband | DHCP | any | rejected — separate capability gate |
@@ -93,7 +93,7 @@ improvement that applies equally to both.
 Catalyst 8000 routers use Guest Shell through `VirtualPortGroup<N>` (VPG), not
 a VLAN/SVI or AppGigabitEthernet interface. Support is **designed for the
 Catalyst 8000 family, lab-tested on Catalyst 8000V**. Both router modes onboard, stage a
-verified image, and undeploy from their receipt, and both appear on the Swarm Map
+verified image, and undeploy from their deployment record, and both appear on the Swarm Map
 with telemetry when observability is enabled.
 
 - **router-routed** creates an IRIS-owned VPG gateway and static app subnet.
@@ -103,8 +103,8 @@ with telemetry when observability is enabled.
 - **router-nat** adds overload NAT behind the operator-selected outside
   interface and static TCP PAT for swarm port **6881**, so peers can reach the
   agent through the router outside address. IRIS owns the VPG, NAT ACL, and NAT
-  rules. The outside interface is canonicalized before rendering. Its receipt
-  records whether `ip nat outside` already existed; a pre-existing marking is
+  rules. The outside interface is canonicalized before rendering. Its deployment
+  record notes whether `ip nat outside` already existed; a pre-existing marking is
   preserved and undeploy removes that marking only when IRIS created it.
 
 `device/router-install.sh` destroys any pre-existing Guest Shell before
@@ -118,7 +118,7 @@ build it from the config this run applies. Agent state persists on
 rebuild.
 
 Undeploy of a **router-nat** device clears only translations whose inside-local
-address matches the app IP recorded in the receipt, using targeted
+address matches the app IP recorded in the deployment record, using targeted
 `clear ip nat translation inside <global> <local> forced` commands before it
 removes the NAT configuration. IOS refuses
 `no ip nat inside source list ... overload` while translations still reference
@@ -138,13 +138,13 @@ an appmgr Docker container on the router's own network stack: there is no
 VLAN, SVI, app IP/mask/gateway, VPG, or NAT interface, and IRIS never touches
 the router's networking configuration. `xr-host` and platform `xr-appmgr` are
 mutually required on any fully-classified device; an inventory-only device
-may carry platform `xr-appmgr` before its attachment is chosen, but planning
+may carry platform `xr-appmgr` before its management type is chosen, but planning
 or deploying refuses the half-classified state.
 
 Onboarding creates the appmgr application `iris`, registers the package
 source `iris-xr`, stages the agent RPM at `harddisk:iris-xr.rpm`, and creates
 the working directory `harddisk:iris-work`. Undeploy removes exactly those
-four resources from its receipt; every other router setting, including its
+four resources from its deployment record; every other router setting, including its
 networking configuration, is preserved. A second undeploy run converges
 even after one was interrupted partway through — a state that can leave
 `harddisk:iris-work` behind — because each step re-probes the router's own
@@ -183,18 +183,18 @@ import: strict IDs, IPv4 addresses and contiguous masks, VLAN range 1–4094, an
 static host/subnet consistency. Older positional CSVs still import but are
 classified `legacy_routed`; they are never inferred as inband.
 
-## Deployment plans and applied receipts
+## Deployment plans and applied records
 
 IRIS separates three concepts that were previously conflated:
 
 1. **Desired inventory** — editable operator intent (`fleet.json`).
 2. **Deployment plan** — an immutable, resolved plan for one action, including
    the resolved platform and a `plan_hash`. Computed before any device contact.
-3. **Applied receipt** — a durable, non-secret record of what IRIS actually
+3. **Deployment record** — a durable, non-secret account of what IRIS actually
    applied, its resource ownership, lifecycle state, management IP, and
    processor-board identity.
 
-Receipts live under `IRIS_STATE` (see below) and contain no passwords, tokens,
+Deployment records live under `IRIS_STATE` (see below) and contain no passwords, tokens,
 certificates, or raw device configuration. Their lifecycle is fail-closed:
 
 ```text
@@ -202,26 +202,26 @@ planned → applying → active → (applying) → removed
                  ↘ unknown / needs-reconcile / drifted / superseded
 ```
 
-A controller restart converts any non-terminal (`planned`/`applying`) receipt to
+A controller restart converts any non-terminal (`planned`/`applying`) deployment record to
 `unknown`; in-flight device work is never silently resumed. A device has exactly
-one live deployment, so when a new receipt becomes `active` — an explicit
+one live deployment, so when a new deployment record becomes `active` — an explicit
 adopt, or an onboard of a device that was undeployed first — any previous
-`active` receipt for
+`active` deployment record for
 that device is retired to the terminal `superseded` state. Undeploy therefore
-always finds at most one active receipt.
+always finds at most one active deployment record.
 
-Undeploy renders **exclusively from an active receipt**, never from the editable
+Undeploy renders **exclusively from an active deployment record**, never from the editable
 inventory — so changing a VLAN, model, or CSV import after onboarding cannot
 retarget a device's cleanup. The one exception is a forced undeploy of a device
-that has no receipt at all: with nothing to render from it resolves the device
+that has no deployment record at all: with nothing to render from it resolves the device
 from inventory and skips the processor-board identity check, so it is limited by
 scope instead — it removes only IRIS-named artifacts and never the operator's
-VLAN/SVI, VirtualPortGroup, or NAT. If a receipt is missing, uncertain, drifted,
+VLAN/SVI, VirtualPortGroup, or NAT. If a deployment record is missing, uncertain, drifted,
 or legacy, cleanup stops in `needs-reconcile` instead of guessing.
 
 ### Adopting a pre-existing deployment
 
-Devices deployed before receipts existed have no active receipt, so a normal
+Devices deployed before deployment records existed have no active deployment record, so a normal
 undeploy is refused. Non-router deployments may use the explicit, audited
 **Adopt** action, which records current ownership without changing the device.
 Routers cannot be adopted, and preflight refuses to onboard over a live agent,
@@ -240,8 +240,8 @@ routers therefore returns a job id per device promptly, with progress shown
 as each job queues and then runs, instead of the request blocking on live SSH
 to every router in turn. Preflight rejects collisions for the VPG, NAT
 entries, named IRIS globals, and `bootflash:guest-share`. These names and the
-guest share are receipt-owned; teardown removes only resources proven by that
-receipt. Every one of these checks, together with device identity and (for
+guest share are tracked in the deployment record; teardown removes only resources proven by that
+record. Every one of these checks, together with device identity and (for
 router NAT) the outside interface, still completes before any enrollment
 token is minted or router configuration is applied.
 
@@ -253,16 +253,16 @@ and app addressing; Router NAT also shows the outside interface. XR host hides
 every addressing field and is auto-selected for a Cisco 8000 series router
 model or the XR appmgr container agent install. The device table shows
 each device's **Management type**, not a bare VLAN/SVI value. Onboarding is
-receipt-backed. See
+record-backed. See
 [Web Console](console.md).
 
 The legacy `tools/gen-device-installers.sh` generator is routed-only and refuses
-a v2 (`management_type`) header: a self-contained installer cannot record a
-receipt or run preflight before minting an enrollment token.
+a v2 (`management_type`) header: a self-contained installer cannot create a
+deployment record or run preflight before minting an enrollment token.
 
 ## Deployment environments
 
-Receipts use the same contract on both deployments:
+Deployment records use the same contract on both deployments:
 
 - **Docker Compose** persists them under `IRIS_STATE` on the `iris-state`
   volume; Console artifact staging is the host-bind-mounted `/srv/artifacts`.

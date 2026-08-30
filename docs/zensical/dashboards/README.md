@@ -166,7 +166,7 @@ rather than hidden, and they explain most surprising readings:
   its own counter, `iris_peer_unattributed_bytes_total`, and drawn as the
   untraced band. That band can step *down*: it is a difference of two counters,
   and bytes traced late leave it. A step down is not a counter reset.
-* **Device receipts are a floor, not a census.** The device-side
+* **Device transfer records are a floor, not a census.** The device-side
   `--on-bt-download-complete` hook snapshots `getPeers` at the completion
   instant, which is exact for peers still connected — but `DefaultPeerStorage`
   erases a peer on disconnect, so peers that left mid-download are simply gone.

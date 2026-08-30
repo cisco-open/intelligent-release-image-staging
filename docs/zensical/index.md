@@ -22,12 +22,12 @@ IRIS also measures that distribution rather than only performing it. Every rollo
 | --- | --- |
 | Server stack | Tracker, catalog, seeder, artifact server, console, telemetry, and encrypted state. |
 | Web console | Browser workflow for images, devices, assignments, onboarding, swarm status, settings, and audit events. |
-| Management types | Per-device **routed**, **inband**, **router-routed**, or **router-nat**, with a receipt-backed deployment lifecycle. |
+| Management types | Per-device **routed**, **inband**, **router-routed**, or **router-nat**, with a record-backed deployment lifecycle. |
 | Guest Shell agent | Catalyst 9300 path that downloads through `aria2c` into the bind-mounted guest-share, verifies hashes, and copies the approved image to `flash:`. |
-| Catalyst 8000 router | Guest Shell through VirtualPortGroup, staging to `bootflash:`. Designed for the Catalyst 8000 family; routed and NAT modes are lab-tested on Catalyst 8000V through verified staging and receipt-backed undeploy. |
+| Catalyst 8000 router | Guest Shell through VirtualPortGroup, staging to `bootflash:`. Designed for the Catalyst 8000 family; routed and NAT modes are lab-tested on Catalyst 8000V through verified staging and record-backed undeploy. |
 | IOx app | The same agent model as an IOx Docker app: IE-3400 (arm64, stages to `sdflash:`) and SSD-equipped Catalyst 9300 (amd64, stages to bootflash through the SSD share). |
 | Network tools | CSV-driven inventory, per-device installers, assignments, and release packaging. |
-| Measured distribution | Per-image accounting of origin-served versus peer-served bytes, plus per-device peer receipts naming which peers supplied the image. The portion the origin-side sampler could not trace to a device is published as its own counter -- untraced bytes did leave the origin, only the recipient is unknown -- rather than folded into the totals. |
+| Measured distribution | Per-image accounting of origin-served versus peer-served bytes, plus per-device peer transfer records naming which peers supplied the image. The portion the origin-side sampler could not trace to a device is published as its own counter -- untraced bytes did leave the origin, only the recipient is unknown -- rather than folded into the totals. |
 | Observability | Swarm map, health endpoint, metrics (Prometheus exposition format), optional OTLP export, peer-distribution counters, and structured audit trail. |
 | Image verification | Compares catalog images against Cisco's published Bulk Hash feed by sha512 and quarantines a mismatch until an operator resolves it. |
 
@@ -54,7 +54,7 @@ flowchart LR
 | Drive the whole workflow from a browser | [Web Console](console.md) |
 | Stand up a lab and stage one image | [Getting Started](getting-started.md) |
 | Understand the trust boundaries before touching production | [Architecture](architecture.md), then [Security Model](security.md) |
-| Decide how a device attaches to the network | [Management Type and VLAN Ownership](network-attachment.md) |
+| Decide how a device attaches to the network | [Management Type and VLAN Ownership](management-type.md) |
 | Run a rollout across many devices | [Web Console](console.md), then [Network Workflows](fleet-workflows.md) |
 | Find out how much of a rollout the peers carried | [Telemetry Export](telemetry-export.md) |
 | Find a day-two command or an env var | [Operations](operations.md), [Reference](reference.md) |
@@ -91,7 +91,7 @@ Read these before connecting production devices.
 | Page | What it covers |
 | --- | --- |
 | [Device Agents](device-agents.md) | Guest Shell and IOx agent behavior on the device. |
-| [Management Type and VLAN Ownership](network-attachment.md) | Switch and router management types, VPG/NAT ownership, receipts, and network-preserving guarantees. |
+| [Management Type and VLAN Ownership](management-type.md) | Switch and router management types, VPG/NAT ownership, deployment records, and network-preserving guarantees. |
 | [IOx App](iox.md) | Building, staging, and transfer paths for the IOx agent. |
 
 ### Operate
@@ -102,7 +102,7 @@ Read these before connecting production devices.
 | [Network Workflows](fleet-workflows.md) | CSV inventory, assignments, and batch operations. |
 | [Operations](operations.md) | Day-two commands, backups, scaling, and cleanup. |
 | [Observability](observability.md) | Metrics, swarm map, OTLP export, and dashboards. |
-| [Telemetry Export](telemetry-export.md) | Peer-distribution accounting: the metric families, the device peer receipts, and what each figure does and does not measure. |
+| [Telemetry Export](telemetry-export.md) | Peer-distribution accounting: the metric families, the device peer transfer records, and what each figure does and does not measure. |
 
 ### Reference and development
 

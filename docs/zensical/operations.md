@@ -72,9 +72,9 @@ individual effects are documented in
 
 A batch onboard no longer blocks its HTTP request on a router's live SSH
 session. `POST /api/devices/<id>/onboard` resolves the plan, checks for a
-conflicting deployment receipt, and returns a job id immediately; router
+conflicting deployment record, and returns a job id immediately; router
 preflight — the read-only collision, identity, and NAT checks in
-[Router preflight and ownership](network-attachment.md#router-preflight-and-ownership)
+[Router preflight and ownership](management-type.md#router-preflight-and-ownership)
 — runs afterward, in the bounded onboarding worker pool, right before that
 job mints its enrollment token. Selecting a large batch of routers therefore
 shows queued and running progress at once instead of the page hanging while
@@ -182,6 +182,14 @@ records it in a known-hosts file under the server state directory
 changes. Verify the fingerprint out of band where the destination warrants
 it, and remove that file after an intentional host rebuild.
 
+Audit detail wording can change between releases without rewriting entries
+already on disk — `audit.jsonl` is append-only, so old lines keep their
+original text. The clearest current example is the deployment-record rename:
+the `adopt` action's detail text and the device-retirement (`device_delete`)
+detail text naming abandoned deployment records both moved to the new
+wording. A saved search over audit detail for either event should match both
+the old and the new phrasing until the old entries age out.
+
 ## Image verification
 
 *Settings → Image verification* checks the catalog's images against Cisco's
@@ -239,39 +247,39 @@ On Catalyst 9300 IOx devices the final agent-to-IOS transfer uses the bind-mount
 
 Use `device/device-uninstall.sh` (Guest Shell devices), `device/router-uninstall.sh` (Catalyst 8000 routers), or the IOx uninstall path for device cleanup. Cleanup removes IRIS-owned EEM applets, Guest Shell or IOx agent wiring, trustpoint binding, and staged agent artifacts. It still does not reload the device.
 
-Undeploy is driven by the device's applied **receipt**, not its editable
+Undeploy is driven by the device's applied **deployment record**, not its editable
 inventory row, so a later inventory edit cannot retarget cleanup. An
 **inband** device's teardown removes the app footprint and every other
 IRIS-named artifact — the EEM applets, the IRISQ discriminator and its logging
 bindings, and the IRIS PKI trustpoint and HTTP-client binding — and preserves
-the operator-owned VLAN/SVI/routes/VRF. A device deployed before receipts
+the operator-owned VLAN/SVI/routes/VRF. A device deployed before deployment records
 existed
-has no active receipt and must be **adopted** (an explicit, audited, no-change
+has no active deployment record and must be **adopted** (an explicit, audited, no-change
 recording of ownership) before it can be undeployed, or undeployed with
-**Force** to strip only the agent footprint when there is no receipt at all —
+**Force** to strip only the agent footprint when there is no deployment record at all —
 see [Bulk device actions](console.md#bulk-device-actions). A Catalyst 8000
 router cannot be adopted, and preflight refuses an onboard over a live agent, so
-a receipt-less router's only path is Force. Force behaves identically on every
+a router with no deployment record has only Force as its path. Force behaves identically on every
 platform: it removes every artifact identifiable by name as IRIS — the IRIS EEM
 applets, the IRISQ logging discriminator and its buffered/console/monitor
 bindings, `crypto pki trustpoint IRIS` and `ip http client secure-trustpoint
 IRIS`, the app-hosting stanza, and the staged IRIS files — and leaves only the
 operator's network exactly as it is: the VLAN/SVI, the VirtualPortGroup, and the
-NAT rules, which no receipt proves IRIS created. Undeploy therefore clears
+NAT rules, which no deployment record proves IRIS created. Undeploy therefore clears
 exactly what preflight refuses, so a forced teardown leaves the device able to be
-onboarded again. A missing, drifted, or uncertain receipt otherwise stops cleanup
+onboarded again. A missing, drifted, or uncertain deployment record otherwise stops cleanup
 in `needs-reconcile` rather than guessing. See
-[Management Type and VLAN Ownership](network-attachment.md).
+[Management Type and VLAN Ownership](management-type.md).
 
 ### Recovering an interrupted IOS-XR teardown
 
 An IOS-XR undeploy that was interrupted partway through needs no special
-recovery: re-run undeploy (receipted or Force) and it converges, because
+recovery: re-run undeploy (record-backed or Force) and it converges, because
 each step re-probes the router's own state — including the appmgr
 application's — before acting rather than assuming an earlier attempt
 succeeded. A step that cannot even trust its own probe — a transport error,
 or a truncated read — refuses to continue rather than guess, and a failed
-teardown leaves the device's receipt in `needs-reconcile` (a red badge in
+teardown leaves the device's deployment record in `needs-reconcile` (a red badge in
 the console); undeploy or Force is legal to run again directly from that
 state, and the re-run converges the same way. Every command session to the
 router is bounded by `IRIS_XR_SESSION_TIMEOUT` (default 900 seconds), so a
@@ -358,6 +366,20 @@ Remedy: re-run `tools/provision-iox-packages.sh`, then re-onboard the affected
 IOx devices. If instead the certificate the server currently serves disagrees
 with the copy already handed to devices, rebuilding packages alone will not
 fix it — new onboards are affected too — so reconcile the certificate first.
+
+## Redeploying agents after an artifact rebuild
+
+Rebuilding an XR RPM, IOx tar, or agent bundle changes what is baked inside
+it — including any script or hook filename — so a rebuild must also be
+republished, and a device must be redeployed to pick it up. Until then, an
+already-deployed agent keeps working against the current server, but any name
+it reports that the server no longer recognizes is dropped by the server's
+allow-list reconstruction rather than rejected: per-peer transfer attribution
+is simply absent from that device's report until it is redeployed, not an
+error. The agent's own persisted telemetry state can carry an old key across
+its own upgrade too, so the first report after upgrading a running agent can
+discard whatever peer data it had already measured for the transfer in
+progress — a one-time gap for that transfer, not a recurring one.
 
 ## Rotating the seeder announce credential
 

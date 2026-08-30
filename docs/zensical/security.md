@@ -20,19 +20,20 @@ IRIS is designed around least surprise: it moves images, verifies images, and re
 | Private swarm | Torrents use private metadata and authenticated announces. |
 | Unprivileged runtime | Every server process runs as a fixed non-root uid with all Linux capabilities dropped. |
 
-Deployment lifecycle state is recorded in durable, non-secret **receipts** under
-`IRIS_STATE`, and a normal teardown is driven from a device's recorded receipt
-rather than its editable inventory. The one exception is a **forced undeploy**,
-for a device stranded with no readable receipt: it is planned from inventory,
+Deployment lifecycle state is recorded in durable, non-secret **deployment
+records** under `IRIS_STATE`, and a normal teardown is driven from a device's
+recorded deployment record rather than its editable inventory. The one
+exception is a **forced undeploy**, for a device stranded with no readable
+deployment record: it is planned from inventory,
 removes only what is identifiable by name as IRIS's own, deliberately leaves the
 operator's network (VLAN/SVI, VirtualPortGroup, NAT rules) untouched because
 nothing proves IRIS created it, and is recorded distinctly in the audit trail as
 `undeploy_forced`. Teardown is otherwise never driven from
-its editable inventory. Receipts contain no passwords, tokens, certificate keys,
-or raw device configuration. Router receipts additionally bind the management IP
+its editable inventory. Deployment records contain no passwords, tokens, certificate keys,
+or raw device configuration. Router deployment records additionally bind the management IP
 and processor-board identity and own only collision-free named globals and
 `guest-share` resources. See
-[Router preflight and ownership](network-attachment.md#router-preflight-and-ownership).
+[Router preflight and ownership](management-type.md#router-preflight-and-ownership).
 
 ## Container runtime privileges
 

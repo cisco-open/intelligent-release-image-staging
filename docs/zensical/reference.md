@@ -285,15 +285,15 @@ verification](operations.md#image-verification).
 | `POST /api/devices/import-csv` | Bulk inventory import (8 MiB cap, all-or-nothing); returns per-row stats. |
 | `GET /api/devices/<id>/plan` | `{plan}` — the resolved deployment plan; 409 when it cannot resolve. |
 | `GET /api/devices/<id>/reports` | `{reports: [...]}` — the device's stored telemetry ring. |
-| `GET /api/devices/<id>/deployment` | `{receipt, total}` — the receipt that best describes the device (the active one, else the teardown-authorizing one, else the newest) plus the stored-receipt count; `receipt` is `null` when none exists. Read-only — feeds the deployment-details panel. |
+| `GET /api/devices/<id>/deployment` | `{record, total}` — the deployment record that best describes the device (the active one, else the teardown-authorizing one, else the newest) plus the stored-record count; `record` is `null` when none exists. Read-only — feeds the deployment-details panel. |
 | `POST /api/devices/<id>/assign` | `{image_ids: [...]}` sets the device's ordered, up-to-ten-image approved set (an empty array unassigns); the singular `{image_id: <id or null>}` is the pre-multi-image compat shape and always means a one-element set. 400 for more than ten ids, a duplicate, or an id not in the catalog; 400 `image_quarantined` with the blocking verdict if one of the ids is currently quarantined by the Cisco Bulk Hash reconciler (see [Image verification](#image-verification)). See [Policy schema](#policy-schema). |
 | `POST /api/devices/<id>/credential`, `.../platform` | Sets the credential profile, or the platform (Agent install choice) and storage target; each returns `{ok: true}`. |
 | `POST /api/devices/<id>/request-report` | Requests a fresh telemetry report; `{ok: true, expires_at}`, or 429 while one is already pending. |
-| `POST /api/devices/<id>/adopt` | Requires `{"acknowledge_adopt": true}`; returns `{receipt_id}`. 409 when the device already has an active receipt; routers cannot be adopted. |
-| `POST /api/devices/<id>/onboard`, `POST /api/devices/<id>/undeploy` | Starts the job; `{job_id}`. 409 when the device is busy with the opposite action. Undeploy also answers 409 when the device has no deployment receipt — send `{"force": true}` to run it anyway, which removes only the IRIS-named agent footprint and leaves operator-owned network state (VLAN/SVI, VirtualPortGroup, NAT) untouched, audited as `undeploy_forced`. |
+| `POST /api/devices/<id>/adopt` | Requires `{"acknowledge_adopt": true}`; returns `{record_id}`. 409 when the device already has an active deployment record; routers cannot be adopted. |
+| `POST /api/devices/<id>/onboard`, `POST /api/devices/<id>/undeploy` | Starts the job; `{job_id}`. 409 when the device is busy with the opposite action. Undeploy also answers 409 when the device has no deployment record — send `{"force": true}` to run it anyway, which removes only the IRIS-named agent footprint and leaves operator-owned network state (VLAN/SVI, VirtualPortGroup, NAT) untouched, audited as `undeploy_forced`. |
 
 Router deployments carry extra preflight and ownership rules — see
-[Management Type and VLAN Ownership](network-attachment.md#router-preflight-and-ownership).
+[Management Type and VLAN Ownership](management-type.md#router-preflight-and-ownership).
 
 ### Onboarding jobs
 

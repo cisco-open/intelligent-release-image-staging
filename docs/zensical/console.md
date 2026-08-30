@@ -155,27 +155,27 @@ device table shows each device's management type rather than a bare VLAN/SVI val
 - **Router routed - IRIS-managed VPG subnet** — creates a VirtualPortGroup and
   routed app subnet; the operator provides routes to IRIS and peers.
 - **Router NAT - VPG behind NAT** — adds overload NAT and static TCP PAT for
-  port 6881. The receipt preserves a pre-existing `ip nat outside` marking.
+  port 6881. The deployment record preserves a pre-existing `ip nat outside` marking.
 - **XR host - router's own network stack** — the appmgr container runs on
   the router's own network stack; there are no app-network fields to set.
 
-A device with no attachment chosen yet — imported from an older positional CSV,
+A device with no management type chosen yet — imported from an older positional CSV,
 or added without picking one of the five types above — reads **Inventory only —
-attachment not chosen** in that column instead. See
+management type not chosen** in that column instead. See
 [Older positional CSVs](fleet-workflows.md#inventory).
 
 Router choices show the VPG number and app addressing; Router NAT also requires
 the outside interface. Both target the Catalyst 8000 family and are validated on
-Catalyst 8000V across onboarding, image staging, receipt-backed undeploy, Swarm Map, and
+Catalyst 8000V across onboarding, image staging, record-backed undeploy, Swarm Map, and
 OpenTelemetry (OTLP) export.
 
-Each onboard records a durable **receipt** of what it applied, and **Undeploy**
-runs only from that receipt, so editing inventory after onboarding cannot
-retarget cleanup. A device deployed before receipts existed shows no active
-receipt; check its row and use the toolbar's **Adopt** action (an explicit,
+Each onboard creates a durable **deployment record** of what it applied, and **Undeploy**
+runs only from that deployment record, so editing inventory after onboarding cannot
+retarget cleanup. A device deployed before deployment records existed shows no active
+deployment record; check its row and use the toolbar's **Adopt** action (an explicit,
 audited, no-change recording of current ownership) before undeploying it. Router deployments cannot
-be adopted — re-onboard instead. For preflight and receipt ownership see
-[Deployment plans and applied receipts](network-attachment.md#deployment-plans-and-applied-receipts).
+be adopted — re-onboard instead. For preflight and deployment-record ownership see
+[Deployment plans and applied records](management-type.md#deployment-plans-and-applied-records).
 
 Each device row's **ⓘ Deployment details** control opens a read-only drawer
 beside the table — it slides in from the right, closes on **Esc** or **✕**, and
@@ -190,13 +190,13 @@ single image shows that agent's own state string instead (for example
 `downloading`, `transferring_to_ios`), since a one-image heartbeat reports
 exactly one image. The reported error is one per heartbeat, for the tick
 rather than for a particular image, so a multi-image set carries it on its
-own **Last reported error** row below the images. Below that, it shows the deployment itself: the receipt state (`active`,
+own **Last reported error** row below the images. Below that, it shows the deployment itself: the deployment record state (`active`,
 `removed`, `superseded`, `needs-reconcile`,
-`abandoned`) and receipt id, the
+`abandoned`) and record id, the
 preflight result, and the resolved configuration the onboard applied — the
-attachment type, the owned management VLAN or VPG, SVI and app addressing,
+management type, the owned management VLAN or VPG, SVI and app addressing,
 NAT interface, swarm port, and the recorded model, **Agent install** choice, and device
-identity. A device with no receipt says so, naming adopt or re-onboard as the
+identity. A device with no deployment record says so, naming adopt or re-onboard as the
 fix. The drawer ends with that device's persisted deployment logs
 ([Deployment logs](#deployment-logs)), each viewable in place. A run that
 finished before the current device was registered under this name is labelled
@@ -217,9 +217,9 @@ an image is never `error` on one and something else on the other. A freshly assi
 right away but does not show on the map until the device's next heartbeat
 reports it.
 
-An `abandoned` receipt is one that no longer describes a device IRIS manages:
+An `abandoned` deployment record is one that no longer describes a device IRIS manages:
 the device was deleted from the inventory, or a forced teardown stripped the
-agent without using the receipt as authority. It is kept as the record of what
+agent without using the deployment record as authority. It is kept as the account of what
 IRIS built on that box, but it never authorises a teardown and never blocks an
 onboard again.
 
@@ -243,8 +243,8 @@ device can read `deployed` and still have gone quiet.
 | --- | --- | --- |
 | Onboard selected | Queues an onboard job per device and tracks them in the batch panel; the server runs a bounded number at a time and queues the rest. | No |
 | *Telemetry reports* / *Telemetry streaming* checkboxes | Set the deployed agent's telemetry posture for every onboard started from this toolbar (single-row onboards included). Reports default on; streaming defaults off ([Transfer streaming](observability.md#transfer-streaming)). A bulk redeploy with the boxes toggled is the site-scale enable/disable path. | No |
-| Undeploy selected | Runs receipt-driven cleanup on each device. | Yes — one dialog for the whole selection, naming what teardown removes and preserves |
-| Adopt selected | Records the ownership receipt for each device. | Yes — a dialog listing the selected devices |
+| Undeploy selected | Runs record-driven cleanup on each device. | Yes — one dialog for the whole selection, naming what teardown removes and preserves |
+| Adopt selected | Creates the ownership deployment record for each device. | Yes — a dialog listing the selected devices |
 | Delete selected | Removes the inventory rows only. | Yes — a dialog listing the devices and warning that deletion is not an undeploy |
 | *credential for selected* + **Apply** | Assigns one credential profile to every checked device. Leaving the picker on either blank entry clears the credential instead. | No |
 | Assign images to selected | Opens the shared image picker for the whole checked selection — the bulk form of each row's own control in the **Assigned images** column, and the reason the filter bar exists: filter to a platform or model, select all, assign. | Only when it would unassign every image |
@@ -273,31 +273,31 @@ routers cannot be adopted, and sends the acknowledgement the server requires —
 an adopt that omits it is refused.
 
 The **Undeploy** dialog's **Force** checkbox covers a device stranded with no
-*usable* deployment receipt. That is either no receipt at all — typically an
-onboard that enabled the agent but died before its receipt was written — or a
-receipt that no longer describes the box in front of it. The second case is a
+*usable* deployment record. That is either no deployment record at all — typically an
+onboard that enabled the agent but died before its deployment record was written — or a
+deployment record that no longer describes the box in front of it. The second case is a
 device that was rebuilt or replaced: it keeps its device id and its address but
 reports a new board ID, so the teardown recipe refuses it with `device identity
 mismatch`, while onboard refuses too and names that same teardown as the fix.
-Force is read before the receipt is, so neither a mismatched receipt nor two
-conflicting recoverable receipts can keep you from it. Forcing removes every
+Force is read before the deployment record is, so neither a mismatched deployment record nor two
+conflicting recoverable deployment records can keep you from it. Forcing removes every
 artifact that
 carries IRIS's own name — the EEM applets, Guest Shell or the IOx app and its
 app-hosting stanza, the IRISQ logging discriminator and its
 buffered/console/monitor bindings, `crypto pki trustpoint IRIS` and `ip http
 client secure-trustpoint IRIS`, and the staged files — and preserves only the
 operator's network: the VLAN and SVI, the VirtualPortGroup, and the NAT rules,
-which without a receipt nothing proves IRIS created. Everything IRIS-named has
+which without a deployment record nothing proves IRIS created. Everything IRIS-named has
 to go, or the next onboard's preflight refuses the device the forced teardown
 just rescued. It behaves the same on every platform, including a router, which
-has no other way to clear a receipt-less agent — it cannot be adopted, and
+has no other way to clear an agent with no deployment record — it cannot be adopted, and
 its preflight refuses to re-onboard over an already-enabled Guest Shell.
 Recorded in Audit as `undeploy_forced`.
 
-Once a forced teardown succeeds, every receipt the device still held is marked
+Once a forced teardown succeeds, every deployment record the device still held is marked
 `abandoned` — only on success, because failing to reach a device is not proof
-that its receipt is wrong. Without that step the next onboard would be refused
-on the very receipt the force was run to get past.
+that its deployment record is wrong. Without that step the next onboard would be refused
+on the very deployment record the force was run to get past.
 
 Bulk operations report per-device refusals rather than failing the whole batch:
 the status line shows how many devices succeeded and names the ones that did
@@ -309,7 +309,7 @@ immediately, so a device imported before any profile existed becomes assignable
 at once instead of after the next ten-second poll.
 
 !!! warning "Deleting inventory is not an undeploy"
-    Delete removes the Console record — it does not touch the box. An onboarded
+    Delete removes the Console inventory entry — it does not touch the box. An onboarded
     device keeps its agent and its staged image, with no inventory entry left to
     manage it. Undeploy first if that is what you meant. The deletion cannot be
     undone.
@@ -317,7 +317,7 @@ at once instead of after the next ten-second poll.
     Delete *is* terminal for the device id, though. Alongside the inventory row
     it revokes the device's credentials, clears its image assignment, heartbeat,
     telemetry history, pending pull and seen-report ledger, marks its
-    deployment receipts `abandoned`, and cancels any onboard or undeploy still
+    deployment records `abandoned`, and cancels any onboard or undeploy still
     queued or running for it. Re-adding the same device id afterwards starts
     from scratch: nothing the previous device left behind can block or
     authorise anything for its replacement. Peer endpoint rows are the one
@@ -335,7 +335,7 @@ instead of hanging inside an opaque SSH timeout. Router and IOx onboards
 already run their own live preflight, so all three platforms now fail loud on
 an unreachable device. Every onboarding rejection — a failed preflight, a
 busy device, an unreachable device, a router already holding a deployment
-receipt — is rendered in the console and recorded in Audit, whether it is
+record — is rendered in the console and recorded in Audit, whether it is
 refused at submit time or fails once the job is running.
 
 ### Job log windows

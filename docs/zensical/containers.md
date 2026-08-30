@@ -87,9 +87,9 @@ needs a one-time migration of its named volumes. Both procedures live in
 [Runtime identity](server.md#runtime-identity), with the migration command in
 [Upgrading from a root-runtime deployment](server.md#upgrading-from-a-root-runtime-deployment).
 
-Deployment receipts persist under `IRIS_STATE` on the `iris-state` volume, so
-undeploy-from-receipt and restart recovery behave identically to the Kubernetes
-PVC layout. See [Management Type and VLAN Ownership](network-attachment.md).
+Deployment records persist under `IRIS_STATE` on the `iris-state` volume, so
+undeploy-from-record and restart recovery behave identically to the Kubernetes
+PVC layout. See [Management Type and VLAN Ownership](management-type.md).
 
 ## App-hosting image
 

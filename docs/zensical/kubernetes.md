@@ -26,13 +26,13 @@ registry is in memory, catalog state is file-backed, and the seeder RPC is local
 to the container. More replicas would split coordination state rather than add
 capacity.
 
-Deployment receipts (the applied-lifecycle state that drives undeploy) are
+Deployment records (the applied-lifecycle state that drives undeploy) are
 file-backed under `IRIS_STATE` (`/data/state`) on the PVC, and Console artifact
 staging uses `/data/artifacts` on the same PVC. Because there is a single
-replica, a pod restart marks any in-flight (`planned`/`applying`) receipt
+replica, a pod restart marks any in-flight (`planned`/`applying`) deployment record
 `unknown` and requires reconciliation instead of blindly retrying a device
 operation. See
-[Management Type and VLAN Ownership](network-attachment.md).
+[Management Type and VLAN Ownership](management-type.md).
 
 IOx onboarding (routed or inband, on IE-3400 or Catalyst 9300) needs the IOx app
 packages staged on the PVC: copy `iris-arm64.tar` and/or `iris-amd64.tar` into

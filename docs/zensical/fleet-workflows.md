@@ -43,9 +43,9 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
   for TCP 6881; the interface is canonicalized and teardown preserves an
   outside NAT marking that pre-dates IRIS. The router path targets the Catalyst
   8000 family and is lab-tested on Catalyst 8000V; see
-  [Router routed and router NAT](network-attachment.md#router-routed-and-router-nat-iris-managed-virtualportgroup).
+  [Router routed and router NAT](management-type.md#router-routed-and-router-nat-iris-managed-virtualportgroup).
 
-See [Management Type and VLAN Ownership](network-attachment.md) for the full
+See [Management Type and VLAN Ownership](management-type.md) for the full
 ownership rules. Older positional CSVs (e.g. `device_id,device_ip,vlan,...`)
 still import, but are classified `legacy_routed` and must be adopted before they
 can be undeployed — they are never inferred as inband.
@@ -84,8 +84,8 @@ Deleting inventory rows is not an undeploy — undeploy the devices first. See
 ### Onboarding path
 
 Management-type-aware onboarding runs through the **Console / API**, which resolves
-an immutable plan, records a durable *receipt* of what it applies, and drives
-teardown from that receipt (not from the editable inventory). Every
+an immutable plan, creates a durable *deployment record* of what it applies, and drives
+teardown from that deployment record (not from the editable inventory). Every
 deployment's preflight runs once, at job execution in the bounded onboarding
 worker pool — not inside the onboard request itself — so submitting a large
 batch returns a job per device promptly instead of the request waiting on live
@@ -93,13 +93,13 @@ SSH to each one. Guest Shell, IOx and router deployments all run the same
 IRIS-named collision checks (a device still carrying IRIS configuration is
 refused until it is undeployed), each plus its own extras; a router deployment
 cannot be adopted afterwards. See
-[Router preflight and ownership](network-attachment.md#router-preflight-and-ownership),
+[Router preflight and ownership](management-type.md#router-preflight-and-ownership),
 [Onboarding at scale](operations.md#onboarding-at-scale), and
 [Web Console](console.md#onboarding-from-the-console).
 
 The legacy CLI generator is **routed-only** and deliberately refuses a v2
-(`management_type`) header, because a self-contained installer cannot record
-a receipt or run preflight before minting an enrollment token:
+(`management_type`) header, because a self-contained installer cannot create
+a deployment record or run preflight before minting an enrollment token:
 
 ```bash
 # legacy routed inventory only (old positional columns)
@@ -136,7 +136,7 @@ The script validates all rows first, then applies assignments. That avoids parti
 
 ```mermaid
 flowchart LR
-    Inventory["fleet/devices.csv"] --> Console["Console / API onboarding (receipts)"]
+    Inventory["fleet/devices.csv"] --> Console["Console / API onboarding (deployment records)"]
     Console --> Device["Device onboarded"]
     Inventory -. legacy, routed-only .-> Installers["fleet/dist/install-*.sh"]
     Installers -.-> Device

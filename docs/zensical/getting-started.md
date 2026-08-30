@@ -140,17 +140,17 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
 Fill the routed columns (`iris_vlan`, `svi_*`) for routed devices, or the inband
 columns (`inband_vlan`, `app_*`) for inband devices. `model`/`platform` are
 optional; blank `platform` auto-selects from the model. See
-[Inventory (CSV v2)](network-attachment.md#inventory-csv-v2).
+[Inventory (CSV v2)](management-type.md#inventory-csv-v2).
 
 For a Catalyst 8000 router, use `router-routed` with a VPG number, plus routes
 you provide between the app subnet and IRIS, or `router-nat` with an outside
 interface, which adds static TCP PAT on port 6881. Both router modes stage to
 `bootflash:` only, so size it for about 2× the image plus 200 MB. Support is
 designed for the Catalyst 8000 family and lab-tested on Catalyst 8000V; see
-[Router routed and router NAT](network-attachment.md#router-routed-and-router-nat-iris-managed-virtualportgroup).
+[Router routed and router NAT](management-type.md#router-routed-and-router-nat-iris-managed-virtualportgroup).
 
-Management-type-aware onboarding runs through the **Console** (or API), which records
-a durable receipt and drives teardown from it. The legacy CLI generator below is
+Management-type-aware onboarding runs through the **Console** (or API), which creates
+a durable deployment record and drives teardown from it. The legacy CLI generator below is
 routed-only and refuses a v2 (`management_type`) header:
 
 ```bash

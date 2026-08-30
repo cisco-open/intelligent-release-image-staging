@@ -53,7 +53,7 @@ const paths = {
   },
   router: {
     title: "Catalyst 8000 Guest Shell",
-    copy: "Bring up Guest Shell through a VirtualPortGroup in routed or NAT attachment, with preflight repeated before token mint and receipts bound to device identity.",
+    copy: "Bring up Guest Shell through a VirtualPortGroup in routed or NAT management type, with preflight repeated before token mint and deployment records bound to device identity.",
     items: [
       "Repeats preflight before token mint.",
       "Downloads image pieces through the private swarm.",

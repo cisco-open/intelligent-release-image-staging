@@ -259,7 +259,7 @@ index are rejected — this is the single most common mistake.
 
 | Index | Splunk type | Holds | `source` | `sourcetype` |
 | ----- | ----------- | ----- | -------- | ------------ |
-| `iris_logs` | Events | Peer receipts, per-device reports, swarm events | `iris` | `otel:logs` |
+| `iris_logs` | Events | Peer transfer records, per-device reports, swarm events | `iris` | `otel:logs` |
 | `iris_metrics` | **Metrics** (`datatype = metric`) | Numeric aggregate time series | `iris` | `otel:metrics` |
 
 ```ini
@@ -392,7 +392,7 @@ advancing.
 log records, one row per edge, keyed on `network.peer.address` and
 `iris.image.id`. This is the origin's sampled view.
 
-**Per-device receipts (device view).** A table built from
+**Per-device transfer records (device view).** A table built from
 `iris.device.peer_transfer_record`, split by `iris.peer.attribution` into `origin`,
 `device` and `unknown`. This is the panel family that answers "did this device
 get its image from a peer or from the origin?" — and the one to quote.
@@ -412,13 +412,13 @@ quotes a number in a meeting.
 | `iris.peer.attribution` (`origin`/`device`/`unknown`) | **Derived** | A server-side join of peer address against the device address map — authoritative, but a join |
 | `iris_peer_attributed_bytes_total` (bytes traced to a device) | **Derived (sampled)** | Sum of per-edge deltas observed by periodic `getPeers` sampling; lossy by construction |
 | `iris_peer_unattributed_bytes_total` (untraced bytes) | **Derived** | Origin sent minus traced. A real published quantity, not an error bar |
-| `iris.swarm.peer_bytes` byte values | **Derived (sampled)** | The origin-side estimate of an edge; the device receipt is the exact form of the same bytes |
+| `iris.swarm.peer_bytes` byte values | **Derived (sampled)** | The origin-side estimate of an edge; the device transfer record is the exact form of the same bytes |
 | Offload share percentages | **Derived** | A ratio of the above |
 
 Measured lab behaviour on real hardware, for calibration: a cold four-router
 swarm staging a 928 MiB image reconciled exactly —
 origin sent 3,492,982,720 B = 3,227,913,693 B traced to devices (92.4%) +
-265,069,027 B untraced (7.6%). Device receipts on that run showed
+265,069,027 B untraced (7.6%). Device transfer records on that run showed
 **two routers took zero bytes from the origin**, and one pulled from a peer
 that was itself still downloading. An earlier seven-router run had the origin
 serve 71.1% of bytes and peers 28.9%, with per-device peer share ranging
@@ -437,13 +437,13 @@ device at 3-second sampling, 88.1% at 2-second sampling.** The gap is not
 hidden; it is published as the untraced counter,
 `iris_peer_unattributed_bytes_total`.
 
-**A device receipt is a floor, not a census.** `DefaultPeerStorage` erases a
+**A device transfer record is a floor, not a census.** `DefaultPeerStorage` erases a
 peer on disconnect, so even the completion-instant snapshot only sees peers
-still connected at that moment. Peers that disconnected mid-download are gone
-from the receipt. `iris.transfer_record.capture_complete = false` on the block is the
+still connected at that moment. Peers that disconnected mid-download leave no
+trace in it. `iris.transfer_record.capture_complete = false` on the block is the
 flag that says so — the individual rows are still exact either way.
 
-**Absence of a receipt is not zero.** A device that reported no receipts emits
+**Absence of a transfer record is not zero.** A device that reported no transfer records emits
 no records at all, while a genuine measured zero appears as an explicit `0`.
 
 **`iris_image_size_bytes` is exact, not measured traffic.** It republishes the
@@ -504,7 +504,7 @@ index=iris_logs earliest=-24h "iris.device.peer_transfer_record" | stats count b
 ```
 
 The first query separates "no log export" (zero rows) from "no traffic" (rows
-present, but none of them peer receipts). Swarm events are edge-triggered, so
+present, but none of them peer transfer records). Swarm events are edge-triggered, so
 an idle fleet produces none — search a 7-day window before concluding it is
 broken.
 

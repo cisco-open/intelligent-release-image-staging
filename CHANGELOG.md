@@ -79,6 +79,48 @@ top-level `VERSION` file.
   sha256 against the catalog's published value, and placement onto the boot filesystem
   is attested by exact byte size. The on-device `copy /verify` step is retired; device
   telemetry reports its state as `not_run`.
+- **Terminology rename — management type, deployment record, peer transfer
+  record:** renamed `attachment`/`network_attachment` to **management type**
+  (`management_type`), deployment `receipt` to **deployment record**
+  (`record`/`record_id`), and agent peer `receipt` to **peer transfer record**
+  (`peer_transfer_records`) across the API, state files, env vars, UI, and
+  docs. Breaking, no backward compatibility, in the same style as the
+  device-neutral rename (#25): the server ignores any existing
+  `deployment_receipts.json` and starts a fresh, empty
+  `deployment_records.json` — operators re-adopt devices that already had a
+  deployment record. The fleet.json `network_attachment` read-alias (and the
+  matching CSV header alias) is gone; a row or export still carrying only the
+  old key reads as unclassified until re-saved or re-exported. The
+  `NETWORK_ATTACHMENT` env var is renamed to `MANAGEMENT_TYPE`; all six
+  install/uninstall scripts that read it now abort with a clear error if
+  `NETWORK_ATTACHMENT` is set but `MANAGEMENT_TYPE` is not, rather than
+  silently falling back to the routed default. OTLP names changed
+  (`iris.device.peer_receipt` → `iris.device.peer_transfer_record`,
+  `iris.receipt.*` → `iris.transfer_record.*`, `iris.transfer.peer_receipts.*`
+  → `iris.transfer.peer_records.*`); Splunk dashboards and saved searches
+  built on the old names need updating, and the queries documented in
+  `docs/zensical/telemetry-export.md`, `docs/zensical/observability.md`, and
+  `docs/zensical/dashboards/README.md` already use the new ones. The
+  published docs page moves from `/network-attachment/` to
+  `/management-type/` with no redirect — a redirect stub is not just declined
+  but impossible, because the nav-completeness gate forbids an orphan page
+  and the docs workflow publishes with `force_orphan: true`. Device images
+  and agent bundles must be rebuilt and republished (the peer-transfer hook
+  script filename changed inside the XR RPM and IOx tars); an
+  already-deployed agent keeps working against the new server, but the
+  server drops its old `peer_receipts` key by allow-list reconstruction
+  rather than rejecting it, so per-peer attribution is simply absent until
+  that device is redeployed, and the agent's own persisted telemetry state
+  carries the old key across its own upgrade too, discarding one in-flight
+  transfer's already-measured peer data at that upgrade.
+  `plan.resolved.attachment` is now `plan.resolved.management_type`, on both
+  the plan/preview endpoint and the deployment-record response — any
+  external consumer of `GET`/`POST /api/devices/<id>/plan` or `/deployment`
+  breaks. Audit detail wording changed for two events, adopting a device and
+  retiring one (`device_delete`); existing `audit.jsonl` lines keep their
+  original wording, so a saved search over audit detail for either event
+  should match both the old and the new phrasing until the old entries age
+  out.
 
 ### Fixed
 - A forced router undeploy now reclaims the VirtualPortGroup, NAT ACL, overload

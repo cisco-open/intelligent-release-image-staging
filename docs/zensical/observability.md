@@ -292,7 +292,7 @@ opened and closed between two polls. It is kept as its own quantity
 (`iris_peer_unattributed_bytes_total`) and never spread across the peers — an
 even split would be arithmetic presented as observation.
 
-!!! warning "The receipt is a floor, not a census"
+!!! warning "The transfer record is a floor, not a census"
     The hook reads only the peers aria2 still has a live connection to.
     `DefaultPeerStorage` erases a peer from `usedPeers_` the moment it
     disconnects, so a peer that fed the device 400 MB and then dropped before
@@ -305,7 +305,7 @@ even split would be arithmetic presented as observation.
     `iris.transfer.peer_records.rows_omitted` and
     `iris.transfer.bytes_from_all_senders_omitted`;
     `iris.transfer.peer_records.capture_complete` goes false when the capture
-    itself was lossy. A transfer with no usable snapshot carries no peer-receipt
+    itself was lossy. A transfer with no usable snapshot carries no peer-transfer-record
     attributes at all rather than a zeroed set.
 
 ### Sizing

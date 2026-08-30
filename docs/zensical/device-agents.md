@@ -14,7 +14,7 @@ an IRIS-managed VirtualPortGroup (**router-routed** or **router-nat**), or the
 router's own network stack with no app-network fields (**xr-host**).
 The management-type choice governs what the installer and uninstaller may configure
 and remove; see
-[Management Type and VLAN Ownership](network-attachment.md).
+[Management Type and VLAN Ownership](management-type.md).
 
 After a successful Guest Shell or IOx onboarding or cleanup lifecycle, IRIS runs
 `copy running-config startup-config`. This persists the IRIS app-hosting,
@@ -88,7 +88,7 @@ the live agent, so undeploy first and then onboard again. `router-install.sh`
 additionally destroys any pre-existing Guest Shell before re-applying config,
 so a re-onboard never leaves the guest running on stale networking from a
 previous install — see
-[Router routed and router NAT](network-attachment.md#router-routed-and-router-nat-iris-managed-virtualportgroup).
+[Router routed and router NAT](management-type.md#router-routed-and-router-nat-iris-managed-virtualportgroup).
 
 ### IOx: what the installer pushes
 
@@ -127,7 +127,7 @@ container writes straight to the router's own filesystem. Secrets and the
 device id are passed as `--env` options on the activation line and are never
 baked into the image; `device/xr/entrypoint.sh` writes them into
 `iris-agent.conf` on first boot, and is its own supervisor loop the same way
-the IOx entrypoint is. `device/xr-uninstall.sh` is the receipt-driven
+the IOx entrypoint is. `device/xr-uninstall.sh` is the record-driven
 inverse: deactivate, uninstall the source, remove the RPM and the agent's
 `iris-work/` directory, and sweep any `*.torrent`/`*.aria2`/`*.peers.json`
 sidecar the agent left at `harddisk:` root — this platform has no placement
@@ -235,7 +235,7 @@ it exists for operators who want the connection pinned.
 | Cisco 8000 series (IOS-XR) | `harddisk:` | appmgr Docker app; no CLI — the container bind-mounts `harddisk:` and stages directly onto it. |
 
 The router path targets the Catalyst 8000 family and is lab-tested on Catalyst 8000V; see
-[Router routed and router NAT](network-attachment.md#router-routed-and-router-nat-iris-managed-virtualportgroup).
+[Router routed and router NAT](management-type.md#router-routed-and-router-nat-iris-managed-virtualportgroup).
 
 For the lab-validation status behind this table — including which of these
 platforms have been exercised end to end on real hardware and which have not

@@ -105,7 +105,7 @@ The collector is external to IRIS and is not published by the Compose stack.
   IRIS`, the app-hosting stanza), has Guest Shell already enabled, or has a
   non-empty `bootflash:guest-share`. The installer separately verifies from the
   server host that the artifact server (8000) is serving over trusted HTTPS.
-  See [Management Type and VLAN Ownership](network-attachment.md).
+  See [Management Type and VLAN Ownership](management-type.md).
 - For **router-routed** devices, the operator must route the VPG app subnet to
   the IRIS server and peers. **router-nat** uses the configured outside
   interface; permit inbound TCP 6881 to its outside address for peer reachability.

@@ -30,7 +30,7 @@ nav = [
   ] },
   { "Onboard devices" = [
     { "Device Agents" = "device-agents.md" },
-    { "Management Type and VLAN Ownership" = "network-attachment.md" },
+    { "Management Type and VLAN Ownership" = "management-type.md" },
     { "IOx App" = "iox.md" },
   ] },
   { "Operate" = [
