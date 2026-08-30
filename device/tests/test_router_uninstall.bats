@@ -29,7 +29,7 @@ setup() {
   [[ "$output" != *"IRIS-NAT-"* ]]
 }
 
-@test "router NAT teardown removes receipt-owned NAT rules" {
+@test "router NAT teardown removes record-owned NAT rules" {
   MANAGEMENT_TYPE=router-nat NAT_INTERFACE=GigabitEthernet1 \
     run bash "$UNINSTALL" --dry-run
   [ "$status" -eq 0 ]
@@ -38,7 +38,7 @@ setup() {
   [[ "$output" == *"no ip access-list standard IRIS-NAT-10"* ]]
 }
 
-@test "NAT teardown clears only receipt-owned translations before the mapping" {
+@test "NAT teardown clears only record-owned translations before the mapping" {
   MANAGEMENT_TYPE=router-nat NAT_INTERFACE=GigabitEthernet1 \
     run bash "$UNINSTALL" --dry-run
   [ "$status" -eq 0 ]
@@ -98,7 +98,7 @@ setup() {
   [[ "$output" != *"unbound variable"* ]]
 }
 
-@test "real router undeploy requires receipt ownership and processor-board identity" {
+@test "real router undeploy requires deployment record ownership and processor-board identity" {
   grep -qF 'ROUTER_RESOURCES_OWNED' "$UNINSTALL"
   grep -qF 'EXPECTED_DEVICE_IDENTITY' "$UNINSTALL"
   grep -qF 'rocessor board ID' "$UNINSTALL"
@@ -136,12 +136,12 @@ setup() {
 
 @test "force teardown removes the agent footprint and reclaims only IRIS-marked network config" {
   # A router whose onboard died after enabling Guest Shell but before its
-  # receipt was written cannot be undeployed (no receipt), cannot be adopted
-  # (routers never can) and cannot be re-onboarded (preflight refuses an
-  # existing VirtualPortGroup and an existing Guest Shell). Force mode is the
-  # only way out.
+  # deployment record was written cannot be undeployed (no record), cannot be
+  # adopted (routers never can) and cannot be re-onboarded (preflight refuses
+  # an existing VirtualPortGroup and an existing Guest Shell). Force mode is
+  # the only way out.
   #
-  # It used to skip the VPG/NAT entirely, on the belief that without a receipt
+  # It used to skip the VPG/NAT entirely, on the belief that without a record
   # nothing proves IRIS created them. That was wrong, and it stranded routers:
   # router-install.sh stamps every VPG it creates with a description, and the
   # NAT objects carry IRIS's own name. Ownership is provable ON THE DEVICE, so
@@ -215,8 +215,8 @@ setup() {
   [ "$(_calls_containing "$FAKE_COMMAND_LOG" "IRIS-NAT-")" -eq 0 ]
 }
 
-@test "force teardown does not require a receipt VPG number" {
-  # Without a receipt there is no VPG number to validate; requiring one would
+@test "force teardown does not require a deployment record VPG number" {
+  # Without a record there is no VPG number to validate; requiring one would
   # re-strand the device this mode exists to rescue.
   unset VPG_NUMBER
   IRIS_FORCE_AGENT_ONLY=1 run bash "$UNINSTALL" --dry-run
@@ -401,10 +401,10 @@ _router_uninstall_run_live() {
 }
 
 _router_uninstall_run_live_forced() {
-  # The receipt-less rescue path: no EXPECTED_DEVICE_IDENTITY, no proven
-  # resource ownership and no VPG number, because there is no receipt to
-  # supply any of them. This is exactly what gui_server.py sets when it
-  # forces a teardown.
+  # The record-less rescue path: no EXPECTED_DEVICE_IDENTITY, no proven
+  # resource ownership and no VPG number, because there is no deployment
+  # record to supply any of them. This is exactly what gui_server.py sets
+  # when it forces a teardown.
   env -u EXPECTED_DEVICE_IDENTITY -u ROUTER_RESOURCES_OWNED -u VPG_NUMBER \
     DEVICE_IP=192.0.2.10 DEVICE_USER=test DEVICE_PASS=test \
     IRIS_FORCE_AGENT_ONLY=1 NAT_REMOVE_SETTLE=1 \
@@ -511,7 +511,7 @@ PY2
 }
 
 @test "forced live teardown does not demand an identity it cannot have" {
-  # Force mode exists for a router with NO receipt, so there is no
+  # Force mode exists for a router with NO deployment record, so there is no
   # EXPECTED_DEVICE_IDENTITY to compare a live processor board ID against.
   # Comparing anyway fails every real forced undeploy before it touches the
   # device, stranding the exact router this mode exists to rescue.
@@ -526,7 +526,7 @@ PY2
 
 @test "forced live teardown does not report the operator VirtualPortGroup as residue" {
   # Force preserves any VPG that does not carry IRIS's description -- this one
-  # is the operator's. With no receipt VPG_NUMBER is empty, so scanning for a
+  # is the operator's. With no record VPG_NUMBER is empty, so scanning for a
   # bare "interface VirtualPortGroup" matches the operator's own group and
   # fails an undeploy that in fact succeeded.
   _router_uninstall_stub_setup
@@ -554,7 +554,7 @@ PY2
   #
   # These are IRIS-named artifacts, unambiguously ours -- the same argument
   # that applies to `app-hosting appid guestshell`. The VPG and NAT stay
-  # untouched, because no receipt proves IRIS created those.
+  # untouched, because no deployment record proves IRIS created those.
   IRIS_FORCE_AGENT_ONLY=1 run bash "$UNINSTALL" --dry-run
   [[ "$output" == *"no logging discriminator IRISQ"* ]] || return 1
   [[ "$output" == *"no logging buffered discriminator IRISQ"* ]] || return 1
@@ -567,7 +567,7 @@ PY2
 
 @test "forced live teardown on router-nat ignores the NAT config it preserves" {
   # Force skips the NAT teardown by design, so the NAT rules are still there
-  # -- and with no receipt VPG_NUMBER is empty, so the ACL pattern collapses
+  # -- and with no record VPG_NUMBER is empty, so the ACL pattern collapses
   # to the bare prefix "ip access-list standard IRIS-NAT-" and matches any
   # other VPG's ACL too.
   _router_uninstall_stub_setup
@@ -579,7 +579,7 @@ PY2
 
 @test "forced teardown does not demand NAT values it will never use" {
   # router-nat comes from the inventory row, but force never touches NAT, so
-  # requiring receipt-derived NAT values re-strands the device.
+  # requiring record-derived NAT values re-strands the device.
   unset NAT_INTERFACE APP_IP
   MANAGEMENT_TYPE=router-nat IRIS_FORCE_AGENT_ONLY=1 \
     run bash "$UNINSTALL" --dry-run

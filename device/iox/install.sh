@@ -87,13 +87,14 @@ APPID=iris
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RUN() { "$HERE/../../lab/device-run.sh" "$DEVICE_IP"; }   # IOS cmds on stdin
 
-# A receipt binds this deployment to one physical device and platform.  Check
-# both before an idempotent reinstall tears down the app on the target address.
+# A deployment record binds this deployment to one physical device and
+# platform.  Check both before an idempotent reinstall tears down the app on
+# the target address.
 MODEL="${MODEL:-}"
 EXPECTED_DEVICE_IDENTITY="${EXPECTED_DEVICE_IDENTITY:-}"
 if [ "$DRY" -eq 0 ]; then
-  : "${EXPECTED_DEVICE_IDENTITY:?set EXPECTED_DEVICE_IDENTITY from the deployment receipt}"
-  : "${MODEL:?set MODEL from the deployment receipt}"
+  : "${EXPECTED_DEVICE_IDENTITY:?set EXPECTED_DEVICE_IDENTITY from the deployment record}"
+  : "${MODEL:?set MODEL from the deployment record}"
   VERSION_OUT="$(printf 'show version\n' | RUN 2>/dev/null)"
   LIVE_MODEL="$(printf '%s\n' "$VERSION_OUT" \
     | sed -nE 's/^cisco[[:space:]]+([^[:space:]]+)[[:space:]]+\(.*/\1/p' | head -1)"

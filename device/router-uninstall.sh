@@ -4,14 +4,14 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# Receipt-driven inverse of router-install.sh. Staged images at bootflash: root
+# Record-driven inverse of router-install.sh. Staged images at bootflash: root
 # are deliberately preserved.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
 if [ -n "${NETWORK_ATTACHMENT:-}" ] && [ -z "${MANAGEMENT_TYPE:-}" ]; then
-  echo "ERROR: NETWORK_ATTACHMENT was renamed to MANAGEMENT_TYPE; refusing to fall back to the routed default" >&2
+  echo "ERROR: NETWORK_ATTACHMENT was renamed to MANAGEMENT_TYPE; refusing to fall back to the router-routed default" >&2
   exit 1
 fi
 MANAGEMENT_TYPE="${MANAGEMENT_TYPE:-router-routed}"
@@ -20,14 +20,15 @@ NAT_INTERFACE="${NAT_INTERFACE:-}"
 BT_LISTEN_PORT="${BT_LISTEN_PORT:-6881}"
 NAT_OUTSIDE_OWNED="${NAT_OUTSIDE_OWNED:-0}"
 ROUTER_RESOURCES_OWNED="${ROUTER_RESOURCES_OWNED:-0}"
-# Force teardown for a device stranded WITHOUT a receipt: an onboard that died
-# after enabling Guest Shell but before its receipt was written leaves a router
-# that cannot be undeployed (no receipt), cannot be adopted (routers never can)
-# and cannot be re-onboarded (preflight refuses an existing Guest Shell).
+# Force teardown for a device stranded WITHOUT a deployment record: an onboard
+# that died after enabling Guest Shell but before its record was written
+# leaves a router that cannot be undeployed (no record), cannot be adopted
+# (routers never can) and cannot be re-onboarded (preflight refuses an
+# existing Guest Shell).
 # Force mode removes only the AGENT footprint, which is identifiable by name.
-# It must never touch the VPG/NAT: with no receipt there is no proof IRIS
+# It must never touch the VPG/NAT: with no record there is no proof IRIS
 # created them, and removing an operator's network would be exactly the harm
-# the receipt design exists to prevent.
+# the record design exists to prevent.
 FORCE_AGENT_ONLY="${IRIS_FORCE_AGENT_ONLY:-0}"
 APP_IP="${APP_IP:-}"
 IOS_ROOT="bootflash:guest-share"
@@ -43,18 +44,18 @@ IRIS_DIR="$IOS_ROOT/iris"
 case "$MANAGEMENT_TYPE" in
   router-routed) ;;
   router-nat)
-    # Force skips the NAT teardown entirely, so requiring receipt-derived NAT
+    # Force skips the NAT teardown entirely, so requiring record-derived NAT
     # values would re-strand the device this mode exists to rescue.
     if [ "${IRIS_FORCE_AGENT_ONLY:-0}" != "1" ]; then
       [ -n "$NAT_INTERFACE" ] && [ -n "$APP_IP" ] \
-        || { echo "ERROR: router-nat receipt is missing NAT_INTERFACE or APP_IP" >&2; exit 1; }
+        || { echo "ERROR: router-nat deployment record is missing NAT_INTERFACE or APP_IP" >&2; exit 1; }
     fi ;;
   *) echo "ERROR: MANAGEMENT_TYPE must be router-routed or router-nat" >&2; exit 1 ;;
 esac
 if [ "$FORCE_AGENT_ONLY" != "1" ]; then
   [[ "$VPG_NUMBER" =~ ^[0-9]+$ ]] && [ "$VPG_NUMBER" -ge 0 ] \
     && [ "$VPG_NUMBER" -le 31 ] \
-    || { echo "ERROR: receipt is missing a valid VPG_NUMBER" >&2; exit 1; }
+    || { echo "ERROR: deployment record is missing a valid VPG_NUMBER" >&2; exit 1; }
 fi
 if [ -n "$NAT_INTERFACE" ] && ! [[ "$NAT_INTERFACE" =~ ^[A-Za-z][A-Za-z0-9./_-]{0,63}$ ]]; then
   echo "ERROR: NAT_INTERFACE contains unsupported characters" >&2; exit 1
@@ -66,15 +67,15 @@ if [ "$DRY" -eq 0 ]; then
   : "${DEVICE_IP:?set DEVICE_IP}"; : "${DEVICE_USER:?set DEVICE_USER}"
   : "${DEVICE_PASS:?set DEVICE_PASS}"
   if [ "$FORCE_AGENT_ONLY" = "1" ]; then
-    echo "===== FORCE: agent-footprint-only teardown (no receipt) ====="
+    echo "===== FORCE: agent-footprint-only teardown (no deployment record) ====="
     echo "  Removing: IRIS EEM applets, Guest Shell, and $IRIS_DIR."
     echo "  Reclaiming ONLY what carries IRIS's own mark: a VirtualPortGroup"
     echo "  with IRIS's description, and IRIS-NAT-* objects. Anything unmarked"
     echo "  is left exactly as it is."
   else
-    : "${EXPECTED_DEVICE_IDENTITY:?set EXPECTED_DEVICE_IDENTITY from the deployment receipt}"
+    : "${EXPECTED_DEVICE_IDENTITY:?set EXPECTED_DEVICE_IDENTITY from the deployment record}"
     [ "$ROUTER_RESOURCES_OWNED" = "1" ] \
-      || { echo "ERROR: receipt does not prove ownership of router resources" >&2; exit 1; }
+      || { echo "ERROR: deployment record does not prove ownership of router resources" >&2; exit 1; }
   fi
   VERSION_OUT="$(printf 'show version\n' \
     | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>/dev/null)"
@@ -82,7 +83,7 @@ if [ "$DRY" -eq 0 ]; then
     | sed -nE 's/^cisco[[:space:]]+([^[:space:]]+)[[:space:]]+\(.*/\1/p' | head -1)"
   LIVE_IDENTITY="$(printf '%s\n' "$VERSION_OUT" \
     | sed -nE 's/^[Pp]rocessor board ID[[:space:]]+([^[:space:]]+).*/\1/p' | head -1)"
-  # Force mode is the receipt-less rescue path, so there is no expected
+  # Force mode is the record-less rescue path, so there is no expected
   # identity to compare a live board ID against. Demanding one anyway made
   # every forced undeploy abort here, which permanently stranded the routers
   # this mode exists to rescue. The operator named DEVICE_IP explicitly and
@@ -90,13 +91,13 @@ if [ "$DRY" -eq 0 ]; then
   if [ "$FORCE_AGENT_ONLY" != "1" ]; then
     if [ -z "$LIVE_IDENTITY" ] || [ "$LIVE_IDENTITY" != "$EXPECTED_DEVICE_IDENTITY" ]; then
       # Name the way out. This fires whenever the box answering at DEVICE_IP is
-      # not the one the receipt was written for -- overwhelmingly because it was
+      # not the one the record was written for -- overwhelmingly because it was
       # rebuilt or replaced, which keeps the address and the device id but gets
       # a fresh board ID. Refusing is right; refusing without saying what to do
       # next left the operator with an undeploy that would not run and an
       # onboard that told them to run it.
       echo "ERROR: device identity mismatch; refusing to modify $DEVICE_IP" >&2
-      echo "  receipt expects board ID '$EXPECTED_DEVICE_IDENTITY', device reports '${LIVE_IDENTITY:-none}'" >&2
+      echo "  record expects board ID '$EXPECTED_DEVICE_IDENTITY', device reports '${LIVE_IDENTITY:-none}'" >&2
       echo "  If this device was rebuilt or replaced, undeploy it again with Force" >&2
       echo "  (removes the IRIS agent footprint only, leaving VirtualPortGroup and" >&2
       echo "  NAT untouched), or delete and re-add it in the Console." >&2
@@ -133,7 +134,7 @@ EOF
 
 # Force mode skips config_cleanup, which owns the removal of everything IRIS
 # configured. What it must NOT remove is the operator's network -- the
-# VirtualPortGroup and the NAT rules -- because with no receipt there is no
+# VirtualPortGroup and the NAT rules -- because with no record there is no
 # proof IRIS created those. Everything else here is IRIS-named and
 # unambiguously ours, and router preflight refuses a re-onboard while ANY of
 # it is present (see the collisions list in gui_onboard.py). Leaving it behind
@@ -141,7 +142,7 @@ EOF
 # one thing force mode exists to prevent.
 # The description router-install.sh writes into every VirtualPortGroup IRIS
 # creates (see device/router-install.sh, "interface VirtualPortGroup" block).
-# It is on-device proof of ownership that survives the loss of a receipt --
+# It is on-device proof of ownership that survives the loss of a record --
 # which is what makes the force path able to reclaim its own network config
 # without ever guessing about an operator's.
 IRIS_VPG_DESCRIPTION="description IRIS Guest Shell VPG"
@@ -240,7 +241,7 @@ if [ "$DRY" -eq 1 ]; then
     echo "===== [4/5] FORCE: IRIS app-hosting stanza removed; VPG/NAT SKIPPED (force) - ownership unproven ====="
     config_cleanup_force
   else
-  echo "===== [4/5] receipt-owned config removal ====="
+  echo "===== [4/5] record-owned config removal ====="
   if [ "$MANAGEMENT_TYPE" = "router-nat" ]; then
     echo "no ip nat inside source static tcp $APP_IP $BT_LISTEN_PORT interface $NAT_INTERFACE $BT_LISTEN_PORT"
     echo "show ip nat translations | include $APP_IP"
@@ -285,7 +286,7 @@ done
 if [ "$FORCE_AGENT_ONLY" = "1" ]; then
   echo "[4/5] FORCE: remove the IRIS app-hosting stanza and reclaim IRIS-marked network config"
   { echo "configure terminal"; config_cleanup_force; echo "end"; } | "$RUN" "$DEVICE_IP" >/dev/null
-  # Without a receipt the device itself is the evidence: a VirtualPortGroup
+  # Without a record the device itself is the evidence: a VirtualPortGroup
   # carrying IRIS's description, and NAT objects carrying IRIS's own name, are
   # provably ours. Reclaiming them is what lets a stranded router be onboarded
   # again -- router preflight refuses an existing VPG, its subnet, and the
@@ -329,10 +330,10 @@ no interface VirtualPortGroup$a"
          "operator network left untouched"
   fi
 else
-echo "[4/5] remove receipt-owned VPG and NAT footprint"
+echo "[4/5] remove record-owned VPG and NAT footprint"
 # IOS refuses to unconfigure a dynamic NAT mapping while translations still
 # reference it. Remove the static rule, clear only translations whose inside
-# local address belongs to this receipt, then remove and verify the overload
+# local address belongs to this record, then remove and verify the overload
 # rule before deleting its ACL. A failure leaves the ACL and unrelated device
 # translations intact for safe operator reconciliation.
 if [ "$MANAGEMENT_TYPE" = "router-nat" ]; then
@@ -481,7 +482,7 @@ FILES_RAW="$(printf '%s' "$VERIFY_OUT" | verify_section FILES)" \
 FILES="$(printf '%s' "$FILES_RAW" | grep -v '#' || true)"
 
 forbidden=""
-# Only a receipt proves IRIS created the VirtualPortGroup, and only a receipt
+# Only a record proves IRIS created the VirtualPortGroup, and only a record
 # supplies its number. Force mode deliberately preserves it, so scanning for a
 # bare "interface VirtualPortGroup" prefix would flag the operator's own group
 # and fail a teardown that actually succeeded.

@@ -99,10 +99,10 @@ setup() {
 
 @test "inband dry-run keeps the existing VLAN/SVI but clears IRIS-named config" {
   # "Operator-owned" is the VLAN and its SVI -- network IRIS merely configured,
-  # which no receipt proves it created. The IRISQ discriminator and the IRIS
-  # PKI trustpoint carry IRIS's own name, so a teardown clears them in every
-  # mode: leaving them behind is what made a "clean" device refuse the next
-  # onboard on an artifact we put there ourselves.
+  # which no deployment record proves it created. The IRISQ discriminator and
+  # the IRIS PKI trustpoint carry IRIS's own name, so a teardown clears them
+  # in every mode: leaving them behind is what made a "clean" device refuse
+  # the next onboard on an artifact we put there ourselves.
   MANAGEMENT_TYPE=inband INBAND_VLAN=120 run bash "$UNINSTALL" --dry-run
   [[ "$output" != *"no vlan "* ]] || return 1
   [[ "$output" != *"no interface Vlan"* ]] || return 1
@@ -153,18 +153,18 @@ setup() {
   [[ "$output" == *"guest-share/iris"* ]]
 }
 
-# --- IRIS_FORCE_AGENT_ONLY: receipt-less force undeploy ---------------------
-# A device stranded WITHOUT a deployment receipt has no receipt to prove the
+# --- IRIS_FORCE_AGENT_ONLY: record-less force undeploy ----------------------
+# A device stranded WITHOUT a deployment record has no record to prove the
 # VLAN/SVI is IRIS-owned. gui_server.py sets IRIS_FORCE_AGENT_ONLY=1 for exactly
 # this case; force preserves that operator network while still removing every
 # artifact carrying IRIS's own name.
 
 @test "force dry-run keeps the operator VLAN but clears IRIS-named config" {
   # "Operator-owned" is the VLAN and its SVI -- network IRIS merely configured,
-  # which no receipt proves it created. The IRISQ discriminator and the IRIS
-  # PKI trustpoint carry IRIS's own name, so a teardown clears them in every
-  # mode: leaving them behind is what made a "clean" device refuse the next
-  # onboard on an artifact we put there ourselves.
+  # which no deployment record proves it created. The IRISQ discriminator and
+  # the IRIS PKI trustpoint carry IRIS's own name, so a teardown clears them
+  # in every mode: leaving them behind is what made a "clean" device refuse
+  # the next onboard on an artifact we put there ourselves.
   IRIS_FORCE_AGENT_ONLY=1 run bash "$UNINSTALL" --dry-run
   [[ "$output" != *"no interface Vlan"* ]] || return 1
   [[ "$output" != *"no vlan 666"* ]] || return 1
@@ -196,7 +196,7 @@ setup() {
 }
 
 
-# --- receipt-less force rescue: the VLAN guard must not gate it -------------
+# --- record-less force rescue: the VLAN guard must not gate it --------------
 # Force mode never uses VLAN -- config_cleanup returns before any Vlan$VLAN
 # line and the verify filter drops every VLAN term -- yet its absence aborted
 # the rescue before the script reached the device.
@@ -217,7 +217,7 @@ STUB
 
 @test "forced teardown does not demand a VLAN it will never use" {
   # A bare legacy_routed fleet row carries no vlan at all, so this closed the
-  # only exit a receipt-less device had: the force banner even says Vlan$VLAN
+  # only exit a record-less device had: the force banner even says Vlan$VLAN
   # is NOT touched.
   _iox_uninstall_stub_setup
   run env -u VLAN -u INBAND_VLAN DEVICE_IP=192.0.2.10 DEVICE_USER=u \
@@ -230,7 +230,7 @@ STUB
 }
 
 @test "non-forced teardown still refuses to guess a missing VLAN" {
-  # The guard is correct for a receipted teardown -- it must keep firing there.
+  # The guard is correct for a record-driven teardown -- it must keep firing there.
   _iox_uninstall_stub_setup
   run env -u VLAN -u INBAND_VLAN DEVICE_IP=192.0.2.10 DEVICE_USER=u \
     DEVICE_PASS=p bash "$STUBDIR/device/iox/uninstall.sh"

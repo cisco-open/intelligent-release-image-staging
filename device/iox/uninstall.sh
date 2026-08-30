@@ -70,9 +70,9 @@ config_cleanup() {
 # agent never self-removes. IRIS-AGENT won't exist on IOx (no 60s timer) but
 # the no-op is harmless. All no-ops if absent.
 #
-# Inband preserves the operator-owned VLAN/SVI, which no receipt proves IRIS
-# created. It still removes everything carrying IRIS's own name, including the
-# IRISQ discriminator and the IRIS PKI trustpoint / HTTP-client binding:
+# Inband preserves the operator-owned VLAN/SVI, which no deployment record
+# proves IRIS created. It still removes everything carrying IRIS's own name,
+# including the IRISQ discriminator and the IRIS PKI trustpoint / HTTP-client binding:
 # leaving those behind strands the device against its own next onboard, which
 # preflight refuses while any of them is present.
 if [ "$MANAGEMENT_TYPE" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
@@ -133,13 +133,13 @@ fi
 : "${DEVICE_IP:?set DEVICE_IP}"; : "${DEVICE_USER:?set DEVICE_USER}"
 : "${DEVICE_PASS:?set DEVICE_PASS}"
 if [ "$FORCE_AGENT_ONLY" = "1" ]; then
-  echo "===== FORCE: IRIS-named footprint teardown (no receipt) ====="
+  echo "===== FORCE: IRIS-named footprint teardown (no deployment record) ====="
   echo "  Removing: IRIS EEM applets, the '$APPID' app, staged files, IRISQ, and IRIS PKI."
-  echo "  Preserving: operator VLAN/SVI network configuration, because no receipt"
-  echo "  proves IRIS created it."
+  echo "  Preserving: operator VLAN/SVI network configuration, because no"
+  echo "  deployment record proves IRIS created it."
 else
-  # Only a receipted teardown removes Vlan$VLAN, so only it needs the number.
-  # Demanding one in force mode re-strands the receipt-less device this mode
+  # Only a record-driven teardown removes Vlan$VLAN, so only it needs the number.
+  # Demanding one in force mode re-strands the record-less device this mode
   # exists to rescue -- a bare fleet row carries no vlan at all.
   [ -n "$VLAN_IN" ] || { echo "ERROR: VLAN not set (the device's fleet row is" \
     "missing its vlan); refusing to guess — set the vlan on the device and retry" >&2; exit 1; }

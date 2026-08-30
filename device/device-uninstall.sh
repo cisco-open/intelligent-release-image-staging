@@ -21,14 +21,14 @@
 #     - <fs>guest-share (agent, conf, bundle, staged seeding copy, and the
 #       peer-receipt hook's staged source + its <image>.peers.json snapshots)
 #   inband preserves the operator-owned VLAN/SVI/routes/VRF, which existed
-#     before IRIS and which no receipt proves IRIS created. It still removes
-#     everything carrying IRIS's own name -- the EEM applets, guestshell/
+#     before IRIS and which no deployment record proves IRIS created. It still
+#     removes everything carrying IRIS's own name -- the EEM applets, guestshell/
 #     app-hosting, guest-share, the IRISQ discriminator and its logging
 #     bindings, and the IRIS PKI trustpoint / HTTP-client binding.
 # IRIS_FORCE_AGENT_ONLY=1 applies that same reduction regardless of
-#   MANAGEMENT_TYPE: a device stranded WITHOUT a deployment receipt (onboard
-#   died after enabling Guest Shell but before its receipt was written) has no
-#   receipt proving the VLAN/SVI is IRIS's, so the network is left exactly as
+#   MANAGEMENT_TYPE: a device stranded WITHOUT a deployment record (onboard
+#   died after enabling Guest Shell but before its record was written) has no
+#   record proving the VLAN/SVI is IRIS's, so the network is left exactly as
 #   it is. What is identifiable by name as IRIS is still removed -- leaving it
 #   would strand the device against its own next onboard, which preflight
 #   refuses while any of it is present.
@@ -83,7 +83,7 @@ config_cleanup() {
 # mode -- otherwise a "clean" device still refuses the next onboard on an
 # artifact we put there. What inband and force must NOT touch is the
 # operator's network: the VLAN and its SVI, which IRIS merely configured and
-# no receipt proves it created.
+# no deployment record proves it created.
 if [ "$MANAGEMENT_TYPE" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
 cat <<EOF
 no app-hosting appid guestshell
@@ -130,15 +130,15 @@ fi
 : "${DEVICE_IP:?set DEVICE_IP}"; : "${DEVICE_USER:?set DEVICE_USER}"
 : "${DEVICE_PASS:?set DEVICE_PASS}"
 if [ "$FORCE_AGENT_ONLY" = "1" ]; then
-  echo "===== FORCE: IRIS-named footprint teardown (no receipt) ====="
+  echo "===== FORCE: IRIS-named footprint teardown (no deployment record) ====="
   echo "  Removing: IRIS EEM applets, Guest Shell, $IOS_ROOT, IRISQ, and IRIS PKI."
-  echo "  Preserving: operator VLAN/SVI network configuration, because no receipt"
-  echo "  proves IRIS created it."
+  echo "  Preserving: operator VLAN/SVI network configuration, because no"
+  echo "  deployment record proves IRIS created it."
 else
-  # Only a receipted teardown removes Vlan$VLAN, so only it needs the number.
-  # Demanding one in force mode re-strands the receipt-less device this mode
+  # Only a record-driven teardown removes Vlan$VLAN, so only it needs the number.
+  # Demanding one in force mode re-strands the record-less device this mode
   # exists to rescue -- a bare fleet row carries no vlan at all.
-  [ -n "$VLAN_IN" ] || { echo "ERROR: VLAN not set (the deployment receipt is" \
+  [ -n "$VLAN_IN" ] || { echo "ERROR: VLAN not set (the deployment record is" \
     "missing its vlan); refusing to guess — set the vlan on the device and retry" >&2; exit 1; }
 fi
 RUN="$HERE/../lab/device-run.sh"
@@ -183,7 +183,7 @@ echo "verify: no app-hosting entry, no leftover config lines, no guest-share"
 # terminal width 512 stops IOS wrapping the echoed command lines (wrap
 # fragments would false-match the artifact greps below); lines carrying the
 # prompt '#' are the command echoes themselves — excluded.
-# Inband (and a receipt-less force undeploy) intentionally preserves the
+# Inband (and a record-less force undeploy) intentionally preserves the
 # operator-owned network, discriminator, and trustpoint, so its verify only
 # asserts the app footprint is gone.
 if [ "$MANAGEMENT_TYPE" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then

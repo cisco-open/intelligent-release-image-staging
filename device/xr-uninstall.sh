@@ -4,7 +4,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# Receipt-driven inverse of device/xr-install.sh. IRIS on a Cisco 8000-series
+# Record-driven inverse of device/xr-install.sh. IRIS on a Cisco 8000-series
 # IOS-XR router is: the appmgr application '$APPID' (default iris), its
 # registered package source '$SOURCE_NAME' (default iris-xr), the RPM staged
 # at harddisk: root, the agent's own iris-work/ control-file directory
@@ -18,11 +18,11 @@
 # ONLY --net=host -- no VirtualPortGroup, VLAN, SVI, or NAT is ever created,
 # so there is no operator-owned network config an undeploy could
 # accidentally touch.
-# EVERY artifact IRIS ever creates here already carries its own name, so
-# receipted and IRIS_FORCE_AGENT_ONLY=1 teardown remove exactly the same
-# footprint -- FORCE exists for interface parity with the router/IOx
-# uninstallers (a device stranded mid-onboard, no receipt to hand this
-# script), not because XR needs a reduced-scope path the way they do.
+# EVERY artifact IRIS ever creates here already carries its own name, so a
+# record-driven teardown and an IRIS_FORCE_AGENT_ONLY=1 teardown remove
+# exactly the same footprint -- FORCE exists for interface parity with the
+# router/IOx uninstallers (a device stranded mid-onboard, no record to hand
+# this script), not because XR needs a reduced-scope path the way they do.
 #
 # 'appmgr package uninstall source <name>' is the Cisco 8000 form (this
 # script's only target platform; see plan Out of scope). The fallback form,
@@ -59,11 +59,11 @@ RPM_PATH="/misc/disk1/$SOURCE_NAME.rpm"
 
 if [ "$DRY" -eq 1 ]; then
   if [ "$FORCE_AGENT_ONLY" = "1" ]; then
-    echo "===== FORCE: reclaiming only IRIS-marked artifacts (no receipt) ====="
+    echo "===== FORCE: reclaiming only IRIS-marked artifacts (no deployment record) ====="
     echo "  The app named '$APPID', the source named '$SOURCE_NAME', and the"
-    echo "  iris-work/ dir -- the same set a receipted undeploy removes, since"
+    echo "  iris-work/ dir -- the same set a record-driven undeploy removes, since"
     echo "  XR activation (--net=host only) never creates anything else IRIS"
-    echo "  would need a receipt to prove ownership of."
+    echo "  would need a deployment record to prove ownership of."
   fi
   echo "===== [1/5] deactivate: probe app-table first; skip if $APPID is already absent (idempotent second run) ====="
   echo "show appmgr application-table"
@@ -159,7 +159,7 @@ files_line_match() {
 }
 
 if [ "$FORCE_AGENT_ONLY" = "1" ]; then
-  echo "===== FORCE: reclaiming only IRIS-marked artifacts on $DEVICE_IP (no receipt) ====="
+  echo "===== FORCE: reclaiming only IRIS-marked artifacts on $DEVICE_IP (no deployment record) ====="
   echo "  Removing: app '$APPID', source '$SOURCE_NAME', $RPM_PATH, $WORK_DIR_PATH."
 fi
 

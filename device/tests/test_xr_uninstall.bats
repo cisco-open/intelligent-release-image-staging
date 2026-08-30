@@ -5,7 +5,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Tests for device/xr-uninstall.sh (agentinfo/plans/2026-08-28-xr-agent.md,
-# Task 3): the receipt-driven inverse of device/xr-install.sh.
+# Task 3): the record-driven inverse of device/xr-install.sh.
 #
 # Final-line discipline: this Mac's bash (3.2) does not treat a failing
 # bare `[[ ... ]]` as fatal under `set -e` unless it is the last command
@@ -78,7 +78,7 @@ setup() {
   [ "$count" -eq 0 ]
 }
 
-@test "FORCE dry-run and receipted dry-run touch the identical IRIS-named footprint" {
+@test "FORCE dry-run and record-driven dry-run touch the identical IRIS-named footprint" {
   run bash "$UNINSTALL" --dry-run
   [ "$status" -eq 0 ]
   plain="$output"
@@ -638,7 +638,7 @@ iris-work" run _xr_uninstall_run_live
   [[ "$output" == *"torrent"* ]]
 }
 
-@test "live: FORCE mode sends the identical command sequence as receipted mode" {
+@test "live: FORCE mode sends the identical command sequence as record-driven mode" {
   _xr_uninstall_stub_setup
   _xr_uninstall_run_live >/dev/null
   plain_log="$(cat "$FAKE_COMMAND_LOG")"
