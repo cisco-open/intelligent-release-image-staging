@@ -269,16 +269,26 @@ An IOS-XR undeploy that was interrupted partway through needs no special
 recovery: re-run undeploy (receipted or Force) and it converges, because
 each step re-probes the router's own state — including the appmgr
 application's — before acting rather than assuming an earlier attempt
-succeeded. Every command session to the router is bounded by
-`IRIS_XR_SESSION_TIMEOUT` (default 900 seconds), so a wedged router fails
-the job with a real exit code instead of hanging it. Undeploy itself never
-touches a bare image filename and reports, in one summary line, that any
-operator-staged image was left in place; which file was kept — or
-replaced, if the catalog had republished different content under the same
-image id — is decided and logged by the agent during its own unassign/park
-cycle, which runs before step [1/5] deactivates it. Check the agent's own
-log for that per-file record; undeploy's output only confirms the blanket
-guarantee.
+succeeded. A step that cannot even trust its own probe — a transport error,
+or a truncated read — refuses to continue rather than guess, and a failed
+teardown leaves the device's receipt in `needs-reconcile` (a red badge in
+the console); undeploy or Force is legal to run again directly from that
+state, and the re-run converges the same way. Every command session to the
+router is bounded by `IRIS_XR_SESSION_TIMEOUT` (default 900 seconds), so a
+wedged router fails the job with a real exit code instead of hanging it —
+in the worst case, undeploy opens roughly eight best-effort router
+sessions, so a completely unresponsive router can hold a teardown job for
+close to two hours at the default bound; a deployment with a tighter
+job-queue deadline can export a lower `IRIS_XR_SESSION_TIMEOUT` (e.g.
+`300`) in the server's environment. Undeploy itself never touches a bare
+image filename and reports, in one summary line, that any operator-staged
+image was left in place. Undeploy never unassigns an image, so it never
+produces the agent's own per-file record on its own: that line — the file
+was kept, or replaced, if the catalog had republished different content
+under the same image id — only exists for an image the agent actually
+unassigned or republished while it was running. A device undeployed with
+its images still assigned leaves every image file in place with no such
+line at all; undeploy's own summary is the only confirmation there is.
 
 Deleting an inventory row is not an undeploy — undeploy before deleting anything
 still deployed. See [Bulk device actions](console.md#bulk-device-actions).

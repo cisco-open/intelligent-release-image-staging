@@ -644,6 +644,56 @@ def test_reassignment_parks_old_image_and_keeps_its_root_copy():
     assert any(m == "PARKED" for m, _ in emitted)
     assert state["img1"]["parked"] is True             # remembered, not dropped
     assert state["image_id"] == "img2"
+    # XE wording pin: copy_in_place=False (this fixture's default) has no
+    # adoption concept at all, so the stage/root split is unconditional --
+    # the PARKED detail must say so in those exact terms, unchanged by the
+    # XR-specific wording the two tests below pin.
+    parked_msg = [msg for m, msg in emitted if m == "PARKED"][0]
+    assert "stage copy deleted, root copy kept" in parked_msg
+
+
+def test_reassignment_parks_an_adopted_root_on_xr_and_logs_left_in_place():
+    # XR wording pin (copy_in_place=True): the old image's root copy was
+    # ADOPTED (attest-in-place, never downloaded by this agent), so park
+    # must leave it exactly where it is and say so -- the same
+    # never-delete-an-adopted-file guarantee _protect_adopted_root enforces
+    # elsewhere, worded for the PARKED detail specifically.
+    cat = FakeCatalog({"approved_image_id": "img2"},
+                      {"id": "img2", "filename": "img2.bin",
+                       "size": 1000, "sha256": "def"})
+    deps, emitted, ios_cmds, _, _, purged, _, bundle_reclaimed = make_deps(
+        cat, {}, free=9_000_000_000)
+    deps = deps._replace(copy_in_place=True)
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "image_id": "img1",
+             "img1": {"done": True, "copied": True,
+                      "root_file": "img1.bin", "origin": "adopted"}}
+    assert iris_agent.run_once(CFG, deps, state) == "downloading"
+    assert bundle_reclaimed == []                      # adopted root NOT deleted
+    assert all("delete" not in c for c in ios_cmds)
+    parked_msg = [msg for m, msg in emitted if m == "PARKED"][0]
+    assert "root copy left in place (adopted)" in parked_msg
+
+
+def test_reassignment_parks_a_downloaded_root_on_xr_and_logs_removed():
+    # XR wording pin (copy_in_place=True), the mirror case: the old image's
+    # root copy was DOWNLOADED by this agent, so on this platform (stage
+    # dir IS the target-FS root) park's stage-copy delete really does
+    # remove the root copy -- the PARKED detail must say "removed", not the
+    # XE "kept" wording, since here there is no separate copy left behind.
+    cat = FakeCatalog({"approved_image_id": "img2"},
+                      {"id": "img2", "filename": "img2.bin",
+                       "size": 1000, "sha256": "def"})
+    deps, emitted, ios_cmds, _, _, purged, _, bundle_reclaimed = make_deps(
+        cat, {}, free=9_000_000_000)
+    deps = deps._replace(copy_in_place=True)
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "image_id": "img1",
+             "img1": {"done": True, "copied": True,
+                      "root_file": "img1.bin", "origin": "downloaded"}}
+    assert iris_agent.run_once(CFG, deps, state) == "downloading"
+    parked_msg = [msg for m, msg in emitted if m == "PARKED"][0]
+    assert "root copy removed" in parked_msg
 
 
 def test_queued_root_delete_uses_cached_stage_fs():
