@@ -186,6 +186,12 @@ case "$cmds" in
       echo "__IRIS_XR_VERIFY_FILES__"
       printf '%s\n' "${FAKE_DIR_HARDDISK-Directory of harddisk:/}"
     fi
+    # verify_request() now asks for a trailing DONE marker too (the [5/5]
+    # twin of APPS_END above) -- emitted unconditionally here since every
+    # existing scenario against this transport shape expects [5/5] to reach
+    # a real verdict; FAKE_VERIFY_OMIT_FILES already covers "FILES itself
+    # never came back" and needs no DONE-specific counterpart on this stub.
+    echo "__IRIS_XR_VERIFY_DONE__"
     ;;
   *"__IRIS_XR_VERIFY_SIDECARS__"*)
     echo "__IRIS_XR_VERIFY_SIDECARS__"
@@ -225,6 +231,22 @@ fi
 printf '%s\n' "$cmds"
 case "$cmds" in
   *"__IRIS_XR_VERIFY_APPS__"*)
+    # verify_request() (the final [5/5] combined read) is the ONLY request
+    # that also asks for the FILES marker -- probe_app_request() (step
+    # [1/5]'s own probe/re-probe) never does. FAKE_VERIFY_RC and
+    # FAKE_TRUNCATE_AFTER_FILES below are gated on that so a test can kill
+    # or truncate [5/5]'s OWN verify call without also killing [1/5]'s
+    # earlier probe in the same run.
+    case "$cmds" in
+      *"__IRIS_XR_VERIFY_FILES__"*)
+        if [ -n "${FAKE_VERIFY_RC:-}" ] && [ "${FAKE_VERIFY_RC}" != "0" ]; then
+          # "blob-only output": nothing real is ever produced -- the echoed
+          # upfront blob (already printed above) is ALL this call returns
+          # before the transport itself dies.
+          exit "$FAKE_VERIFY_RC"
+        fi
+        ;;
+    esac
     if [ "${FAKE_VERIFY_OMIT_APPS:-no}" != "yes" ]; then
       countfile="${BATS_TEST_TMPDIR:-.}/probe-count"
       n=0
@@ -255,6 +277,19 @@ case "$cmds" in
       echo "__IRIS_XR_VERIFY_FILES__"
       printf '%s\n' "${FAKE_DIR_HARDDISK-Directory of harddisk:/}"
     fi
+    case "$cmds" in
+      *"__IRIS_XR_VERIFY_FILES__"*)
+        # FAKE_TRUNCATE_AFTER_FILES simulates the transport dying (rc 0)
+        # right after the REAL FILES section -- before its own DONE marker.
+        # The echoed upfront blob still has a literal copy of DONE's text,
+        # so only the positional (last-DONE-after-last-FILES) check in
+        # end_after_start catches this, not a plain substring test.
+        if [ "${FAKE_TRUNCATE_AFTER_FILES:-no}" = "yes" ]; then
+          exit 0
+        fi
+        echo "__IRIS_XR_VERIFY_DONE__"
+        ;;
+    esac
     ;;
   *"__IRIS_XR_VERIFY_SIDECARS__"*)
     echo "__IRIS_XR_VERIFY_SIDECARS__"
@@ -439,6 +474,32 @@ iris-work" run _xr_uninstall_run_live
   fi
 }
 
+@test "live [echoing transport]: [5/5]'s verify transport exiting nonzero (blob-only output) is a hard error, not clean" {
+  # The verify_request() call dies immediately, rc 124, having produced
+  # nothing but the echoed upfront blob (no real APPS/SOURCES/FILES/DONE at
+  # all) -- a wedged session under Task 1's bound. This must never be read
+  # as "clean": every verify_section call would otherwise be satisfied from
+  # the blob's own empty-looking sections alone, declaring the device torn
+  # down when nothing was actually checked.
+  _xr_uninstall_echoing_stub_setup
+  FAKE_VERIFY_RC=124 run _xr_uninstall_run_live
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"undeploy verify's transport exited 124"* ]] || return 1
+  if printf '%s\n' "$output" | grep -q 'undeploy complete'; then
+    return 1
+  fi
+}
+
+@test "live [echoing transport]: [5/5]'s verify truncated after the executed FILES marker (rc 0) is a hard error, not clean" {
+  _xr_uninstall_echoing_stub_setup
+  FAKE_TRUNCATE_AFTER_FILES=yes run _xr_uninstall_run_live
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"undeploy verify was truncated before its end marker"* ]] || return 1
+  if printf '%s\n' "$output" | grep -q 'undeploy complete'; then
+    return 1
+  fi
+}
+
 @test "live: fails when the source is still listed after teardown" {
   _xr_uninstall_stub_setup
   FAKE_SOURCE_ROW="iris-xr  0.1.0  ThinXR_7.3.15" run _xr_uninstall_run_live
@@ -460,6 +521,64 @@ iris-work" run _xr_uninstall_run_live
   FAKE_VERIFY_OMIT_FILES=yes run _xr_uninstall_run_live
   [ "$status" -ne 0 ]
   [[ "$output" == *"did not return the harddisk: file check"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# IMPORTANT 2: a router hostname that happens to CONTAIN the app id/source
+# name (e.g. host "iris-lab-8010" while the app id is "iris") must not turn
+# a genuinely empty appmgr table into a permanent false "present" via the
+# XR exec prompt string (RP/0/RP0/CPU0:iris-lab-8010#) riding along in the
+# same captured section. A real data row must still be detected correctly
+# alongside that same prompt noise.
+# ---------------------------------------------------------------------------
+
+@test "live: a hostname containing the app id does not block an already-absent app forever" {
+  _xr_uninstall_stub_setup
+  FAKE_APP_ROW_1='RP/0/RP0/CPU0:iris-lab-8010#' run _xr_uninstall_run_live
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"already deactivated/absent"* ]] || return 1
+  [[ "$output" == *"undeploy complete"* ]]
+}
+
+@test "live: a real app row is still detected as present alongside hostname-prompt noise" {
+  _xr_uninstall_stub_setup
+  FAKE_APP_ROW_1='RP/0/RP0/CPU0:iris-lab-8010#
+iris  docker  iris-xr  Up  app_manager' run _xr_uninstall_run_live
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"undeploy complete"* ]] || return 1
+  log="$(cat "$FAKE_COMMAND_LOG")"
+  count="$(printf '%s\n' "$log" | grep -c '^no appmgr application iris$')"
+  [ "$count" -eq 1 ] || return 1
+}
+
+@test "live: hostname-prompt noise does not block [5/5]'s independent APPS/SOURCES check either" {
+  # call 1 ([1/5]'s own probe) sees a genuinely empty table (no override) and
+  # converges normally; call 2 ([5/5]'s combined verify) is the one carrying
+  # the hostname-prompt noise in BOTH its APPS and SOURCES sections, proving
+  # the same fix covers [5/5]'s independent check, not just [1/5]'s probe.
+  _xr_uninstall_stub_setup
+  FAKE_APP_ROW_2='RP/0/RP0/CPU0:iris-xr-lab#' \
+    FAKE_SOURCE_ROW='RP/0/RP0/CPU0:iris-xr-lab#' \
+    run _xr_uninstall_run_live
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"undeploy complete"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# MINOR 4: [5/5]'s FILES checks must be $-anchored per-line matches (the
+# sidecar sweep's own shape), not whole-blob substring tests -- an operator
+# file that merely CONTAINS the target text (notes.aria2.bak for ".aria2";
+# iris-workshop.txt for "iris-work") must never be flagged as a forbidden
+# IRIS leftover forever.
+# ---------------------------------------------------------------------------
+
+@test "live: an operator file that merely contains a forbidden substring does not block verify forever" {
+  _xr_uninstall_stub_setup
+  FAKE_DIR_HARDDISK="Directory of harddisk:/
+    12345 -rw-------. 1 root root 512 Aug 27 12:00 notes.aria2.bak
+    12345 -rw-------. 1 root root 512 Aug 27 12:00 iris-workshop.txt" run _xr_uninstall_run_live
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"undeploy complete"* ]]
 }
 
 # ---------------------------------------------------------------------------

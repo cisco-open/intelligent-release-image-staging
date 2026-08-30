@@ -135,6 +135,29 @@ ei = text.rfind(end_marker)
 sys.exit(0 if (si != -1 and ei != -1 and ei > si) else 1)' "$1" "$2"
 }
 
+# Word-anchored match against real table DATA lines only, excluding prompt
+# lines. A router hostname that happens to CONTAIN the search term (e.g.
+# host "iris-lab-8010" while probing for app "iris") would otherwise make
+# an EMPTY app/source table look "present" forever via the prompt string
+# embedded in the transcript (RP/0/RP0/CPU0:iris-lab-8010#) -- a plain
+# substring test reads that as a permanent false-positive and never
+# converges. Prompt lines always contain '#' (the XR exec prompt
+# terminator); real appmgr application-table/source-table data rows never
+# do.
+table_contains() {
+  printf '%s\n' "$1" | grep -v '#' | grep -qE "(^|[[:space:]])$2([[:space:]]|$)"
+}
+
+# $-anchored, per-line match against the harddisk: file listing -- the same
+# shape the sidecar sweep above already uses (one dir-entry per line,
+# suffix-anchored) instead of a whole-blob substring test, which would
+# otherwise flag an unrelated operator file that merely CONTAINS the target
+# text as a forbidden IRIS leftover forever (iris-workshop.txt for
+# "iris-work"; notes.aria2.bak for ".aria2").
+files_line_match() {
+  printf '%s\n' "$1" | grep -qE "$2"
+}
+
 if [ "$FORCE_AGENT_ONLY" = "1" ]; then
   echo "===== FORCE: reclaiming only IRIS-marked artifacts on $DEVICE_IP (no receipt) ====="
   echo "  Removing: app '$APPID', source '$SOURCE_NAME', $RPM_PATH, $WORK_DIR_PATH."
@@ -185,7 +208,7 @@ app_present() {
     echo "ERROR: deactivate probe was truncated before its end marker; refusing to continue teardown on $DEVICE_IP" >&2
     exit 1
   fi
-  case "$apps" in *"$APPID"*) return 0 ;; esac
+  if table_contains "$apps" "$APPID"; then return 0; fi
   return 1
 }
 deactivate_request() {
@@ -260,24 +283,57 @@ echo ${VERIFY_MARKER}SOURCES__
 show appmgr source-table
 echo ${VERIFY_MARKER}FILES__
 dir harddisk:
+echo ${VERIFY_MARKER}DONE__
 EOF
 }
-VERIFY_OUT="$(verify_request | RUN 2>/dev/null || true)"
+# Same honesty contract as [1/5]'s probe: capture the transport's own exit
+# status instead of discarding it (a wedged/failed session, incl. rc 124
+# under Task 1's bound, must never be read as "clean" just because the
+# captured text happens to look empty), and require a trailing DONE marker
+# positioned AFTER the real FILES marker -- an echoing transport that dies
+# rc 0 right after the executed FILES marker still has the upfront echoed
+# blob's own literal copy of every marker's text, so a plain substring
+# presence check for DONE would be fooled the same way the old APPS_END
+# substring check was; only the positional check catches it.
+VERIFY_OUT="$(verify_request | RUN 2>/dev/null)"
+VERIFY_RC=$?
+if [ "$VERIFY_RC" -ne 0 ]; then
+  echo "ERROR: undeploy verify's transport exited $VERIFY_RC; refusing to declare $DEVICE_IP clean" >&2
+  exit 1
+fi
 APPS="$(printf '%s' "$VERIFY_OUT" | verify_section APPS)" \
   || { echo "ERROR: undeploy verify did not return the appmgr application-table; refusing to declare $DEVICE_IP clean" >&2; exit 1; }
 SOURCES="$(printf '%s' "$VERIFY_OUT" | verify_section SOURCES)" \
   || { echo "ERROR: undeploy verify did not return the appmgr source-table; refusing to declare $DEVICE_IP clean" >&2; exit 1; }
 FILES="$(printf '%s' "$VERIFY_OUT" | verify_section FILES)" \
   || { echo "ERROR: undeploy verify did not return the harddisk: file check; refusing to declare $DEVICE_IP clean" >&2; exit 1; }
+if ! printf '%s' "$VERIFY_OUT" | end_after_start "${VERIFY_MARKER}FILES__" "${VERIFY_MARKER}DONE__"; then
+  echo "ERROR: undeploy verify was truncated before its end marker; refusing to declare $DEVICE_IP clean" >&2
+  exit 1
+fi
 
 forbidden=""
-case "$APPS" in *"$APPID"*) forbidden="${forbidden}${forbidden:+, }appmgr application $APPID" ;; esac
-case "$SOURCES" in *"$SOURCE_NAME"*) forbidden="${forbidden}${forbidden:+, }appmgr source $SOURCE_NAME" ;; esac
-case "$FILES" in *"$SOURCE_NAME.rpm"*) forbidden="${forbidden}${forbidden:+, }$RPM_PATH" ;; esac
-case "$FILES" in *"iris-work"*) forbidden="${forbidden}${forbidden:+, }$WORK_DIR_PATH" ;; esac
-case "$FILES" in *".torrent"*) forbidden="${forbidden}${forbidden:+, }leftover *.torrent sidecar on harddisk:" ;; esac
-case "$FILES" in *".aria2"*) forbidden="${forbidden}${forbidden:+, }leftover *.aria2 sidecar on harddisk:" ;; esac
-case "$FILES" in *".peers.json"*) forbidden="${forbidden}${forbidden:+, }leftover *.peers.json sidecar on harddisk:" ;; esac
+if table_contains "$APPS" "$APPID"; then
+  forbidden="${forbidden}${forbidden:+, }appmgr application $APPID"
+fi
+if table_contains "$SOURCES" "$SOURCE_NAME"; then
+  forbidden="${forbidden}${forbidden:+, }appmgr source $SOURCE_NAME"
+fi
+if files_line_match "$FILES" "(^|[[:space:]])${SOURCE_NAME}\\.rpm\$"; then
+  forbidden="${forbidden}${forbidden:+, }$RPM_PATH"
+fi
+if files_line_match "$FILES" '(^|[[:space:]])iris-work$'; then
+  forbidden="${forbidden}${forbidden:+, }$WORK_DIR_PATH"
+fi
+if files_line_match "$FILES" '\.torrent$'; then
+  forbidden="${forbidden}${forbidden:+, }leftover *.torrent sidecar on harddisk:"
+fi
+if files_line_match "$FILES" '\.aria2$'; then
+  forbidden="${forbidden}${forbidden:+, }leftover *.aria2 sidecar on harddisk:"
+fi
+if files_line_match "$FILES" '\.peers\.json$'; then
+  forbidden="${forbidden}${forbidden:+, }leftover *.peers.json sidecar on harddisk:"
+fi
 
 if [ -n "$forbidden" ]; then
   echo "ERROR: artifacts still present after undeploy: $forbidden" >&2
