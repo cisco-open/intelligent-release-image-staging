@@ -144,9 +144,11 @@
         <!-- Slides in from the RIGHT, like the deployment-details drawer --
              a panel to read alongside the table it was opened from, not a
              choice to confirm, so a drawer rather than a modal. role=dialog
-             + aria-modal (Task 6): an informational drawer that covers part
-             of the page while open is still a dialog to assistive tech. -->
-        <div id="img-info-panel" class="drawer" hidden role="dialog" aria-modal="true" aria-label="Image details">
+             (Task 6, fix wave): a NON-modal dialog -- no backdrop, the page
+             behind stays fully interactive (openImageInfo can be called
+             again while this is open), so aria-modal and a Tab-trap would
+             be dishonest and would wrongly lock out the rest of the page. -->
+        <div id="img-info-panel" class="drawer" hidden role="dialog" aria-label="Image details">
           <div class="drawer-head">
             <span>Image details <span id="ii-id" class="machine"></span></span>
             <button class="btn ghost" id="ii-close" aria-label="Close image details">✕</button>
@@ -328,10 +330,13 @@
         <!-- Slides in from the RIGHT, like the deployment-log drawer. It used
              to be appended below the devices table, so opening it on a fleet of
              any size pushed the details off-screen and made the operator scroll
-             away from the row they had just clicked. role=dialog + aria-modal
-             (Task 6): an informational drawer that covers part of the page
-             while open is still a dialog to assistive tech. -->
-        <div id="deploy-info-panel" class="drawer" hidden role="dialog" aria-modal="true" aria-label="Deployment details">
+             away from the row they had just clicked. role=dialog (Task 6, fix
+             wave): a NON-modal dialog -- no backdrop, the page behind stays
+             fully interactive (openDeployInfo's own deployInfoDev guard
+             expects a second row's drawer to open while the first is still
+             loading), so aria-modal and a Tab-trap would be dishonest and
+             would wrongly lock out the rest of the page. -->
+        <div id="deploy-info-panel" class="drawer" hidden role="dialog" aria-label="Deployment details">
           <div class="drawer-head">
             <span>Deployment details <span id="di-dev" class="machine"></span></span>
             <button class="btn ghost" id="di-close" aria-label="Close deployment details">✕</button>
@@ -763,7 +768,12 @@
             <button class="btn ghost" id="dl-next">Older ›</button>
           </div>
         </div>
-        <div id="dl-drawer" hidden role="dialog" aria-modal="true" aria-label="Deployment log">
+        <!-- role=dialog (Task 6, fix wave): a NON-modal dialog -- no
+             backdrop, the deployment-logs table behind stays fully
+             interactive while this is open, so aria-modal and a Tab-trap
+             would be dishonest and would wrongly lock out the rest of the
+             page. -->
+        <div id="dl-drawer" hidden role="dialog" aria-label="Deployment log">
           <div class="dl-drawer-head">
             <span class="machine" id="dl-drawer-title"></span>
             <button class="btn ghost" id="dl-drawer-close" aria-label="Close log">✕</button>

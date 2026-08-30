@@ -8283,23 +8283,37 @@ def test_every_operational_table_gets_a_scroll_wrapper():
     assert ".table-scroll {" in css and "overflow-x: auto;" in css
 
 
-def test_dialogs_get_dialog_role_and_a_focus_trap():
-    """The four overlays that cover part of the page while open -- the
-    image-detail drawer, the deployment-details drawer, the deployment-log
-    drawer and the image-picker modal -- are dialogs to assistive tech
-    (role=dialog + aria-modal), and Tab must not escape them while they are
-    open. trapDialogFocus is modeled on swarmmap.html's #drawer keydown
-    handler and is attached once per container at setup time."""
+def test_dialogs_get_dialog_role_honestly():
+    """Fix wave (reviewer Critical, controller-adjudicated): the image-detail
+    drawer, the deployment-details drawer and the deployment-log drawer are
+    NON-modal -- no backdrop, the page behind stays fully interactive while
+    one is open (openImageInfo/openDeployInfo can each be called again for
+    another row while their drawer is still showing the last one), so they
+    get role=dialog WITHOUT aria-modal and WITHOUT a Tab-trap: either would
+    be dishonest ARIA and would wrongly lock keyboard/screen-reader users
+    out of the still-interactive page behind the drawer. The image-picker
+    IS a real modal (a translucent backdrop, a choice to make and confirm)
+    and keeps aria-modal + the Tab-trap unchanged.
+
+    All four still move focus in on open and restore it to the opener on
+    close -- that part of a dialog's contract holds regardless of modality."""
     html = _webroot("index.html")
     js = _webroot("app.js")
-    for panel_id in ("img-info-panel", "deploy-info-panel", "img-picker", "dl-drawer"):
+    non_modal_drawers = ("img-info-panel", "deploy-info-panel", "dl-drawer")
+    for panel_id in non_modal_drawers + ("img-picker",):
         tag = html.split('id="%s"' % panel_id, 1)[1].split(">", 1)[0]
         assert 'role="dialog"' in tag, panel_id
-        assert 'aria-modal="true"' in tag, panel_id
+    for panel_id in non_modal_drawers:
+        tag = html.split('id="%s"' % panel_id, 1)[1].split(">", 1)[0]
+        assert 'aria-modal' not in tag, panel_id
+    img_picker_tag = html.split('id="img-picker"', 1)[1].split(">", 1)[0]
+    assert 'aria-modal="true"' in img_picker_tag
     assert "function trapDialogFocus(container) {" in js
-    for panel_id in ("img-info-panel", "deploy-info-panel", "img-picker", "dl-drawer"):
-        assert "trapDialogFocus(document.getElementById('%s'))" % panel_id in js, panel_id
-    # focus moves in on open and is restored to the opener on close
+    assert "trapDialogFocus(document.getElementById('img-picker'))" in js
+    for panel_id in non_modal_drawers:
+        assert "trapDialogFocus(document.getElementById('%s'))" % panel_id not in js, panel_id
+    # focus moves in on open and is restored to the opener on close, for
+    # all four -- modal or not
     for opener_var in ("imgInfoOpener", "deployInfoOpener", "imgPickerOpener", "dlDrawerOpener"):
         assert ("var %s = null;" % opener_var) in js, opener_var
         assert (opener_var + " = document.activeElement;") in js, opener_var

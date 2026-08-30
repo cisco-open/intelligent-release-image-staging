@@ -462,7 +462,10 @@
     var panel = document.getElementById('img-info-panel');
     if (e.key === 'Escape' && panel && !panel.hidden) closeImageInfo();
   });
-  trapDialogFocus(document.getElementById('img-info-panel'));
+  // No trapDialogFocus here (Task 6, fix wave): this drawer is non-modal --
+  // no backdrop, openImageInfo can be called again for another row while
+  // this is open -- so Tab must be free to leave it for the rest of the
+  // page. Focus still moves in on open and is restored to the opener above.
   // Normal release first; the API answers 409 quarantine_still_mismatched
   // when the stored sha512 still disagrees, which is when the override path
   // (typed filename confirmation) appears. Every other failure is surfaced
@@ -1093,7 +1096,11 @@
     var panel = document.getElementById('deploy-info-panel');
     if (e.key === 'Escape' && panel && !panel.hidden) closeDeployInfo();
   });
-  trapDialogFocus(document.getElementById('deploy-info-panel'));
+  // No trapDialogFocus here (Task 6, fix wave): this drawer is non-modal --
+  // no backdrop, deployInfoDev's own guard above expects a second row's
+  // drawer to open while the first is still loading -- so Tab must be free
+  // to leave it for the rest of the page. Focus still moves in on open and
+  // is restored to the opener above.
   // ---- Per-job onboard log panels ----
   // One panel PER JOB in #onboard-logs — its own <pre>, its own EventSource,
   // its own close/abort — so two concurrent onboards never merge into (or
@@ -3841,7 +3848,10 @@
       closeDeployLogDrawer();
     }
   });
-  trapDialogFocus(document.getElementById('dl-drawer'));
+  // No trapDialogFocus here (Task 6, fix wave): this drawer is non-modal --
+  // no backdrop, the deployment-logs table behind stays fully interactive
+  // while it is open -- so Tab must be free to leave it for the rest of the
+  // page. Focus still moves in on open and is restored to the opener above.
 
   // OTLP export health badge (spec 8.3), via the console's session-gated
   // proxy — never the unauthenticated :9101 directly.
