@@ -817,17 +817,26 @@ def _root_file_origin(state, fname):
     return None
 
 
-def _protect_adopted_root(deps, entry):
-    """True when `entry` names a root-FS placement that must never be
-    agent-deleted: a platform whose copy_to_root is attest-in-place
-    (deps.copy_in_place) succeeded WITHOUT this agent writing anything —
-    origin 'adopted', or missing/legacy (fail-safe). Only a SUCCESSFULLY
-    placed entry (`copied`) has any provenance to protect at all; an
-    in-progress or failed placement is ordinary cleanup, unaffected. A
-    platform that physically writes its own root copy (copy_in_place=False)
-    has no adoption path — see xr_deps' module docstring — so it is never
-    protected here."""
-    return bool(deps.copy_in_place and entry.get("copied")
+def _protect_adopted_root(deps, entry, fname):
+    """True when `entry` names `fname` as the root-FS placement it made,
+    on a platform where that must never be agent-deleted: a platform whose
+    copy_to_root is attest-in-place (deps.copy_in_place) succeeded WITHOUT
+    this agent writing anything — origin 'adopted', or missing/legacy
+    (fail-safe).
+
+    Keyed on `root_file == fname` — the durable fact that THIS record IS
+    the placement about to be deleted — rather than `copied`. `copied` is
+    RECOMPUTED every tick from a fresh root_present() call (the steady-state
+    self-heal) and goes False on nothing more than a transient size drift
+    or a single stat miss, while `root_file`/`origin` do not move with that
+    noise (reviewer PROBE1: keying on `copied` failed OPEN exactly when a
+    placement's provenance was most in doubt). An entry with no root_file
+    at all — never successfully placed, or already cleared — can never
+    match here, which is what preserves ordinary cleanup of an in-progress
+    or failed placement. A platform that physically writes its own root
+    copy (copy_in_place=False) has no adoption path — see xr_deps' module
+    docstring — so it is never protected here."""
+    return bool(deps.copy_in_place and entry.get("root_file") == fname
                and entry.get("origin") != "downloaded")
 
 
@@ -849,7 +858,13 @@ def _reconcile_set(deps, state, ids, stage_dir):
     in direct conflict — there is only one file. _protect_adopted_root
     resolves that: an origin-'adopted' (or provenance-unknown) placement is
     left in place exactly like every other platform's root copy; only a
-    placement this agent proved it downloaded is freed on park.
+    placement this agent proved it downloaded is freed on park. Either way,
+    origin/download_started are CLEARED on park (reviewer PROBE2): the
+    acquisition cycle those facts describe ends the moment the image leaves
+    the set, and an operator can restage a byte-identical file under the
+    SAME name while it is gone — the steady-state short-circuit that will
+    greet a reassignment never revisits copy_to_root, so a stale verdict
+    left behind here would silently re-arm on the NEXT park.
 
     UN-PARK — a parked image back in the set: clear the flag and the placement
     retry gate, then let the normal path re-confirm it.
@@ -937,7 +952,8 @@ def _reconcile_set(deps, state, ids, stage_dir):
         # operator-staged ISO. Only a copy this agent proved it downloaded is
         # still fair game; an in-progress/failed placement was never proven
         # to be anyone's root copy at all and is cleaned up as always.
-        if _protect_adopted_root(deps, entry):
+        protected = _protect_adopted_root(deps, entry, fname)
+        if protected:
             deps.emit("ROOTCOPY-KEPT",
                       "left in place: operator-adopted %s" % fname)
         else:
@@ -965,8 +981,33 @@ def _reconcile_set(deps, state, ids, stage_dir):
         # fresh download and mints a fresh transfer_id. This pass is the
         # cycle-boundary owner the old state.pop(prev) used to be.
         telemetry_report.clear_transfer(state, key)
-        deps.emit("PARKED", "%s removed from the assignment set; torrent "
-                            "stopped, stage copy deleted, root copy kept" % key)
+        # Provenance (Directive 2, reviewer PROBE2 fix): origin/download_started
+        # describe a placement fact about this exact acquisition cycle, and
+        # that cycle ends the moment the image leaves the assigned set —
+        # whether the file was just deleted (nothing left to prove) or left
+        # in place untouched (still fine to call it unproven going forward;
+        # fail-safe is never wrong to re-derive from). The steady-state
+        # short-circuit that will greet this record on reassignment never
+        # revisits copy_to_root as long as done/copied read true, so an
+        # operator who restages a byte-identical file under the SAME name
+        # while the image is unassigned must not inherit a stale
+        # 'downloaded' verdict from the PREVIOUS occupant of that name — that
+        # is exactly what let the incident recur on the next unassign.
+        # Cleared unconditionally rather than only on the deleted branch, so
+        # re-derivation always starts from "unproven" instead of an
+        # assumption this cycle can no longer back.
+        entry.pop("origin", None)
+        entry.pop("download_started", None)
+        if protected:
+            detail = "torrent stopped, root copy left in place (adopted)"
+        elif deps.copy_in_place:
+            # stage IS root on this platform: remove_stage above just
+            # deleted the SAME file this message used to call "kept".
+            detail = "torrent stopped, root copy removed"
+        else:
+            detail = "torrent stopped, stage copy deleted, root copy kept"
+        deps.emit("PARKED",
+                  "%s removed from the assignment set; %s" % (key, detail))
     # Only sweep when EVERY assigned image resolved to a filename. The sweep
     # deletes every staged artifact outside the keep set, so an image the
     # catalog merely failed to answer for this tick must never look unassigned
@@ -1129,15 +1170,37 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
             return "complete"
         deps.emit("RECHECK", "%s re-acquiring (content=%s staged=%s root=%s)"
                   % (image["filename"], content_ok, staged_ok, root_ok))
+        if not staged_ok:
+            # Provenance (Directive 2, reviewer PROBE1/PROBE2 follow-up): the
+            # placement this record's origin/download_started describe is
+            # gone, or was not re-verified THIS cycle — on a stage-equals-root
+            # platform (deps.copy_in_place, e.g. XR) staged_ok and root_ok are
+            # literally the same fact, so this also covers a root copy that
+            # vanished or was silently replaced OUTSIDE an unassign. Whatever
+            # eventually lands at this name next is judged on its OWN
+            # evidence (a fresh copy_to_root re-derives origin), never on a
+            # provenance fact this record can no longer vouch for.
+            done_st.pop("origin", None)
+            done_st.pop("download_started", None)
         if staged_ok and not content_ok:
-            # A republished image under the SAME id is a normal catalog
-            # event this agent must still converge on — unlike an
-            # unassign/teardown, refusing this delete would leave the
-            # device stuck on stale content forever with no path back to
-            # the current catalog target. (An adopted file that happens to
-            # be replaced this way was, by construction, byte-identical to
-            # the OLD content; the operator's own file is gone the moment
-            # content changed under it either way.)
+            # A republished image under the SAME id is the ORDINARY catalog
+            # event, not a rare edge case: image ids are DERIVED from the
+            # filename (server/publish.py's derive_id strips the known image
+            # suffixes), so a rebuild published under an unchanged filename
+            # routinely lands here with new content under the SAME id and
+            # the SAME name. Refusing this delete would leave the device
+            # stuck on stale content forever with no path back to the
+            # catalog's current target, on every such republish — so
+            # convergence wins even over an adopted file (the operator's
+            # file is not assumed to match either the old or the new
+            # content; the catalog changed, not necessarily anything about
+            # what is actually sitting at this name). The one thing owed to
+            # the operator is honesty: say so before overriding it.
+            if deps.copy_in_place and done_st.get("origin") != "downloaded":
+                deps.emit("ROOTCOPY-REPLACED",
+                          "replacing operator-adopted %s: catalog content "
+                          "changed under image id %s" % (image["filename"],
+                                                          img_id))
             deps.remove_stage(stage)      # stale content on disk -> drop, re-download
             staged_ok = False
             # Same catalog id with new content is a genuine image change, so a
@@ -1149,6 +1212,7 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
             # marking a subsequent operator-adopted replacement as
             # 'downloaded'). aria_add re-sets it later THIS SAME tick if the
             # file really is gone and a fresh download starts.
+            done_st.pop("origin", None)
             done_st.pop("download_started", None)
         # 'copied' is a fact about the FLASH-ROOT copy, and root_present()
         # above just checked THAT copy by presence AND exact catalog size.
@@ -1191,18 +1255,26 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
     #
     # Provenance gate (Directive 2): pending_root_deletes names a FILE, not
     # the per-image record that placed it, so its origin is looked up by
-    # root_file. A name whose owning record says 'downloaded' is deleted
-    # exactly as before; 'adopted' or unproven (no owning record at all, or
-    # one with no origin — a state file older than this field) is left in
-    # place, logged once, and resolved out of the queue immediately rather
-    # than retried forever — there is nothing a retry could ever change.
+    # root_file. Gated on deps.copy_in_place exactly like the park guard: a
+    # platform that physically writes its own root copy (every IOS-XE
+    # platform) has no adoption concept at all, so a legacy entry with no
+    # owning record there is deleted exactly as it always was — treating it
+    # as "operator-adopted" would be a false claim, and worse, would strand
+    # a genuinely replaced image on flash forever with nothing left to
+    # retry it. On a platform WITH an adoption concept (copy_in_place), a
+    # name whose owning record says 'downloaded' is deleted exactly as
+    # before; 'adopted' or unproven (no owning record at all, or one with
+    # no origin — a state file older than this field) is left in place,
+    # logged once, and resolved out of the queue immediately rather than
+    # retried forever — there is nothing a retry could ever change.
     pending = state.get("pending_root_deletes") or []
     if pending:
         fs = state.get("stage_fs", "flash:")
         doomed = [n for n in pending
                   if n != image["filename"] and _FILENAME_RE.match(n)]
         deletable = [n for n in doomed
-                    if _root_file_origin(state, n) == "downloaded"]
+                    if not deps.copy_in_place
+                    or _root_file_origin(state, n) == "downloaded"]
         for protected in doomed:
             if protected not in deletable:
                 deps.emit("ROOTCOPY-KEPT",

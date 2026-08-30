@@ -297,12 +297,15 @@ def test_pending_delete_of_an_adopted_file_is_skipped_and_cleared():
     # The Directive-2 incident: attest-in-place ADOPTED an operator's
     # pre-existing file as IRIS's staged copy; the OLD pending-delete queue
     # must never be allowed to delete it. Skipped, logged, and the queue
-    # entry is resolved (cleared) rather than retried forever.
+    # entry is resolved (cleared) rather than retried forever. Only
+    # meaningful on a platform with an adoption concept at all
+    # (copy_in_place) — see the XE counterpart below.
     cat = FakeCatalog({"approved_image_id": "img2"},
                       {"id": "img2", "filename": "img2.bin", "size": 7,
                        "sha256": "def"})
     deps, emitted, ios_cmds, _, _, _, _, bundle_reclaimed = make_deps(
         cat, {"/stage/img2.bin": 7}, verify_ok=True)
+    deps = deps._replace(copy_in_place=True)
     state = {"schema_version": iris_agent._STATE_SCHEMA,
              "image_id": "img2", "pending_root_deletes": ["old.bin"],
              "old-img": {"root_file": "old.bin", "copied": True,
@@ -315,15 +318,17 @@ def test_pending_delete_of_an_adopted_file_is_skipped_and_cleared():
     assert kept and "old.bin" in kept[0] and "operator-adopted" in kept[0]
 
 
-def test_pending_delete_of_a_legacy_missing_origin_file_is_never_deleted():
+def test_pending_delete_of_a_legacy_missing_origin_file_is_never_deleted_on_xr():
     # No per-image record at all claims old.bin's provenance (a state file
     # from before this feature existed). Missing/unknown origin is the
-    # fail-safe default: treated exactly like "adopted".
+    # fail-safe default on a platform with an adoption concept
+    # (copy_in_place): treated exactly like "adopted".
     cat = FakeCatalog({"approved_image_id": "img2"},
                       {"id": "img2", "filename": "img2.bin", "size": 7,
                        "sha256": "def"})
     deps, emitted, ios_cmds, _, _, _, _, bundle_reclaimed = make_deps(
         cat, {"/stage/img2.bin": 7}, verify_ok=True)
+    deps = deps._replace(copy_in_place=True)
     state = {"schema_version": iris_agent._STATE_SCHEMA,
              "image_id": "img2", "pending_root_deletes": ["old.bin"]}
     iris_agent.run_once(CFG, deps, state)
@@ -332,19 +337,43 @@ def test_pending_delete_of_a_legacy_missing_origin_file_is_never_deleted():
     assert any(m == "ROOTCOPY-KEPT" and "old.bin" in msg for m, msg in emitted)
 
 
+def test_pending_delete_ignores_the_origin_gate_on_a_platform_with_no_adoption():
+    # IMPORTANT 3: copy_in_place=False (every IOS-XE platform) has NO
+    # adoption concept at all — a legacy entry with no owning per-image
+    # record must still be deleted exactly as before every deletion path
+    # here learned about provenance, never mislabelled 'operator-adopted'
+    # and stranded on flash.
+    cat = FakeCatalog({"approved_image_id": "img2"},
+                      {"id": "img2", "filename": "img2.bin", "size": 7,
+                       "sha256": "def"})
+    deps, emitted, ios_cmds, _, _, _, _, bundle_reclaimed = make_deps(
+        cat, {"/stage/img2.bin": 7}, verify_ok=True)
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "image_id": "img2", "pending_root_deletes": ["old.bin"]}
+    iris_agent.run_once(CFG, deps, state)
+    assert bundle_reclaimed == [("flash:", ["old.bin"])]
+    assert all(m != "ROOTCOPY-KEPT" for m, _ in emitted)
+
+
 def test_pending_delete_mixed_queue_only_deletes_the_downloaded_entry():
     cat = FakeCatalog({"approved_image_id": "img3"},
                       {"id": "img3", "filename": "img3.bin", "size": 7,
                        "sha256": "xyz"})
     deps, emitted, ios_cmds, _, _, _, _, bundle_reclaimed = make_deps(
         cat, {"/stage/img3.bin": 7}, verify_ok=True)
+    deps = deps._replace(copy_in_place=True)
     state = {"schema_version": iris_agent._STATE_SCHEMA,
              "image_id": "img3",
              "pending_root_deletes": ["adopted.bin", "downloaded.bin"],
+             # already 'parked' -- these represent OLD, already-fully-parked
+             # records (exactly what a pending_root_deletes-carrying state
+             # file predates), so _reconcile_set's own stale-park pass
+             # leaves them alone this tick and their origin survives for
+             # the drain below to read.
              "old-a": {"root_file": "adopted.bin", "copied": True,
-                      "origin": "adopted"},
+                      "origin": "adopted", "parked": True},
              "old-b": {"root_file": "downloaded.bin", "copied": True,
-                      "origin": "downloaded"}}
+                      "origin": "downloaded", "parked": True}}
     iris_agent.run_once(CFG, deps, state)
     assert bundle_reclaimed == [("flash:", ["downloaded.bin"])]
     assert any(m == "ROOTCOPY-KEPT" and "adopted.bin" in msg
@@ -716,6 +745,46 @@ def test_self_heal_redownloads_when_content_sha_changed():
     assert iris_agent.run_once(CFG, deps, _DONE(sha="OLDSHA")) == "downloading"
     assert removed == ["/stage/img1.bin"]              # stale content discarded
     assert aria == [("/stage/img1.torrent", "/stage")]  # re-downloaded
+    # copy_in_place=False here (default fixture): no adoption concept, so no
+    # replace warning is due regardless of origin.
+    assert all(m != "ROOTCOPY-REPLACED" for m, _ in emitted)
+
+
+def test_content_republish_on_an_adopted_file_warns_before_replacing_it():
+    # IMPORTANT 4: same-id republish stays UNGUARDED -- convergence to the
+    # catalog's current target wins over provenance protection here, by
+    # design -- but overriding a file this agent never downloaded must say
+    # so honestly, in the same tick, before the delete.
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 5,
+                       "sha256": "NEWSHA"})
+    deps, emitted, _, aria, _, _, _, _ = make_deps(cat, {"/stage/img1.bin": 5})
+    deps = deps._replace(copy_in_place=True)
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "image_id": "img1", "root_file": "img1.bin",
+             "img1": {"done": True, "copied": True, "sha": "OLDSHA",
+                      "origin": "adopted"}}
+    assert iris_agent.run_once(CFG, deps, state) == "downloading"
+    replaced = [msg for m, msg in emitted if m == "ROOTCOPY-REPLACED"]
+    assert replaced
+    assert replaced[0] == ("replacing operator-adopted img1.bin: catalog "
+                           "content changed under image id img1")
+    # still converges -- the whole point of the adjudication
+    assert aria == [("/stage/img1.torrent", "/stage")]
+
+
+def test_content_republish_on_a_downloaded_file_stays_silent():
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 5,
+                       "sha256": "NEWSHA"})
+    deps, emitted, _, aria, _, _, _, _ = make_deps(cat, {"/stage/img1.bin": 5})
+    deps = deps._replace(copy_in_place=True)
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "image_id": "img1", "root_file": "img1.bin",
+             "img1": {"done": True, "copied": True, "sha": "OLDSHA",
+                      "origin": "downloaded"}}
+    assert iris_agent.run_once(CFG, deps, state) == "downloading"
+    assert all(m != "ROOTCOPY-REPLACED" for m, _ in emitted)
 
 
 def test_self_heal_drops_stale_aria_entry_before_redownload():

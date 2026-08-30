@@ -279,6 +279,78 @@ def test_park_deletes_an_uncopied_partial_regardless_of_origin_when_stage_is_roo
     assert state["img-a"]["parked"] is True
 
 
+def test_park_keeps_an_adopted_root_copy_even_when_copied_reads_false():
+    # Reviewer PROBE1: 'copied' is RECOMPUTED every tick from a fresh
+    # root_present() call (iris_agent.py's steady-state check) and goes
+    # False on nothing more than a transient size drift or a single XR
+    # root_present miss -- while 'origin' and 'root_file' are durable facts
+    # about what THIS record placed and do not move with that noise. Keying
+    # protection on 'copied' failed OPEN exactly when a placement's
+    # provenance was most in doubt.
+    cat = MultiCatalog([_img("img-a"), _img("img-b")], ids=["img-a"])
+    deps, rec = make_deps(cat, {"/stage/img-a.bin": 5})
+    deps = deps._replace(copy_in_place=True)
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "img-a": {"done": True, "copied": False, "root_file": "img-a.bin",
+                       "origin": "adopted"}}
+
+    cat.ids = ["img-b"]
+    iris_agent.run_once(CFG, deps, state)
+
+    assert "/stage/img-a.bin" not in rec["removed"]
+    kept = _emits(rec, "ROOTCOPY-KEPT")
+    assert any("img-a.bin" in msg and "operator-adopted" in msg for msg in kept)
+
+
+def test_a_restaged_file_is_never_deleted_after_a_park_and_reassign_cycle():
+    # Reviewer PROBE2, the full incident-recurrence sequence, driven through
+    # real ticks throughout:
+    #   1. IRIS genuinely downloads img-a (origin='downloaded').
+    #   2. Unassigned -> park correctly deletes IRIS's own download.
+    #   3. An operator restages a byte-identical img-a.bin under the SAME
+    #      name (the exact shape of the 2026-08-29 incident).
+    #   4. img-a is reassigned. done/copied were never touched by park, so
+    #      this hits the steady-state short-circuit -- copy_to_root/origin
+    #      is never re-derived for the file actually sitting there now.
+    #   5. Unassigned again: the stale 'downloaded' origin must NOT survive
+    #      to authorise deleting what is now the operator's file.
+    cat = MultiCatalog([_img("img-a"), _img("img-b")], ids=["img-a"])
+    sizes = {}
+    deps, rec = make_deps(cat, sizes)
+    deps = deps._replace(copy_in_place=True)
+    state = {}
+
+    # 1. genuine download + placement, over two real ticks: absent -> this
+    #    agent's own aria2 session starts the fetch (sets download_started)
+    #    -> the file "arrives" -> copy_to_root succeeds on the next tick.
+    iris_agent.run_once(CFG, deps, state)
+    assert rec["aria_added"]                        # genuinely downloading
+    sizes["/stage/img-a.bin"] = 5
+    iris_agent.run_once(CFG, deps, state)
+    assert state["img-a"]["origin"] == "downloaded"
+
+    # 2. unassign -> park deletes the genuinely-downloaded copy
+    cat.ids = ["img-b"]
+    iris_agent.run_once(CFG, deps, state)
+    assert "/stage/img-a.bin" in rec["removed"]
+    assert state["img-a"]["parked"] is True
+
+    # 3. operator restages a byte-identical file under the same name
+    sizes["/stage/img-a.bin"] = 5
+    rec["removed"].clear()
+
+    # 4. reassigned -> greets the restage via the steady-state short-circuit
+    cat.ids = ["img-a", "img-b"]
+    iris_agent.run_once(CFG, deps, state)
+    assert state["img-a"]["copied"] is True         # short-circuit confirmed it
+
+    # 5. unassigned again -> must NOT delete the operator's restage
+    cat.ids = ["img-b"]
+    iris_agent.run_once(CFG, deps, state)
+    assert "/stage/img-a.bin" not in rec["removed"]
+    assert any("img-a.bin" in msg for msg in _emits(rec, "ROOTCOPY-KEPT"))
+
+
 def test_park_then_unpark_reuses_the_surviving_root_copy():
     # Park -> un-park driven through REAL ticks (a park deletes the stage copy,
     # so a state with parked=True AND the stage file still present is a state
