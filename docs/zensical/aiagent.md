@@ -94,9 +94,11 @@ At the end of every step, state the next action required from me.
    `iris` / `irisisgreat!`, and create the initial admin account. The default
    credential works only before an admin account exists. The next sign-in opens
    the first-run setup wizard at `#setup`: telemetry destination, stage host,
-   device packages, and image verification (the Cisco source check against the
-   published Known Good Values feed — enable its daily schedule here or later
-   under Settings › Image verification; see [Validation](validation.md)). Any
+   and device packages. Image verification — the Cisco source check against
+   the published Known Good Values feed — is reported on Settings › Setup and
+   configured under Settings › Image verification, including its daily
+   schedule and the offline feed-file import for air-gapped servers; enable it
+   before trusting staged images (see [Validation](validation.md)). Any wizard
    step can be skipped and resumed later — a banner keeps offering the
    unfinished ones, and Settings › Setup reports their state. The
    device-packages step is the same check as step 6 below; it cannot be
@@ -170,12 +172,19 @@ first-run slate instead of deploying over live state:
     (Compose prefixes volume names with the project name; the snippet resolves
     it. `docker volume ls` shows the exact names if in doubt.)
 4. Remove the two state volumes (`docker volume rm <project>_iris-state
-   <project>_iris-config`). Image files are untouched by this: they live under
-   the host image root (`IRIS_IMAGE_ROOT`, default `/opt/images`), which is
-   bind-mounted read-only, and reappear in the catalog through the Console
-   **Import from disk** panel after setup.
-5. Rebuild served agent packages if the agent changed since they were built
-   (step 6 above — stale packages ship the old agent).
+   <project>_iris-config`). The third volume, `iris-images`, holds images that
+   were **uploaded through the Console** — keep it (and know it is in your
+   backup) if you want those payloads; images imported from the host image
+   root (`IRIS_IMAGE_ROOT`, default `/opt/images`, bind-mounted read-only) are
+   untouched either way and reappear through the Console **Import from disk**
+   panel after setup.
+5. Treat every prebuilt agent package as stale after the wipe — no condition
+   to check: the next bootstrap mints a new server certificate, and all
+   packages pin the old one at build time. The bring-up script in step 6
+   restages both IOx tars against the new certificate; rebuild the XR package
+   after bring-up (`tools/build-xr-package.sh --out artifacts/` with
+   `CATALOG_PEM` pointing at the NEW live certificate, certificate block
+   only) when IOS-XR devices are in scope.
 6. Bring the server back up with `tools/start-compose-server.sh` — not raw
    `docker compose up`. The entrypoint fails closed when the encrypted secrets
    file is missing from the freshly recreated config volume, and only the
@@ -187,10 +196,12 @@ first-run slate instead of deploying over live state:
 The reset erases fleet rows, catalog entries and verification verdicts, the
 image-verification schedule, deployment records, settings, credential
 profiles, and the audit log (all captured in the backup). Devices themselves
-are not touched: an agent already running on a device keeps running and
-reporting. Re-add such a device to the inventory to reconnect it rather than
-onboarding it again blindly — onboarding installs the agent, and the device
-already has one.
+are not touched, but agents deployed before the reset are **orphaned by it**:
+they pinned the old server certificate and their enrollment tokens died with
+the state, so they cannot reconnect on their own. Re-onboard each device —
+onboarding reinstalls the agent against the new certificate. (Restoring the
+old TLS material from the backup is the only way to revive existing agents
+without re-onboarding; that trades away the clean-slate certificate.)
 
 ## Completion record
 
