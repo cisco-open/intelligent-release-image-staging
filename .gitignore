@@ -85,3 +85,6 @@ HANDOFF-*.md
 
 # --- superpowers brainstorm/visual-companion scratch (local only) ---
 .superpowers/
+
+# --- Cisco-licensed typeface: staged at deploy time, never distributed ---
+server/webroot/fonts/SharpSans-Bold.woff2

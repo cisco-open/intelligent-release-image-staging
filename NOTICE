@@ -72,6 +72,32 @@ third-party tools or runtime assets. They are not linked into the IRIS runtime:
                Loaded by the generated documentation site to render diagrams
                from Mermaid code blocks.
 
+------------------------------------------------------------------------------
+Vendored web console assets
+------------------------------------------------------------------------------
+
+The operator web console (server/webroot/) self-hosts the following third-party
+assets, each governed solely by its own license:
+
+  * Inter — SIL Open Font License 1.1.
+               Copyright (c) The Inter Project Authors.
+               Self-hosted as WOFF2 under server/webroot/fonts/ for console
+               body and interface text.
+
+  * Roboto Mono — Apache License, Version 2.0.
+               Copyright (c) Google LLC.
+               Self-hosted as WOFF2 under server/webroot/fonts/ for
+               machine-data text (identifiers, hashes, addresses, logs).
+
+  * Phosphor Icons — MIT License.
+               Copyright (c) 2023 Phosphor Icons.
+               Bold-weight glyph path data vendored as inline SVG symbols in
+               server/webroot/index.html for status indicators.
+
+The Sharp Sans typeface is licensed to Cisco Systems, Inc. for use in Cisco
+products and is NOT part of this source distribution; deployments stage it
+separately, and the console falls back to Inter when it is absent.
+
 The tools listed above are invoked as separate programs and are not
 linked into or derived from this project's source code. The documentation tools
 and assets listed above are used only for documentation build or rendering. The
