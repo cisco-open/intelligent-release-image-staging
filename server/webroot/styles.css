@@ -145,6 +145,29 @@ h4 { font-size:14px; line-height:20px; }
 /* audit table: composed messages, category tags, result badges */
 #audit-tbl td.nowrap { white-space:nowrap; }
 #audit-tbl .detail { color:var(--text-secondary); }
+/* Status pill grammar (12-level Magnetic mapping, Task 4). Icon + tinted
+   background, never color alone. Positive is BLUE-family per Magnetic --
+   green stays reserved for Allow/policy grammar elsewhere in the console. */
+.status-pill { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px;
+  border-radius: 9999px; font-size: 12px; line-height: 18px; font-weight: 500; }
+.status-pill svg { width: 12px; height: 12px; flex: none; }
+.status-pill.is-positive { background: var(--action-tint); color: var(--action-active); }
+.status-pill.is-progress { background: var(--progress-tint); color: var(--progress); }
+.status-pill.is-negative { background: var(--danger-tint); color: var(--danger); }
+.status-pill.is-warning  { background: var(--warning-tint); color: var(--warning); }
+.status-pill.is-severe   { background: var(--severe-tint); color: var(--severe); }
+.status-pill.is-info     { background: var(--info-tint); color: var(--info); }
+.status-pill.is-inactive { background: var(--inactive-tint); color: var(--inactive); }
+.status-pill.is-disabled { background: var(--inactive-tint); color: var(--inactive); }
+/* Icon sprite (Phosphor bold symbols, index.html): defines but never paints
+   -- CSP forbids a literal style= attribute, so it's hidden by class
+   instead of the usual inline 0x0/absolute trick. */
+.icon-sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+/* Batch-onboard row marker for an undeploy job (was a literal style=
+   attribute -- CSP forbids inline style in dynamic HTML). Purple to match
+   the In-progress pill level it names the same lifecycle action as. */
+.job-action-undeploy { color: var(--progress); font-size: 10px; font-weight: 600; }
+
 .badge { display:inline-block; font-size:11px; font-weight:600; border-radius:4px; padding:1px 7px; line-height:1.5; }
 /* same trap: #telemetry-health starts hidden and would otherwise render as an
    empty pill until its first refresh. */

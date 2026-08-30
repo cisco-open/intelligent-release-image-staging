@@ -10,6 +10,47 @@
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
+  <!-- Status pill icon sprite (12-level Magnetic mapping, Task 4). Phosphor
+       bold-derived symbols, referenced by <use href="#i-..."> in app.js's
+       statusPillHTML(); the pill's own text label carries the accessible
+       name, so this whole sprite is inert to assistive tech. -->
+  <svg class="icon-sprite" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+    <symbol id="i-check-circle" viewBox="0 0 256 256" fill="none" stroke="currentColor" stroke-width="20" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="128" cy="128" r="100"/>
+      <polyline points="82,132 112,164 176,92"/>
+    </symbol>
+    <symbol id="i-dash-circle" viewBox="0 0 256 256" fill="none" stroke="currentColor" stroke-width="20" stroke-linecap="round">
+      <circle cx="128" cy="128" r="100" stroke-dasharray="36 24"/>
+    </symbol>
+    <symbol id="i-octagon-x" viewBox="0 0 256 256" fill="none" stroke="currentColor" stroke-width="20" stroke-linecap="round" stroke-linejoin="round">
+      <polygon points="90,28 166,28 228,90 228,166 166,228 90,228 28,166 28,90"/>
+      <line x1="92" y1="92" x2="164" y2="164"/>
+      <line x1="164" y1="92" x2="92" y2="164"/>
+    </symbol>
+    <symbol id="i-triangle-warn" viewBox="0 0 256 256" fill="none" stroke="currentColor" stroke-width="20" stroke-linecap="round" stroke-linejoin="round">
+      <polygon points="128,26 230,220 26,220"/>
+      <line x1="128" y1="96" x2="128" y2="152"/>
+      <circle cx="128" cy="182" r="11" fill="currentColor" stroke="none"/>
+    </symbol>
+    <symbol id="i-diamond-severe" viewBox="0 0 256 256" fill="none" stroke="currentColor" stroke-width="18" stroke-linecap="round" stroke-linejoin="round">
+      <polygon points="128,20 236,128 128,236 20,128"/>
+      <line x1="128" y1="84" x2="128" y2="150"/>
+      <circle cx="128" cy="178" r="11" fill="currentColor" stroke="none"/>
+    </symbol>
+    <symbol id="i-square-info" viewBox="0 0 256 256" fill="none" stroke="currentColor" stroke-width="20" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="32" y="32" width="192" height="192" rx="28"/>
+      <circle cx="128" cy="88" r="13" fill="currentColor" stroke="none"/>
+      <line x1="128" y1="122" x2="128" y2="186"/>
+    </symbol>
+    <symbol id="i-minus-circle" viewBox="0 0 256 256" fill="none" stroke="currentColor" stroke-width="20" stroke-linecap="round">
+      <circle cx="128" cy="128" r="100"/>
+      <line x1="86" y1="128" x2="170" y2="128"/>
+    </symbol>
+    <symbol id="i-slash-circle" viewBox="0 0 256 256" fill="none" stroke="currentColor" stroke-width="20" stroke-linecap="round">
+      <circle cx="128" cy="128" r="100"/>
+      <line x1="68" y1="188" x2="188" y2="68"/>
+    </symbol>
+  </svg>
   <div class="top">
     <span>◈ Intelligent Release &amp; Image Staging <span class="tag">IRIS</span></span>
     <span class="spacer"></span>

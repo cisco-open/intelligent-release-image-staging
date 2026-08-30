@@ -59,20 +59,25 @@
   // because right after an onboard the agent needs minutes to bootstrap before
   // its first heartbeat, and without them the row reads "not enrolled" and
   // looks like the onboard did nothing.
+  // Labels here are sentence case (Magnetic pill grammar, Task 4) -- they
+  // double as statusDisplay()'s default text below, so the dropdown and the
+  // rendered pill share one copy of every static label and cannot drift
+  // apart. 'deployed' is the one WIRE key that keeps its old spelling while
+  // its DISPLAY text becomes "Staged" (spec: derivation in app.js unchanged).
   var DEVICE_STATUS_OPTIONS = [
-    ['onboarding', 'onboarding'],
-    ['undeploying', 'undeploying'],
-    ['waiting-heartbeat', 'waiting for heartbeat'],
-    ['onboard-failed', 'onboard failed'],
-    ['undeploy-failed', 'undeploy failed'],
-    ['deployed', 'deployed'],
-    ['placement-failed', 'placement failed'],
-    ['image-failed', 'image failed'],
-    ['copying', 'copying to IOS storage'],
-    ['staging', 'staging (other)'],
-    ['enrolled', 'enrolled'],
-    ['not-enrolled', 'not enrolled'],
-    ['offline', 'offline (no recent heartbeat)']
+    ['onboarding', 'Onboarding'],
+    ['undeploying', 'Undeploying'],
+    ['waiting-heartbeat', 'Waiting for heartbeat'],
+    ['onboard-failed', 'Onboard failed'],
+    ['undeploy-failed', 'Undeploy failed'],
+    ['deployed', 'Staged'],
+    ['placement-failed', 'Placement failed'],
+    ['image-failed', 'Image(s) failed'],
+    ['copying', 'Copying to IOS storage'],
+    ['staging', 'Staging (other)'],
+    ['enrolled', 'Enrolled'],
+    ['not-enrolled', 'Not enrolled'],
+    ['offline', 'Offline (no recent heartbeat)']
   ];
   // The device's approved image ids, ordered. assigned_image_ids is absent
   // for a policy row that predates the ordered set (or simply unassigned),
@@ -160,15 +165,91 @@
     }
     return { key: 'not-enrolled', label: 'not enrolled', cls: 'muted' };
   }
+
+  // ---- Status pill grammar (12-level Magnetic mapping, Task 4) ----------
+  // One level (and one icon) per status, built next to deviceStatus() so a
+  // key can never be renderable under a level this map doesn't cover --
+  // same "one derivation feeds both" reasoning as DEVICE_STATUS_OPTIONS
+  // above. Positive is BLUE-family per Magnetic, not green: green stays
+  // reserved for Allow/policy grammar elsewhere in the console.
+  var STATUS_OPTION_LABELS = {};
+  DEVICE_STATUS_OPTIONS.forEach(function (o) { STATUS_OPTION_LABELS[o[0]] = o[1]; });
+  // copying/staging/image-failed carry PER-DEVICE text deviceStatus() itself
+  // already built (target filesystem, the raw stage_state, an N-of-M count)
+  // -- the option label above is only their generic dropdown stand-in, never
+  // what a row's own pill should show.
+  var STATUS_DYNAMIC_KEYS = { copying: 1, staging: 1, 'image-failed': 1 };
+  // offline's dropdown text is a full explanation ("no recent heartbeat"),
+  // too long beside the status it modifies -- the pill gets the short form.
+  var STATUS_PILL_LABEL_OVERRIDES = { offline: 'Offline' };
+  var STATUS_LEVELS = {
+    onboarding: 'progress', undeploying: 'progress',
+    copying: 'progress', staging: 'progress',
+    'waiting-heartbeat': 'info',
+    'onboard-failed': 'negative', 'undeploy-failed': 'negative',
+    'placement-failed': 'negative',
+    deployed: 'positive', enrolled: 'positive',
+    'image-failed': 'warning',   // overridden to 'severe' by ratio below
+    'not-enrolled': 'inactive', offline: 'inactive'
+  };
+  var STATUS_ICONS = {
+    positive: 'i-check-circle', progress: 'i-dash-circle', negative: 'i-octagon-x',
+    warning: 'i-triangle-warn', severe: 'i-diamond-severe', info: 'i-square-info',
+    inactive: 'i-minus-circle', disabled: 'i-slash-circle'
+  };
+  function statusSentenceCase(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
+
+  // status: the {key, label, ...} object deviceStatus() returns, or a bare
+  // key string for the one modifier deviceStatus() never produces itself
+  // ('offline', applied by deviceIsOffline() on top of whatever the cell
+  // already says). ratio: errored/assigned images, image-failed only --
+  // swings the pill between the amber warning and the orange severe diamond
+  // (N-of-M by severity, spec status grammar).
+  function statusDisplay(status, ratio) {
+    var key = typeof status === 'string' ? status : status.key;
+    var level = STATUS_LEVELS[key] || 'inactive';
+    var label;
+    if (key === 'image-failed') {
+      level = (ratio || 0) >= 0.5 ? 'severe' : 'warning';
+      label = (status && status.label) || STATUS_OPTION_LABELS[key] || key;
+    } else if (STATUS_DYNAMIC_KEYS[key]) {
+      label = statusSentenceCase((status && status.label) || STATUS_OPTION_LABELS[key] || key);
+    } else {
+      label = STATUS_PILL_LABEL_OVERRIDES[key] || STATUS_OPTION_LABELS[key] || key;
+    }
+    return { label: label, level: level };
+  }
+
+  // Icon + sentence-case label, tinted background, never color alone. <use>
+  // only ever references the sprite vendored in index.html; the label text
+  // (not the icon) carries the accessible name, so the sprite stays
+  // aria-hidden and the icon itself needs none.
+  function statusPillHTML(status, opts) {
+    opts = opts || {};
+    var d = statusDisplay(status, opts.ratio);
+    var icon = STATUS_ICONS[d.level] || STATUS_ICONS.inactive;
+    var titleAttr = opts.title ? ' title="' + esc(opts.title) + '"' : '';
+    return '<span class="status-pill is-' + d.level + '"' + titleAttr + '>' +
+      '<svg aria-hidden="true"><use href="#' + icon + '"></use></svg>' +
+      esc(d.label) + '</span>';
+  }
+
   function deviceStatusHtml(d, devNow) {
     var st = deviceStatus(d, devNow);
-    var title = st.detail ? ' title="' + esc(st.detail) + '"' : '';
-    var html = '<span class="' + st.cls + '"' + title + '>' + esc(st.label) + '</span>';
+    var ratio;
+    if (st.key === 'image-failed') {
+      var assigned = rowAssignedIds(d);
+      var errored = rowErroredIds(d).filter(function (iid) {
+        return assigned.indexOf(iid) !== -1;
+      });
+      ratio = assigned.length ? errored.length / assigned.length : 0;
+    }
+    var html = statusPillHTML(st, { title: st.detail, ratio: ratio });
     if (st.detail) {
-      html += ' <span class="muted"' + title + '>' + esc(st.detail) + '</span>';
+      html += ' <span class="muted" title="' + esc(st.detail) + '">' + esc(st.detail) + '</span>';
     }
     if (deviceIsOffline(d, devNow)) {
-      html += ' <span class="muted" style="font-size:10px">offline</span>';
+      html += ' ' + statusPillHTML('offline');
     }
     return html;
   }
@@ -1161,7 +1242,7 @@
       counts[j.state] = (counts[j.state] || 0) + 1;
       var queuePos = j.state === 'queued' ? ('#' + (queuedAll.indexOf(j) + 1) + ' in line') : jobDur(j, now);
       var act = (j.action === 'undeploy')
-        ? '<div style="color:#8a4baf;font-size:10px;font-weight:600">undeploy</div>' : '';
+        ? '<div class="job-action-undeploy">undeploy</div>' : '';
       return '<tr data-job="' + esc(j.id) + '" data-dev="' + esc(j.device_id) + '"' +
         ' data-state="' + esc(j.state) + '" data-action="' + esc(j.action || 'onboard') + '">' +
         '<td class="machine">' + esc(j.device_id) + act + '</td>' +

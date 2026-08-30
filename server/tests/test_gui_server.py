@@ -252,6 +252,40 @@ def test_undeploy_and_status_ui_wired():
     assert "Waiting for heartbeat" in js         # overview card
 
 
+def test_status_display_map_covers_every_status():
+    """Task 4: statusDisplay()/statusPillHTML() are the ONE derivation of the
+    Magnetic 12-level status grammar, built next to deviceStatus() itself
+    (same "one derivation feeds both" reasoning as
+    test_every_status_the_cell_can_show_is_filterable below) so the rendered
+    pill and the filter dropdown can never disagree about a status. Every
+    key deviceStatus() can produce (DEVICE_STATUS_OPTIONS, app.js:62-76),
+    plus the 'offline' freshness modifier deviceIsOffline() applies on top,
+    must be covered. 'deployed' keeps its WIRE key unchanged -- only the
+    pill/dropdown DISPLAY text becomes "Staged" (spec: derivation in app.js
+    unchanged)."""
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    assert "function statusDisplay(" in js
+    assert "function statusPillHTML(" in js
+    for key in ("onboarding", "undeploying", "waiting-heartbeat",
+                "onboard-failed", "undeploy-failed", "deployed",
+                "placement-failed", "image-failed", "copying", "staging",
+                "enrolled", "not-enrolled", "offline"):
+        assert "'%s'" % key in js, key
+    # the wire key is untouched; only the DISPLAY label changes
+    assert "['deployed', 'Staged']" in js
+    # the 8 pill levels the CSS/sprite must supply (Warning/Severe split by
+    # N-of-M severity for image-failed; Disabled has no producible key yet,
+    # so it only ever appears as a bare map key, not a quoted value)
+    for level in ("positive", "progress", "negative", "warning", "severe",
+                  "info", "inactive", "disabled"):
+        assert level in js, level
+    for icon in ("i-check-circle", "i-dash-circle", "i-octagon-x",
+                 "i-triangle-warn", "i-diamond-severe", "i-square-info",
+                 "i-minus-circle", "i-slash-circle"):
+        assert icon in js, icon
+
+
 def test_monitoring_timeline_wired():
     """Source guards for the Monitoring time-travel timeline:
     (1) index.html has the timeline container + range-preset chips.
