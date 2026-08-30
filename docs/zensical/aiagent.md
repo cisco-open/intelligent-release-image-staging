@@ -176,9 +176,13 @@ first-run slate instead of deploying over live state:
    **Import from disk** panel after setup.
 5. Rebuild served agent packages if the agent changed since they were built
    (step 6 above — stale packages ship the old agent).
-6. `docker compose build && docker compose up -d`, then continue from step 3 of
-   the guided sequence: the default first-run credential works again because no
-   admin account exists in the fresh state.
+6. Bring the server back up with `tools/start-compose-server.sh` — not raw
+   `docker compose up`. The entrypoint fails closed when the encrypted secrets
+   file is missing from the freshly recreated config volume, and only the
+   bring-up script's `iris-bootstrap` step recreates it (raw `up -d` produces a
+   restart-looping container, never the first-run page). Then continue from
+   step 3 of the guided sequence: the default first-run credential works again
+   because no admin account exists in the fresh state.
 
 The reset erases fleet rows, catalog entries and verification verdicts, the
 image-verification schedule, deployment records, settings, credential
