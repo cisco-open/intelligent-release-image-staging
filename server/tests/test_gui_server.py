@@ -8094,3 +8094,26 @@ def test_previous_registration_logs_are_labelled_in_the_console():
     assert "previous_registration" in app_js
     block = app_js.split("previous_registration", 1)[1][:400]
     assert "previous device" in block
+
+
+def test_console_fonts_are_served_with_woff2_type(tmp_path):
+    host, port, _, stop = _serve(tmp_path)
+    try:
+        for name in (
+            "SharpSans-Bold.woff2", "Inter-Regular.woff2", "Inter-Medium.woff2",
+            "Inter-SemiBold.woff2", "RobotoMono-Regular.woff2", "RobotoMono-Medium.woff2",
+        ):
+            status, headers, body = _req(host, port, "GET", f"/fonts/{name}")
+            assert status == 200, name
+            assert headers.get("Content-Type") == "font/woff2", name
+            assert body[:4] == b"wOF2", name
+    finally:
+        stop()
+
+
+def test_stylesheet_registers_selfhosted_faces_only():
+    css = _webroot("styles.css")
+    for fam in ('font-family: "Inter"', 'font-family: "Roboto Mono"', 'font-family: "Sharp Sans"'):
+        assert fam in css
+    assert "https://" not in css  # CSP: no remote assets in the stylesheet
+    assert "DM Sans" not in css

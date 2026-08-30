@@ -102,6 +102,7 @@ _CONTENT_TYPES = {
     ".js": "application/javascript",
     ".css": "text/css",
     ".svg": "image/svg+xml",
+    ".woff2": "font/woff2",
 }
 _MAX_BODY = 64 * 1024  # cap request bodies (esp. the pre-auth /api/login POST) — DoS guard
 _SSE_IDLE = 600   # close an onboard log stream after this long with NO progress
