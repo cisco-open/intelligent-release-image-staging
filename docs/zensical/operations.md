@@ -263,6 +263,19 @@ onboarded again. A missing, drifted, or uncertain receipt otherwise stops cleanu
 in `needs-reconcile` rather than guessing. See
 [Management Type and VLAN Ownership](network-attachment.md).
 
+### Recovering an interrupted IOS-XR teardown
+
+An IOS-XR undeploy that was interrupted partway through needs no special
+recovery: re-run undeploy (receipted or Force) and it converges, because
+each step re-probes the router's own state — including the appmgr
+application's — before acting rather than assuming an earlier attempt
+succeeded. Every command session to the router is bounded by
+`IRIS_XR_SESSION_TIMEOUT` (default 900 seconds), so a wedged router fails
+the job with a real exit code instead of hanging it. Any image file an
+operator staged directly on the router is left in place, with a log line
+recording it, unless the catalog republishes different content under the
+same image id.
+
 Deleting an inventory row is not an undeploy — undeploy before deleting anything
 still deployed. See [Bulk device actions](console.md#bulk-device-actions).
 
