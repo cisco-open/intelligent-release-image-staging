@@ -10,45 +10,36 @@
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <!-- Status pill icon sprite (12-level Magnetic mapping, Task 4). Phosphor
-       bold-derived symbols, referenced by <use href="#i-..."> in app.js's
-       statusPillHTML(); the pill's own text label carries the accessible
-       name, so this whole sprite is inert to assistive tech. -->
+  <!-- Status pill icon sprite (12-level Magnetic mapping, Task 4). Vendored
+       Phosphor (MIT-licensed) bold-weight glyphs, referenced by
+       <use href="#i-..."> in app.js's statusPillHTML(); the pill's own text
+       label carries the accessible name, so this whole sprite is inert to
+       assistive tech. Icon-to-symbol mapping and any substitutions are
+       documented in .superpowers/sdd/task-4-report.md. -->
   <svg class="icon-sprite" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
-    <symbol id="i-check-circle" viewBox="0 0 256 256" fill="none" stroke="currentColor" stroke-width="20" stroke-linecap="round" stroke-linejoin="round">
-      <circle cx="128" cy="128" r="100"/>
-      <polyline points="82,132 112,164 176,92"/>
+    <symbol id="i-check-circle" viewBox="0 0 256 256" fill="currentColor">
+      <path d="M176.49,95.51a12,12,0,0,1,0,17l-56,56a12,12,0,0,1-17,0l-24-24a12,12,0,1,1,17-17L112,143l47.51-47.52A12,12,0,0,1,176.49,95.51ZM236,128A108,108,0,1,1,128,20,108.12,108.12,0,0,1,236,128Zm-24,0a84,84,0,1,0-84,84A84.09,84.09,0,0,0,212,128Z"/>
     </symbol>
-    <symbol id="i-dash-circle" viewBox="0 0 256 256" fill="none" stroke="currentColor" stroke-width="20" stroke-linecap="round">
-      <circle cx="128" cy="128" r="100" stroke-dasharray="36 24"/>
+    <symbol id="i-dash-circle" viewBox="0 0 256 256" fill="currentColor">
+      <path d="M92.38,38.05A12,12,0,0,1,101,23.42a108,108,0,0,1,54,0,12,12,0,1,1-6,23.23,84.11,84.11,0,0,0-42,0A12,12,0,0,1,92.38,38.05ZM50.94,52.34a108.1,108.1,0,0,0-27,46.76,12,12,0,0,0,8.37,14.77,12.2,12.2,0,0,0,3.2.43,12,12,0,0,0,11.56-8.8,84,84,0,0,1,21-36.35A12,12,0,1,0,50.94,52.34Zm-3.88,98.14a12,12,0,0,0-23.12,6.42,108,108,0,0,0,27,46.78A12,12,0,0,0,68,186.85,84,84,0,0,1,47.06,150.48ZM149,209.35a84,84,0,0,1-42,0,12,12,0,1,0-6,23.23,108,108,0,0,0,54,0,12,12,0,1,0-6-23.23Zm74.72-67.22A12,12,0,0,0,209,150.5a84,84,0,0,1-21,36.35,12,12,0,0,0,17.12,16.82,108.19,108.19,0,0,0,27-46.77A12,12,0,0,0,223.71,142.13Zm-14.77-36.61a12,12,0,0,0,23.12-6.42,108,108,0,0,0-27-46.78A12,12,0,1,0,188,69.15,84,84,0,0,1,208.94,105.52Z"/>
     </symbol>
-    <symbol id="i-octagon-x" viewBox="0 0 256 256" fill="none" stroke="currentColor" stroke-width="20" stroke-linecap="round" stroke-linejoin="round">
-      <polygon points="90,28 166,28 228,90 228,166 166,228 90,228 28,166 28,90"/>
-      <line x1="92" y1="92" x2="164" y2="164"/>
-      <line x1="164" y1="92" x2="92" y2="164"/>
+    <symbol id="i-octagon-x" viewBox="0 0 256 256" fill="currentColor">
+      <path d="M230.14,77.41,178.59,25.86A19.85,19.85,0,0,0,164.45,20H91.55a19.85,19.85,0,0,0-14.14,5.86L25.86,77.41A19.85,19.85,0,0,0,20,91.55v72.9a19.85,19.85,0,0,0,5.86,14.14l51.55,51.55A19.85,19.85,0,0,0,91.55,236h72.9a19.85,19.85,0,0,0,14.14-5.86l51.55-51.55A19.85,19.85,0,0,0,236,164.45V91.55A19.85,19.85,0,0,0,230.14,77.41ZM212,162.79,162.79,212H93.21L44,162.79V93.21L93.21,44h69.58L212,93.21Z"/>
     </symbol>
-    <symbol id="i-triangle-warn" viewBox="0 0 256 256" fill="none" stroke="currentColor" stroke-width="20" stroke-linecap="round" stroke-linejoin="round">
-      <polygon points="128,26 230,220 26,220"/>
-      <line x1="128" y1="96" x2="128" y2="152"/>
-      <circle cx="128" cy="182" r="11" fill="currentColor" stroke="none"/>
+    <symbol id="i-triangle-warn" viewBox="0 0 256 256" fill="currentColor">
+      <path d="M240.26,186.1,152.81,34.23h0a28.74,28.74,0,0,0-49.62,0L15.74,186.1a27.45,27.45,0,0,0,0,27.71A28.31,28.31,0,0,0,40.55,228h174.9a28.31,28.31,0,0,0,24.79-14.19A27.45,27.45,0,0,0,240.26,186.1Zm-20.8,15.7a4.46,4.46,0,0,1-4,2.2H40.55a4.46,4.46,0,0,1-4-2.2,3.56,3.56,0,0,1,0-3.73L124,46.2a4.77,4.77,0,0,1,8,0l87.44,151.87A3.56,3.56,0,0,1,219.46,201.8ZM116,136V104a12,12,0,0,1,24,0v32a12,12,0,0,1-24,0Zm28,40a16,16,0,1,1-16-16A16,16,0,0,1,144,176Z"/>
     </symbol>
-    <symbol id="i-diamond-severe" viewBox="0 0 256 256" fill="none" stroke="currentColor" stroke-width="18" stroke-linecap="round" stroke-linejoin="round">
-      <polygon points="128,20 236,128 128,236 20,128"/>
-      <line x1="128" y1="84" x2="128" y2="150"/>
-      <circle cx="128" cy="178" r="11" fill="currentColor" stroke="none"/>
+    <symbol id="i-diamond-severe" viewBox="0 0 256 256" fill="currentColor">
+      <path d="M128,68a12,12,0,0,1,12,12v52a12,12,0,0,1-24,0V80A12,12,0,0,1,128,68Zm0,88a16,16,0,1,0,16,16A16,16,0,0,0,128,156Zm116-28a19.86,19.86,0,0,1-5.84,14.11l-96,96.06a20,20,0,0,1-28.21,0h0l-96-96.06a20,20,0,0,1,0-28.22l96.05-96.06a20,20,0,0,1,28.21,0l96.06,96.06A19.86,19.86,0,0,1,244,128Zm-25.68,0L128,37.67,37.68,128,128,218.33Z"/>
     </symbol>
-    <symbol id="i-square-info" viewBox="0 0 256 256" fill="none" stroke="currentColor" stroke-width="20" stroke-linecap="round" stroke-linejoin="round">
-      <rect x="32" y="32" width="192" height="192" rx="28"/>
-      <circle cx="128" cy="88" r="13" fill="currentColor" stroke="none"/>
-      <line x1="128" y1="122" x2="128" y2="186"/>
+    <symbol id="i-square-info" viewBox="0 0 256 256" fill="currentColor">
+      <path d="M108,84a16,16,0,1,1,16,16A16,16,0,0,1,108,84Zm128,44A108,108,0,1,1,128,20,108.12,108.12,0,0,1,236,128Zm-24,0a84,84,0,1,0-84,84A84.09,84.09,0,0,0,212,128Zm-72,36.68V132a20,20,0,0,0-20-20,12,12,0,0,0-4,23.32V168a20,20,0,0,0,20,20,12,12,0,0,0,4-23.32Z"/>
     </symbol>
-    <symbol id="i-minus-circle" viewBox="0 0 256 256" fill="none" stroke="currentColor" stroke-width="20" stroke-linecap="round">
-      <circle cx="128" cy="128" r="100"/>
-      <line x1="86" y1="128" x2="170" y2="128"/>
+    <symbol id="i-minus-circle" viewBox="0 0 256 256" fill="currentColor">
+      <path d="M180,128a12,12,0,0,1-12,12H88a12,12,0,0,1,0-24h80A12,12,0,0,1,180,128Zm56,0A108,108,0,1,1,128,20,108.12,108.12,0,0,1,236,128Zm-24,0a84,84,0,1,0-84,84A84.09,84.09,0,0,0,212,128Z"/>
     </symbol>
-    <symbol id="i-slash-circle" viewBox="0 0 256 256" fill="none" stroke="currentColor" stroke-width="20" stroke-linecap="round">
-      <circle cx="128" cy="128" r="100"/>
-      <line x1="68" y1="188" x2="188" y2="68"/>
+    <symbol id="i-slash-circle" viewBox="0 0 256 256" fill="currentColor">
+      <path d="M128,20A108,108,0,1,0,236,128,108.12,108.12,0,0,0,128,20Zm84,108a83.6,83.6,0,0,1-16.75,50.28L77.72,60.75A84,84,0,0,1,212,128ZM44,128A83.6,83.6,0,0,1,60.75,77.72L178.28,195.25A84,84,0,0,1,44,128Z"/>
     </symbol>
   </svg>
   <div class="top">
