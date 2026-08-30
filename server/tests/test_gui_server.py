@@ -8117,3 +8117,40 @@ def test_stylesheet_registers_selfhosted_faces_only():
         assert fam in css
     assert "https://" not in css  # CSP: no remote assets in the stylesheet
     assert "DM Sans" not in css
+
+
+# ---------------------------------------------------------------------------
+# Magnetic token layer, base typography, monospace restriction (facelift Task 3)
+# ---------------------------------------------------------------------------
+
+def test_stylesheet_defines_the_magnetic_token_layer():
+    css = _webroot("styles.css")
+    for tok in (
+        "--canvas: #F0F1F2", "--surface: #FFFFFF", "--text-heading: #23282E",
+        "--text-body: #373C42", "--text-secondary: #6F7680", "--rule: #E1E4E8",
+        "--action: #2774D9", "--action-hover: #1D69CC", "--action-active: #0051AF",
+        "--danger: #D93843", "--success: #398519", "--progress: #8D4EED",
+        # yellow-95 / lavender-50 / lavender-95 extracted from magnetic.css --
+        # this token file has no "indigo" family; "lavender" is its
+        # blue-purple scale and is what the spec's indigo-50/indigo-95
+        # placeholder values were sampled from (near-exact match).
+        "--warning-tint: #FAEFB9", "--info: #5A68E5", "--info-tint: #EBEDFF",
+        "--font-sans:", "--font-mono:", "--font-display:",
+    ):
+        assert tok in css, tok
+
+
+def test_rainbow_stripe_is_retired():
+    css = _webroot("styles.css")
+    assert "linear-gradient(90deg,#00bceb" not in css
+    html = _webroot("index.html")
+    assert "stripe" not in html  # no orphaned class hook either
+
+
+def test_machine_class_replaces_blanket_table_monospace():
+    css = _webroot("styles.css")
+    assert ".machine { font-family: var(--font-mono); }" in css
+    # the blanket rule that used to force every table cell into monospace,
+    # regardless of whether the cell held prose or machine data, is gone
+    tbl_td = css.split(".tbl td {", 1)[1].split("}", 1)[0]
+    assert "font-family" not in tbl_td

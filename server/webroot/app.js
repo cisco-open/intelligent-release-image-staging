@@ -290,8 +290,8 @@
     imgs.sort(function (a, b) { return (b.published_at || 0) - (a.published_at || 0); });
     LAST_IMAGES = imgs;
     document.getElementById('rows').innerHTML = imgs.map(function (i) {
-      return '<tr data-id="' + esc(i.id) + '"><td>' + esc(i.id) + '</td><td>' + esc(i.filename || '') + '</td><td>' +
-        esc(fmtSize(i.size)) + '</td><td>' + esc((i.sha256 || '').slice(0, 16)) + '…</td><td>' +
+      return '<tr data-id="' + esc(i.id) + '"><td class="machine">' + esc(i.id) + '</td><td class="machine">' + esc(i.filename || '') + '</td><td class="machine">' +
+        esc(fmtSize(i.size)) + '</td><td class="machine">' + esc((i.sha256 || '').slice(0, 16)) + '…</td><td class="machine">' +
         esc(fmtDate(i.published_at)) + '</td><td>' + bulkhashVerdictBadge(i.hash_verification, i.quarantined) +
         '</td><td><button class="linkish img-info" title="Image details" aria-label="' +
         'Image details for ' + esc(i.id) + '">ⓘ</button> ' +
@@ -421,13 +421,13 @@
     // The full path is shown, not just the basename: two files can share a
     // basename across the roots, and the path is what distinguishes them.
     document.getElementById('import-rows').innerHTML = cands.map(function (c) {
-      return '<tr><td>' + esc(c.filename) + '</td><td>' + esc(fmtSize(c.size)) +
-        '</td><td class="muted">' + esc(c.path) +
+      return '<tr><td class="machine">' + esc(c.filename) + '</td><td class="machine">' + esc(fmtSize(c.size)) +
+        '</td><td class="muted machine">' + esc(c.path) +
         '</td><td><button class="linkish do-import" data-path="' + esc(c.path) +
         '">import</button></td></tr>';
     }).concat(skipped.map(function (c) {
-      return '<tr class="muted"><td>' + esc(c.filename) + '</td><td>' +
-        esc(fmtSize(c.size)) + '</td><td class="muted">' + esc(c.path) +
+      return '<tr class="muted"><td class="machine">' + esc(c.filename) + '</td><td class="machine">' +
+        esc(fmtSize(c.size)) + '</td><td class="muted machine">' + esc(c.path) +
         '</td><td>' + esc(c.reason) + '</td></tr>';
     })).join('');
     document.querySelectorAll('#import-rows .do-import').forEach(function (btn) {
@@ -719,7 +719,7 @@
       return '<tr data-id="' + esc(d.device_id) + '">' +
         '<td><input type="checkbox" class="mark" data-id="' + esc(d.device_id) + '"' +
         (marked[d.device_id] ? ' checked' : '') + '></td>' +
-        '<td>' + esc(d.device_id) + '</td><td>' + esc(d.device_ip || '') + '</td>' +
+        '<td class="machine">' + esc(d.device_id) + '</td><td class="machine">' + esc(d.device_ip || '') + '</td>' +
         '<td>' + esc(d.model || d.heartbeat_model || '') + '</td>' +
         '<td>' + esc(managementTypeLabel) + '</td>' +
         '<td><select class="platform">' + platSel + '</select></td>' +
@@ -808,26 +808,26 @@
     var pairs = [
       ['State', '<span class="badge ' + stateCls + '">' + esc(rec.state || 'unknown') + '</span>' +
         (rec.adopted ? ' <span class="muted">(adopted)</span>' : '')],
-      ['Record', esc(rec.record_id || '') +
+      ['Record', '<span class="machine">' + esc(rec.record_id || '') + '</span>' +
         ' <span class="muted">(' + esc(total) + ' stored for this device)</span>'],
-      ['Planned', esc(fmtDate(ts.planned_at) || '—')],
-      ['Finished', esc(fmtDate(ts.finished_at) || '—')],
+      ['Planned', '<span class="machine">' + esc(fmtDate(ts.planned_at) || '—') + '</span>'],
+      ['Finished', '<span class="machine">' + esc(fmtDate(ts.finished_at) || '—') + '</span>'],
       ['Preflight', esc(pf.status || '—')],
       ['Management type', esc(managementTypeLabel || '—')]
     ];
     if (!xrHost) {
       pairs.push(
         ['Management VLAN / VPG', esc(mgmt || '—')],
-        ['SVI', esc(svi || '—')],
-        ['App IP', esc(app || '—')],
-        ['NAT interface', esc(res.nat_interface || '—')]
+        ['SVI', '<span class="machine">' + esc(svi || '—') + '</span>'],
+        ['App IP', '<span class="machine">' + esc(app || '—') + '</span>'],
+        ['NAT interface', '<span class="machine">' + esc(res.nat_interface || '—') + '</span>']
       );
     }
     pairs.push(
-      ['Swarm port', esc(res.swarm_port || '—')],
+      ['Swarm port', '<span class="machine">' + esc(res.swarm_port || '—') + '</span>'],
       ['Model', esc(res.model || '—')],
       ['Agent install', esc(res.platform || '—')],
-      ['Device identity', esc(res.device_identity || '—')]
+      ['Device identity', '<span class="machine">' + esc(res.device_identity || '—') + '</span>']
     );
     return pairs.map(function (kv) {
       return '<tr><td class="muted">' + esc(kv[0]) + '</td><td>' + kv[1] + '</td></tr>';
@@ -872,7 +872,7 @@
         // neither staged nor errored this tick: genuinely still in flight
         state = 'staging';
       }
-      return '<tr><td class="mono">' + imageLabel(iid) + '</td><td>' + esc(state) + '</td></tr>';
+      return '<tr><td class="machine">' + imageLabel(iid) + '</td><td>' + esc(state) + '</td></tr>';
     }).join('');
     if (perImage && d.stage_error) {
       rows += '<tr><td class="muted">Last reported error</td><td>' +
@@ -941,9 +941,9 @@
           ' current device was registered under this name, so it belongs to a' +
           ' previous device.">previous device</span>'
         : '';
-      return '<tr data-file="' + esc(l.file) + '"><td>' + esc(fmtDate(l.finished_at)) +
+      return '<tr data-file="' + esc(l.file) + '"><td class="machine">' + esc(fmtDate(l.finished_at)) +
         prev + '</td><td>' + esc(l.action || '') + '</td><td>' + deployLogResult(l) +
-        '</td><td>' + esc(fmtSize(l.size)) + '</td>' +
+        '</td><td class="machine">' + esc(fmtSize(l.size)) + '</td>' +
         '<td><button class="linkish dlog-view">view</button></td></tr>';
     }).join('');
     document.querySelectorAll('#di-log-rows .dlog-view').forEach(function (btn) {
@@ -1164,10 +1164,10 @@
         ? '<div style="color:#8a4baf;font-size:10px;font-weight:600">undeploy</div>' : '';
       return '<tr data-job="' + esc(j.id) + '" data-dev="' + esc(j.device_id) + '"' +
         ' data-state="' + esc(j.state) + '" data-action="' + esc(j.action || 'onboard') + '">' +
-        '<td>' + esc(j.device_id) + act + '</td>' +
+        '<td class="machine">' + esc(j.device_id) + act + '</td>' +
         '<td>' + jobBadge(j.state) + '</td>' +
         '<td class="muted">' + queuePos + '</td>' +
-        '<td class="out">' + esc(j.last_line || '') + '</td>' +
+        '<td class="out machine">' + esc(j.last_line || '') + '</td>' +
         '<td><button class="linkish blog">log</button></td></tr>';
     }).join('');
     var parts = ['queued', 'running', 'done', 'error', 'cancelled']
@@ -1955,7 +1955,7 @@
     syncCredSelected();
     document.getElementById('cred-rows').innerHTML = profs.length
       ? profs.map(function (p) {
-          return '<tr data-id="' + esc(p.id) + '"><td><b>' + esc(p.id) + '</b></td><td>' +
+          return '<tr data-id="' + esc(p.id) + '"><td class="machine"><b>' + esc(p.id) + '</b></td><td>' +
             esc(p.name || '') + '</td><td>' + esc(p.device_user || '') +
             '</td><td><button class="linkish cred-edit">edit</button> · ' +
             '<button class="linkish cred-del">delete</button></td></tr>'; }).join('')
@@ -2034,7 +2034,7 @@
     }).join('');
     document.getElementById('ov-rows').innerHTML = (ov.rollout || []).map(function (x) {
       var pct = x.assigned ? Math.round(x.staged / x.assigned * 100) : 0;
-      return '<tr><td>' + esc(x.image_id) + '</td><td>' + esc(x.assigned) + '</td><td>' +
+      return '<tr><td class="machine">' + esc(x.image_id) + '</td><td>' + esc(x.assigned) + '</td><td>' +
         esc(x.staged) + '</td><td><div class="pbar"><span data-pct="' + pct +
         '"></span></div></td></tr>';
     }).join('');
@@ -2220,7 +2220,7 @@
     var body = document.querySelector('#wz-pkg-table tbody');
     if (!body) return;
     body.innerHTML = ((pkg && pkg.items) || []).map(function (i) {
-      return '<tr><td class="mono">' + esc(i.name || '') + '</td><td>' +
+      return '<tr><td class="machine">' + esc(i.name || '') + '</td><td>' +
         setupChip(i.state) + '</td><td class="muted">built ' +
         esc(i.built_at || 'unknown') + '</td></tr>';
     }).join('');
@@ -2322,7 +2322,7 @@
       s.packages.items.map(function (i) {
         var when = i.built_at
           ? new Date(i.built_at * 1000).toLocaleString() : '—';
-        return '<tr><td class="muted">' + esc(i.name) + '</td><td>' +
+        return '<tr><td class="muted machine">' + esc(i.name) + '</td><td>' +
                setupChip(i.state) + '</td><td class="muted">built ' +
                esc(when) + '</td></tr>';
       }).join('');
@@ -2370,7 +2370,7 @@
           : '<span class="badge badge-queued">built-in</span> ') +
         esc(gc.subject || 'unknown') +
         ' — expires ' + esc(gc.not_after || 'unknown') +
-        ' — sha256 ' + esc((gc.fingerprint_sha256 || '').slice(0, 16)) + '…' +
+        ' — sha256 <span class="machine">' + esc((gc.fingerprint_sha256 || '').slice(0, 16)) + '…</span>' +
         (gc.source === 'custom' ? ''
           : ' <span class="muted">(the revert button appears once a custom certificate is installed)</span>');
     } else {
@@ -2392,8 +2392,8 @@
             (isBundle
               ? esc('Public CA bundle — ' + bundleLabel)
               : esc(t.subject || 'unknown')) +
-            '</td><td>' + esc(t.not_after || 'unknown') +
-            '</td><td>' + esc((t.fingerprint_sha256 || '').slice(0, 16)) + '…</td><td>' +
+            '</td><td class="machine">' + esc(t.not_after || 'unknown') +
+            '</td><td class="machine">' + esc((t.fingerprint_sha256 || '').slice(0, 16)) + '…</td><td>' +
             (isBundle
               ? '<span class="badge badge-queued">downloaded</span>'
               : '<span class="badge badge-ok">manual</span>') +
@@ -3219,7 +3219,7 @@
       auditVerb(e, target) +
       (detail ? ' <span class="detail">— ' + esc(detail) + '</span>' : '') +
       (e.src_ip && category === 'auth' ? ' <span class="muted">(from ' + esc(e.src_ip) + ')</span>' : '');
-    return '<tr><td class="nowrap" title="' + esc(fmtAgo(e.ts)) + '">' + esc(fmtDate(e.ts)) + '</td>' +
+    return '<tr><td class="nowrap machine" title="' + esc(fmtAgo(e.ts)) + '">' + esc(fmtDate(e.ts)) + '</td>' +
       '<td>' + auditActorHtml(actor) + '</td>' +
       '<td class="msg">' + msg + '</td>' +
       '<td>' + auditBadge(e.result) + '</td></tr>';
@@ -3607,9 +3607,9 @@
       tbody.innerHTML = '<tr><td colspan="6" class="muted">No deployment logs match.</td></tr>';
     } else {
       tbody.innerHTML = page.map(function (l) {
-        return '<tr data-file="' + esc(l.file) + '"><td>' + esc(fmtDate(l.finished_at)) +
-          '</td><td>' + esc(l.device_id || '') + '</td><td>' + esc(l.action || '') +
-          '</td><td>' + deployLogResult(l) + '</td><td>' + esc(fmtSize(l.size)) + '</td>' +
+        return '<tr data-file="' + esc(l.file) + '"><td class="machine">' + esc(fmtDate(l.finished_at)) +
+          '</td><td class="machine">' + esc(l.device_id || '') + '</td><td>' + esc(l.action || '') +
+          '</td><td>' + deployLogResult(l) + '</td><td class="machine">' + esc(fmtSize(l.size)) + '</td>' +
           '<td><button class="linkish dlog-view">view</button></td></tr>';
       }).join('');
       document.querySelectorAll('#dl-rows .dlog-view').forEach(function (btn) {

@@ -19,7 +19,7 @@
       <div class="menu right" id="help-pop" hidden>
         <div class="help-row muted" id="help-version"></div>
         <div class="help-row muted">Deployment id
-          <span class="mono" id="help-deployment-id"></span>
+          <span class="machine" id="help-deployment-id"></span>
           <button class="linkish" type="button" id="help-copy-id">copy</button>
         </div>
         <a class="menu-item menu-close" id="help-docs-link" href="https://cisco-open.github.io/intelligent-release-image-staging/" target="_blank" rel="noopener">Official documentation ↗</a>
@@ -29,7 +29,6 @@
     </div>
     <button class="btn ghost" id="logout">Sign out</button>
   </div>
-  <div class="stripe"></div>
   <div class="shell">
     <nav class="side">
       <a href="#overview" class="nav" id="nav-overview">Overview</a>
@@ -77,13 +76,13 @@
           <p class="muted" id="status"></p>
         </div>
         <p class="muted">Images copied onto the server under
-          <span class="mono">/opt/images</span> — including any subdirectory,
-          such as <span class="mono">/opt/images/iosxe/c9300/</span> or
-          <span class="mono">/opt/images/iosxr/</span> — are offered for import
+          <span class="machine">/opt/images</span> — including any subdirectory,
+          such as <span class="machine">/opt/images/iosxe/c9300/</span> or
+          <span class="machine">/opt/images/iosxr/</span> — are offered for import
           below without uploading. Files ending in
-          <span class="mono">.bin</span>, <span class="mono">.iso</span>,
-          <span class="mono">.tar</span> or <span class="mono">.rpm</span> are
-          scanned. Set <span class="mono">IMAGES_ROOT</span> to scan a
+          <span class="machine">.bin</span>, <span class="machine">.iso</span>,
+          <span class="machine">.tar</span> or <span class="machine">.rpm</span> are
+          scanned. Set <span class="machine">IMAGES_ROOT</span> to scan a
           different directory.</p>
         <div id="import-panel" hidden>
           <h3>Import from disk</h3>
@@ -103,7 +102,7 @@
              choice to confirm, so a drawer rather than a modal. -->
         <div id="img-info-panel" class="drawer" hidden aria-label="Image details">
           <div class="drawer-head">
-            <span>Image details <span id="ii-id" class="mono"></span></span>
+            <span>Image details <span id="ii-id" class="machine"></span></span>
             <button class="btn ghost" id="ii-close" aria-label="Close image details">✕</button>
           </div>
           <div class="drawer-body">
@@ -280,7 +279,7 @@
              away from the row they had just clicked. -->
         <div id="deploy-info-panel" class="drawer" hidden aria-label="Deployment details">
           <div class="drawer-head">
-            <span>Deployment details <span id="di-dev" class="mono"></span></span>
+            <span>Deployment details <span id="di-dev" class="machine"></span></span>
             <button class="btn ghost" id="di-close" aria-label="Close deployment details">✕</button>
           </div>
           <div class="drawer-body">
@@ -377,7 +376,7 @@
             package but never rebuild one. Run the command below on the Docker host,
             then re-check.</p>
           <table class="tbl" id="wz-pkg-table"><tbody></tbody></table>
-          <p class="mono" id="wz-pkg-remedy"></p>
+          <p class="machine" id="wz-pkg-remedy"></p>
           <p><button class="btn ghost" id="wz-pkg-recheck">Re-check</button></p>
         </div>
 
@@ -684,7 +683,7 @@
         </div>
         <div id="dl-drawer" hidden aria-label="Deployment log">
           <div class="dl-drawer-head">
-            <span class="mono" id="dl-drawer-title"></span>
+            <span class="machine" id="dl-drawer-title"></span>
             <button class="btn ghost" id="dl-drawer-close" aria-label="Close log">✕</button>
           </div>
           <pre class="log" id="dl-text"></pre>
