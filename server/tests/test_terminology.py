@@ -14,7 +14,10 @@ deliberate hard-break regression pins). This test scans every TRACKED file
 (``git ls-files`` -- untracked/ignored paths such as HANDOFF.md and
 skills-lock.json are excluded by construction, no allowlist entry needed)
 for the retired vocabulary and fails on anything not covered by the
-ALLOWLIST below.
+ALLOWLIST below. This file's own path is also excluded from the scan (see
+_SELF_PATH / _tracked_files) -- its ALLOWLIST reasons and docstrings must
+NAME the retired words to justify excluding them, so it would otherwise
+self-trip on every one of its own comments.
 
 Scan design: `network_attachment` and `NETWORK_ATTACHMENT` are, case-
 insensitively, a strict substring of the word `attachment` -- every
@@ -155,10 +158,12 @@ ALLOWLIST = [
      "(attachment -> management_type -> network_attachment) this "
      "regression test guards against -- historical, Task 2 / decision 6"),
 
-    # -- declared break 8: the retired receipt_id wire key -------------
+    # -- declared break 7 family: receipt_id -> record_id on wire --------
+    # -- responses (break 8 is the separate audit-detail-string wording) --
     ("server/tests/test_gui_server.py", frozenset({2591, 2596, 2609, 2615}),
      "deliberate hard-break pin: asserts the retired receipt_id key never "
-     "leaks onto the onboard-job-status wire response (declared break 8)"),
+     "leaks onto the onboard-job-status wire response (declared break 7's "
+     "response-object family; NOT break 8, which is audit-string wording)"),
 
     # -- declared break 6: old-agent peer_receipts compatibility -------
     ("server/tests/test_catalog.py", frozenset({2118, 2119, 2126, 2129}),
@@ -167,11 +172,17 @@ ALLOWLIST = [
 ]
 
 
+_SELF_PATH = os.path.relpath(__file__, REPO).replace(os.sep, "/")
+
+
 def _tracked_files():
     out = subprocess.run(["git", "ls-files", "-z"], cwd=REPO,
                          capture_output=True, check=True)
     names = out.stdout.decode("utf-8", "surrogateescape").split("\0")
-    return [n for n in names if n]
+    # Exclude this guard's own path: its ALLOWLIST reasons, docstrings, and
+    # _PATTERNS necessarily NAME the retired words to explain/justify what
+    # they exclude, so scanning itself would self-trip on every one of them.
+    return [n for n in names if n and n != _SELF_PATH]
 
 
 def _allowlist_index():

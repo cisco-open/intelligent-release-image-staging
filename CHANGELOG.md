@@ -116,7 +116,13 @@ top-level `VERSION` file.
   `plan.resolved.attachment` is now `plan.resolved.management_type`, on both
   the plan/preview endpoint and the deployment-record response — any
   external consumer of `GET`/`POST /api/devices/<id>/plan` or `/deployment`
-  breaks. Audit detail wording changed for two events, adopting a device and
+  breaks. The onboard-job-status routes break the same way: `GET
+  /api/onboard/jobs` and `/api/onboard/jobs/<id>` now serve `record_id`
+  instead of `receipt_id`, and the installer output streamed over a job's
+  SSE log (`/api/onboard/jobs/<id>/stream`) carries the renamed wording
+  (e.g. "deployment record" in place of "receipt") — a poller or scraper
+  keyed on the old field name or matching the old log text breaks too.
+  Audit detail wording changed for two events, adopting a device and
   retiring one (`device_delete`); existing `audit.jsonl` lines keep their
   original wording, so a saved search over audit detail for either event
   should match both the old and the new phrasing until the old entries age
