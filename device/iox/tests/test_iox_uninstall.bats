@@ -84,7 +84,7 @@ setup() {
 }
 
 @test "inband dry-run removes only the app footprint" {
-  NETWORK_ATTACHMENT=inband INBAND_VLAN=120 run bash "$UNINSTALL" --dry-run
+  MANAGEMENT_TYPE=inband INBAND_VLAN=120 run bash "$UNINSTALL" --dry-run
   [[ "$output" == *"no app-hosting appid iris"* ]] && \
   [[ "$output" == *"no event manager applet IRIS-COPYROOT"* ]]
 }
@@ -95,7 +95,7 @@ setup() {
   # PKI trustpoint carry IRIS's own name, so a teardown clears them in every
   # mode: leaving them behind is what made a "clean" device refuse the next
   # onboard on an artifact we put there ourselves.
-  NETWORK_ATTACHMENT=inband INBAND_VLAN=120 run bash "$UNINSTALL" --dry-run
+  MANAGEMENT_TYPE=inband INBAND_VLAN=120 run bash "$UNINSTALL" --dry-run
   [[ "$output" != *"no vlan "* ]] || return 1
   [[ "$output" != *"no interface Vlan"* ]] || return 1
   [[ "$output" == *"no crypto pki trustpoint IRIS"* ]] || return 1

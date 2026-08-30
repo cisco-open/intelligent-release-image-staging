@@ -10,7 +10,7 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
-NETWORK_ATTACHMENT="${NETWORK_ATTACHMENT:-router-routed}"
+MANAGEMENT_TYPE="${MANAGEMENT_TYPE:-router-routed}"
 VPG_NUMBER="${VPG_NUMBER:-}"
 NAT_INTERFACE="${NAT_INTERFACE:-}"
 BT_LISTEN_PORT="${BT_LISTEN_PORT:-6881}"
@@ -36,7 +36,7 @@ IOS_ROOT="bootflash:guest-share"
 # exactly what the collision preflight refuses on the next onboard.
 IRIS_DIR="$IOS_ROOT/iris"
 
-case "$NETWORK_ATTACHMENT" in
+case "$MANAGEMENT_TYPE" in
   router-routed) ;;
   router-nat)
     # Force skips the NAT teardown entirely, so requiring receipt-derived NAT
@@ -45,7 +45,7 @@ case "$NETWORK_ATTACHMENT" in
       [ -n "$NAT_INTERFACE" ] && [ -n "$APP_IP" ] \
         || { echo "ERROR: router-nat receipt is missing NAT_INTERFACE or APP_IP" >&2; exit 1; }
     fi ;;
-  *) echo "ERROR: NETWORK_ATTACHMENT must be router-routed or router-nat" >&2; exit 1 ;;
+  *) echo "ERROR: MANAGEMENT_TYPE must be router-routed or router-nat" >&2; exit 1 ;;
 esac
 if [ "$FORCE_AGENT_ONLY" != "1" ]; then
   [[ "$VPG_NUMBER" =~ ^[0-9]+$ ]] && [ "$VPG_NUMBER" -ge 0 ] \
@@ -107,7 +107,7 @@ case "$(printf '%s' "$MODEL" | tr 'a-z' 'A-Z')" in
      exit 1 ;;
 esac
 
-if [ "$NETWORK_ATTACHMENT" = "router-nat" ] && [ "$FORCE_AGENT_ONLY" != "1" ]; then
+if [ "$MANAGEMENT_TYPE" = "router-nat" ] && [ "$FORCE_AGENT_ONLY" != "1" ]; then
   python3 - "$APP_IP" <<'PY'
 import ipaddress
 import sys
@@ -205,7 +205,7 @@ config_cleanup() {
 cat <<EOF
 no app-hosting appid guestshell
 EOF
-if [ "$NETWORK_ATTACHMENT" = "router-nat" ]; then
+if [ "$MANAGEMENT_TYPE" = "router-nat" ]; then
 cat <<EOF
 no ip access-list standard IRIS-NAT-$VPG_NUMBER
 EOF
@@ -237,7 +237,7 @@ if [ "$DRY" -eq 1 ]; then
     config_cleanup_force
   else
   echo "===== [4/5] receipt-owned config removal ====="
-  if [ "$NETWORK_ATTACHMENT" = "router-nat" ]; then
+  if [ "$MANAGEMENT_TYPE" = "router-nat" ]; then
     echo "no ip nat inside source static tcp $APP_IP $BT_LISTEN_PORT interface $NAT_INTERFACE $BT_LISTEN_PORT"
     echo "show ip nat translations | include $APP_IP"
     echo "clear ip nat translation inside <IRIS-inside-global> $APP_IP forced"
@@ -331,7 +331,7 @@ echo "[4/5] remove receipt-owned VPG and NAT footprint"
 # local address belongs to this receipt, then remove and verify the overload
 # rule before deleting its ACL. A failure leaves the ACL and unrelated device
 # translations intact for safe operator reconciliation.
-if [ "$NETWORK_ATTACHMENT" = "router-nat" ]; then
+if [ "$MANAGEMENT_TYPE" = "router-nat" ]; then
   {
     echo "configure terminal"
     echo "no ip nat inside source static tcp $APP_IP $BT_LISTEN_PORT interface $NAT_INTERFACE $BT_LISTEN_PORT"
@@ -514,7 +514,7 @@ for name in bootstrap.sh iris-agent.conf rpc-secret bundle.tgz iris-catalog.pem;
   case "$FILES" in *"$name"*) forbidden="${forbidden}${forbidden:+, }$IOS_ROOT/$name" ;; esac
 done
 
-if [ "$NETWORK_ATTACHMENT" = "router-nat" ] && [ "$FORCE_AGENT_ONLY" != "1" ]; then
+if [ "$MANAGEMENT_TYPE" = "router-nat" ] && [ "$FORCE_AGENT_ONLY" != "1" ]; then
   for artifact in \
     "ip access-list standard IRIS-NAT-$VPG_NUMBER" \
     "ip nat inside source list IRIS-NAT-$VPG_NUMBER interface $NAT_INTERFACE overload" \

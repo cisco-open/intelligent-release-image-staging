@@ -778,7 +778,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 # stored record (gui_fleet.py); this is the same honesty
                 # requirement applied to the plan a caller actually reads.
                 network = {
-                    "attachment": attachment,
+                    "management_type": attachment,
                     "device_ip": device.get("device_ip", ""),
                     "swarm_port": "6881",
                     "model": device.get("model", ""),
@@ -787,7 +787,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 }
             else:
                 network = {
-                    "attachment": attachment,
+                    "management_type": attachment,
                     "device_ip": device.get("device_ip", ""),
                     "iris_vlan": device.get("iris_vlan", device.get("vlan", "")),
                     "svi_ip": device.get("svi_ip", ""),
@@ -848,7 +848,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             directory. Every other attachment here is IOS-XE and runs its
             agent inside a guestshell resource; IOS-XR has no such feature,
             so xr-host must NOT claim one."""
-            attachment = resolved.get("attachment")
+            attachment = resolved["management_type"]
             if attachment == "xr-host":
                 # Sidecar files (*.torrent/*.aria2/*.peers.json at harddisk:
                 # root) are also part of xr-uninstall.sh's sweep, but are
@@ -925,7 +925,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                         "logging-discriminator", "pki-trustpoint",
                         "http-client-trustpoint", "iox-global",
                         "file-prompt-quiet", "guestshell"}
-            if resolved.get("attachment") == "router-nat":
+            if resolved["management_type"] == "router-nat":
                 required.update(("nat-acl", "nat-overload", "nat-static",
                                  "nat-outside-marking"))
             resources = receipt.get("resources") or []
@@ -951,7 +951,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 "pki-trustpoint": ("name", "IRIS"),
                 "http-client-trustpoint": ("name", "IRIS"),
             }
-            if resolved.get("attachment") == "router-nat":
+            if resolved["management_type"] == "router-nat":
                 expected.update({
                     "nat-acl": ("name", "IRIS-NAT-%s" % resolved.get("vpg_number", "")),
                     "nat-static": ("port", str(resolved.get("swarm_port", "6881"))),
@@ -964,7 +964,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             if not resolved.get("device_ip") or not resolved.get("device_identity"):
                 raise ValueError("router receipt is missing deployed device identity")
             resolved["router_resources_owned"] = "1"
-            if resolved.get("attachment") == "router-nat":
+            if resolved["management_type"] == "router-nat":
                 marking = by_kind["nat-outside-marking"]
                 if marking.get("ownership") not in ("iris-created", "pre-existing"):
                     raise ValueError("router receipt has ambiguous NAT outside ownership")
@@ -2888,7 +2888,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     "resources": self._owned_resources(plan["resolved"])})
                 self._audit("device_adopt", "onboard", action="adopt", target=did,
                            actor=actor, detail="receipt %s (%s)"
-                           % (receipt["receipt_id"], plan["resolved"]["attachment"]))
+                           % (receipt["receipt_id"], plan["resolved"]["management_type"]))
                 self._json(200, {"receipt_id": receipt["receipt_id"]}); return
             if path.startswith("/api/devices/") and (
                     path.endswith("/onboard") or path.endswith("/undeploy")):

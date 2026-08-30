@@ -71,6 +71,7 @@ def _svc(run_fn, stage_host=None, **kw):
     fleet = _Fleet({"d1": {"device_id": "d1", "device_ip": "10.0.0.1", "vlan": "666",
                            "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
                            "guest_ip": "10.0.0.3", "model": "C9300",
+                           "management_type": "routed",
                            "credential_profile_id": "lab"}})
     profs = {"lab": {"device_user": "admin", "device_pass": "s3cret",
                      "enable_secret": "en"}}
@@ -180,7 +181,8 @@ def test_onboard_missing_credential_errors(tmp_path):
 
 def test_enable_secret_defaults_to_device_pass(tmp_path):
     fleet = _Fleet({"d1": {"device_id": "d1", "device_ip": "10.0.0.1",
-                           "model": "C9300", "credential_profile_id": "lab"}})
+                           "model": "C9300", "management_type": "routed",
+                           "credential_profile_id": "lab"}})
     creds = _Creds({"lab": {"device_user": "u", "device_pass": "pw",
                             "enable_secret": ""}})
     seen = {}
@@ -210,7 +212,8 @@ def test_device_install_env_override(monkeypatch):
 def test_old_terminal_onboard_jobs_evicted():
     clock = {"t": 1000}
     fleet = _Fleet({"d1": {"device_id": "d1", "device_ip": "10.0.0.1",
-                           "model": "C9300", "credential_profile_id": "lab"}})
+                           "model": "C9300", "management_type": "routed",
+                           "credential_profile_id": "lab"}})
     creds = _Creds({"lab": {"device_user": "u", "device_pass": "p",
                             "enable_secret": ""}})
     svc = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
@@ -309,6 +312,23 @@ def test_build_env_honors_iris_artifacts_dir_env(monkeypatch):
     _dev, env = svc._build_env("d1")
     assert env["IRIS_STAGE_LOCAL"] == "1"
     assert env["IRIS_ARTIFACTS_DIR"] == "/custom/artifacts"
+
+
+def test_build_env_raises_without_management_type():
+    """Task 2 (spec decision 6): _build_env used to default a missing
+    attachment/management_type to "routed" -- a PARTIAL rename that kept
+    that default would silently retarget teardown scope instead of erroring.
+    A target dict (device row or resolved plan) lacking management_type
+    must fail loud."""
+    fleet = _Fleet({"d1": {"device_id": "d1", "device_ip": "10.0.0.1",
+                           "credential_profile_id": "lab"}})
+    creds = _Creds({"lab": {"device_user": "u", "device_pass": "p",
+                            "enable_secret": "e"}})
+    svc = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
+                                     run_fn=lambda p, e, on: 0,
+                                     mint_fn=lambda d: "TOK")
+    with pytest.raises(KeyError):
+        svc._build_env("d1")
 
 
 # --- resolve_platform ---------------------------------------------------
@@ -667,6 +687,7 @@ def _xr_svc(run_fn, **kw):
                            "svi_mask": "255.255.255.252",
                            "guest_ip": "10.0.0.3", "model": "8010",
                            "os_family": "xr", "platform": "xr-appmgr",
+                           "management_type": "xr-host",
                            "credential_profile_id": "lab"}})
     creds = _Creds({"lab": {"device_user": "admin", "device_pass": "s3cret"}})
     kw.setdefault("probe_fn", lambda dev, env: "8010")
@@ -692,7 +713,8 @@ def test_xr_onboard_runs_the_xr_recipe_with_the_env_it_documents(tmp_path):
         return 0
 
     svc = _xr_svc(fake_run, artifacts_dir=str(tmp_path))
-    job = _wait(svc, svc.start("d1", resolved={"platform": "xr-appmgr"}))
+    job = _wait(svc, svc.start("d1", resolved={"platform": "xr-appmgr",
+                                               "management_type": "xr-host"}))
     assert job["state"] == "done", job["lines"]
     assert seen["path"].endswith("device/xr-install.sh")
     env = seen["env"]
@@ -730,7 +752,8 @@ def test_xr_onboard_refuses_when_the_preflight_refuses(tmp_path):
 
     svc = _xr_svc(fake_run, artifacts_dir=str(tmp_path),
                   xr_preflight_fn=refuse)
-    job = _wait(svc, svc.start("d1", resolved={"platform": "xr-appmgr"}))
+    job = _wait(svc, svc.start("d1", resolved={"platform": "xr-appmgr",
+                                               "management_type": "xr-host"}))
     assert job["state"] == "error"
     assert any("IOS-XE" in line for line in job["lines"]), job["lines"]
     assert ran == []
@@ -742,7 +765,8 @@ def test_service_preflight_dispatches_the_xr_platform(tmp_path):
     svc = _xr_svc(lambda p, e, on: 0, artifacts_dir=str(tmp_path),
                   xr_preflight_fn=lambda dev, env, resolved: {
                       "status": "passed", "detected_model": "8010"})
-    evidence = svc.preflight("d1", {"platform": "xr-appmgr"})
+    evidence = svc.preflight("d1", {"platform": "xr-appmgr",
+                                    "management_type": "xr-host"})
     assert evidence == {"status": "passed", "detected_model": "8010"}
 
 
@@ -922,7 +946,8 @@ def test_parse_os_family_ignores_an_xr_mention_in_the_login_banner():
 def _iox_fleet(platform=None, model=None):
     dev = {"device_id": "d1", "device_ip": "10.0.0.1", "vlan": "666",
            "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
-           "guest_ip": "10.0.0.3", "credential_profile_id": "lab"}
+           "guest_ip": "10.0.0.3", "management_type": "routed",
+           "credential_profile_id": "lab"}
     if platform is not None:
         dev["platform"] = platform
     if model is not None:
@@ -1058,7 +1083,7 @@ def test_preresolved_guestshell_platform_still_refuses_an_xr_device(tmp_path):
 
     svc = _svc(fake_run, probe_fn=_xr_probe)
     svc.fleet._d["d1"]["model"] = "ASR-9906"
-    job = _wait(svc, svc.start("d1", resolved={"platform": "guestshell"}))
+    job = _wait(svc, svc.start("d1", resolved={"platform": "guestshell", "management_type": "routed"}))
     assert job["state"] == "error"
     assert any("IOS-XR" in line for line in job["lines"]), job["lines"]
     # The whole point: device/device-install.sh must never be handed an
@@ -1073,7 +1098,7 @@ def test_preresolved_onboard_caches_the_family_it_just_learned(tmp_path):
     # the devices table never shows why.
     svc = _svc(lambda p, e, on: 0, probe_fn=_xr_probe)
     svc.fleet._d["d1"]["model"] = "ASR-9906"
-    _wait(svc, svc.start("d1", resolved={"platform": "guestshell"}))
+    _wait(svc, svc.start("d1", resolved={"platform": "guestshell", "management_type": "routed"}))
     assert {"device_id": "d1", "os_family": "xr"} in svc.fleet.upserts
     assert svc.fleet._d["d1"]["os_family"] == "xr"
 
@@ -1187,7 +1212,7 @@ def test_router_recipe_and_env_plumbing(tmp_path):
     job = _wait(svc, svc.start("r1"))
     assert job["state"] == "done"
     assert seen["install_path"].endswith("device/router-install.sh")
-    assert seen["env"]["NETWORK_ATTACHMENT"] == "router-nat"
+    assert seen["env"]["MANAGEMENT_TYPE"] == "router-nat"
     assert seen["env"]["VPG_NUMBER"] == "10"
     assert seen["env"]["NAT_INTERFACE"] == "GigabitEthernet1"
     assert seen["env"]["BT_LISTEN_PORT"] == "6881"
@@ -1203,7 +1228,7 @@ def test_router_undeploy_uses_router_recipe_and_receipt_ownership(tmp_path):
     svc = gui_onboard.OnboardService(
         fleet, _iox_creds(), host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
         run_fn=_run_capture(seen), artifacts_dir=str(tmp_path))
-    resolved = {"platform": "router", "attachment": "router-nat",
+    resolved = {"platform": "router", "management_type": "router-nat",
                 "device_ip": "192.0.2.10", "device_identity": "9ABC123",
                 "vpg_number": "10", "nat_interface": "GigabitEthernet1",
                 "app_ip": "10.8.0.2", "app_mask": "255.255.255.252",
@@ -1401,10 +1426,24 @@ def _router_preflight_stub(monkeypatch, running="", apps="", guest_share="%Error
 
 
 def _router_resolved(attachment="router-nat"):
-    return {"attachment": attachment, "vpg_number": "10",
+    return {"management_type": attachment, "vpg_number": "10",
             "app_ip": "10.8.0.2", "app_mask": "255.255.255.252",
             "app_gateway": "10.8.0.1", "nat_interface": "Gi1",
             "swarm_port": "6881"}
+
+
+def test_apply_router_preflight_raises_without_management_type():
+    """Task 2 (spec decision 6): apply_router_preflight's own three-level
+    fallback (attachment -> management_type -> network_attachment -> "")
+    was the 11th silent-default site the Task 1 re-derivation found -- a
+    live router-preflight code path. A resolved plan missing management_type
+    must fail loud, not silently bind evidence as attachment=""."""
+    resolved = {"vpg_number": "10", "app_ip": "10.8.0.2",
+                "app_mask": "255.255.255.252", "app_gateway": "10.8.0.1",
+                "nat_interface": "Gi1", "swarm_port": "6881"}
+    evidence = {"status": "passed", "device_identity": "9ABC123"}
+    with pytest.raises(KeyError):
+        gui_onboard.apply_router_preflight(resolved, evidence)
 
 
 def test_default_router_preflight_canonicalizes_interface_and_records_globals(monkeypatch):
@@ -1827,7 +1866,8 @@ def _multi_svc(n, run_fn, **kw):
     for i in range(1, n + 1):
         did = "d%d" % i
         devs[did] = {"device_id": did, "device_ip": "10.0.0.%d" % i,
-                     "model": "C9300", "credential_profile_id": "lab"}
+                     "model": "C9300", "management_type": "routed",
+                     "credential_profile_id": "lab"}
     creds = _Creds({"lab": {"device_user": "admin", "device_pass": "s3cret",
                             "enable_secret": "en"}})
     kw.setdefault("probe_fn", lambda dev, env: "C9300")  # see _svc: guestshell reachability gate
@@ -2491,7 +2531,8 @@ def test_undeploy_with_superseded_receipt_aborts_cleanly(tmp_path):
     _active_receipt(receipts, "r1")
     _active_receipt(receipts, "r2")   # supersedes r1 (the race winner)
     job = _wait(svc, svc.start("d1", action="undeploy",
-                               resolved={"platform": "guestshell"},
+                               resolved={"platform": "guestshell",
+                                         "management_type": "routed"},
                                prepare=lambda: "r1"))
     # the worker must FINISH (error), not die mid-thread leaving "running"
     assert job["state"] == "error"
@@ -2513,7 +2554,8 @@ def test_receipt_retired_during_run_does_not_wedge_the_job(tmp_path):
     holder["receipts"] = receipts
     _active_receipt(receipts, "r1")
     job = _wait(svc, svc.start("d1", action="undeploy",
-                               resolved={"platform": "guestshell"},
+                               resolved={"platform": "guestshell",
+                                         "management_type": "routed"},
                                prepare=lambda: "r1"))
     # script succeeded -> job reports the script's truth; the receipt
     # discrepancy is surfaced as a job line instead of killing the worker
@@ -2593,7 +2635,8 @@ def test_persisted_log_filename_sanitizes_device_but_header_keeps_raw(tmp_path):
     log_dir = str(tmp_path / "deploy-logs")
     did = "sw 1/a"          # not filesystem-safe
     fleet = _Fleet({did: {"device_id": did, "device_ip": "10.0.0.1",
-                          "model": "C9300", "credential_profile_id": "lab"}})
+                          "model": "C9300", "management_type": "routed",
+                          "credential_profile_id": "lab"}})
     creds = _Creds({"lab": {"device_user": "u", "device_pass": "p"}})
     svc = gui_onboard.OnboardService(
         fleet, creds, device_install="/fake/device-install.sh",
@@ -2766,7 +2809,8 @@ def test_preflight_is_required_on_every_platform():
     svc._iox_preflight = stub
     svc._guestshell_preflight = stub
     for platform in ("router", "guestshell", "iox"):
-        result = svc.preflight("d1", {"platform": platform})
+        result = svc.preflight("d1", {"platform": platform,
+                                      "management_type": "routed"})
         assert result.get("status") != "not-required", \
             "%s still skips the collision preflight" % platform
     assert seen == {"router": True, "guestshell": True, "iox": True}

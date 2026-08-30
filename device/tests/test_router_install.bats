@@ -8,7 +8,7 @@ setup() {
   INSTALL="$BATS_TEST_DIRNAME/../router-install.sh"
   export MODEL=C8000V DEVICE_IP=192.0.2.10 DEVICE_ID=router-1 \
     CATALOG_URL=https://192.0.2.20:8443 CATALOG_TOKEN=deadbeef \
-    STAGE_HOST=192.0.2.20 NETWORK_ATTACHMENT=router-routed VPG_NUMBER=10 \
+    STAGE_HOST=192.0.2.20 MANAGEMENT_TYPE=router-routed VPG_NUMBER=10 \
     APP_IP=10.8.0.2 APP_MASK=255.255.255.252 APP_GATEWAY=10.8.0.1
 }
 
@@ -29,7 +29,7 @@ setup() {
 }
 
 @test "router-nat renders overload and deterministic inbound swarm PAT" {
-  NETWORK_ATTACHMENT=router-nat NAT_INTERFACE=GigabitEthernet1 \
+  MANAGEMENT_TYPE=router-nat NAT_INTERFACE=GigabitEthernet1 \
     run bash "$INSTALL" --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" == *"interface GigabitEthernet1"* ]]
@@ -42,7 +42,7 @@ setup() {
 }
 
 @test "router renderer never emits switch network primitives" {
-  NETWORK_ATTACHMENT=router-nat NAT_INTERFACE=GigabitEthernet1 \
+  MANAGEMENT_TYPE=router-nat NAT_INTERFACE=GigabitEthernet1 \
     run bash "$INSTALL" --dry-run
   [ "$status" -eq 0 ]
   ! grep -Eq '(^|[[:space:]])vlan [0-9]|interface Vlan|switchport|ip router isis|vrf definition|AppGigabitEthernet' <<<"$output"

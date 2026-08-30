@@ -6,7 +6,7 @@
 
 # Undeploy IRIS from a Guest Shell device (Catalyst 9300 / ISR / ASR / CSR /
 # C8000v): the exact inverse of device/device-install.sh, lab-validated on
-# C9300 (2026-07-04). NETWORK_ATTACHMENT selects the teardown scope:
+# C9300 (2026-07-04). MANAGEMENT_TYPE selects the teardown scope:
 #   routed (default) removes the full IRIS footprint:
 #     - EEM applets IRIS-AGENT + IRIS-COPYROOT (FIRST, so the 60s timer can't
 #       relaunch bootstrap mid-teardown)
@@ -26,7 +26,7 @@
 #     app-hosting, guest-share, the IRISQ discriminator and its logging
 #     bindings, and the IRIS PKI trustpoint / HTTP-client binding.
 # IRIS_FORCE_AGENT_ONLY=1 applies that same reduction regardless of
-#   NETWORK_ATTACHMENT: a device stranded WITHOUT a deployment receipt (onboard
+#   MANAGEMENT_TYPE: a device stranded WITHOUT a deployment receipt (onboard
 #   died after enabling Guest Shell but before its receipt was written) has no
 #   receipt proving the VLAN/SVI is IRIS's, so the network is left exactly as
 #   it is. What is identifiable by name as IRIS is still removed -- leaving it
@@ -51,13 +51,13 @@ DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
 # verify clean (the verify greps for this exact VLAN). Platform selection is
 # the CALLER's job now (OnboardService routes IOx to device/iox/uninstall.sh),
 # so this script no longer refuses by model.
-NETWORK_ATTACHMENT="${NETWORK_ATTACHMENT:-routed}"
+MANAGEMENT_TYPE="${MANAGEMENT_TYPE:-routed}"
 VLAN_IN="${VLAN:-${INBAND_VLAN:-}}"
 VLAN="${VLAN_IN:-666}"
 IOS_FS="${IOS_FS:-flash:}"
 IOS_ROOT="${IOS_FS}guest-share"
 # See header: force preserves only the operator's VLAN/SVI network. Everything
-# carrying IRIS's own name is still removed regardless of NETWORK_ATTACHMENT.
+# carrying IRIS's own name is still removed regardless of MANAGEMENT_TYPE.
 FORCE_AGENT_ONLY="${IRIS_FORCE_AGENT_ONLY:-0}"
 
 config_teardown() {
@@ -80,7 +80,7 @@ config_cleanup() {
 # artifact we put there. What inband and force must NOT touch is the
 # operator's network: the VLAN and its SVI, which IRIS merely configured and
 # no receipt proves it created.
-if [ "$NETWORK_ATTACHMENT" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
+if [ "$MANAGEMENT_TYPE" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
 cat <<EOF
 no app-hosting appid guestshell
 no logging buffered discriminator IRISQ
@@ -111,7 +111,7 @@ if [ "$DRY" -eq 1 ]; then
   echo "===== [1/5] EEM applets removed FIRST (stops the 60s bootstrap timer) ====="
   config_teardown
   echo "===== [2/5] guestshell disable  [3/5] guestshell destroy (polled) ====="
-  if [ "$NETWORK_ATTACHMENT" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
+  if [ "$MANAGEMENT_TYPE" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
     echo "===== [4/5] IRIS-named config removal (operator VLAN/SVI left in place) ====="
   else
     echo "===== [4/5] config footprint removal ====="
@@ -165,7 +165,7 @@ if [ -n "$st" ]; then
 fi
 echo "  guestshell destroyed"
 
-if [ "$NETWORK_ATTACHMENT" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
+if [ "$MANAGEMENT_TYPE" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
   echo "[4/5] remove IRIS-named footprint (operator VLAN/SVI preserved)"
 else
   echo "[4/5] remove config footprint (app-hosting block, Vlan$VLAN, IRISQ, PKI trustpoint)"
@@ -182,7 +182,7 @@ echo "verify: no app-hosting entry, no leftover config lines, no guest-share"
 # Inband (and a receipt-less force undeploy) intentionally preserves the
 # operator-owned network, discriminator, and trustpoint, so its verify only
 # asserts the app footprint is gone.
-if [ "$NETWORK_ATTACHMENT" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
+if [ "$MANAGEMENT_TYPE" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
   # The VLAN/SVI is deliberately absent here -- it is preserved, so scanning
   # for it would fail a teardown that did exactly what it promised. The
   # IRIS-named artifacts ARE removed in this mode, so they are verified.

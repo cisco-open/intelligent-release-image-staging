@@ -562,7 +562,7 @@ def _default_router_preflight(dev, env, resolved, repo_root):
         ("apps", "show app-hosting list"),
         ("guest_share", "dir bootflash:guest-share"),
     ]
-    if resolved.get("attachment") == "router-nat":
+    if resolved["management_type"] == "router-nat":
         commands.append(("interfaces", "show interfaces %s" % resolved["nat_interface"]))
     # One SSH login per router is essential for large fleet submissions. IOS XE
     # echoes these markers verbatim, letting the same fail-closed checks consume
@@ -636,7 +636,7 @@ def _default_router_preflight(dev, env, resolved, repo_root):
                 "file_prompt_quiet_preexisting": bool(
                     re.search(r"(?m)^file prompt quiet\s*$", running)),
                 "nat_outside_preexisting": False}
-    if resolved.get("attachment") != "router-nat":
+    if resolved["management_type"] != "router-nat":
         return evidence
 
     requested_outside = resolved["nat_interface"]
@@ -684,9 +684,7 @@ def apply_router_preflight(resolved, evidence):
     if not identity or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", identity):
         raise ValueError("router preflight did not return a safe device identity")
     result = dict(resolved)
-    attachment = result.get(
-        "attachment", result.get("management_type",
-                                 result.get("network_attachment", "")))
+    attachment = result["management_type"]
     bound_identity = str(result.get("device_identity") or "").strip()
     if bound_identity and bound_identity != identity:
         raise ValueError("router device identity changed while the job was queued")
@@ -942,9 +940,7 @@ class OnboardService:
         token = self._mint(device_id) if mint else ""
         env = dict(os.environ)
         target = resolved or dev
-        attachment = target.get("attachment",
-                                target.get("management_type",
-                                           target.get("network_attachment", "routed")))
+        attachment = target["management_type"]
         if attachment == "legacy_routed":
             attachment = "routed"
         target_ip = (target.get("device_ip")
@@ -952,7 +948,7 @@ class OnboardService:
         env.update({
             "DEVICE_IP": target_ip or dev["device_ip"],
             "DEVICE_ID": device_id,
-            "NETWORK_ATTACHMENT": attachment,
+            "MANAGEMENT_TYPE": attachment,
             "VLAN": str(target.get("iris_vlan", target.get("vlan", ""))),
             "SVI_IP": target.get("svi_ip", ""),
             "SVI_MASK": target.get("svi_mask", target.get("app_mask", "")),

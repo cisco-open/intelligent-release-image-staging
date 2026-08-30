@@ -6,7 +6,7 @@
 
 setup() {
   UNINSTALL="$BATS_TEST_DIRNAME/../router-uninstall.sh"
-  export MODEL=C8000V NETWORK_ATTACHMENT=router-routed VPG_NUMBER=10 \
+  export MODEL=C8000V MANAGEMENT_TYPE=router-routed VPG_NUMBER=10 \
     APP_IP=10.8.0.2
 }
 
@@ -22,7 +22,7 @@ setup() {
 }
 
 @test "router NAT teardown removes receipt-owned NAT rules" {
-  NETWORK_ATTACHMENT=router-nat NAT_INTERFACE=GigabitEthernet1 \
+  MANAGEMENT_TYPE=router-nat NAT_INTERFACE=GigabitEthernet1 \
     run bash "$UNINSTALL" --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" == *"no ip nat inside source static tcp 10.8.0.2 6881 interface GigabitEthernet1 6881"* ]]
@@ -31,7 +31,7 @@ setup() {
 }
 
 @test "NAT teardown clears only receipt-owned translations before the mapping" {
-  NETWORK_ATTACHMENT=router-nat NAT_INTERFACE=GigabitEthernet1 \
+  MANAGEMENT_TYPE=router-nat NAT_INTERFACE=GigabitEthernet1 \
     run bash "$UNINSTALL" --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" == *"clear ip nat translation inside <IRIS-inside-global> 10.8.0.2 forced"* ]]
@@ -54,14 +54,14 @@ setup() {
 }
 
 @test "pre-existing outside marking is preserved" {
-  NETWORK_ATTACHMENT=router-nat NAT_INTERFACE=GigabitEthernet1 NAT_OUTSIDE_OWNED=0 \
+  MANAGEMENT_TYPE=router-nat NAT_INTERFACE=GigabitEthernet1 NAT_OUTSIDE_OWNED=0 \
     run bash "$UNINSTALL" --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" != *"no ip nat outside"* ]]
 }
 
 @test "IRIS-created outside marking is removed" {
-  NETWORK_ATTACHMENT=router-nat NAT_INTERFACE=GigabitEthernet1 NAT_OUTSIDE_OWNED=1 \
+  MANAGEMENT_TYPE=router-nat NAT_INTERFACE=GigabitEthernet1 NAT_OUTSIDE_OWNED=1 \
     run bash "$UNINSTALL" --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" == *"interface GigabitEthernet1"* ]]
@@ -69,7 +69,7 @@ setup() {
 }
 
 @test "router teardown never emits switch network primitives" {
-  NETWORK_ATTACHMENT=router-nat NAT_INTERFACE=GigabitEthernet1 NAT_OUTSIDE_OWNED=1 \
+  MANAGEMENT_TYPE=router-nat NAT_INTERFACE=GigabitEthernet1 NAT_OUTSIDE_OWNED=1 \
     run bash "$UNINSTALL" --dry-run
   [ "$status" -eq 0 ]
   ! grep -Eq '(^|[[:space:]])vlan [0-9]|interface Vlan|switchport|ip router isis|vrf definition|AppGigabitEthernet' <<<"$output"
@@ -477,7 +477,7 @@ PY2
   # translations still reference it, so this has to stay mutate -> observe
   # -> retry across separate device-run.sh calls, never a single shot.
   _router_uninstall_stub_setup
-  NETWORK_ATTACHMENT=router-nat NAT_INTERFACE=GigabitEthernet1 \
+  MANAGEMENT_TYPE=router-nat NAT_INTERFACE=GigabitEthernet1 \
     FAKE_NAT_DRAIN_ROUNDS=2 run _router_uninstall_run_live
   [ "$status" -eq 0 ]
   mutates="$(_calls_between_containing "$FAKE_COMMAND_LOG" \
@@ -563,7 +563,7 @@ PY2
   # to the bare prefix "ip access-list standard IRIS-NAT-" and matches any
   # other VPG's ACL too.
   _router_uninstall_stub_setup
-  NETWORK_ATTACHMENT=router-nat NAT_INTERFACE=GigabitEthernet1 APP_IP=10.8.0.2 \
+  MANAGEMENT_TYPE=router-nat NAT_INTERFACE=GigabitEthernet1 APP_IP=10.8.0.2 \
     FAKE_RUNNING_NAT=yes run _router_uninstall_run_live_forced
   [[ "$output" != *"artifacts still present"* ]] || return 1
   [ "$status" -eq 0 ]
@@ -573,7 +573,7 @@ PY2
   # router-nat comes from the inventory row, but force never touches NAT, so
   # requiring receipt-derived NAT values re-strands the device.
   unset NAT_INTERFACE APP_IP
-  NETWORK_ATTACHMENT=router-nat IRIS_FORCE_AGENT_ONLY=1 \
+  MANAGEMENT_TYPE=router-nat IRIS_FORCE_AGENT_ONLY=1 \
     run bash "$UNINSTALL" --dry-run
   [[ "$output" != *"missing NAT_INTERFACE or APP_IP"* ]] || return 1
   [ "$status" -eq 0 ]

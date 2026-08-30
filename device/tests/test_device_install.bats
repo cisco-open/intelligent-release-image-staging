@@ -259,7 +259,7 @@ setup_stage_local() {
   # instead of up to three — see device-install.sh. The stub recognizes that
   # single request by the marker prefix and answers all of its sections
   # (FLASH always, ROUTING only when the request actually asked for it, i.e.
-  # NETWORK_ATTACHMENT=routed, CLOCK always) in one reply. Real sessions echo
+  # MANAGEMENT_TYPE=routed, CLOCK always) in one reply. Real sessions echo
   # commands back; FAKE_DEVICE_DOWN=yes simulates a dead session that echoes
   # nothing at all — no markers either — which is exactly what a missing
   # section looks like to the installer's fail-closed ROUTING parse.
@@ -437,7 +437,7 @@ run_with_timeout() {
 
 # --- inband Guest Shell (network-preserving; must still enable iox) ---
 _inband() {
-  NETWORK_ATTACHMENT=inband INBAND_VLAN=120 APP_IP=198.51.100.20 \
+  MANAGEMENT_TYPE=inband INBAND_VLAN=120 APP_IP=198.51.100.20 \
     APP_MASK=255.255.255.0 APP_GATEWAY=198.51.100.1 \
     bash "$INSTALL" --dry-run
 }

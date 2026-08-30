@@ -169,7 +169,7 @@ run_start_aria2c() {
   # guest-share itself is a preserved platform directory here: only named files
   # at its root plus the whole iris/ subtree are removed. Every hook artifact
   # is inside iris/, so nothing new has to be named.
-  run env VLAN=666 MODEL=C8000V NETWORK_ATTACHMENT=router-routed VPG_NUMBER=10 \
+  run env VLAN=666 MODEL=C8000V MANAGEMENT_TYPE=router-routed VPG_NUMBER=10 \
       APP_IP=10.8.0.2 bash "$DEVICE/router-uninstall.sh" --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" == *"guestshell destroy"* ]]

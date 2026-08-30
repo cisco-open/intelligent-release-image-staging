@@ -5,6 +5,7 @@ import os
 import re
 
 import gui_server
+import pytest
 
 
 def test_webroot_assets_exist():
@@ -2279,7 +2280,7 @@ def test_xr_host_plan_carries_no_addressing_fields(tmp_path):
         assert status == 200, body
         plan = json.loads(body)["plan"]
         assert plan["resolved"] == {
-            "attachment": "xr-host", "device_ip": "10.0.0.9",
+            "management_type": "xr-host", "device_ip": "10.0.0.9",
             "swarm_port": "6881", "model": "8201", "platform": "xr-appmgr",
             "renderer": "v1"}
         for key in ("iris_vlan", "svi_ip", "svi_mask", "app_ip", "app_mask",
@@ -2338,7 +2339,7 @@ def test_owned_resources_for_xr_host_matches_the_uninstall_recipe(tmp_path):
     srv = gui_server.make_server("127.0.0.1", 0, app, certfile=None)
     try:
         resources = srv.RequestHandlerClass._owned_resources(
-            {"attachment": "xr-host"})
+            {"management_type": "xr-host"})
         kinds = [r["kind"] for r in resources]
         assert kinds == ["appmgr-application", "appmgr-source",
                           "agent-rpm", "agent-work-dir"]
@@ -2349,6 +2350,24 @@ def test_owned_resources_for_xr_host_matches_the_uninstall_recipe(tmp_path):
         by_kind = {r["kind"]: r for r in resources}
         assert by_kind["appmgr-application"]["name"] == gui_onboard._XR_APPID
         assert by_kind["appmgr-source"]["name"] == gui_onboard._XR_SOURCE_NAME
+    finally:
+        srv.server_close()
+
+
+def test_owned_resources_raises_without_management_type(tmp_path):
+    """Task 2 (spec decision 6): resolved["management_type"] is read as a
+    direct subscript, never a defaulted .get() -- a resolved dict missing
+    the key must fail loud instead of silently resolving to some guessed
+    scope. A PARTIAL rename that kept the old .get(..., None) default would
+    make this pass through as attachment=None -> the plain-VLAN/SVI teardown
+    branch, which can delete an operator-owned resource it never proved it
+    owns."""
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path)
+    srv = gui_server.make_server("127.0.0.1", 0, app, certfile=None)
+    try:
+        with pytest.raises(KeyError):
+            srv.RequestHandlerClass._owned_resources({})
     finally:
         srv.server_close()
 
@@ -2407,7 +2426,7 @@ def test_inband_iox_onboard_defaults_ssh_host_to_mgmt_ip(tmp_path):
                         headers={"Cookie": ck})
         assert st == 200
         resolved = json.loads(b)["plan"]["resolved"]
-        assert resolved["attachment"] == "inband" and resolved["platform"] == "iox"
+        assert resolved["management_type"] == "inband" and resolved["platform"] == "iox"
         assert resolved["ios_ssh_host"] == "192.0.2.30"    # defaults to device_ip
         st, _, b = _req(host, port, "POST", "/api/devices/ie/onboard", {}, headers=hh)
         assert st == 200
@@ -2417,7 +2436,7 @@ def test_inband_iox_onboard_defaults_ssh_host_to_mgmt_ip(tmp_path):
             if ran:
                 break
             _t.sleep(0.02)
-        assert ran and ran[-1]["NETWORK_ATTACHMENT"] == "inband"
+        assert ran and ran[-1]["MANAGEMENT_TYPE"] == "inband"
         assert ran[-1]["IOS_SSH_HOST"] == "192.0.2.30"
     finally:
         stop()
@@ -2459,7 +2478,7 @@ def test_reonboard_then_undeploy_starts(tmp_path):
 
 def test_inband_onboard_is_one_click_and_drives_inband_renderer(tmp_path):
     """Inband onboards exactly like routed: a plain POST starts a job, records a
-    receipt, and runs the installer with NETWORK_ATTACHMENT=inband."""
+    receipt, and runs the installer with MANAGEMENT_TYPE=inband."""
     ran = []
     host, port, stop = _serve_inband(
         tmp_path, lambda p, e, on: (ran.append(dict(e)), 0)[1])
@@ -2469,7 +2488,7 @@ def test_inband_onboard_is_one_click_and_drives_inband_renderer(tmp_path):
         # plan preview reports the inband attachment
         st, _, b = _req(host, port, "GET", "/api/devices/edge/plan",
                         headers={"Cookie": ck})
-        assert st == 200 and json.loads(b)["plan"]["resolved"]["attachment"] == "inband"
+        assert st == 200 and json.loads(b)["plan"]["resolved"]["management_type"] == "inband"
         # a plain onboard POST starts the job (no gate, no acknowledgement dance)
         st, _, b = _req(host, port, "POST", "/api/devices/edge/onboard", {},
                         headers=hh)
@@ -2483,7 +2502,7 @@ def test_inband_onboard_is_one_click_and_drives_inband_renderer(tmp_path):
             if json.loads(jb)["state"] in ("done", "error"):
                 break
             _t.sleep(0.02)
-        assert ran and ran[-1]["NETWORK_ATTACHMENT"] == "inband"
+        assert ran and ran[-1]["MANAGEMENT_TYPE"] == "inband"
     finally:
         stop()
 
@@ -2547,7 +2566,7 @@ def test_c8000v_router_plan_auto_resolves_blank_platform_and_fields(tmp_path):
         plan = json.loads(body)["plan"]
         assert plan["ownership"] == "creates only a clean IRIS-owned VirtualPortGroup"
         assert plan["resolved"] == {
-            "attachment": "router-routed", "device_ip": "192.0.2.10",
+            "management_type": "router-routed", "device_ip": "192.0.2.10",
             "iris_vlan": "", "svi_ip": "",
             "svi_mask": "", "app_ip": "10.7.0.2", "app_mask": "255.255.255.252",
             "app_gateway": "10.7.0.1", "inband_vlan": "", "vpg_number": "7",
@@ -2585,9 +2604,9 @@ def test_router_onboard_uses_router_recipe_env_and_router_resource_kinds(tmp_pat
         assert events == ["preflight", "mint"]
         path, env = ran[-1]
         assert path.endswith("device/router-install.sh")
-        assert {key: env[key] for key in ("NETWORK_ATTACHMENT", "VPG_NUMBER",
+        assert {key: env[key] for key in ("MANAGEMENT_TYPE", "VPG_NUMBER",
                                            "NAT_INTERFACE", "BT_LISTEN_PORT")} == {
-            "NETWORK_ATTACHMENT": "router-nat", "VPG_NUMBER": "10",
+            "MANAGEMENT_TYPE": "router-nat", "VPG_NUMBER": "10",
             "NAT_INTERFACE": "GigabitEthernet1", "BT_LISTEN_PORT": "6881"}
         receipt = receipts.active_for_device("r1")
         assert [resource["kind"] for resource in receipt["resources"]] == [
@@ -2722,7 +2741,7 @@ def test_router_undeploy_refuses_incomplete_or_mismatched_receipt(tmp_path):
     try:
         cookie, csrf = _auth(host, port)
         headers = {"Cookie": cookie, "X-CSRF-Token": csrf}
-        plan = {"platform": "router", "attachment": "router-routed",
+        plan = {"platform": "router", "management_type": "router-routed",
                 "device_ip": "192.0.2.10", "device_identity": "9ABC123",
                 "vpg_number": "10", "model": "C8000V"}
         receipt = receipts.create({"controller_id": "iris", "device_id": "r1",
@@ -7274,7 +7293,7 @@ def _stranded_receipt(receipts, resources=None):
     rid = receipts.create({
         "controller_id": "iris", "device_id": "r1", "inventory_revision": 1,
         "plan_hash": "b" * 64,
-        "resolved": {"platform": "router", "attachment": "router-nat",
+        "resolved": {"platform": "router", "management_type": "router-nat",
                      "device_ip": "192.0.2.10", "vpg_number": "10",
                      "nat_interface": "GigabitEthernet1", "app_ip": "10.8.0.2",
                      "app_mask": "255.255.255.252", "app_gateway": "10.8.0.1"},

@@ -31,15 +31,15 @@ set -euo pipefail
 : "${DEVICE_IP:?set DEVICE_IP}"
 : "${CATALOG_URL:?set CATALOG_URL}"; : "${CATALOG_TOKEN:?set CATALOG_TOKEN}"
 : "${DEVICE_ID:?set DEVICE_ID}"; : "${STAGE_HOST:?set STAGE_HOST}"
-NETWORK_ATTACHMENT="${NETWORK_ATTACHMENT:-routed}"
-case "$NETWORK_ATTACHMENT" in
+MANAGEMENT_TYPE="${MANAGEMENT_TYPE:-routed}"
+case "$MANAGEMENT_TYPE" in
   routed)
     : "${VLAN:?set VLAN}"; : "${SVI_IP:?set SVI_IP}"; : "${SVI_MASK:?set SVI_MASK}"; : "${GUEST_IP:?set GUEST_IP}"
     GW_IP="${GW_IP:-$SVI_IP}" ;;
   inband)
     : "${INBAND_VLAN:?set INBAND_VLAN}"; : "${APP_IP:?set APP_IP}"; : "${APP_MASK:?set APP_MASK}"; : "${APP_GATEWAY:?set APP_GATEWAY}"
     VLAN="$INBAND_VLAN"; GUEST_IP="$APP_IP"; SVI_MASK="$APP_MASK"; GW_IP="$APP_GATEWAY" ;;
-  *) echo "ERROR: NETWORK_ATTACHMENT must be routed or inband" >&2; exit 1 ;;
+  *) echo "ERROR: MANAGEMENT_TYPE must be routed or inband" >&2; exit 1 ;;
 esac
 RPC_SECRET=""   # NOT baked: the agent fetches it on its first token-refresh
 CPU="${CPU:-1110}"; MEM="${MEM:-512}"; PERSIST="${PERSIST:-256}"
@@ -86,7 +86,7 @@ IOS_STAGE="${IOS_FS}${STAGE#/flash}"
 # NOTE: IRIS-COPYROOT is NOT installed here — the agent templates+fires it at runtime
 # (event syslog/$_arg1 proved unreliable on 17.18; the agent's cli.configure does it).
 ios_config() {
-if [ "$NETWORK_ATTACHMENT" = "inband" ]; then
+if [ "$MANAGEMENT_TYPE" = "inband" ]; then
 # Inband keeps the operator's network intact: no vlan/SVI/route/VRF/IS-IS. The
 # ONE allowed touch is the AppGig trunk, and only ADDITIVELY — `allowed vlan add`
 # never replaces the allowed list (the bare form would), and uninstall never
@@ -256,7 +256,7 @@ cat <<EOF
 echo ${PRECHECK_MARKER}FLASH__
 dir flash: | include bytes free
 EOF
-if [ "$NETWORK_ATTACHMENT" = "routed" ]; then
+if [ "$MANAGEMENT_TYPE" = "routed" ]; then
 cat <<EOF
 echo ${PRECHECK_MARKER}ROUTING__
 show running-config | include no ip routing
@@ -291,7 +291,7 @@ echo "[pre] prerequisite checks (ip routing, device clock)"
 # language, before any config is touched. Only the routed path creates an
 # IRIS-managed SVI that depends on global routing; inband rides the operator's
 # own already-routed network.
-if [ "$NETWORK_ATTACHMENT" = "routed" ]; then
+if [ "$MANAGEMENT_TYPE" = "routed" ]; then
   # `ip routing` can be the platform DEFAULT (seen on IE3x00): then neither
   # `ip routing` nor `no ip routing` appears in the config, and grepping for
   # the positive line false-fails a healthy switch. Decide from authoritative
@@ -341,7 +341,7 @@ else
   ssh_host "cat > ~/iris/artifacts/iris-catalog.pem" < "$IRIS_CRT_FILE"
 fi
 
-echo "[3/7] apply IOS config ($NETWORK_ATTACHMENT app-hosting, file prompt, EEM timers)"
+echo "[3/7] apply IOS config ($MANAGEMENT_TYPE app-hosting, file prompt, EEM timers)"
 { echo "configure terminal"; ios_config; } | "$HERE/../lab/device-run.sh" "$DEVICE_IP" >/dev/null
 
 # HARDWARE-LEARNED (C9300, 2026-07-04): <fs>guest-share must exist BEFORE

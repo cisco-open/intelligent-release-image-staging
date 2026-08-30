@@ -14,11 +14,11 @@ set -euo pipefail
 : "${VPG_NUMBER:?set VPG_NUMBER}"; : "${APP_IP:?set APP_IP}"
 : "${APP_MASK:?set APP_MASK}"; : "${APP_GATEWAY:?set APP_GATEWAY}"
 
-NETWORK_ATTACHMENT="${NETWORK_ATTACHMENT:-router-routed}"
-case "$NETWORK_ATTACHMENT" in
+MANAGEMENT_TYPE="${MANAGEMENT_TYPE:-router-routed}"
+case "$MANAGEMENT_TYPE" in
   router-routed) NAT_INTERFACE="" ;;
   router-nat) : "${NAT_INTERFACE:?set NAT_INTERFACE}" ;;
-  *) echo "ERROR: NETWORK_ATTACHMENT must be router-routed or router-nat" >&2; exit 1 ;;
+  *) echo "ERROR: MANAGEMENT_TYPE must be router-routed or router-nat" >&2; exit 1 ;;
 esac
 [[ "$VPG_NUMBER" =~ ^[0-9]+$ ]] && [ "$VPG_NUMBER" -ge 0 ] \
   && [ "$VPG_NUMBER" -le 31 ] \
@@ -95,7 +95,7 @@ interface VirtualPortGroup$VPG_NUMBER
  description IRIS Guest Shell VPG
  ip address $APP_GATEWAY $APP_MASK
 EOF
-if [ "$NETWORK_ATTACHMENT" = "router-nat" ]; then
+if [ "$MANAGEMENT_TYPE" = "router-nat" ]; then
 cat <<EOF
  ip nat inside
 EOF
@@ -104,7 +104,7 @@ cat <<EOF
  no shutdown
 !
 EOF
-if [ "$NETWORK_ATTACHMENT" = "router-nat" ]; then
+if [ "$MANAGEMENT_TYPE" = "router-nat" ]; then
 cat <<EOF
 interface $NAT_INTERFACE
  ip nat outside
@@ -248,7 +248,7 @@ if [ -n "$existing" ]; then
   done
 fi
 
-echo "[3/7] apply IOS config ($NETWORK_ATTACHMENT VirtualPortGroup)"
+echo "[3/7] apply IOS config ($MANAGEMENT_TYPE VirtualPortGroup)"
 { echo "configure terminal"; ios_config; } \
   | "$HERE/../lab/device-run.sh" "$DEVICE_IP" >/dev/null
 printf 'mkdir %s\n\n' "$IOS_ROOT" \
@@ -411,7 +411,7 @@ require_text "$APP_STATE" "RUNNING" "Guest Shell RUNNING state" || verify_failed
 require_text "$FILES" "bootstrap.sh" "bootflash:guest-share/bootstrap.sh" || verify_failed=1
 require_text "$FILES" "iris-agent.conf" "the staged agent config" || verify_failed=1
 
-if [ "$NETWORK_ATTACHMENT" = "router-nat" ]; then
+if [ "$MANAGEMENT_TYPE" = "router-nat" ]; then
   OUTSIDE_RUNNING="$(printf '%s\n' "$RUNNING" | config_block "$NAT_INTERFACE")"
   require_text "$VPG_RUNNING" "ip nat inside" "the VPG NAT-inside marking" \
     || verify_failed=1
