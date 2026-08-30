@@ -224,26 +224,102 @@
   // only ever references the sprite vendored in index.html; the label text
   // (not the icon) carries the accessible name, so the sprite stays
   // aria-hidden and the icon itself needs none.
+  //
+  // levelPillHTML is the raw renderer (level chosen directly by the
+  // caller); statusPillHTML derives the level from a deviceStatus() key via
+  // statusDisplay() first, then hands off to it. Splitting them out (Task
+  // 7) lets non-deviceStatus() domains -- the Cisco Bulk Hash verdict pill,
+  // the Overview "Needs attention" rollup cards, a Staging Boundary
+  // step's failed-step pill -- share the exact same markup/CSS without
+  // borrowing deviceStatus()'s key space, which the spec keeps separate
+  // ("device pill vs image verdict pill share only the same 8-level
+  // PALETTE, not one key space").
+  function levelPillHTML(level, label, opts) {
+    opts = opts || {};
+    var icon = STATUS_ICONS[level] || STATUS_ICONS.inactive;
+    var titleAttr = opts.title ? ' title="' + esc(opts.title) + '"' : '';
+    return '<span class="status-pill is-' + level + '"' + titleAttr + '>' +
+      '<svg aria-hidden="true"><use href="#' + icon + '"></use></svg>' +
+      esc(label) + '</span>';
+  }
   function statusPillHTML(status, opts) {
     opts = opts || {};
     var d = statusDisplay(status, opts.ratio);
-    var icon = STATUS_ICONS[d.level] || STATUS_ICONS.inactive;
-    var titleAttr = opts.title ? ' title="' + esc(opts.title) + '"' : '';
-    return '<span class="status-pill is-' + d.level + '"' + titleAttr + '>' +
-      '<svg aria-hidden="true"><use href="#' + icon + '"></use></svg>' +
-      esc(d.label) + '</span>';
+    return levelPillHTML(d.level, d.label, opts);
   }
 
+  // ---- Staging Boundary (spec §4 "Signature: Staging Boundary") ----------
+  // The one intentional IRIS signature: Catalogued -> Source checked ->
+  // Assigned -> Transferring -> Verified -> Staged, then a hatched
+  // "Operator control" terminus -- installation, activation and reload
+  // stay outside IRIS. stagingBoundaryHTML(steps) is the ONE renderer,
+  // shared verbatim by every view that shows it (Overview here; device and
+  // image detail contexts in Task 8) -- callers derive `steps` from
+  // whatever data THEIR view actually has and must never guess: an unknown
+  // or not-applicable step stays the explicit 'na' state, not an inferred
+  // 'done'.
+  //
+  // `steps` is an array of six entries, one per BOUNDARY_STEPS below, each
+  // either a bare state string -- 'done' | 'current' | 'upcoming' | 'na' --
+  // or, only for a failed step, `{ state: 'failed', pillHtml: '<pre-
+  // rendered pill>' }` (built with levelPillHTML, so it matches every other
+  // pill in the console). A missing/unrecognized entry renders as
+  // 'upcoming' (a plain outline), never as progress that was not reported.
+  var BOUNDARY_STEPS = [
+    { label: "Catalogued" }, { label: "Source checked" }, { label: "Assigned" },
+    { label: "Transferring" }, { label: "Verified" }, { label: "Staged" }
+  ];
+  function boundaryMarkerHTML(state, pillHtml) {
+    if (state === 'failed' && pillHtml) {
+      return '<span class="boundary-marker">' + pillHtml + '</span>';
+    }
+    if (state === 'done') {
+      return '<span class="boundary-circle is-done">' +
+        '<svg aria-hidden="true"><use href="#i-check"></use></svg></span>';
+    }
+    if (state === 'current') {
+      return '<span class="boundary-circle is-current"><span class="boundary-dot"></span></span>';
+    }
+    if (state === 'na') {
+      return '<span class="boundary-circle is-na"></span>';
+    }
+    // upcoming, and the safe default for anything unrecognized -- a plain
+    // outline claims no progress at all, so an unknown value never reads
+    // as more complete than it is.
+    return '<span class="boundary-circle is-upcoming"></span>';
+  }
+  function stagingBoundaryHTML(steps) {
+    steps = steps || [];
+    var stepsHtml = BOUNDARY_STEPS.map(function (step, i) {
+      var entry = steps[i];
+      var state = typeof entry === 'string' ? entry : (entry && entry.state) || 'upcoming';
+      var pillHtml = (entry && typeof entry === 'object') ? entry.pillHtml : null;
+      var connector = i > 0 ? '<span class="boundary-connector" aria-hidden="true"></span>' : '';
+      return connector + '<span class="boundary-step is-' + esc(state) + '">' +
+        boundaryMarkerHTML(state, pillHtml) +
+        '<span class="boundary-label">' + esc(step.label) + '</span></span>';
+    }).join('');
+    return '<div class="staging-boundary">' + stepsHtml +
+      '<span class="boundary-connector" aria-hidden="true"></span>' +
+      '<span class="boundary-terminus"><span class="boundary-terminus-label">' +
+      'Operator control</span></span></div>';
+  }
+
+  // Shared by deviceStatusHtml and Overview's "Needs attention" tally
+  // (overviewDeviceAttention): image-failed's severity (warning vs severe)
+  // depends on THIS device's own errored/assigned ratio -- one derivation,
+  // so a fleet rollup can never grade a device's severity differently than
+  // its own row does.
+  function imageFailedRatio(d) {
+    var assigned = rowAssignedIds(d);
+    var errored = rowErroredIds(d).filter(function (iid) {
+      return assigned.indexOf(iid) !== -1;
+    });
+    return assigned.length ? errored.length / assigned.length : 0;
+  }
   function deviceStatusHtml(d, devNow) {
     var st = deviceStatus(d, devNow);
-    var ratio;
-    if (st.key === 'image-failed') {
-      var assigned = rowAssignedIds(d);
-      var errored = rowErroredIds(d).filter(function (iid) {
-        return assigned.indexOf(iid) !== -1;
-      });
-      ratio = assigned.length ? errored.length / assigned.length : 0;
-    }
+    var ratio = st.key === 'image-failed' ? imageFailedRatio(d) : undefined;
     var html = statusPillHTML(st, { title: st.detail, ratio: ratio });
     if (st.detail) {
       html += ' <span class="muted" title="' + esc(st.detail) + '">' + esc(st.detail) + '</span>';
@@ -285,9 +361,27 @@
       // "offline" is a modifier on top of whatever the cell says (a device can
       // read "deployed" and still be stale), so it stays its own choice.
       if (f.status === 'offline') { if (!deviceIsOffline(d, devNow)) return false; }
+      // '__attention': Overview's "Needs attention" rollup card routes here
+      // (goToDevicesFiltered below) -- any level the Magnetic grammar marks
+      // negative/severe/warning, spanning BOTH IRIS lifecycles (agent
+      // deployment AND target-software staging). A general "what needs me"
+      // filter, unlike the Staging Boundary's own failed-step derivation
+      // (overviewBoundarySteps), which stays scoped to the staging
+      // lifecycle only -- see that function's comment.
+      else if (f.status === '__attention') {
+        var lvl = statusDisplay(deviceStatus(d, devNow)).level;
+        if (lvl !== 'negative' && lvl !== 'severe' && lvl !== 'warning') return false;
+      }
       else if (deviceStatus(d, devNow).key !== f.status) return false;
     }
     return true;
+  }
+  // Set once by an Overview "Needs attention" devices card just before
+  // routing here; consumed the next time the devices list is (re)fetched.
+  var PENDING_DEV_FILTER = null;
+  function goToDevicesFiltered(status) {
+    PENDING_DEV_FILTER = status;
+    location.hash = '#devices';
   }
 
   // Re-render from the devices already in hand -- filtering must not wait on
@@ -359,49 +453,76 @@
   // wrote row HTML before, with nowhere to read a single image's verdict
   // back out of once the drawer needed one.
   var LAST_IMAGES = [];
-  // Verdict badge shared by the Images table, the image-detail drawer and
-  // the image picker: null state (never checked) reads as neutral, a
-  // mismatch reads as quarantined only while quarantined is actually still
-  // true (an override-released mismatch stays a mismatch verdict forever --
+  // Verdict PILL (Task 7: was a plain .badge, now the Magnetic status-pill
+  // grammar) shared by the Images catalog, the image-detail drawer and the
+  // image picker: null state (never checked) reads as neutral, a mismatch
+  // reads as quarantined only while quarantined is actually still true (an
+  // override-released mismatch stays a mismatch verdict forever --
   // release_quarantine() deliberately never rewrites hash_verification.state
   // -- but it is no longer BLOCKING anything, so it must not keep claiming
   // "quarantined"). Deferral is an orthogonal warning that can accompany any
-  // state, per the spec.
-  function bulkhashVerdictBadge(hv, quarantined) {
+  // state, per the spec. A standalone derivation (not routed through
+  // statusDisplay()'s deviceStatus() key space) -- see levelPillHTML's own
+  // comment for why the two domains stay separate.
+  function bulkhashVerdictPillHTML(hv, quarantined) {
     var state = hv && hv.state;
     var html;
     if (!state) {
-      html = '<span class="badge badge-queued">Not checked</span>';
+      html = levelPillHTML('inactive', 'Not checked');
     } else if (state === 'verified') {
-      html = '<span class="badge badge-ok">Verified</span>';
+      html = levelPillHTML('positive', 'Verified');
     } else if (state === 'mismatch') {
       html = quarantined
-        ? '<span class="badge badge-fail">MISMATCH — quarantined</span>'
-        : '<span class="badge badge-fail">MISMATCH — released</span>';
+        ? levelPillHTML('negative', 'Mismatch — quarantined')
+        : levelPillHTML('negative', 'Mismatch — released');
     } else if (state === 'not_in_feed') {
-      html = '<span class="badge badge-queued">Not in Cisco\'s feed</span>';
+      html = levelPillHTML('inactive', 'Not in Cisco\'s feed');
     } else {
       // Defensive: bulkhash.py only ever writes verified/mismatch/
       // not_in_feed, but a catch-all that silently relabeled anything else
       // as "Not in Cisco's feed" would misreport a genuinely unrecognized
       // state as a specific, wrong verdict instead of admitting it doesn't
       // know.
-      html = '<span class="badge badge-queued">Unknown verification state</span>';
+      html = levelPillHTML('inactive', 'Unknown verification state');
     }
     if (hv && hv.deferral) {
-      html += ' <span class="badge badge-cancelled" title="Deferred by Cisco">⚠ Deferred by Cisco</span>';
+      html += ' ' + levelPillHTML('warning', 'Deferred by Cisco', { title: 'Deferred by Cisco' });
     }
     return html;
   }
+  // Set once by an Overview "Needs attention" image card (goToImagesFiltered
+  // below) just before routing here; consumed the next time the catalog's
+  // data is (re)fetched, so the toggle below reflects it even though the
+  // fetch and the navigation race each other.
+  var PENDING_IMG_ATTENTION = false;
   async function refreshImages() {
     var r = await fetch('/api/images'); if (!r.ok) return;
     var imgs = (await r.json()).images || [];
     imgs.sort(function (a, b) { return (b.published_at || 0) - (a.published_at || 0); });
     LAST_IMAGES = imgs;
+    if (PENDING_IMG_ATTENTION) {
+      var attnBox = document.getElementById('images-filter-attention');
+      if (attnBox) attnBox.checked = true;
+      PENDING_IMG_ATTENTION = false;
+    }
+    renderImageRows();
+  }
+  // Pure client-side render from LAST_IMAGES -- no fetch -- so the "Needs
+  // attention only" toggle can re-render instantly, the same pattern
+  // applyDeviceFilters() uses for the Devices table.
+  function renderImageRows() {
+    var attnBox = document.getElementById('images-filter-attention');
+    var attnOnly = !!(attnBox && attnBox.checked);
+    var imgs = attnOnly
+      ? LAST_IMAGES.filter(function (i) { return !!i.quarantined; })
+      : LAST_IMAGES;
+    // Catalog rows lead with the exact filename + verdict pill; image id
+    // stays adjacent (spec Task 7 Step 5).
     document.getElementById('rows').innerHTML = imgs.map(function (i) {
-      return '<tr data-id="' + esc(i.id) + '"><td class="machine">' + esc(i.id) + '</td><td class="machine">' + esc(i.filename || '') + '</td><td class="machine">' +
-        esc(fmtSize(i.size)) + '</td><td class="machine">' + esc((i.sha256 || '').slice(0, 16)) + '…</td><td class="machine">' +
-        esc(fmtDate(i.published_at)) + '</td><td>' + bulkhashVerdictBadge(i.hash_verification, i.quarantined) +
+      return '<tr data-id="' + esc(i.id) + '"><td class="machine">' + esc(i.filename || '') + '</td><td>' +
+        bulkhashVerdictPillHTML(i.hash_verification, i.quarantined) + '</td><td class="machine">' + esc(i.id) +
+        '</td><td class="machine">' + esc(fmtSize(i.size)) + '</td><td class="machine">' +
+        esc((i.sha256 || '').slice(0, 16)) + '…</td><td class="machine">' + esc(fmtDate(i.published_at)) +
         '</td><td><button class="linkish img-info" title="Image details" aria-label="' +
         'Image details for ' + esc(i.id) + '">ⓘ</button> ' +
         '<button class="linkish danger-link del-img">delete</button></td></tr>';
@@ -420,6 +541,18 @@
         openImageInfo(btn.closest('tr').getAttribute('data-id'));
       });
     });
+    var countEl = document.getElementById('images-count');
+    if (countEl) {
+      countEl.textContent = attnOnly
+        ? imgs.length + ' of ' + LAST_IMAGES.length + ' image' + (LAST_IMAGES.length === 1 ? '' : 's')
+        : LAST_IMAGES.length + ' image' + (LAST_IMAGES.length === 1 ? '' : 's');
+    }
+  }
+  document.getElementById('images-filter-attention').addEventListener('change', renderImageRows);
+  // Overview's quarantined-images attention card routes here.
+  function goToImagesFiltered() {
+    PENDING_IMG_ATTENTION = true;
+    location.hash = '#images';
   }
   // ---- Image detail drawer: verdict + release-from-quarantine, with the
   // typed-confirm override path (KGV / Cisco Bulk Hash reconciler, Task 5).
@@ -438,11 +571,11 @@
     var img = LAST_IMAGES.filter(function (x) { return x.id === id; })[0] || {};
     document.getElementById('ii-id').textContent = id;
     document.getElementById('ii-file').textContent = img.filename || '';
-    document.getElementById('ii-verdict').innerHTML = bulkhashVerdictBadge(img.hash_verification, img.quarantined);
+    document.getElementById('ii-verdict').innerHTML = bulkhashVerdictPillHTML(img.hash_verification, img.quarantined);
     document.getElementById('ii-verdict-detail').textContent = imageVerdictDetailText(img.hash_verification);
     // The release action only makes sense while an image is ACTUALLY
     // quarantined -- an override-released mismatch keeps its "mismatch"
-    // verdict (see bulkhashVerdictBadge) but is not blocking anything, so
+    // verdict (see bulkhashVerdictPillHTML) but is not blocking anything, so
     // there is nothing left here to release.
     document.getElementById('ii-release-block').hidden = !img.quarantined;
     document.getElementById('ii-override-block').hidden = true;
@@ -794,6 +927,11 @@
     LAST_DEVICES = devs;
     LAST_DEV_NOW = devNow;
     syncDeviceFilterOptions();
+    if (PENDING_DEV_FILTER !== null) {
+      var statusSel = document.getElementById('dev-filter-status');
+      if (statusSel) statusSel.value = PENDING_DEV_FILTER;
+      PENDING_DEV_FILTER = null;
+    }
     renderDevices(devs, devNow);
   }
 
@@ -1685,10 +1823,16 @@
   (function () {
     var sel = document.getElementById('dev-filter-status');
     if (!sel) return;
+    // '__attention' is appended here, NOT added to DEVICE_STATUS_OPTIONS
+    // itself -- that array is specifically "every key deviceStatus() can
+    // produce" (test_every_status_the_cell_can_show_is_filterable enforces
+    // it), and '__attention' is a rollup over several of those keys, not a
+    // producible status of its own.
     sel.innerHTML = '<option value="">Status: any</option>' +
       DEVICE_STATUS_OPTIONS.map(function (o) {
         return '<option value="' + esc(o[0]) + '">' + esc(o[1]) + '</option>';
-      }).join('');
+      }).join('') +
+      '<option value="__attention">Needs attention (any)</option>';
   })();
   ['dev-filter-q', 'dev-filter-management-type', 'dev-filter-platform',
    'dev-filter-cred', 'dev-filter-telemetry', 'dev-filter-peer',
@@ -2159,20 +2303,183 @@
     await renderCreds(); refreshDevices();
   });
 
+  // ---- Overview: "Needs attention" band (worst-of-group rollups) --------
+  // Combined worst-of-group, per the Magnetic status-indicator guidance
+  // ("COMBINED status = worst-of-group (Overview fleet rollups)"): reuses
+  // the SAME deviceStatus()/statusDisplay() derivation the Devices table
+  // already renders from, and the SAME quarantine flag the Images catalog
+  // and image picker already read -- nothing new is computed here, only
+  // tallied. Offline (Inactive, a freshness modifier per spec) is
+  // deliberately not counted -- this band is real negative/severe/warning
+  // problems, not staleness.
+  var ATTENTION_LEVEL_RANK = { negative: 3, severe: 2, warning: 1 };
+  function overviewDeviceAttention(devs, devNow) {
+    var worst = null, count = 0;
+    devs.forEach(function (d) {
+      var st = deviceStatus(d, devNow);
+      var ratio = st.key === 'image-failed' ? imageFailedRatio(d) : undefined;
+      var lvl = statusDisplay(st, ratio).level;
+      if (!ATTENTION_LEVEL_RANK[lvl]) return;
+      count++;
+      if (!worst || ATTENTION_LEVEL_RANK[lvl] > ATTENTION_LEVEL_RANK[worst]) worst = lvl;
+    });
+    return { count: count, level: worst };
+  }
+  function overviewImageAttention(imgs) {
+    var count = imgs.filter(function (i) { return !!i.quarantined; }).length;
+    return { count: count, level: count ? 'negative' : null };
+  }
+  function attentionCardHTML(kind, level, count, label, hint) {
+    var icon = STATUS_ICONS[level] || STATUS_ICONS.inactive;
+    return '<button type="button" class="attention-card is-' + level + '" data-attn="' + kind + '">' +
+      '<svg aria-hidden="true"><use href="#' + icon + '"></use></svg>' +
+      '<span class="attention-text"><span class="attention-count">' + esc(count) +
+      '</span><span class="attention-label">' + esc(label) + '</span>' +
+      '<span class="attention-hint">' + esc(hint) + '</span></span></button>';
+  }
+  function renderOverviewAttention(devs, devNow, imgs) {
+    var devAttn = overviewDeviceAttention(devs, devNow);
+    var imgAttn = overviewImageAttention(imgs);
+    var cards = [];
+    if (devAttn.count) {
+      cards.push(attentionCardHTML('devices', devAttn.level, devAttn.count,
+        devAttn.count === 1 ? 'device needs attention' : 'devices need attention',
+        'View filtered devices'));
+    }
+    if (imgAttn.count) {
+      cards.push(attentionCardHTML('images', imgAttn.level, imgAttn.count,
+        imgAttn.count === 1 ? 'image quarantined' : 'images quarantined',
+        'View filtered images'));
+    }
+    if (!cards.length) {
+      cards.push('<div class="attention-card is-positive">' +
+        '<svg aria-hidden="true"><use href="#i-check-circle"></use></svg>' +
+        '<span class="attention-text"><span class="attention-label">All clear</span>' +
+        '<span class="attention-hint">No devices or images need attention.</span></span></div>');
+    }
+    document.getElementById('ov-attention').innerHTML = cards.join('');
+    var devBtn = document.querySelector('#ov-attention [data-attn="devices"]');
+    if (devBtn) devBtn.addEventListener('click', function () { goToDevicesFiltered('__attention'); });
+    var imgBtn = document.querySelector('#ov-attention [data-attn="images"]');
+    if (imgBtn) imgBtn.addEventListener('click', goToImagesFiltered);
+  }
+
+  // ---- Overview: aggregate Staging Boundary (fleet-wide) -----------------
+  // Spec: "Overview: fleet/image progress and exception context" -- this is
+  // the AGGREGATE instance of the six-step lifecycle (Task 8 covers the
+  // per-device/per-image instance). Every step is derived independently
+  // from /api/overview + /api/images + /api/devices, the same three
+  // endpoints already backing this page's other bands. A step this data
+  // cannot honestly answer renders 'na', never a guessed 'done'; a step
+  // with a real zero (nothing assigned yet, nothing staged yet) renders
+  // 'upcoming' rather than 'na', since that IS known, just not started.
+  function overviewBoundarySteps(ov, devs, devNow, imgs) {
+    // Nothing catalogued at all -- a genuine first-run/no-data state, not
+    // "in progress" or "failed" for anything downstream either.
+    if (!ov.images) return ['na', 'na', 'na', 'na', 'na', 'na'];
+    var catalogued = 'done';
+
+    var checked = imgs.filter(function (i) {
+      return i.hash_verification && i.hash_verification.state;
+    });
+    var mismatched = imgs.filter(function (i) {
+      return i.quarantined && i.hash_verification && i.hash_verification.state === 'mismatch';
+    });
+    var sourceChecked;
+    if (mismatched.length) {
+      sourceChecked = { state: 'failed', pillHtml: levelPillHTML('negative',
+        mismatched.length + (mismatched.length === 1 ? ' image quarantined' : ' images quarantined')) };
+    } else if (!checked.length) sourceChecked = 'na';
+    else if (checked.length >= imgs.length) sourceChecked = 'done';
+    else sourceChecked = 'current';
+
+    var assigned;
+    if (!ov.devices) assigned = 'na';
+    else if (!ov.assigned) assigned = 'upcoming';
+    else if (ov.assigned >= ov.devices) assigned = 'done';
+    else assigned = 'current';
+
+    // Placement/image-failed only -- NOT onboard-failed/undeploy-failed,
+    // which belong to the agent-deployment lifecycle, a different one from
+    // target-software staging (HANDOFF §2: "distinguish two different
+    // lifecycles"). The Devices "Needs attention" filter above deliberately
+    // spans both; this boundary stays scoped to staging only.
+    var placementFailed = devs.filter(function (d) { return deviceStatus(d, devNow).key === 'placement-failed'; });
+    var imageFailed = devs.filter(function (d) { return deviceStatus(d, devNow).key === 'image-failed'; });
+    var transferring;
+    if (placementFailed.length) {
+      transferring = { state: 'failed', pillHtml: levelPillHTML('negative',
+        placementFailed.length + ' placement failed') };
+    } else if (imageFailed.length) {
+      var ratio = ov.assigned ? imageFailed.length / ov.assigned : 0;
+      transferring = { state: 'failed', pillHtml: levelPillHTML(ratio >= 0.5 ? 'severe' : 'warning',
+        imageFailed.length + (imageFailed.length === 1 ? ' image failed' : ' images failed')) };
+    } else if (!ov.assigned) transferring = 'na';
+    else if (ov.staging_now) transferring = 'current';
+    else if (ov.staged >= ov.assigned) transferring = 'done';
+    // Assigned exists, nothing is actively transferring right now, yet not
+    // everything is staged either -- genuinely ambiguous (stalled? offline?
+    // never picked up the job?) with no signal here to say which, so 'na'
+    // rather than a guess in either direction.
+    else transferring = 'na';
+
+    // No distinct on-device post-transfer verification signal exists in
+    // this build, separate from the Cisco source check above and the final
+    // staged report below -- admitting that gap honestly (spec: "unknown
+    // ... stay explicit") beats inventing a proxy for it.
+    var verified = 'na';
+
+    var staged;
+    if (!ov.assigned) staged = 'na';
+    else if (ov.staged >= ov.assigned) staged = 'done';
+    else if (ov.staged > 0) staged = 'current';
+    else staged = 'upcoming';
+
+    return [catalogued, sourceChecked, assigned, transferring, verified, staged];
+  }
+  function renderOverviewBoundary(ov, devs, devNow, imgs) {
+    document.getElementById('ov-boundary').innerHTML =
+      stagingBoundaryHTML(overviewBoundarySteps(ov, devs, devNow, imgs));
+  }
+
   // ---- Overview ----
   async function refreshOverview() {
     // Telemetry export health is dashboard state, so it rides the Overview
     // refresh. Deliberately not awaited with the overview fetch: a slow or
     // unreachable collector must not delay the cards.
     refreshTelemetryHealth();
-    var r = await fetch('/api/overview'); if (!r.ok) return;
-    var ov = await r.json();
-    var cards = [['Images', ov.images], ['Devices', ov.devices],
-                 ['Staged', ov.staged], ['Staging now', ov.staging_now],
-                 ['Waiting for heartbeat', ov.awaiting_heartbeat || 0]];
+    // The attention band and the aggregate boundary need the same device/
+    // image rows Devices and Images already fetch -- Overview reads the
+    // same three existing endpoints, nothing server-side is new.
+    var results;
+    try {
+      results = await Promise.all(
+        [fetch('/api/overview'), fetch('/api/devices'), fetch('/api/images')]);
+    } catch (e) { return; }
+    var or_ = results[0], dr = results[1], ir = results[2];
+    if (!or_.ok) return;
+    var ov = await or_.json();
+    var dbody = dr.ok ? await dr.json() : { devices: [], now: Date.now() / 1000 };
+    var devs = dbody.devices || [];
+    var devNow = dbody.now || Date.now() / 1000;
+    var imgs = ir.ok ? ((await ir.json()).images || []) : [];
+
+    renderOverviewAttention(devs, devNow, imgs);
+    renderOverviewBoundary(ov, devs, devNow, imgs);
+
+    var devicesWord = ov.devices === 1 ? 'device' : 'devices';
+    var cards = [
+      { lbl: 'Images', num: ov.images },
+      { lbl: 'Devices', num: ov.devices },
+      { lbl: 'Assigned', num: ov.assigned, sub: 'of ' + ov.devices + ' ' + devicesWord },
+      { lbl: 'Staged', num: ov.staged, sub: 'of ' + ov.assigned + ' assigned' },
+      { lbl: 'Staging now', num: ov.staging_now, sub: 'of ' + ov.assigned + ' assigned' },
+      { lbl: 'Waiting for heartbeat', num: ov.awaiting_heartbeat || 0, sub: 'of ' + ov.devices + ' ' + devicesWord }
+    ];
     document.getElementById('ov-cards').innerHTML = cards.map(function (c) {
-      return '<div class="card"><div class="lbl">' + esc(c[0]) +
-        '</div><div class="num">' + esc(c[1]) + '</div></div>';
+      return '<div class="card"><div class="lbl">' + esc(c.lbl) +
+        '</div><div class="num">' + esc(c.num) + '</div>' +
+        (c.sub ? '<div class="sub">' + esc(c.sub) + '</div>' : '') + '</div>';
     }).join('');
     document.getElementById('ov-rows').innerHTML = (ov.rollout || []).map(function (x) {
       var pct = x.assigned ? Math.round(x.staged / x.assigned * 100) : 0;

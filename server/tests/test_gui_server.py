@@ -8404,3 +8404,172 @@ def test_reduced_motion_covers_more_than_the_two_drawers_and_shadows_are_tokeniz
     last_block = css.rsplit("@media (prefers-reduced-motion: reduce)", 1)[1]
     for selector in (".nav-rail", ".btn", ".chip", ".dropzone", ".progress .bar"):
         assert selector in last_block.split("}\n", 1)[0], selector
+
+
+# ---------------------------------------------------------------------------
+# Overview + Images hierarchy, Staging Boundary (facelift Task 7)
+# ---------------------------------------------------------------------------
+
+def test_staging_boundary_component_exists_and_ends_at_operator_control():
+    """Brief Step 1: the Staging Boundary is one shared component
+    (stagingBoundaryHTML(steps)), reused verbatim by Overview here and by
+    device/image detail contexts in Task 8. This is a pure source guard --
+    every named step of the lifecycle and the hatched terminus label must
+    exist as literal strings in app.js, regardless of how any one view
+    derives the states it feeds the component."""
+    js = _webroot("app.js")
+    assert "function stagingBoundaryHTML(" in js
+    for label in ('"Catalogued"', '"Source checked"', '"Assigned"',
+                  '"Transferring"', '"Verified"', '"Staged"', "Operator control"):
+        assert label in js, label
+
+
+def test_staging_boundary_step_states_are_css_backed():
+    """Brief Step 3: circles = done/current/upcoming/na CSS states, plus the
+    status-pill substitution for a failed step. Every state stagingBoundaryHTML
+    can render must have a real selector -- a typo'd class here would render
+    invisibly rather than fail loudly."""
+    js = _webroot("app.js")
+    fn = js.split("function boundaryMarkerHTML(state, pillHtml) {", 1)[1].split(
+        "\n  }", 1)[0]
+    for cls in ("boundary-circle is-done", "boundary-circle is-current",
+                "boundary-dot", "boundary-circle is-na", "boundary-circle is-upcoming",
+                "boundary-marker"):
+        assert cls in fn, cls
+    css = _webroot("styles.css")
+    for selector in (".boundary-circle.is-done", ".boundary-circle.is-current",
+                     ".boundary-dot", ".boundary-circle.is-na",
+                     ".boundary-circle.is-upcoming", ".boundary-marker",
+                     ".boundary-terminus", ".boundary-connector"):
+        assert selector in css, selector
+    # hatched terminus: repeating-linear-gradient on --surface-subtle, never
+    # a literal inline style= (CSP) -- the marker/step/terminus builders
+    # themselves emit no style= attribute anywhere.
+    assert "repeating-linear-gradient" in css
+    assert "style=" not in fn
+    assert "style=" not in js.split("function stagingBoundaryHTML(steps) {", 1)[1].split(
+        "\n  }", 1)[0]
+
+
+def test_overview_boundary_scoped_to_staging_lifecycle_not_agent_deployment():
+    """HANDOFF §2: IRIS agent deployment (onboard/undeploy) and target-
+    software staging are two different lifecycles. The Staging Boundary is
+    about the second one only -- its failed-step derivation must key off
+    placement-failed/image-failed, never onboard-failed/undeploy-failed."""
+    js = _webroot("app.js")
+    fn = js.split("function overviewBoundarySteps(ov, devs, devNow, imgs) {", 1)[1].split(
+        "\n  }", 1)[0]
+    assert "'placement-failed'" in fn
+    assert "'image-failed'" in fn
+    assert "'onboard-failed'" not in fn
+    assert "'undeploy-failed'" not in fn
+    # unknown/no-data collapses every step to 'na', never a guessed 'done'
+    assert "if (!ov.images) return ['na', 'na', 'na', 'na', 'na', 'na'];" in fn
+    # no distinct on-device post-transfer verification signal exists in this
+    # build -- admitted honestly as 'na', not inferred from a proxy
+    assert "var verified = 'na';" in fn
+
+
+def test_overview_needs_attention_is_worst_of_group_and_excludes_offline():
+    """Spec: "Overview rollups = combined worst-of-group". Offline is a
+    freshness modifier (Inactive), not a negative/severe/warning problem, so
+    it must never be tallied into this band."""
+    js = _webroot("app.js")
+    fn = js.split("function overviewDeviceAttention(devs, devNow) {", 1)[1].split(
+        "\n  }", 1)[0]
+    assert "ATTENTION_LEVEL_RANK" in fn
+    assert "deviceIsOffline" not in fn
+    rank = js.split("var ATTENTION_LEVEL_RANK = {", 1)[1].split("}", 1)[0]
+    assert "negative" in rank and "severe" in rank and "warning" in rank
+    assert "'positive'" not in rank and "'inactive'" not in rank and "'info'" not in rank
+    # the quarantine count feeds the images half of the same band
+    img_fn = js.split("function overviewImageAttention(imgs) {", 1)[1].split(
+        "\n  }", 1)[0]
+    assert "i.quarantined" in img_fn
+
+
+def test_devices_attention_filter_is_appended_not_added_to_the_status_options():
+    """'__attention' is a rollup over several deviceStatus() keys, not a
+    producible status of its own -- it must be appended to the rendered
+    <select>, never merged into DEVICE_STATUS_OPTIONS itself (that array is
+    exactly "every key deviceStatus() can produce",
+    test_every_status_the_cell_can_show_is_filterable enforces it)."""
+    js = _webroot("app.js")
+    options_literal = js.split("var DEVICE_STATUS_OPTIONS = [", 1)[1].split("];", 1)[0]
+    assert "__attention" not in options_literal
+    assert "'<option value=\"__attention\">Needs attention (any)</option>'" in js
+    filter_fn = js.split("function deviceMatchesFilters(d, f, devNow) {", 1)[1].split(
+        "\n  }", 1)[0]
+    assert "f.status === '__attention'" in filter_fn
+    assert "'negative'" in filter_fn and "'severe'" in filter_fn and "'warning'" in filter_fn
+
+
+def test_images_catalog_leads_with_filename_and_verdict_pill():
+    """Brief Step 5: catalog rows lead with the exact filename (.machine) +
+    Cisco source-verification verdict pill; image id stays adjacent
+    (.machine)."""
+    html = _webroot("index.html")
+    thead = html.split('id="images">', 1)[1].split("</thead>", 1)[0]
+    headers = [h.split("</th>")[0] for h in thead.split("<th>")[1:]]
+    assert headers[:3] == ["File", "Verification", "Image ID"], headers
+    js = _webroot("app.js")
+    fn = js.split("function renderImageRows() {", 1)[1].split(
+        "\n  document.getElementById('images-filter-attention')", 1)[0]
+    row = fn.split("return '<tr data-id=", 1)[1].split("}).join('')", 1)[0]
+    pill_idx = row.index("bulkhashVerdictPillHTML(")
+    # filename leads (the FIRST esc(i.id) is the data-id attribute, not a
+    # displayed column -- the id column's own esc(i.id) comes after the pill)
+    assert row.index("esc(i.filename") < pill_idx
+    assert "esc(i.id)" in row[pill_idx:]
+
+
+def test_images_needs_attention_toggle_filters_client_side_no_refetch():
+    """The "Needs attention only" toggle re-renders from LAST_IMAGES (the
+    already-fetched catalog), the same applyDeviceFilters()/renderDevices()
+    split Devices uses -- toggling it must never trigger a new /api/images
+    fetch."""
+    js = _webroot("app.js")
+    fn = js.split("function renderImageRows() {", 1)[1].split(
+        "\n  document.getElementById('images-filter-attention')", 1)[0]
+    # the filter + row-build itself, BEFORE the per-row click-handler wiring
+    # (the delete button's own handler legitimately calls fetch() for the
+    # DELETE request -- that is a click-time action, not part of re-render)
+    build = fn.split("document.querySelectorAll('#rows .del-img')", 1)[0]
+    assert "fetch(" not in build
+    assert "LAST_IMAGES.filter(" in build
+    assert "images-filter-attention" in fn
+    assert "'change', renderImageRows" in js
+
+
+def test_overview_fetches_devices_and_images_alongside_overview():
+    """The attention band and the aggregate boundary need per-device and
+    per-image rows Overview did not fetch before Task 7 -- all three
+    requests must be issued together (Promise.all), not serially, so the
+    dashboard is not three round trips slower than it used to be."""
+    js = _webroot("app.js")
+    fn = js.split("async function refreshOverview() {", 1)[1].split("\n  }", 1)[0]
+    assert "Promise.all(" in fn
+    assert "fetch('/api/overview')" in fn
+    assert "fetch('/api/devices')" in fn
+    assert "fetch('/api/images')" in fn
+    assert "renderOverviewAttention(" in fn
+    assert "renderOverviewBoundary(" in fn
+
+
+def test_overview_fleet_totals_carry_precise_denominators():
+    """Brief Step 4, band 3: fleet totals with precise denominators. Every
+    ratio card names what it is a fraction OF, not a bare count."""
+    js = _webroot("app.js")
+    fn = js.split("async function refreshOverview() {", 1)[1].split("\n  }", 1)[0]
+    assert "'Waiting for heartbeat'" in fn  # pinned card label, unchanged
+    for sub in ("'of ' + ov.devices", "'of ' + ov.assigned"):
+        assert sub in fn, sub
+
+
+def test_card_component_matches_spec_padding_radius_and_elevation():
+    """spec §4 card rules: 24px padding, --radius-card, --shadow-xs."""
+    css = _webroot("styles.css")
+    card_rule = css.split(".card {", 1)[1].split("}", 1)[0]
+    assert "padding:var(--sp-xl)" in card_rule
+    assert "border-radius:var(--radius-card)" in card_rule
+    assert "box-shadow:var(--shadow-xs)" in card_rule

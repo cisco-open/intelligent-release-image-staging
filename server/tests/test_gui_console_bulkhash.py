@@ -234,19 +234,24 @@ def test_images_table_has_a_verification_column():
 
 
 def test_verdict_badge_texts_match_the_binding_copy():
+    """Task 7: the verdict badge became a status PILL (bulkhashVerdictBadge
+    -> bulkhashVerdictPillHTML, levelPillHTML markup instead of .badge), but
+    it still owes the same verdict text. MISMATCH went from all-caps to
+    sentence case (Magnetic pill grammar: "sentence case ALL labels") --
+    that is a deliberate copy change, not a regression."""
     js = _read("app.js")
-    fn = js.split("function bulkhashVerdictBadge(hv, quarantined) {", 1)[1].split(
+    fn = js.split("function bulkhashVerdictPillHTML(hv, quarantined) {", 1)[1].split(
         "\n  }", 1)[0]
-    assert ">Verified<" in fn
-    assert "MISMATCH — quarantined" in fn
+    assert "'Verified'" in fn
+    assert "Mismatch — quarantined" in fn
     assert "Not in Cisco" in fn  # apostrophe escaped, don't pin the escaping style
-    assert ">Not checked<" in fn
+    assert "'Not checked'" in fn
     assert "Deferred by Cisco" in fn
 
 
 def test_null_verdict_state_reads_as_not_checked_not_hidden():
     js = _read("app.js")
-    fn = js.split("function bulkhashVerdictBadge(hv, quarantined) {", 1)[1].split(
+    fn = js.split("function bulkhashVerdictPillHTML(hv, quarantined) {", 1)[1].split(
         "\n  }", 1)[0]
     assert "if (!state) {" in fn
 
@@ -257,14 +262,14 @@ def test_mismatch_badge_ternary_keys_off_the_live_quarantined_flag():
     (quarantined=false, hash_verification.state still "mismatch" forever --
     release_quarantine() never rewrites it) must say "released" instead, or
     the badge lies about still blocking something it no longer blocks. A
-    regression that always renders "MISMATCH — quarantined" regardless of
+    regression that always renders "Mismatch — quarantined" regardless of
     the quarantined flag must fail this."""
     js = _read("app.js")
-    fn = js.split("function bulkhashVerdictBadge(hv, quarantined) {", 1)[1].split(
+    fn = js.split("function bulkhashVerdictPillHTML(hv, quarantined) {", 1)[1].split(
         "\n  }", 1)[0]
-    assert ("quarantined\n        ? '<span class=\"badge badge-fail\">"
-            "MISMATCH — quarantined</span>'\n        : "
-            "'<span class=\"badge badge-fail\">MISMATCH — released</span>'") in fn
+    assert ("quarantined\n        ? levelPillHTML('negative', "
+            "'Mismatch — quarantined')\n        : "
+            "levelPillHTML('negative', 'Mismatch — released')") in fn
 
 
 def test_not_in_feed_is_an_explicit_branch_with_a_neutral_unknown_fallback():
@@ -274,7 +279,7 @@ def test_not_in_feed_is_an_explicit_branch_with_a_neutral_unknown_fallback():
     an admitted-unknown, not be silently mislabeled as the specific,
     plausible-sounding "Not in Cisco's feed" verdict it may not actually be."""
     js = _read("app.js")
-    fn = js.split("function bulkhashVerdictBadge(hv, quarantined) {", 1)[1].split(
+    fn = js.split("function bulkhashVerdictPillHTML(hv, quarantined) {", 1)[1].split(
         "\n  }", 1)[0]
     assert "state === 'not_in_feed'" in fn
     assert "Unknown verification state" in fn
@@ -289,7 +294,7 @@ def test_not_in_feed_is_an_explicit_branch_with_a_neutral_unknown_fallback():
 
 def test_deferral_warning_is_additive_to_whatever_state_is_shown():
     js = _read("app.js")
-    fn = js.split("function bulkhashVerdictBadge(hv, quarantined) {", 1)[1].split(
+    fn = js.split("function bulkhashVerdictPillHTML(hv, quarantined) {", 1)[1].split(
         "\n  }", 1)[0]
     # the deferral branch appends to html rather than replacing it -- so it
     # can accompany verified/mismatch/not_in_feed alike
@@ -297,11 +302,15 @@ def test_deferral_warning_is_additive_to_whatever_state_is_shown():
     assert "hv.deferral" in fn
 
 
-def test_images_row_renders_the_badge_and_an_info_button():
+def test_images_row_renders_the_pill_and_an_info_button():
+    """Task 7: the catalog row renderer moved out of refreshImages() (now
+    fetch-only) into renderImageRows(), a pure client-side render off
+    LAST_IMAGES shared with the new "Needs attention only" toggle -- same
+    split applyDeviceFilters()/renderDevices() already use for Devices."""
     js = _read("app.js")
-    fn = js.split("async function refreshImages() {", 1)[1].split(
-        "\n  // ---- Image detail drawer", 1)[0]
-    assert "bulkhashVerdictBadge(i.hash_verification, i.quarantined)" in fn
+    fn = js.split("function renderImageRows() {", 1)[1].split(
+        "\n  document.getElementById('images-filter-attention')", 1)[0]
+    assert "bulkhashVerdictPillHTML(i.hash_verification, i.quarantined)" in fn
     assert "img-info" in fn
 
 

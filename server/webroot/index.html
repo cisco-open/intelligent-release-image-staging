@@ -41,6 +41,14 @@
     <symbol id="i-slash-circle" viewBox="0 0 256 256" fill="currentColor">
       <path d="M128,20A108,108,0,1,0,236,128,108.12,108.12,0,0,0,128,20Zm84,108a83.6,83.6,0,0,1-16.75,50.28L77.72,60.75A84,84,0,0,1,212,128ZM44,128A83.6,83.6,0,0,1,60.75,77.72L178.28,195.25A84,84,0,0,1,44,128Z"/>
     </symbol>
+    <!-- Bare checkmark (no circle) -- the completed-step marker inside the
+         Staging Boundary's own 16px CSS-bordered circle (Task 7). This is
+         exactly the checkmark sub-path already vendored above inside
+         i-check-circle, split out on its own: same MIT-licensed Phosphor
+         bold glyph, no new asset. -->
+    <symbol id="i-check" viewBox="0 0 256 256" fill="currentColor">
+      <path d="M176.49,95.51a12,12,0,0,1,0,17l-56,56a12,12,0,0,1-17,0l-24-24a12,12,0,1,1,17-17L112,143l47.51-47.52A12,12,0,0,1,176.49,95.51Z"/>
+    </symbol>
   </svg>
   <div class="product-bar">
     <button class="btn ghost icon" id="nav-toggle" aria-expanded="false" aria-label="Toggle navigation" title="Menu">☰</button>
@@ -95,51 +103,85 @@
         <div class="page-header">
           <h2 class="page-title">Network Overview <span id="telemetry-health" class="badge badge-queued" hidden></span></h2>
         </div>
-        <div class="cards" id="ov-cards"></div>
-        <h3>Rollout</h3>
-        <div class="table-scroll">
-        <table class="tbl" id="ov-rollout">
-          <thead><tr><th>Image</th><th>Assigned</th><th>Staged</th><th>Progress</th></tr></thead>
-          <tbody id="ov-rows"></tbody>
-        </table>
+        <!-- Band 1: worst-of-group rollups, clickable into a filtered
+             Devices/Images view (spec: "Overview rollups = combined
+             worst-of-group"). -->
+        <div class="ov-band">
+          <h3>Needs attention</h3>
+          <div class="attention-cards" id="ov-attention"></div>
+        </div>
+        <!-- Band 2: the Staging Boundary (fleet-wide instance) plus the
+             concrete in-progress-transfer evidence (the Rollout table) that
+             backs it. -->
+        <div class="ov-band">
+          <h3>Active staging</h3>
+          <div class="card"><div id="ov-boundary"></div></div>
+          <h3>Rollout</h3>
+          <div class="table-scroll">
+          <table class="tbl" id="ov-rollout">
+            <thead><tr><th>Image</th><th>Assigned</th><th>Staged</th><th>Progress</th></tr></thead>
+            <tbody id="ov-rows"></tbody>
+          </table>
+          </div>
+        </div>
+        <!-- Band 3: fleet totals, precise denominators. -->
+        <div class="ov-band">
+          <h3>Fleet totals</h3>
+          <div class="cards" id="ov-cards"></div>
         </div>
       </section>
       <section id="view-images" hidden>
         <div class="page-header">
           <h2 class="page-title">Images</h2>
         </div>
-        <div class="upload" id="drop">
-          <input type="file" id="file" accept=".bin,.SPA.bin" multiple hidden>
-          <p><button class="btn" id="pick">Choose files</button> or drag images here</p>
-          <div id="uploads"></div>
-          <div class="progress" id="prog" hidden role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Publish progress"><div class="bar" id="bar"></div></div>
-          <p class="muted" id="status" role="status" aria-live="polite"></p>
-        </div>
-        <p class="muted">Images copied onto the server under
-          <span class="machine">/opt/images</span> — including any subdirectory,
-          such as <span class="machine">/opt/images/iosxe/c9300/</span> or
-          <span class="machine">/opt/images/iosxr/</span> — are offered for import
-          below without uploading. Files ending in
-          <span class="machine">.bin</span>, <span class="machine">.iso</span>,
-          <span class="machine">.tar</span> or <span class="machine">.rpm</span> are
-          scanned. Set <span class="machine">IMAGES_ROOT</span> to scan a
-          different directory.</p>
-        <div id="import-panel" hidden>
-          <h3>Import from disk</h3>
-          <p class="muted">Images already present on this server that are not in the
-            catalog. They are published where they are — nothing is copied.</p>
-          <div class="table-scroll">
-          <table class="tbl" id="importable">
-            <thead><tr><th>File</th><th>Size</th><th>Path</th><th></th></tr></thead>
-            <tbody id="import-rows"></tbody>
-          </table>
+        <!-- Intake/publish work area: bounded cards, visually separated from
+             the catalog below (brief Step 5). -->
+        <div class="images-intake">
+          <div class="card">
+            <h3>Publish</h3>
+            <div class="upload" id="drop">
+              <input type="file" id="file" accept=".bin,.SPA.bin" multiple hidden>
+              <p><button class="btn" id="pick">Choose files</button> or drag images here</p>
+              <div id="uploads"></div>
+              <div class="progress" id="prog" hidden role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Publish progress"><div class="bar" id="bar"></div></div>
+              <p class="muted" id="status" role="status" aria-live="polite"></p>
+            </div>
+            <p class="muted">Images copied onto the server under
+              <span class="machine">/opt/images</span> — including any subdirectory,
+              such as <span class="machine">/opt/images/iosxe/c9300/</span> or
+              <span class="machine">/opt/images/iosxr/</span> — are offered for import
+              below without uploading. Files ending in
+              <span class="machine">.bin</span>, <span class="machine">.iso</span>,
+              <span class="machine">.tar</span> or <span class="machine">.rpm</span> are
+              scanned. Set <span class="machine">IMAGES_ROOT</span> to scan a
+              different directory.</p>
+          </div>
+          <div class="card" id="import-panel" hidden>
+            <h3>Import from disk</h3>
+            <p class="muted">Images already present on this server that are not in the
+              catalog. They are published where they are — nothing is copied.</p>
+            <div class="table-scroll">
+            <table class="tbl" id="importable">
+              <thead><tr><th>File</th><th>Size</th><th>Path</th><th></th></tr></thead>
+              <tbody id="import-rows"></tbody>
+            </table>
+            </div>
           </div>
         </div>
-        <div class="table-scroll">
-        <table class="tbl" id="images">
-          <thead><tr><th>Image ID</th><th>File</th><th>Size</th><th>SHA-256</th><th>Published</th><th>Verification</th><th></th></tr></thead>
-          <tbody id="rows"></tbody>
-        </table>
+        <!-- Catalog: filename + Cisco source-verification verdict lead each
+             row, image id stays adjacent (brief Step 5). -->
+        <div class="images-catalog">
+          <h3>Catalog</h3>
+          <div class="toolbar">
+            <span class="muted push" id="images-count"></span>
+            <label class="muted"><input type="checkbox" id="images-filter-attention"> Needs attention only</label>
+          </div>
+          <div class="table-scroll">
+          <table class="tbl" id="images">
+            <thead><tr><th>File</th><th>Verification</th><th>Image ID</th><th>Size</th><th>SHA-256</th><th>Published</th><th></th></tr></thead>
+            <tbody id="rows"></tbody>
+          </table>
+          </div>
         </div>
         <!-- Slides in from the RIGHT, like the deployment-details drawer --
              a panel to read alongside the table it was opened from, not a

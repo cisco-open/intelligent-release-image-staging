@@ -171,7 +171,10 @@ ALLOWLIST = [
      "peer_receipts key is dropped silently, not rejected (declared break 6)"),
 
     # -- Task 6: CSS property name, not the retired business term ------
-    ("server/webroot/styles.css", frozenset({425}),
+    # Line number moved from 425 (Task 6) to 491 when Task 7 inserted the
+    # Overview/Images/Staging-Boundary rules above it -- same property,
+    # re-pinned at its new location.
+    ("server/webroot/styles.css", frozenset({491}),
      "the CSS `background-attachment` property (Task 6's .table-scroll "
      "scroll-shadow gradients) -- unrelated to the retired attachment "
      "vocabulary, hard exclusion"),

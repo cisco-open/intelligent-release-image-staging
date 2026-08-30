@@ -125,9 +125,14 @@ select:focus-visible, textarea:focus-visible, button:focus-visible {
 .machine { font-family: var(--font-mono); }
 .log { background:#0b1626; color:#cfe3ff; font-family:var(--font-mono); font-size:12px; padding:12px; border-radius:8px; max-height:340px; overflow:auto; white-space:pre-wrap; }
 .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin:8px 0 20px; }
-.card { border:1px solid var(--rule); border-radius:8px; padding:14px; }
+/* Container card (spec §4: 24px padding, --radius-card, --shadow-xs -- the
+   "card=xs (Subtle)" elevation mapping). Reserved for summary/bounded
+   status, not the default wrapper around every section. */
+.card { background:var(--surface); border:1px solid var(--rule);
+  border-radius:var(--radius-card); padding:var(--sp-xl); box-shadow:var(--shadow-xs); }
 .card .lbl { font-size:11px; text-transform:uppercase; letter-spacing:.4px; color:var(--text-secondary); }
 .card .num { font-size:30px; font-weight:300; color:var(--action); line-height:1.2; }
+.card .sub { font-size:11px; color:var(--text-secondary); margin-top:2px; }
 .pbar { height:8px; background:var(--rule); border-radius:5px; overflow:hidden; min-width:80px; }
 .pbar > span { display:block; height:100%; background:var(--success); }
 .inline-form:not([hidden]) { display:flex; flex-wrap:wrap; gap:8px; align-items:center; background:var(--surface-subtle); border:1px solid var(--rule); border-radius:8px; padding:12px; margin:0 0 16px; }
@@ -181,6 +186,67 @@ select:focus-visible, textarea:focus-visible, button:focus-visible {
 .status-pill.is-info     { background: var(--info-tint); color: var(--info); }
 .status-pill.is-inactive { background: var(--inactive-tint); color: var(--inactive); }
 .status-pill.is-disabled { background: var(--inactive-tint); color: var(--inactive); }
+
+/* Overview bands (Task 7): attention first, active staging second, fleet
+   totals third -- each its own vertical section, 24px between sections
+   (spec §4 spacing scale). */
+.ov-band { margin:0 0 var(--sp-xl); }
+.ov-band h3:first-child { margin-top:0; }
+/* "Needs attention": clickable worst-of-group rollup cards. A real <button>
+   when it routes somewhere (Devices/Images, filtered); a plain <div> for
+   the all-clear state, which has nowhere useful to send a click. */
+.attention-cards { display:flex; flex-wrap:wrap; gap:12px; margin:8px 0 0; }
+.attention-card { display:flex; align-items:center; gap:12px; text-align:left;
+  background:var(--surface); border:1px solid var(--rule); border-radius:var(--radius-card);
+  padding:12px 16px; box-shadow:var(--shadow-xs); font:inherit; color:inherit;
+  min-width:220px; }
+button.attention-card { cursor:pointer; transition:box-shadow .12s ease, transform .06s ease; }
+button.attention-card:hover { box-shadow:var(--shadow-sm); }
+button.attention-card:active { transform:translateY(1px); }
+button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring); }
+.attention-card svg { width:22px; height:22px; flex:none; }
+.attention-text { display:flex; flex-direction:column; }
+.attention-card.is-negative svg { color:var(--danger); }
+.attention-card.is-severe svg { color:var(--severe); }
+.attention-card.is-warning svg { color:var(--warning); }
+.attention-card.is-positive svg { color:var(--action-active); }
+.attention-count { display:block; font-family:var(--font-display); font-size:20px;
+  font-weight:700; line-height:1.2; color:var(--text-heading); }
+.attention-label { display:block; font-size:13px; color:var(--text-body); }
+.attention-hint { display:block; font-size:11px; color:var(--text-secondary); margin-top:2px; }
+
+/* Staging Boundary (spec §4 "Signature: Staging Boundary" -- the one
+   intentional IRIS signature). Horizontal stepper: 16px circles + neutral
+   connectors, a failed step shows the status pill in place of its circle,
+   never a falsely-linear "done". Ends at a hatched, explicitly non-IRIS
+   "Operator control" terminus -- installation/activation/reload stay with
+   the operator. No glow, no particles. */
+.staging-boundary { display:flex; align-items:flex-start; flex-wrap:wrap; }
+.boundary-step { display:flex; flex-direction:column; align-items:center; gap:6px;
+  width:92px; text-align:center; }
+.boundary-connector { flex:1 1 16px; min-width:12px; height:1px; background:var(--rule);
+  margin-top:7px; }
+.boundary-circle { width:16px; height:16px; border-radius:9999px; box-sizing:border-box;
+  display:inline-flex; align-items:center; justify-content:center; }
+.boundary-circle.is-done { border:2px solid var(--action); color:var(--action); }
+.boundary-circle.is-done svg { width:12px; height:12px; }
+.boundary-circle.is-current { background:var(--action); }
+.boundary-dot { width:6px; height:6px; border-radius:9999px; background:#fff; }
+.boundary-circle.is-upcoming { border:2px solid var(--border); }
+.boundary-circle.is-na { border:2px dashed var(--border); }
+.boundary-marker svg { width:16px; height:16px; }
+.boundary-label { font-size:12px; line-height:18px; color:var(--text-secondary); }
+.boundary-terminus { display:flex; align-items:center; justify-content:center;
+  padding:0 14px; min-height:16px; border-radius:var(--radius-control);
+  background-image: repeating-linear-gradient(45deg, var(--rule), var(--rule) 4px,
+    var(--surface-subtle) 4px, var(--surface-subtle) 8px); }
+.boundary-terminus-label { font-size:12px; line-height:18px; font-weight:600;
+  color:var(--text-secondary); white-space:nowrap; }
+
+/* Images: intake/publish work area, visually separated (bounded cards) from
+   the catalog table below it (Task 7 Step 5). */
+.images-intake { display:flex; flex-direction:column; gap:16px; margin:0 0 24px; }
+.images-intake h3:first-child { margin-top:0; }
 /* Icon sprite (Phosphor bold symbols, index.html): defines but never paints
    -- CSP forbids a literal style= attribute, so it's hidden by class
    instead of the usual inline 0x0/absolute trick. */
