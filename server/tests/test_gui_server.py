@@ -6642,17 +6642,24 @@ def test_undeploy_force_help_and_confirm_text_cover_xr_alongside_router():
     router/IOx wording, what force actually does on an IOS-XR device --
     strips only the IRIS-named appmgr footprint (app `iris`, source
     `iris-xr`, the RPM, iris-work/, sidecar files) and never a staged image
-    file or a file the agent did not itself download. Pinned as one
-    whitespace-collapsed sentence so re-wrapped HTML indentation can't dodge
-    the assertion, and the pre-existing router/IOx sentences are pinned
-    alongside it so neither text loses its wording when the other changes."""
+    file -- with the carve-out honestly stated too: the agent (not IRIS
+    teardown) deletes an adopted file when the catalog republishes new
+    content under that same image id, per
+    test_content_republish_on_an_adopted_file_warns_before_replacing_it in
+    device/agent/tests/test_iris_agent.py -- a claim that "a file the agent
+    did not itself download is never removed" would overclaim against that
+    tested behavior. Pinned as one whitespace-collapsed sentence so
+    re-wrapped HTML indentation can't dodge the assertion, and the
+    pre-existing router/IOx sentences are pinned alongside it so neither
+    text loses its wording when the other changes."""
     xr_sentence = (
         "On an IOS-XR device, force removes the same IRIS-named footprint "
         "a normal undeploy would — the appmgr application iris, its "
         "iris-xr package source, the RPM, iris-work/, and the IRIS sidecar "
         "files at harddisk: root — but a staged image file there is never "
-        "removed by IRIS teardown, and a file the agent did not itself "
-        "download is never removed by the agent.")
+        "removed by IRIS teardown, and the agent deletes an adopted file "
+        "only when the catalog republishes new content under that same "
+        "image id — never otherwise.")
 
     with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
         html = f.read()
