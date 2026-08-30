@@ -2338,13 +2338,14 @@
     var rows = [
       ['Version', s.version],
       ['Admin', s.admin_username],
-      ['Host IP', s.host_ip || '(unset)'],
+      ['Host IP', s.host_ip || '(unset)', 'machine'],
       ['Ports', 'tracker ' + s.ports.tracker + ' · catalog ' + s.ports.catalog +
                 ' · artifacts ' + s.ports.artifacts + ' · swarm ' + s.ports.swarm +
                 ' · console ' + s.ports.console]
     ];
     document.querySelector('#settings-info tbody').innerHTML = rows.map(function (kv) {
-      return '<tr><td class="muted">' + esc(kv[0]) + '</td><td>' + esc(kv[1]) + '</td></tr>';
+      return '<tr><td class="muted">' + esc(kv[0]) + '</td><td' +
+        (kv[2] ? ' class="' + kv[2] + '"' : '') + '>' + esc(kv[1]) + '</td></tr>';
     }).join('');
     document.getElementById('sessions-info').textContent =
       s.sessions.active + ' active session(s); idle timeout ' +

@@ -8143,8 +8143,14 @@ def test_stylesheet_defines_the_magnetic_token_layer():
 def test_rainbow_stripe_is_retired():
     css = _webroot("styles.css")
     assert "linear-gradient(90deg,#00bceb" not in css
-    html = _webroot("index.html")
-    assert "stripe" not in html  # no orphaned class hook either
+    # Every page in webroot shares this stylesheet, so an orphaned
+    # class="stripe" hook can survive in any of them, not just index.html --
+    # check them all, not just the page most people think to look at.
+    html_names = sorted(
+        n for n in os.listdir(gui_server.WEBROOT) if n.endswith(".html"))
+    assert html_names, "no .html files found under WEBROOT"
+    for name in html_names:
+        assert 'class="stripe"' not in _webroot(name), name
 
 
 def test_machine_class_replaces_blanket_table_monospace():
