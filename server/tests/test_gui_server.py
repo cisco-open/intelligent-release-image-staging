@@ -2326,6 +2326,68 @@ def test_plan_refuses_xr_appmgr_platform_without_xr_host_attachment(tmp_path):
         stop()
 
 
+def test_plan_ignores_the_network_attachment_alias_and_falls_to_legacy_routed(tmp_path):
+    """gui_server._plan reads management_type off the RAW fleet device
+    (gui_server.py:739), a site the Task 2 eleven-site atomic rename did not
+    cover -- that list was the 'resolved' dict's own writers/readers, not
+    this earlier raw-record read. A fleet.json row still carrying only the
+    retired network_attachment alias (never re-saved since before the
+    rename) is no longer interpreted at all here: it plans exactly like a
+    truly unclassified row -- legacy_routed coerced to 'routed' -- even when
+    the alias claims 'inband' and a stale inband_vlan sits on the row. The
+    stale inband_vlan is echoed back verbatim in the resolved dict (every
+    raw XE field is, regardless of management_type -- pre-existing,
+    unrelated behavior), but the row does NOT plan AS inband: management_type
+    reads 'routed', and the fields that a real inband/routed classification
+    would have populated (iris_vlan/svi_ip) stay empty because nothing in
+    the raw row ever set them."""
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, _cat = deps
+    try:
+        with open(fleet.path, "w") as stream:
+            json.dump({"revision": 1, "devices": {"d1": {
+                "device_id": "d1", "device_ip": "10.0.0.1", "platform": "guestshell",
+                "network_attachment": "inband", "inband_vlan": "120",
+                "registered_at": 1000,
+            }}}, stream)
+        ck, _csrf = _auth(host, port)
+        status, _, body = _req(host, port, "GET", "/api/devices/d1/plan",
+                               headers={"Cookie": ck})
+        assert status == 200, body
+        resolved = json.loads(body)["plan"]["resolved"]
+        assert resolved["management_type"] == "routed"     # not 'inband'
+        assert resolved["iris_vlan"] == "" and resolved["svi_ip"] == ""
+    finally:
+        stop()
+
+
+def test_plan_refuses_xr_appmgr_platform_on_a_network_attachment_alias_only_row(tmp_path):
+    """Same alias-retirement boundary, the xr-appmgr side: a row whose only
+    hint of xr-host is the retired network_attachment alias, with platform
+    explicitly xr-appmgr, still resolves management_type via the alias-free
+    path (legacy_routed -> 'routed'), so the xr-host<->xr-appmgr mutual gate
+    (gui_server.py:769) fires exactly as it would for any other alias-blind
+    xr-appmgr row: a clean 409, not a silent xr-host plan and not a 500."""
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, _cat = deps
+    try:
+        with open(fleet.path, "w") as stream:
+            json.dump({"revision": 1, "devices": {"xr1": {
+                "device_id": "xr1", "device_ip": "10.0.0.9",
+                "network_attachment": "xr-host", "platform": "xr-appmgr",
+                "model": "8201", "registered_at": 1000,
+            }}}, stream)
+        ck, _csrf = _auth(host, port)
+        status, _, body = _req(host, port, "GET", "/api/devices/xr1/plan",
+                               headers={"Cookie": ck})
+        assert status == 409, body
+        assert json.loads(body)["error"] == (
+            "platform xr-appmgr requires management_type xr-host "
+            "(the two are mutually required)")
+    finally:
+        stop()
+
+
 def test_owned_resources_for_xr_host_matches_the_uninstall_recipe(tmp_path):
     """_owned_resources must claim exactly what device/xr-uninstall.sh
     actually removes: the appmgr application, its registered package

@@ -736,13 +736,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
 
         def _plan(self, device_id, device):
             """Resolve immutable, non-secret installer input before token minting."""
-            attachment = device.get("management_type",
-                                    device.get("network_attachment", "legacy_routed"))
+            attachment = device.get("management_type", "legacy_routed")
             if attachment == "legacy_routed":
                 attachment = "routed"
             if attachment not in ("routed", "inband", "router-routed", "router-nat",
                                   "xr-host"):
-                raise ValueError("unknown network attachment")
+                raise ValueError("unknown management type")
             platform = gui_onboard.resolve_platform(device)
             router_attachment = attachment in ("router-routed", "router-nat")
             if device.get("model") and re.match(
