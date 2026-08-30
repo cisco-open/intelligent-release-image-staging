@@ -42,8 +42,9 @@
       <path d="M128,20A108,108,0,1,0,236,128,108.12,108.12,0,0,0,128,20Zm84,108a83.6,83.6,0,0,1-16.75,50.28L77.72,60.75A84,84,0,0,1,212,128ZM44,128A83.6,83.6,0,0,1,60.75,77.72L178.28,195.25A84,84,0,0,1,44,128Z"/>
     </symbol>
   </svg>
-  <div class="top">
-    <span>◈ Intelligent Release &amp; Image Staging <span class="tag">IRIS</span></span>
+  <div class="product-bar">
+    <span class="product-name">◈ Intelligent Release &amp; Image Staging <span class="tag">IRIS</span></span>
+    <span class="product-suite">Console</span>
     <span class="spacer"></span>
     <span class="who" id="who"></span>
     <div class="menu-wrap">
@@ -62,7 +63,7 @@
     <button class="btn ghost" id="logout">Sign out</button>
   </div>
   <div class="shell">
-    <nav class="side">
+    <nav class="nav-rail">
       <a href="#overview" class="nav" id="nav-overview">Overview</a>
       <a href="#images" class="nav" id="nav-images">Images</a>
       <a href="#devices" class="nav" id="nav-devices">Devices</a>
@@ -90,7 +91,9 @@
         <button class="linkish" id="setup-nudge-dismiss">dismiss</button>
       </div>
       <section id="view-overview" hidden>
-        <h2>Network Overview <span id="telemetry-health" class="badge badge-queued" hidden></span></h2>
+        <div class="page-header">
+          <h2 class="page-title">Network Overview <span id="telemetry-health" class="badge badge-queued" hidden></span></h2>
+        </div>
         <div class="cards" id="ov-cards"></div>
         <h3>Rollout</h3>
         <table class="tbl" id="ov-rollout">
@@ -99,7 +102,9 @@
         </table>
       </section>
       <section id="view-images" hidden>
-        <h2>Images</h2>
+        <div class="page-header">
+          <h2 class="page-title">Images</h2>
+        </div>
         <div class="upload" id="drop">
           <input type="file" id="file" accept=".bin,.SPA.bin" multiple hidden>
           <p><button class="btn" id="pick">Choose files</button> or drag images here</p>
@@ -160,7 +165,9 @@
         </div>
       </section>
       <section id="view-devices" hidden>
-        <h2>Devices</h2>
+        <div class="page-header">
+          <h2 class="page-title">Devices</h2>
+        </div>
         <div class="toolbar">
           <button class="btn" id="add-dev">+ Add device</button>
           <span class="sep"></span>
@@ -362,14 +369,18 @@
         <div id="onboard-logs"></div>
       </section>
       <section id="view-swarm" hidden>
-        <h2>Swarm</h2>
+        <div class="page-header">
+          <h2 class="page-title">Swarm</h2>
+        </div>
         <p class="muted" id="swarm-summary"></p>
         <p class="legacy-warning" id="legacy-peer-warning" hidden></p>
         <iframe id="swarm-frame" class="swarm-frame" title="Live swarm map"></iframe>
         <p><a class="btn ghost" id="swarm-open" target="_blank" rel="noopener">Open the swarm map full-screen ↗</a></p>
       </section>
       <section id="view-setup" hidden>
-        <h2>Finish setting up this server</h2>
+        <div class="page-header">
+          <h2 class="page-title">Finish setting up this server</h2>
+        </div>
         <p class="muted" id="wz-progress"></p>
         <div id="wz-steplist" role="list"></div>
 
@@ -420,7 +431,9 @@
         </div>
       </section>
       <section id="view-settings" hidden>
-        <h2>Settings</h2>
+        <div class="page-header">
+          <h2 class="page-title">Settings</h2>
+        </div>
         <div id="settings-pane-setup" hidden>
           <p class="muted">Four things to complete after installing a server.
             They can be done in any order, and this page keeps reporting their
@@ -621,7 +634,9 @@
         </div>
       </section>
       <section id="view-monitoring" hidden>
-        <h2>Monitoring</h2>
+        <div class="page-header">
+          <h2 class="page-title">Monitoring</h2>
+        </div>
         <div id="monitoring-pane-audit">
         <h3>Audit trail (90-day circular)</h3>
         <div class="toolbar">

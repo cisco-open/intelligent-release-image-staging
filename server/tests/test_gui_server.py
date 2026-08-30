@@ -505,7 +505,7 @@ def test_settings_uses_sidebar_feature_submenus():
     revealed only while a settings sub-page is active."""
     with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
         html = f.read()
-    side = html.split('<nav class="side">')[1].split("</nav>")[0]
+    side = html.split('<nav class="nav-rail">')[1].split("</nav>")[0]
     # the sub-menu container starts hidden (revealed by the router) and holds
     # one deep-linkable entry per feature sub-page
     assert 'id="settings-submenu" hidden' in side
