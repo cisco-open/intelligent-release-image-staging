@@ -16,6 +16,14 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
+@test "stale NETWORK_ATTACHMENT without MANAGEMENT_TYPE aborts; a normal env is unaffected" {
+  run env -u MANAGEMENT_TYPE NETWORK_ATTACHMENT=inband bash "$UNINSTALL" --dry-run
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"NETWORK_ATTACHMENT was renamed to MANAGEMENT_TYPE"* ]] || return 1
+  run bash "$UNINSTALL" --dry-run
+  [ "$status" -eq 0 ]
+}
+
 @test "dry-run tears the app down stop -> deactivate -> uninstall" {
   run bash "$UNINSTALL" --dry-run
   [[ "$output" == *"app-hosting stop appid iris"* ]] && \

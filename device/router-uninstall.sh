@@ -10,6 +10,10 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
+if [ -n "${NETWORK_ATTACHMENT:-}" ] && [ -z "${MANAGEMENT_TYPE:-}" ]; then
+  echo "ERROR: NETWORK_ATTACHMENT was renamed to MANAGEMENT_TYPE; refusing to fall back to the routed default" >&2
+  exit 1
+fi
 MANAGEMENT_TYPE="${MANAGEMENT_TYPE:-router-routed}"
 VPG_NUMBER="${VPG_NUMBER:-}"
 NAT_INTERFACE="${NAT_INTERFACE:-}"

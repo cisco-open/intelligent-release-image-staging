@@ -51,6 +51,10 @@ DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
 # verify clean (the verify greps for this exact VLAN). Platform selection is
 # the CALLER's job now (OnboardService routes IOx to device/iox/uninstall.sh),
 # so this script no longer refuses by model.
+if [ -n "${NETWORK_ATTACHMENT:-}" ] && [ -z "${MANAGEMENT_TYPE:-}" ]; then
+  echo "ERROR: NETWORK_ATTACHMENT was renamed to MANAGEMENT_TYPE; refusing to fall back to the routed default" >&2
+  exit 1
+fi
 MANAGEMENT_TYPE="${MANAGEMENT_TYPE:-routed}"
 VLAN_IN="${VLAN:-${INBAND_VLAN:-}}"
 VLAN="${VLAN_IN:-666}"

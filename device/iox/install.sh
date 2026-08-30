@@ -46,6 +46,10 @@ fi
 # SVI (IOS_SSH_HOST) for its plain-copy placement. The AppGig trunk is the one inband
 # touch: IRIS ADDs the inband VLAN to its allowed list (additive only, never
 # replaced, never removed on uninstall).
+if [ -n "${NETWORK_ATTACHMENT:-}" ] && [ -z "${MANAGEMENT_TYPE:-}" ]; then
+  echo "ERROR: NETWORK_ATTACHMENT was renamed to MANAGEMENT_TYPE; refusing to fall back to the routed default" >&2
+  exit 1
+fi
 MANAGEMENT_TYPE="${MANAGEMENT_TYPE:-routed}"
 case "$MANAGEMENT_TYPE" in
   routed)

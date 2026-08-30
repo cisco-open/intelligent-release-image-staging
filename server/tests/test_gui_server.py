@@ -2366,8 +2366,27 @@ def test_owned_resources_raises_without_management_type(tmp_path):
     app = gui_app.GuiApp(secrets_path)
     srv = gui_server.make_server("127.0.0.1", 0, app, certfile=None)
     try:
-        with pytest.raises(KeyError):
+        with pytest.raises(KeyError, match="management_type"):
             srv.RequestHandlerClass._owned_resources({})
+    finally:
+        srv.server_close()
+
+
+def test_router_teardown_resolved_raises_without_management_type(tmp_path):
+    """Task 2 fix-wave (Minor 5): unlike the other eight reader sites, the
+    three management_type reads inside _router_teardown_resolved sit behind
+    an except ValueError in the undeploy route (gui_server.py:3084-3098),
+    which marks the receipt needs-reconcile and answers a clean 409. A bare
+    KeyError there would escape as an unhandled 500 instead -- so this one
+    function raises ValueError, not KeyError, on a resolved dict missing the
+    key."""
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path)
+    srv = gui_server.make_server("127.0.0.1", 0, app, certfile=None)
+    try:
+        with pytest.raises(ValueError, match="management_type"):
+            srv.RequestHandlerClass._router_teardown_resolved(
+                {"resolved": {"platform": "router"}})
     finally:
         srv.server_close()
 
@@ -6987,17 +7006,24 @@ def test_deploy_info_panel_hides_meaningless_rows_and_labels_xr_host():
         js = f.read()
     fn = js.split("function deployReceiptRows(rec, total) {", 1)[1].split(
         "\n  }", 1)[0]
+    # Pins the DATA KEY, not just the rendered label: a reader still keyed
+    # off the retired res.attachment would read undefined for every device
+    # (deployment_receipts never wrote res.attachment) and this whole test
+    # would stay green testing a dead code path -- Task 2's fix-wave gap.
+    assert "res.management_type" in fn
+    assert "res.attachment" not in fn
     assert "var xrHost = attach === 'xr-host';" in fn
     assert "'XR host'" in fn
     assert "if (!xrHost) {" in fn
     guarded = fn.split("if (!xrHost) {", 1)[1].split("}", 1)[0]
     for row in ("Management VLAN / VPG", "SVI", "App IP", "NAT interface"):
         assert row in guarded, "%r must be inside the !xrHost guard" % row
-    # State/Receipt/Planned/Finished/Preflight/Attachment stay unconditional
-    # (every receipt has them); so do Swarm port/Model/Agent install/Device
-    # identity, which are outside the guard, after it closes
+    # State/Receipt/Planned/Finished/Preflight/Management type stay
+    # unconditional (every receipt has them); so do Swarm port/Model/Agent
+    # install/Device identity, which are outside the guard, after it closes
     unguarded = fn.split("if (!xrHost) {", 1)[0]
-    for row in ("State", "Receipt", "Planned", "Finished", "Preflight", "Attachment"):
+    for row in ("State", "Receipt", "Planned", "Finished", "Preflight",
+                "Management type"):
         assert row in unguarded
     after_guard = fn.split("if (!xrHost) {", 1)[1].split("}", 1)[1]
     for row in ("Swarm port", "Model", "Agent install", "Device identity"):

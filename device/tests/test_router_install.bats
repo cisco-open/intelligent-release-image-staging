@@ -12,6 +12,14 @@ setup() {
     APP_IP=10.8.0.2 APP_MASK=255.255.255.252 APP_GATEWAY=10.8.0.1
 }
 
+@test "stale NETWORK_ATTACHMENT without MANAGEMENT_TYPE aborts; a normal env is unaffected" {
+  run env -u MANAGEMENT_TYPE NETWORK_ATTACHMENT=router-routed bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"NETWORK_ATTACHMENT was renamed to MANAGEMENT_TYPE"* ]] || return 1
+  run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ]
+}
+
 @test "router-routed renders a VPG Guest Shell attachment" {
   run bash "$INSTALL" --dry-run
   [ "$status" -eq 0 ]

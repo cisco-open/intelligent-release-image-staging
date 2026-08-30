@@ -14,6 +14,10 @@ set -euo pipefail
 : "${VPG_NUMBER:?set VPG_NUMBER}"; : "${APP_IP:?set APP_IP}"
 : "${APP_MASK:?set APP_MASK}"; : "${APP_GATEWAY:?set APP_GATEWAY}"
 
+if [ -n "${NETWORK_ATTACHMENT:-}" ] && [ -z "${MANAGEMENT_TYPE:-}" ]; then
+  echo "ERROR: NETWORK_ATTACHMENT was renamed to MANAGEMENT_TYPE; refusing to fall back to the routed default" >&2
+  exit 1
+fi
 MANAGEMENT_TYPE="${MANAGEMENT_TYPE:-router-routed}"
 case "$MANAGEMENT_TYPE" in
   router-routed) NAT_INTERFACE="" ;;

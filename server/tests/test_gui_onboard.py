@@ -327,7 +327,7 @@ def test_build_env_raises_without_management_type():
     svc = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
                                      run_fn=lambda p, e, on: 0,
                                      mint_fn=lambda d: "TOK")
-    with pytest.raises(KeyError):
+    with pytest.raises(KeyError, match="management_type"):
         svc._build_env("d1")
 
 
@@ -1442,7 +1442,7 @@ def test_apply_router_preflight_raises_without_management_type():
                 "app_mask": "255.255.255.252", "app_gateway": "10.8.0.1",
                 "nat_interface": "Gi1", "swarm_port": "6881"}
     evidence = {"status": "passed", "device_identity": "9ABC123"}
-    with pytest.raises(KeyError):
+    with pytest.raises(KeyError, match="management_type"):
         gui_onboard.apply_router_preflight(resolved, evidence)
 
 

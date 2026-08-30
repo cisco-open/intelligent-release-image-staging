@@ -31,6 +31,10 @@ set -euo pipefail
 : "${DEVICE_IP:?set DEVICE_IP}"
 : "${CATALOG_URL:?set CATALOG_URL}"; : "${CATALOG_TOKEN:?set CATALOG_TOKEN}"
 : "${DEVICE_ID:?set DEVICE_ID}"; : "${STAGE_HOST:?set STAGE_HOST}"
+if [ -n "${NETWORK_ATTACHMENT:-}" ] && [ -z "${MANAGEMENT_TYPE:-}" ]; then
+  echo "ERROR: NETWORK_ATTACHMENT was renamed to MANAGEMENT_TYPE; refusing to fall back to the routed default" >&2
+  exit 1
+fi
 MANAGEMENT_TYPE="${MANAGEMENT_TYPE:-routed}"
 case "$MANAGEMENT_TYPE" in
   routed)

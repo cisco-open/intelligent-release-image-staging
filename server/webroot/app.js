@@ -789,7 +789,7 @@
     var res = rec.resolved || {};
     var ts = rec.timestamps || {};
     var pf = rec.preflight || {};
-    var attach = res.attachment || '';
+    var attach = res.management_type || '';
     // xr-host carries none of the four addressing rows below -- the
     // appmgr container runs on the router's own network stack -- so they
     // are dropped from the table entirely rather than shown as dashes,
@@ -813,7 +813,7 @@
       ['Planned', esc(fmtDate(ts.planned_at) || '—')],
       ['Finished', esc(fmtDate(ts.finished_at) || '—')],
       ['Preflight', esc(pf.status || '—')],
-      ['Attachment', esc(attachLabel || '—')]
+      ['Management type', esc(attachLabel || '—')]
     ];
     if (!xrHost) {
       pairs.push(

@@ -10,6 +10,14 @@ setup() {
     APP_IP=10.8.0.2
 }
 
+@test "stale NETWORK_ATTACHMENT without MANAGEMENT_TYPE aborts; a normal env is unaffected" {
+  run env -u MANAGEMENT_TYPE NETWORK_ATTACHMENT=router-routed bash "$UNINSTALL" --dry-run
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"NETWORK_ATTACHMENT was renamed to MANAGEMENT_TYPE"* ]] || return 1
+  run bash "$UNINSTALL" --dry-run
+  [ "$status" -eq 0 ]
+}
+
 @test "router-routed teardown removes only the VPG app footprint" {
   run bash "$UNINSTALL" --dry-run
   [ "$status" -eq 0 ]

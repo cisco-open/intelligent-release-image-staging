@@ -921,6 +921,13 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             resolved = dict(receipt.get("resolved") or {})
             if resolved.get("platform") != "router":
                 return resolved
+            # A raw KeyError here would escape do_POST as an unhandled 500
+            # instead of the clean 409 + needs-reconcile transition the
+            # caller's except ValueError expects (gui_server.py:3084-3098) --
+            # so every management_type read below this point is guaranteed
+            # safe by this one explicit, idiomatic raise.
+            if "management_type" not in resolved:
+                raise ValueError("plan is missing management_type")
             required = {"virtualportgroup", "eem-applets", "agent-files",
                         "logging-discriminator", "pki-trustpoint",
                         "http-client-trustpoint", "iox-global",

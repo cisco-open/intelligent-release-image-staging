@@ -24,6 +24,14 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
+@test "stale NETWORK_ATTACHMENT without MANAGEMENT_TYPE aborts; a normal env is unaffected" {
+  run env -u MANAGEMENT_TYPE NETWORK_ATTACHMENT=inband bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"NETWORK_ATTACHMENT was renamed to MANAGEMENT_TYPE"* ]] || return 1
+  run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ]
+}
+
 @test "dry-run emits iox" {
   run bash "$INSTALL" --dry-run
   [[ "$output" == *"iox"* ]]

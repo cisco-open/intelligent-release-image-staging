@@ -40,6 +40,10 @@ DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
 # VLAN_IN preserves whether a VLAN was actually supplied; the 666 default is
 # ONLY for --dry-run text. A real run re-requires a non-empty VLAN below, so we
 # never tear down the wrong SVI/VLAN and then falsely verify clean.
+if [ -n "${NETWORK_ATTACHMENT:-}" ] && [ -z "${MANAGEMENT_TYPE:-}" ]; then
+  echo "ERROR: NETWORK_ATTACHMENT was renamed to MANAGEMENT_TYPE; refusing to fall back to the routed default" >&2
+  exit 1
+fi
 MANAGEMENT_TYPE="${MANAGEMENT_TYPE:-routed}"
 VLAN_IN="${VLAN:-${INBAND_VLAN:-}}"
 VLAN="${VLAN_IN:-666}"

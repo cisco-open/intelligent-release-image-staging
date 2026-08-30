@@ -43,6 +43,16 @@ setup() {
   INSTALL="$BATS_TEST_DIRNAME/../install.sh"
 }
 
+@test "stale NETWORK_ATTACHMENT without MANAGEMENT_TYPE aborts; a normal env is unaffected" {
+  NETWORK_ATTACHMENT=inband run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"NETWORK_ATTACHMENT was renamed to MANAGEMENT_TYPE"* ]] || return 1
+  MANAGEMENT_TYPE=inband INBAND_VLAN=120 APP_IP=192.0.2.21 APP_MASK=255.255.255.0 \
+    APP_GATEWAY=192.0.2.1 IOS_SSH_HOST=192.0.2.1 \
+    run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ]
+}
+
 @test "inband dry-run creates no VLAN/SVI and never replaces the AppGig allowed list" {
   MANAGEMENT_TYPE=inband INBAND_VLAN=120 APP_IP=192.0.2.21 APP_MASK=255.255.255.0 \
     APP_GATEWAY=192.0.2.1 IOS_SSH_HOST=192.0.2.1 \
