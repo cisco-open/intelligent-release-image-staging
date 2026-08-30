@@ -2331,7 +2331,10 @@
   }
   function attentionCardHTML(kind, level, count, label, hint) {
     var icon = STATUS_ICONS[level] || STATUS_ICONS.inactive;
-    return '<button type="button" class="attention-card is-' + level + '" data-attn="' + kind + '">' +
+    // level/kind are both closed sets (ATTENTION_LEVEL_RANK's values,
+    // 'devices'/'images') -- esc() here is belt-and-suspenders consistency
+    // with every other interpolation, not a guard against untrusted input.
+    return '<button type="button" class="attention-card is-' + esc(level) + '" data-attn="' + esc(kind) + '">' +
       '<svg aria-hidden="true"><use href="#' + icon + '"></use></svg>' +
       '<span class="attention-text"><span class="attention-count">' + esc(count) +
       '</span><span class="attention-label">' + esc(label) + '</span>' +
@@ -2411,6 +2414,12 @@
       transferring = { state: 'failed', pillHtml: levelPillHTML('negative',
         placementFailed.length + ' placement failed') };
     } else if (imageFailed.length) {
+      // Fleet-wide ratio (failed devices / all assigned devices) -- NOT
+      // imageFailedRatio(d), which is one device's own errored/assigned
+      // ratio (used by deviceStatusHtml's row pill and by
+      // overviewDeviceAttention's per-device tally above). This step is a
+      // single aggregate pill for the whole fleet, so it needs the
+      // fleet-wide figure, not any one device's.
       var ratio = ov.assigned ? imageFailed.length / ov.assigned : 0;
       transferring = { state: 'failed', pillHtml: levelPillHTML(ratio >= 0.5 ? 'severe' : 'warning',
         imageFailed.length + (imageFailed.length === 1 ? ' image failed' : ' images failed')) };
@@ -2448,21 +2457,35 @@
     // refresh. Deliberately not awaited with the overview fetch: a slow or
     // unreachable collector must not delay the cards.
     refreshTelemetryHealth();
-    // The attention band and the aggregate boundary need the same device/
-    // image rows Devices and Images already fetch -- Overview reads the
-    // same three existing endpoints, nothing server-side is new.
-    var results;
+    // /api/overview is the PRIMARY fetch -- Fleet Totals and Rollout need
+    // nothing else, so its own failure is still a hard bail (matches the
+    // pre-existing behavior: no data, nothing to render).
+    var or_;
     try {
-      results = await Promise.all(
-        [fetch('/api/overview'), fetch('/api/devices'), fetch('/api/images')]);
+      or_ = await fetch('/api/overview');
     } catch (e) { return; }
-    var or_ = results[0], dr = results[1], ir = results[2];
     if (!or_.ok) return;
     var ov = await or_.json();
-    var dbody = dr.ok ? await dr.json() : { devices: [], now: Date.now() / 1000 };
+
+    // /api/devices and /api/images are SECONDARY -- only the attention band
+    // and the aggregate boundary need them (Overview reads the same two
+    // existing endpoints Devices/Images already fetch; nothing server-side
+    // is new). Each gets its OWN .catch(), so a network-level rejection on
+    // either one resolves to an empty fallback instead of rejecting the
+    // Promise.all below -- a coupled try/catch around all three fetches
+    // would have let one flaky secondary request kill Fleet Totals and
+    // Rollout too, which never needed it. Both still fire concurrently.
+    var devsPromise = fetch('/api/devices').then(function (r) {
+      return r.ok ? r.json() : { devices: [], now: null };
+    }).catch(function () { return { devices: [], now: null }; });
+    var imgsPromise = fetch('/api/images').then(function (r) {
+      return r.ok ? r.json() : { images: [] };
+    }).catch(function () { return { images: [] }; });
+    var results = await Promise.all([devsPromise, imgsPromise]);
+    var dbody = results[0];
     var devs = dbody.devices || [];
     var devNow = dbody.now || Date.now() / 1000;
-    var imgs = ir.ok ? ((await ir.json()).images || []) : [];
+    var imgs = results[1].images || [];
 
     renderOverviewAttention(devs, devNow, imgs);
     renderOverviewBoundary(ov, devs, devNow, imgs);
