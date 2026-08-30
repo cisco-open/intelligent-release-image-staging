@@ -30,18 +30,22 @@ setup() {
   # the whole task -- a stub that only drained stdin into /dev/null could
   # not distinguish "the real request arrived" from "ssh was launched with
   # stdin already redirected from /dev/null before a single byte got
-  # there"), optionally sleeps to simulate a wedged router (FAKE_SLEEP),
-  # then emits FAKE_OUTPUT and exits FAKE_SSHPASS_STATUS.
+  # there"), emits FAKE_OUTPUT (matching a real device, which prints its
+  # login banner before it ever wedges), THEN optionally sleeps to simulate
+  # a wedged router (FAKE_SLEEP) -- banner-then-sleep, not sleep-then-banner,
+  # is load-bearing for the redaction test below: a session killed mid-sleep
+  # must already have flushed its output, or that test would be asserting
+  # redaction against zero bytes -- then exits FAKE_SSHPASS_STATUS.
   cat > "$STUB/sshpass" <<'STUBEOF'
 #!/usr/bin/env bash
 if [ -n "${ARGV_LOG:-}" ]; then
   printf '%s\n' "$*" >> "$ARGV_LOG"
 fi
 cat > "${STDIN_LOG:-/dev/null}"
+printf '%s\n' "${FAKE_OUTPUT:-sw1#ok}"
 if [ -n "${FAKE_SLEEP:-}" ]; then
   /bin/sleep "$FAKE_SLEEP"
 fi
-printf '%s\n' "${FAKE_OUTPUT:-sw1#ok}"
 exit "${FAKE_SSHPASS_STATUS:-0}"
 STUBEOF
   chmod +x "$STUB/sshpass"

@@ -116,25 +116,31 @@ run_bounded_ssh() {
     echo "xr-run.sh: mktemp failed creating the session-timeout marker -- refusing to run without the bound in place" >&2
     return 1
   }
-  # Belt-and-suspenders: the explicit `rm -f` at the end of this function
-  # covers the normal-return case. The EXIT trap alone does NOT cover
-  # xr-run.sh being killed from outside while blocked in the `wait` below
-  # -- verified by sending it a TERM there: an untrapped fatal signal
-  # terminates bash immediately at the point of delivery and never reaches
-  # the EXIT trap at all. TERM/INT are trapped explicitly so that case runs
-  # the same cleanup before exiting (128+signum), which in turn fires the
-  # EXIT trap too. Scope, also verified directly: this function's `trap`
-  # calls only apply to the specific process running it, and this is a
-  # non-last pipe stage, so bash runs it in its own forked subshell,
-  # distinct from xr-run.sh's top-level process. A kill of only the
-  # single outermost PID a caller happens to have captured will NOT reach
-  # this subshell and the marker will NOT be cleaned up; a kill that
-  # reaches every process in the tree (`pkill -f xr-run.sh`, a container
-  # teardown killing its whole process tree, the pattern the original
-  # incident's "container restart" actually used) does reach it and does
-  # clean up correctly. Full coverage of every possible way to signal a
-  # multi-process pipeline is out of scope here; a few leaked bytes in
-  # TMPDIR in the uncovered case is a cosmetic nit, not a correctness one.
+  # The explicit `rm -f "$fired_marker"` at the end of this function is what
+  # actually removes it, on every path this script controls itself: normal
+  # completion and the watchdog killing a wedged ssh once the bound fires
+  # both return through the end of this function and hit that line. The
+  # EXIT/TERM/INT traps just below exist for the one path the explicit rm
+  # can't reach -- xr-run.sh killed from outside while still blocked in the
+  # `wait` below -- but measured directly (sending this subshell a TERM
+  # there, on the bash 3.2 this repo's bats suite runs under, per the
+  # portability note above): an untrapped fatal signal terminates bash
+  # immediately at the point of delivery and never reaches the EXIT trap,
+  # and routing TERM/INT through an explicit `exit` (128+signum) so they
+  # fire the EXIT trap instead does NOT actually fire it on this shell
+  # either -- the marker is left behind in that one case regardless. The
+  # traps stay in place because they cost nothing and would restore cleanup
+  # on a shell where a subshell's EXIT trap does fire on a trapped-signal
+  # exit; on bash 3.2 they are inert, and the explicit rm is the only
+  # mechanism actually doing the work. Scope, also verified directly: this
+  # function's `trap` calls only apply to the specific process running it,
+  # and this is a non-last pipe stage, so bash runs it in its own forked
+  # subshell, distinct from xr-run.sh's top-level process -- a kill of only
+  # the single outermost PID a caller happens to have captured would not
+  # even reach this subshell to begin with. Full coverage of every possible
+  # way to signal a multi-process pipeline is out of scope here; a few
+  # leaked bytes in TMPDIR from an external kill during `wait` is a cosmetic
+  # nit, not a correctness one.
   trap 'rm -f "$fired_marker" 2>/dev/null' EXIT
   trap 'exit 143' TERM
   trap 'exit 130' INT
