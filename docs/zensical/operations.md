@@ -271,10 +271,14 @@ each step re-probes the router's own state — including the appmgr
 application's — before acting rather than assuming an earlier attempt
 succeeded. Every command session to the router is bounded by
 `IRIS_XR_SESSION_TIMEOUT` (default 900 seconds), so a wedged router fails
-the job with a real exit code instead of hanging it. Any image file an
-operator staged directly on the router is left in place, with a log line
-recording it, unless the catalog republishes different content under the
-same image id.
+the job with a real exit code instead of hanging it. Undeploy itself never
+touches a bare image filename and reports, in one summary line, that any
+operator-staged image was left in place; which file was kept — or
+replaced, if the catalog had republished different content under the same
+image id — is decided and logged by the agent during its own unassign/park
+cycle, which runs before step [1/5] deactivates it. Check the agent's own
+log for that per-file record; undeploy's output only confirms the blanket
+guarantee.
 
 Deleting an inventory row is not an undeploy — undeploy before deleting anything
 still deployed. See [Bulk device actions](console.md#bulk-device-actions).
