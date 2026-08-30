@@ -207,10 +207,10 @@ def test_recover_interrupted_collapses_legacy_duplicate_actives(tmp_path):
 
 def test_interrupted_work_can_still_be_torn_down(tmp_path):
     """A controller restart during an onboard leaves the record 'unknown' while
-    the device is already configured. That record records what IRIS created, so
-    it MUST still authorize a teardown — otherwise the device is stranded: a
-    router cannot be adopted and its preflight refuses a re-onboard, leaving no
-    Console path at all."""
+    the device is already configured. That record still describes what IRIS
+    created, so it MUST still authorize a teardown — otherwise the device is
+    stranded: a router cannot be adopted and its preflight refuses a
+    re-onboard, leaving no Console path at all."""
     store = deployment_records.DeploymentRecordStore(str(tmp_path))
     created = store.create(_record())
     store.transition(created["record_id"], "applying")

@@ -2472,7 +2472,7 @@ def _serve_inband(tmp_path, run_fn, device=None):
         open(os.path.join(art, pkg), "w").close()   # IOx package-presence gate
     onboard = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
                                          mint_fn=lambda d: "TOK", run_fn=run_fn,
-                                         receipts=record_store, artifacts_dir=art,
+                                         record_store=record_store, artifacts_dir=art,
                                          # this device is platform=guestshell, so
                                          # the job-start reachability gate (see
                                          # gui_onboard.py) probes it before run_fn
@@ -2588,6 +2588,35 @@ def test_inband_onboard_is_one_click_and_drives_inband_renderer(tmp_path):
         stop()
 
 
+def test_onboard_job_status_wire_uses_record_id_not_receipt_id(tmp_path):
+    """get_job()/list_jobs() serialize the job dict WHOLESALE, so whatever key
+    binds the job to its deployment record is live public wire on
+    GET /api/onboard/jobs and /api/onboard/jobs/<id> -- not an
+    internal-only detail. It must speak record_id only; a lingering
+    receipt_id key would leak the retired vocabulary onto the console's
+    polling response."""
+    host, port, stop = _serve_inband(tmp_path, lambda p, e, on: 0)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, b = _req(host, port, "POST", "/api/devices/edge/onboard", {},
+                        headers=hh)
+        assert st == 200
+        jid = json.loads(b)["job_id"]
+        job = _wait_onboard_job(host, port, ck, jid)
+        assert job["state"] == "done"
+        assert "record_id" in job and job["record_id"]
+        assert "receipt_id" not in job
+        # the list endpoint serializes the same job dicts (minus 'lines')
+        _, _, lb = _req(host, port, "GET", "/api/onboard/jobs",
+                        headers={"Cookie": ck})
+        listed = json.loads(lb)["jobs"]
+        assert listed and "record_id" in listed[0] and listed[0]["record_id"]
+        assert "receipt_id" not in listed[0]
+    finally:
+        stop()
+
+
 def _serve_router(tmp_path, run_fn, preflight_fn=None, mint_fn=None, device=None,
                   audit_path=None):
     """Record-backed server with one C8000V router inventory row."""
@@ -2608,7 +2637,7 @@ def _serve_router(tmp_path, run_fn, preflight_fn=None, mint_fn=None, device=None
     record_store = deployment_records.DeploymentRecordStore(state)
     onboard = gui_onboard.OnboardService(
         fleet, creds, host_ip="10.9.9.9", mint_fn=mint_fn or (lambda d: "TOK"),
-        run_fn=run_fn, receipts=record_store, preflight_fn=preflight_fn)
+        run_fn=run_fn, record_store=record_store, preflight_fn=preflight_fn)
     srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, creds, None,
                                  onboard, certfile=None, record_store=record_store,
                                  audit_path=audit_path)
@@ -7953,7 +7982,7 @@ def _serve_router_jobs(tmp_path, run_fn=None, now_fn=None):
     record_store = deployment_records.DeploymentRecordStore(state)
     onboard = gui_onboard.OnboardService(
         fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
-        run_fn=run_fn or (lambda p, e, on: 0), receipts=record_store,
+        run_fn=run_fn or (lambda p, e, on: 0), record_store=record_store,
         log_dir=log_dir)
     srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, creds, None,
                                  onboard, certfile=None, record_store=record_store,
@@ -7993,7 +8022,7 @@ def test_delete_stops_the_device_s_in_flight_jobs(tmp_path, monkeypatch):
             "id": "ghost", "device_id": "r1", "action": "onboard",
             "state": "queued", "queued_at": 1, "started_at": None,
             "finished_at": None, "lines": [], "returncode": None,
-            "_line_bytes": 0, "_log_truncated": False, "receipt_id": None,
+            "_line_bytes": 0, "_log_truncated": False, "record_id": None,
             "resolved": None, "env_extra": None}
 
         assert _req(host, port, "DELETE", "/api/devices/r1", headers=hh)[0] == 200

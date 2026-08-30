@@ -1452,9 +1452,10 @@
   });
   function delWarning(ids) {
     // Removing inventory does NOT undeploy: an onboarded device keeps running
-    // its agent with no Console record of it, so say so before it happens.
+    // its agent with no Console inventory entry for it, so say so before it
+    // happens.
     return 'Delete ' + ids.length + ' device(s) from the inventory?\n\n' +
-      ids.join(', ') + '\n\nThis removes the Console record only — it does NOT ' +
+      ids.join(', ') + '\n\nThis removes the device from the Console inventory only — it does NOT ' +
       'undeploy. An onboarded device keeps its agent and staged image with no ' +
       'inventory entry left to manage it. Undeploy first if that is what you want.' +
       '\n\nAny deployment record is abandoned: it is kept as the account of what ' +

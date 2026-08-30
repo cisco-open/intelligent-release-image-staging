@@ -3519,7 +3519,7 @@ def main():
     record_store.recover_interrupted()
     onboard = gui_onboard.OnboardService(
         fleet, creds, audit_fn=_bg_audit,
-        clear_state_fn=catalog.forget_device, receipts=record_store,
+        clear_state_fn=catalog.forget_device, record_store=record_store,
         log_dir=os.path.join(state_dir, "deploy-logs"))
     srv = make_server(host, port, app, images, fleet, creds, catalog, onboard,
                        None, certfile=certfile, audit_path=audit_path, record_store=record_store)

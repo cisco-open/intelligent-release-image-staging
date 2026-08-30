@@ -1291,7 +1291,7 @@ def test_router_execution_preflight_failure_never_mints_or_runs(tmp_path):
         fleet, _iox_creds(), host_ip="10.9.9.9",
         mint_fn=lambda d: minted.append(d) or "TOK",
         run_fn=lambda p, e, on: ran.append(1) or 0,
-        receipts=record_store,
+        record_store=record_store,
         preflight_fn=lambda *args: (_ for _ in ()).throw(
             ValueError("VirtualPortGroup10 appeared while queued")))
     job = _wait(svc, svc.start("r1", prepare=lambda: record["record_id"]))
@@ -2144,7 +2144,7 @@ def test_prepare_runs_once_and_not_on_dedup():
     j2 = svc.start("d1", prepare=lambda: calls.append(1) or "rcpt-2")
     assert j1 == j2                                # deduped onto the running job
     assert calls == [1]                            # prepare fired only once
-    assert svc.get_job(j1)["receipt_id"] == "rcpt-1"
+    assert svc.get_job(j1)["record_id"] == "rcpt-1"
     release.set()
     assert _wait(svc, j1)["state"] == "done"
 
@@ -2512,7 +2512,7 @@ def test_abort_unknown_job_is_false():
 def _record_backed_svc(tmp_path, run_fn):
     import deployment_records
     record_store = deployment_records.DeploymentRecordStore(str(tmp_path))
-    svc = _svc(run_fn, receipts=record_store)
+    svc = _svc(run_fn, record_store=record_store)
     return svc, record_store
 
 
@@ -2537,10 +2537,9 @@ def test_undeploy_with_superseded_record_aborts_cleanly(tmp_path):
     # the worker must FINISH (error), not die mid-thread leaving "running"
     assert job["state"] == "error"
     assert ran == []                  # stale-record teardown never ran
-    # gui_onboard's own job-line wording is untouched by this rename (Task 4
-    # scope: deployment_records + gui_server + console only) — it still logs
-    # "receipt %s -> %s not applied", so this pin stays as-is.
-    assert any("receipt" in line for line in job["lines"])
+    # _transition_or_note logs "record %s -> %s not applied: %s" on a failed
+    # transition (the superseded r1 raises when the worker tries to move it).
+    assert any("record" in line for line in job["lines"])
 
 
 def test_record_retired_during_run_does_not_wedge_the_job(tmp_path):
@@ -2563,9 +2562,9 @@ def test_record_retired_during_run_does_not_wedge_the_job(tmp_path):
     # script succeeded -> job reports the script's truth; the record
     # discrepancy is surfaced as a job line instead of killing the worker
     assert job["state"] == "done"
-    # gui_onboard's own job-line wording is untouched by this rename (see
-    # test_undeploy_with_superseded_record_aborts_cleanly above).
-    assert any("receipt" in line for line in job["lines"])
+    # same "record %s -> %s not applied: %s" line as
+    # test_undeploy_with_superseded_record_aborts_cleanly above.
+    assert any("record" in line for line in job["lines"])
 
 
 # ---- telemetry onboarding flags (device transfer telemetry spec 8.1) ----
@@ -2833,7 +2832,7 @@ def _stuck_job(svc, device_id="d1", action="onboard", state="running",
         "id": jid, "device_id": device_id, "action": action, "state": state,
         "queued_at": started_at, "started_at": started_at, "finished_at": None,
         "lines": [], "returncode": None, "_line_bytes": 0,
-        "_log_truncated": False, "receipt_id": None, "resolved": None,
+        "_log_truncated": False, "record_id": None, "resolved": None,
         "env_extra": None}
     return jid
 

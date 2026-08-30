@@ -839,7 +839,7 @@ class OnboardService:
                  crt_public=None, host_ip=None, catalog_url=None,
                  mint_fn=None, run_fn=_default_runner, now_fn=time.time,
                  probe_fn=None, artifacts_dir=None, audit_fn=None,
-                 max_concurrent=None, clear_state_fn=None, receipts=None,
+                 max_concurrent=None, clear_state_fn=None, record_store=None,
                  preflight_fn=None, iox_preflight_fn=None, log_dir=None,
                  guestshell_preflight_fn=None, xr_preflight_fn=None):
         self.fleet = fleet
@@ -880,7 +880,7 @@ class OnboardService:
         # CatalogStore.forget_device in main()). Injected, like mint/run/audit,
         # so orchestration stays unit-testable without a catalog.
         self._clear_state = clear_state_fn
-        self.receipts = receipts
+        self.record_store = record_store
         # Directory for persisted per-job logs (None disables persistence —
         # unit tests and legacy callers keep the purely in-memory behavior).
         self.log_dir = log_dir
@@ -1092,22 +1092,22 @@ class OnboardService:
         except Exception:
             pass
 
-    def _transition_or_note(self, job_id, receipt_id, state):
-        """Advance the job's receipt, downgrading lifecycle races to a job
-        line. A concurrent action can retire the bound receipt between this
+    def _transition_or_note(self, job_id, record_id, state):
+        """Advance the job's record, downgrading lifecycle races to a job
+        line. A concurrent action can retire the bound record between this
         worker's steps — e.g. a re-onboard's activation supersedes it, or an
         operator adopt replaces it. The transition then raises, and an
         uncaught raise here would kill the worker thread BEFORE _finish(),
         wedging the job "running" and the device "busy" until a restart.
         Returns True iff the transition applied."""
-        if self.receipts is None or not receipt_id:
+        if self.record_store is None or not record_id:
             return True
         try:
-            self.receipts.transition(receipt_id, state)
+            self.record_store.transition(record_id, state)
             return True
         except Exception as exc:
-            self._append(job_id, "receipt %s -> %s not applied: %s"
-                         % (receipt_id, state, exc))
+            self._append(job_id, "record %s -> %s not applied: %s"
+                         % (record_id, state, exc))
             return False
 
     def start(self, device_id, action="onboard", resolved=None, prepare=None,
@@ -1129,9 +1129,9 @@ class OnboardService:
 
         prepare() (optional) is called EXACTLY ONCE, under the job lock, only
         when a genuinely new job is registered — never when this start joins an
-        already-active same-action job. It returns the receipt id to bind to the
-        job. Creating the receipt there (instead of before start) means a
-        concurrent double-onboard cannot leave an orphan planned receipt behind.
+        already-active same-action job. It returns the record id to bind to the
+        job. Creating the record there (instead of before start) means a
+        concurrent double-onboard cannot leave an orphan planned record behind.
 
         Jobs are in-memory and per-process: a server restart loses all job state
         and abandons any in-flight job (re-running either script is
@@ -1144,7 +1144,7 @@ class OnboardService:
                  "state": "queued", "lines": [], "returncode": None,
                  "_line_bytes": 0, "_log_truncated": False,
                 "queued_at": int(self._now()),
-                "started_at": None, "finished_at": None, "receipt_id": None,
+                "started_at": None, "finished_at": None, "record_id": None,
                 "resolved": resolved, "env_extra": env_extra}
         # Reap BEFORE the busy guard, not after it. The reaper used to run
         # further down, past every path that returns or raises — so it could
@@ -1167,8 +1167,8 @@ class OnboardService:
                         "device %s is busy with an active %s job (%s)"
                         % (device_id, j.get("action", "onboard"), j["id"]))
             # Only now, holding the lock and past the dedup guard, do we mint the
-            # receipt — so exactly one receipt exists per genuinely started job.
-            job["receipt_id"] = prepare() if prepare else None
+            # record — so exactly one record exists per genuinely started job.
+            job["record_id"] = prepare() if prepare else None
             self._evict_old(self._now())
             self._jobs[job_id] = job
 
@@ -1183,7 +1183,7 @@ class OnboardService:
             try:
                 # Build credentials and resolve the recipe without minting. A
                 # Router preflight runs only here, in the bounded worker pool,
-                # immediately before its receipt becomes applying and before an
+                # immediately before its record becomes applying and before an
                 # enrollment token is created. Batch submissions therefore do
                 # not block their HTTP requests on individual routers' SSH.
                 dev, env = self._build_env(device_id, mint=False,
@@ -1295,12 +1295,12 @@ class OnboardService:
                         device_id, dev, env, action)
             except Exception as exc:
                 # Nothing has reached the device yet. A planned onboarding
-                # receipt must not become teardown authority: another actor
+                # record must not become teardown authority: another actor
                 # may own the resources that caused this pre-apply failure.
-                # An undeploy receipt already describes the live deployment,
+                # An undeploy record already describes the live deployment,
                 # so leave it unchanged when teardown never started.
                 if action == "onboard":
-                    self._transition_or_note(job_id, j.get("receipt_id"),
+                    self._transition_or_note(job_id, j.get("record_id"),
                                              "removed")
                 self._append(job_id, "ERROR: " + str(exc))
                 self._finish(job_id, "error", None)
@@ -1320,15 +1320,15 @@ class OnboardService:
                     self._append(job_id, "ERROR: %s not found in artifacts dir "
                                  "-- build device/iox/build.sh%s and place it in "
                                  "artifacts/ (device untouched)" % (pkg, flag))
-                    self._transition_or_note(job_id, j.get("receipt_id"),
+                    self._transition_or_note(job_id, j.get("record_id"),
                                              "removed")
                     self._finish(job_id, "error", None)
                     return
             # An operator abort can land while the job is "running" but the
             # installer has not been spawned yet (env build, preflight, the
             # artifacts guard). Stop here, before minting a token or touching
-            # the device: an onboard's planned receipt is retired outright; an
-            # undeploy receipt still describes the live deployment, so leave
+            # the device: an onboard's planned record is retired outright; an
+            # undeploy record still describes the live deployment, so leave
             # it, as in the pre-apply error path above.
             with self._lock:
                 cur = self._jobs.get(job_id)
@@ -1338,18 +1338,18 @@ class OnboardService:
                 self._append(job_id, "ERROR: aborted by operator before the "
                              "installer started; device untouched")
                 if action == "onboard":
-                    self._transition_or_note(job_id, j.get("receipt_id"),
+                    self._transition_or_note(job_id, j.get("record_id"),
                                              "removed")
                 self._finish(job_id, "error", None)
                 return
             try:
-                receipt_id = j.get("receipt_id")
-                if not self._transition_or_note(job_id, receipt_id, "applying"):
-                    # The bound receipt is no longer usable (a newer action
+                record_id = j.get("record_id")
+                if not self._transition_or_note(job_id, record_id, "applying"):
+                    # The bound record is no longer usable (a newer action
                     # superseded it). Running a script rendered from a STALE
-                    # receipt would act on a box someone else just changed —
+                    # record would act on a box someone else just changed —
                     # abort before touching the device.
-                    self._append(job_id, "ERROR: the job's receipt is no "
+                    self._append(job_id, "ERROR: the job's record is no "
                                  "longer active; aborting without touching "
                                  "the device")
                     self._finish(job_id, "error", None)
@@ -1363,7 +1363,7 @@ class OnboardService:
                 else:
                     rc = self._run(script, env, lambda line: self._append(job_id, line))
             except Exception as exc:
-                self._transition_or_note(job_id, receipt_id, "needs-reconcile")
+                self._transition_or_note(job_id, record_id, "needs-reconcile")
                 self._append(job_id, "ERROR: " + str(exc))
                 self._finish(job_id, "error", None)
                 return
@@ -1376,10 +1376,10 @@ class OnboardService:
                 except Exception:
                     pass   # a bookkeeping failure must never fail the job
             # Same contract for the caller's own success bookkeeping. A forced
-            # teardown retires its receipts here rather than at submit time:
-            # force means "that receipt does not describe this box", but a
+            # teardown retires its records here rather than at submit time:
+            # force means "that record does not describe this box", but a
             # transient failure to reach the device is not proof of that, and
-            # voiding a healthy deployment's receipt on a network blip would
+            # voiding a healthy deployment's record on a network blip would
             # strand it exactly the way this whole path exists to prevent.
             if rc == 0 and on_success is not None:
                 try:
@@ -1387,11 +1387,11 @@ class OnboardService:
                 except Exception:
                     pass   # as above: never fail a job that already succeeded
             if rc != 0:
-                self._transition_or_note(job_id, receipt_id, "needs-reconcile")
+                self._transition_or_note(job_id, record_id, "needs-reconcile")
             elif action == "onboard":
-                self._transition_or_note(job_id, receipt_id, "active")
+                self._transition_or_note(job_id, record_id, "active")
             else:
-                self._transition_or_note(job_id, receipt_id, "removed")
+                self._transition_or_note(job_id, record_id, "removed")
             self._finish(job_id, "done" if rc == 0 else "error", rc)
 
         try:
@@ -1399,8 +1399,8 @@ class OnboardService:
         except queue.Full:
             with self._lock:
                 self._jobs.pop(job_id, None)
-            if job.get("receipt_id"):
-                self._transition_or_note(job_id, job["receipt_id"], "removed")
+            if job.get("record_id"):
+                self._transition_or_note(job_id, job["record_id"], "removed")
             raise ValueError("onboarding queue is full")
         with self._lock:
             self._ensure_workers()
@@ -1445,7 +1445,7 @@ class OnboardService:
     def abort(self, job_id):
         """Terminate a running installer subprocess. Returns True if a running
         job's process was signalled. The run loop then finishes with a non-zero
-        rc, so the job errors and its receipt moves to needs-reconcile.
+        rc, so the job errors and its record moves to needs-reconcile.
 
         A job reports "running" before its installer process exists (env
         build, preflight). An abort in that window is recorded instead of
@@ -1635,7 +1635,7 @@ class OnboardService:
         parked thread exits without running when it eventually wins a slot.
         Returns the count cancelled."""
         n = 0
-        receipt_ids = []
+        record_ids = []
         with self._lock:
             now = int(self._now())
             for jid, j in self._jobs.items():
@@ -1645,12 +1645,12 @@ class OnboardService:
                     j["state"] = "cancelled"
                     j["finished_at"] = now
                     self._append_locked(j, "cancelled before start")
-                    if j.get("receipt_id"):
-                        receipt_ids.append((jid, j["receipt_id"]))
+                    if j.get("record_id"):
+                        record_ids.append((jid, j["record_id"]))
                     n += 1
-        for jid, receipt_id in receipt_ids:
-            if not self._transition_or_note(jid, receipt_id, "removed"):
-                self._append(jid, "cancelled job receipt could not be retired")
+        for jid, record_id in record_ids:
+            if not self._transition_or_note(jid, record_id, "removed"):
+                self._append(jid, "cancelled job record could not be retired")
         return n
 
     def reap_overdue_jobs(self):
@@ -1699,7 +1699,7 @@ class OnboardService:
         that did nothing. It self-healed only after _JOB_DEADLINE.
 
         Queued jobs are cancelled through the same path the console's cancel
-        uses, so their receipts are retired too."""
+        uses, so their records are retired too."""
         with self._lock:
             queued = [jid for jid, j in self._jobs.items()
                       if j.get("device_id") == device_id
@@ -1724,9 +1724,10 @@ class OnboardService:
 
         A hung recipe is indistinguishable from a slow one from here, so the
         bound is deliberately generous. What matters is that the job becomes
-        TERMINAL: that releases the busy guard, lets the record be evicted, and
-        leaves the receipt in a state teardown can read -- turning a permanent
-        strand into an ordinary failure. Caller must hold self._lock."""
+        TERMINAL: that releases the busy guard, lets the job record be
+        evicted, and leaves the deployment record in a state teardown can
+        read -- turning a permanent strand into an ordinary failure. Caller
+        must hold self._lock."""
         overdue = []
         for jid, j in self._jobs.items():
             if j.get("state") not in _TERMINAL and j.get("finished_at") is None:
