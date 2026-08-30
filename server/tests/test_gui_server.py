@@ -6598,6 +6598,78 @@ def test_force_undeploy_delivers_the_force_flag_to_the_recipe(tmp_path):
         stop()
 
 
+def test_force_undeploy_delivers_the_force_flag_to_xr_uninstall(tmp_path):
+    """The same force-flag delivery test above, but for an xr-host/xr-appmgr
+    device: force must resolve to device/xr-uninstall.sh (not one of the
+    IOS-XE teardown scripts) and IRIS_FORCE_AGENT_ONLY=1 must reach it the
+    same way it reaches the Guest Shell/IOx recipes. XR force never touches
+    a receipt -- os_family xr + platform xr-appmgr resolve straight to the
+    XR recipe with no probe or preflight involved, so a bare device record
+    is enough here, unlike an onboard test."""
+    seen = {}
+    ran_script = {}
+
+    def run_fn(p, e, on):
+        seen.update(e)
+        ran_script["path"] = p
+        return 0
+
+    host, port, stop = _serve_inband(
+        tmp_path, run_fn,
+        device={"device_id": "xr1", "device_ip": "10.0.0.9", "model": "8201",
+                "os_family": "xr", "platform": "xr-appmgr",
+                "management_type": "xr-host", "credential_profile_id": "lab"})
+    try:
+        ck, csrf = _auth(host, port)
+        st, _, b = _req(host, port, "POST", "/api/devices/xr1/undeploy",
+                        {"force": True},
+                        headers={"Cookie": ck, "X-CSRF-Token": csrf})
+        assert st == 200, b
+        _wait_onboard_job(host, port, ck, json.loads(b)["job_id"])
+        assert seen.get("IRIS_FORCE_AGENT_ONLY") == "1", (
+            "forced XR undeploy reached the recipe without the force flag")
+        assert ran_script.get("path", "").endswith("device/xr-uninstall.sh"), (
+            "forced XR undeploy did not run device/xr-uninstall.sh: %r"
+            % ran_script.get("path"))
+    finally:
+        stop()
+
+
+def test_undeploy_force_help_and_confirm_text_cover_xr_alongside_router():
+    """Source guard for the force-undeploy operator-facing text (Directive 2
+    Task 4): both the undeploy-pop help copy (index.html) and the confirm()
+    dialog text (app.js) must say, in the same breath as the pre-existing
+    router/IOx wording, what force actually does on an IOS-XR device --
+    strips only the IRIS-named appmgr footprint (app `iris`, source
+    `iris-xr`, the RPM, iris-work/, sidecar files) and never a staged image
+    file or a file the agent did not itself download. Pinned as one
+    whitespace-collapsed sentence so re-wrapped HTML indentation can't dodge
+    the assertion, and the pre-existing router/IOx sentences are pinned
+    alongside it so neither text loses its wording when the other changes."""
+    xr_sentence = (
+        "On an IOS-XR device, force removes the same IRIS-named footprint "
+        "a normal undeploy would — the appmgr application iris, its "
+        "iris-xr package source, the RPM, iris-work/, and the IRIS sidecar "
+        "files at harddisk: root — but a staged image file there is never "
+        "removed by IRIS teardown, and a file the agent did not itself "
+        "download is never removed by the agent.")
+
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    help_row = html.split('id="undeploy-pop"', 1)[1].split(
+        "</div>", 1)[0]
+    collapsed = " ".join(help_row.split())
+    assert xr_sentence in collapsed
+    assert ("VirtualPortGroup and NAT are left untouched, because nothing "
+            "here proves IRIS created them.") in collapsed
+
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    assert xr_sentence in js
+    assert ("The VirtualPortGroup and NAT are NOT removed, because without "
+            "a receipt there is no proof IRIS created them") in js
+
+
 def test_telemetry_health_badge_lives_on_overview_not_monitoring():
     """Telemetry export health belongs on the Overview dashboard.
 

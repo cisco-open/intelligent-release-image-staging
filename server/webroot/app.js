@@ -1236,7 +1236,7 @@
     var forced = action === 'undeploy' && forceEl && forceEl.checked;
     if (action === 'undeploy' &&
         !confirm('Undeploy ' + ids.length + ' device(s)?' + (forced
-          ? '\n\nFORCE is on. For any device with no deployment receipt this removes the IRIS agent footprint only — EEM applets, Guest Shell and the IRIS guest-share files. The VirtualPortGroup and NAT are NOT removed, because without a receipt there is no proof IRIS created them; clean those up yourself if IRIS did.'
+          ? '\n\nFORCE is on. For any device with no deployment receipt this removes the IRIS agent footprint only — EEM applets, Guest Shell and the IRIS guest-share files. The VirtualPortGroup and NAT are NOT removed, because without a receipt there is no proof IRIS created them; clean those up yourself if IRIS did. On an IOS-XR device, force removes the same IRIS-named footprint a normal undeploy would — the appmgr application iris, its iris-xr package source, the RPM, iris-work/, and the IRIS sidecar files at harddisk: root — but a staged image file there is never removed by IRIS teardown, and a file the agent did not itself download is never removed by the agent.'
           : '\n\nThis removes the device agent (Guest Shell or IOx app) and only receipt-owned resources. Inband deployments preserve their existing network; router NAT preserves a pre-existing outside marking.') +
                  '\n\nStaged images at the filesystem root are left in place. Running jobs are never interrupted.')) {
       setBulkBusy(false); return;

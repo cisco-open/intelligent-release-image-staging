@@ -210,8 +210,14 @@
                 refuses it on an identity mismatch. Force skips the receipt
                 entirely and removes the IRIS agent footprint only: the
                 VirtualPortGroup and NAT are left untouched, because nothing here
-                proves IRIS created them. Any receipt for the device is abandoned
-                once the teardown succeeds, so it can be onboarded again.
+                proves IRIS created them. On an IOS-XR device, force removes the
+                same IRIS-named footprint a normal undeploy would — the appmgr
+                application iris, its iris-xr package source, the RPM,
+                iris-work/, and the IRIS sidecar files at harddisk: root — but a
+                staged image file there is never removed by IRIS teardown, and a
+                file the agent did not itself download is never removed by the
+                agent. Any receipt for the device is abandoned once the
+                teardown succeeds, so it can be onboarded again.
               </div>
               <button class="btn menu-close" id="undeploy-selected">Start undeploy</button>
             </div>

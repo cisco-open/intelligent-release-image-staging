@@ -852,9 +852,14 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             if attachment == "xr-host":
                 # Sidecar files (*.torrent/*.aria2/*.peers.json at harddisk:
                 # root) are also part of xr-uninstall.sh's sweep, but are
-                # deliberately NOT claimed as an owned resource here --
-                # sidecar ownership/provenance is being reworked in the
-                # Directive 2 teardown-provenance work.
+                # deliberately NOT claimed as an owned resource here: they
+                # are swept as IRIS-derived artifacts, not receipt-claimed
+                # ones. Image files are a different story entirely -- they
+                # are never IRIS-deleted, in the receipted path or the
+                # forced one, and the agent itself deletes only the image
+                # files it downloaded (an unknown or missing origin is
+                # treated as operator-adopted and left alone), so there is
+                # no image-file resource kind to claim here either.
                 return [
                     {"kind": "appmgr-application", "ownership": "iris-created",
                      "name": gui_onboard._XR_APPID},
