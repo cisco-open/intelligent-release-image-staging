@@ -321,6 +321,34 @@
     return fetch(url, { method: 'POST', headers: csrfHdr({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
   }
 
+  // Focus trap for a modal/drawer overlay (Task 6): Tab/Shift+Tab cycle
+  // within the container's own focusable elements instead of escaping to
+  // the page behind it. Modeled on server/swarmmap.html's #drawer keydown
+  // handler, ported to this file's ES5 style. Attaching the listener
+  // directly on the container (rather than document) is what makes this
+  // safe to call once at setup time for every dialog: while the container
+  // carries [hidden] nothing inside it is focusable, so no keydown ever
+  // bubbles out of it and the trap is inert until the dialog is actually
+  // open.
+  function trapDialogFocus(container) {
+    container.addEventListener('keydown', function (e) {
+      if (e.key !== 'Tab') return;
+      var focusable = Array.prototype.filter.call(
+        container.querySelectorAll(
+          'button:not([disabled]), [href], input:not([disabled]), ' +
+          'select:not([disabled]), textarea:not([disabled]), ' +
+          '[tabindex]:not([tabindex="-1"])'),
+        function (el) { return el.offsetWidth > 0 || el.offsetHeight > 0; });
+      if (!focusable.length) return;
+      var first = focusable[0], last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault(); last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault(); first.focus();
+      }
+    });
+  }
+
   // ---- Images (unchanged behavior) ----
   var statusEl = document.getElementById('status');
   var prog = document.getElementById('prog');
@@ -397,6 +425,7 @@
   // typed-confirm override path (KGV / Cisco Bulk Hash reconciler, Task 5).
   // Mirrors openDeployInfo/closeDeployInfo's drawer pattern below.
   var imgInfoId = null;
+  var imgInfoOpener = null;
   function imageVerdictDetailText(hv) {
     if (!hv || !hv.checked_at) return 'Never checked against the Cisco Bulk Hash feed.';
     var text = 'Checked ' + fmtDate(hv.checked_at) + ' (source: ' + (hv.source || 'unknown') + ')';
@@ -405,6 +434,7 @@
   }
   function openImageInfo(id) {
     imgInfoId = id;
+    imgInfoOpener = document.activeElement;
     var img = LAST_IMAGES.filter(function (x) { return x.id === id; })[0] || {};
     document.getElementById('ii-id').textContent = id;
     document.getElementById('ii-file').textContent = img.filename || '';
@@ -420,16 +450,19 @@
     document.getElementById('ii-confirm-text').value = '';
     document.getElementById('ii-release-msg').textContent = '';
     document.getElementById('img-info-panel').hidden = false;
+    document.getElementById('ii-close').focus();
   }
   function closeImageInfo() {
     imgInfoId = null;
     document.getElementById('img-info-panel').hidden = true;
+    if (imgInfoOpener) { imgInfoOpener.focus(); imgInfoOpener = null; }
   }
   document.getElementById('ii-close').addEventListener('click', closeImageInfo);
   document.addEventListener('keydown', function (e) {
     var panel = document.getElementById('img-info-panel');
     if (e.key === 'Escape' && panel && !panel.hidden) closeImageInfo();
   });
+  trapDialogFocus(document.getElementById('img-info-panel'));
   // Normal release first; the API answers 409 quarantine_still_mismatched
   // when the stored sha512 still disagrees, which is when the override path
   // (typed filename confirmation) appears. Every other failure is surfaced
@@ -541,9 +574,15 @@
     var label = document.createElement('span');
     label.className = 'up-name'; label.textContent = name; label.title = name;
     var rowProg = document.createElement('div'); rowProg.className = 'progress';
+    rowProg.setAttribute('role', 'progressbar');
+    rowProg.setAttribute('aria-valuemin', '0');
+    rowProg.setAttribute('aria-valuemax', '100');
+    rowProg.setAttribute('aria-valuenow', '0');
+    rowProg.setAttribute('aria-label', name + ' upload progress');
     var rowBar = document.createElement('div'); rowBar.className = 'bar';
     rowProg.appendChild(rowBar);
     var state = document.createElement('span'); state.className = 'up-state muted';
+    state.setAttribute('role', 'status'); state.setAttribute('aria-live', 'polite');
     var dismiss = document.createElement('button');
     dismiss.type = 'button'; dismiss.className = 'linkish up-dismiss';
     dismiss.textContent = '×'; dismiss.title = 'Dismiss'; dismiss.hidden = true;
@@ -554,11 +593,16 @@
     return {
       progress: function (pct) {
         rowBar.style.width = pct + '%';
+        rowProg.setAttribute('aria-valuenow', String(Math.round(pct)));
         state.textContent = Math.round(pct) + '%';
       },
-      publishing: function () { rowBar.style.width = '100%'; state.textContent = 'publishing…'; },
+      publishing: function () {
+        rowBar.style.width = '100%'; rowProg.setAttribute('aria-valuenow', '100');
+        state.textContent = 'publishing…';
+      },
       done: function (text) {
-        rowBar.style.width = '100%'; state.textContent = text;
+        rowBar.style.width = '100%'; rowProg.setAttribute('aria-valuenow', '100');
+        state.textContent = text;
         state.classList.remove('err'); dismiss.hidden = false;
         // auto-fade finished rows; errors stay until dismissed
         setTimeout(function () { row.remove(); }, 8000);
@@ -864,6 +908,7 @@
   // touches it. deployInfoDev guards against a slow fetch for one device
   // painting over the panel after another row was opened.
   var deployInfoDev = null;
+  var deployInfoOpener = null;
   var DEPLOY_STATE_BADGE = { active: 'badge-ok', removed: 'badge-queued',
                              superseded: 'badge-cancelled', 'needs-reconcile': 'badge-fail' };
   function deployRecordRows(rec, total) {
@@ -963,6 +1008,7 @@
   }
   async function openDeployInfo(id) {
     deployInfoDev = id;
+    deployInfoOpener = document.activeElement;
     var note = document.getElementById('di-note');
     document.getElementById('di-dev').textContent = id;
     document.getElementById('di-rows').innerHTML = '';
@@ -973,6 +1019,7 @@
     lt.hidden = true; lt.textContent = '';
     note.textContent = 'Loading…';
     document.getElementById('deploy-info-panel').hidden = false;
+    document.getElementById('di-close').focus();
     var r = null;
     try { r = await fetch('/api/devices/' + encodeURIComponent(id) + '/deployment'); } catch (e) { }
     if (deployInfoDev !== id) return;      // another row was opened meanwhile
@@ -1037,6 +1084,7 @@
   function closeDeployInfo() {
     deployInfoDev = null;
     document.getElementById('deploy-info-panel').hidden = true;
+    if (deployInfoOpener) { deployInfoOpener.focus(); deployInfoOpener = null; }
   }
   document.getElementById('di-close').addEventListener('click', closeDeployInfo);
   // Escape closes it, the same as the deployment-log drawer: a drawer that
@@ -1045,6 +1093,7 @@
     var panel = document.getElementById('deploy-info-panel');
     if (e.key === 'Escape' && panel && !panel.hidden) closeDeployInfo();
   });
+  trapDialogFocus(document.getElementById('deploy-info-panel'));
   // ---- Per-job onboard log panels ----
   // One panel PER JOB in #onboard-logs — its own <pre>, its own EventSource,
   // its own close/abort — so two concurrent onboards never merge into (or
@@ -1445,8 +1494,10 @@
         });
     });
   }
+  var imgPickerOpener = null;
   function openImagePicker(currentIds, onApply) {
     var overlay = document.getElementById('img-picker');
+    imgPickerOpener = document.activeElement;
     var rows = document.getElementById('img-picker-rows');
     var counter = document.getElementById('img-picker-count');
     // Reset any note left over from a previous open (the bulk caller below
@@ -1517,10 +1568,12 @@
       onApply(ids);
     };
     overlay.hidden = false;
+    document.getElementById('img-picker-cancel').focus();
   }
   function closeImagePicker() {
     document.getElementById('img-picker').hidden = true;
     imgPickerOnApply = null;
+    if (imgPickerOpener) { imgPickerOpener.focus(); imgPickerOpener = null; }
   }
   document.getElementById('img-picker-apply').addEventListener('click', function () {
     if (imgPickerOnApply) imgPickerOnApply();
@@ -1531,6 +1584,7 @@
     var overlay = document.getElementById('img-picker');
     if (e.key === 'Escape' && overlay && !overlay.hidden) closeImagePicker();
   });
+  trapDialogFocus(document.getElementById('img-picker'));
   function delWarning(ids) {
     // Removing inventory does NOT undeploy: an onboarded device keeps running
     // its agent with no Console inventory entry for it, so say so before it
@@ -2116,7 +2170,9 @@
     document.getElementById('ov-rows').innerHTML = (ov.rollout || []).map(function (x) {
       var pct = x.assigned ? Math.round(x.staged / x.assigned * 100) : 0;
       return '<tr><td class="machine">' + esc(x.image_id) + '</td><td>' + esc(x.assigned) + '</td><td>' +
-        esc(x.staged) + '</td><td><div class="pbar"><span data-pct="' + pct +
+        esc(x.staged) + '</td><td><div class="pbar" role="progressbar" aria-valuemin="0" ' +
+        'aria-valuemax="100" aria-valuenow="' + pct + '" aria-label="' + esc(x.image_id) +
+        ' staged"><span data-pct="' + pct +
         '"></span></div></td></tr>';
     }).join('');
     // set widths via JS property (CSP forbids inline style= attributes)
@@ -2665,11 +2721,16 @@
     var msg = document.getElementById('iv-offline-msg'); msg.textContent = ''; msg.classList.remove('ok');
     var prog = document.getElementById('iv-offline-progress');
     var bar = document.getElementById('iv-offline-bar');
-    prog.hidden = false; bar.style.width = '0%';
+    prog.hidden = false; bar.style.width = '0%'; prog.setAttribute('aria-valuenow', '0');
     var xhr = new XMLHttpRequest();
     xhr.open('POST', '/api/image-verification/offline');
     xhr.setRequestHeader('X-CSRF-Token', info.csrf);
-    xhr.upload.onprogress = function (e) { if (e.lengthComputable) bar.style.width = (e.loaded / e.total * 100) + '%'; };
+    xhr.upload.onprogress = function (e) {
+      if (!e.lengthComputable) return;
+      var pct = e.loaded / e.total * 100;
+      bar.style.width = pct + '%';
+      prog.setAttribute('aria-valuenow', String(Math.round(pct)));
+    };
     function finish(text, ok) {
       ivOfflineBusy = false;
       prog.hidden = true;
@@ -3708,14 +3769,18 @@
     document.getElementById('dl-next').disabled = dlPage >= pages - 1;
   }
 
+  var dlDrawerOpener = null;
   function openDeployLogDrawer(file) {
     var drawer = document.getElementById('dl-drawer');
+    dlDrawerOpener = document.activeElement;
     document.getElementById('dl-drawer-title').textContent = file;
     drawer.hidden = false;
+    document.getElementById('dl-drawer-close').focus();
     showDeployLog(file, document.getElementById('dl-text'));
   }
   function closeDeployLogDrawer() {
     document.getElementById('dl-drawer').hidden = true;
+    if (dlDrawerOpener) { dlDrawerOpener.focus(); dlDrawerOpener = null; }
   }
 
   function dlListUrl() {
@@ -3776,6 +3841,7 @@
       closeDeployLogDrawer();
     }
   });
+  trapDialogFocus(document.getElementById('dl-drawer'));
 
   // OTLP export health badge (spec 8.3), via the console's session-gated
   // proxy — never the unauthenticated :9101 directly.
@@ -3956,6 +4022,22 @@
     setTimeout(function () { btn.textContent = 'copy'; }, 1500);
   });
 
+  // ---- off-canvas nav (mobile, <=768px; Task 6) ----
+  // The nav rail slides in from the left below the 768px breakpoint (CSS);
+  // this just flips the open state and keeps aria-expanded honest for
+  // assistive tech. show() below closes it on every navigation, so picking
+  // a page never leaves the rail covering the content it just opened.
+  var navToggle = document.getElementById('nav-toggle');
+  var navRail = document.querySelector('.nav-rail');
+  function setNavOpen(open) {
+    navRail.classList.toggle('open', !!open);
+    navToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+  navToggle.addEventListener('click', function () { setNavOpen(!navRail.classList.contains('open')); });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && navRail.classList.contains('open')) setNavOpen(false);
+  });
+
   // ---- hash router ----
   var VIEWS = ['overview', 'images', 'devices', 'swarm', 'settings', 'monitoring', 'setup'];
 
@@ -3991,6 +4073,9 @@
   });
 
   function show(view) {
+    // A navigation is exactly when the mobile off-canvas nav should close --
+    // the operator picked a page, so the rail covering it has done its job.
+    setNavOpen(false);
     // "#settings/tls" style hashes: the part before the slash picks the view,
     // the rest picks the view's sub-page (showSettingsSub / showMonitoringSub
     // validate it).

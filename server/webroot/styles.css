@@ -322,7 +322,7 @@ select:focus-visible, textarea:focus-visible, button:focus-visible {
    and the operator has to scroll away from the row they clicked to read it. */
 .drawer { position:fixed; top:0; right:0; bottom:0; width:min(720px, 92vw);
   z-index:60; display:flex; flex-direction:column; background:var(--surface);
-  border-left:1px solid var(--rule); box-shadow:-8px 0 24px rgba(11,37,69,.18);
+  border-left:1px solid var(--rule); box-shadow:var(--shadow-lg);
   transform:translateX(100%); transition:transform .18s ease; }
 .drawer:not([hidden]) { transform:translateX(0); }
 /* A class selector outranks the UA stylesheet's [hidden]{display:none}. */
@@ -342,11 +342,11 @@ select:focus-visible, textarea:focus-visible, button:focus-visible {
    per-row assign button and the bulk "Assign images to N devices…" action
    (openImagePicker in app.js) -- a choice to make and confirm, not a panel
    to read alongside the table, so it is a modal rather than a third drawer. */
-.modal-backdrop { position:fixed; inset:0; z-index:70; background:rgba(11,37,69,.35);
+.modal-backdrop { position:fixed; inset:0; z-index:70; background:rgba(0,0,0,.35);
   display:flex; align-items:center; justify-content:center; padding:24px; }
 .modal-backdrop[hidden] { display:none; }
 .modal { background:var(--surface); border-radius:10px;
-  box-shadow:0 12px 36px rgba(11,37,69,.28); width:min(480px, 100%);
+  box-shadow:var(--shadow-lg); width:min(480px, 100%);
   max-height:min(640px, 90vh); display:flex; flex-direction:column; }
 .modal-head { display:flex; align-items:center; justify-content:space-between;
   gap:10px; padding:12px 16px; border-bottom:1px solid var(--rule);
@@ -363,7 +363,7 @@ select:focus-visible, textarea:focus-visible, button:focus-visible {
    by a panel appended below the table. */
 #dl-drawer { position:fixed; top:0; right:0; bottom:0; width:min(720px, 92vw);
   z-index:60; display:flex; flex-direction:column; background:var(--surface);
-  border-left:1px solid var(--rule); box-shadow:-8px 0 24px rgba(11,37,69,.18);
+  border-left:1px solid var(--rule); box-shadow:var(--shadow-lg);
   transform:translateX(100%); transition:transform .18s ease; }
 #dl-drawer:not([hidden]) { transform:translateX(0); }
 #dl-drawer[hidden] { display:none; }
@@ -399,3 +399,63 @@ select:focus-visible, textarea:focus-visible, button:focus-visible {
   width:18px; height:18px; border-radius:50%; background:var(--inactive-tint);
   font-size:11px; font-weight:600; }
 .wz-steplist-item.current .wz-steplist-n { background:var(--action); color:#fff; }
+
+/* ---------------------------------------------------------------------
+   Responsive + accessibility foundations (Task 6)
+   --------------------------------------------------------------------- */
+
+/* Horizontal scroll wrapper for every operational table: the console's
+   density is deliberate (Devices carries 11 columns), so at narrow
+   viewports the table scrolls within its own box instead of forcing the
+   whole page to scroll sideways. The edge gradients are a pure-CSS "is
+   there more to scroll" cue (Lea Verou's scroll-shadow trick, adapted to
+   the horizontal axis): a canvas-colored layer that scrolls WITH the
+   content masks a shadow layer that stays pinned to the viewport, so the
+   shadow only shows on the side that still has columns hidden off-screen. */
+.table-scroll {
+  overflow-x: auto;
+  background:
+    linear-gradient(to right, var(--canvas) 30%, rgba(240,241,242,0)) 0 0,
+    linear-gradient(to left, var(--canvas) 30%, rgba(240,241,242,0)) 100% 0,
+    linear-gradient(to right, rgba(0,0,0,.10), rgba(0,0,0,0)) 0 0,
+    linear-gradient(to left, rgba(0,0,0,.10), rgba(0,0,0,0)) 100% 0;
+  background-repeat: no-repeat;
+  background-color: var(--canvas);
+  background-size: 32px 100%, 32px 100%, 12px 100%, 12px 100%;
+  background-attachment: local, local, scroll, scroll;
+}
+
+/* Persistent field labels (foundation for Task 9's field-row layout):
+   every operational form input gets a real <label>, wrapping the control
+   so the association holds even once a form is restyled around it. */
+.field { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.field-label { font-size: 12px; font-weight: 500; color: var(--text-secondary); }
+/* A textarea field spans the row instead of sitting at compact width, and
+   its control stretches to fill it (matches the pre-Task-6 sizing). */
+.field-wide { flex: 1 1 100%; max-width: 640px; align-items: stretch; }
+/* A field's own control can be hidden independently by app.js (conditional
+   form fields, e.g. df-vlan for xr-host) -- without this the wrapping
+   label stays on screen with nothing left to label. */
+.field:has(> [hidden]) { display: none; }
+
+/* Off-canvas nav rail (mobile, <=768px): #nav-toggle lives in the product
+   bar and is otherwise invisible -- there is nothing to toggle above the
+   breakpoint, where the rail is always shown in place. */
+#nav-toggle { display: none; }
+
+@media (max-width: 768px) {
+  #nav-toggle { display: inline-flex; }
+  .nav-rail {
+    position: fixed; top: 48px; left: 0; bottom: 0; z-index: 55;
+    box-shadow: var(--shadow-lg);
+    transform: translateX(-100%); transition: transform .18s ease;
+  }
+  .nav-rail.open { transform: translateX(0); }
+  .main { padding: var(--sp-lg); }
+  .drawer, #dl-drawer { width: 100vw; }
+  .modal { width: calc(100% - 2 * var(--sp-lg)); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nav-rail, .btn, .chip, .dropzone, .progress .bar { transition: none; }
+}

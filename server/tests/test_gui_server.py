@@ -8200,3 +8200,193 @@ def test_machine_class_replaces_blanket_table_monospace():
     # regardless of whether the cell held prose or machine data, is gone
     tbl_td = css.split(".tbl td {", 1)[1].split("}", 1)[0]
     assert "font-family" not in tbl_td
+
+
+# ---------------------------------------------------------------------------
+# Responsive + accessibility foundations (facelift Task 6)
+# ---------------------------------------------------------------------------
+
+def test_console_declares_responsive_and_a11y_foundations():
+    """Step-1 pin from the task brief: the four foundations must exist
+    somewhere in the console webroot before any of the more targeted tests
+    below can mean anything."""
+    html = _webroot("index.html")
+    css = _webroot("styles.css")
+    assert 'id="nav-toggle"' in html
+    assert "@media" in css and "prefers-reduced-motion" in css
+    assert 'class="table-scroll"' in html or "table-scroll" in _webroot("app.js")
+    assert 'aria-live' in html
+
+
+def test_off_canvas_nav_toggle_wired():
+    """#nav-toggle lives in the product bar (not the nav rail itself, which
+    carries no id -- Task 5 shipped it as a bare `.nav-rail` and several
+    existing tests slice on the literal '<nav class="nav-rail">' string, so
+    this task targets it by selector rather than adding an id and risking
+    those pins). Below 768px it slides in via `.open`/`translateX`; the
+    button must report its own state through aria-expanded, not just move
+    a class around."""
+    html = _webroot("index.html")
+    css = _webroot("styles.css")
+    js = _webroot("app.js")
+    toggle = html.split('id="nav-toggle"', 1)[1].split(">", 1)[0]
+    assert 'aria-expanded="false"' in toggle
+    assert 'aria-label="' in toggle
+    # the off-canvas rail lives inside the same max-width:768px breakpoint
+    # the Step-1 pin already requires to exist for prefers-reduced-motion
+    mobile = css.split("@media (max-width: 768px)", 1)[1].split("\n}\n", 1)[0]
+    assert ".nav-rail" in mobile and "translateX(-100%)" in mobile
+    assert ".nav-rail.open" in css and "translateX(0)" in css
+    assert "#nav-toggle" in mobile or "#nav-toggle { display: inline-flex; }" in css
+    # full-width drawers/modal and --sp-lg page padding at the breakpoint
+    assert ".main { padding: var(--sp-lg); }" in mobile
+    assert "width: 100vw;" in mobile
+    # app.js: click toggles an open state and keeps aria-expanded honest,
+    # and every navigation closes it again (show() is the router's one
+    # entry point, so hooking it there covers every nav-rail link)
+    assert "var navToggle = document.getElementById('nav-toggle');" in js
+    assert "function setNavOpen(open) {" in js
+    assert "navRail.classList.toggle('open'" in js
+    assert "navToggle.setAttribute('aria-expanded'" in js
+    show_fn = js.split("function show(view) {", 1)[1][:200]
+    assert "setNavOpen(false);" in show_fn
+
+
+def test_every_operational_table_gets_a_scroll_wrapper():
+    """Every <table> in the console -- Overview rollout, Images, the
+    credential list, Devices, the deployment-details drawer's three
+    tables, the onboarding batch panel, both setup/settings package
+    tables, Server & build, Trusted CAs, Audit trail and Deployment logs --
+    scrolls in its own box below its own natural width, rather than
+    forcing the whole page to scroll sideways. Density and ids are
+    untouched: this only wraps, it never rewrites a table's own markup."""
+    html = _webroot("index.html")
+    table_ids = ("ov-rollout", "importable", "images", "devices",
+                 "di-img-tbl", "di-tbl", "di-log-tbl", "wz-pkg-table",
+                 "setup-pkg-table", "settings-info", "trust-tbl",
+                 "audit-tbl", "dl-tbl")
+    for tid in table_ids:
+        marker = 'id="%s"' % tid
+        assert marker in html, tid
+        before = html.split(marker, 1)[0]
+        # nearest preceding table-scroll open tag must be closer than the
+        # nearest preceding table-scroll CLOSE (i.e. this table is still
+        # inside an open wrapper, not after one that already closed)
+        last_open = before.rfind('<div class="table-scroll">')
+        assert last_open != -1, "%s has no preceding table-scroll wrapper" % tid
+        between = before[last_open:]
+        assert between.count("</div>") == 0, \
+            "%s's table-scroll wrapper closed before the table opened" % tid
+    # the two unnamed tables (credential list, onboarding batch) get one too
+    assert html.count('<div class="table-scroll">') == html.count("<table")
+    css = _webroot("styles.css")
+    assert ".table-scroll {" in css and "overflow-x: auto;" in css
+
+
+def test_dialogs_get_dialog_role_and_a_focus_trap():
+    """The four overlays that cover part of the page while open -- the
+    image-detail drawer, the deployment-details drawer, the deployment-log
+    drawer and the image-picker modal -- are dialogs to assistive tech
+    (role=dialog + aria-modal), and Tab must not escape them while they are
+    open. trapDialogFocus is modeled on swarmmap.html's #drawer keydown
+    handler and is attached once per container at setup time."""
+    html = _webroot("index.html")
+    js = _webroot("app.js")
+    for panel_id in ("img-info-panel", "deploy-info-panel", "img-picker", "dl-drawer"):
+        tag = html.split('id="%s"' % panel_id, 1)[1].split(">", 1)[0]
+        assert 'role="dialog"' in tag, panel_id
+        assert 'aria-modal="true"' in tag, panel_id
+    assert "function trapDialogFocus(container) {" in js
+    for panel_id in ("img-info-panel", "deploy-info-panel", "img-picker", "dl-drawer"):
+        assert "trapDialogFocus(document.getElementById('%s'))" % panel_id in js, panel_id
+    # focus moves in on open and is restored to the opener on close
+    for opener_var in ("imgInfoOpener", "deployInfoOpener", "imgPickerOpener", "dlDrawerOpener"):
+        assert ("var %s = null;" % opener_var) in js, opener_var
+        assert (opener_var + " = document.activeElement;") in js, opener_var
+        assert (opener_var + ".focus();") in js, opener_var
+
+
+def test_forms_get_persistent_field_labels():
+    """Every operational input inside the console's ten <form> elements gets
+    a real, persistent <label> -- not just a placeholder, which disappears
+    the moment the operator starts typing and is not a reliable accessible
+    name. Filter-toolbar controls (dev-filter-*, dl-action, iv-hour, ...)
+    already carry aria-label from earlier work and are intentionally left
+    as-is here; this only targets the ten <form>s the task brief scopes."""
+    html = _webroot("index.html")
+    css = _webroot("styles.css")
+    assert ".field {" in css and ".field-label {" in css
+    assert "font-size: 12px" in css.split(".field-label {", 1)[1].split("}", 1)[0]
+    # a representative sample across different forms, not every field
+    samples = {
+        "dev-form": ("df-id", "df-management-type", "df-cred"),
+        "cred-form": ("cf-id", "cf-pass"),
+        "pw-form": ("pw-cur", "pw-new", "pw-confirm"),
+        "cert-form": ("cert-pem", "cert-key"),
+        "trust-form": ("trust-pem",),
+        "ca-form": ("ca-source", "ca-url"),
+        "ae-form": ("ae-host", "ae-port", "ae-recipient"),
+        "iv-schedule-form": ("iv-mode",),
+    }
+    for form_id, field_ids in samples.items():
+        form = html.split('id="%s"' % form_id, 1)[1].split("</form>", 1)[0]
+        for fid in field_ids:
+            assert 'for="%s"' % fid in form, "%s: no label for=%r" % (form_id, fid)
+    # the two shared templates (mounted into both Setup and Settings)
+    for tpl_id, field_ids in (("tpl-sh-form", ("sh-user", "sh-pass", "sh-pass2")),
+                               ("tpl-td-form", ("td-endpoint",))):
+        tpl = html.split('id="%s"' % tpl_id, 1)[1].split("</template>", 1)[0]
+        for fid in field_ids:
+            assert 'for="%s"' % fid in tpl, "%s: no label for=%r" % (tpl_id, fid)
+
+
+def test_error_and_status_regions_carry_live_roles():
+    """Async status text gets role=status/aria-live=polite; the inline
+    per-form error/outcome spans (reused for both a failure message and an
+    .err.ok success message -- see the .err.ok source-order comment in
+    styles.css) get role=alert, so either outcome is announced without the
+    operator having to go find the message by sight."""
+    html = _webroot("index.html")
+    alert_ids = ("df-err", "cf-err", "pw-msg", "sh-msg", "cert-msg",
+                 "trust-msg", "ca-msg", "td-msg", "ae-msg",
+                 "iv-schedule-msg", "iv-refresh-msg", "iv-offline-msg",
+                 "ii-override-note", "ii-release-msg")
+    for eid in alert_ids:
+        tag = html.split('id="%s"' % eid, 1)[1].split(">", 1)[0]
+        assert 'role="alert"' in tag, eid
+    status_ids = ("status", "dev-status", "di-note", "wz-progress", "wz-msg",
+                  "sh-status", "cert-status", "td-status", "ae-status",
+                  "sessions-info", "swarm-summary")
+    for sid in status_ids:
+        tag = html.split('id="%s"' % sid, 1)[1].split(">", 1)[0]
+        assert 'role="status"' in tag and 'aria-live="polite"' in tag, sid
+    # progress bars are exposed as progressbar, not silent divs
+    for pid in ("prog", "iv-offline-progress"):
+        tag = html.split('id="%s"' % pid, 1)[1].split(">", 1)[0]
+        assert 'role="progressbar"' in tag, pid
+        assert 'aria-valuemin="0"' in tag and 'aria-valuemax="100"' in tag, pid
+    app_js = _webroot("app.js")
+    assert "rowProg.setAttribute('role', 'progressbar');" in app_js
+    assert "aria-valuenow" in app_js
+
+
+def test_reduced_motion_covers_more_than_the_two_drawers_and_shadows_are_tokenized():
+    """Task 3/5 already pinned '.drawer { transition:none; }' verbatim
+    (test_deployment_details_open_in_a_right_hand_drawer) -- this asserts
+    the SAME line survives byte-for-byte while a second reduced-motion
+    block widens the exemption to the nav rail and the other micro-
+    interaction transitions this task's off-canvas nav and forms
+    introduce. Also: the drawer/modal shadows migrate off the old
+    Cisco-navy rgba() literals onto --shadow-lg (Task 6 owned-minors item);
+    the modal backdrop keeps an rgba() scrim but de-branded to neutral
+    black."""
+    css = _webroot("styles.css")
+    assert ".drawer { transition:none; }" in css
+    assert "rgba(11,37,69" not in css
+    assert "box-shadow:var(--shadow-lg);" in css
+    assert "background:rgba(0,0,0,.35);" in css
+    reduced_motion_blocks = css.count("@media (prefers-reduced-motion: reduce)")
+    assert reduced_motion_blocks >= 3
+    last_block = css.rsplit("@media (prefers-reduced-motion: reduce)", 1)[1]
+    for selector in (".nav-rail", ".btn", ".chip", ".dropzone", ".progress .bar"):
+        assert selector in last_block.split("}\n", 1)[0], selector

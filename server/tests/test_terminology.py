@@ -169,6 +169,12 @@ ALLOWLIST = [
     ("server/tests/test_catalog.py", frozenset({2118, 2119, 2126, 2129}),
      "deliberate hard-break pin: an old, not-yet-redeployed agent's stale "
      "peer_receipts key is dropped silently, not rejected (declared break 6)"),
+
+    # -- Task 6: CSS property name, not the retired business term ------
+    ("server/webroot/styles.css", frozenset({425}),
+     "the CSS `background-attachment` property (Task 6's .table-scroll "
+     "scroll-shadow gradients) -- unrelated to the retired attachment "
+     "vocabulary, hard exclusion"),
 ]
 
 
