@@ -38,7 +38,7 @@
     }
     return {
       q: val('dev-filter-q').trim().toLowerCase(),
-      attachment: val('dev-filter-attachment'),
+      managementType: val('dev-filter-management-type'),
       platform: val('dev-filter-platform'),
       cred: val('dev-filter-cred'),
       telemetry: val('dev-filter-telemetry'),
@@ -182,8 +182,8 @@
         .filter(Boolean).join(' ').toLowerCase();
       if (hay.indexOf(f.q) === -1) return false;
     }
-    if (f.attachment &&
-        (d.management_type || d.network_attachment || 'legacy') !== f.attachment) return false;
+    if (f.managementType &&
+        (d.management_type || 'legacy') !== f.managementType) return false;
     if (f.platform) {
       var plat = d.platform || '';
       if (f.platform === '__none' ? plat !== '' : plat !== f.platform) return false;
@@ -708,20 +708,20 @@
         return '<option value="' + esc(o[0]) + '"' + (o[0] === platVal ? ' selected' : '') + '>' + esc(o[1]) + '</option>';
       }).join('');
       var status = deviceStatusHtml(d, devNow);
-      var attachment = d.management_type || d.network_attachment || 'legacy';
-      var attachmentDetail = attachment.indexOf('router-') === 0
+      var managementType = d.management_type || 'legacy';
+      var managementTypeDetail = managementType.indexOf('router-') === 0
         ? (' / VPG' + (d.vpg_number == null ? '' : d.vpg_number))
         : (' / ' + (d.inband_vlan || d.iris_vlan || ''));
-      var attachmentLabel = (attachment === 'legacy_routed' || attachment === 'legacy')
-        ? 'Inventory only — attachment not chosen'
-        : attachment === 'xr-host' ? 'XR host'
-        : (attachment + attachmentDetail);
+      var managementTypeLabel = (managementType === 'legacy_routed' || managementType === 'legacy')
+        ? 'Inventory only — management type not chosen'
+        : managementType === 'xr-host' ? 'XR host'
+        : (managementType + managementTypeDetail);
       return '<tr data-id="' + esc(d.device_id) + '">' +
         '<td><input type="checkbox" class="mark" data-id="' + esc(d.device_id) + '"' +
         (marked[d.device_id] ? ' checked' : '') + '></td>' +
         '<td>' + esc(d.device_id) + '</td><td>' + esc(d.device_ip || '') + '</td>' +
         '<td>' + esc(d.model || d.heartbeat_model || '') + '</td>' +
-        '<td>' + esc(attachmentLabel) + '</td>' +
+        '<td>' + esc(managementTypeLabel) + '</td>' +
         '<td><select class="platform">' + platSel + '</select></td>' +
         '<td><select class="cred">' + credSel + '</select></td>' +
         '<td><button type="button" class="linkish assign-btn">' + esc(assignLabel) + '</button></td>' +
@@ -1547,7 +1547,7 @@
         return '<option value="' + esc(o[0]) + '">' + esc(o[1]) + '</option>';
       }).join('');
   })();
-  ['dev-filter-q', 'dev-filter-attachment', 'dev-filter-platform',
+  ['dev-filter-q', 'dev-filter-management-type', 'dev-filter-platform',
    'dev-filter-cred', 'dev-filter-telemetry', 'dev-filter-peer',
    'dev-filter-status'].forEach(function (id) {
     var el = document.getElementById(id);
@@ -1559,7 +1559,7 @@
     var clear = document.getElementById('dev-filter-clear');
     if (!clear) return;
     clear.addEventListener('click', function () {
-      ['dev-filter-q', 'dev-filter-attachment', 'dev-filter-platform',
+      ['dev-filter-q', 'dev-filter-management-type', 'dev-filter-platform',
        'dev-filter-cred', 'dev-filter-telemetry', 'dev-filter-peer',
        'dev-filter-status'].forEach(function (id) {
         var el = document.getElementById(id);
@@ -1735,11 +1735,11 @@
   restoreBatch();
   var devForm = document.getElementById('dev-form');
   function updateDeviceFields() {
-    var attach = document.getElementById('df-attachment').value;
+    var attach = document.getElementById('df-management-type').value;
     var router = attach === 'router-routed' || attach === 'router-nat';
     // xr-host runs the appmgr container on the router's own network stack:
     // no VLAN, SVI, VPG, NAT interface, or app IP/mask/gateway. Those last
-    // three used to be visible for every attachment -- the core bug this
+    // three used to be visible for every management type -- the core bug this
     // hides.
     var xrHost = attach === 'xr-host';
     document.getElementById('df-vlan').hidden = router || xrHost;
@@ -1755,14 +1755,14 @@
     if (xrHost && !platform.value) platform.value = 'xr-appmgr';
     if (!xrHost && platform.value === 'xr-appmgr') platform.value = '';
   }
-  document.getElementById('df-attachment').addEventListener('change', updateDeviceFields);
+  document.getElementById('df-management-type').addEventListener('change', updateDeviceFields);
   // xr-host <-> xr-appmgr is mutually required server-side, so picking the
   // agent install directly should carry the operator into xr-host too --
   // the same auto-select the model-driven path below performs, just from
   // the other field. Never fight an operator already on xr-host.
   document.getElementById('df-platform').addEventListener('change', function () {
     if (this.value !== 'xr-appmgr') return;
-    var attachSel = document.getElementById('df-attachment');
+    var attachSel = document.getElementById('df-management-type');
     if (attachSel.value === 'xr-host') return;
     attachSel.value = 'xr-host';
     updateDeviceFields();
@@ -1789,14 +1789,14 @@
   async function refreshInstallOptions() {
     var model = document.getElementById('df-model').value.trim();
     var platform = document.getElementById('df-platform');
-    var attachSel = document.getElementById('df-attachment');
+    var attachSel = document.getElementById('df-management-type');
     var gen = ++installOptionsGen;
     // The install-options answer for an IOS-XR-shaped model is exactly
     // ["xr-appmgr"] -- the one thing it can run, and nothing else ever
     // returns just that -- so ANY other repaint of the platform select
     // (blank model, a server/network error, a null or empty answer, or a
     // real answer that isn't that exact singleton) must exit an
-    // auto-entered xr-host attachment. Left stuck on xr-host, the
+    // auto-entered xr-host management type. Left stuck on xr-host, the
     // addressing fields stay hidden for a non-XR device with no visible
     // cause and the platform select no longer even offers xr-appmgr to
     // undo it with. Every one of those paths below calls this helper.
@@ -1848,7 +1848,7 @@
           return '<option value="' + esc(o) + '">' + esc(INSTALL_OPTION_LABELS[o] || o) + '</option>';
         }).join('');
       if (options.indexOf(kept) !== -1) platform.value = kept;
-      // Drive the attachment auto-select off the server answer instead of
+      // Drive the management type auto-select off the server answer instead of
       // re-implementing the model regex here.
       if (options.length === 1 && options[0] === 'xr-appmgr') {
         if (attachSel.value !== 'xr-host') {
@@ -1881,7 +1881,7 @@
     var did = document.getElementById('df-id').value.trim();
     var derr = document.getElementById('df-err'); derr.textContent = '';
     if (!did) { derr.textContent = 'Device ID is required.'; return; }
-    var attach = document.getElementById('df-attachment').value;
+    var attach = document.getElementById('df-management-type').value;
     var vlan = document.getElementById('df-vlan').value.trim();
     var mask = document.getElementById('df-mask').value.trim();
     var body = {

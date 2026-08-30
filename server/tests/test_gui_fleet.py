@@ -207,7 +207,7 @@ def test_validate_record_accepts_the_xr_platform_on_xr_hardware(tmp_path):
     that does NOT, even once os_family classifies it as XR). xr-appmgr is
     mutually bound to management_type xr-host (see the bidirectional tests
     below), so acceptance is exercised through that pairing rather than the
-    fabricated 'routed' attachment this used to (incorrectly) accept."""
+    fabricated 'routed' management type this used to (incorrectly) accept."""
     fs = _fs(tmp_path)
     saved = fs.upsert(dict(_XRHOST, device_id="xr-8201", model="8201",
                            platform="xr-appmgr"))
@@ -395,10 +395,10 @@ def test_xr_appmgr_platform_requires_xr_host_management_type(tmp_path):
     with pytest.raises(ValueError,
                        match="platform xr-appmgr requires management_type xr-host"):
         fs.upsert(dict(_XRHOST, device_id="xr-bad-inband", management_type="inband"))
-    for attachment in ("router-routed", "router-nat"):
+    for mgmt_type in ("router-routed", "router-nat"):
         with pytest.raises(ValueError):
-            fs.upsert(dict(_XRHOST, device_id="xr-bad-" + attachment,
-                           management_type=attachment))
+            fs.upsert(dict(_XRHOST, device_id="xr-bad-" + mgmt_type,
+                           management_type=mgmt_type))
 
 
 def test_xr_host_still_refused_by_model_platform_ladder(tmp_path):
@@ -411,9 +411,9 @@ def test_xr_host_still_refused_by_model_platform_ladder(tmp_path):
         fs.upsert(dict(_XRHOST, device_id="xr-on-a-switch", model="C9300-48UXM"))
 
 
-def test_legacy_upsert_accepts_xr_appmgr_platform_without_attachment(tmp_path):
+def test_legacy_upsert_accepts_xr_appmgr_platform_without_management_type(tmp_path):
     """The legacy short-circuit stays untouched: an inventory-only device may
-    carry platform xr-appmgr before an attachment is chosen (the console
+    carry platform xr-appmgr before a management type is chosen (the console
     records the live probe's platform before the operator picks xr-host)."""
     fs = _fs(tmp_path)
     saved = fs.upsert({"device_id": "xr-inventory", "device_ip": "10.0.0.9",
@@ -554,7 +554,7 @@ def test_example_csv_is_a_safe_importable_template(tmp_path):
     fs = _fs(tmp_path)
     assert fs.import_csv(tpl)["imported"] == 0           # comments + header only
     assert fs.list_devices() == []                       # safe to import as-is
-    assert "inband" in tpl.lower()                       # both attachment modes documented
+    assert "inband" in tpl.lower()                       # both management types documented
     assert "routed" in tpl.lower()
     assert "router-nat" in tpl.lower()
     assert "xr-host" in tpl.lower()
@@ -617,17 +617,40 @@ def test_import_csv_rejects_xr_host_row_with_app_ip_atomically(tmp_path):
     assert fs.list_devices() == []   # atomic: the good row is rejected too
 
 
-def test_network_attachment_header_alias_imports_xr_host_row(tmp_path):
-    """The pre-rename v2 header (network_attachment instead of
-    management_type) still imports an xr-host row."""
+def test_network_attachment_csv_header_is_rejected(tmp_path):
+    """The retired network_attachment v2 header alias is gone: a CSV using it
+    (an old export from before the rename) fails exactly like any other
+    unrecognized header -- not a silent partial import, not a field-alias
+    substitution, just the same unknown-header ValueError every other bad
+    header produces."""
     fs = _fs(tmp_path)
     alias_header = ",".join(
         col if col != "management_type" else "network_attachment"
         for col in gui_fleet.CSV_V2_COLS)
     row = "xr1,10.0.0.9,xr-host,,,,,,,,,8201,,,xr-appmgr"
-    assert fs.import_csv(alias_header + "\n" + row + "\n")["imported"] == 1
-    dev = fs.get_device("xr1")
-    assert dev["management_type"] == "xr-host" and dev["platform"] == "xr-appmgr"
+    with pytest.raises(ValueError, match="v2 named header"):
+        fs.import_csv(alias_header + "\n" + row + "\n")
+    assert fs.list_devices() == []
+
+
+def test_legacy_network_attachment_only_row_reads_as_unclassified(tmp_path):
+    """Decision 1: the network_attachment read-alias is REMOVED from
+    FleetStore._read -- a fleet.json row still carrying only the retired
+    alias key (never re-saved since before the rename) is not migrated in
+    memory. It reads back exactly as stored: no management_type key at all,
+    so it is unclassified/legacy from every reader's point of view (the
+    console table, the filter, an operator script) until an upsert
+    normalizes it."""
+    fs = _fs(tmp_path)
+    with open(fs.path, "w") as stream:
+        json.dump({"revision": 1, "devices": {"d1": {
+            "device_id": "d1", "device_ip": "10.0.0.1",
+            "network_attachment": "routed", "registered_at": 1000,
+        }}}, stream)
+    dev = fs.get_device("d1")
+    assert dev.get("management_type") is None
+    assert dev["network_attachment"] == "routed"          # untouched, not migrated
+    assert [d.get("management_type") for d in fs.list_devices()] == [None]
 
 
 def test_pre_router_v2_header_still_imports_xr_host_row(tmp_path):

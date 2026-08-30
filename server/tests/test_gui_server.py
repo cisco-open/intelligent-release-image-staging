@@ -6771,7 +6771,7 @@ def test_devices_filter_every_column_and_act_on_the_filtered_set():
         js = f.read()
     devices = html.split('id="view-devices"', 1)[1].split("</section>", 1)[0]
     # one control per meaningful column, plus free text across the row
-    for control in ("dev-filter-q", "dev-filter-attachment", "dev-filter-platform",
+    for control in ("dev-filter-q", "dev-filter-management-type", "dev-filter-platform",
                     "dev-filter-cred", "dev-filter-telemetry", "dev-filter-peer",
                     "dev-filter-status", "dev-filter-clear"):
         assert 'id="%s"' % control in devices, "missing filter control: %s" % control
@@ -6789,19 +6789,19 @@ def test_agent_install_rename_and_inventory_only_label():
     networking hardware to operators, so its DISPLAY text becomes "Agent
     install" everywhere it appears -- the add-form placeholder, the devices-
     table header, and the filter label. Separately, the 'legacy'/
-    'legacy_routed' attachment value displayed as the word "legacy", which
-    reads like a real inventory state rather than "attachment not chosen
-    yet" -- it becomes "Inventory only — attachment not chosen". Both are
-    display-only: the wire field name 'platform', its values (guestshell/
-    iox/router), and the attachment values (legacy/legacy_routed) are
-    unchanged."""
+    'legacy_routed' management_type value displayed as the word "legacy",
+    which reads like a real inventory state rather than "management type
+    not chosen yet" -- it becomes "Inventory only — management type not
+    chosen". Both are display-only: the wire field name 'platform', its
+    values (guestshell/iox/router), and the management_type values (legacy/
+    legacy_routed) are unchanged."""
     with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
         html = f.read()
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
 
     # index.html: filter option, filter label, table header, add-form select
-    assert '<option value="legacy">Inventory only — attachment not chosen</option>' in html
+    assert '<option value="legacy">Inventory only — management type not chosen</option>' in html
     assert 'aria-label="Filter by agent install"' in html
     assert '<option value="">Agent install: any</option>' in html
     assert '<th>Agent install</th>' in html
@@ -6812,15 +6812,15 @@ def test_agent_install_rename_and_inventory_only_label():
     assert 'Filter by platform"' not in html
     assert '>legacy</option>' not in html
 
-    # the field id, its values, and the attachment values are untouched
+    # the field id, its values, and the management_type values are untouched
     assert 'id="df-platform"' in html and 'id="dev-filter-platform"' in html
     assert 'value="guestshell"' in html and 'value="iox"' in html
     assert 'value="router"' in html and 'value="xr-appmgr"' in html
     assert '<option value="legacy"' in html
 
-    # app.js: the row-attachment display and the status/detail lines
-    assert "'Inventory only — attachment not chosen'" in js
-    assert "attachment === 'legacy_routed' || attachment === 'legacy'" in js
+    # app.js: the row-management-type display and the status/detail lines
+    assert "'Inventory only — management type not chosen'" in js
+    assert "managementType === 'legacy_routed' || managementType === 'legacy'" in js
     assert "'Agent install updated for '" in js
     assert "'Agent install update failed: '" in js
     assert "['Agent install', esc(res.platform" in js
@@ -6854,10 +6854,10 @@ def test_add_device_form_filters_install_options_live_by_model():
     assert "refreshInstallOptions" in js
 
 
-def test_xr_host_attachment_option_added_to_both_selects():
+def test_xr_host_management_type_option_added_to_both_selects():
     """The xr-host management type needs to be choosable from the console:
-    the add-device form's df-attachment select and the devices-table
-    dev-filter-attachment select both gain the wire value xr-host. The
+    the add-device form's df-management-type select and the devices-table
+    dev-filter-management-type select both gain the wire value xr-host. The
     filter (whose siblings are bare wire-value labels like "routed") gets
     the short honest label 'XR host'; the add-device form (whose siblings
     are each "Label - one-line description", e.g. "Routed - IRIS-managed
@@ -6865,18 +6865,18 @@ def test_xr_host_attachment_option_added_to_both_selects():
     stand out as the one option with no explanation."""
     with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
         html = f.read()
-    dev_filter = html.split('id="dev-filter-attachment"', 1)[1].split("</select>", 1)[0]
+    dev_filter = html.split('id="dev-filter-management-type"', 1)[1].split("</select>", 1)[0]
     assert '<option value="xr-host">XR host</option>' in dev_filter
-    df_attach = html.split('id="df-attachment"', 1)[1].split("</select>", 1)[0]
+    df_mgmt_type = html.split('id="df-management-type"', 1)[1].split("</select>", 1)[0]
     assert ('<option value="xr-host">XR host - router\'s own network '
-            'stack</option>') in df_attach
+            'stack</option>') in df_mgmt_type
 
 
 def test_update_device_fields_hides_every_addressing_field_for_xr_host():
     """xr-host runs the appmgr container on the router's own network stack:
     no VLAN, SVI, VPG, NAT interface, or app IP/mask/gateway. Before this,
     df-guest/df-mask/df-gateway were ALWAYS visible regardless of
-    attachment -- the core UX bug this task fixes, since an operator adding
+    management type -- the core UX bug this task fixes, since an operator adding
     an XR router saw three fields that mean nothing for it. updateDeviceFields
     must hide all seven addressing fields for xr-host and set the agent
     install to xr-appmgr, mirroring the pre-existing router auto-set/clear
@@ -6900,23 +6900,23 @@ def test_xr_host_auto_selected_from_model_and_from_platform_pick():
     the /api/install-options answer -- an XR model gets back exactly
     ["xr-appmgr"], nothing else ever does -- and (2) the operator picks
     Agent install = XR appmgr container directly. Either path auto-selects
-    df-attachment to xr-host and repaints the form, without fighting an
+    df-management-type to xr-host and repaints the form, without fighting an
     operator who is already there.
 
     Symmetric exit: correcting the model away from an XR shape (e.g. 8201
-    -> C9300-48UXM) must reset an auto-entered xr-host attachment back to
-    the unset/default option and repaint. Without this, df-guest/df-mask/
+    -> C9300-48UXM) must reset an auto-entered xr-host management type back
+    to the unset/default option and repaint. Without this, df-guest/df-mask/
     df-gateway stay hidden for a non-XR device with no visible cause and
     the form cannot be completed. Scoped to the same model-driven repaint
-    -- it must not reach for any of the operator's own explicit attachment
-    changes elsewhere in the form.
+    -- it must not reach for any of the operator's own explicit management
+    type changes elsewhere in the form.
 
     Regression closed here: a first pass only wired the exit into the
     fetched-non-XR-answer branch. Every OTHER path that repaints the
     platform select away from offering xr-appmgr -- the blank-model early
     return, the !r.ok error path, a null options answer, the zero-options
     dead end, and the catch block -- painted FULL_INSTALL_OPTIONS_HTML
-    (which does not even list xr-appmgr) while leaving df-attachment
+    (which does not even list xr-appmgr) while leaving df-management-type
     stuck on xr-host, so the addressing fields stayed hidden with the
     agent-install select silently offering no way back to xr-appmgr
     either. The exit must be a single helper invoked from every one of
@@ -6940,7 +6940,7 @@ def test_xr_host_auto_selected_from_model_and_from_platform_pick():
     assert refresh_fn.count("exitXrHostIfStale();") == 6
     blank_model_block = refresh_fn.split("if (!model) {", 1)[1].split("}", 1)[0]
     assert "exitXrHostIfStale();" in blank_model_block, \
-        "blank-model early return must exit a stale xr-host attachment too"
+        "blank-model early return must exit a stale xr-host management type too"
     catch_block = refresh_fn.split("} catch (e) {", 1)[1]
     assert "exitXrHostIfStale();" in catch_block
     assert "getElementById('df-platform').addEventListener('change'" in js
@@ -6969,29 +6969,29 @@ def test_device_form_submit_sends_no_addressing_fields_for_xr_host():
 
 
 def test_devices_table_renders_honest_xr_host_label():
-    """attachmentLabel must render xr-host as 'XR host' -- no VLAN/VPG
+    """managementTypeLabel must render xr-host as 'XR host' -- no VLAN/VPG
     detail suffix appended, since xr-host carries neither -- while the
     existing legacy/inventory-only branch stays untouched. Scoped to the
-    attachmentLabel assignment itself (a bare substring search would pass
-    on ANY occurrence of these tokens anywhere in app.js and would never
-    notice a xr-host arm that accidentally referenced attachmentDetail),
-    so this also pins that the xr-host arm precedes the generic
-    'attachment + attachmentDetail' fallback and never reads
-    attachmentDetail."""
+    managementTypeLabel assignment itself (a bare substring search would
+    pass on ANY occurrence of these tokens anywhere in app.js and would
+    never notice a xr-host arm that accidentally referenced
+    managementTypeDetail), so this also pins that the xr-host arm precedes
+    the generic 'managementType + managementTypeDetail' fallback and never
+    reads managementTypeDetail."""
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
-    label = js.split("var attachmentLabel = ", 1)[1].split(";\n", 1)[0]
-    assert "attachment === 'legacy_routed' || attachment === 'legacy'" in label
-    assert "'Inventory only — attachment not chosen'" in label
-    assert "attachment === 'xr-host'" in label
+    label = js.split("var managementTypeLabel = ", 1)[1].split(";\n", 1)[0]
+    assert "managementType === 'legacy_routed' || managementType === 'legacy'" in label
+    assert "'Inventory only — management type not chosen'" in label
+    assert "managementType === 'xr-host'" in label
     assert "'XR host'" in label
-    fallback_marker = "(attachment + attachmentDetail)"
+    fallback_marker = "(managementType + managementTypeDetail)"
     assert fallback_marker in label
-    xr_idx = label.index("attachment === 'xr-host'")
+    xr_idx = label.index("managementType === 'xr-host'")
     fallback_idx = label.index(fallback_marker)
     assert xr_idx < fallback_idx, "xr-host arm must precede the generic fallback"
     xr_arm = label[xr_idx:fallback_idx]
-    assert "attachmentDetail" not in xr_arm
+    assert "managementTypeDetail" not in xr_arm
 
 
 def test_deploy_info_panel_hides_meaningless_rows_and_labels_xr_host():

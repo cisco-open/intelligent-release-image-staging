@@ -1,7 +1,7 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 #
 # SPDX-License-Identifier: Apache-2.0
-"""Validated operator inventory, separate from applied deployment receipts."""
+"""Validated operator inventory, separate from applied deployment records."""
 import csv
 import io
 import ipaddress
@@ -102,9 +102,6 @@ def validate_record(record, allow_legacy=False):
     if not isinstance(record, dict):
         raise ValueError("device record must be an object")
     result = {key: _text(value) for key, value in record.items() if value is not None}
-    # Accept the pre-rename field name as an alias.
-    if "network_attachment" in result and "management_type" not in result:
-        result["management_type"] = result.pop("network_attachment")
     did = result.get("device_id", "")
     if not _ID_RE.fullmatch(did):
         raise ValueError("device_id must contain only letters, numbers, dot, underscore, or hyphen")
@@ -294,11 +291,6 @@ class FleetStore:
             else:
                 # Upgrade the old bare mapping in memory on the next write.
                 result = {"revision": 0, "devices": data}
-            # Migrate the pre-rename field name in memory (persists on next write).
-            for rec in result["devices"].values():
-                if isinstance(rec, dict) and "network_attachment" in rec \
-                        and "management_type" not in rec:
-                    rec["management_type"] = rec.pop("network_attachment")
             return result
         except (OSError, ValueError):
             return {"revision": 0, "devices": {}}
@@ -319,12 +311,11 @@ class FleetStore:
             previous = data["devices"].get(did)
             previous_record = previous if isinstance(previous, dict) else {}
             merged = dict(previous_record)
-            incoming_attachment = record.get(
-                "management_type", record.get("network_attachment"))
+            incoming_attachment = record.get("management_type")
             if incoming_attachment is not None:
                 incoming_attachment = _text(incoming_attachment)
             if incoming_attachment and incoming_attachment != previous_record.get(
-                    "management_type", previous_record.get("network_attachment")):
+                    "management_type"):
                 # Attachment-specific fields are mutually exclusive. A partial
                 # upsert changing type must not retain stale values from the old
                 # family and then fail validation (or, worse, retarget a plan).
@@ -353,8 +344,6 @@ class FleetStore:
                         "platform" not in record:
                     merged.pop("platform", None)
             merged.update({key: value for key, value in record.items() if value is not None})
-            if "network_attachment" in merged and "management_type" not in merged:
-                merged["management_type"] = merged.pop("network_attachment")
             # Full v2 validation applies only when the record actually carries a
             # classified attachment (Console form, CSV v2, adoption). Bare
             # creation and partial edits (model/platform/credential/legacy CSV)
@@ -403,13 +392,11 @@ class FleetStore:
             data_rows.append(row)
         if header is None:
             return {"imported": 0, "new": 0, "updated": 0, "skipped": skipped}
-        # Accept the pre-rename v2 header (network_attachment) as an alias so an
-        # older exported CSV still imports; validate_record maps the field.
-        v2_alias = [c if c != "management_type" else "network_attachment"
-                    for c in CSV_V2_COLS]
-        old_v2_alias = [c if c != "management_type" else "network_attachment"
-                        for c in _CSV_V2_OLD_COLS]
-        v2_headers = (CSV_V2_COLS, v2_alias, _CSV_V2_OLD_COLS, old_v2_alias)
+        # The pre-router v2 header (_CSV_V2_OLD_COLS, no vpg_number/nat_interface
+        # columns) still imports unchanged; the retired network_attachment
+        # alias header is gone -- an old exported CSV using it is rejected
+        # below like any other unknown header.
+        v2_headers = (CSV_V2_COLS, _CSV_V2_OLD_COLS)
         legacy = header in (_LEGACY_COLS, _LEGACY_COLS[:-1], _LEGACY_COLS[:-2])
         if header not in v2_headers and not legacy:
             raise ValueError("CSV must use the v2 named header: %s" % ",".join(CSV_V2_COLS))
