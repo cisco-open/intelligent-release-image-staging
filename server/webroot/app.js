@@ -1736,17 +1736,17 @@
   restoreBatch();
   var devForm = document.getElementById('dev-form');
   function updateDeviceFields() {
-    var attach = document.getElementById('df-management-type').value;
-    var router = attach === 'router-routed' || attach === 'router-nat';
+    var managementType = document.getElementById('df-management-type').value;
+    var router = managementType === 'router-routed' || managementType === 'router-nat';
     // xr-host runs the appmgr container on the router's own network stack:
     // no VLAN, SVI, VPG, NAT interface, or app IP/mask/gateway. Those last
     // three used to be visible for every management type -- the core bug this
     // hides.
-    var xrHost = attach === 'xr-host';
+    var xrHost = managementType === 'xr-host';
     document.getElementById('df-vlan').hidden = router || xrHost;
-    document.getElementById('df-svi').hidden = attach !== 'routed';
+    document.getElementById('df-svi').hidden = managementType !== 'routed';
     document.getElementById('df-vpg').hidden = !router;
-    document.getElementById('df-nat-interface').hidden = attach !== 'router-nat';
+    document.getElementById('df-nat-interface').hidden = managementType !== 'router-nat';
     document.getElementById('df-guest').hidden = xrHost;
     document.getElementById('df-mask').hidden = xrHost;
     document.getElementById('df-gateway').hidden = xrHost;
@@ -1763,9 +1763,9 @@
   // the other field. Never fight an operator already on xr-host.
   document.getElementById('df-platform').addEventListener('change', function () {
     if (this.value !== 'xr-appmgr') return;
-    var attachSel = document.getElementById('df-management-type');
-    if (attachSel.value === 'xr-host') return;
-    attachSel.value = 'xr-host';
+    var mgmtTypeSel = document.getElementById('df-management-type');
+    if (mgmtTypeSel.value === 'xr-host') return;
+    mgmtTypeSel.value = 'xr-host';
     updateDeviceFields();
   });
   // Agent-install options depend on the model, so df-model sits ahead of
@@ -1790,7 +1790,7 @@
   async function refreshInstallOptions() {
     var model = document.getElementById('df-model').value.trim();
     var platform = document.getElementById('df-platform');
-    var attachSel = document.getElementById('df-management-type');
+    var mgmtTypeSel = document.getElementById('df-management-type');
     var gen = ++installOptionsGen;
     // The install-options answer for an IOS-XR-shaped model is exactly
     // ["xr-appmgr"] -- the one thing it can run, and nothing else ever
@@ -1802,8 +1802,8 @@
     // cause and the platform select no longer even offers xr-appmgr to
     // undo it with. Every one of those paths below calls this helper.
     function exitXrHostIfStale() {
-      if (attachSel.value === 'xr-host') {
-        attachSel.value = '';
+      if (mgmtTypeSel.value === 'xr-host') {
+        mgmtTypeSel.value = '';
         updateDeviceFields();
       }
     }
@@ -1852,8 +1852,8 @@
       // Drive the management type auto-select off the server answer instead of
       // re-implementing the model regex here.
       if (options.length === 1 && options[0] === 'xr-appmgr') {
-        if (attachSel.value !== 'xr-host') {
-          attachSel.value = 'xr-host';
+        if (mgmtTypeSel.value !== 'xr-host') {
+          mgmtTypeSel.value = 'xr-host';
           updateDeviceFields();
         }
       } else {
@@ -1882,31 +1882,31 @@
     var did = document.getElementById('df-id').value.trim();
     var derr = document.getElementById('df-err'); derr.textContent = '';
     if (!did) { derr.textContent = 'Device ID is required.'; return; }
-    var attach = document.getElementById('df-management-type').value;
+    var managementType = document.getElementById('df-management-type').value;
     var vlan = document.getElementById('df-vlan').value.trim();
     var mask = document.getElementById('df-mask').value.trim();
     var body = {
       device_id: did,
       device_ip: document.getElementById('df-ip').value.trim() || did,
-      management_type: attach,
+      management_type: managementType,
       model: document.getElementById('df-model').value.trim(),
       platform: document.getElementById('df-platform').value,
       credential_profile_id: document.getElementById('df-cred').value
     };
-    if (attach === 'xr-host') {
+    if (managementType === 'xr-host') {
       // XR host networking -- the agent shares the router's own network
       // stack, so no app-network fields belong on this wire body.
-    } else if (attach === 'inband') {
+    } else if (managementType === 'inband') {
       body.app_ip = document.getElementById('df-guest').value.trim();
       body.app_mask = mask;
       body.app_gateway = document.getElementById('df-gateway').value.trim();
       body.inband_vlan = vlan;
-    } else if (attach === 'router-routed' || attach === 'router-nat') {
+    } else if (managementType === 'router-routed' || managementType === 'router-nat') {
       body.app_ip = document.getElementById('df-guest').value.trim();
       body.app_mask = mask;
       body.app_gateway = document.getElementById('df-gateway').value.trim();
       body.vpg_number = document.getElementById('df-vpg').value.trim();
-      if (attach === 'router-nat') {
+      if (managementType === 'router-nat') {
         body.nat_interface = document.getElementById('df-nat-interface').value.trim();
       }
     } else {

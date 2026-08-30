@@ -107,10 +107,10 @@ def validate_record(record, allow_legacy=False):
         raise ValueError("device_id must contain only letters, numbers, dot, underscore, or hyphen")
     secrets_store.validate_device_id(did)
     result["device_ip"] = _ipv4(result.get("device_ip"), "device_ip")
-    attachment = result.get("management_type", "")
-    if attachment == "legacy_routed" and allow_legacy:
+    management_type = result.get("management_type", "")
+    if management_type == "legacy_routed" and allow_legacy:
         return result
-    if attachment not in ("routed", "inband", "router-routed", "router-nat", "xr-host"):
+    if management_type not in ("routed", "inband", "router-routed", "router-nat", "xr-host"):
         raise ValueError("management_type must be routed, inband, router-routed, "
                          "router-nat, or xr-host")
     platform = result.get("platform", "")
@@ -128,7 +128,7 @@ def validate_record(record, allow_legacy=False):
         raise ValueError("model contains unsupported characters")
     model_is_c8k = bool(_C8K_RE.match(model))
     effective_platform = platform or ("router" if model_is_c8k else "")
-    if attachment in _ROUTER_TYPES:
+    if management_type in _ROUTER_TYPES:
         if model and not model_is_c8k:
             raise ValueError("router modes support the Catalyst 8000 family only; "
                              "%s is not yet supported" % model)
@@ -164,16 +164,16 @@ def validate_record(record, allow_legacy=False):
     # ever means that. Before this, no such pairing existed anywhere, which
     # is how an XR router ended up recorded as 'inband' with a made-up
     # VLAN. The legacy short-circuit above (allow_legacy) is untouched, so
-    # an inventory-only device may still carry platform xr-appmgr before an
-    # attachment is chosen.
-    if attachment == "xr-host":
+    # an inventory-only device may still carry platform xr-appmgr before a
+    # management type is chosen.
+    if management_type == "xr-host":
         if platform != "xr-appmgr":
             raise ValueError("management_type xr-host requires platform xr-appmgr")
     elif platform == "xr-appmgr":
         raise ValueError("platform xr-appmgr requires management_type xr-host")
     result["schema_version"] = 2
-    result["management_type"] = attachment
-    if attachment == "routed":
+    result["management_type"] = management_type
+    if management_type == "routed":
         result["iris_vlan"] = str(_vlan(result.get("iris_vlan"), "iris_vlan"))
         result["svi_ip"] = _ipv4(result.get("svi_ip"), "svi_ip")
         result["svi_mask"] = _mask(result.get("svi_mask"), "svi_mask")
@@ -183,7 +183,7 @@ def validate_record(record, allow_legacy=False):
         if any(result.get(key) for key in ("inband_vlan", "ios_ssh_host",
                                            "vpg_number", "nat_interface")):
             raise ValueError("routed inventory cannot contain inband or router fields")
-    elif attachment == "inband":
+    elif management_type == "inband":
         result["inband_vlan"] = str(_vlan(result.get("inband_vlan"), "inband_vlan"))
         app_ip, app_mask, app_gateway = _static_network(
             result.get("app_ip"), result.get("app_mask"), result.get("app_gateway"), "app")
@@ -198,7 +198,7 @@ def validate_record(record, allow_legacy=False):
         # Guest Shell never uses it.
         if result.get("ios_ssh_host"):
             result["ios_ssh_host"] = _ipv4(result.get("ios_ssh_host"), "ios_ssh_host")
-    elif attachment == "xr-host":
+    elif management_type == "xr-host":
         # The appmgr container runs on the router's own network stack -- no
         # VLAN, SVI, app IP/mask/gateway, VPG, or NAT interface exists to
         # configure, so a non-empty one is a caller mistake, not silently
@@ -218,7 +218,7 @@ def validate_record(record, allow_legacy=False):
                                            "inband_vlan", "ios_ssh_host")):
             raise ValueError("router inventory cannot contain switch management fields")
         nat_interface = result.get("nat_interface", "")
-        if attachment == "router-nat":
+        if management_type == "router-nat":
             if not _INTERFACE_RE.fullmatch(nat_interface):
                 raise ValueError("nat_interface must be a valid IOS interface name")
         elif nat_interface:
@@ -240,8 +240,8 @@ def _legacy_record(row):
 def _legacy_like(record):
     """Minimal normalization for an unclassified or legacy record. It enforces a
     safe device_id and IPv4 device_ip, preserves the remaining fields as-is, and
-    marks the row ``legacy_routed`` so it cannot deploy until an attachment is
-    chosen. This keeps bare device creation and partial edits (model, platform,
+    marks the row ``legacy_routed`` so it cannot deploy until a management type
+    is chosen. This keeps bare device creation and partial edits (model, platform,
     credential) working without demanding full routed/inband fields."""
     result = {key: (_text(value) if isinstance(value, str) else value)
               for key, value in record.items() if value is not None}
@@ -311,22 +311,23 @@ class FleetStore:
             previous = data["devices"].get(did)
             previous_record = previous if isinstance(previous, dict) else {}
             merged = dict(previous_record)
-            incoming_attachment = record.get("management_type")
-            if incoming_attachment is not None:
-                incoming_attachment = _text(incoming_attachment)
-            if incoming_attachment and incoming_attachment != previous_record.get(
+            incoming_management_type = record.get("management_type")
+            if incoming_management_type is not None:
+                incoming_management_type = _text(incoming_management_type)
+            if incoming_management_type and incoming_management_type != previous_record.get(
                     "management_type"):
-                # Attachment-specific fields are mutually exclusive. A partial
-                # upsert changing type must not retain stale values from the old
-                # family and then fail validation (or, worse, retarget a plan).
+                # Management-type-specific fields are mutually exclusive. A
+                # partial upsert changing type must not retain stale values
+                # from the old family and then fail validation (or, worse,
+                # retarget a plan).
                 old_router = previous_record.get("management_type") in _ROUTER_TYPES
-                new_router = incoming_attachment in _ROUTER_TYPES
+                new_router = incoming_management_type in _ROUTER_TYPES
                 old_xr = previous_record.get("management_type") == "xr-host"
-                new_xr = incoming_attachment == "xr-host"
+                new_xr = incoming_management_type == "xr-host"
                 if old_xr or new_xr:
                     # xr-host carries none of the XE addressing fields, and no
-                    # XE attachment carries xr-host's (none); either direction
-                    # of this swap must not let a stale one survive.
+                    # XE management type carries xr-host's (none); either
+                    # direction of this swap must not let a stale one survive.
                     for key in ("iris_vlan", "svi_ip", "svi_mask", "app_ip",
                                 "app_mask", "app_gateway", "inband_vlan",
                                 "ios_ssh_host", "vpg_number", "nat_interface"):
@@ -334,7 +335,7 @@ class FleetStore:
                 elif old_router and new_router:
                     # VPG and app addressing are shared by both router modes;
                     # only the NAT outside field is mode-specific.
-                    if incoming_attachment == "router-routed":
+                    if incoming_management_type == "router-routed":
                         merged.pop("nat_interface", None)
                 else:
                     for key in ("iris_vlan", "svi_ip", "svi_mask", "inband_vlan",
@@ -345,9 +346,9 @@ class FleetStore:
                     merged.pop("platform", None)
             merged.update({key: value for key, value in record.items() if value is not None})
             # Full v2 validation applies only when the record actually carries a
-            # classified attachment (Console form, CSV v2, adoption). Bare
+            # classified management type (Console form, CSV v2, adoption). Bare
             # creation and partial edits (model/platform/credential/legacy CSV)
-            # are stored as legacy_routed and must pick an attachment before
+            # are stored as legacy_routed and must pick a management type before
             # deployment -- OnboardService/plan enforce that at onboard time.
             if merged.get("management_type") in (
                     "routed", "inband", "router-routed", "router-nat", "xr-host"):

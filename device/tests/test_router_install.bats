@@ -20,7 +20,7 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
-@test "router-routed renders a VPG Guest Shell attachment" {
+@test "router-routed renders a VPG Guest Shell interface" {
   run bash "$INSTALL" --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" == *"interface VirtualPortGroup10"* ]]

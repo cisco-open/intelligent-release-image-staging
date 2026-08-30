@@ -2127,6 +2127,13 @@ def test_old_agent_peer_receipts_key_is_dropped_not_rejected():
     out = catalog._sanitize_report(stale)          # must not raise
     assert "peer_transfer_records" not in out
     assert "peer_receipts" not in out
+    # Dropping the stale key must be surgical: every other field -- report_id,
+    # peers_total, and the rest -- sanitizes identically to a report that
+    # never carried the obsolete key at all.
+    clean = catalog._sanitize_report(_v2())
+    assert out == clean
+    assert out["report_id"] == clean["report_id"]
+    assert out["peers_total"] == clean["peers_total"]
 
 
 def test_peer_transfer_records_round_trip_whitelisted():

@@ -1425,8 +1425,8 @@ def _router_preflight_stub(monkeypatch, running="", apps="", guest_share="%Error
     monkeypatch.setattr(gui_onboard.subprocess, "run", run)
 
 
-def _router_resolved(attachment="router-nat"):
-    return {"management_type": attachment, "vpg_number": "10",
+def _router_resolved(management_type="router-nat"):
+    return {"management_type": management_type, "vpg_number": "10",
             "app_ip": "10.8.0.2", "app_mask": "255.255.255.252",
             "app_gateway": "10.8.0.1", "nat_interface": "Gi1",
             "swarm_port": "6881"}

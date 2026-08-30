@@ -40,7 +40,7 @@ if [ "$DRY" -eq 0 ]; then
   [ -r "$IRIS_CRT_FILE" ] || { echo "ERROR: IRIS_CRT_FILE=$IRIS_CRT_FILE not readable" >&2; exit 1; }
 fi
 
-# Attachment model. routed: IRIS creates a dedicated VLAN/SVI and the app SSHes
+# Management type model. routed: IRIS creates a dedicated VLAN/SVI and the app SSHes
 # to that SVI. inband: the app attaches to an EXISTING operator-owned VLAN that
 # IRIS never creates/changes/removes, and SSHes to the existing IOS management
 # SVI (IOS_SSH_HOST) for its plain-copy placement. The AppGig trunk is the one inband

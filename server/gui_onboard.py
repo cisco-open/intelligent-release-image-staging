@@ -684,7 +684,7 @@ def apply_router_preflight(resolved, evidence):
     if not identity or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", identity):
         raise ValueError("router preflight did not return a safe device identity")
     result = dict(resolved)
-    attachment = result["management_type"]
+    management_type = result["management_type"]
     bound_identity = str(result.get("device_identity") or "").strip()
     if bound_identity and bound_identity != identity:
         raise ValueError("router device identity changed while the job was queued")
@@ -698,7 +698,7 @@ def apply_router_preflight(resolved, evidence):
         if not re.match(r"^C8[0-9]{3}", detected_model, re.IGNORECASE):
             raise ValueError("router preflight returned a non-Catalyst-8000 model")
         result["model"] = detected_model
-    if attachment == "router-nat":
+    if management_type == "router-nat":
         outside = str(evidence.get("nat_interface") or "").strip()
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9./_-]{0,63}", outside):
             raise ValueError("router preflight did not resolve nat_interface")
@@ -940,15 +940,15 @@ class OnboardService:
         token = self._mint(device_id) if mint else ""
         env = dict(os.environ)
         target = resolved or dev
-        attachment = target["management_type"]
-        if attachment == "legacy_routed":
-            attachment = "routed"
+        management_type = target["management_type"]
+        if management_type == "legacy_routed":
+            management_type = "routed"
         target_ip = (target.get("device_ip")
-                     if attachment in ("router-routed", "router-nat") else None)
+                     if management_type in ("router-routed", "router-nat") else None)
         env.update({
             "DEVICE_IP": target_ip or dev["device_ip"],
             "DEVICE_ID": device_id,
-            "MANAGEMENT_TYPE": attachment,
+            "MANAGEMENT_TYPE": management_type,
             "VLAN": str(target.get("iris_vlan", target.get("vlan", ""))),
             "SVI_IP": target.get("svi_ip", ""),
             "SVI_MASK": target.get("svi_mask", target.get("app_mask", "")),
@@ -960,13 +960,13 @@ class OnboardService:
             "VPG_NUMBER": str(target.get("vpg_number", "")),
             "NAT_INTERFACE": target.get("nat_interface", ""),
             "BT_LISTEN_PORT": str(target.get("swarm_port", "6881"))
-                              if attachment == "router-nat" else "",
+                              if management_type == "router-nat" else "",
             "NAT_OUTSIDE_OWNED": str(target.get("nat_outside_owned", "0")),
             "EXPECTED_DEVICE_IDENTITY": target.get("device_identity", ""),
             "ROUTER_RESOURCES_OWNED": str(target.get("router_resources_owned", "0")),
             # inband IOx reaches IOS at the switch's management IP by default
             "IOS_SSH_HOST": (target.get("ios_ssh_host", "")
-                             or (dev["device_ip"] if attachment == "inband" else "")),
+                             or (dev["device_ip"] if management_type == "inband" else "")),
             "CATALOG_URL": self.catalog_url,
             "STAGE_HOST": self.host_ip,
             "CATALOG_TOKEN": token,

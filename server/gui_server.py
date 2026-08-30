@@ -736,20 +736,20 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
 
         def _plan(self, device_id, device):
             """Resolve immutable, non-secret installer input before token minting."""
-            attachment = device.get("management_type", "legacy_routed")
-            if attachment == "legacy_routed":
-                attachment = "routed"
-            if attachment not in ("routed", "inband", "router-routed", "router-nat",
-                                  "xr-host"):
+            management_type = device.get("management_type", "legacy_routed")
+            if management_type == "legacy_routed":
+                management_type = "routed"
+            if management_type not in ("routed", "inband", "router-routed", "router-nat",
+                                       "xr-host"):
                 raise ValueError("unknown management type")
             platform = gui_onboard.resolve_platform(device)
-            router_attachment = attachment in ("router-routed", "router-nat")
+            router_management_type = management_type in ("router-routed", "router-nat")
             if device.get("model") and re.match(
                     r"^C8[0-9]{3}", device["model"], re.IGNORECASE) \
-                    and not router_attachment:
+                    and not router_management_type:
                 raise ValueError("Catalyst 8000 models require management_type "
                                  "router-routed or router-nat")
-            if (platform == "router") != router_attachment:
+            if (platform == "router") != router_management_type:
                 raise ValueError("platform router requires management_type "
                                  "router-routed or router-nat")
             if platform == "router" and device.get("model") and not re.match(
@@ -765,10 +765,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             # VLAN/SVI ownership narrative, and vlan/svi/guestshell owned
             # resources on an IOS-XR box. Gate on the RESOLVED platform, the same
             # way the 'router' coupling above already does.
-            if (platform == "xr-appmgr") != (attachment == "xr-host"):
+            if (platform == "xr-appmgr") != (management_type == "xr-host"):
                 raise ValueError("platform xr-appmgr requires management_type "
                                  "xr-host (the two are mutually required)")
-            if attachment == "xr-host":
+            if management_type == "xr-host":
                 # The appmgr container runs on the router's own network stack
                 # (--net=host): no VLAN, SVI, app IP/mask/gateway, VPG, or NAT
                 # interface is ever configured, so this dict must not carry
@@ -777,7 +777,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 # stored record (gui_fleet.py); this is the same honesty
                 # requirement applied to the plan a caller actually reads.
                 network = {
-                    "management_type": attachment,
+                    "management_type": management_type,
                     "device_ip": device.get("device_ip", ""),
                     "swarm_port": "6881",
                     "model": device.get("model", ""),
@@ -786,7 +786,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 }
             else:
                 network = {
-                    "management_type": attachment,
+                    "management_type": management_type,
                     "device_ip": device.get("device_ip", ""),
                     "iris_vlan": device.get("iris_vlan", device.get("vlan", "")),
                     "svi_ip": device.get("svi_ip", ""),
@@ -802,19 +802,19 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     # (which is on the same existing management VLAN); ios_ssh_host is
                     # an optional advanced override for asymmetric topologies.
                     "ios_ssh_host": (device.get("ios_ssh_host")
-                                     or (device.get("device_ip", "") if attachment == "inband" else "")),
+                                     or (device.get("device_ip", "") if management_type == "inband" else "")),
                     "model": device.get("model", ""),
                     "platform": platform,
                     "renderer": "v1",
                 }
-            if attachment == "inband":
+            if management_type == "inband":
                 ownership = "preserves existing VLAN, SVI, gateway, routes, and VRF"
-            elif attachment == "routed":
+            elif management_type == "routed":
                 ownership = "creates only a clean IRIS-owned VLAN and SVI"
-            elif attachment == "router-nat":
+            elif management_type == "router-nat":
                 ownership = ("creates an IRIS-owned VPG and NAT rules; preserves the "
                              "outside interface except for a record-owned NAT marking")
-            elif attachment == "xr-host":
+            elif management_type == "xr-host":
                 ownership = ("XR host networking — the agent shares the router's "
                              "own network stack; no app-network fields")
             else:
@@ -839,16 +839,16 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
 
         @staticmethod
         def _owned_resources(resolved):
-            """Resources IRIS may later remove, per attachment. Inband owns only
-            the app; it never claims the operator's VLAN/SVI. XR host owns
+            """Resources IRIS may later remove, per management type. Inband owns
+            only the app; it never claims the operator's VLAN/SVI. XR host owns
             exactly what device/xr-uninstall.sh removes: the appmgr
             application, its registered package source, the RPM staged at
             harddisk: root, and the agent's iris-work/ control-file
-            directory. Every other attachment here is IOS-XE and runs its
+            directory. Every other management type here is IOS-XE and runs its
             agent inside a guestshell resource; IOS-XR has no such feature,
             so xr-host must NOT claim one."""
-            attachment = resolved["management_type"]
-            if attachment == "xr-host":
+            management_type = resolved["management_type"]
+            if management_type == "xr-host":
                 # Sidecar files (*.torrent/*.aria2/*.peers.json at harddisk:
                 # root) are also part of xr-uninstall.sh's sweep, but are
                 # deliberately NOT claimed as an owned resource here: they
@@ -870,14 +870,14 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                      "path": "harddisk:iris-work"},
                 ]
             resources = [{"kind": "guestshell", "ownership": "iris-created"}]
-            if attachment == "routed":
+            if management_type == "routed":
                 resources = [
                     {"kind": "vlan", "ownership": "iris-created",
                      "id": resolved.get("iris_vlan", "")},
                     {"kind": "svi", "ownership": "iris-created",
                      "ip": resolved.get("svi_ip", "")},
                 ] + resources
-            elif attachment in ("router-routed", "router-nat"):
+            elif management_type in ("router-routed", "router-nat"):
                 vpg = resolved.get("vpg_number", "")
                 resources = [
                     {"kind": "virtualportgroup", "ownership": "iris-created",
@@ -899,7 +899,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                    if resolved.get("file_prompt_quiet_preexisting") == "1"
                                    else "iris-added-preserved")},
                 ] + resources
-                if attachment == "router-nat":
+                if management_type == "router-nat":
                     outside_ownership = ("iris-created"
                                          if resolved.get("nat_outside_owned") in (True, 1, "1")
                                          else "pre-existing")

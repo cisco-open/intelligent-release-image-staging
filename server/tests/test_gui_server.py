@@ -2258,7 +2258,7 @@ def test_xr_host_plan_carries_no_addressing_fields(tmp_path):
     mutually required) must plan cleanly -- the enum gate at gui_server._plan
     accepts xr-host, and the resolved network dict carries ONLY device_ip/
     model/platform plus the handful of non-addressing keys every plan
-    carries (attachment, swarm_port, renderer). Every XE addressing key
+    carries (management_type, swarm_port, renderer). Every XE addressing key
     (iris_vlan/svi_*/app_*/inband_vlan/vpg_number/nat_interface/ios_ssh_host)
     must be ABSENT -- not even present with an empty string -- because
     xr-host's appmgr container uses the router's own network stack.
@@ -2295,7 +2295,7 @@ def test_xr_host_plan_carries_no_addressing_fields(tmp_path):
         stop()
 
 
-def test_plan_refuses_xr_appmgr_platform_without_xr_host_attachment(tmp_path):
+def test_plan_refuses_xr_appmgr_platform_without_xr_host_management_type(tmp_path):
     """The mutual xr-host <-> xr-appmgr requirement (Task 1's
     validate_record) is enforced only on a fully-classified record --
     fleet.upsert on a bare {"platform": ...} payload (the /platform route;
@@ -2305,7 +2305,7 @@ def test_plan_refuses_xr_appmgr_platform_without_xr_host_attachment(tmp_path):
     plain IOS-XE routed device: 10 XE addressing keys, a VLAN/SVI ownership
     narrative, and owned resources [vlan, svi, guestshell] -- on hardware
     that has none of those. _plan must gate on the RESOLVED platform vs.
-    attachment directly, the same way it already gates 'router'."""
+    management_type directly, the same way it already gates 'router'."""
     host, port, deps, stop = _serve_full(tmp_path)
     _app, fleet, _creds, _cat = deps
     try:
@@ -2394,8 +2394,8 @@ def test_owned_resources_for_xr_host_matches_the_uninstall_recipe(tmp_path):
     source, the RPM staged at harddisk: root, and the agent's iris-work/
     control-file directory -- and it must NOT claim a guestshell resource,
     which XR hardware has no such thing as (the bug the unconditional
-    guestshell entry at gui_server.py:813 introduced for every attachment
-    before this branch existed)."""
+    guestshell entry at gui_server.py:813 introduced for every management
+    type before this branch existed)."""
     secrets_path = str(tmp_path / "secrets.json")
     app = gui_app.GuiApp(secrets_path)
     srv = gui_server.make_server("127.0.0.1", 0, app, certfile=None)
@@ -2566,7 +2566,7 @@ def test_inband_onboard_is_one_click_and_drives_inband_renderer(tmp_path):
     try:
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
-        # plan preview reports the inband attachment
+        # plan preview reports the inband management type
         st, _, b = _req(host, port, "GET", "/api/devices/edge/plan",
                         headers={"Cookie": ck})
         assert st == 200 and json.loads(b)["plan"]["resolved"]["management_type"] == "inband"
@@ -4220,8 +4220,8 @@ def test_device_platform_invalid_value_400(tmp_path):
 
 def test_device_platform_accepts_the_xr_agent_on_xr_hardware(tmp_path):
     """The devices table lets an operator change a row's agent install. It
-    must be able to SET xr-appmgr on an IOS-XR box before its attachment is
-    classified (the legacy short-circuit; platform xr-appmgr is now
+    must be able to SET xr-appmgr on an IOS-XR box before its management type
+    is classified (the legacy short-circuit; platform xr-appmgr is now
     mutually bound to management_type xr-host on any fully-validated row,
     so xr1 stays unclassified here) -- and the fleet guard still refuses
     xr-appmgr on hardware that is not IOS-XR."""
@@ -6975,7 +6975,7 @@ def test_update_device_fields_hides_every_addressing_field_for_xr_host():
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
     fn = js.split("function updateDeviceFields() {", 1)[1].split("\n  }", 1)[0]
-    assert "var xrHost = attach === 'xr-host';" in fn
+    assert "var xrHost = managementType === 'xr-host';" in fn
     assert "df-vlan').hidden = router || xrHost;" in fn
     assert "df-guest').hidden = xrHost;" in fn
     assert "df-mask').hidden = xrHost;" in fn
@@ -7017,13 +7017,13 @@ def test_xr_host_auto_selected_from_model_and_from_platform_pick():
     refresh_fn = js.split("async function refreshInstallOptions() {", 1)[1].split(
         "  document.getElementById('df-model').addEventListener('input', refreshInstallOptions);", 1)[0]
     assert "options.length === 1 && options[0] === 'xr-appmgr'" in refresh_fn
-    assert "attachSel.value !== 'xr-host'" in refresh_fn
-    assert "attachSel.value = 'xr-host';" in refresh_fn
+    assert "mgmtTypeSel.value !== 'xr-host'" in refresh_fn
+    assert "mgmtTypeSel.value = 'xr-host';" in refresh_fn
     assert "updateDeviceFields();" in refresh_fn
     assert "function exitXrHostIfStale() {" in refresh_fn
     helper = refresh_fn.split("function exitXrHostIfStale() {", 1)[1].split("}", 1)[0]
-    assert "attachSel.value === 'xr-host'" in helper
-    assert "attachSel.value = '';" in helper
+    assert "mgmtTypeSel.value === 'xr-host'" in helper
+    assert "mgmtTypeSel.value = '';" in helper
     assert "updateDeviceFields();" in helper
     # every non-XR repaint path calls the helper -- six calls: blank model,
     # !r.ok, options === null, options.length === 0, the fetched-non-XR
@@ -7039,8 +7039,8 @@ def test_xr_host_auto_selected_from_model_and_from_platform_pick():
         "getElementById('df-platform').addEventListener('change', function () {", 1)[1].split(
         "});", 1)[0]
     assert "this.value !== 'xr-appmgr'" in plat_fn
-    assert "attachSel.value === 'xr-host'" in plat_fn
-    assert "attachSel.value = 'xr-host';" in plat_fn
+    assert "mgmtTypeSel.value === 'xr-host'" in plat_fn
+    assert "mgmtTypeSel.value = 'xr-host';" in plat_fn
 
 
 def test_device_form_submit_sends_no_addressing_fields_for_xr_host():
@@ -7051,9 +7051,9 @@ def test_device_form_submit_sends_no_addressing_fields_for_xr_host():
     all: not the routed ones, not app_ip/app_mask/app_gateway either."""
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
-    assert "if (attach === 'xr-host') {" in js
-    xr_branch = js.split("if (attach === 'xr-host') {", 1)[1].split(
-        "} else if (attach === 'inband') {", 1)[0]
+    assert "if (managementType === 'xr-host') {" in js
+    xr_branch = js.split("if (managementType === 'xr-host') {", 1)[1].split(
+        "} else if (managementType === 'inband') {", 1)[0]
     for key in ("iris_vlan", "svi_ip", "svi_mask", "app_ip", "app_mask",
                 "app_gateway", "vpg_number", "nat_interface", "inband_vlan"):
         assert key not in xr_branch, "xr-host submit branch sends %s" % key
