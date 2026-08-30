@@ -2340,7 +2340,7 @@
       '</span><span class="attention-label">' + esc(label) + '</span>' +
       '<span class="attention-hint">' + esc(hint) + '</span></span></button>';
   }
-  function renderOverviewAttention(devs, devNow, imgs) {
+  function renderOverviewAttention(devs, devNow, imgs, fleetDataUnavailable) {
     var devAttn = overviewDeviceAttention(devs, devNow);
     var imgAttn = overviewImageAttention(imgs);
     var cards = [];
@@ -2354,7 +2354,17 @@
         imgAttn.count === 1 ? 'image quarantined' : 'images quarantined',
         'View filtered images'));
     }
-    if (!cards.length) {
+    // "No data to report a problem from" and "confirmed no problem" are
+    // different claims -- rendering the same green all-clear card either
+    // way would silently lie about which one happened. A real attention
+    // card from whichever fetch DID succeed (above) still renders
+    // alongside this: only the OTHER half degrades.
+    if (fleetDataUnavailable) {
+      cards.push('<div class="attention-card is-inactive">' +
+        '<svg aria-hidden="true"><use href="#i-minus-circle"></use></svg>' +
+        '<span class="attention-text"><span class="attention-label">Fleet status unavailable</span>' +
+        '<span class="attention-hint">Device or image data could not be loaded; retrying.</span></span></div>');
+    } else if (!cards.length) {
       cards.push('<div class="attention-card is-positive">' +
         '<svg aria-hidden="true"><use href="#i-check-circle"></use></svg>' +
         '<span class="attention-text"><span class="attention-label">All clear</span>' +
@@ -2475,19 +2485,26 @@
     // Promise.all below -- a coupled try/catch around all three fetches
     // would have let one flaky secondary request kill Fleet Totals and
     // Rollout too, which never needed it. Both still fire concurrently.
+    // failed:true marks BOTH degraded shapes -- a network-level rejection
+    // (.catch) and a resolved-but-non-2xx response (the r.ok ? ... : ...
+    // branch) -- so the renderer can tell "no data to report a problem
+    // from" apart from "confirmed no problem", which look identical if all
+    // you have is an empty array.
     var devsPromise = fetch('/api/devices').then(function (r) {
-      return r.ok ? r.json() : { devices: [], now: null };
-    }).catch(function () { return { devices: [], now: null }; });
+      return r.ok ? r.json() : { devices: [], now: null, failed: true };
+    }).catch(function () { return { devices: [], now: null, failed: true }; });
     var imgsPromise = fetch('/api/images').then(function (r) {
-      return r.ok ? r.json() : { images: [] };
-    }).catch(function () { return { images: [] }; });
+      return r.ok ? r.json() : { images: [], failed: true };
+    }).catch(function () { return { images: [], failed: true }; });
     var results = await Promise.all([devsPromise, imgsPromise]);
     var dbody = results[0];
     var devs = dbody.devices || [];
     var devNow = dbody.now || Date.now() / 1000;
-    var imgs = results[1].images || [];
+    var imgsBody = results[1];
+    var imgs = imgsBody.images || [];
+    var fleetDataUnavailable = !!(dbody.failed || imgsBody.failed);
 
-    renderOverviewAttention(devs, devNow, imgs);
+    renderOverviewAttention(devs, devNow, imgs, fleetDataUnavailable);
     renderOverviewBoundary(ov, devs, devNow, imgs);
 
     var devicesWord = ov.devices === 1 ? 'device' : 'devices';

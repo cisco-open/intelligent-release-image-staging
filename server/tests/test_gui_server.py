@@ -8573,3 +8573,40 @@ def test_card_component_matches_spec_padding_radius_and_elevation():
     assert "padding:var(--sp-xl)" in card_rule
     assert "border-radius:var(--radius-card)" in card_rule
     assert "box-shadow:var(--shadow-xs)" in card_rule
+
+
+def test_overview_attention_band_distinguishes_no_data_from_all_clear():
+    """Fix wave 2 (reviewer-confirmed truthfulness defect): a failed
+    /api/devices or /api/images fetch used to render the byte-identical
+    green "All clear" card genuine health renders -- "no data to report a
+    problem from" and "confirmed no problem" must be distinguishable.
+    renderOverviewAttention() now takes a fourth `fleetDataUnavailable`
+    argument and gates the all-clear branch behind its absence."""
+    js = _webroot("app.js")
+    fn = js.split(
+        "function renderOverviewAttention(devs, devNow, imgs, fleetDataUnavailable) {",
+        1)[1].split("\n  }", 1)[0]
+    assert "Fleet status unavailable" in fn
+    assert "attention-card is-inactive" in fn
+    assert "i-minus-circle" in fn
+    # the failure branch is neutral, not a repaint of the positive one --
+    # no check-circle/positive class anywhere in its own pushed markup
+    unavailable_card = fn.split("if (fleetDataUnavailable) {", 1)[1].split(
+        "} else if (!cards.length) {", 1)[0]
+    assert "i-check-circle" not in unavailable_card
+    assert "is-positive" not in unavailable_card
+    assert "All clear" not in unavailable_card
+    # the all-clear branch is the OTHER arm of the same if/else -- reachable
+    # only when fleet data was NOT reported unavailable
+    assert "} else if (!cards.length) {" in fn
+    all_clear_card = fn.split("} else if (!cards.length) {", 1)[1]
+    assert "All clear" in all_clear_card
+
+    # refreshOverview() marks BOTH degraded shapes (a rejected fetch and a
+    # resolved-but-non-2xx response) with failed:true, ORs them together,
+    # and threads the result into the renderer as its 4th argument.
+    overview_fn = js.split("async function refreshOverview() {", 1)[1].split(
+        "\n  }", 1)[0]
+    assert "failed: true" in overview_fn
+    assert "dbody.failed || imgsBody.failed" in overview_fn
+    assert "renderOverviewAttention(devs, devNow, imgs, fleetDataUnavailable)" in overview_fn
