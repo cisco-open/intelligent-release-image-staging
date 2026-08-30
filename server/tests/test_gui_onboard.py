@@ -8,7 +8,7 @@ import time
 from types import SimpleNamespace
 
 import catalog as catalog_mod
-import deployment_receipts
+import deployment_records
 import gui_onboard
 import pytest
 
@@ -1220,7 +1220,7 @@ def test_router_recipe_and_env_plumbing(tmp_path):
     assert "DEVICE_SSH_PASS" not in seen["env"]
 
 
-def test_router_undeploy_uses_router_recipe_and_receipt_ownership(tmp_path):
+def test_router_undeploy_uses_router_recipe_and_record_ownership(tmp_path):
     fleet = _Fleet({"r1": {
         "device_id": "r1", "device_ip": "192.0.2.10", "model": "C8000V",
         "platform": "router", "credential_profile_id": "lab"}})
@@ -1278,11 +1278,11 @@ def test_router_execution_preflight_failure_never_mints_or_runs(tmp_path):
         "app_mask": "255.255.255.252", "app_gateway": "10.8.0.1",
         "credential_profile_id": "lab"}})
     minted, ran = [], []
-    receipts = deployment_receipts.ReceiptStore(str(tmp_path / "state"))
-    receipt = receipts.create({
+    record_store = deployment_records.DeploymentRecordStore(str(tmp_path / "state"))
+    record = record_store.create({
         "controller_id": "controller-1", "device_id": "r1",
         "inventory_revision": 1, "plan_hash": "queued-plan",
-        "resolved": {"platform": "router", "attachment": "router-routed"},
+        "resolved": {"platform": "router", "management_type": "router-routed"},
         "preflight": {"status": "passed"},
         "resources": [{"kind": "virtualportgroup", "name": "10",
                        "ownership": "iris-created"}],
@@ -1291,15 +1291,15 @@ def test_router_execution_preflight_failure_never_mints_or_runs(tmp_path):
         fleet, _iox_creds(), host_ip="10.9.9.9",
         mint_fn=lambda d: minted.append(d) or "TOK",
         run_fn=lambda p, e, on: ran.append(1) or 0,
-        receipts=receipts,
+        receipts=record_store,
         preflight_fn=lambda *args: (_ for _ in ()).throw(
             ValueError("VirtualPortGroup10 appeared while queued")))
-    job = _wait(svc, svc.start("r1", prepare=lambda: receipt["receipt_id"]))
+    job = _wait(svc, svc.start("r1", prepare=lambda: record["record_id"]))
     assert job["state"] == "error"
     assert minted == [] and ran == []
     assert any("preflight failed" in line for line in job["lines"])
-    assert receipts.get(receipt["receipt_id"])["state"] == "removed"
-    assert receipts.recoverable_for_device("r1") is None
+    assert record_store.get(record["record_id"])["state"] == "removed"
+    assert record_store.recoverable_for_device("r1") is None
 
 
 def _router_fleet():
@@ -2128,9 +2128,9 @@ def test_conflicting_action_on_active_job_raises():
 
 
 def test_prepare_runs_once_and_not_on_dedup():
-    """start()'s prepare() (used to mint the receipt) must fire exactly once for
+    """start()'s prepare() (used to mint the record) must fire exactly once for
     a genuinely new job and NEVER when a second same-action start dedups onto the
-    running job -- otherwise a double-onboard would strand an orphan receipt."""
+    running job -- otherwise a double-onboard would strand an orphan record."""
     release = threading.Event()
 
     def run_fn(p, e, on):
@@ -2503,63 +2503,68 @@ def test_abort_unknown_job_is_false():
     assert svc.abort("nope") is False
 
 
-# --- Receipt lifecycle races in the worker thread: a concurrent action can
-# retire (supersede) the receipt a job bound between the job's start and its
-# worker's receipt transitions. Those transitions then raise — and must not
+# --- Record lifecycle races in the worker thread: a concurrent action can
+# retire (supersede) the record a job bound between the job's start and its
+# worker's record transitions. Those transitions then raise — and must not
 # kill the worker before _finish(), which would wedge the job "running" and
 # the device "busy" until a server restart. ---
 
-def _receipted_svc(tmp_path, run_fn):
-    import deployment_receipts
-    receipts = deployment_receipts.ReceiptStore(str(tmp_path))
-    svc = _svc(run_fn, receipts=receipts)
-    return svc, receipts
+def _record_backed_svc(tmp_path, run_fn):
+    import deployment_records
+    record_store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    svc = _svc(run_fn, receipts=record_store)
+    return svc, record_store
 
 
-def _active_receipt(receipts, rid, device_id="d1"):
-    receipts.create({"receipt_id": rid, "controller_id": "c", "device_id": device_id,
+def _active_record(record_store, rid, device_id="d1"):
+    record_store.create({"record_id": rid, "controller_id": "c", "device_id": device_id,
                      "inventory_revision": 1, "plan_hash": "h" * 64,
                      "resolved": {"platform": "guestshell"},
                      "preflight": {}, "resources": []})
-    receipts.transition(rid, "applying")
-    receipts.transition(rid, "active")
+    record_store.transition(rid, "applying")
+    record_store.transition(rid, "active")
 
 
-def test_undeploy_with_superseded_receipt_aborts_cleanly(tmp_path):
+def test_undeploy_with_superseded_record_aborts_cleanly(tmp_path):
     ran = []
-    svc, receipts = _receipted_svc(tmp_path, lambda p, e, on: ran.append(1) or 0)
-    _active_receipt(receipts, "r1")
-    _active_receipt(receipts, "r2")   # supersedes r1 (the race winner)
+    svc, record_store = _record_backed_svc(tmp_path, lambda p, e, on: ran.append(1) or 0)
+    _active_record(record_store, "r1")
+    _active_record(record_store, "r2")   # supersedes r1 (the race winner)
     job = _wait(svc, svc.start("d1", action="undeploy",
                                resolved={"platform": "guestshell",
                                          "management_type": "routed"},
                                prepare=lambda: "r1"))
     # the worker must FINISH (error), not die mid-thread leaving "running"
     assert job["state"] == "error"
-    assert ran == []                  # stale-receipt teardown never ran
+    assert ran == []                  # stale-record teardown never ran
+    # gui_onboard's own job-line wording is untouched by this rename (Task 4
+    # scope: deployment_records + gui_server + console only) — it still logs
+    # "receipt %s -> %s not applied", so this pin stays as-is.
     assert any("receipt" in line for line in job["lines"])
 
 
-def test_receipt_retired_during_run_does_not_wedge_the_job(tmp_path):
+def test_record_retired_during_run_does_not_wedge_the_job(tmp_path):
     holder = {}
 
     def run_fn(p, e, on):
-        # simulate a concurrent reconciliation retiring the in-flight receipt
+        # simulate a concurrent reconciliation retiring the in-flight record
         # mid-script (applying -> unknown), so the worker's terminal
         # transition (removed) becomes invalid
-        holder["receipts"].transition("r1", "unknown")
+        holder["record_store"].transition("r1", "unknown")
         return 0
 
-    svc, receipts = _receipted_svc(tmp_path, run_fn)
-    holder["receipts"] = receipts
-    _active_receipt(receipts, "r1")
+    svc, record_store = _record_backed_svc(tmp_path, run_fn)
+    holder["record_store"] = record_store
+    _active_record(record_store, "r1")
     job = _wait(svc, svc.start("d1", action="undeploy",
                                resolved={"platform": "guestshell",
                                          "management_type": "routed"},
                                prepare=lambda: "r1"))
-    # script succeeded -> job reports the script's truth; the receipt
+    # script succeeded -> job reports the script's truth; the record
     # discrepancy is surfaced as a job line instead of killing the worker
     assert job["state"] == "done"
+    # gui_onboard's own job-line wording is untouched by this rename (see
+    # test_undeploy_with_superseded_record_aborts_cleanly above).
     assert any("receipt" in line for line in job["lines"])
 
 

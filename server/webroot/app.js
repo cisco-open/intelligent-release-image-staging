@@ -785,18 +785,18 @@
   var deployInfoDev = null;
   var DEPLOY_STATE_BADGE = { active: 'badge-ok', removed: 'badge-queued',
                              superseded: 'badge-cancelled', 'needs-reconcile': 'badge-fail' };
-  function deployReceiptRows(rec, total) {
+  function deployRecordRows(rec, total) {
     var res = rec.resolved || {};
     var ts = rec.timestamps || {};
     var pf = rec.preflight || {};
-    var attach = res.management_type || '';
+    var managementType = res.management_type || '';
     // xr-host carries none of the four addressing rows below -- the
     // appmgr container runs on the router's own network stack -- so they
     // are dropped from the table entirely rather than shown as dashes,
     // which would read as "unknown" instead of "not applicable".
-    var xrHost = attach === 'xr-host';
-    var attachLabel = xrHost ? 'XR host' : attach;
-    var mgmt = attach.indexOf('router-') === 0
+    var xrHost = managementType === 'xr-host';
+    var managementTypeLabel = xrHost ? 'XR host' : managementType;
+    var mgmt = managementType.indexOf('router-') === 0
       ? (res.vpg_number ? 'VPG' + res.vpg_number : '')
       : ((res.inband_vlan || res.iris_vlan) ? 'VLAN ' + (res.inband_vlan || res.iris_vlan) : '');
     var svi = res.svi_ip ? res.svi_ip + (res.svi_mask ? ' / ' + res.svi_mask : '') : '';
@@ -808,12 +808,12 @@
     var pairs = [
       ['State', '<span class="badge ' + stateCls + '">' + esc(rec.state || 'unknown') + '</span>' +
         (rec.adopted ? ' <span class="muted">(adopted)</span>' : '')],
-      ['Receipt', esc(rec.receipt_id || '') +
+      ['Record', esc(rec.record_id || '') +
         ' <span class="muted">(' + esc(total) + ' stored for this device)</span>'],
       ['Planned', esc(fmtDate(ts.planned_at) || '—')],
       ['Finished', esc(fmtDate(ts.finished_at) || '—')],
       ['Preflight', esc(pf.status || '—')],
-      ['Management type', esc(attachLabel || '—')]
+      ['Management type', esc(managementTypeLabel || '—')]
     ];
     if (!xrHost) {
       pairs.push(
@@ -898,19 +898,19 @@
     if (!r) {
       note.textContent = 'Deployment details unavailable.';
     } else if (r.status === 404) {
-      note.textContent = 'Deployment receipts are unavailable on this server.';
+      note.textContent = 'Deployment records are unavailable on this server.';
     } else if (!r.ok) {
       note.textContent = 'Deployment details unavailable (' + r.status + ').';
     } else {
       var body = await r.json();
       if (deployInfoDev !== id) return;
-      if (!body.receipt) {
-        note.textContent = 'No deployment receipt — onboarded before receipts ' +
+      if (!body.record) {
+        note.textContent = 'No deployment record — onboarded before records ' +
           'existed, or added manually; adopt or re-onboard to create one.';
       } else {
         note.textContent = '';
         document.getElementById('di-rows').innerHTML =
-          deployReceiptRows(body.receipt, body.total || 0);
+          deployRecordRows(body.record, body.total || 0);
       }
     }
     renderDeviceDeployLogs(id);
@@ -1236,8 +1236,8 @@
     var forced = action === 'undeploy' && forceEl && forceEl.checked;
     if (action === 'undeploy' &&
         !confirm('Undeploy ' + ids.length + ' device(s)?' + (forced
-          ? '\n\nFORCE is on. For any device with no deployment receipt this removes the IRIS agent footprint only — EEM applets, Guest Shell and the IRIS guest-share files. The VirtualPortGroup and NAT are NOT removed, because without a receipt there is no proof IRIS created them; clean those up yourself if IRIS did. On an IOS-XR device, force removes the same IRIS-named footprint a normal undeploy would — the appmgr application iris, its iris-xr package source, the RPM, iris-work/, and the IRIS sidecar files at harddisk: root — but a staged image file there is never removed by IRIS teardown, and the agent deletes an adopted file only when the catalog republishes new content under that same image id — never otherwise.'
-          : '\n\nThis removes the device agent (Guest Shell or IOx app) and only receipt-owned resources. Inband deployments preserve their existing network; router NAT preserves a pre-existing outside marking.') +
+          ? '\n\nFORCE is on. For any device with no deployment record this removes the IRIS agent footprint only — EEM applets, Guest Shell and the IRIS guest-share files. The VirtualPortGroup and NAT are NOT removed, because without a record there is no proof IRIS created them; clean those up yourself if IRIS did. On an IOS-XR device, force removes the same IRIS-named footprint a normal undeploy would — the appmgr application iris, its iris-xr package source, the RPM, iris-work/, and the IRIS sidecar files at harddisk: root — but a staged image file there is never removed by IRIS teardown, and the agent deletes an adopted file only when the catalog republishes new content under that same image id — never otherwise.'
+          : '\n\nThis removes the device agent (Guest Shell or IOx app) and only record-owned resources. Inband deployments preserve their existing network; router NAT preserves a pre-existing outside marking.') +
                  '\n\nStaged images at the filesystem root are left in place. Running jobs are never interrupted.')) {
       setBulkBusy(false); return;
     }
@@ -1457,7 +1457,7 @@
       ids.join(', ') + '\n\nThis removes the Console record only — it does NOT ' +
       'undeploy. An onboarded device keeps its agent and staged image with no ' +
       'inventory entry left to manage it. Undeploy first if that is what you want.' +
-      '\n\nAny deployment receipt is abandoned: it is kept as the record of what ' +
+      '\n\nAny deployment record is abandoned: it is kept as the account of what ' +
       'IRIS built on the box, but it stops authorising a teardown, so re-adding ' +
       'this device id later starts from scratch.' +
       '\n\nThis cannot be undone.';
@@ -1627,7 +1627,7 @@
     var ids = claimSelection();
     if (!ids) return;
     if (!confirm('Adopt ' + ids.length + ' device(s)?\n\n' + ids.join(', ') +
-      '\n\nAdoption records an ownership receipt for a device IRIS did not onboard, ' +
+      '\n\nAdoption creates an ownership record for a device IRIS did not onboard, ' +
       'so undeploy may later remove resources IRIS did not create. Only adopt ' +
       'devices whose inventory matches what is really on the box; re-onboarding ' +
       '(idempotent) is the safer option. Router deployments cannot be adopted.' +

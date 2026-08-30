@@ -25,7 +25,7 @@ Two consequences shape this module:
 
 The store lives at ``$IRIS_STATE/peer-ledger.json`` and is written with the
 same atomic-replace + ``secrets_store.store_lock`` idiom as
-``deployment_receipts``: the telemetry hub, the GUI process and any CLI that
+``deployment_records``: the telemetry hub, the GUI process and any CLI that
 reads it all serialize on one lockfile.
 """
 import copy

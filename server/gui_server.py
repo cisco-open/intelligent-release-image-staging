@@ -659,7 +659,7 @@ def ca_trust_refresh_loop(stop_event, state_dir, audit_fn=None,
 
 def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=None,
                  onboard=None, swarm_fetch=None, certfile=None, audit_path=None,
-                 receipts=None, now_fn=time.time):
+                 record_store=None, now_fn=time.time):
     login_limiter = gui_auth.LoginRateLimiter()
 
     def policy_state_dir():
@@ -813,7 +813,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 ownership = "creates only a clean IRIS-owned VLAN and SVI"
             elif attachment == "router-nat":
                 ownership = ("creates an IRIS-owned VPG and NAT rules; preserves the "
-                             "outside interface except for a receipt-owned NAT marking")
+                             "outside interface except for a record-owned NAT marking")
             elif attachment == "xr-host":
                 ownership = ("XR host networking — the agent shares the router's "
                              "own network stack; no app-network fields")
@@ -852,10 +852,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 # Sidecar files (*.torrent/*.aria2/*.peers.json at harddisk:
                 # root) are also part of xr-uninstall.sh's sweep, but are
                 # deliberately NOT claimed as an owned resource here: they
-                # are swept as IRIS-derived artifacts, not receipt-claimed
+                # are swept as IRIS-derived artifacts, not record-claimed
                 # ones. Image files are a different story entirely -- a
                 # staged image file is never removed by IRIS teardown
-                # (receipted or forced), and the agent deletes an adopted
+                # (recorded or forced), and the agent deletes an adopted
                 # file only when the catalog republishes new content under
                 # that same image id -- never otherwise -- so there is no
                 # image-file resource kind to claim here either.
@@ -915,9 +915,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             return resources
 
         @staticmethod
-        def _router_teardown_resolved(receipt):
-            """Authorize router teardown strictly from receipt-owned resources."""
-            resolved = dict(receipt.get("resolved") or {})
+        def _router_teardown_resolved(record):
+            """Authorize router teardown strictly from record-owned resources."""
+            resolved = dict(record.get("resolved") or {})
             if resolved.get("platform") != "router":
                 return resolved
             # A raw KeyError here would escape do_POST as an unhandled 500
@@ -934,21 +934,21 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             if resolved["management_type"] == "router-nat":
                 required.update(("nat-acl", "nat-overload", "nat-static",
                                  "nat-outside-marking"))
-            resources = receipt.get("resources") or []
+            resources = record.get("resources") or []
             by_kind = {resource.get("kind"): resource for resource in resources}
             missing = sorted(required - set(by_kind))
             if missing:
-                raise ValueError("router receipt does not prove ownership of: %s"
+                raise ValueError("router record does not prove ownership of: %s"
                                  % ", ".join(missing))
             preserved = {"nat-outside-marking", "iox-global", "file-prompt-quiet"}
             for kind in required - preserved:
                 if by_kind[kind].get("ownership") != "iris-created":
-                    raise ValueError("router receipt does not prove IRIS ownership of %s"
+                    raise ValueError("router record does not prove IRIS ownership of %s"
                                      % kind)
             for kind in ("iox-global", "file-prompt-quiet"):
                 if by_kind[kind].get("ownership") not in (
                         "pre-existing", "iris-added-preserved"):
-                    raise ValueError("router receipt has ambiguous ownership of %s"
+                    raise ValueError("router record has ambiguous ownership of %s"
                                      % kind)
             expected = {
                 "virtualportgroup": ("id", str(resolved.get("vpg_number", ""))),
@@ -965,15 +965,15 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 })
             for kind, (field, value) in expected.items():
                 if str(by_kind[kind].get(field, "")) != str(value):
-                    raise ValueError("router receipt %s does not match resolved plan"
+                    raise ValueError("router record %s does not match resolved plan"
                                      % kind)
             if not resolved.get("device_ip") or not resolved.get("device_identity"):
-                raise ValueError("router receipt is missing deployed device identity")
+                raise ValueError("router record is missing deployed device identity")
             resolved["router_resources_owned"] = "1"
             if resolved["management_type"] == "router-nat":
                 marking = by_kind["nat-outside-marking"]
                 if marking.get("ownership") not in ("iris-created", "pre-existing"):
-                    raise ValueError("router receipt has ambiguous NAT outside ownership")
+                    raise ValueError("router record has ambiguous NAT outside ownership")
                 resolved["nat_outside_owned"] = (
                     "1" if marking.get("ownership") == "iris-created" else "0")
                 resolved["nat_interface"] = marking.get("interface") or ""
@@ -1259,24 +1259,24 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             if path.startswith("/api/devices/") and path.endswith("/deployment"):
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
-                if receipts is None:
-                    self._json(404, {"error": "receipts unavailable"}); return
+                if record_store is None:
+                    self._json(404, {"error": "records unavailable"}); return
                 did = unquote(path[len("/api/devices/"):-len("/deployment")])
-                records = receipts.list(did)
+                records = record_store.list(did)
                 # The record that best describes the device: the active one,
                 # else the recoverable teardown-authorizing one — both can
-                # raise on ambiguity (duplicate receipts), and this is a
+                # raise on ambiguity (duplicate records), and this is a
                 # read-only visibility panel, so fall back to the newest
                 # record rather than erroring it.
                 try:
-                    record = receipts.recoverable_for_device(did)
+                    record = record_store.recoverable_for_device(did)
                 except ValueError:
                     record = None
                 if record is None and records:
                     record = max(records,
                                  key=lambda r: (r.get("timestamps") or {})
                                  .get("planned_at") or 0)
-                self._json(200, {"receipt": record, "total": len(records)})
+                self._json(200, {"record": record, "total": len(records)})
                 return
             if path == "/api/credentials":
                 if app.session_info(self._sid()) is None:
@@ -2856,15 +2856,15 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                  "stream_pause": pause})
                 return
             if path.startswith("/api/devices/") and path.endswith("/adopt"):
-                # Adopt an already-deployed device that predates receipts, so it
-                # can be undeployed. Creates an ACTIVE receipt from the current
+                # Adopt an already-deployed device that predates records, so it
+                # can be undeployed. Creates an ACTIVE record from the current
                 # validated inventory; it is an explicit, acknowledged operator
                 # action (audited), never an implicit fallback.
                 did = unquote(path[len("/api/devices/"):-len("/adopt")])
                 if not did.strip():
                     self._json(400, {"error": "bad device id"}); return
-                if receipts is None:
-                    self._json(503, {"error": "receipt store unavailable"}); return
+                if record_store is None:
+                    self._json(503, {"error": "record store unavailable"}); return
                 device = fleet.get_device(did) if fleet else None
                 if device is None:
                     self._json(404, {"error": "no such device"}); return
@@ -2874,8 +2874,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if body.get("acknowledge_adopt") is not True:
                     self._json(400, {"error": "adoption acknowledgement is required"}); return
                 try:
-                    if receipts.active_for_device(did) is not None:
-                        self._json(409, {"error": "device already has an active receipt"}); return
+                    if record_store.active_for_device(did) is not None:
+                        self._json(409, {"error": "device already has an active deployment record"}); return
                 except ValueError as exc:
                     # duplicate actives (legacy store not yet healed) — surface
                     # the reason like the undeploy branch, not a dropped request
@@ -2887,15 +2887,15 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if plan["resolved"].get("platform") == "router":
                     self._json(409, {"error": "router deployments cannot be adopted; "
                                      "re-onboard to record live ownership evidence"}); return
-                receipt = receipts.adopt({"controller_id": "iris", "device_id": did,
+                record = record_store.adopt({"controller_id": "iris", "device_id": did,
                     "inventory_revision": fleet.revision(), "plan_hash": plan["plan_hash"],
                     "resolved": plan["resolved"],
                     "preflight": {"status": "adopted"},
                     "resources": self._owned_resources(plan["resolved"])})
                 self._audit("device_adopt", "onboard", action="adopt", target=did,
-                           actor=actor, detail="receipt %s (%s)"
-                           % (receipt["receipt_id"], plan["resolved"]["management_type"]))
-                self._json(200, {"receipt_id": receipt["receipt_id"]}); return
+                           actor=actor, detail="record %s (%s)"
+                           % (record["record_id"], plan["resolved"]["management_type"]))
+                self._json(200, {"record_id": record["record_id"]}); return
             if path.startswith("/api/devices/") and (
                     path.endswith("/onboard") or path.endswith("/undeploy")):
                 if onboard is None:
@@ -2924,7 +2924,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if fleet is not None and fleet.get_device(did) is None:
                     _reject(404, "no such device"); return
                 resolved = None
-                receipt_ref = {}
+                record_ref = {}
                 prepare = None
                 pre_apply = None
                 on_success = None
@@ -2935,8 +2935,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if body_flags is None:
                     return
                 # Force teardown: an onboard that died after enabling the
-                # agent but before its receipt was written leaves a router that
-                # cannot be undeployed (no receipt), cannot be adopted (routers
+                # agent but before its record was written leaves a router that
+                # cannot be undeployed (no record), cannot be adopted (routers
                 # never can) and cannot be re-onboarded (preflight refuses the
                 # existing Guest Shell). Force removes ONLY the agent footprint.
                 force = body_flags.get("force", False) is True
@@ -2951,10 +2951,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 # teardown recipe. env_extra is the only channel into it.
                 undeploy_env = None
                 if act == "onboard":
-                    # With a receipt store (always in production via main()), an
-                    # onboard resolves an immutable plan and records a receipt.
+                    # With a record store (always in production via main()), an
+                    # onboard resolves an immutable plan and persists a record.
                     # Without one (embedded/degraded), it stays one-click legacy.
-                    if receipts is not None:
+                    if record_store is not None:
                         device = fleet.get_device(did)
                         try:
                             plan = self._plan(did, device)
@@ -2962,17 +2962,17 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             _reject(409, str(exc)); return
                         if plan["resolved"].get("platform") == "router":
                             try:
-                                # Any receipt IRIS already applied blocks a
+                                # Any record IRIS already applied blocks a
                                 # re-onboard, not just an active one: the box is
                                 # configured either way, so preflight would fail
                                 # with a confusing "guestshell is already
                                 # enabled" instead of naming the real fix.
-                                existing = receipts.recoverable_for_device(did)
+                                existing = record_store.recoverable_for_device(did)
                             except ValueError as exc:
                                 _reject(409, str(exc)); return
                             if existing is not None:
                                 _reject(409, "router already has a %s "
-                                        "deployment receipt; undeploy it before "
+                                        "deployment record; undeploy it before "
                                         "onboarding again — if this device was "
                                         "replaced, undeploy with force, or "
                                         "delete and re-add it"
@@ -2982,8 +2982,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                         def prepare():
                             # Runs under the onboard job lock only when a genuinely
                             # new job is registered, so a concurrent double-onboard
-                            # cannot leave an orphan planned receipt.
-                            rid = receipts.create({"controller_id": "iris",
+                            # cannot leave an orphan planned record.
+                            rid = record_store.create({"controller_id": "iris",
                                 "device_id": did, "inventory_revision": fleet.revision(),
                                 "plan_hash": plan["plan_hash"], "resolved": plan["resolved"],
                                 # Router preflight runs in the bounded worker pool,
@@ -2992,20 +2992,20 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                 "preflight": ({"status": "pending"}
                                               if resolved.get("platform") == "router"
                                               else {"status": "not-required"}),
-                                "resources": self._owned_resources(plan["resolved"])})["receipt_id"]
-                            receipt_ref["id"] = rid
+                                "resources": self._owned_resources(plan["resolved"])})["record_id"]
+                            record_ref["id"] = rid
                             return rid
 
                         if resolved.get("platform") == "router":
                             def pre_apply(evidence):
                                 # The job may have waited in the queue. Refresh
                                 # live ownership immediately before apply, then
-                                # atomically replace the planned receipt inputs.
+                                # atomically replace the planned record inputs.
                                 final_plan = self._apply_router_preflight(plan, evidence)
-                                rid = receipt_ref.get("id")
+                                rid = record_ref.get("id")
                                 if not rid:
-                                    raise ValueError("planned receipt is unavailable")
-                                receipts.update_planned(
+                                    raise ValueError("planned record is unavailable")
+                                record_store.update_planned(
                                     rid, plan_hash=final_plan["plan_hash"],
                                     resolved=final_plan["resolved"],
                                     preflight=evidence,
@@ -3019,18 +3019,18 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             _reject(409, str(exc)); return
                         if degraded_plan["resolved"].get("platform") == "router":
                             _reject(503, "router onboarding requires the "
-                                    "deployment receipt store"); return
+                                    "deployment record store"); return
                 else:
-                    # Undeploy renders exclusively from an active receipt so a
+                    # Undeploy renders exclusively from an active record so a
                     # post-deploy inventory edit cannot retarget cleanup. Without
-                    # a receipt store, fall back to legacy fleet-driven teardown.
-                    if receipts is not None:
-                        # FORCE is decided BEFORE the receipt is read, because a
-                        # forced teardown never uses a receipt as authority: it
+                    # a record store, fall back to legacy fleet-driven teardown.
+                    if record_store is not None:
+                        # FORCE is decided BEFORE the record is read, because a
+                        # forced teardown never uses a record as authority: it
                         # strips only what is identifiably IRIS's by name and
                         # leaves the operator's network exactly as it is. Force
-                        # used to be consulted only on the no-receipt branch,
-                        # which defeated the one case it exists for — a receipt
+                        # used to be consulted only on the no-record branch,
+                        # which defeated the one case it exists for — a record
                         # that describes a device no longer there. A rebuilt VM
                         # keeps its id and address but gets a new board ID, so
                         # the teardown recipe's identity guard refused it every
@@ -3047,32 +3047,32 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
 
                             # Retired only once the box is actually clean (see
                             # OnboardService.start's on_success). EVERY
-                            # non-terminal receipt goes, which is also the only
-                            # exit from "multiple recoverable receipts" — that
+                            # non-terminal record goes, which is also the only
+                            # exit from "multiple recoverable records" — that
                             # state refuses onboard, undeploy and adopt alike,
                             # and nothing else in the product resolves it.
                             def on_success(_did=did):
-                                receipts.retire_device(
+                                record_store.retire_device(
                                     _did, "forced agent-only teardown; the "
-                                    "receipt no longer describes this device")
+                                    "record no longer describes this device")
 
                             self._audit("undeploy_forced", "onboard",
                                         action="start", target=did,
                                         actor=actor, result="ok",
                                         detail="forced agent-footprint teardown;"
                                                " VPG/NAT left untouched, any "
-                                               "deployment receipt abandoned "
+                                               "deployment record abandoned "
                                                "once the teardown succeeds")
                         else:
                             try:
-                                # Not just the ACTIVE receipt: a controller
-                                # restart during an onboard leaves the receipt
+                                # Not just the ACTIVE record: a controller
+                                # restart during an onboard leaves the record
                                 # "unknown" while the device is already
-                                # configured, and that receipt still records
+                                # configured, and that record still records
                                 # what IRIS created. Teardown must accept it, or
                                 # the device is stranded — a router cannot be
                                 # adopted and its preflight refuses a re-onboard.
-                                receipt = receipts.recoverable_for_device(did)
+                                record = record_store.recoverable_for_device(did)
                             except ValueError as exc:
                                 # duplicate actives should be impossible
                                 # (activation supersedes siblings; startup
@@ -3082,30 +3082,30 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                 # a state the console cannot resolve.
                                 _reject(409, "%s; retry with force to remove "
                                         "the agent footprint only" % exc); return
-                            if receipt is None:
-                                _reject(409, "no deployment receipt for this "
+                            if record is None:
+                                _reject(409, "no deployment record for this "
                                         "device; adopt it first, then undeploy, "
                                         "or retry with force to remove the "
                                         "agent footprint only"); return
                             try:
-                                resolved = self._router_teardown_resolved(receipt)
+                                resolved = self._router_teardown_resolved(record)
                             except ValueError as exc:
-                                # Best effort: the receipt may already BE
+                                # Best effort: the record may already BE
                                 # needs-reconcile, from an earlier attempt at
                                 # this same broken teardown, and that self-edge
                                 # is not a legal transition. Letting it raise
                                 # turned every retry after the first into an
                                 # unhandled 500 with no JSON body to explain it.
                                 try:
-                                    receipts.transition(receipt["receipt_id"],
+                                    record_store.transition(record["record_id"],
                                                         "needs-reconcile")
                                 except ValueError:
                                     pass
                                 _reject(409, str(exc)); return
 
                             def prepare():
-                                receipt_ref["id"] = receipt["receipt_id"]
-                                return receipt["receipt_id"]
+                                record_ref["id"] = record["record_id"]
+                                return record["record_id"]
                     else:
                         try:
                             degraded_plan = self._plan(did, fleet.get_device(did))
@@ -3113,7 +3113,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             _reject(409, str(exc)); return
                         if degraded_plan["resolved"].get("platform") == "router":
                             _reject(503, "router undeploy requires an "
-                                    "active deployment receipt"); return
+                                    "active deployment record"); return
                 try:
                     jid = onboard.start(
                         did, action=act, resolved=resolved, prepare=prepare,
@@ -3121,16 +3121,16 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                         env_extra=(env_extra if act == "onboard"
                                    else undeploy_env))
                 except ValueError as exc:
-                    if receipt_ref.get("id") and act == "onboard":
+                    if record_ref.get("id") and act == "onboard":
                         # Best effort, for the same reason as the teardown-
-                        # resolve handler above: start() retires the receipt
+                        # resolve handler above: start() retires the record
                         # itself when the work queue is full, so this would be
                         # removed -> needs-reconcile, which is not a legal edge.
                         # An illegal transition raised from inside an except
                         # handler escapes do_POST entirely — the operator gets a
                         # dropped request instead of the 409 that explains why.
                         try:
-                            receipts.transition(receipt_ref["id"],
+                            record_store.transition(record_ref["id"],
                                                 "needs-reconcile")
                         except ValueError:
                             pass
@@ -3317,22 +3317,22 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 except Exception:
                     purged = False
                     degraded.append("catalog")
-                # Retire the deployment receipts for the same reason the catalog
-                # state goes: a receipt outlives the fleet row, and the NEXT
+                # Retire the deployment records for the same reason the catalog
+                # state goes: a record outlives the fleet row, and the NEXT
                 # device registered under this id inherits it. That strands the
                 # device rather than merely confusing it — onboard refuses while
-                # a recoverable receipt exists and names undeploy as the fix,
+                # a recoverable record exists and names undeploy as the fix,
                 # while that teardown refuses the (replaced) box on an identity
-                # mismatch. Abandoned, not dropped: the receipt stays the record
+                # mismatch. Abandoned, not dropped: the record stays the account
                 # of what IRIS built there, which an operator who deleted a
                 # still-configured device is the one person who needs.
                 retired = []
                 try:
-                    if receipts is not None:
-                        retired = receipts.retire_device(
+                    if record_store is not None:
+                        retired = record_store.retire_device(
                             did, "device deleted from the fleet")
                 except Exception:
-                    degraded.append("receipts")
+                    degraded.append("records")
                 # Work in flight outlives the device for the same reason: a job
                 # record is keyed on the device id alone, so one left behind
                 # keeps the busy guard armed against the NEXT device registered
@@ -3351,9 +3351,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     suffix = (", secrets revoked" if revoke_state == "ok"
                               else "")
                     suffix += ", endpoints retained"
-                    suffix += (", %d deployment receipt%s abandoned"
+                    suffix += (", %d deployment record%s abandoned"
                                % (len(retired), "" if len(retired) == 1 else "s")
-                               if retired else ", no deployment receipt")
+                               if retired else ", no deployment record")
                     if stopped:
                         suffix += (", %d in-flight job%s stopped"
                                    % (stopped, "" if stopped == 1 else "s"))
@@ -3482,7 +3482,7 @@ def main():
     import gui_images
     import gui_fleet
     import gui_creds
-    import deployment_receipts
+    import deployment_records
     import catalog as catalog_mod
     import publish as publish_mod
     host = os.environ.get("IRIS_GUI_HOST", "0.0.0.0")
@@ -3515,14 +3515,14 @@ def main():
     catalog = catalog_mod.CatalogStore(
         state_dir, audit_path=audit_path,
         seeder_remove_fn=publish_mod.remove_torrent_rpc)
-    receipts = deployment_receipts.ReceiptStore(state_dir)
-    receipts.recover_interrupted()
+    record_store = deployment_records.DeploymentRecordStore(state_dir)
+    record_store.recover_interrupted()
     onboard = gui_onboard.OnboardService(
         fleet, creds, audit_fn=_bg_audit,
-        clear_state_fn=catalog.forget_device, receipts=receipts,
+        clear_state_fn=catalog.forget_device, receipts=record_store,
         log_dir=os.path.join(state_dir, "deploy-logs"))
     srv = make_server(host, port, app, images, fleet, creds, catalog, onboard,
-                       None, certfile=certfile, audit_path=audit_path, receipts=receipts)
+                       None, certfile=certfile, audit_path=audit_path, record_store=record_store)
     # Daily public-CA bundle auto-refresh (spec A3): in-process daemon
     # thread, the repo's periodic-work idiom -- no cron/timer/extra process.
     ca_stop = threading.Event()     # never set in production; loop dies with us

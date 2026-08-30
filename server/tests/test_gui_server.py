@@ -2408,7 +2408,7 @@ def test_owned_resources_for_xr_host_matches_the_uninstall_recipe(tmp_path):
         assert "guestshell" not in kinds
         assert all(r["ownership"] == "iris-created" for r in resources)
         # Names are gui_onboard's own constants, not re-hardcoded here, so a
-        # rename of APPID/SOURCE_NAME cannot silently drift the receipt.
+        # rename of APPID/SOURCE_NAME cannot silently drift the record.
         by_kind = {r["kind"]: r for r in resources}
         assert by_kind["appmgr-application"]["name"] == gui_onboard._XR_APPID
         assert by_kind["appmgr-source"]["name"] == gui_onboard._XR_SOURCE_NAME
@@ -2438,7 +2438,7 @@ def test_router_teardown_resolved_raises_without_management_type(tmp_path):
     """Task 2 fix-wave (Minor 5): unlike the other eight reader sites, the
     three management_type reads inside _router_teardown_resolved sit behind
     an except ValueError in the undeploy route (gui_server.py:3084-3098),
-    which marks the receipt needs-reconcile and answers a clean 409. A bare
+    which marks the record needs-reconcile and answers a clean 409. A bare
     KeyError there would escape as an unhandled 500 instead -- so this one
     function raises ValueError, not KeyError, on a resolved dict missing the
     key."""
@@ -2454,7 +2454,7 @@ def test_router_teardown_resolved_raises_without_management_type(tmp_path):
 
 
 def _serve_inband(tmp_path, run_fn, device=None):
-    import deployment_receipts
+    import deployment_records
     secrets_path = str(tmp_path / "secrets.json")
     app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
     state = str(tmp_path / "state")
@@ -2466,13 +2466,13 @@ def _serve_inband(tmp_path, run_fn, device=None):
                   "platform": "guestshell", "credential_profile_id": "lab"})
     creds = gui_creds.CredentialStore(secrets_path)
     creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
-    receipts = deployment_receipts.ReceiptStore(state)
+    record_store = deployment_records.DeploymentRecordStore(state)
     art = str(tmp_path / "artifacts"); os.makedirs(art, exist_ok=True)
     for pkg in ("iris-arm64.tar", "iris-amd64.tar"):
         open(os.path.join(art, pkg), "w").close()   # IOx package-presence gate
     onboard = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
                                          mint_fn=lambda d: "TOK", run_fn=run_fn,
-                                         receipts=receipts, artifacts_dir=art,
+                                         receipts=record_store, artifacts_dir=art,
                                          # this device is platform=guestshell, so
                                          # the job-start reachability gate (see
                                          # gui_onboard.py) probes it before run_fn
@@ -2483,7 +2483,7 @@ def _serve_inband(tmp_path, run_fn, device=None):
                                              "device_identity": "FCW0000TEST",
                                              "detected_model": "IE-3400"})
     srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, creds, None,
-                                 onboard, certfile=None, receipts=receipts)
+                                 onboard, certfile=None, record_store=record_store)
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return "127.0.0.1", port, srv.shutdown
@@ -2525,9 +2525,9 @@ def test_inband_iox_onboard_defaults_ssh_host_to_mgmt_ip(tmp_path):
 
 def test_reonboard_then_undeploy_starts(tmp_path):
     """Re-onboarding a device (idempotent redeploy) and then undeploying it
-    must work: the second onboard's receipt supersedes the first, so the
-    undeploy start finds exactly one active receipt. This is the lab-observed
-    failure: two active receipts made active_for_device() raise and the
+    must work: the second onboard's record supersedes the first, so the
+    undeploy start finds exactly one active record. This is the lab-observed
+    failure: two active records made active_for_device() raise and the
     Console reported 'failed to start' with no reason."""
     host, port, stop = _serve_inband(tmp_path, lambda p, e, on: 0)
     try:
@@ -2545,7 +2545,7 @@ def test_reonboard_then_undeploy_starts(tmp_path):
                 _t.sleep(0.02)
             return "timeout"
 
-        for _ in range(2):    # onboard TWICE — the re-onboard mints receipt #2
+        for _ in range(2):    # onboard TWICE — the re-onboard mints record #2
             st, _, b = _req(host, port, "POST", "/api/devices/edge/onboard", {},
                             headers=hh)
             assert st == 200
@@ -2558,8 +2558,8 @@ def test_reonboard_then_undeploy_starts(tmp_path):
 
 
 def test_inband_onboard_is_one_click_and_drives_inband_renderer(tmp_path):
-    """Inband onboards exactly like routed: a plain POST starts a job, records a
-    receipt, and runs the installer with MANAGEMENT_TYPE=inband."""
+    """Inband onboards exactly like routed: a plain POST starts a job, persists a
+    record, and runs the installer with MANAGEMENT_TYPE=inband."""
     ran = []
     host, port, stop = _serve_inband(
         tmp_path, lambda p, e, on: (ran.append(dict(e)), 0)[1])
@@ -2590,8 +2590,8 @@ def test_inband_onboard_is_one_click_and_drives_inband_renderer(tmp_path):
 
 def _serve_router(tmp_path, run_fn, preflight_fn=None, mint_fn=None, device=None,
                   audit_path=None):
-    """Receipt-backed server with one C8000V router inventory row."""
-    import deployment_receipts
+    """Record-backed server with one C8000V router inventory row."""
+    import deployment_records
     os.makedirs(tmp_path, exist_ok=True)
     secrets_path = str(tmp_path / "secrets.json")
     app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
@@ -2605,16 +2605,16 @@ def _serve_router(tmp_path, run_fn, preflight_fn=None, mint_fn=None, device=None
         "credential_profile_id": "lab"})
     creds = gui_creds.CredentialStore(secrets_path)
     creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
-    receipts = deployment_receipts.ReceiptStore(state)
+    record_store = deployment_records.DeploymentRecordStore(state)
     onboard = gui_onboard.OnboardService(
         fleet, creds, host_ip="10.9.9.9", mint_fn=mint_fn or (lambda d: "TOK"),
-        run_fn=run_fn, receipts=receipts, preflight_fn=preflight_fn)
+        run_fn=run_fn, receipts=record_store, preflight_fn=preflight_fn)
     srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, creds, None,
-                                 onboard, certfile=None, receipts=receipts,
+                                 onboard, certfile=None, record_store=record_store,
                                  audit_path=audit_path)
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    return "127.0.0.1", port, fleet, receipts, srv.shutdown
+    return "127.0.0.1", port, fleet, record_store, srv.shutdown
 
 
 def _wait_onboard_job(host, port, cookie, job_id):
@@ -2630,7 +2630,7 @@ def _wait_onboard_job(host, port, cookie, job_id):
 
 
 def test_c8000v_router_plan_auto_resolves_blank_platform_and_fields(tmp_path):
-    host, port, _fleet, receipts, stop = _serve_router(
+    host, port, _fleet, record_store, stop = _serve_router(
         tmp_path, lambda p, e, on: 0,
         preflight_fn=lambda dev, env, resolved: {
             "status": "passed", "device_identity": "9ABC123",
@@ -2657,7 +2657,7 @@ def test_c8000v_router_plan_auto_resolves_blank_platform_and_fields(tmp_path):
                                headers={"Cookie": cookie, "X-CSRF-Token": csrf})
         assert status == 200
         assert _wait_onboard_job(host, port, cookie, json.loads(body)["job_id"])["state"] == "done"
-        assert [resource["kind"] for resource in receipts.active_for_device("r1")["resources"]] == [
+        assert [resource["kind"] for resource in record_store.active_for_device("r1")["resources"]] == [
             "virtualportgroup", "eem-applets", "agent-files",
             "logging-discriminator", "pki-trustpoint", "http-client-trustpoint",
             "iox-global", "file-prompt-quiet",
@@ -2668,7 +2668,7 @@ def test_c8000v_router_plan_auto_resolves_blank_platform_and_fields(tmp_path):
 
 def test_router_onboard_uses_router_recipe_env_and_router_resource_kinds(tmp_path):
     events, ran = [], []
-    host, port, _fleet, receipts, stop = _serve_router(
+    host, port, _fleet, record_store, stop = _serve_router(
         tmp_path, lambda path, env, on: (ran.append((path, dict(env))), 0)[1],
         preflight_fn=lambda dev, env, resolved: (events.append("preflight") or {
             "status": "passed", "device_identity": "9ABC123",
@@ -2689,14 +2689,14 @@ def test_router_onboard_uses_router_recipe_env_and_router_resource_kinds(tmp_pat
                                            "NAT_INTERFACE", "BT_LISTEN_PORT")} == {
             "MANAGEMENT_TYPE": "router-nat", "VPG_NUMBER": "10",
             "NAT_INTERFACE": "GigabitEthernet1", "BT_LISTEN_PORT": "6881"}
-        receipt = receipts.active_for_device("r1")
-        assert [resource["kind"] for resource in receipt["resources"]] == [
+        record = record_store.active_for_device("r1")
+        assert [resource["kind"] for resource in record["resources"]] == [
             "virtualportgroup", "eem-applets", "agent-files",
             "logging-discriminator", "pki-trustpoint", "http-client-trustpoint",
             "iox-global", "file-prompt-quiet",
             "guestshell",
             "nat-acl", "nat-overload", "nat-static", "nat-outside-marking"]
-        assert receipt["resources"][-1]["ownership"] == "iris-created"
+        assert record["resources"][-1]["ownership"] == "iris-created"
     finally:
         stop()
 
@@ -2707,7 +2707,7 @@ def test_router_preflight_failure_is_reported_by_the_queued_job(tmp_path):
     def reject(*_args):
         raise ValueError("VirtualPortGroup10 already exists")
 
-    host, port, _fleet, receipts, stop = _serve_router(
+    host, port, _fleet, record_store, stop = _serve_router(
         tmp_path, lambda p, e, on: ran.append(1) or 0, preflight_fn=reject,
         mint_fn=lambda did: minted.append(did) or "TOK")
     try:
@@ -2719,15 +2719,15 @@ def test_router_preflight_failure_is_reported_by_the_queued_job(tmp_path):
         assert job["state"] == "error"
         assert any("preflight failed" in line for line in job["lines"])
         assert minted == [] and ran == []
-        assert receipts.list("r1")[0]["state"] == "removed"
+        assert record_store.list("r1")[0]["state"] == "removed"
     finally:
         stop()
 
 
-def test_router_nat_preflight_ownership_persists_and_undeploy_uses_receipt(tmp_path):
+def test_router_nat_preflight_ownership_persists_and_undeploy_uses_record(tmp_path):
     for preexisting, expected in ((True, "0"), (False, "1")):
         ran = []
-        host, port, _fleet, receipts, stop = _serve_router(
+        host, port, _fleet, record_store, stop = _serve_router(
             tmp_path / ("existing" if preexisting else "created"),
             lambda path, env, on: (ran.append((path, dict(env))), 0)[1],
             preflight_fn=lambda dev, env, resolved, preexisting=preexisting: {
@@ -2741,9 +2741,9 @@ def test_router_nat_preflight_ownership_persists_and_undeploy_uses_receipt(tmp_p
                               headers=headers)
             onboard_job = _wait_onboard_job(host, port, cookie, json.loads(body)["job_id"])
             assert onboard_job["state"] == "done"
-            receipt = receipts.active_for_device("r1")
-            assert receipt["resolved"]["nat_outside_owned"] == expected
-            marking = [r for r in receipt["resources"] if r["kind"] == "nat-outside-marking"]
+            record = record_store.active_for_device("r1")
+            assert record["resolved"]["nat_outside_owned"] == expected
+            marking = [r for r in record["resources"] if r["kind"] == "nat-outside-marking"]
             assert marking == [{"kind": "nat-outside-marking", "interface": "GigabitEthernet1",
                                 "ownership": "pre-existing" if preexisting else "iris-created"}]
             _, _, body = _req(host, port, "POST", "/api/devices/r1/undeploy", {},
@@ -2757,7 +2757,7 @@ def test_router_nat_preflight_ownership_persists_and_undeploy_uses_receipt(tmp_p
 
 
 def test_platform_endpoint_allows_router_only_for_router_management_types(tmp_path):
-    host, port, fleet, _receipts, stop = _serve_router(tmp_path, lambda p, e, on: 0)
+    host, port, fleet, _record_store, stop = _serve_router(tmp_path, lambda p, e, on: 0)
     try:
         fleet.upsert({"device_id": "switch", "device_ip": "192.0.2.20",
                       "management_type": "routed", "iris_vlan": "120",
@@ -2777,7 +2777,7 @@ def test_platform_endpoint_allows_router_only_for_router_management_types(tmp_pa
 
 
 def test_router_adopt_is_refused_without_live_ownership_evidence(tmp_path):
-    host, port, _fleet, receipts, stop = _serve_router(tmp_path, lambda p, e, on: 0)
+    host, port, _fleet, record_store, stop = _serve_router(tmp_path, lambda p, e, on: 0)
     try:
         cookie, csrf = _auth(host, port)
         status, _, body = _req(
@@ -2785,17 +2785,17 @@ def test_router_adopt_is_refused_without_live_ownership_evidence(tmp_path):
             {"acknowledge_adopt": True},
             headers={"Cookie": cookie, "X-CSRF-Token": csrf})
         assert status == 409 and "cannot be adopted" in json.loads(body)["error"]
-        assert receipts.list("r1") == []
+        assert record_store.list("r1") == []
     finally:
         stop()
 
 
-def test_router_undeploy_uses_receipt_ip_after_inventory_edit(tmp_path):
+def test_router_undeploy_uses_record_ip_after_inventory_edit(tmp_path):
     ran = []
     evidence = {"status": "passed", "device_identity": "9ABC123",
                 "detected_model": "C8000V", "nat_interface": "GigabitEthernet1",
                 "nat_outside_preexisting": False}
-    host, port, fleet, _receipts, stop = _serve_router(
+    host, port, fleet, _record_store, stop = _serve_router(
         tmp_path, lambda path, env, on: (ran.append(dict(env)), 0)[1],
         preflight_fn=lambda *args: dict(evidence))
     try:
@@ -2817,30 +2817,30 @@ def test_router_undeploy_uses_receipt_ip_after_inventory_edit(tmp_path):
         stop()
 
 
-def test_router_undeploy_refuses_incomplete_or_mismatched_receipt(tmp_path):
-    host, port, _fleet, receipts, stop = _serve_router(tmp_path, lambda p, e, on: 0)
+def test_router_undeploy_refuses_incomplete_or_mismatched_record(tmp_path):
+    host, port, _fleet, record_store, stop = _serve_router(tmp_path, lambda p, e, on: 0)
     try:
         cookie, csrf = _auth(host, port)
         headers = {"Cookie": cookie, "X-CSRF-Token": csrf}
         plan = {"platform": "router", "management_type": "router-routed",
                 "device_ip": "192.0.2.10", "device_identity": "9ABC123",
                 "vpg_number": "10", "model": "C8000V"}
-        receipt = receipts.create({"controller_id": "iris", "device_id": "r1",
+        record = record_store.create({"controller_id": "iris", "device_id": "r1",
             "inventory_revision": 1, "plan_hash": "a" * 64,
             "resolved": plan, "preflight": {"status": "passed"},
             "resources": [{"kind": "virtualportgroup", "ownership": "iris-created",
                            "id": "99"}]})
-        receipts.transition(receipt["receipt_id"], "applying")
-        receipts.transition(receipt["receipt_id"], "active")
+        record_store.transition(record["record_id"], "applying")
+        record_store.transition(record["record_id"], "active")
         status, _, body = _req(host, port, "POST", "/api/devices/r1/undeploy", {},
                                headers=headers)
         assert status == 409 and "does not prove ownership" in json.loads(body)["error"]
-        assert receipts.get(receipt["receipt_id"])["state"] == "needs-reconcile"
+        assert record_store.get(record["record_id"])["state"] == "needs-reconcile"
     finally:
         stop()
 
 
-def test_router_routes_fail_closed_without_receipt_store(tmp_path):
+def test_router_routes_fail_closed_without_record_store(tmp_path):
     secrets_path = str(tmp_path / "secrets.json")
     app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
     fleet = gui_fleet.FleetStore(str(tmp_path / "state"))
@@ -2855,7 +2855,7 @@ def test_router_routes_fail_closed_without_receipt_store(tmp_path):
         fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
         run_fn=lambda p, e, on: 0)
     srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, creds, None,
-                                 onboard, certfile=None, receipts=None)
+                                 onboard, certfile=None, record_store=None)
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
@@ -2865,7 +2865,7 @@ def test_router_routes_fail_closed_without_receipt_store(tmp_path):
             status, _, body = _req(
                 "127.0.0.1", port, "POST", "/api/devices/r1/" + action, {},
                 headers=headers)
-            assert status == 503 and "receipt" in json.loads(body)["error"]
+            assert status == 503 and "record" in json.loads(body)["error"]
     finally:
         srv.shutdown()
 
@@ -4908,11 +4908,11 @@ def test_device_delete_details_ok_and_fail(tmp_path):
         dels = [e for e in _read_audit_lines(audit_path)
                 if e.get("event") == "device_delete"]
         assert dels[0]["result"] == "ok"
-        # the receipt outcome is named too: it used to be the one thing delete
+        # the record outcome is named too: it used to be the one thing delete
         # changed (or in this case did not change) without saying so
         assert dels[0]["detail"] == (
             "removed (ip 10.0.0.1, model -), endpoints retained, "
-            "no deployment receipt")
+            "no deployment record")
         # deleting a device that never existed is a FAIL, not a phantom ok
         assert dels[1]["result"] == "fail"
         assert dels[1]["detail"] == "no such device"
@@ -6322,108 +6322,108 @@ def test_settings_ca_trust_malformed_ipv6_rejected(tmp_path, monkeypatch):
 
 # ---- GET /api/devices/<id>/deployment (deployment config visibility) ------
 
-def _serve_receipts(tmp_path, now_fn=None):
-    """A server with ONLY a receipt store wired (the deployment route needs
+def _serve_records(tmp_path, now_fn=None):
+    """A server with ONLY a record store wired (the deployment route needs
     nothing else). Returns the store so tests can seed records directly."""
-    import deployment_receipts
+    import deployment_records
     app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
     app.set_admin("admin", "pw")
     state = str(tmp_path / "state")
-    receipts = (deployment_receipts.ReceiptStore(state, now_fn=now_fn)
-                if now_fn else deployment_receipts.ReceiptStore(state))
+    record_store = (deployment_records.DeploymentRecordStore(state, now_fn=now_fn)
+                if now_fn else deployment_records.DeploymentRecordStore(state))
     srv = gui_server.make_server("127.0.0.1", 0, app, certfile=None,
-                                 receipts=receipts)
+                                 record_store=record_store)
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    return "127.0.0.1", port, receipts, srv.shutdown
+    return "127.0.0.1", port, record_store, srv.shutdown
 
 
-def _receipt_stub(device_id):
+def _record_stub(device_id):
     return {"controller_id": "iris", "device_id": device_id,
             "inventory_revision": 1, "plan_hash": "h",
-            "resolved": {"attachment": "routed", "platform": "guestshell"},
+            "resolved": {"management_type": "routed", "platform": "guestshell"},
             "preflight": {"status": "not-required"},
             "resources": [{"kind": "guestshell", "ownership": "iris-created"}]}
 
 
-def test_deployment_route_auth_and_receipts_unavailable(tmp_path):
-    # no receipt store wired at all -> 404 "receipts unavailable"
+def test_deployment_route_auth_and_records_unavailable(tmp_path):
+    # no record store wired at all -> 404 "records unavailable"
     host, port, _app, stop = _serve(tmp_path)
     try:
         assert _req(host, port, "GET", "/api/devices/d1/deployment")[0] == 401
         ck, _csrf = _auth(host, port)
         st, _, b = _req(host, port, "GET", "/api/devices/d1/deployment",
                         headers={"Cookie": ck})
-        assert st == 404 and json.loads(b)["error"] == "receipts unavailable"
+        assert st == 404 and json.loads(b)["error"] == "records unavailable"
     finally:
         stop()
 
 
 def test_deployment_route_null_then_newest_then_active(tmp_path):
     clock = {"t": 100}
-    host, port, receipts, stop = _serve_receipts(tmp_path,
+    host, port, record_store, stop = _serve_records(tmp_path,
                                                  now_fn=lambda: clock["t"])
     try:
         ck, _csrf = _auth(host, port)
-        # no receipts for the device: record is null, total 0
+        # no records for the device: record is null, total 0
         st, _, b = _req(host, port, "GET", "/api/devices/d1/deployment",
                         headers={"Cookie": ck})
         assert st == 200
-        assert json.loads(b) == {"receipt": None, "total": 0}
-        # two non-active, non-recoverable receipts -> the newest by
+        assert json.loads(b) == {"record": None, "total": 0}
+        # two non-active, non-recoverable records -> the newest by
         # timestamps.planned_at wins
-        r1 = receipts.create(_receipt_stub("d1"))
-        receipts.transition(r1["receipt_id"], "removed")
+        r1 = record_store.create(_record_stub("d1"))
+        record_store.transition(r1["record_id"], "removed")
         clock["t"] = 200
-        r2 = receipts.create(_receipt_stub("d1"))
+        r2 = record_store.create(_record_stub("d1"))
         _, _, b = _req(host, port, "GET", "/api/devices/d1/deployment",
                        headers={"Cookie": ck})
         got = json.loads(b)
         assert got["total"] == 2
-        assert got["receipt"]["receipt_id"] == r2["receipt_id"]
-        assert got["receipt"]["state"] == "planned"
-        # the record is the stored receipt as-is (resolved/preflight/
+        assert got["record"]["record_id"] == r2["record_id"]
+        assert got["record"]["state"] == "planned"
+        # the response is the stored record as-is (resolved/preflight/
         # resources ride along)
-        assert got["receipt"]["resolved"]["platform"] == "guestshell"
-        assert got["receipt"]["preflight"] == {"status": "not-required"}
-        assert got["receipt"]["resources"][0]["kind"] == "guestshell"
-        assert got["receipt"]["timestamps"]["planned_at"] == 200
-        # once a receipt goes active it wins regardless of age
-        receipts.transition(r2["receipt_id"], "applying")
-        receipts.transition(r2["receipt_id"], "active")
+        assert got["record"]["resolved"]["platform"] == "guestshell"
+        assert got["record"]["preflight"] == {"status": "not-required"}
+        assert got["record"]["resources"][0]["kind"] == "guestshell"
+        assert got["record"]["timestamps"]["planned_at"] == 200
+        # once a record goes active it wins regardless of age
+        record_store.transition(r2["record_id"], "applying")
+        record_store.transition(r2["record_id"], "active")
         clock["t"] = 300
-        r3 = receipts.create(_receipt_stub("d1"))     # newer, but only planned
+        r3 = record_store.create(_record_stub("d1"))     # newer, but only planned
         _, _, b = _req(host, port, "GET", "/api/devices/d1/deployment",
                        headers={"Cookie": ck})
         got = json.loads(b)
         assert got["total"] == 3
-        assert got["receipt"]["receipt_id"] == r2["receipt_id"]
-        assert got["receipt"]["state"] == "active"
-        assert r3["receipt_id"] != r2["receipt_id"]
-        # receipts are per-device: another device still sees null
+        assert got["record"]["record_id"] == r2["record_id"]
+        assert got["record"]["state"] == "active"
+        assert r3["record_id"] != r2["record_id"]
+        # records are per-device: another device still sees null
         _, _, b = _req(host, port, "GET", "/api/devices/other/deployment",
                        headers={"Cookie": ck})
-        assert json.loads(b) == {"receipt": None, "total": 0}
+        assert json.loads(b) == {"record": None, "total": 0}
     finally:
         stop()
 
 
 def test_deployment_route_recoverable_beats_newer_planned(tmp_path):
     clock = {"t": 100}
-    host, port, receipts, stop = _serve_receipts(tmp_path,
+    host, port, record_store, stop = _serve_records(tmp_path,
                                                  now_fn=lambda: clock["t"])
     try:
         ck, _csrf = _auth(host, port)
-        r1 = receipts.create(_receipt_stub("d1"))
-        receipts.transition(r1["receipt_id"], "needs-reconcile")
+        r1 = record_store.create(_record_stub("d1"))
+        record_store.transition(r1["record_id"], "needs-reconcile")
         clock["t"] = 200
-        receipts.create(_receipt_stub("d1"))          # newer, merely planned
+        record_store.create(_record_stub("d1"))          # newer, merely planned
         _, _, b = _req(host, port, "GET", "/api/devices/d1/deployment",
                        headers={"Cookie": ck})
         got = json.loads(b)
-        # the recoverable receipt still describes what is ON the box
-        assert got["receipt"]["receipt_id"] == r1["receipt_id"]
-        assert got["receipt"]["state"] == "needs-reconcile"
+        # the recoverable record still describes what is ON the box
+        assert got["record"]["record_id"] == r1["record_id"]
+        assert got["record"]["state"] == "needs-reconcile"
         assert got["total"] == 2
     finally:
         stop()
@@ -6673,9 +6673,9 @@ def test_force_undeploy_delivers_the_force_flag_to_the_recipe(tmp_path):
 
     env_extra is the ONLY channel into the recipe, and the undeploy branch is
     the only place the flag is ever set. Dropping env_extra for that action
-    silently downgrades a forced teardown to the full receipted one: on Guest
+    silently downgrades a forced teardown to the full recorded one: on Guest
     Shell and IOx that removes Vlan$VLAN, the IRISQ discriminators and the PKI
-    trustpoint using inventory values no receipt has proven -- precisely the
+    trustpoint using inventory values no record has proven -- precisely the
     harm the flag exists to prevent -- while the audit trail records that the
     operator's network was left untouched."""
     seen = {}
@@ -6703,7 +6703,7 @@ def test_force_undeploy_delivers_the_force_flag_to_xr_uninstall(tmp_path):
     device: force must resolve to device/xr-uninstall.sh (not one of the
     IOS-XE teardown scripts) and IRIS_FORCE_AGENT_ONLY=1 must reach it the
     same way it reaches the Guest Shell/IOx recipes. XR force never touches
-    a receipt -- os_family xr + platform xr-appmgr resolve straight to the
+    a record -- os_family xr + platform xr-appmgr resolve straight to the
     XR recipe with no probe or preflight involved, so a bare device record
     is enough here, unlike an onboard test."""
     seen = {}
@@ -6774,7 +6774,7 @@ def test_undeploy_force_help_and_confirm_text_cover_xr_alongside_router():
         js = f.read()
     assert xr_sentence in js
     assert ("The VirtualPortGroup and NAT are NOT removed, because without "
-            "a receipt there is no proof IRIS created them") in js
+            "a record there is no proof IRIS created them") in js
 
 
 def test_telemetry_health_badge_lives_on_overview_not_monitoring():
@@ -7059,32 +7059,32 @@ def test_devices_table_renders_honest_xr_host_label():
 def test_deploy_info_panel_hides_meaningless_rows_and_labels_xr_host():
     """The per-row (i) deployment-details panel rendered raw 'xr-host' as
     the Attachment value and four rows of dashes -- Management VLAN / VPG,
-    SVI, App IP, NAT interface -- that mean nothing for an xr-host receipt,
+    SVI, App IP, NAT interface -- that mean nothing for an xr-host record,
     since the appmgr container carries none of them. xr-host now renders
     the honest 'XR host' label, and the four addressing rows are dropped
     from the table entirely for it rather than shown as em-dashes (which
     read as "unknown", not "not applicable")."""
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
-    fn = js.split("function deployReceiptRows(rec, total) {", 1)[1].split(
+    fn = js.split("function deployRecordRows(rec, total) {", 1)[1].split(
         "\n  }", 1)[0]
     # Pins the DATA KEY, not just the rendered label: a reader still keyed
     # off the retired res.attachment would read undefined for every device
-    # (deployment_receipts never wrote res.attachment) and this whole test
+    # (deployment_records never wrote res.attachment) and this whole test
     # would stay green testing a dead code path -- Task 2's fix-wave gap.
     assert "res.management_type" in fn
     assert "res.attachment" not in fn
-    assert "var xrHost = attach === 'xr-host';" in fn
+    assert "var xrHost = managementType === 'xr-host';" in fn
     assert "'XR host'" in fn
     assert "if (!xrHost) {" in fn
     guarded = fn.split("if (!xrHost) {", 1)[1].split("}", 1)[0]
     for row in ("Management VLAN / VPG", "SVI", "App IP", "NAT interface"):
         assert row in guarded, "%r must be inside the !xrHost guard" % row
-    # State/Receipt/Planned/Finished/Preflight/Management type stay
-    # unconditional (every receipt has them); so do Swarm port/Model/Agent
+    # State/Record/Planned/Finished/Preflight/Management type stay
+    # unconditional (every record has them); so do Swarm port/Model/Agent
     # install/Device identity, which are outside the guard, after it closes
     unguarded = fn.split("if (!xrHost) {", 1)[0]
-    for row in ("State", "Receipt", "Planned", "Finished", "Preflight",
+    for row in ("State", "Record", "Planned", "Finished", "Preflight",
                 "Management type"):
         assert row in unguarded
     after_guard = fn.split("if (!xrHost) {", 1)[1].split("}", 1)[1]
@@ -7376,9 +7376,9 @@ _OWNED = [{"kind": k, "ownership": "iris-created"} for k in (
     "nat-static", "nat-outside-marking")]
 
 
-def _stranded_receipt(receipts, resources=None):
-    """A receipt in the state a died-mid-teardown router is left in."""
-    rid = receipts.create({
+def _stranded_record(record_store, resources=None):
+    """A record in the state a died-mid-teardown router is left in."""
+    rid = record_store.create({
         "controller_id": "iris", "device_id": "r1", "inventory_revision": 1,
         "plan_hash": "b" * 64,
         "resolved": {"platform": "router", "management_type": "router-nat",
@@ -7386,36 +7386,36 @@ def _stranded_receipt(receipts, resources=None):
                      "nat_interface": "GigabitEthernet1", "app_ip": "10.8.0.2",
                      "app_mask": "255.255.255.252", "app_gateway": "10.8.0.1"},
         "preflight": {"status": "passed", "device_identity": "OLDBOARDID"},
-        "resources": _OWNED if resources is None else resources})["receipt_id"]
-    receipts.transition(rid, "applying")
-    receipts.transition(rid, "needs-reconcile")
+        "resources": _OWNED if resources is None else resources})["record_id"]
+    record_store.transition(rid, "applying")
+    record_store.transition(rid, "needs-reconcile")
     return rid
 
 
-def test_delete_abandons_receipts_so_a_readded_device_can_onboard(tmp_path, monkeypatch):
+def test_delete_abandons_records_so_a_readded_device_can_onboard(tmp_path, monkeypatch):
     """Delete must be terminal for a device id.
 
     Every other per-device store is purged on delete -- assignment, heartbeat,
-    telemetry, pull directive, report ledger -- but the receipt store was never
+    telemetry, pull directive, report ledger -- but the record store was never
     touched, and it is the one that gates onboard. A device deleted and added
     back under the same id therefore inherited its predecessor's deployment:
     onboard refused with "undeploy it first", and the undeploy it named refused
     the box, because a rebuilt VM keeps the id and the address but reports a new
     board ID. Neither door opened, and delete was no way out either."""
     monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
-    host, port, fleet, receipts, stop = _serve_router(tmp_path, lambda p, e, on: 0)
+    host, port, fleet, record_store, stop = _serve_router(tmp_path, lambda p, e, on: 0)
     try:
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
-        rid = _stranded_receipt(receipts)
+        rid = _stranded_record(record_store)
 
         st, _, b = _req(host, port, "POST", "/api/devices/r1/onboard", {}, headers=hh)
-        assert st == 409 and b"deployment receipt" in b
+        assert st == 409 and b"deployment record" in b
 
         st, _, b = _req(host, port, "DELETE", "/api/devices/r1", headers=hh)
         assert st == 200, b
-        assert receipts.get(rid)["state"] == "abandoned"
-        assert receipts.recoverable_for_device("r1") is None
+        assert record_store.get(rid)["state"] == "abandoned"
+        assert record_store.recoverable_for_device("r1") is None
 
         st, _, b = _req(host, port, "POST", "/api/devices", dict(_ROUTER_ROW),
                         headers=hh)
@@ -7427,32 +7427,32 @@ def test_delete_abandons_receipts_so_a_readded_device_can_onboard(tmp_path, monk
         stop()
 
 
-def test_delete_audit_names_the_receipt_outcome(tmp_path, monkeypatch):
+def test_delete_audit_names_the_record_outcome(tmp_path, monkeypatch):
     """The delete audit line already names what it revoked and what it retained.
-    Receipts were the one thing it changed silently."""
+    Records were the one thing it changed silently."""
     monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
     audit_path = str(tmp_path / "audit.jsonl")
-    host, port, fleet, receipts, stop = _serve_router(
+    host, port, fleet, record_store, stop = _serve_router(
         tmp_path, lambda p, e, on: 0, audit_path=audit_path)
     try:
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
-        _stranded_receipt(receipts)
+        _stranded_record(record_store)
         assert _req(host, port, "DELETE", "/api/devices/r1", headers=hh)[0] == 200
         with open(audit_path) as stream:
             events = [json.loads(line) for line in stream if line.strip()]
         deletes = [e for e in events if e.get("event") == "device_delete"]
         assert deletes, "no device_delete audit event"
-        assert "1 deployment receipt abandoned" in deletes[0]["detail"], \
+        assert "1 deployment record abandoned" in deletes[0]["detail"], \
             deletes[0]["detail"]
     finally:
         stop()
 
 
-def test_forced_undeploy_is_honoured_when_a_receipt_exists(tmp_path):
-    """Force is the rescue path for a box that no longer matches its receipt --
-    which is exactly a case where a receipt EXISTS. It used to be consulted only
-    on the no-receipt branch, so a replaced device ran the full receipted
+def test_forced_undeploy_is_honoured_when_a_record_exists(tmp_path):
+    """Force is the rescue path for a box that no longer matches its record --
+    which is exactly a case where a record EXISTS. It used to be consulted only
+    on the no-record branch, so a replaced device ran the full recorded
     teardown, hit the recipe's identity guard on the new board ID, and failed
     every single time with no way to ask for anything else."""
     seen = {}
@@ -7461,81 +7461,81 @@ def test_forced_undeploy_is_honoured_when_a_receipt_exists(tmp_path):
         seen.update(e)
         return 0
 
-    host, port, fleet, receipts, stop = _serve_router(tmp_path, run_fn)
+    host, port, fleet, record_store, stop = _serve_router(tmp_path, run_fn)
     try:
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
-        rid = _stranded_receipt(receipts)
+        rid = _stranded_record(record_store)
 
         st, _, b = _req(host, port, "POST", "/api/devices/r1/undeploy",
                         {"force": True}, headers=hh)
         assert st == 200, b
         _wait_onboard_job(host, port, ck, json.loads(b)["job_id"])
         assert seen.get("IRIS_FORCE_AGENT_ONLY") == "1", (
-            "a forced undeploy ran the receipted teardown instead")
-        # and the receipt it deliberately did not use as authority is retired,
+            "a forced undeploy ran the recorded teardown instead")
+        # and the record it deliberately did not use as authority is retired,
         # or the very next onboard is refused on it again.
-        assert receipts.get(rid)["state"] == "abandoned"
-        assert receipts.recoverable_for_device("r1") is None
+        assert record_store.get(rid)["state"] == "abandoned"
+        assert record_store.recoverable_for_device("r1") is None
     finally:
         stop()
 
 
-def test_forced_undeploy_retires_receipts_only_on_success(tmp_path):
-    """A failure to reach the device is not proof that the receipt is wrong.
-    Voiding a healthy deployment's receipt on a network blip would strand it the
+def test_forced_undeploy_retires_records_only_on_success(tmp_path):
+    """A failure to reach the device is not proof that the record is wrong.
+    Voiding a healthy deployment's record on a network blip would strand it the
     way this path exists to prevent, so retirement waits for a clean exit."""
-    host, port, fleet, receipts, stop = _serve_router(
+    host, port, fleet, record_store, stop = _serve_router(
         tmp_path, lambda p, e, on: 1)
     try:
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
-        rid = _stranded_receipt(receipts)
+        rid = _stranded_record(record_store)
         st, _, b = _req(host, port, "POST", "/api/devices/r1/undeploy",
                         {"force": True}, headers=hh)
         assert st == 200, b
         _wait_onboard_job(host, port, ck, json.loads(b)["job_id"])
-        assert receipts.get(rid)["state"] != "abandoned"
+        assert record_store.get(rid)["state"] != "abandoned"
     finally:
         stop()
 
 
-def test_forced_undeploy_escapes_multiple_recoverable_receipts(tmp_path):
-    """Two recoverable receipts refuse onboard, undeploy and adopt alike, and
+def test_forced_undeploy_escapes_multiple_recoverable_records(tmp_path):
+    """Two recoverable records refuse onboard, undeploy and adopt alike, and
     nothing in the product resolved them. The refusal now names force, and force
     reaches the teardown instead of being rejected ahead of it."""
-    host, port, fleet, receipts, stop = _serve_router(tmp_path, lambda p, e, on: 0)
+    host, port, fleet, record_store, stop = _serve_router(tmp_path, lambda p, e, on: 0)
     try:
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
-        first = _stranded_receipt(receipts)
-        second = _stranded_receipt(receipts)
+        first = _stranded_record(record_store)
+        second = _stranded_record(record_store)
 
         st, _, b = _req(host, port, "POST", "/api/devices/r1/undeploy", {},
                         headers=hh)
         assert st == 409
-        assert b"multiple recoverable receipts" in b and b"force" in b
+        assert b"multiple recoverable records" in b and b"force" in b
 
         st, _, b = _req(host, port, "POST", "/api/devices/r1/undeploy",
                         {"force": True}, headers=hh)
         assert st == 200, b
         _wait_onboard_job(host, port, ck, json.loads(b)["job_id"])
-        assert receipts.get(first)["state"] == "abandoned"
-        assert receipts.get(second)["state"] == "abandoned"
+        assert record_store.get(first)["state"] == "abandoned"
+        assert record_store.get(second)["state"] == "abandoned"
     finally:
         stop()
 
 
-def test_repeated_unusable_receipt_undeploy_stays_409(tmp_path):
-    """The 409 path marks the receipt needs-reconcile on its way out. Doing that
-    to a receipt already in needs-reconcile is not a legal transition, and the
+def test_repeated_unusable_record_undeploy_stays_409(tmp_path):
+    """The 409 path marks the record needs-reconcile on its way out. Doing that
+    to a record already in needs-reconcile is not a legal transition, and the
     raise escaped do_POST -- so the first retry answered with a traceback and no
     JSON body instead of the reason."""
-    host, port, fleet, receipts, stop = _serve_router(tmp_path, lambda p, e, on: 0)
+    host, port, fleet, record_store, stop = _serve_router(tmp_path, lambda p, e, on: 0)
     try:
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
-        _stranded_receipt(receipts, resources=[])   # proves ownership of nothing
+        _stranded_record(record_store, resources=[])   # proves ownership of nothing
         for attempt in range(3):
             st, _, b = _req(host, port, "POST", "/api/devices/r1/undeploy", {},
                             headers=hh)
@@ -7938,7 +7938,7 @@ def test_deployment_details_open_in_a_right_hand_drawer():
 def _serve_router_jobs(tmp_path, run_fn=None, now_fn=None):
     """_serve_router, but handing back the onboard service, its log dir and an
     audit file so a test can plant in-flight work and persisted logs."""
-    import deployment_receipts
+    import deployment_records
     os.makedirs(tmp_path, exist_ok=True)
     secrets_path = str(tmp_path / "secrets.json")
     app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
@@ -7950,13 +7950,13 @@ def _serve_router_jobs(tmp_path, run_fn=None, now_fn=None):
     fleet.upsert(dict(_ROUTER_ROW))
     creds = gui_creds.CredentialStore(secrets_path)
     creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
-    receipts = deployment_receipts.ReceiptStore(state)
+    record_store = deployment_records.DeploymentRecordStore(state)
     onboard = gui_onboard.OnboardService(
         fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
-        run_fn=run_fn or (lambda p, e, on: 0), receipts=receipts,
+        run_fn=run_fn or (lambda p, e, on: 0), receipts=record_store,
         log_dir=log_dir)
     srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, creds, None,
-                                 onboard, certfile=None, receipts=receipts,
+                                 onboard, certfile=None, record_store=record_store,
                                  audit_path=audit_path)
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
