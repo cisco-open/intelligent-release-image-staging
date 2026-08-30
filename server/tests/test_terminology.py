@@ -60,7 +60,7 @@ ALLOWLIST = [
      "narrates the change using both the old and new vocabulary by design"),
 
     # -- decision 5 hard exclusions: RFC / IOS / CSV-guard sites -------
-    ("server/gui_server.py", frozenset({1239, 1247}),
+    ("server/gui_server.py", frozenset({1240, 1248}),
      "Content-Disposition: attachment (RFC 6266) on the CSV export/example "
      "download headers -- hard exclusion, decision 5"),
     ("device/device-uninstall.sh", frozenset({19}),
@@ -130,21 +130,21 @@ ALLOWLIST = [
     ("server/tests/test_gui_fleet.py", frozenset({636, 637, 648, 652}),
      "deliberate hard-break pin: the removed network_attachment read-alias "
      "no longer classifies a fleet.json row (decision 1)"),
-    ("server/tests/test_gui_server.py", frozenset({2329, 2334, 2350}),
+    ("server/tests/test_gui_server.py", frozenset({2363, 2368, 2384}),
      "deliberate hard-break pin: a fleet row carrying only the retired "
      "network_attachment alias plans as unclassified, not migrated "
      "(decision 1)"),
-    ("server/tests/test_gui_server.py", frozenset({2364, 2366, 2377}),
+    ("server/tests/test_gui_server.py", frozenset({2398, 2400, 2411}),
      "deliberate hard-break pin: same alias-retirement boundary on the "
      "xr-appmgr/xr-host mutual-requirement side (decision 1)"),
 
     # -- Task 2 / decision 6: docstrings that name the pre-fix silent --
     # -- default a regression test guards against (historical prose) --
-    ("server/tests/test_gui_server.py", frozenset({2424}),
+    ("server/tests/test_gui_server.py", frozenset({2458}),
      "docstring names the pre-fix silent default (falling through as "
      "attachment=None) this regression test guards against -- historical, "
      "Task 2 / decision 6"),
-    ("server/tests/test_gui_server.py", frozenset({7090, 7101, 7102, 7105}),
+    ("server/tests/test_gui_server.py", frozenset({7124, 7135, 7136, 7139}),
      "deliberate hard-break pin: asserts app.js's deployRecordRows reads "
      "res.management_type and never falls back to the retired res.attachment "
      "(decision 6); line 7090 is historical prose describing the pre-fix "
@@ -160,7 +160,7 @@ ALLOWLIST = [
 
     # -- declared break 7 family: receipt_id -> record_id on wire --------
     # -- responses (break 8 is the separate audit-detail-string wording) --
-    ("server/tests/test_gui_server.py", frozenset({2591, 2596, 2609, 2615}),
+    ("server/tests/test_gui_server.py", frozenset({2625, 2630, 2643, 2649}),
      "deliberate hard-break pin: asserts the retired receipt_id key never "
      "leaks onto the onboard-job-status wire response (declared break 7's "
      "response-object family; NOT break 8, which is audit-string wording)"),
