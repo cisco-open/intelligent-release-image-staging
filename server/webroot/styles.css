@@ -345,6 +345,21 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
 .nav-flyout { left:200px; padding:6px 0; min-width:220px; }
 #settings-submenu { top:179px; }
 #monitoring-submenu { top:211px; }
+/* Flyout indent fix (review, Wave E): .nav.subsub's 48px left padding is a
+   carry-over from the in-rail staircase this flyout replaced (two nesting
+   levels' worth of on-grid indent, see the .nav.sub/.nav.subsub comment
+   above) -- inside a flyout there is only one level below the panel's own
+   .nav-group header, so 48px reads as a large, unexplained gap under a
+   header sitting at .nav-group's 16px. Magnetic's own drawer reference
+   (agentinfo/magnetic_export, navigation/drawer sub-items) shows sub-item
+   text flush with its group header, not stepped in further -- so this
+   flattens .nav-flyout's sub items to that same 16px rather than
+   re-deriving a new nesting depth for a one-level panel. Scoped to
+   .nav-flyout only: the <=768px inline fallback below reverts these panels
+   to the in-rail presentation, where the staircase is still correct and
+   must stay untouched. */
+.nav-flyout .nav.subsub { padding-left:16px; }
+.nav-flyout .nav.subsub.active { padding-left:13px; }
 /* display lives on :not([hidden]) so the hidden attribute keeps working
    (same pattern as .inline-form above) */
 .selbar { gap:8px; align-items:center; flex-wrap:wrap; background:var(--action-tint);
@@ -614,6 +629,16 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
     position: static; left: auto; top: auto; box-shadow: none; border: 0;
     border-radius: 0; min-width: 0; padding: 0; background: transparent;
   }
+  /* The flyout-indent fix above (16px, scoped to .nav-flyout) is a
+     floating-panel correction -- these submenus keep their .nav-flyout
+     class even off-canvas, so without this the 16px would leak into the
+     in-rail presentation too. Here the items are back to being a nested
+     level of the rail's own staircase, where the original 48px on-grid
+     step (matching .nav.sub/.nav.subsub above) is still correct; same
+     specificity as the desktop override, so source order (this comes
+     later) decides the tie. */
+  .nav-flyout .nav.subsub { padding-left:48px; }
+  .nav-flyout .nav.subsub.active { padding-left:45px; }
   .main { padding: var(--sp-lg); }
   .drawer, #dl-drawer { width: 100vw; }
   .modal { width: calc(100% - 2 * var(--sp-lg)); }
@@ -676,10 +701,10 @@ body.selecting #devices #mark-all { opacity: 1; }
 /* Scan hierarchy: device id leads each row (12/500 sans, Magnetic body
    type, stepped down from 14 by the dense modifier above); IP/model are
    secondary machine data (12px, --text-secondary) -- scoped to #dev-rows
-   so the shared .machine utility (pinned elsewhere at its bare ".machine {
-   font-family: var(--font-mono); }" definition) keeps its default
-   size/color everywhere else it is used (deploy-info drawer, batch panel,
-   help popover, …). */
+   so the shared .machine utility (pinned elsewhere at its own ".machine {
+   font-family: var(--font-mono); font-size:14px; line-height:20px; }"
+   definition) keeps its default size/color everywhere else it is used
+   (deploy-info drawer, batch panel, help popover, …). */
 #dev-rows .dev-id { font-family: var(--font-sans); font-size: 12px; line-height: 18px; font-weight: 500; color: var(--text-heading); }
 #dev-rows .machine { color: var(--text-secondary); }
 
