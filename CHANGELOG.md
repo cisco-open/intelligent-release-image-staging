@@ -76,7 +76,21 @@ top-level `VERSION` file.
   already staged, and an adopted (or legacy, origin-unknown) file is never
   deleted by teardown or by the agent's own cleanup paths, except when the
   catalog republishes different content under the same image id, which
-  replaces the file and logs the replacement.
+  replaces the file and logs the replacement. Both `APPID` and
+  `SOURCE_NAME` overrides are now escaped before they build the router-table
+  and file-listing match patterns those steps use, so a name containing a
+  regex metacharacter (for example `iris.x`) can no longer loosen a match
+  into an unrelated table row.
+- `tools/check-package-freshness.sh` now also covers the XR RPM
+  (`iris-xr.rpm`), previously left for an operator to check by hand: it
+  cannot unpack the RPM the way it unpacks the two IOx tars' inner archive,
+  so it compares the RPM's build time against the live catalog certificate's
+  own mtime instead of inspecting pinned contents, and says so plainly in
+  its output. `tools/start-compose-server.sh` runs the same by-mtime
+  comparison at bring-up and warns when a staged `iris-xr.rpm` predates the
+  certificate it just (re)provisioned, so a stale package is visible before
+  a router is ever onboarded from it rather than only in a later manual
+  check.
 
 ### Changed
 - Image verification is now the same on every platform: the agent proves integrity by
