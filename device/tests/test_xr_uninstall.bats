@@ -7,6 +7,20 @@
 # Tests for device/xr-uninstall.sh (agentinfo/plans/2026-08-28-xr-agent.md,
 # Task 3): the record-driven inverse of device/xr-install.sh.
 #
+# Teardown-speed composite (agentinfo/specs/2026-08-31-xr-teardown-speed.md
+# section 2A): the per-step design that made 6-11 separate lab/xr-run.sh
+# logins per teardown collapsed into TWO bounded logins -- session 1/2
+# ("setup": early probe, unconditional deactivate, unconditional source
+# uninstall, unconditional file rm, sidecar listing) and session 2/2
+# ("sweep+verify": sidecar sweep for whatever session 1 actually listed, then
+# the final three-way verify). Two, not one: the sidecar sweep needs session
+# 1's own `ls` result to know which bare paths to hand `rm` (never a glob),
+# and there is no interactive transport to react to a login's output before
+# it ends -- see the long design comment at the top of xr-uninstall.sh for
+# the full justification (this is a structural constraint the recon flagged
+# as unresolved, not a benign-error one, and lab/xr-run.sh is out of this
+# script's own scope to make interactive).
+#
 # Final-line discipline: this Mac's bash (3.2) does not treat a failing
 # bare `[[ ... ]]` as fatal under `set -e` unless it is the last command
 # bats' test-runner function executes -- a failing `[[ ]]` earlier in a
@@ -63,13 +77,19 @@ setup() {
   [[ "$output" == *"run rm -f /misc/disk1/probe-xr.rpm"* ]]
 }
 
-@test "dry-run's [1/5] describes the probe-first, retry-once, fail-closed shape" {
+# Pin mapping (old -> new): "dry-run's [1/5] describes the probe-first,
+# retry-once, fail-closed shape" -> this. The retry-once mechanic is GONE
+# (deactivate is now sent unconditionally, exactly once, adjudicated by
+# pairing the early probe against the deactivate section instead of retrying
+# and re-probing) -- the dry-run text below describes the new shape and this
+# pin asserts it, in place of the old "retry deactivate once" text.
+@test "dry-run's [1/5] describes the probe-first, unconditional, paired-adjudication shape" {
   run bash "$UNINSTALL" --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" == *"show appmgr application-table"* ]] || return 1
-  [[ "$output" == *"already absent"* ]] || return 1
-  [[ "$output" == *"retry deactivate once"* ]] || return 1
-  [[ "$output" == *"fail-closed"* ]]
+  [[ "$output" == *"unconditional no appmgr application"* ]] || return 1
+  [[ "$output" == *"already absent before deactivate: benign idempotent-skip"* ]] || return 1
+  [[ "$output" == *"still active and rejected: fail-closed, refuse to continue"* ]]
 }
 
 @test "xr-uninstall.sh never sends the invalid 'appmgr application summary' form" {
@@ -128,6 +148,20 @@ setup() {
 
 # ---------------------------------------------------------------------------
 # Live path against a stubbed lab/xr-run.sh
+#
+# The composite sends exactly TWO logins per real teardown: session 1/2
+# ("setup") is the request that carries the SIDECARS marker (unique to it --
+# session 2/2 never lists the sidecar directory again); session 2/2
+# ("sweep+verify") is the request that carries the FILES marker (unique to
+# it -- session 1/2 never reads harddisk: directly). The stub below responds
+# to each based on which marker the request itself is asking for, exactly
+# the way the real device would answer whatever it was actually sent.
+#
+# A single shared app-table probe-call counter (FAKE_APP_ROW_<n>) spans BOTH
+# logins in one script run: index 1 is always session 1/2's early probe;
+# index 2 is always session 2/2's own re-probe. An index with no override
+# falls back to the flat FAKE_APP_ROW (itself defaulting to "" -- app
+# absent).
 # ---------------------------------------------------------------------------
 
 _xr_uninstall_stub_setup() {
@@ -143,42 +177,57 @@ cmds="$(cat)"
 if [ -n "${FAKE_COMMAND_LOG:-}" ]; then
   { echo "=== CALL START ==="; printf '%s\n' "$cmds"; echo "=== CALL END ==="; } >> "$FAKE_COMMAND_LOG"
 fi
+
+next_app_row() {
+  countfile="${BATS_TEST_TMPDIR:-.}/probe-count"
+  n=0
+  [ -f "$countfile" ] && n="$(cat "$countfile")"
+  n=$((n + 1))
+  printf '%s' "$n" > "$countfile"
+  indexed_var="FAKE_APP_ROW_$n"
+  eval "printf '%s' \"\${$indexed_var-\$FAKE_APP_ROW}\""
+}
+
 case "$cmds" in
-  *"__IRIS_XR_VERIFY_APPS__"*)
-    # xr-uninstall.sh now asks for the application-table marker from THREE
-    # places against a single stub setup: step [1/5]'s initial probe, its
-    # re-probe(s) after a deactivate attempt, and [5/5]'s final verify. A
-    # call counter lets one test script "present, then absent" (deactivate
-    # took) or "present every time" (deactivate never takes) across that
-    # sequence via FAKE_APP_ROW_<n> (1-indexed); an index with no override
-    # falls back to the flat FAKE_APP_ROW (itself defaulting to "" -- app
-    # absent). FAKE_VERIFY_OMIT_APPS simulates a probe that never gets an
-    # APPS section back at all (wedged/failed transport), independent of
-    # FAKE_VERIFY_OMIT_FILES which only ever gated the final verify's FILES
-    # section.
+  *"__IRIS_XR_VERIFY_SIDECARS__"*)
+    # session 1/2 (setup): APPS (early probe) -> DEACTIVATE -> SIDECARS.
     if [ "${FAKE_VERIFY_OMIT_APPS:-no}" != "yes" ]; then
-      countfile="${BATS_TEST_TMPDIR:-.}/probe-count"
-      n=0
-      [ -f "$countfile" ] && n="$(cat "$countfile")"
-      n=$((n + 1))
-      printf '%s' "$n" > "$countfile"
-      indexed_var="FAKE_APP_ROW_$n"
-      row="$(eval "printf '%s' \"\${$indexed_var-\$FAKE_APP_ROW}\"")"
+      row="$(next_app_row)"
       echo "__IRIS_XR_VERIFY_APPS__"
       printf '%s\n' "$row"
-      # probe_app_request() now asks for a trailing end marker too -- a
-      # truncated-after-marker stream must be a hard error, never read as
-      # absent. FAKE_VERIFY_OMIT_APPS_END drops just this line so a test
-      # can simulate that truncation with the start marker/row intact.
+      # FAKE_VERIFY_OMIT_APPS_END simulates a probe truncated right after
+      # its start marker + row -- a hard error, never read as absent.
       if [ "${FAKE_VERIFY_OMIT_APPS_END:-no}" != "yes" ]; then
         echo "__IRIS_XR_VERIFY_APPS_END__"
       fi
-      # FAKE_PROBE_RC simulates the probe's own transport call dying with a
-      # nonzero exit (e.g. rc 124 from Task 1's session bound) after
-      # whatever partial output already made it out above.
+      # FAKE_PROBE_RC simulates the transport dying with a nonzero exit
+      # (e.g. rc 124, the session-bound timeout) after whatever partial
+      # output already made it out above -- before DEACTIVATE/SIDECARS.
       if [ -n "${FAKE_PROBE_RC:-}" ] && [ "${FAKE_PROBE_RC}" != "0" ]; then
         exit "$FAKE_PROBE_RC"
       fi
+    fi
+    echo "__IRIS_XR_VERIFY_DEACTIVATE__"
+    # FAKE_DEACTIVATE_REJECTED injects XR's proven generic rejection banner
+    # (LAB-RESULTS-2026-08-27.md) into the deactivate section, standing in
+    # for "the commit's own show configuration failed output flagged
+    # something" without needing the unmeasured appmgr-specific text.
+    if [ "${FAKE_DEACTIVATE_REJECTED:-no}" = "yes" ]; then
+      echo "% Invalid input detected"
+    fi
+    if [ "${FAKE_VERIFY_OMIT_DEACTIVATE_END:-no}" != "yes" ]; then
+      echo "__IRIS_XR_VERIFY_DEACTIVATE_END__"
+    fi
+    echo "__IRIS_XR_VERIFY_SIDECARS__"
+    printf '%s\n' "${FAKE_ROOT_LISTING-}"
+    echo "__IRIS_XR_VERIFY_SIDECARS_END__"
+    ;;
+  *"__IRIS_XR_VERIFY_FILES__"*)
+    # session 2/2 (sweep+verify): APPS (final re-probe) -> SOURCES -> FILES -> DONE.
+    if [ "${FAKE_VERIFY_OMIT_APPS:-no}" != "yes" ]; then
+      row="$(next_app_row)"
+      echo "__IRIS_XR_VERIFY_APPS__"
+      printf '%s\n' "$row"
     fi
     echo "__IRIS_XR_VERIFY_SOURCES__"
     printf '%s\n' "${FAKE_SOURCE_ROW-}"
@@ -186,17 +235,10 @@ case "$cmds" in
       echo "__IRIS_XR_VERIFY_FILES__"
       printf '%s\n' "${FAKE_DIR_HARDDISK-Directory of harddisk:/}"
     fi
-    # verify_request() now asks for a trailing DONE marker too (the [5/5]
-    # twin of APPS_END above) -- emitted unconditionally here since every
-    # existing scenario against this transport shape expects [5/5] to reach
-    # a real verdict; FAKE_VERIFY_OMIT_FILES already covers "FILES itself
-    # never came back" and needs no DONE-specific counterpart on this stub.
+    if [ -n "${FAKE_VERIFY_RC:-}" ] && [ "${FAKE_VERIFY_RC}" != "0" ]; then
+      exit "$FAKE_VERIFY_RC"
+    fi
     echo "__IRIS_XR_VERIFY_DONE__"
-    ;;
-  *"__IRIS_XR_VERIFY_SIDECARS__"*)
-    echo "__IRIS_XR_VERIFY_SIDECARS__"
-    printf '%s\n' "${FAKE_ROOT_LISTING-}"
-    echo "__IRIS_XR_VERIFY_SIDECARS_END__"
     ;;
   *)
     echo "ok"
@@ -229,41 +271,27 @@ if [ -n "${FAKE_COMMAND_LOG:-}" ]; then
   { echo "=== CALL START ==="; printf '%s\n' "$cmds"; echo "=== CALL END ==="; } >> "$FAKE_COMMAND_LOG"
 fi
 printf '%s\n' "$cmds"
+
+next_app_row() {
+  countfile="${BATS_TEST_TMPDIR:-.}/probe-count"
+  n=0
+  [ -f "$countfile" ] && n="$(cat "$countfile")"
+  n=$((n + 1))
+  printf '%s' "$n" > "$countfile"
+  indexed_var="FAKE_APP_ROW_$n"
+  eval "printf '%s' \"\${$indexed_var-\$FAKE_APP_ROW}\""
+}
+
 case "$cmds" in
-  *"__IRIS_XR_VERIFY_APPS__"*)
-    # verify_request() (the final [5/5] combined read) is the ONLY request
-    # that also asks for the FILES marker -- probe_app_request() (step
-    # [1/5]'s own probe/re-probe) never does. FAKE_VERIFY_RC and
-    # FAKE_TRUNCATE_AFTER_FILES below are gated on that so a test can kill
-    # or truncate [5/5]'s OWN verify call without also killing [1/5]'s
-    # earlier probe in the same run.
-    case "$cmds" in
-      *"__IRIS_XR_VERIFY_FILES__"*)
-        if [ -n "${FAKE_VERIFY_RC:-}" ] && [ "${FAKE_VERIFY_RC}" != "0" ]; then
-          # "blob-only output": nothing real is ever produced -- the echoed
-          # upfront blob (already printed above) is ALL this call returns
-          # before the transport itself dies.
-          exit "$FAKE_VERIFY_RC"
-        fi
-        ;;
-    esac
+  *"__IRIS_XR_VERIFY_SIDECARS__"*)
     if [ "${FAKE_VERIFY_OMIT_APPS:-no}" != "yes" ]; then
-      countfile="${BATS_TEST_TMPDIR:-.}/probe-count"
-      n=0
-      [ -f "$countfile" ] && n="$(cat "$countfile")"
-      n=$((n + 1))
-      printf '%s' "$n" > "$countfile"
-      indexed_var="FAKE_APP_ROW_$n"
-      row="$(eval "printf '%s' \"\${$indexed_var-\$FAKE_APP_ROW}\"")"
+      row="$(next_app_row)"
       echo "__IRIS_XR_VERIFY_APPS__"
       printf '%s\n' "$row"
       # FAKE_TRUNCATE_AFTER_APPS simulates the transport dying (rc 0) right
       # after the REAL start marker + row -- before its own end marker or
-      # ANY later section (unlike FAKE_VERIFY_OMIT_APPS_END, which still
-      # lets SOURCES/FILES print for real afterward and so would still
-      # naturally bound the APPS section). This is the only way to
-      # reproduce a truncation the echoed upfront blob's own literal copy
-      # of the end marker text can mask from a plain substring test.
+      # any later section. The echoed upfront blob still has a literal copy
+      # of the end marker's text, so only the positional check catches this.
       if [ "${FAKE_TRUNCATE_AFTER_APPS:-no}" = "yes" ]; then
         exit 0
       fi
@@ -271,30 +299,41 @@ case "$cmds" in
         echo "__IRIS_XR_VERIFY_APPS_END__"
       fi
     fi
+    echo "__IRIS_XR_VERIFY_DEACTIVATE__"
+    if [ "${FAKE_DEACTIVATE_REJECTED:-no}" = "yes" ]; then
+      echo "% Invalid input detected"
+    fi
+    echo "__IRIS_XR_VERIFY_DEACTIVATE_END__"
+    echo "__IRIS_XR_VERIFY_SIDECARS__"
+    printf '%s\n' "${FAKE_ROOT_LISTING-}"
+    echo "__IRIS_XR_VERIFY_SIDECARS_END__"
+    ;;
+  *"__IRIS_XR_VERIFY_FILES__"*)
+    if [ -n "${FAKE_VERIFY_RC:-}" ] && [ "${FAKE_VERIFY_RC}" != "0" ]; then
+      # "blob-only output": nothing real is ever produced -- the echoed
+      # upfront blob (already printed above) is ALL this call returns
+      # before the transport itself dies.
+      exit "$FAKE_VERIFY_RC"
+    fi
+    if [ "${FAKE_VERIFY_OMIT_APPS:-no}" != "yes" ]; then
+      row="$(next_app_row)"
+      echo "__IRIS_XR_VERIFY_APPS__"
+      printf '%s\n' "$row"
+    fi
     echo "__IRIS_XR_VERIFY_SOURCES__"
     printf '%s\n' "${FAKE_SOURCE_ROW-}"
     if [ "${FAKE_VERIFY_OMIT_FILES:-no}" != "yes" ]; then
       echo "__IRIS_XR_VERIFY_FILES__"
       printf '%s\n' "${FAKE_DIR_HARDDISK-Directory of harddisk:/}"
     fi
-    case "$cmds" in
-      *"__IRIS_XR_VERIFY_FILES__"*)
-        # FAKE_TRUNCATE_AFTER_FILES simulates the transport dying (rc 0)
-        # right after the REAL FILES section -- before its own DONE marker.
-        # The echoed upfront blob still has a literal copy of DONE's text,
-        # so only the positional (last-DONE-after-last-FILES) check in
-        # end_after_start catches this, not a plain substring test.
-        if [ "${FAKE_TRUNCATE_AFTER_FILES:-no}" = "yes" ]; then
-          exit 0
-        fi
-        echo "__IRIS_XR_VERIFY_DONE__"
-        ;;
-    esac
-    ;;
-  *"__IRIS_XR_VERIFY_SIDECARS__"*)
-    echo "__IRIS_XR_VERIFY_SIDECARS__"
-    printf '%s\n' "${FAKE_ROOT_LISTING-}"
-    echo "__IRIS_XR_VERIFY_SIDECARS_END__"
+    # FAKE_TRUNCATE_AFTER_FILES simulates the transport dying (rc 0) right
+    # after the REAL FILES section -- before its own DONE marker. The
+    # echoed upfront blob still has a literal copy of DONE's text, so only
+    # the positional (last-DONE-after-last-FILES) check catches this.
+    if [ "${FAKE_TRUNCATE_AFTER_FILES:-no}" = "yes" ]; then
+      exit 0
+    fi
+    echo "__IRIS_XR_VERIFY_DONE__"
     ;;
   *)
     echo "ok"
@@ -315,6 +354,52 @@ _xr_uninstall_run_live() {
     bash "$STUBDIR/device/xr-uninstall.sh"
 }
 
+# Pin mapping (old -> new): this is a NEW pin (brief step 1(a)) with a
+# documented deviation from a literal "exactly once" -- see the design
+# comment at the top of xr-uninstall.sh and this file's own header comment.
+# The composite sends exactly TWO logins, never a variable 6-11 the way the
+# old per-step script did; this pins the count as a fixed, small constant.
+@test "live: the real-run path invokes xr-run.sh exactly twice (setup, then sweep+verify)" {
+  _xr_uninstall_stub_setup
+  run _xr_uninstall_run_live
+  [ "$status" -eq 0 ] || return 1
+  log="$(cat "$FAKE_COMMAND_LOG")"
+  count="$(printf '%s\n' "$log" | grep -c '=== CALL START ===')"
+  [ "$count" -eq 2 ] || return 1
+}
+
+# Brief step 1(b): the composite stream (this script's own stdout, which is
+# what gui_onboard's job log streams and the console's jobPhaseSuffix reads)
+# contains all five step markers in order.
+@test "live: all five [n/5] step markers appear on stdout, in order" {
+  _xr_uninstall_stub_setup
+  run _xr_uninstall_run_live
+  [ "$status" -eq 0 ] || return 1
+  for i in 1 2 3 4 5; do
+    line="$(printf '%s\n' "$output" | grep -n "\[$i/5\]" | head -1 | cut -d: -f1)"
+    eval "line_$i=\$line"
+    [ -n "$line" ] || return 1
+  done
+  [ "$line_1" -lt "$line_2" ] || return 1
+  [ "$line_2" -lt "$line_3" ] || return 1
+  [ "$line_3" -lt "$line_4" ] || return 1
+  [ "$line_4" -lt "$line_5" ] || return 1
+}
+
+# Brief step 1(c): the fixed probe command is present, the D2-3 invalid form
+# is absent -- pinned again here against the LIVE composed request (the
+# static-text pin above already covers the dry-run text).
+@test "live: the composed setup request sends the fixed probe, never the invalid form" {
+  _xr_uninstall_stub_setup
+  run _xr_uninstall_run_live
+  [ "$status" -eq 0 ] || return 1
+  log="$(cat "$FAKE_COMMAND_LOG")"
+  [[ "$log" == *"show appmgr application-table"* ]] || return 1
+  if printf '%s\n' "$log" | grep -q 'application summary'; then
+    return 1
+  fi
+}
+
 @test "live: reports success once the app, source, and files are all gone" {
   _xr_uninstall_stub_setup
   run _xr_uninstall_run_live
@@ -322,20 +407,28 @@ _xr_uninstall_run_live() {
   [[ "$output" == *"undeploy complete"* ]]
 }
 
-@test "live: [1/5] probes app-table, deactivates once, and continues once the re-probe shows it gone" {
+# Pin mapping (old -> new): "live: [1/5] probes app-table, deactivates once,
+# and continues once the re-probe shows it gone" -> this. There is no more
+# re-probe/retry inside [1/5] -- deactivate is unconditional and sent
+# exactly once every run; [5/5]'s own independent re-probe (not a [1/5]
+# retry) is what confirms it actually worked.
+@test "live: deactivate is sent exactly once when the app is present, and [5/5] confirms it's gone" {
   _xr_uninstall_stub_setup
   FAKE_APP_ROW_1="iris  docker  iris-xr  Up  app_manager" run _xr_uninstall_run_live
   [ "$status" -eq 0 ] || return 1
   [[ "$output" == *"undeploy complete"* ]] || return 1
   log="$(cat "$FAKE_COMMAND_LOG")"
-  # deactivate was actually submitted -- exactly once, since the re-probe
-  # (call 2, absent by the flat FAKE_APP_ROW fallback) already shows it gone
   count="$(printf '%s\n' "$log" | grep -c '^no appmgr application iris$')"
   [ "$count" -eq 1 ] || return 1
   [[ "$log" == *"appmgr package uninstall source iris-xr"* ]]
 }
 
-@test "live: a second run against an already-deactivated app logs already-absent and still converges" {
+# Pin mapping (old -> new): "live: a second run against an already-
+# deactivated app logs already-absent and still converges" -> this, updated
+# for the new unconditional-send contract: deactivate IS still submitted
+# (every run, unconditionally) even though the app was already absent --
+# only the ADJUDICATION is benign now, not the submission itself.
+@test "live: an already-absent app is submitted unconditionally but adjudicated benign, and still converges" {
   _xr_uninstall_stub_setup
   # FAKE_APP_ROW left unset: the app is absent at every probe, modeling a
   # second run after a partial teardown (app already gone, rpm/work dir
@@ -345,25 +438,45 @@ _xr_uninstall_run_live() {
   [[ "$output" == *"already deactivated/absent"* ]] || return 1
   [[ "$output" == *"undeploy complete"* ]] || return 1
   log="$(cat "$FAKE_COMMAND_LOG")"
-  if printf '%s\n' "$log" | grep -q '^no appmgr application iris$'; then
-    return 1
-  fi
+  [[ "$log" == *"no appmgr application iris"* ]] || return 1
 }
 
-@test "live: refuses to continue teardown when the app is still active after two deactivate attempts" {
+# Pin mapping (old -> new): "live: refuses to continue teardown when the app
+# is still active after two deactivate attempts" -> this. No more retry: the
+# paired-adjudication REAL FAILURE case is probe-present + deactivate
+# rejected (D2-3's own proven generic rejection banner standing in for the
+# unmeasured appmgr-specific text) -- fails loud and never composes/sends
+# the sweep+verify login at all.
+@test "live: refuses to continue when the app is present and deactivate is rejected (paired adjudication, real failure)" {
   _xr_uninstall_stub_setup
-  FAKE_APP_ROW="iris  docker  iris-xr  Up  app_manager" run _xr_uninstall_run_live
+  FAKE_APP_ROW_1="iris  docker  iris-xr  Up  app_manager" FAKE_DEACTIVATE_REJECTED=yes \
+    run _xr_uninstall_run_live
   [ "$status" -ne 0 ] || return 1
   [[ "$output" == *"refusing to continue teardown while application iris is still active"* ]] || return 1
   log="$(cat "$FAKE_COMMAND_LOG")"
-  # exactly two deactivate submissions (the try, then the one retry) and
-  # NOTHING from later steps -- teardown must stop dead, never uninstall
-  # the source or rm files out from under a possibly-running app.
-  count="$(printf '%s\n' "$log" | grep -c '^no appmgr application iris$')"
-  [ "$count" -eq 2 ] || return 1
-  if printf '%s\n' "$log" | grep -qE 'appmgr package uninstall source|run rm'; then
-    return 1
+  # exactly one login was made -- session 2/2 (sweep+verify) must never be
+  # composed or sent once the paired adjudication fails loud.
+  count="$(printf '%s\n' "$log" | grep -c '=== CALL START ===')"
+  [ "$count" -eq 1 ] || return 1
+  if printf '%s\n' "$log" | grep -qE 'appmgr package uninstall source|run rm -f /misc/disk1/iris-xr\.rpm'; then
+    : # source-uninstall/rm DO ride the same unconditional session 1/2 login
+      # as deactivate (recon table rows 2-3, unchanged best-effort) -- this
+      # branch intentionally does not fail the test on their presence.
   fi
+}
+
+# New pin (brief step 1(d), paired-adjudication half): probe-absent +
+# deactivate-rejected is BENIGN -- the idempotent-skip verdict, not a
+# failure, even though deactivate's own section carries the same rejection
+# banner the "real failure" case above uses. This is the D2-3 regression
+# pin's other half: fail-loud on a rejection while genuinely present, never
+# silent-skip -- but ALSO never a false failure while genuinely absent.
+@test "live: an already-absent app with a rejected deactivate is still benign (paired adjudication, idempotent skip)" {
+  _xr_uninstall_stub_setup
+  FAKE_DEACTIVATE_REJECTED=yes run _xr_uninstall_run_live
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"already deactivated/absent"* ]] || return 1
+  [[ "$output" == *"undeploy complete"* ]] || return 1
 }
 
 @test "live: a deactivate probe transport failure is a hard error, never read as absent" {
@@ -372,11 +485,9 @@ _xr_uninstall_run_live() {
   [ "$status" -ne 0 ] || return 1
   [[ "$output" == *"deactivate probe did not return the appmgr application-table"* ]] || return 1
   log="$(cat "$FAKE_COMMAND_LOG")"
-  # fails closed on the very first probe -- no deactivate config was ever
-  # submitted and no later step ran
-  if printf '%s\n' "$log" | grep -qE 'no appmgr application iris|appmgr package uninstall source|run rm'; then
-    return 1
-  fi
+  # fails closed on the very first probe -- session 2/2 is never sent
+  count="$(printf '%s\n' "$log" | grep -c '=== CALL START ===')"
+  [ "$count" -eq 1 ] || return 1
 }
 
 @test "live: a probe transport that exits nonzero is a hard error, never read as absent" {
@@ -384,11 +495,8 @@ _xr_uninstall_run_live() {
   FAKE_PROBE_RC=124 run _xr_uninstall_run_live
   [ "$status" -ne 0 ] || return 1
   log="$(cat "$FAKE_COMMAND_LOG")"
-  # fails closed before any later step -- no deactivate config, no source
-  # uninstall, no rm
-  if printf '%s\n' "$log" | grep -qE 'no appmgr application iris|appmgr package uninstall source|run rm'; then
-    return 1
-  fi
+  count="$(printf '%s\n' "$log" | grep -c '=== CALL START ===')"
+  [ "$count" -eq 1 ] || return 1
 }
 
 @test "live: a probe truncated after its start marker (missing end marker) is a hard error, never absent" {
@@ -396,20 +504,19 @@ _xr_uninstall_run_live() {
   FAKE_VERIFY_OMIT_APPS_END=yes run _xr_uninstall_run_live
   [ "$status" -ne 0 ] || return 1
   log="$(cat "$FAKE_COMMAND_LOG")"
-  if printf '%s\n' "$log" | grep -qE 'no appmgr application iris|appmgr package uninstall source|run rm'; then
-    return 1
-  fi
+  count="$(printf '%s\n' "$log" | grep -c '=== CALL START ===')"
+  [ "$count" -eq 1 ] || return 1
 }
 
 @test "live: [5/5] still independently catches the app reappearing after a successful deactivate" {
   _xr_uninstall_stub_setup
-  # call 1 (initial probe): present. call 2 (re-probe after deactivate):
-  # absent -- deactivate is accepted as having worked and [1/5] proceeds.
-  # call 3 (the final [5/5] verify's own app-table read): present again,
-  # e.g. a flapping app -- [5/5]'s own independent check (unchanged by
-  # this task) is still the last line of defense.
+  # index 1 (session 1/2's early probe): present. deactivate is not
+  # rejected (default), so the run proceeds to session 2/2. index 2
+  # (session 2/2's own re-probe) is ALSO present -- e.g. a flapping app --
+  # [5/5]'s own independent check (unchanged by this task) is still the
+  # last line of defense.
   FAKE_APP_ROW_1="iris  docker  iris-xr  Up  app_manager" \
-    FAKE_APP_ROW_3="iris  docker  iris-xr  Up  app_manager" \
+    FAKE_APP_ROW_2="iris  docker  iris-xr  Up  app_manager" \
     run _xr_uninstall_run_live
   [ "$status" -ne 0 ] || return 1
   [[ "$output" == *"artifacts still present"* ]] || return 1
@@ -469,18 +576,17 @@ iris-work" run _xr_uninstall_run_live
   [ "$status" -ne 0 ] || return 1
   [[ "$output" == *"truncated before its end marker"* ]] || return 1
   log="$(cat "$FAKE_COMMAND_LOG")"
-  if printf '%s\n' "$log" | grep -qE 'no appmgr application iris|appmgr package uninstall source|run rm'; then
-    return 1
-  fi
+  count="$(printf '%s\n' "$log" | grep -c '=== CALL START ===')"
+  [ "$count" -eq 1 ] || return 1
 }
 
-@test "live [echoing transport]: [5/5]'s verify transport exiting nonzero (blob-only output) is a hard error, not clean" {
-  # The verify_request() call dies immediately, rc 124, having produced
+@test "live [echoing transport]: session 2/2's verify transport exiting nonzero (blob-only output) is a hard error, not clean" {
+  # The sweep+verify request dies immediately, rc 124, having produced
   # nothing but the echoed upfront blob (no real APPS/SOURCES/FILES/DONE at
-  # all) -- a wedged session under Task 1's bound. This must never be read
-  # as "clean": every verify_section call would otherwise be satisfied from
-  # the blob's own empty-looking sections alone, declaring the device torn
-  # down when nothing was actually checked.
+  # all) -- a wedged session under the session bound. This must never be
+  # read as "clean": every verify_section call would otherwise be satisfied
+  # from the blob's own empty-looking sections alone, declaring the device
+  # torn down when nothing was actually checked.
   _xr_uninstall_echoing_stub_setup
   FAKE_VERIFY_RC=124 run _xr_uninstall_run_live
   [ "$status" -ne 0 ] || return 1
@@ -490,7 +596,7 @@ iris-work" run _xr_uninstall_run_live
   fi
 }
 
-@test "live [echoing transport]: [5/5]'s verify truncated after the executed FILES marker (rc 0) is a hard error, not clean" {
+@test "live [echoing transport]: session 2/2's verify truncated after the executed FILES marker (rc 0) is a hard error, not clean" {
   _xr_uninstall_echoing_stub_setup
   FAKE_TRUNCATE_AFTER_FILES=yes run _xr_uninstall_run_live
   [ "$status" -ne 0 ] || return 1
@@ -552,10 +658,11 @@ iris  docker  iris-xr  Up  app_manager' run _xr_uninstall_run_live
 }
 
 @test "live: hostname-prompt noise does not block [5/5]'s independent APPS/SOURCES check either" {
-  # call 1 ([1/5]'s own probe) sees a genuinely empty table (no override) and
-  # converges normally; call 2 ([5/5]'s combined verify) is the one carrying
-  # the hostname-prompt noise in BOTH its APPS and SOURCES sections, proving
-  # the same fix covers [5/5]'s independent check, not just [1/5]'s probe.
+  # index 1 (session 1/2's early probe) sees a genuinely empty table (no
+  # override) and converges normally; index 2 (session 2/2's own re-probe)
+  # is the one carrying the hostname-prompt noise in BOTH its APPS and
+  # SOURCES sections, proving the same fix covers [5/5]'s independent check,
+  # not just the early probe.
   _xr_uninstall_stub_setup
   FAKE_APP_ROW_2='RP/0/RP0/CPU0:iris-xr-lab#' \
     FAKE_SOURCE_ROW='RP/0/RP0/CPU0:iris-xr-lab#' \
