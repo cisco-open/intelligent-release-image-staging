@@ -9030,3 +9030,98 @@ def test_nav_divider_grid_spacing_and_compact_anatomy_comment():
     assert ".nav.subsub { padding-left:48px; font-size:13px; color:var(--text-secondary); }" \
         in css
     assert "56px" in css and "280px" in css and "48px" in css and "200px" in css
+
+
+# ---------------------------------------------------------------------------
+# Wave D: post-walk fixes (dense Devices type, flyout outside-click close,
+# Images import blurb)
+# ---------------------------------------------------------------------------
+
+def test_devices_table_gets_the_dense_type_modifier():
+    """Wave D fix 1 (operator, AFTER the Wave A type-role fix had already
+    landed: "still different fonts"). Devices is an 11-column table where a
+    single row mixed 14px sans (.dev-id, plain-text cells like Management
+    type), 12px mono (.machine), and 14px inherited control text (row
+    selects/buttons) -- individually "correct" per type role, but
+    heterogeneous enough to read as inconsistent. .tbl.dense steps every
+    cell's TEXT SIZE to one P4 scale (12/18); family still varies by data
+    kind (sans vs --font-mono), weight 500 stays on .dev-id. Scoped to
+    #devices only -- Images (5 columns) stays on the base 14px .tbl scale,
+    unmodified."""
+    html = _webroot("index.html")
+    css = _webroot("styles.css")
+    assert '<table class="tbl dense" id="devices">' in html
+    # Images keeps the base (non-dense) table scale this wave
+    assert '<table class="tbl" id="images">' in html
+    assert ".tbl.dense td { font-size:12px; line-height:18px; }" in css
+    # row controls (selects/buttons) match the row's own 12px text
+    assert "#dev-rows select, #dev-rows button { font-size:12px; }" in css
+    # .dev-id steps down from 14px to 12/18, weight 500 preserved
+    assert "#dev-rows .dev-id { font-family: var(--font-sans); font-size: 12px; " \
+        "line-height: 18px; font-weight: 500; color: var(--text-heading); }" in css
+
+
+def test_settings_monitoring_flyouts_close_on_outside_click_not_just_route():
+    """Wave D fix 2 (operator: "does not disappear when I click the site").
+    Wave B's flyouts were visually floating panels, but their hidden state
+    was still tied to the active route (`hidden = view !== 'settings'`), so
+    a flyout stayed open for as long as the operator was anywhere on
+    Settings/Monitoring -- never closing on an outside click the way every
+    other .menu popover does. The rail trigger is now ALSO wired through
+    wireMenu -- the same open-on-click / close-on-outside-click-or-Escape
+    machinery as csv-menu / onboard-pop / more-pop -- and the unconditional
+    route-tied hidden assignment is gone from the router."""
+    js = _webroot("app.js")
+    assert "wireMenu('nav-settings', 'settings-submenu');" in js
+    assert "wireMenu('nav-monitoring', 'monitoring-submenu');" in js
+    # the old unconditional route-tied visibility toggle is gone
+    assert "document.getElementById('settings-submenu').hidden = view !== 'settings';" \
+        not in js
+    assert "document.getElementById('monitoring-submenu').hidden = view !== 'monitoring';" \
+        not in js
+    # navigating to an unrelated view still closes a flyout left open (the
+    # back-button / programmatic-hashchange path an outside click never
+    # covers, since no click event fires on the page at all)
+    show_fn = js.split("function show(view) {", 1)[1].split(
+        "function current() {", 1)[0]
+    assert "if (view !== 'settings' && view !== 'monitoring') closeMenus();" in show_fn
+    # closeMenus() also clears aria-expanded on both triggers -- they live
+    # directly in the rail, not inside a .menu-wrap, so the generic
+    # .menu-wrap [aria-expanded] reset in closeMenus() would otherwise miss
+    # them and leave a stale aria-expanded="true" on a collapsed trigger
+    close_menus_fn = js.split("function closeMenus() {", 1)[1].split(
+        "\n  }", 1)[0]
+    assert "nav-settings" in close_menus_fn and "nav-monitoring" in close_menus_fn
+    assert "setAttribute('aria-expanded', 'false')" in close_menus_fn
+
+    html = _webroot("index.html")
+    assert 'id="nav-settings" aria-expanded="false"' in html
+    assert 'id="nav-monitoring" aria-expanded="false"' in html
+    # every sub-item closes the flyout the instant it is chosen (wireMenu's
+    # own panel click handler acts on .menu-close)
+    for sub_id in ("nav-settings-setup", "nav-settings-general", "nav-settings-tls",
+                   "nav-settings-telemetry", "nav-settings-audit", "nav-settings-bulkhash",
+                   "nav-monitoring-audit", "nav-monitoring-deploylogs"):
+        before = html.split('id="%s"' % sub_id, 1)[0]
+        tag_start = before.rfind("<a ")
+        assert "menu-close" in before[tag_start:], sub_id
+
+
+def test_images_import_blurb_drops_the_subdirectory_examples():
+    """Wave D fix 3 (operator: wanted the worked examples gone from the
+    Images import blurb -- the mechanism (a real subdirectory, the scanned
+    extensions, IMAGES_ROOT) stays, only the illustrative "such as
+    /opt/images/iosxe/c9300/ or /opt/images/iosxr/" clause goes."""
+    html = _webroot("index.html")
+    # the worked examples are gone outright -- these substrings do not
+    # appear anywhere else in the page
+    assert "such as" not in html
+    assert "iosxe/c9300" not in html
+    assert "/opt/images/iosxr/" not in html
+    assert ("Images copied onto the server under\n"
+            '              <span class="machine">/opt/images</span> — including any subdirectory —\n'
+            "              are offered for import below without uploading. Files ending in\n"
+            '              <span class="machine">.bin</span>, <span class="machine">.iso</span>,\n'
+            '              <span class="machine">.tar</span> or <span class="machine">.rpm</span> are\n'
+            "              scanned. Set <span class=\"machine\">IMAGES_ROOT</span> to scan a\n"
+            "              different directory.</p>") in html

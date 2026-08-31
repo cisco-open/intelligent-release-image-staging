@@ -1561,6 +1561,15 @@
     document.querySelectorAll('.menu-wrap [aria-expanded]').forEach(function (b) {
       b.setAttribute('aria-expanded', 'false');
     });
+    // The Settings/Monitoring flyout triggers live directly in the rail,
+    // not inside a .menu-wrap (their panel is positioned off .nav-rail
+    // itself, not off the trigger) -- reset their aria-expanded here too,
+    // or a flyout closed by an outside click / Escape leaves a stale
+    // aria-expanded="true" on an already-collapsed trigger.
+    var settingsTrigger = document.getElementById('nav-settings');
+    var monitoringTrigger = document.getElementById('nav-monitoring');
+    if (settingsTrigger) settingsTrigger.setAttribute('aria-expanded', 'false');
+    if (monitoringTrigger) monitoringTrigger.setAttribute('aria-expanded', 'false');
     openMenuPanel = null;
   }
   function wireMenu(btnId, panelId) {
@@ -1587,6 +1596,19 @@
   wireMenu('more-menu-btn', 'more-pop');
   wireMenu('help-btn', 'help-pop');
   wireMenu('status-legend-btn', 'status-legend-pop');
+  // Settings/Monitoring flyouts (Wave D fix 2, operator: "does not
+  // disappear when I click the site"): Wave B made these floating panels
+  // but left their visibility tied to the active route, so a flyout stayed
+  // open the entire time the operator was anywhere on Settings/Monitoring,
+  // never closing on an outside click the way every other .menu popover
+  // does. The rail item is both a real navigation link (href, unchanged)
+  // AND now this popover's trigger -- same wireMenu machinery as every
+  // other menu-wrap pair: open on trigger click, close on outside click or
+  // Escape (already wired above, generically, for every open .menu), or on
+  // choosing a sub-item (each carries .menu-close, so wireMenu's own panel
+  // click handler closes it the instant a destination is picked).
+  wireMenu('nav-settings', 'settings-submenu');
+  wireMenu('nav-monitoring', 'monitoring-submenu');
   // Status column legend (density pass, Task 8): one row per
   // DEVICE_STATUS_OPTIONS entry (the SAME 12-level Magnetic mapping the
   // Status filter and the cell itself already derive from -- STATUS_LEVELS,
@@ -4841,9 +4863,16 @@
     if (swarmFrame && swarmFrame.contentWindow) {
       swarmFrame.contentWindow.postMessage(view === 'swarm' ? 'MAP_RESUME' : 'MAP_PAUSE', location.origin);
     }
-    document.getElementById('settings-submenu').hidden = view !== 'settings';
+    // Wave D fix 2: the flyouts are now trigger-driven popovers (wireMenu,
+    // above) rather than tied to the active route -- but navigating to a
+    // DIFFERENT view still has to close one left open over a page it no
+    // longer applies to. A click-driven navigation already closes it via
+    // wireMenu's own outside-click handler; this covers the paths that
+    // never dispatch a click on the page at all -- the browser back/
+    // forward buttons, or a hashchange from code elsewhere in the app
+    // (e.g. the Overview attention cards' router jump).
+    if (view !== 'settings' && view !== 'monitoring') closeMenus();
     if (view === 'settings') showSettingsSub(sub || 'general');
-    document.getElementById('monitoring-submenu').hidden = view !== 'monitoring';
     if (view === 'monitoring') showMonitoringSub(sub || 'audit');
     // Each view names the refresh the poll should repeat. Settings is
     // deliberately excluded: it is a set of forms, and re-rendering them

@@ -652,13 +652,35 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
 body.selecting #devices .mark,
 body.selecting #devices #mark-all { opacity: 1; }
 
-/* Scan hierarchy: device id leads each row (14/500 sans, Magnetic body
-   type); IP/model are secondary machine data (12px, --text-secondary) --
-   scoped to #dev-rows so the shared .machine utility (pinned elsewhere at
-   its bare ".machine { font-family: var(--font-mono); }" definition) keeps
-   its default size/color everywhere else it is used (deploy-info drawer,
-   batch panel, help popover, …). */
-#dev-rows .dev-id { font-family: var(--font-sans); font-size: 14px; font-weight: 500; color: var(--text-heading); }
+/* Dense-table modifier (Wave D fix 1, operator: "different fonts" persisted
+   even after the Wave A type-role fix): a single Devices row was mixing
+   14px sans (.dev-id, plain-text cells like Management type) with 12px
+   mono (.machine, via the .tbl .machine override above) and 14px inherited
+   control text (row selects/buttons) -- heterogeneous enough to read as
+   inconsistent even though every piece was individually "correct" per its
+   own type role. .tbl.dense steps every cell's TEXT SIZE down to one P4
+   scale (12/18) regardless of content kind; family still varies by data
+   kind (sans for names/labels, --font-mono for machine data), weight 500
+   stays on .dev-id below. Scoped to #devices only via this "tbl dense"
+   class pairing on that one <table> (11 columns, the console's densest) --
+   Images (5 columns, 14px-base) is unaffected. */
+.tbl.dense td { font-size:12px; line-height:18px; }
+/* Row controls must match the row's own 12px text or they tower over
+   everything else in the row -- the root cause of the "different fonts"
+   read. select/button already inherit `font: inherit` from the UA-reset
+   rule near the top of this file, but a later, equally-specific rule
+   (input/select's own font-size:14px, above) wins that inheritance tie by
+   source order, so the size needs an explicit override here. */
+#dev-rows select, #dev-rows button { font-size:12px; }
+
+/* Scan hierarchy: device id leads each row (12/500 sans, Magnetic body
+   type, stepped down from 14 by the dense modifier above); IP/model are
+   secondary machine data (12px, --text-secondary) -- scoped to #dev-rows
+   so the shared .machine utility (pinned elsewhere at its bare ".machine {
+   font-family: var(--font-mono); }" definition) keeps its default
+   size/color everywhere else it is used (deploy-info drawer, batch panel,
+   help popover, …). */
+#dev-rows .dev-id { font-family: var(--font-sans); font-size: 12px; line-height: 18px; font-weight: 500; color: var(--text-heading); }
 #dev-rows .machine { color: var(--text-secondary); }
 
 /* "More filters" disclosure: a native <details>, no JS needed to toggle it

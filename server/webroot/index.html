@@ -115,21 +115,21 @@
       <a href="#swarm" class="nav" id="nav-swarm"><svg class="nav-icon" aria-hidden="true"><use href="#i-nav-share-network"/></svg><span class="nav-label">Swarm</span></a>
       <hr class="nav-divider">
       <div class="nav-group">System</div>
-      <a href="#settings" class="nav sub" id="nav-settings"><svg class="nav-icon" aria-hidden="true"><use href="#i-nav-gear"/></svg><span class="nav-label">Settings</span></a>
+      <a href="#settings" class="nav sub" id="nav-settings" aria-expanded="false"><svg class="nav-icon" aria-hidden="true"><use href="#i-nav-gear"/></svg><span class="nav-label">Settings</span></a>
       <div class="nav-flyout menu" id="settings-submenu" hidden>
         <div class="nav-group">Settings</div>
-        <a href="#settings/setup" class="nav subsub" id="nav-settings-setup"><svg class="nav-icon" aria-hidden="true"><use href="#i-nav-list-checks"/></svg><span class="nav-label">Setup</span></a>
-        <a href="#settings/general" class="nav subsub" id="nav-settings-general">General</a>
-        <a href="#settings/tls" class="nav subsub" id="nav-settings-tls">TLS &amp; trust</a>
-        <a href="#settings/telemetry" class="nav subsub" id="nav-settings-telemetry">Telemetry</a>
-        <a href="#settings/audit" class="nav subsub" id="nav-settings-audit">Audit export</a>
-        <a href="#settings/bulkhash" class="nav subsub" id="nav-settings-bulkhash">Image verification</a>
+        <a href="#settings/setup" class="nav subsub menu-close" id="nav-settings-setup"><svg class="nav-icon" aria-hidden="true"><use href="#i-nav-list-checks"/></svg><span class="nav-label">Setup</span></a>
+        <a href="#settings/general" class="nav subsub menu-close" id="nav-settings-general">General</a>
+        <a href="#settings/tls" class="nav subsub menu-close" id="nav-settings-tls">TLS &amp; trust</a>
+        <a href="#settings/telemetry" class="nav subsub menu-close" id="nav-settings-telemetry">Telemetry</a>
+        <a href="#settings/audit" class="nav subsub menu-close" id="nav-settings-audit">Audit export</a>
+        <a href="#settings/bulkhash" class="nav subsub menu-close" id="nav-settings-bulkhash">Image verification</a>
       </div>
-      <a href="#monitoring" class="nav sub" id="nav-monitoring"><svg class="nav-icon" aria-hidden="true"><use href="#i-nav-pulse"/></svg><span class="nav-label">Monitoring</span></a>
+      <a href="#monitoring" class="nav sub" id="nav-monitoring" aria-expanded="false"><svg class="nav-icon" aria-hidden="true"><use href="#i-nav-pulse"/></svg><span class="nav-label">Monitoring</span></a>
       <div class="nav-flyout menu" id="monitoring-submenu" hidden>
         <div class="nav-group">Monitoring</div>
-        <a href="#monitoring/audit" class="nav subsub" id="nav-monitoring-audit">Audit trail</a>
-        <a href="#monitoring/deploylogs" class="nav subsub" id="nav-monitoring-deploylogs">Deployment logs</a>
+        <a href="#monitoring/audit" class="nav subsub menu-close" id="nav-monitoring-audit">Audit trail</a>
+        <a href="#monitoring/deploylogs" class="nav subsub menu-close" id="nav-monitoring-deploylogs">Deployment logs</a>
       </div>
     </nav>
     <main class="main">
@@ -182,10 +182,8 @@
               <p class="muted" id="status" role="status" aria-live="polite"></p>
             </div>
             <p class="muted">Images copied onto the server under
-              <span class="machine">/opt/images</span> — including any subdirectory,
-              such as <span class="machine">/opt/images/iosxe/c9300/</span> or
-              <span class="machine">/opt/images/iosxr/</span> — are offered for import
-              below without uploading. Files ending in
+              <span class="machine">/opt/images</span> — including any subdirectory —
+              are offered for import below without uploading. Files ending in
               <span class="machine">.bin</span>, <span class="machine">.iso</span>,
               <span class="machine">.tar</span> or <span class="machine">.rpm</span> are
               scanned. Set <span class="machine">IMAGES_ROOT</span> to scan a
@@ -447,7 +445,7 @@
              in the Status header cell, the table's own rightmost column). -->
         <div class="devices-table-wrap">
         <div class="table-scroll">
-        <table class="tbl" id="devices">
+        <table class="tbl dense" id="devices">
           <thead><tr><th><input type="checkbox" id="mark-all"></th><th>Device</th><th>IP</th><th>Model</th><th>Management type</th><th>Agent install</th><th>Credential</th><th>Assigned images</th><th>Telemetry</th><th>Peer policy</th><th>Status <button class="linkish" type="button" id="status-legend-btn" aria-expanded="false" aria-label="Show status pill legend">ⓘ</button></th></tr></thead>
           <tbody id="dev-rows"></tbody>
         </table>
