@@ -274,6 +274,12 @@ if [ -n "${FAKE_COMMAND_LOG:-}" ]; then
   { echo "=== CALL START ==="; printf '%s\n' "$cmds"; echo "=== CALL END ==="; } >> "$FAKE_COMMAND_LOG"
 fi
 
+# True when the request carries this exact command on a line of its own. A
+# device answers COMMANDS, not markers; keying the stub's replies off the
+# marker alone is what let a read be deleted from the builder with the whole
+# suite still green.
+sent_line() { printf '%s\n' "$cmds" | grep -qxF "$1"; }
+
 next_app_row() {
   countfile="${BATS_TEST_TMPDIR:-.}/probe-count"
   n=0
@@ -338,7 +344,8 @@ case "$cmds" in
     # session 2/2 (sweep+verify): the destructive commands (when composed at
     # all -- gated client-side, not by this stub) -> APPS (final re-probe)
     # -> SOURCES -> FILES -> WORKDIR -> DONE.
-    if [ "${FAKE_VERIFY_OMIT_APPS:-no}" != "yes" ]; then
+    if sent_line "show appmgr application-table" \
+       && [ "${FAKE_VERIFY_OMIT_APPS:-no}" != "yes" ]; then
       row="$(next_app_row)"
       echo "__IRIS_XR_VERIFY_APPS__"
       # XR stamps every exec command with a timestamp line before its output,
@@ -349,10 +356,13 @@ case "$cmds" in
       echo "Mon Aug 31 14:24:08.136 UTC"
       printf '%s\n' "$row"
     fi
-    echo "__IRIS_XR_VERIFY_SOURCES__"
-    echo "Mon Aug 31 14:24:11.615 UTC"
-    printf '%s\n' "${FAKE_SOURCE_ROW-}"
-    if [ "${FAKE_VERIFY_OMIT_FILES:-no}" != "yes" ]; then
+    if sent_line "show appmgr source-table"; then
+      echo "__IRIS_XR_VERIFY_SOURCES__"
+      echo "Mon Aug 31 14:24:11.615 UTC"
+      printf '%s\n' "${FAKE_SOURCE_ROW-}"
+    fi
+    if sent_line "dir harddisk:" \
+       && [ "${FAKE_VERIFY_OMIT_FILES:-no}" != "yes" ]; then
       echo "__IRIS_XR_VERIFY_FILES__"
       echo "Mon Aug 31 14:24:15.440 UTC"
       printf '%s\n' "${FAKE_DIR_HARDDISK-Directory of harddisk:/}"
@@ -363,7 +373,8 @@ case "$cmds" in
     # for every test that never puts "iris-work" into FAKE_DIR_HARDDISK,
     # since [5/5] only ever consults this once the root-level FILES check
     # has already confirmed iris-work is present.
-    if [ "${FAKE_VERIFY_OMIT_WORKDIR:-no}" != "yes" ]; then
+    if sent_line "dir harddisk:/iris-work" \
+       && [ "${FAKE_VERIFY_OMIT_WORKDIR:-no}" != "yes" ]; then
       echo "__IRIS_XR_VERIFY_WORKDIR__"
       echo "Mon Aug 31 14:24:05.992 UTC"
       printf '%s\n' "${FAKE_WORKDIR_LISTING-Directory of harddisk:/iris-work
@@ -417,6 +428,12 @@ printf '%s\n' "$cmds"
 if [ "${FAKE_ECHO_ONLY:-no}" = "yes" ]; then
   exit 0
 fi
+
+# True when the request carries this exact command on a line of its own. A
+# device answers COMMANDS, not markers; keying the stub's replies off the
+# marker alone is what let a read be deleted from the builder with the whole
+# suite still green.
+sent_line() { printf '%s\n' "$cmds" | grep -qxF "$1"; }
 
 next_app_row() {
   countfile="${BATS_TEST_TMPDIR:-.}/probe-count"
@@ -473,7 +490,8 @@ case "$cmds" in
       # before the transport itself dies.
       exit "$FAKE_VERIFY_RC"
     fi
-    if [ "${FAKE_VERIFY_OMIT_APPS:-no}" != "yes" ]; then
+    if sent_line "show appmgr application-table" \
+       && [ "${FAKE_VERIFY_OMIT_APPS:-no}" != "yes" ]; then
       row="$(next_app_row)"
       echo "__IRIS_XR_VERIFY_APPS__"
       # XR stamps every exec command with a timestamp line before its output,
@@ -484,10 +502,13 @@ case "$cmds" in
       echo "Mon Aug 31 14:24:08.136 UTC"
       printf '%s\n' "$row"
     fi
-    echo "__IRIS_XR_VERIFY_SOURCES__"
-    echo "Mon Aug 31 14:24:11.615 UTC"
-    printf '%s\n' "${FAKE_SOURCE_ROW-}"
-    if [ "${FAKE_VERIFY_OMIT_FILES:-no}" != "yes" ]; then
+    if sent_line "show appmgr source-table"; then
+      echo "__IRIS_XR_VERIFY_SOURCES__"
+      echo "Mon Aug 31 14:24:11.615 UTC"
+      printf '%s\n' "${FAKE_SOURCE_ROW-}"
+    fi
+    if sent_line "dir harddisk:" \
+       && [ "${FAKE_VERIFY_OMIT_FILES:-no}" != "yes" ]; then
       echo "__IRIS_XR_VERIFY_FILES__"
       echo "Mon Aug 31 14:24:15.440 UTC"
       printf '%s\n' "${FAKE_DIR_HARDDISK-Directory of harddisk:/}"
@@ -502,7 +523,8 @@ case "$cmds" in
     fi
     # Run-4/5 fix wave: iris-work's own sub-listing (default: the REAL
     # empty-directory shape captured live on hardware, run 5).
-    if [ "${FAKE_VERIFY_OMIT_WORKDIR:-no}" != "yes" ]; then
+    if sent_line "dir harddisk:/iris-work" \
+       && [ "${FAKE_VERIFY_OMIT_WORKDIR:-no}" != "yes" ]; then
       echo "__IRIS_XR_VERIFY_WORKDIR__"
       echo "Mon Aug 31 14:24:05.992 UTC"
       printf '%s\n' "${FAKE_WORKDIR_LISTING-Directory of harddisk:/iris-work
@@ -645,9 +667,19 @@ _xr_call_body() {
   _xr_uninstall_stub_setup
   run _xr_uninstall_run_live
   [ "$status" -eq 0 ] || return 1
-  log="$(cat "$FAKE_COMMAND_LOG")"
-  [[ "$log" == *"show appmgr application-table"* ]] || return 1
-  if printf '%s\n' "$log" | grep -q 'application summary'; then
+  # Pinned by POSITION inside session 1's own body, which is the only form that
+  # actually holds. A whole-log substring was satisfied by session 2's copy of
+  # the same string; scoping to session 1 alone is still not enough, because
+  # session 1 now carries a SECOND app-table read (the post-commit re-probe)
+  # whose copy would keep this green with the probe deleted. What the paired
+  # adjudication actually needs is a read that happens BEFORE the deactivate.
+  body="$(_xr_call_body 1)"
+  probe_at="$(printf '%s\n' "$body" | grep -n '^show appmgr application-table$' | head -1 | cut -d: -f1)"
+  deact_at="$(printf '%s\n' "$body" | grep -n 'VERIFY_DEACTIVATE__' | head -1 | cut -d: -f1)"
+  [ -n "$probe_at" ] || return 1
+  [ -n "$deact_at" ] || return 1
+  [ "$probe_at" -lt "$deact_at" ] || return 1
+  if printf '%s\n' "$body" | grep -q 'application summary'; then
     return 1
   fi
 }
@@ -1048,6 +1080,35 @@ _xr_call_body() {
   # not just "didn't error".
   count="$(printf '%s\n' "$log" | grep -c '^no appmgr application iris$')"
   [ "$count" -eq 1 ] || return 1
+}
+
+# The D2-3 guard itself had no test: deleting the session-1 probe-rejection
+# check kept the suite green while re-arming the exact incident the composite
+# exists to prevent -- a rejected probe read as "app absent", deactivate
+# skipped, the app left running while teardown reported success.
+@test "live: a rejected session-1 probe is a hard error, never read as app absent" {
+  _xr_uninstall_stub_setup
+  FAKE_APP_ROW_1="% Invalid input detected at '^' marker." run _xr_uninstall_run_live
+  [ "$status" -ne 0 ] || return 1
+  if printf '%s\n' "$output" | grep -q 'already deactivated/absent'; then
+    return 1
+  fi
+  if printf '%s\n' "$output" | grep -q 'undeploy complete'; then
+    return 1
+  fi
+  [[ "$output" == *"probe was rejected"* ]]
+}
+
+@test "live: a rejected verify-side app-table read is a hard error, never read as app gone" {
+  _xr_uninstall_stub_setup
+  # index 1 probe clean, index 2 re-probe clean, index 3 (session 2's own
+  # read) comes back rejected.
+  FAKE_APP_ROW_3="% Invalid input detected at '^' marker." run _xr_uninstall_run_live
+  [ "$status" -ne 0 ] || return 1
+  if printf '%s\n' "$output" | grep -q 'undeploy complete'; then
+    return 1
+  fi
+  [[ "$output" == *"APPS read was rejected"* ]]
 }
 
 # Review finding (2026-08-31): xr_command_rejected was applied to the app table
