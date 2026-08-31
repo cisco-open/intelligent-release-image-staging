@@ -4,6 +4,15 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+# `|| return 1` on every assertion that is not the final command in its test is
+# load-bearing, not style: under the bash 3.2 this suite runs on, a bare failing
+# `[[ ]]`, `[ ]` or `grep -q` mid-body does NOT fail a bats test -- the test's
+# status is the status of its LAST command. Every test here ends with a
+# `rm -rf "$tmp"` cleanup, which always succeeds, so before 2026-08-31 the
+# assertions in three of these four tests were dead weight: they could not fail,
+# whatever the code did. Found by writing a new test for a real seeder defect and
+# watching it pass against the unfixed code.
+
 @test "seed-launch builds the expected aria2c command line" {
   tmp="$(mktemp -d)"
   mkdir -p "$tmp/state/torrents" "$tmp/config" "$tmp/log" "$tmp/images"
@@ -15,12 +24,12 @@
       IMAGES_DIR="$tmp/images" ARIA2="$tmp/aria2c-stub" \
       bash "$BATS_TEST_DIRNAME/../seed-launch.sh"
 
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"--enable-rpc=true"* ]]
-  [[ "$output" == *"--rpc-secret=secretval"* ]]
-  [[ "$output" == *"--enable-dht=false"* ]]
-  [[ "$output" == *"--enable-peer-exchange=false"* ]]
-  [[ "$output" == *"--seed-ratio=0.0"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"--enable-rpc=true"* ]] || return 1
+  [[ "$output" == *"--rpc-secret=secretval"* ]] || return 1
+  [[ "$output" == *"--enable-dht=false"* ]] || return 1
+  [[ "$output" == *"--enable-peer-exchange=false"* ]] || return 1
+  [[ "$output" == *"--seed-ratio=0.0"* ]] || return 1
   [[ "$output" == *"--dir=$tmp/images"* ]]
 }
 
@@ -35,8 +44,8 @@
       IMAGES_DIR="$tmp/images" ARIA2="$tmp/aria2c-stub" \
       bash "$BATS_TEST_DIRNAME/../seed-launch.sh"
 
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"FATAL"* ]] || [[ "$output" == *"rpc-secret"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"FATAL"* ]] || [[ "$output" == *"rpc-secret"* ]] || return 1
   rm -rf "$tmp"
 }
 
@@ -52,8 +61,8 @@
       IMAGES_DIR="$tmp/images" ARIA2="$tmp/aria2c-stub" \
       bash "$BATS_TEST_DIRNAME/../seed-launch.sh"
 
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"FATAL"* ]] || [[ "$output" == *"rpc-secret"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"FATAL"* ]] || [[ "$output" == *"rpc-secret"* ]] || return 1
   rm -rf "$tmp"
 }
 
@@ -71,13 +80,13 @@
       ARIA2="$tmp/aria2c-stub" \
       bash "$BATS_TEST_DIRNAME/../seed-launch.sh"
 
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
   # the seeder is driven by a generated per-torrent input file...
-  echo "$output" | grep -q -- "--input-file=$tmp/run/seeder.input"
+  echo "$output" | grep -q -- "--input-file=$tmp/run/seeder.input" || return 1
   # ...which pairs the IE torrent with its ACTUAL image dir (the model subdir),
   # not the global --dir (which would error "Failed to open file").
-  grep -q -- "$tmp/state/torrents/ie3x00-universalk9.17.18.03.torrent" "$tmp/run/seeder.input"
-  grep -q -- "dir=$tmp/images/IE3400" "$tmp/run/seeder.input"
+  grep -q -- "$tmp/state/torrents/ie3x00-universalk9.17.18.03.torrent" "$tmp/run/seeder.input" || return 1
+  grep -q -- "dir=$tmp/images/IE3400" "$tmp/run/seeder.input" || return 1
   rm -rf "$tmp"
 }
 
