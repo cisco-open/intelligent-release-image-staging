@@ -399,23 +399,28 @@ def test_setup_pane_telemetry_card_funnels_into_the_setup_flow():
     assert "setupTelemetryNote" in js
 
 
-def test_setup_pane_image_verification_card_links_to_settings_not_the_wizard():
-    """Unlike telemetry/stage-host/packages, Image verification is NOT a
-    first-run wizard step (a scheduled/manual/offline check cannot be
-    completed in the wizard's two form steps any more than it could be
-    squeezed into 'first-run setup') -- its card mirrors the admin card's
-    own precedent instead: report status here, but send the operator
-    straight to the Settings pane that owns the feature."""
+def test_setup_pane_image_verification_card_now_enters_the_wizard():
+    """Task 9 (USER DIRECTIVE: Setup becomes a real flow) supersedes the
+    earlier decision this test used to pin -- image verification was kept
+    out of the wizard because a scheduled/manual/offline check "cannot be
+    squeezed into first-run setup". Task 9's step 4 proves that decision
+    wrong: it mounts the SAME Settings > Image verification controls
+    (schedule, Refresh now, offline import) the wizard's telemetry/
+    stage-host steps already reuse from Settings, via mountImageVerification
+    (a move, not a template clone -- see its own comment in app.js for why).
+    So the Setup status card now sends the operator into the wizard, the
+    same precedent telemetry/stage-host/packages already follow, instead of
+    off to Settings on its own."""
     html = _webroot("index.html")
     js = _webroot("app.js")
     assert 'id="setup-iv-chip"' in html
     card = html.split('id="setup-iv-chip"', 1)[1].split("</div>", 1)[0]
-    assert 'href="#settings/bulkhash"' in card
-    assert 'href="#setup"' not in card
+    assert 'href="#setup"' in card
+    assert 'href="#settings/bulkhash"' not in card
     assert "cisco" in card.lower()
     assert "s.image_verification.state" in js
-    # never added as a fifth wizard step
-    assert "image_verification" not in js.split(
+    # NOW a real fourth wizard step -- the opposite of the old decision
+    assert "image_verification" in js.split(
         "var WIZARD_STEPS = [", 1)[1].split("];", 1)[0]
 
 
@@ -559,3 +564,103 @@ def test_first_run_setup_hands_off_to_the_wizard():
     assert "#settings/setup" not in login_js
     assert "removeItem('iris_post_setup')" in login_js, \
         "the handoff must be one-shot, or every later sign-in lands there"
+
+
+# ---------------------------------------------------------------------------
+# Task 9: the Magnetic Stepper flow -- a real fourth step (Image
+# verification), the left-panel/right-content anatomy, and the M37 fold-in
+# (a configured-but-never-succeeded schedule reads differently from a truly
+# unconfigured one). Same source-guard idiom as the rest of this file: no JS
+# runtime harness exists in this repo, so these assert on the SOURCE TEXT.
+# ---------------------------------------------------------------------------
+
+def test_wizard_steplist_carries_four_steps_including_image_verification():
+    js = _webroot("app.js")
+    steps = js.split("var WIZARD_STEPS = [", 1)[1].split("];", 1)[0]
+    for key in ("telemetry", "stage_host", "packages", "image_verification"):
+        assert ("key: '%s'" % key) in steps, key
+    assert steps.count("{ id:") == 4
+
+
+def test_wizard_step_four_is_image_verification_with_a_form_mount():
+    html = _webroot("index.html")
+    wiz = html.split('id="view-setup"', 1)[1].split("</section>", 1)[0]
+    assert 'id="wz-step-imageverification"' in wiz
+    step = wiz.split('id="wz-step-imageverification"', 1)[1].split(
+        "</div>", 1)[0]
+    assert 'id="wz-iv-mount"' in step
+    assert 'id="wz-iv-chip"' in step
+    # a mount point, not inlined markup -- the moved #iv-content supplies the
+    # actual controls at runtime (mountImageVerification)
+    assert "<form" not in step
+
+
+def test_wizard_uses_the_left_panel_right_content_stepper_anatomy():
+    """Captured anatomy (agentinfo/facelift-2026-08-30-visual-direction.md
+    lines 63-70): left step panel ~320px, content area right. wz-steplist
+    must live in the panel column and every wz-step-*/wz-nav in the content
+    column, not stacked flat above them as the pre-Task-9 layout did."""
+    html = _webroot("index.html")
+    css = _webroot("styles.css")
+    wiz = html.split('id="view-setup"', 1)[1].split("</section>", 1)[0]
+    panel = wiz.split('class="wz-panel"', 1)[1].split("</div>", 1)[0]
+    assert 'id="wz-steplist"' in panel
+    content = wiz.split('class="wz-content"', 1)[1]
+    for marker in ("wz-step-telemetry", "wz-step-stagehost", "wz-step-packages",
+                   "wz-step-imageverification", 'id="wz-nav"'):
+        assert marker in content, marker
+    assert ".wz-panel {" in css and "320px" in css.split(".wz-panel {", 1)[1].split("}", 1)[0]
+
+
+def test_image_verification_content_is_moved_not_cloned_between_setup_and_settings():
+    """Unlike the telemetry/stage-host forms (a <template>, cloned fresh per
+    mount, re-wired each time via FORM_MOUNTS), the Image verification
+    controls bind their handlers once at load -- so relocating them must be a
+    live DOM move (appendChild), never a second clone that would duplicate
+    ids or leave the original's listeners behind."""
+    html = _webroot("index.html")
+    js = _webroot("app.js")
+    assert 'id="iv-content"' in html
+    # #iv-content's static home is inside the Settings pane, not a <template>
+    bulkhash_pane = html.split('id="settings-pane-bulkhash" hidden>', 1)[1]
+    assert 'id="iv-content"' in bulkhash_pane.split("</section>", 1)[0]
+    fn = js.split("function mountImageVerification(hostId) {", 1)[1].split(
+        "\n  }", 1)[0]
+    assert "cloneNode" not in fn
+    assert "appendChild(content)" in fn
+    assert "mountImageVerification('wz-iv-mount')" in js
+    assert "mountImageVerification('settings-pane-bulkhash')" in js
+
+
+def test_m37_configured_but_unrun_schedule_gets_its_own_wording():
+    """M37 fold-in (carried from the KGV close-out): setup_status.py's
+    image_verification card only ever reports ok/unset (a scheduled-but-
+    never-run config and a truly unconfigured one both resolve to "unset"
+    from that field alone -- see its docstring). The console tells them
+    apart using the schedule's own mode, fetched separately from
+    /api/settings/image-verification, and renders a distinct label rather
+    than conflating the two."""
+    js = _webroot("app.js")
+    assert "'Configured — no successful run yet'" in js
+    assert "function fetchIvScheduleConfigured()" in js
+    fn = js.split("function fetchIvScheduleConfigured() {", 1)[1].split(
+        "\n  }", 1)[0]
+    assert "'/api/settings/image-verification'" in fn
+    assert "(iv.mode || 'off') !== 'off'" in fn
+    item_fn = js.split("function setupItemChipHTML(key, state, ivScheduleConfigured) {", 1)[1].split(
+        "\n  }", 1)[0]
+    assert "configured_unrun" in item_fn
+    assert "key === 'image_verification'" in item_fn
+
+
+def test_setup_pills_route_through_the_real_status_pill_system():
+    """Task 9: the Setup pane's ad-hoc badge-* chips became real Magnetic
+    status pills (levelPillHTML) -- setupChip keeps its name and its pinned
+    setupChip('unknown') call (test_refresh_setup_paints_unknown_on_failed_
+    or_thrown_fetch above), but its body now renders through the shared pill
+    renderer instead of a bespoke <span class="badge ...">."""
+    js = _webroot("app.js")
+    fn = js.split("function setupChip(state, levelOverride) {", 1)[1].split(
+        "\n  }", 1)[0]
+    assert "levelPillHTML(" in fn
+    assert "class=\"badge " not in fn

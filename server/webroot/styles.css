@@ -247,6 +247,10 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
    the catalog table below it (Task 7 Step 5). */
 .images-intake { display:flex; flex-direction:column; gap:16px; margin:0 0 24px; }
 .images-intake h3:first-child { margin-top:0; }
+/* Same stacked-card pattern as .images-intake above, reused wherever Task 9
+   turns a run of Settings/Setup h3 sections into bounded .card sections. */
+.setup-cards { display:flex; flex-direction:column; gap:16px; margin:12px 0 0; }
+.setup-cards .card h3:first-child { margin-top:0; }
 /* Icon sprite (Phosphor bold symbols, index.html): defines but never paints
    -- CSP forbids a literal style= attribute, so it's hidden by class
    instead of the usual inline 0x0/absolute trick. */
@@ -257,6 +261,11 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
 .job-action-undeploy { color: var(--progress); font-size: 10px; font-weight: 600; }
 
 .badge { display:inline-block; font-size:11px; font-weight:600; border-radius:4px; padding:1px 7px; line-height:1.5; }
+/* Monitoring: the active time-scope tag next to a pane's own title (Task 9) --
+   read from the same range the histogram/table below already use. */
+.scope-tag { display:inline-block; font-size:11px; font-weight:600; padding:1px 8px;
+  border-radius:999px; background:var(--action-tint); color:var(--action);
+  margin-left:6px; vertical-align:middle; }
 /* same trap: #telemetry-health starts hidden and would otherwise render as an
    empty pill until its first refresh. */
 .badge[hidden] { display:none; }
@@ -447,7 +456,13 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
   #dl-drawer { transition:none; }
 }
 
-/* First-run setup wizard + the nudge that brings an operator back to it. */
+/* First-run setup wizard + the nudge that brings an operator back to it.
+   Magnetic Stepper anatomy (agentinfo/facelift-2026-08-30-visual-
+   direction.md lines 63-70): left step panel ~320px (range 200-400px),
+   content area right, Next/Back right-aligned at the content column's own
+   bottom. .wz-layout/.wz-panel/.wz-content are new -- every wz-step-*/
+   wz-nav/wz-steplist id below stays on the same functionally equivalent
+   element, per the brief. */
 .nudge { display:flex; align-items:center; gap:10px; margin:0 0 12px;
   padding:8px 12px; border:1px solid var(--warning); background:var(--warning-tint);
   border-radius:4px; }
@@ -455,22 +470,40 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
    without this `el.hidden = true` sets the attribute and changes nothing. */
 .nudge[hidden] { display:none; }
 .nudge .btn { margin-left:auto; }
+.wz-layout { display:flex; align-items:flex-start; gap:24px; margin-top:12px; }
+.wz-panel { flex:0 0 320px; max-width:320px; }
+.wz-content { flex:1 1 auto; min-width:0; }
+@media (max-width:900px) {
+  .wz-layout { flex-direction:column; }
+  .wz-panel { flex:0 0 auto; max-width:none; width:100%; }
+}
 #view-setup .wz-step, #view-setup .wz-done { padding:12px 14px; margin:12px 0;
   border:1px solid var(--rule); border-radius:4px; }
+#view-setup .wz-step:first-child, #view-setup .wz-done:first-child { margin-top:0; }
 #view-setup .wz-done { opacity:.75; }
 #view-setup .form-mount { margin-top:10px; }
 #wz-nav { margin-top:16px; }
 
-/* Wizard step list: every step visible with its state, any of them openable. */
-#wz-steplist { display:flex; flex-wrap:wrap; gap:8px; margin:10px 0 4px; }
+/* Wizard step list: every step visible with its state, any of them openable,
+   laid out as the panel's vertical list (not the horizontal chip row this
+   replaces). */
+#wz-steplist { display:flex; flex-direction:column; gap:6px; }
 .wz-steplist-item { display:flex; align-items:center; gap:8px; cursor:pointer;
-  padding:6px 10px; font:inherit; color:inherit; background:var(--surface);
-  border:1px solid var(--rule); border-radius:999px; }
+  padding:8px 10px; font:inherit; color:inherit; text-align:left; background:var(--surface);
+  border:1px solid var(--rule); border-radius:var(--radius-control); }
 .wz-steplist-item.current { border-color:var(--action); background:var(--action-tint); }
 .wz-steplist-n { display:inline-flex; align-items:center; justify-content:center;
-  width:18px; height:18px; border-radius:50%; background:var(--inactive-tint);
+  flex:none; width:18px; height:18px; border-radius:50%; box-sizing:border-box;
+  border:2px solid var(--border); background:var(--surface); color:var(--text-secondary);
   font-size:11px; font-weight:600; }
-.wz-steplist-item.current .wz-steplist-n { background:var(--action); color:#fff; }
+/* current = blue filled with the step number (still shown even on an
+   already-'ok' step -- the operator is standing on it right now) */
+.wz-steplist-n.is-current { background:var(--action); border-color:var(--action); color:#fff; }
+/* completed = blue-outline circle with a check, never filled */
+.wz-steplist-n.is-done { border-color:var(--action); background:var(--surface); color:var(--action); }
+.wz-steplist-n.is-done svg { width:11px; height:11px; }
+/* upcoming = plain gray-outline number, the base rule above */
+.wz-steplist-label { flex:1 1 auto; }
 
 /* ---------------------------------------------------------------------
    Responsive + accessibility foundations (Task 6)
@@ -483,19 +516,28 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
    there more to scroll" cue (Lea Verou's scroll-shadow trick, adapted to
    the horizontal axis): a canvas-colored layer that scrolls WITH the
    content masks a shadow layer that stays pinned to the viewport, so the
-   shadow only shows on the side that still has columns hidden off-screen. */
+   shadow only shows on the side that still has columns hidden off-screen.
+
+   --scroll-fade (Task 9, carried seam): the fade color used to be hardcoded
+   to --canvas, which was fine while every .table-scroll sat directly on the
+   page background -- but Task 9 puts several inside a --surface (white)
+   .card, where a canvas-tinted fade reads as a visible seam against the
+   white card. Defaulting the custom property here and overriding it inside
+   .card below keeps every other .table-scroll (still on canvas) unchanged. */
 .table-scroll {
+  --scroll-fade: var(--canvas);
   overflow-x: auto;
   background:
-    linear-gradient(to right, var(--canvas) 30%, rgba(240,241,242,0)) 0 0,
-    linear-gradient(to left, var(--canvas) 30%, rgba(240,241,242,0)) 100% 0,
+    linear-gradient(to right, var(--scroll-fade) 30%, rgba(240,241,242,0)) 0 0,
+    linear-gradient(to left, var(--scroll-fade) 30%, rgba(240,241,242,0)) 100% 0,
     linear-gradient(to right, rgba(0,0,0,.10), rgba(0,0,0,0)) 0 0,
     linear-gradient(to left, rgba(0,0,0,.10), rgba(0,0,0,0)) 100% 0;
   background-repeat: no-repeat;
-  background-color: var(--canvas);
+  background-color: var(--scroll-fade);
   background-size: 32px 100%, 32px 100%, 12px 100%, 12px 100%;
   background-attachment: local, local, scroll, scroll;
 }
+.card .table-scroll { --scroll-fade: var(--surface); }
 
 /* Persistent field labels (foundation for Task 9's field-row layout):
    every operational form input gets a real <label>, wrapping the control

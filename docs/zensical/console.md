@@ -27,9 +27,10 @@ docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin
 
 ### Finishing setup
 
-Creating the admin is the first of four things a new server needs. The sign-in
-straight after it lands on the **setup flow** (`#setup`), which walks the other
-three in order:
+Creating the admin is the first of five things a new server needs. The sign-in
+straight after it lands on the **setup flow** (`#setup`) — a real Magnetic
+Stepper, not a linking checklist: a step panel on the left, the active step's
+own controls on the right — which walks the other four in order:
 
 1. **Telemetry destination** — where swarm progress, device reports and export
    health are published. Already satisfied if the deployment environment sets
@@ -40,10 +41,18 @@ three in order:
    the Docker path cannot start.
 3. **Device packages** — whether each served IOx package still pins the
    certificate this server hands to devices.
+4. **Image verification** — the Cisco Bulk Hash source check against every
+   staged image. Configured inline: refresh now, enable the daily schedule, a
+   pointer to downloading Cisco's Bulk Hash feed for air-gapped servers, and
+   the offline feed-file import. These are the same controls Settings ›
+   Image verification exposes — the wizard step mounts them in place rather
+   than duplicating them.
 
 The forms are hosted in the flow itself, so finishing setup does not send you
-round the Settings pages. A step list across the top shows every step with its
-current state and lets you open any of them directly, in any order.
+round the Settings pages. A step panel on the left shows every step with its
+current state — completed steps carry a check, the current step is filled in,
+upcoming ones stay outline-only — and lets you open any of them directly, in
+any order.
 
 Every step can be skipped, and re-entering `#setup` resumes at the first one
 still outstanding. That is not merely a convenience: **the device-packages step
@@ -58,8 +67,10 @@ the session rather than permanently, because a package that goes stale later is
 a silent failure with no other symptom, and a banner dismissed for good would
 hide precisely the case this exists to catch.
 
-Settings › Setup keeps reporting the same four states afterwards, for checking a
-server long after it was installed.
+Settings › Setup keeps reporting the same five states afterwards, for checking
+a server long after it was installed — including a schedule for image
+verification that is configured but has not yet produced a successful run,
+worded distinctly from one never configured at all.
 
 ## Console areas
 

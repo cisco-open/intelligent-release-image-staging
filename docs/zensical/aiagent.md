@@ -93,17 +93,19 @@ At the end of every step, state the next action required from me.
    for the expected server, sign in with the default first-run credential
    `iris` / `irisisgreat!`, and create the initial admin account. The default
    credential works only before an admin account exists. The next sign-in opens
-   the first-run setup wizard at `#setup`: telemetry destination, stage host,
-   and device packages. Image verification — the Cisco source check against
-   the published Known Good Values feed — is reported on Settings › Setup and
-   configured under Settings › Image verification, including its daily
-   schedule and the offline feed-file import for air-gapped servers; enable it
-   before trusting staged images (see [Validation](validation.md)). Any wizard
-   step can be skipped and resumed later — a banner keeps offering the
-   unfinished ones, and Settings › Setup reports their state. The
-   device-packages step is the same check as step 6 below; it cannot be
-   completed from the console, because the console container has no Docker
-   socket.
+   the first-run setup wizard at `#setup`, a Magnetic Stepper with a step
+   panel on the left and each step's own controls on the right: telemetry
+   destination, stage host, device packages, and now a fourth step, image
+   verification — the Cisco source check against the published Known Good
+   Values feed, configured inline (daily-schedule enable, refresh now, and
+   the offline feed-file import for air-gapped servers) rather than a link
+   out to Settings. Enable it before trusting staged images (see
+   [Validation](validation.md)). Any step can be skipped and resumed later —
+   a banner keeps offering the unfinished ones, and Settings › Setup reports
+   all five states, including a schedule that is configured but has not yet
+   produced a successful run. The device-packages step is the same check as
+   step 6 below; it cannot be completed from the console, because the
+   console container has no Docker socket.
 4. **Publish an image.** Upload through the Console, import a file that is
    already on the server from the Console **Import from disk** panel, or use
    `iris-publish` from inside the server container. Publishing creates catalog

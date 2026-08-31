@@ -8695,3 +8695,86 @@ def test_offline_is_expected_during_active_undeploy():
     # regression guard: the old, insufficient gate (bare st.key, no job-state
     # check) must not be what decides the label any more
     assert "if (st.key === 'undeploying') {" not in fn
+
+
+# ---------------------------------------------------------------------------
+# Task 9: Setup/Settings/Monitoring get the Magnetic card hierarchy. Same
+# source-guard idiom throughout this file (no JS runtime harness exists in
+# this repo).
+# ---------------------------------------------------------------------------
+
+def test_settings_forms_are_wrapped_in_bounded_card_sections():
+    """Each Settings form's section heading now sits inside a .card -- the
+    24px-padding/--radius-card/--shadow-xs container test_card_component_
+    matches_spec_padding_radius_and_elevation already pins -- rather than a
+    bare h3 floating directly in the pane. Button counts/ids inside each
+    <form> are untouched; only the surrounding wrapper changed."""
+    html = _webroot("index.html")
+    settings = html.split('id="view-settings"')[1].split("</section>")[0]
+    for heading in ("<h3>Certificate</h3>", "<h3>Trusted CAs</h3>",
+                    "<h3>Telemetry destination</h3>", "<h3>Audit export</h3>",
+                    "<h3>Server &amp; build</h3>", "<h3>Schedule</h3>"):
+        assert heading in settings, heading
+        before = settings.split(heading, 1)[0]
+        last_open = before.rfind('<div class="card">')
+        assert last_open != -1, "%s has no preceding card wrapper" % heading
+        between = before[last_open:]
+        assert between.count("</div>") == 0, \
+            "%s's card wrapper closed before the heading" % heading
+    # button counts inside the pinned forms are exactly as before -- card
+    # wrapping never merges or drops a Save
+    cert_form = settings.split('id="cert-form"')[1].split('</form>')[0]
+    assert cert_form.count('class="btn"') == 1
+    td_form = settings.split('id="td-form"')[1].split('</form>')[0]
+    assert td_form.count('class="btn"') == 1
+
+
+def test_settings_card_never_wraps_a_template_root():
+    """The card goes AROUND the mount point (#sh-mount / #td-mount), never
+    around the <template> whose content is cloned into it -- a wrapped
+    template root would be inert markup styled as a card that never
+    actually renders."""
+    html = _webroot("index.html")
+    for tpl_id, mount_id in (("tpl-sh-form", "sh-mount"), ("tpl-td-form", "td-mount")):
+        before_tpl = html.split('id="%s"' % tpl_id, 1)[0]
+        last_card_open = before_tpl.rfind('<div class="card">')
+        last_card_close = before_tpl.rfind("</div>")
+        assert last_card_close > last_card_open, \
+            "%s: the preceding card must already be closed" % tpl_id
+        mount_pos = html.index('id="%s"' % mount_id)
+        assert mount_pos < html.index('id="%s"' % tpl_id), \
+            "%s: mount point must precede its template" % mount_id
+
+
+def test_monitoring_panes_carry_a_scope_tag_and_stay_distinct():
+    html = _webroot("index.html")
+    js = _webroot("app.js")
+    css = _webroot("styles.css")
+    audit_pane = html.split('id="monitoring-pane-audit"', 1)[1]
+    assert 'id="audit-scope-tag"' in audit_pane.split("<h3>", 1)[1].split(
+        "</h3>", 1)[0]
+    dl_pane = html.split('id="monitoring-pane-deploylogs"', 1)[1]
+    assert 'id="dl-scope-tag"' in dl_pane.split("<h3>", 1)[1].split("</h3>", 1)[0]
+    # each pane keeps its own description, distinct from the other's
+    assert "Every settings change" in audit_pane.split("<h3>", 1)[1][:600]
+    assert "Per-job onboard and undeploy logs" in dl_pane.split("<h3>", 1)[1][:600]
+    assert ".scope-tag {" in css
+    fn = js.split("function updateMonitoringScopeTags() {", 1)[1].split(
+        "\n  }", 1)[0]
+    assert "auditRange" in fn and "dlRange" in fn
+    show_fn = js.split("function showMonitoringSub(sub) {", 1)[1].split(
+        "\n  }", 1)[0]
+    assert "updateMonitoringScopeTags();" in show_fn
+
+
+def test_table_scroll_fade_color_is_parameterized_for_cards():
+    """Carried seam: .table-scroll's fade used to hardcode --canvas, which
+    reads as a visible seam now that several sit inside a --surface .card
+    (Task 9). A --scroll-fade custom property defaults to --canvas and is
+    overridden inside .card, so every table-scroll NOT inside a card is
+    visually unchanged."""
+    css = _webroot("styles.css")
+    rule = css.split(".table-scroll {", 1)[1].split("\n}", 1)[0]
+    assert "--scroll-fade: var(--canvas);" in rule
+    assert "var(--scroll-fade)" in rule
+    assert ".card .table-scroll { --scroll-fade: var(--surface); }" in css

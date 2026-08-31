@@ -491,54 +491,73 @@
           <h2 class="page-title">Finish setting up this server</h2>
         </div>
         <p class="muted" id="wz-progress" role="status" aria-live="polite"></p>
-        <div id="wz-steplist" role="list"></div>
-
-        <div class="wz-done" id="wz-admin">
-          <h3>Admin account <span id="wz-admin-chip"></span></h3>
-          <p class="muted">Created during first-run sign-in. Change the password
-            any time from Settings &rsaquo; General.</p>
-        </div>
-
-        <div class="wz-step" id="wz-step-telemetry" hidden>
-          <h3>1. Telemetry destination <span id="wz-td-chip"></span></h3>
-          <p class="muted">Where swarm progress, device reports and export health
-            are published. With no destination configured, none of it leaves this
-            server.</p>
-          <div class="form-mount" id="wz-td-mount"></div>
-        </div>
-
-        <div class="wz-step" id="wz-step-stagehost" hidden>
-          <h3>2. Stage host <span id="wz-sh-chip"></span></h3>
-          <p class="muted">Credentials IRIS uses to reach the Docker host that
-            builds and serves device onboarding material. Without them, onboarding
-            a device over the Docker path cannot start.</p>
-          <div class="form-mount" id="wz-sh-mount"></div>
-        </div>
-
-        <div class="wz-step" id="wz-step-packages" hidden>
-          <h3>3. Device packages <span id="wz-pkg-chip"></span></h3>
-          <p class="muted">Devices that run the agent as an IOx app (IE-3x00, and
-            C9300 with app-hosting) install a package that pins this server's
-            certificate at build time. If that certificate changes, existing
-            packages can no longer authenticate &mdash; the app installs and reports
-            RUNNING, but the device never checks in. Guest Shell platforms re-fetch
-            the certificate on every onboard and are not affected.</p>
-          <p class="muted"><strong>This step cannot be completed from the console.</strong>
-            The console container has no Docker socket, so it can detect a stale
-            package but never rebuild one. Run the command below on the Docker host,
-            then re-check.</p>
-          <div class="table-scroll">
-          <table class="tbl" id="wz-pkg-table"><tbody></tbody></table>
+        <!-- Magnetic Stepper anatomy: left step panel (~320px), content area
+             right, Next/Back right-aligned at the content column's own
+             bottom -- captured in agentinfo/facelift-2026-08-30-visual-
+             direction.md lines 63-70. wz-* ids stay on the same functionally
+             equivalent elements; only the surrounding layout changed. -->
+        <div class="wz-layout">
+          <div class="wz-panel">
+            <div id="wz-steplist" role="list"></div>
           </div>
-          <p class="machine" id="wz-pkg-remedy"></p>
-          <p><button class="btn ghost" id="wz-pkg-recheck">Re-check</button></p>
-        </div>
+          <div class="wz-content">
+            <div class="wz-done" id="wz-admin">
+              <h3>Admin account <span id="wz-admin-chip"></span></h3>
+              <p class="muted">Created during first-run sign-in. Change the password
+                any time from Settings &rsaquo; General.</p>
+            </div>
 
-        <div class="toolbar" id="wz-nav">
-          <button class="btn ghost" id="wz-back">&lsaquo; Back</button>
-          <button class="btn ghost" id="wz-skip">Skip for now</button>
-          <button class="btn" id="wz-next">Next &rsaquo;</button>
-          <span class="muted push" id="wz-msg" role="status" aria-live="polite"></span>
+            <div class="wz-step" id="wz-step-telemetry" hidden>
+              <h3>1. Telemetry destination <span id="wz-td-chip"></span></h3>
+              <p class="muted">Where swarm progress, device reports and export health
+                are published. With no destination configured, none of it leaves this
+                server.</p>
+              <div class="form-mount" id="wz-td-mount"></div>
+            </div>
+
+            <div class="wz-step" id="wz-step-stagehost" hidden>
+              <h3>2. Stage host <span id="wz-sh-chip"></span></h3>
+              <p class="muted">Credentials IRIS uses to reach the Docker host that
+                builds and serves device onboarding material. Without them, onboarding
+                a device over the Docker path cannot start.</p>
+              <div class="form-mount" id="wz-sh-mount"></div>
+            </div>
+
+            <div class="wz-step" id="wz-step-packages" hidden>
+              <h3>3. Device packages <span id="wz-pkg-chip"></span></h3>
+              <p class="muted">Devices that run the agent as an IOx app (IE-3x00, and
+                C9300 with app-hosting) install a package that pins this server's
+                certificate at build time. If that certificate changes, existing
+                packages can no longer authenticate &mdash; the app installs and reports
+                RUNNING, but the device never checks in. Guest Shell platforms re-fetch
+                the certificate on every onboard and are not affected.</p>
+              <p class="muted"><strong>This step cannot be completed from the console.</strong>
+                The console container has no Docker socket, so it can detect a stale
+                package but never rebuild one. Run the command below on the Docker host,
+                then re-check.</p>
+              <div class="table-scroll">
+              <table class="tbl" id="wz-pkg-table"><tbody></tbody></table>
+              </div>
+              <p class="machine" id="wz-pkg-remedy"></p>
+              <p><button class="btn ghost" id="wz-pkg-recheck">Re-check</button></p>
+            </div>
+
+            <div class="wz-step" id="wz-step-imageverification" hidden>
+              <h3>4. Image verification <span id="wz-iv-chip"></span></h3>
+              <p class="muted">Confirms every staged image's hash against Cisco's
+                Bulk Hash feed before it is trusted. Without at least one successful
+                check, IRIS cannot vouch that a staged image is the genuine,
+                untampered Cisco release.</p>
+              <div class="form-mount" id="wz-iv-mount"></div>
+            </div>
+
+            <div class="toolbar" id="wz-nav">
+              <button class="btn ghost" id="wz-back">&lsaquo; Back</button>
+              <button class="btn ghost" id="wz-skip">Skip for now</button>
+              <button class="btn" id="wz-next">Next &rsaquo;</button>
+              <span class="muted push" id="wz-msg" role="status" aria-live="polite"></span>
+            </div>
+          </div>
         </div>
       </section>
       <section id="view-settings" hidden>
@@ -546,28 +565,36 @@
           <h2 class="page-title">Settings</h2>
         </div>
         <div id="settings-pane-setup" hidden>
-          <p class="muted">Four things to complete after installing a server.
+          <p class="muted">Five things to complete after installing a server.
             They can be done in any order, and this page keeps reporting their
             state so you can come back and check.</p>
 
+          <div class="setup-cards">
+          <div class="card">
           <h3>Admin account <span id="setup-admin-chip"></span></h3>
           <p class="muted">The single account that signs in to this console.
             It was created during first-run setup.</p>
           <p><a href="#settings/general" class="btn ghost">Change password</a></p>
+          </div>
 
+          <div class="card">
           <h3>Telemetry destination <span id="setup-td-chip"></span></h3>
           <p class="muted">Telemetry export is how swarm progress, device
             reports and export health reach the dashboards. Without a
             destination configured, none of it is published anywhere.</p>
           <p class="muted" id="setup-td-note"></p>
           <p><a href="#setup" class="btn ghost">Configure in setup</a></p>
+          </div>
 
+          <div class="card">
           <h3>Stage host (Docker onboarding) <span id="setup-sh-chip"></span></h3>
           <p class="muted">Credentials IRIS uses to reach the Docker host that
             builds and serves device onboarding material. Without them,
             onboarding a device over the Docker path cannot start.</p>
           <p><a href="#setup" class="btn ghost">Configure in setup</a></p>
+          </div>
 
+          <div class="card">
           <h3>Device packages <span id="setup-pkg-chip"></span></h3>
           <p class="muted">Devices that run the agent as an IOx app (IE-3x00, and
             C9300 with app-hosting) install a package that pins this server's
@@ -579,19 +606,27 @@
           <table class="tbl" id="setup-pkg-table"><tbody></tbody></table>
           </div>
           <p class="muted" id="setup-pkg-remedy"></p>
+          </div>
 
+          <div class="card">
           <h3>Image verification <span id="setup-iv-chip"></span></h3>
           <p class="muted">Confirms every staged image's hash against Cisco's
             Bulk Hash feed before it is trusted. Without at least one
             successful check, IRIS cannot vouch that a staged image is the
             genuine, untampered Cisco release.</p>
-          <p><a href="#settings/bulkhash" class="btn ghost">Configure in Settings</a></p>
+          <p><a href="#setup" class="btn ghost">Configure in setup</a></p>
+          </div>
+          </div>
         </div>
         <div id="settings-pane-general">
+          <div class="setup-cards">
+          <div class="card">
           <h3>Server &amp; build</h3>
           <div class="table-scroll">
           <table class="tbl" id="settings-info"><tbody></tbody></table>
           </div>
+          </div>
+          <div class="card">
           <h3>Change admin password</h3>
           <form class="inline-form" id="pw-form">
             <label class="field" for="pw-cur"><span class="field-label">Current password</span><input id="pw-cur" type="password" placeholder="Current password" autocomplete="current-password"></label>
@@ -600,8 +635,15 @@
             <button class="btn" type="submit">Change password</button>
             <span class="err" id="pw-msg" role="alert"></span>
           </form>
+          </div>
+          <!-- Card goes AROUND the mount point, never around the template
+               root below -- the template's own content is inert markup
+               until cloned into #sh-mount (mountSettingsForm, app.js), so it
+               stays outside the card entirely. -->
+          <div class="card">
           <h3>Stage host (Docker onboarding)</h3>
           <div class="form-mount" id="sh-mount"></div>
+          </div>
           <template id="tpl-sh-form">
           <p class="muted" id="sh-status" role="status" aria-live="polite"></p>
           <form class="inline-form" id="sh-form">
@@ -613,14 +655,19 @@
             <span class="err" id="sh-msg" role="alert"></span>
           </form>
           </template>
+          <div class="card">
           <h3>Sessions</h3>
           <p class="muted" id="sessions-info" role="status" aria-live="polite"></p>
           <p>
             <button class="btn ghost" id="revoke-others">Sign out other sessions</button>
             <span class="muted" id="revoke-msg" role="status" aria-live="polite"></span>
           </p>
+          </div>
+          </div>
         </div>
         <div id="settings-pane-tls" hidden>
+          <div class="setup-cards">
+          <div class="card">
           <h3>Certificate</h3>
           <p class="muted">Serves the console only — the device-facing catalog and
             artifact certificates are untouched, so enrolled devices keep working.
@@ -642,6 +689,8 @@
             <button class="linkish danger-link" type="button" id="cert-revert" hidden>Use built-in certificate</button>
             <span class="err" id="cert-msg" role="alert"></span>
           </form>
+          </div>
+          <div class="card">
           <h3>Trusted CAs</h3>
           <p class="muted">Root CAs trusted by outbound TLS (telemetry export, CA
             bundle download) in addition to the system store.</p>
@@ -661,6 +710,9 @@
             <button class="btn" type="submit">Add CA</button>
             <span class="err" id="trust-msg" role="alert"></span>
           </form>
+          </div>
+          <div class="card">
+          <h3>Public CA bundle</h3>
           <p class="muted">Optional public CA bundle: Download now fetches the
             https:// URL below (Cisco's Trusted Root Store by default); enable the
             daily auto-refresh to keep it current. A failed download never replaces
@@ -677,10 +729,16 @@
             <button class="btn ghost" type="button" id="ca-refresh">Download now</button>
             <span class="err" id="ca-msg" role="alert"></span>
           </form>
+          </div>
+          </div>
         </div>
         <div id="settings-pane-telemetry" hidden>
+          <!-- Card goes around the mount point, never around the template
+               root below -- same convention as tpl-sh-form above. -->
+          <div class="card">
           <h3>Telemetry destination</h3>
           <div class="form-mount" id="td-mount"></div>
+          </div>
           <template id="tpl-td-form">
           <p class="muted" id="td-status" role="status" aria-live="polite"></p>
           <form class="inline-form" id="td-form">
@@ -693,6 +751,7 @@
           </template>
         </div>
         <div id="settings-pane-audit" hidden>
+          <div class="card">
           <h3>Audit export</h3>
           <p class="muted">Uploads the audit trail to a remote host over SCP,
             age-encrypted to the recipient below — encryption is mandatory.
@@ -711,8 +770,17 @@
             <button class="linkish danger-link" type="button" id="ae-clear">Clear</button>
             <span class="err" id="ae-msg" role="alert"></span>
           </form>
+          </div>
         </div>
         <div id="settings-pane-bulkhash" hidden>
+          <!-- iv-content is MOVED (never cloned) between here and the setup
+               wizard's step 4 mount point at runtime (mountImageVerification,
+               app.js) -- see that function's comment for why a move rather
+               than the td/sh template-clone precedent. Its static home is
+               here, so every id-scoped source guard below keeps working
+               unchanged: the move only ever happens after the page loads. -->
+          <div id="iv-content">
+          <div class="card">
           <h3>Schedule</h3>
           <p class="muted">Cisco's Bulk Hash feed lists the sha512 of every
             genuine Cisco release image. A scheduled or manual check compares
@@ -729,6 +797,8 @@
             <button class="btn" type="submit">Save</button>
             <span class="err" id="iv-schedule-msg" role="alert"></span>
           </form>
+          </div>
+          <div class="card">
           <h3>Refresh now</h3>
           <p class="muted">Runs the check immediately against Cisco's live
             feed, outside the schedule above.</p>
@@ -737,10 +807,15 @@
             <span class="err" id="iv-refresh-msg" role="alert"></span>
           </p>
           <p class="muted" id="iv-last-run" role="status" aria-live="polite">Never run.</p>
+          </div>
+          <div class="card">
           <h3>Offline check</h3>
-          <p class="muted">No route to Cisco? Upload a Bulk Hash feed tar
-            obtained another way and it is verified and reconciled exactly
-            like a live fetch.</p>
+          <p class="muted">No route to Cisco from this server? Download the
+            feed manually from
+            <a href="https://tools.cisco.com/cscrdr/security/center/files/trust/Cisco_BulkHash_CSV.tar"
+               target="_blank" rel="noopener" class="machine">Cisco's Bulk Hash feed</a>
+            on a machine that has a route, then upload the tar below &mdash;
+            it is verified and reconciled exactly like a live fetch.</p>
           <div class="dropzone" id="iv-offline-dropzone" tabindex="0" role="button"
               aria-label="Drop a Cisco Bulk Hash feed tar file, or press Enter to browse for files">
             <input type="file" id="iv-offline-dropzone-input" accept=".tar" hidden>
@@ -748,6 +823,8 @@
           </div>
           <div class="progress" id="iv-offline-progress" hidden role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Offline feed upload progress"><div class="bar" id="iv-offline-bar"></div></div>
           <p class="err" id="iv-offline-msg" role="alert"></p>
+          </div>
+          </div>
         </div>
       </section>
       <section id="view-monitoring" hidden>
@@ -755,7 +832,10 @@
           <h2 class="page-title">Monitoring</h2>
         </div>
         <div id="monitoring-pane-audit">
-        <h3>Audit trail (90-day circular)</h3>
+        <h3>Audit trail <span class="scope-tag" id="audit-scope-tag"></span></h3>
+        <p class="muted">Every settings change, sign-in, device and image
+          action recorded on this server, kept for 90 days on a rolling
+          basis.</p>
         <div class="toolbar">
           <span class="joined">
             <select id="audit-category" aria-label="Filter by category">
@@ -797,7 +877,7 @@
         <p><button class="btn ghost" id="audit-load-older">Load older</button></p>
         </div>
         <div id="monitoring-pane-deploylogs" hidden>
-          <h3>Deployment logs</h3>
+          <h3>Deployment logs <span class="scope-tag" id="dl-scope-tag"></span></h3>
           <p class="muted">Per-job onboard and undeploy logs kept on the server —
             they survive console reloads and session changes. Pick a window
             below, or drag across the graph to select a range; the table follows

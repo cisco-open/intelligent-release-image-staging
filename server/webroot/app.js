@@ -2792,15 +2792,33 @@
   var CA_MOZILLA_URL = 'https://curl.se/ca/cacert.pem';
 
   // ---- Settings: post-install setup checklist ----
-  // Chip classes reuse the existing badge-* palette (see the telemetry
-  // health badge above) rather than the bare ok/warn/muted classes, which
-  // don't exist as standalone selectors in styles.css.
-  function setupChip(state) {
-    var label = {ok: 'done', unset: 'not configured', stale: 'needs rebuild',
-                 absent: 'not built', unknown: 'cannot determine'}[state] || state;
-    var cls = state === 'ok' ? 'badge-ok'
-      : (state === 'unset' || state === 'stale') ? 'badge-cancelled' : 'badge-queued';
-    return '<span class="badge ' + cls + '">' + esc(label) + '</span>';
+  // Chips render through the real Magnetic status-pill system (levelPillHTML)
+  // rather than the ad-hoc badge-* palette this used before Task 9 --
+  // "everything should match Magnetic" applies to the Setup pane's pills too.
+  // The level is state-driven by default (SETUP_CHIP_LEVELS); a caller may
+  // override it (setupItemChipHTML below) for items that are recommended
+  // rather than required, which the state alone cannot express.
+  var SETUP_CHIP_LEVELS = {
+    ok: 'positive',
+    unset: 'warning', stale: 'warning', absent: 'warning',
+    configured_unrun: 'warning',
+    // "cannot determine" is an honest unknown, not a claimed problem -- it
+    // reads closer to Magnetic's Inactive ("unknown ... indefinite holds")
+    // than to a Warning this module has no evidence to justify.
+    unknown: 'inactive'
+  };
+  var SETUP_CHIP_LABELS = {
+    ok: 'Done', unset: 'Not configured', stale: 'Needs rebuild',
+    absent: 'Not built', unknown: 'Cannot determine',
+    // M37 fold-in (carried from the KGV close-out): distinct wording for "a
+    // schedule exists but has not yet produced a successful run", never
+    // conflated with "never configured at all".
+    configured_unrun: 'Configured — no successful run yet'
+  };
+  function setupChip(state, levelOverride) {
+    var level = levelOverride || SETUP_CHIP_LEVELS[state] || 'inactive';
+    var label = SETUP_CHIP_LABELS[state] || state;
+    return levelPillHTML(level, label);
   }
 
   // packages.reason (present only in some non-ok states) needs its own
@@ -2859,6 +2877,52 @@
     document.getElementById('setup-iv-chip').innerHTML = setupChip('unknown');
   }
 
+  // Items that are recommended rather than required to finish onboarding a
+  // server: IRIS runs without a telemetry destination or image verification,
+  // it just cannot prove either is happening. This is a per-ITEM judgment
+  // call the setup-status payload does not itself encode (it only ever
+  // reports each card's own ok/unset), so it lives here rather than in the
+  // API -- widening that response is out of scope for this task.
+  var SETUP_ITEM_OPTIONAL = { telemetry: true, image_verification: true };
+
+  // M37 fold-in (carried from the KGV close-out): setup_status.py's
+  // image_verification card reports ok only once a run has actually
+  // SUCCEEDED (see its docstring) -- a scheduled-but-never-run config and a
+  // truly unconfigured one both resolve to "unset" from that field alone.
+  // The schedule's own mode -- the same data Settings > Image verification
+  // already reads via /api/settings/image-verification -- is what tells
+  // them apart. A failed/thrown fetch here must never invent "configured"
+  // without evidence, so it resolves to null (treated as "don't know",
+  // never as configured).
+  async function fetchIvScheduleConfigured() {
+    try {
+      var r = await fetch('/api/settings/image-verification');
+      if (!r.ok) return null;
+      var iv = await r.json();
+      return (iv.mode || 'off') !== 'off';
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // One place that combines: the state a card reports, the M37 distinction
+  // (image_verification only), and the required-vs-recommended pill level --
+  // shared verbatim by the Settings > Setup status pane and the wizard's own
+  // step list/chips, so the two surfaces can never disagree about how a step
+  // reads (spec: "Step titles carry status indicators, reuse pill levels").
+  function setupItemChipHTML(key, state, ivScheduleConfigured) {
+    var effectiveState = state;
+    if (key === 'image_verification' && state !== 'ok' && ivScheduleConfigured) {
+      effectiveState = 'configured_unrun';
+    }
+    var override;
+    if (effectiveState !== 'ok' && effectiveState !== 'configured_unrun' &&
+        SETUP_ITEM_OPTIONAL[key]) {
+      override = 'info';
+    }
+    return setupChip(effectiveState, override);
+  }
+
   // ---- First-run setup wizard -------------------------------------------
   // A flow, not a checklist: the operator finishes setup here instead of being
   // sent back and forth to Settings pages. The two form steps mount the SAME
@@ -2868,13 +2932,25 @@
   // That is forced, not a convenience: the packages step can never complete
   // in-console (the container has no Docker socket), so a wizard that insisted
   // on completion could never be finished.
+  //
+  // Step 4, Image verification (Task 9, USER DIRECTIVE): supersedes the
+  // earlier decision that this card stays outside the wizard -- it now
+  // mounts the SAME Settings > Image verification controls (schedule,
+  // Refresh now, offline import) via mountImageVerification, the same
+  // one-implementation precedent as the telemetry/stage-host form mounts.
   var WIZARD_STEPS = [
     { id: 'telemetry', pane: 'wz-step-telemetry', key: 'telemetry',  chip: 'wz-td-chip',  label: 'Telemetry destination' },
     { id: 'stagehost', pane: 'wz-step-stagehost', key: 'stage_host', chip: 'wz-sh-chip',  label: 'Stage host' },
-    { id: 'packages',  pane: 'wz-step-packages',  key: 'packages',   chip: 'wz-pkg-chip', label: 'Device packages' }
+    { id: 'packages',  pane: 'wz-step-packages',  key: 'packages',   chip: 'wz-pkg-chip', label: 'Device packages' },
+    { id: 'imageverification', pane: 'wz-step-imageverification', key: 'image_verification',
+      chip: 'wz-iv-chip', label: 'Image verification' }
   ];
   var wizardStep = 0;
   var wizardStatus = null;
+  // M37 fold-in for the wizard's own step list/chip -- fetched alongside
+  // wizardStatus in refreshSetupWizard, same shared helper the Settings >
+  // Setup status pane uses.
+  var wizardIvConfigured = null;
 
   function wizardFirstIncompleteStep(status) {
     if (!status) return 0;
@@ -2897,11 +2973,24 @@
     host.innerHTML = WIZARD_STEPS.map(function (st, n) {
       var state = wizardStatus ? ((wizardStatus[st.key] || {}).state || 'unknown')
                                : 'unknown';
+      var isCurrent = n === wizardStep;
+      // Marker anatomy (captured Magnetic Stepper): completed = blue-outline
+      // check, current = blue filled with the step number, upcoming = plain
+      // number -- current always wins the marker even on an already-'ok'
+      // step, since the operator is standing on it right now.
+      var isDone = !isCurrent && state === 'ok';
+      var markerCls = isCurrent ? 'is-current' : (isDone ? 'is-done' : 'is-upcoming');
+      var marker = isDone
+        ? '<svg aria-hidden="true"><use href="#i-check"></use></svg>'
+        : String(n + 1);
+      var pill = wizardStatus
+        ? setupItemChipHTML(st.key, state, st.id === 'imageverification' ? wizardIvConfigured : null)
+        : setupChip('unknown');
       return '<button type="button" role="listitem" class="wz-steplist-item' +
-        (n === wizardStep ? ' current' : '') + '" data-step="' + n + '">' +
-        '<span class="wz-steplist-n">' + (n + 1) + '</span>' +
+        (isCurrent ? ' current' : '') + '" data-step="' + n + '">' +
+        '<span class="wz-steplist-n ' + markerCls + '">' + marker + '</span>' +
         '<span class="wz-steplist-label">' + esc(st.label) + '</span>' +
-        setupChip(state) + '</button>';
+        pill + '</button>';
     }).join('');
     host.querySelectorAll('.wz-steplist-item').forEach(function (b) {
       b.addEventListener('click', function () {
@@ -2923,6 +3012,11 @@
     } else if (WIZARD_STEPS[wizardStep].id === 'stagehost') {
       mountSettingsForm('sh', 'wz-sh-mount');
       refreshSettings();
+    } else if (WIZARD_STEPS[wizardStep].id === 'imageverification') {
+      // Moved, not cloned (see mountImageVerification) -- Settings reclaims
+      // the same live nodes back on its own way in.
+      mountImageVerification('wz-iv-mount');
+      refreshImageVerificationSettings();
     }
     document.getElementById('wz-progress').textContent =
       'Step ' + (wizardStep + 1) + ' of ' + WIZARD_STEPS.length;
@@ -2950,13 +3044,19 @@
       if (r.ok) s = await r.json();
     } catch (e) { /* leave s null -- never report green on missing evidence */ }
     wizardStatus = s;
+    wizardIvConfigured = await fetchIvScheduleConfigured();
     function chip(id, state) {
       var el = document.getElementById(id);
       if (el) el.innerHTML = setupChip(state);
     }
     chip('wz-admin-chip', s ? (s.admin || {}).state : 'unknown');
     WIZARD_STEPS.forEach(function (st) {
-      chip(st.chip, s ? (s[st.key] || {}).state : 'unknown');
+      var el = document.getElementById(st.chip);
+      if (!el) return;
+      var state = s ? (s[st.key] || {}).state : 'unknown';
+      el.innerHTML = s
+        ? setupItemChipHTML(st.key, state, st.id === 'imageverification' ? wizardIvConfigured : null)
+        : setupChip('unknown');
     });
     renderWizardPackages(s ? s.packages : null);
     renderWizardStepList();
@@ -3024,10 +3124,11 @@
       setupShowUnknown();
       return;
     }
+    var ivConfigured = await fetchIvScheduleConfigured();
     document.getElementById('setup-admin-chip').innerHTML =
       setupChip(s.admin.state);
     document.getElementById('setup-td-chip').innerHTML =
-      setupChip(s.telemetry.state);
+      setupItemChipHTML('telemetry', s.telemetry.state, null);
     document.getElementById('setup-td-note').textContent =
       setupTelemetryNote(s.telemetry);
     document.getElementById('setup-sh-chip').innerHTML =
@@ -3045,7 +3146,7 @@
     document.getElementById('setup-pkg-remedy').textContent =
       setupPkgRemedyText(s.packages);
     document.getElementById('setup-iv-chip').innerHTML =
-      setupChip(s.image_verification.state);
+      setupItemChipHTML('image_verification', s.image_verification.state, ivConfigured);
   }
 
   async function refreshSettings() {
@@ -3388,6 +3489,25 @@
     formMountedAt[which] = hostId;
     spec.wire();
     return true;
+  }
+
+  // The Image verification content (schedule form, Refresh now, offline
+  // import) is relocated the same way -- Settings and the wizard's step 4
+  // share one implementation -- but by MOVING the live nodes rather than
+  // cloning a <template>: unlike wireTelemetryForm/wireStageHostForm above,
+  // its handlers (the schedule-form submit listener, the iv-refresh click
+  // handler, wireDropzone on the offline dropzone, the once-only hour-select
+  // IIFE) are bound ONCE at load, not re-wired per mount. Moving the same
+  // DOM node keeps every listener intact and needs no rewire step, and since
+  // there is only ever the one instance, its ids can never duplicate.
+  var ivMountedAt = 'settings-pane-bulkhash';
+  function mountImageVerification(hostId) {
+    if (ivMountedAt === hostId) return;
+    var host = document.getElementById(hostId);
+    var content = document.getElementById('iv-content');
+    if (!host || !content) return;
+    host.appendChild(content);
+    ivMountedAt = hostId;
   }
 
   function wireStageHostForm() {
@@ -3764,6 +3884,9 @@
     // a freshly cloned form is empty until refreshSettings writes to it.
     if (sub === 'general') mountSettingsForm('sh', 'sh-mount');
     if (sub === 'telemetry') mountSettingsForm('td', 'td-mount');
+    // Same reclaim, but a move rather than a re-mount -- see
+    // mountImageVerification's own comment for why.
+    if (sub === 'bulkhash') mountImageVerification('settings-pane-bulkhash');
     refreshSettings();
   }
   // Monitoring uses the same sidebar sub-menu pattern (audit | deploylogs):
@@ -3776,6 +3899,20 @@
       document.getElementById('monitoring-pane-' + t).hidden = t !== sub;
       document.getElementById('nav-monitoring-' + t).classList.toggle('active', t === sub);
     });
+    updateMonitoringScopeTags();
+  }
+  // The active time scope, as a small tag next to each pane's own title --
+  // read from the SAME range variables the histogram/table already use, so
+  // the tag can never say something the data below it disagrees with.
+  var MONITORING_RANGE_TAG_LABELS = {
+    '24h': 'Last 24 h', '7d': 'Last 7 d', '30d': 'Last 30 d',
+    '90d': 'Last 90 d', 'all': 'All time'
+  };
+  function updateMonitoringScopeTags() {
+    var auditTag = document.getElementById('audit-scope-tag');
+    if (auditTag) auditTag.textContent = MONITORING_RANGE_TAG_LABELS[auditRange] || auditRange;
+    var dlTag = document.getElementById('dl-scope-tag');
+    if (dlTag) dlTag.textContent = MONITORING_RANGE_TAG_LABELS[dlRange] || dlRange;
   }
 
   // ---- Monitoring (audit trail + draggable time brush) ----
@@ -4309,6 +4446,7 @@
       });
       dlRange = c.getAttribute('data-range');
       dlSel = null;                       // a new outer window drops the selection
+      updateMonitoringScopeTags();
       refreshDeployLogsAll();
     });
   });
@@ -4573,6 +4711,7 @@
       Array.prototype.forEach.call(document.querySelectorAll('#audit-range-chips .chip'), function (c) {
         c.classList.toggle('active', c === chip);
       });
+      updateMonitoringScopeTags();
       refreshMonitoring();
     });
   });
