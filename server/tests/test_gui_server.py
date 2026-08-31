@@ -8549,9 +8549,12 @@ def test_overview_fetches_devices_and_images_alongside_overview():
     js = _webroot("app.js")
     fn = js.split("async function refreshOverview() {", 1)[1].split("\n  }", 1)[0]
     assert "Promise.all(" in fn
-    assert "fetch('/api/overview')" in fn
-    assert "fetch('/api/devices')" in fn
-    assert "fetch('/api/images')" in fn
+    # Task 10 added an AbortController signal to each fetch call (generation/
+    # abort protection); these check the endpoint is still fetched, not the
+    # exact argument list.
+    assert "fetch('/api/overview'" in fn
+    assert "fetch('/api/devices'" in fn
+    assert "fetch('/api/images'" in fn
     assert "renderOverviewAttention(" in fn
     assert "renderOverviewBoundary(" in fn
 

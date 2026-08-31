@@ -973,25 +973,25 @@
       if (btn.isConnected) btn.disabled = false;
     }
   }
-  // Live status: the devices table previously refreshed only on tab switches
-  // and after actions, so stage_state changes (staging -> transferring ->
-  // ready) sat stale until the operator clicked something. Poll every 10s —
-  // but never while the operator is interacting with a row control (redrawing
-  // innerHTML would yank an open dropdown out from under them) and never in a
-  // hidden browser tab.
-  function scheduleDevices() {
-    setTimeout(async function () {
-      if (!document.hidden) {
-        var a = document.activeElement;
-        if (!(a && a.closest && a.closest('#dev-rows'))) {
-          try { await refreshDevices(); }
-          catch (e) { devStatus.textContent = 'Device refresh unavailable; retrying…'; }
-        }
-      }
-      scheduleDevices();
-    }, 10000);
+  // Live status: the devices table previously refreshed via TWO independent
+  // 10s loops -- this function's own unconditional setTimeout chain
+  // (formerly named scheduleDevices, which ran for the page's lifetime
+  // regardless of which hash-routed view was visible) AND the hash
+  // router's view-scoped startViewPoll(). Both called refreshDevices()
+  // every ~10s while Devices was on screen -- redundant, unsynchronized
+  // /api/devices traffic. The hash router (below) is now the SOLE owner of
+  // visible-view polling, Devices included; this is the guarded function it
+  // polls Devices with. Never redraw while the operator is interacting
+  // with a row control (redrawing innerHTML would yank an open dropdown
+  // out from under them) -- the hidden-tab suspension, immediate refresh on
+  // tab return, and 10s cadence are all the router's startViewPoll now.
+  function pollDevices() {
+    var a = document.activeElement;
+    if (a && a.closest && a.closest('#dev-rows')) return;
+    return refreshDevices().catch(function () {
+      devStatus.textContent = 'Device refresh unavailable; retrying…';
+    });
   }
-  scheduleDevices();
   async function refreshDevices() {
     var mine = ++devicesRefreshGeneration;
     if (devicesRefreshController) devicesRefreshController.abort();
@@ -2687,7 +2687,18 @@
   }
 
   // ---- Overview ----
+  // Same stale-response hazard refreshDevices() already guards against
+  // (generation counter + AbortController, above): once the hash router
+  // owns ALL visible-view polling (Task 10), an overlapping refreshOverview()
+  // call -- a visibilitychange-triggered immediate refresh racing the
+  // interval tick, or a rapid nav-away-and-back -- is a real possibility, so
+  // a superseded call must not clobber a newer one's render.
+  var overviewRefreshGeneration = 0, overviewRefreshController = null;
   async function refreshOverview() {
+    var mine = ++overviewRefreshGeneration;
+    if (overviewRefreshController) overviewRefreshController.abort();
+    overviewRefreshController = new AbortController();
+    var signal = overviewRefreshController.signal;
     // Telemetry export health is dashboard state, so it rides the Overview
     // refresh. Deliberately not awaited with the overview fetch: a slow or
     // unreachable collector must not delay the cards.
@@ -2697,10 +2708,18 @@
     // pre-existing behavior: no data, nothing to render).
     var or_;
     try {
-      or_ = await fetch('/api/overview');
-    } catch (e) { return; }
-    if (!or_.ok) return;
+      or_ = await fetch('/api/overview', { signal: signal });
+    } catch (e) {
+      // Superseding a refresh is expected (a newer refreshOverview() call
+      // already owns the render) and must not be treated as a real
+      // failure; any other failure keeps the pre-existing hard bail: no
+      // data, nothing to render.
+      if (e && e.name === 'AbortError') return;
+      return;
+    }
+    if (!or_.ok || mine !== overviewRefreshGeneration) return;
     var ov = await or_.json();
+    if (mine !== overviewRefreshGeneration) return;
 
     // /api/devices and /api/images are SECONDARY -- only the attention band
     // and the aggregate boundary need them (Overview reads the same two
@@ -2714,14 +2733,17 @@
     // (.catch) and a resolved-but-non-2xx response (the r.ok ? ... : ...
     // branch) -- so the renderer can tell "no data to report a problem
     // from" apart from "confirmed no problem", which look identical if all
-    // you have is an empty array.
-    var devsPromise = fetch('/api/devices').then(function (r) {
+    // you have is an empty array. (A superseded/aborted secondary fetch
+    // also resolves to this same failed:true fallback, but that is never
+    // rendered either -- the generation check right below discards it.)
+    var devsPromise = fetch('/api/devices', { signal: signal }).then(function (r) {
       return r.ok ? r.json() : { devices: [], now: null, failed: true };
     }).catch(function () { return { devices: [], now: null, failed: true }; });
-    var imgsPromise = fetch('/api/images').then(function (r) {
+    var imgsPromise = fetch('/api/images', { signal: signal }).then(function (r) {
       return r.ok ? r.json() : { images: [], failed: true };
     }).catch(function () { return { images: [], failed: true }; });
     var results = await Promise.all([devsPromise, imgsPromise]);
+    if (mine !== overviewRefreshGeneration) return;
     var dbody = results[0];
     var devs = dbody.devices || [];
     var devNow = dbody.now || Date.now() / 1000;
@@ -4862,7 +4884,7 @@
     else if (view === 'images') {
       refreshImages(); refreshImportable();
       poll = function () { refreshImages(); refreshImportable(); };
-    } else if (view === 'devices') { refreshDevices(); poll = refreshDevices; }
+    } else if (view === 'devices') { refreshDevices(); poll = pollDevices; }
     else if (view === 'swarm') { refreshSwarm(); poll = refreshSwarm; }
     else if (view === 'settings') { refreshSettings(); refreshSetup(); }
     else if (view === 'monitoring') { refreshMonitoring(); poll = refreshMonitoring; }
