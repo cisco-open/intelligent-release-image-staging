@@ -395,18 +395,33 @@ files_line_match() {
   printf '%s\n' "$1" | grep -qE "$2"
 }
 
-# Run-4 fix wave: distinguishes an EMPTY iris-work directory (inert residue
-# -- see the [5/5] adjudication below) from a genuine leftover. "Has
-# entries" means the WORKDIR section (`dir harddisk:/iris-work`) contains
-# any line beyond a blank line or the "Directory of ..." header XR's own
-# `dir` command always prints, whether or not the directory holds anything
-# (the same header shape [5/5]'s own top-level `dir harddisk:` read already
-# carries -- see FAKE_DIR_HARDDISK in the bats suite). Biased toward
-# "has entries" on any unrecognized line, so an unexpected output shape
-# fails closed (still forbidden) rather than risking a real leftover being
-# silently waved through as empty residue.
+# Run-4/5 fix wave: distinguishes an EMPTY iris-work directory (inert
+# residue -- see the [5/5] adjudication below) from a genuine leftover.
+# Real hardware output for a genuinely empty directory on this platform
+# (captured live, run 5):
+#   Directory of harddisk:/iris-work
+#   No files in directory
+#
+#   41968752 kbytes total (39714572 kbytes free)
+# -- an EARLIER version of this check only stripped the "Directory of ..."
+# header and blank lines, so it misread the "No files in directory" line
+# and the "<N> kbytes total (<M> kbytes free)" footer as entries (a false
+# branch-b FAIL on a genuinely empty directory, live-reproduced run 5). "Has
+# entries" now strips all four noise shapes -- blank lines, the header, the
+# literal "No files in directory" line, and the kbytes-total footer -- and
+# treats anything else as a real entry (this hardware's nonempty rows are
+# shaped "<inode> <perms>. <n> <size> <date> <name>", same family as [5/5]'s
+# own top-level `dir harddisk:` read -- see FAKE_DIR_HARDDISK in the bats
+# suite). Still biased toward "has entries" on any OTHER unrecognized line,
+# so a genuinely new output shape fails closed (still forbidden) rather than
+# risking a real leftover being silently waved through as empty residue.
 workdir_has_entries() {
-  printf '%s\n' "$1" | grep -v '^[[:space:]]*$' | grep -v '^Directory of ' | grep -q .
+  printf '%s\n' "$1" \
+    | grep -v '^[[:space:]]*$' \
+    | grep -v '^Directory of ' \
+    | grep -vF 'No files in directory' \
+    | grep -vE '^[0-9]+ kbytes total \([0-9]+ kbytes free\)$' \
+    | grep -q .
 }
 
 # D2-3 regression guard, generalized to every app-table read in this script

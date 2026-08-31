@@ -336,14 +336,18 @@ case "$cmds" in
       echo "__IRIS_XR_VERIFY_FILES__"
       printf '%s\n' "${FAKE_DIR_HARDDISK-Directory of harddisk:/}"
     fi
-    # Run-4 fix wave: iris-work's own sub-listing. Default is an
-    # empty-directory listing (just the header XR's own `dir` always
-    # prints) -- harmless for every test that never puts "iris-work" into
-    # FAKE_DIR_HARDDISK, since [5/5] only ever consults this once the
-    # root-level FILES check has already confirmed iris-work is present.
+    # Run-4/5 fix wave: iris-work's own sub-listing. Default is the REAL
+    # empty-directory shape captured live on hardware (run 5) -- header,
+    # "No files in directory", blank line, kbytes-total footer -- harmless
+    # for every test that never puts "iris-work" into FAKE_DIR_HARDDISK,
+    # since [5/5] only ever consults this once the root-level FILES check
+    # has already confirmed iris-work is present.
     if [ "${FAKE_VERIFY_OMIT_WORKDIR:-no}" != "yes" ]; then
       echo "__IRIS_XR_VERIFY_WORKDIR__"
-      printf '%s\n' "${FAKE_WORKDIR_LISTING-Directory of harddisk:/iris-work}"
+      printf '%s\n' "${FAKE_WORKDIR_LISTING-Directory of harddisk:/iris-work
+No files in directory
+
+41968752 kbytes total (39714572 kbytes free)}"
     fi
     if [ -n "${FAKE_VERIFY_RC:-}" ] && [ "${FAKE_VERIFY_RC}" != "0" ]; then
       exit "$FAKE_VERIFY_RC"
@@ -441,12 +445,14 @@ case "$cmds" in
     if [ "${FAKE_TRUNCATE_AFTER_FILES:-no}" = "yes" ]; then
       exit 0
     fi
-    # Run-4 fix wave: iris-work's own sub-listing (default: an
-    # empty-directory listing, just the header XR's own `dir` always
-    # prints).
+    # Run-4/5 fix wave: iris-work's own sub-listing (default: the REAL
+    # empty-directory shape captured live on hardware, run 5).
     if [ "${FAKE_VERIFY_OMIT_WORKDIR:-no}" != "yes" ]; then
       echo "__IRIS_XR_VERIFY_WORKDIR__"
-      printf '%s\n' "${FAKE_WORKDIR_LISTING-Directory of harddisk:/iris-work}"
+      printf '%s\n' "${FAKE_WORKDIR_LISTING-Directory of harddisk:/iris-work
+No files in directory
+
+41968752 kbytes total (39714572 kbytes free)}"
     fi
     echo "__IRIS_XR_VERIFY_DONE__"
     ;;
@@ -973,7 +979,9 @@ _xr_call_body() {
   FAKE_DIR_HARDDISK="Directory of harddisk:/
     12345 -rw-------. 1 root root 512 Aug 27 12:00 iris-work" \
     FAKE_WORKDIR_LISTING="Directory of harddisk:/iris-work
-    12345 -rw-------. 1 root root 100 Aug 27 12:00 leftover.txt" \
+    12345 -rw-------.  1    100 Aug 27 12:00 leftover.txt
+
+41968752 kbytes total (39714572 kbytes free)" \
     run _xr_uninstall_run_live
   [ "$status" -ne 0 ] || return 1
   [[ "$output" == *"artifacts still present"* ]] || return 1
@@ -983,11 +991,20 @@ _xr_call_body() {
   fi
 }
 
+# Real hardware shape for a genuinely empty directory on this platform
+# (captured live, run 5) -- the header alone is NOT what XR prints; it also
+# carries an explicit "No files in directory" line and a kbytes-total
+# footer, both of which an earlier version of workdir_has_entries()
+# misread as real entries (false branch-b FAIL on a genuinely empty
+# directory, live-reproduced run 5).
 @test "live: iris-work present but EMPTY is accepted as inert residue -- note printed, still converges" {
   _xr_uninstall_stub_setup
   FAKE_DIR_HARDDISK="Directory of harddisk:/
     12345 -rw-------. 1 root root 512 Aug 27 12:00 iris-work" \
-    FAKE_WORKDIR_LISTING="Directory of harddisk:/iris-work" \
+    FAKE_WORKDIR_LISTING="Directory of harddisk:/iris-work
+No files in directory
+
+41968752 kbytes total (39714572 kbytes free)" \
     run _xr_uninstall_run_live
   [ "$status" -eq 0 ] || return 1
   [[ "$output" == *"undeploy complete"* ]] || return 1
