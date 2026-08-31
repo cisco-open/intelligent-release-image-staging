@@ -218,6 +218,31 @@ _assert_full_request_delivered() {
   [ ! -s "$SLEEP_LOG" ]
 }
 
+# Live-reproduced 2026-08-31 on 8010-R4 (100.90.170.84), byte dump in
+# agentinfo/xr-support/: the router does not only terminate lines with the
+# `\r\n` a pty is expected to produce -- it also emits a bare CR at the START
+# of an output line (the `\n\r` sequence, a column reset before printing).
+# The sanitizer below used to be `s/\r$//`, which strips a CR only where it
+# sits immediately before the newline, so a LEADING CR sailed straight
+# through into every consumer of this transport. That was not cosmetic:
+# device/xr-uninstall.sh's [5/5] emptiness check drops the `dir` timestamp
+# line with a `^(Mon|Tue|...)` anchor, `\rMon Aug 31 ... UTC` does not match
+# that anchor, so the line survived every filter and a provably EMPTY
+# iris-work directory was reported as still holding artifacts -- undeploy
+# exited 1 on a clean device across seven live runs. Stripping CR everywhere
+# repairs every `^`-anchored parser downstream of this transport at once,
+# which is why the fix belongs here and not in any one parser.
+@test "a carriage return is stripped anywhere in the line, not just before the newline" {
+  run env FAKE_OUTPUT="$(printf 'RP/0/RP0/CPU0:8010-R4#dir harddisk:/iris-work\r\n\rMon Aug 31 14:19:11.430 UTC\r')" \
+    bash -c "printf 'dir harddisk:/iris-work\n' | bash '$RUN' 192.0.2.10"
+  [ "$status" -eq 0 ] || return 1
+  # The text itself must survive intact -- this strips CR, it does not drop lines.
+  [[ "$output" == *"Mon Aug 31 14:19:11.430 UTC"* ]] || return 1
+  [[ "$output" == *"dir harddisk:/iris-work"* ]] || return 1
+  # And the leading CR that defeated the anchor must be gone.
+  [[ "$output" != *$'\r'* ]]
+}
+
 @test "a failing mktemp is refused loudly, not silently run unbounded" {
   cat > "$STUB/mktemp" <<'STUBEOF'
 #!/usr/bin/env bash

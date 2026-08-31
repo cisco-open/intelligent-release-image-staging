@@ -219,7 +219,22 @@ run_bounded_ssh() {
   printf 'exit\n'
 } | run_bounded_ssh "$SESSION_TIMEOUT" \
   | perl -pe '
-      s/\r$//;
+      # Strip CR ANYWHERE in the line, not just the `\r` before the newline.
+      # This router does not only send the `\r\n` terminator a pty is
+      # expected to produce: it also emits a bare CR at the START of an
+      # output line -- an `\n\r` sequence, a column reset before printing --
+      # measured byte-exact on 8010-R4 (100.90.170.84) 2026-08-31. The old
+      # `s/\r$//` anchored form left every one of those leading CRs in place,
+      # and a leading CR silently defeats every `^`-anchored parser
+      # downstream: device/xr-uninstall.sh:s [5/5] emptiness check drops the
+      # `dir` timestamp line with `^(Mon|Tue|...)`, `\rMon Aug 31 ... UTC`
+      # never matched it, that one line survived all six filters, and a
+      # provably EMPTY iris-work directory was reported as still holding
+      # artifacts (undeploy exited 1 against a clean device, seven live
+      # runs). Sanitizing here rather than in any one parser is deliberate:
+      # CR is never meaningful content in XR CLI output, and one strip at the
+      # transport repairs every current and future consumer at once.
+      s/\r//g;
       for my $secret (grep { defined && length } $ENV{DEVICE_PASS}) {
         s/\Q$secret\E/[REDACTED]/g;
       }
