@@ -1524,6 +1524,14 @@
     document.querySelectorAll('#dev-rows .mark').forEach(function (cb) { cb.checked = e.target.checked; });
     updateSelBar();
   });
+  // Bulk bar's "Select all N filtered devices" (spec §5 scope copy, below in
+  // updateSelBar) is a shortcut INTO the header checkbox's own machinery,
+  // not a second selection path: check it and replay its change handler.
+  document.getElementById('sel-scope-all').addEventListener('click', function () {
+    var markAll = document.getElementById('mark-all');
+    markAll.checked = true;
+    markAll.dispatchEvent(new Event('change'));
+  });
   // Selection-gutter visibility toggle (density pass, Task 8): purely
   // cosmetic -- body.selecting only drives the checkbox-column opacity in
   // styles.css. It never touches which boxes are checked, the filtered-
@@ -1589,9 +1597,22 @@
       }).join('');
   })();
   function updateSelBar() {
+    var m = document.querySelectorAll('#dev-rows .mark').length;
     var n = document.querySelectorAll('#dev-rows .mark:checked').length;
     document.getElementById('sel-bar').hidden = n === 0;
     document.getElementById('sel-count').textContent = n + ' selected';
+    // Scope copy (spec §5): names whether the checked set IS the whole
+    // filtered table or only part of it, and -- when it's only part --
+    // offers a one-click way to the rest. The click just flips #mark-all
+    // and replays that checkbox's OWN change handler (above), so this never
+    // grows a second copy of the select-all logic.
+    var scopeText = document.getElementById('sel-scope-text');
+    var scopeAll = document.getElementById('sel-scope-all');
+    var allSelected = n > 0 && n === m;
+    scopeText.hidden = !allSelected;
+    if (allSelected) scopeText.textContent = '· All ' + m + ' filtered devices selected';
+    scopeAll.hidden = allSelected || n === 0;
+    if (!scopeAll.hidden) scopeAll.textContent = '· Select all ' + m + ' filtered devices';
     document.getElementById('onboard-selected').textContent = 'Start onboard (' + n + ')';
     document.getElementById('assign-images-selected').textContent =
       'Assign images to ' + n + ' devices…';
@@ -2933,9 +2954,14 @@
   // this via refreshSetupWizard immediately before showing the resulting
   // step, so without this cache that step 4 landing fetched the identical
   // endpoint twice in a row. wizardIvStatus is consumed (read, then cleared)
-  // by that one call site; any OTHER path to step 4 -- Back, a direct
-  // steplist click, neither of which refreshes first -- finds it null and
-  // falls through to its own fresh fetch, same as before this fix.
+  // only by that one call site, landing on step 4 straight out of
+  // refreshSetupWizard -- Back and a direct steplist click both call
+  // showWizardStep directly, with no refresh first, so neither one clears
+  // or renews this cache. Landing on step 4 that way renders whatever this
+  // variable last held, however old: fresh if refreshSetupWizard only just
+  // set it, stale if the operator lingered on another step or edited image
+  // verification via Settings in between. The setup view is not polled, so
+  // nothing else invalidates the cache in the meantime.
   var wizardIvStatus = null;
   async function fetchIvScheduleConfigured() {
     try {
@@ -4111,7 +4137,7 @@
     if (actor.slice(0, 8) === 'console:')
       return '<span title="console session">' + esc(actor.slice(8)) + '</span>';
     if (actor.slice(0, 7) === 'device:')
-      return '<span title="device">' + esc(actor.slice(7)) + '</span>';
+      return '<span class="machine" title="device">' + esc(actor.slice(7)) + '</span>';
     if (actor === 'system') return '<span class="muted">system</span>';
     return esc(actor);
   }

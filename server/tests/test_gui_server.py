@@ -8781,3 +8781,32 @@ def test_table_scroll_fade_color_is_parameterized_for_cards():
     assert "--scroll-fade: var(--canvas);" in rule
     assert "var(--scroll-fade)" in rule
     assert ".card .table-scroll { --scroll-fade: var(--surface); }" in css
+
+
+def test_bulk_bar_names_selection_scope():
+    """Final review fix wave, spec §5: the bulk bar names whether the checked
+    set IS the whole filtered table or only part of it, and -- when it's
+    only part -- gives a one-click path to the rest, WITHOUT growing a
+    second copy of the header checkbox's select-all logic. The click just
+    flips #mark-all and replays that checkbox's own 'change' listener."""
+    html = _webroot("index.html")
+    selbar = html.split('id="sel-bar"', 1)[1].split('id="onboard-menu-btn"', 1)[0]
+    assert '<span class="muted" id="sel-scope-text" hidden></span>' in selbar
+    assert '<button class="linkish" type="button" id="sel-scope-all" hidden></button>' in selbar
+    assert 'onclick=' not in selbar
+
+    js = _webroot("app.js")
+    fn = js.split("function updateSelBar() {", 1)[1].split("\n  }", 1)[0]
+    assert "var m = document.querySelectorAll('#dev-rows .mark').length;" in fn
+    assert "var allSelected = n > 0 && n === m;" in fn
+    assert "'· All ' + m + ' filtered devices selected'" in fn
+    assert "'· Select all ' + m + ' filtered devices'" in fn
+
+    # the click is a shortcut INTO #mark-all's own change handler, not a
+    # second selection code path -- no independent '.mark' forEach nearby
+    click_fn = js.split(
+        "document.getElementById('sel-scope-all').addEventListener('click', function () {",
+        1)[1].split("\n  });", 1)[0]
+    assert "markAll.checked = true;" in click_fn
+    assert "markAll.dispatchEvent(new Event('change'));" in click_fn
+    assert "querySelectorAll" not in click_fn
