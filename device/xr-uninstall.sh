@@ -205,6 +205,9 @@ configure
 no appmgr application $APPID
 commit
 ! ${VERIFY_MARKER}DEACTIVATE_END__
+! ${VERIFY_MARKER}RECHECK__
+show appmgr application-table
+! ${VERIFY_MARKER}RECHECK_END__
 EOF
 }
 
@@ -571,10 +574,37 @@ fi
 # BEFORE session 2 (the destructive commands) is ever composed, let alone
 # sent -- so this message stays accurate: teardown really has been refused
 # before anything destructive happened.
+#
+# The re-probe below is the second half of that pairing, and it exists because
+# a syntax rejection is not the only way a deactivate fails. A `commit` can
+# fail on its own -- leaving the application running -- while emitting no
+# `% Invalid input` at all, and the destructive session then ran against a
+# device still hosting the app: the exact D2-3 shape. Rather than pattern-match
+# commit-failure text that has never been measured on this platform, ask the
+# device: read the application table again, after the commit, in the SAME
+# login, and refuse if the app is still listed -- whatever the cause. That
+# turns "we saw no error" into "the device says it is gone".
+RECHECK="$(printf '%s' "$SETUP_OUT" | verify_section RECHECK)" \
+  || { echo "ERROR: deactivate re-probe did not return the appmgr application-table; refusing to continue teardown on $DEVICE_IP" >&2; exit 1; }
+if ! printf '%s' "$SETUP_OUT" | end_after_start "${VERIFY_MARKER}RECHECK__" "${VERIFY_MARKER}RECHECK_END__"; then
+  echo "ERROR: deactivate re-probe was truncated before its end marker; refusing to continue teardown on $DEVICE_IP" >&2
+  exit 1
+fi
+if ! section_has_device_output "$RECHECK" "$SETUP_REQ"; then
+  echo "ERROR: the deactivate re-probe returned no device output (only the transport's echo of the request); refusing to continue teardown on $DEVICE_IP" >&2
+  exit 1
+fi
+if xr_command_rejected "$RECHECK"; then
+  echo "ERROR: the deactivate re-probe was rejected by the device; refusing to continue teardown on $DEVICE_IP" >&2
+  exit 1
+fi
 if [ "$PRESENT_BEFORE" -eq 0 ]; then
   echo "  $APPID already deactivated/absent; skipping"
 elif xr_command_rejected "$DEACT"; then
   echo "ERROR: refusing to continue teardown while application $APPID is still active on $DEVICE_IP" >&2
+  exit 1
+elif table_contains "$RECHECK" "$APPID"; then
+  echo "ERROR: refusing to continue teardown while application $APPID is still active on $DEVICE_IP (deactivate reported no error, but the application table still lists it -- a commit that did not apply)" >&2
   exit 1
 fi
 # else: probe showed it present and deactivate was not rejected -- proceed;

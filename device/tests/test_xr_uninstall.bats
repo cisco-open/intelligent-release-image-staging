@@ -326,6 +326,13 @@ case "$cmds" in
     if [ "${FAKE_VERIFY_OMIT_DEACTIVATE_END:-no}" != "yes" ]; then
       echo "__IRIS_XR_VERIFY_DEACTIVATE_END__"
     fi
+    # Post-commit re-probe: the script asks the device whether the app is
+    # ACTUALLY gone rather than inferring it from the absence of an error.
+    # This consumes app-table index 2, so session 2/2's own read is index 3.
+    echo "__IRIS_XR_VERIFY_RECHECK__"
+    echo "Mon Aug 31 14:24:09.221 UTC"
+    printf '%s\n' "$(next_app_row)"
+    echo "__IRIS_XR_VERIFY_RECHECK_END__"
     ;;
   *"__IRIS_XR_VERIFY_FILES__"*)
     # session 2/2 (sweep+verify): the destructive commands (when composed at
@@ -449,6 +456,10 @@ case "$cmds" in
       echo "% Invalid input detected"
     fi
     echo "__IRIS_XR_VERIFY_DEACTIVATE_END__"
+    echo "__IRIS_XR_VERIFY_RECHECK__"
+    echo "Mon Aug 31 14:24:09.221 UTC"
+    printf '%s\n' "$(next_app_row)"
+    echo "__IRIS_XR_VERIFY_RECHECK_END__"
     ;;
   *"__IRIS_XR_VERIFY_FILES__"*)
     # Session 1 succeeds normally; only the sweep+verify session comes back
@@ -546,6 +557,9 @@ case "$cmds" in
     printf '%s! __IRIS_XR_VERIFY_APPS_END__\n' "$PROMPT"
     printf '%s! __IRIS_XR_VERIFY_DEACTIVATE__\n' "$PROMPT"
     printf '%s! __IRIS_XR_VERIFY_DEACTIVATE_END__\n' "$PROMPT"
+    printf '%s! __IRIS_XR_VERIFY_RECHECK__\n' "$PROMPT"
+    printf 'Mon Aug 31 14:24:09.221 UTC\n'
+    printf '%s! __IRIS_XR_VERIFY_RECHECK_END__\n' "$PROMPT"
     ;;
   *"__IRIS_XR_VERIFY_FILES__"*)
     printf '%s! __IRIS_XR_VERIFY_APPS__\n' "$PROMPT"
@@ -851,17 +865,43 @@ _xr_call_body() {
 
 @test "live: [5/5] still independently catches the app reappearing after a successful deactivate" {
   _xr_uninstall_stub_setup
-  # index 1 (session 1/2's early probe): present. deactivate is not
-  # rejected (default), so the run proceeds to session 2/2. index 2
-  # (session 2/2's own re-probe) is ALSO present -- e.g. a flapping app --
-  # [5/5]'s own independent check (unchanged by this task) is still the
-  # last line of defense.
+  # index 1 (session 1/2's early probe): present. index 2 (session 1/2's
+  # post-commit re-probe): ABSENT, so the deactivate genuinely worked and the
+  # run proceeds to session 2/2. index 3 (session 2/2's own read) is present
+  # again -- a flapping app -- and [5/5]'s independent check is still the last
+  # line of defense.
   FAKE_APP_ROW_1="iris  docker  iris-xr  Up  app_manager" \
-    FAKE_APP_ROW_2="iris  docker  iris-xr  Up  app_manager" \
+    FAKE_APP_ROW_2="" \
+    FAKE_APP_ROW_3="iris  docker  iris-xr  Up  app_manager" \
     run _xr_uninstall_run_live
   [ "$status" -ne 0 ] || return 1
   [[ "$output" == *"artifacts still present"* ]] || return 1
   [[ "$output" == *"appmgr application iris"* ]]
+}
+
+# Review finding (2026-08-31): the paired adjudication gated the destructive
+# session on a SYNTAX rejection alone. A deactivate whose `commit` fails --
+# leaving the application running -- produces no `% Invalid input`, so the run
+# proceeded to uninstall the source and delete the RPM and every sidecar on a
+# device still running the app. That is the D2-3 fail-open shape the whole
+# composite exists to prevent.
+#
+# The fix does not try to recognize commit-failure text, which has never been
+# measured on this platform. It asks the device instead: re-probe the
+# application table after the commit, in the same login, and refuse if the app
+# is still there -- whatever the reason.
+@test "live: an app still present after deactivate refuses before anything destructive is sent" {
+  _xr_uninstall_stub_setup
+  FAKE_APP_ROW_1="iris  docker  iris-xr  Up  app_manager" \
+    FAKE_APP_ROW_2="iris  docker  iris-xr  Up  app_manager" \
+    run _xr_uninstall_run_live
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"still active"* ]] || return 1
+  log="$(cat "$FAKE_COMMAND_LOG")"
+  # Session 2 must never have been composed, let alone sent.
+  [ "$(printf '%s\n' "$log" | grep -c 'delete /noprompt')" -eq 0 ] || return 1
+  [ "$(printf '%s\n' "$log" | grep -c 'appmgr package uninstall source')" -eq 0 ] || return 1
+  [ "$(printf '%s\n' "$log" | grep -c '=== CALL START ===')" -eq 1 ]
 }
 
 # ---------------------------------------------------------------------------
