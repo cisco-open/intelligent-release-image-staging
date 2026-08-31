@@ -8421,8 +8421,9 @@ def test_reduced_motion_covers_more_than_the_two_drawers_and_shadows_are_tokeniz
 
 def test_staging_boundary_component_exists_and_ends_at_operator_control():
     """Brief Step 1: the Staging Boundary is one shared component
-    (stagingBoundaryHTML(steps)), reused verbatim by Overview here and by
-    device/image detail contexts in Task 8. This is a pure source guard --
+    (stagingBoundaryHTML(steps)), reused verbatim by device/image detail
+    contexts (Task 8; Overview's own fleet-wide instance was removed per
+    operator decision, Wave C). This is a pure source guard --
     every named step of the lifecycle and the hatched terminus label must
     exist as literal strings in app.js, regardless of how any one view
     derives the states it feeds the component."""
@@ -8460,20 +8461,29 @@ def test_staging_boundary_step_states_are_css_backed():
         "\n  }", 1)[0]
 
 
-def test_overview_boundary_scoped_to_staging_lifecycle_not_agent_deployment():
+def test_device_boundary_scoped_to_staging_lifecycle_not_agent_deployment():
     """HANDOFF §2: IRIS agent deployment (onboard/undeploy) and target-
     software staging are two different lifecycles. The Staging Boundary is
     about the second one only -- its failed-step derivation must key off
-    placement-failed/image-failed, never onboard-failed/undeploy-failed."""
+    placement-failed/image-failed, never onboard-failed/undeploy-failed.
+
+    This used to pin Overview's own fleet-wide instance
+    (overviewBoundarySteps); that band (#ov-boundary, "Active staging") was
+    removed per operator decision (Wave C post-walk fix) along with the
+    function that derived its steps. The device drawer's per-device
+    instance (deviceBoundarySteps) is the sole survivor of the Staging
+    Boundary's per-view step derivation and carries the exact same
+    invariant, so the pin moves here rather than disappearing."""
     js = _webroot("app.js")
-    fn = js.split("function overviewBoundarySteps(ov, devs, devNow, imgs) {", 1)[1].split(
+    fn = js.split("function deviceBoundarySteps(d, devNow) {", 1)[1].split(
         "\n  }", 1)[0]
     assert "'placement-failed'" in fn
     assert "'image-failed'" in fn
     assert "'onboard-failed'" not in fn
     assert "'undeploy-failed'" not in fn
-    # unknown/no-data collapses every step to 'na', never a guessed 'done'
-    assert "if (!ov.images) return ['na', 'na', 'na', 'na', 'na', 'na'];" in fn
+    # no assigned images collapses every step but 'assigned' to 'na', never
+    # a guessed 'done'
+    assert "if (!ids.length) return ['na', 'na', 'upcoming', 'na', 'na', 'na'];" in fn
     # no distinct on-device post-transfer verification signal exists in this
     # build -- admitted honestly as 'na', not inferred from a proxy
     assert "var verified = 'na';" in fn
@@ -8553,10 +8563,14 @@ def test_images_needs_attention_toggle_filters_client_side_no_refetch():
 
 
 def test_overview_fetches_devices_and_images_alongside_overview():
-    """The attention band and the aggregate boundary need per-device and
-    per-image rows Overview did not fetch before Task 7 -- all three
-    requests must be issued together (Promise.all), not serially, so the
-    dashboard is not three round trips slower than it used to be."""
+    """The attention band needs per-device and per-image rows Overview did
+    not fetch before Task 7 -- all three requests must be issued together
+    (Promise.all), not serially, so the dashboard is not three round trips
+    slower than it used to be. (The aggregate Staging Boundary this test
+    used to also cite was the other original consumer of /api/devices and
+    /api/images here; it was removed per operator decision -- Wave C -- but
+    the attention band alone still needs both, so the three-way Promise.all
+    stays exactly as load-bearing as before.)"""
     js = _webroot("app.js")
     fn = js.split("async function refreshOverview() {", 1)[1].split("\n  }", 1)[0]
     assert "Promise.all(" in fn
@@ -8567,7 +8581,7 @@ def test_overview_fetches_devices_and_images_alongside_overview():
     assert "fetch('/api/devices'" in fn
     assert "fetch('/api/images'" in fn
     assert "renderOverviewAttention(" in fn
-    assert "renderOverviewBoundary(" in fn
+    assert "renderOverviewBoundary(" not in fn
 
 
 def test_overview_fleet_totals_carry_precise_denominators():

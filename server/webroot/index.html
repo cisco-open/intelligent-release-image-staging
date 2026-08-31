@@ -149,12 +149,14 @@
           <h3>Needs attention</h3>
           <div class="attention-cards" id="ov-attention"></div>
         </div>
-        <!-- Band 2: the Staging Boundary (fleet-wide instance) plus the
-             concrete in-progress-transfer evidence (the Rollout table) that
-             backs it. -->
+        <!-- Band 2: fleet totals, precise denominators, plus the concrete
+             in-progress-transfer evidence (the Rollout table) -- the
+             fleet-wide Staging Boundary that used to sit above this
+             (Active staging) was removed per operator decision; the
+             per-device instance still lives in the device detail drawer. -->
         <div class="ov-band">
-          <h3>Active staging</h3>
-          <div class="card"><div id="ov-boundary"></div></div>
+          <h3>Fleet totals</h3>
+          <div class="cards" id="ov-cards"></div>
           <h3>Rollout</h3>
           <div class="table-scroll">
           <table class="tbl" id="ov-rollout">
@@ -162,11 +164,6 @@
             <tbody id="ov-rows"></tbody>
           </table>
           </div>
-        </div>
-        <!-- Band 3: fleet totals, precise denominators. -->
-        <div class="ov-band">
-          <h3>Fleet totals</h3>
-          <div class="cards" id="ov-cards"></div>
         </div>
       </section>
       <section id="view-images" hidden>

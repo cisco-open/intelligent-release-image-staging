@@ -262,11 +262,11 @@
   // Assigned -> Transferring -> Verified -> Staged, then a hatched
   // "Operator control" terminus -- installation, activation and reload
   // stay outside IRIS. stagingBoundaryHTML(steps) is the ONE renderer,
-  // shared verbatim by every view that shows it (Overview here; device and
-  // image detail contexts in Task 8) -- callers derive `steps` from
-  // whatever data THEIR view actually has and must never guess: an unknown
-  // or not-applicable step stays the explicit 'na' state, not an inferred
-  // 'done'.
+  // shared verbatim by every device/image detail context that shows it
+  // (Task 8; Overview's own fleet-wide instance was removed per operator
+  // decision, Wave C) -- callers derive `steps` from whatever data THEIR
+  // view actually has and must never guess: an unknown or not-applicable
+  // step stays the explicit 'na' state, not an inferred 'done'.
   //
   // `steps` is an array of six entries, one per BOUNDARY_STEPS below, each
   // either a bare state string -- 'done' | 'current' | 'upcoming' | 'na' --
@@ -469,8 +469,9 @@
       // negative/severe/warning, spanning BOTH IRIS lifecycles (agent
       // deployment AND target-software staging). A general "what needs me"
       // filter, unlike the Staging Boundary's own failed-step derivation
-      // (overviewBoundarySteps), which stays scoped to the staging
-      // lifecycle only -- see that function's comment.
+      // (deviceBoundarySteps, the device drawer's per-device instance),
+      // which stays scoped to the staging lifecycle only -- see that
+      // function's comment.
       else if (f.status === '__attention') {
         var lvl = statusDisplay(deviceStatus(d, devNow)).level;
         if (lvl !== 'negative' && lvl !== 'severe' && lvl !== 'warning') return false;
@@ -1294,17 +1295,18 @@
   }
   // Per-device instance of the Staging Boundary (Task 7's
   // stagingBoundaryHTML, spec: "device and image detail contexts in Task
-  // 8" -- reused verbatim, never re-implemented). Mirrors
-  // overviewBoundarySteps()'s OWN per-step reasoning (same six steps, same
-  // deviceStatus() keys, same "unknown stays na, never a guessed done") but
-  // scoped to this one device's assigned set, and derives ONLY from data
+  // 8" -- reused verbatim, never re-implemented). Uses the same six-step,
+  // same-deviceStatus()-keys reasoning Overview's own fleet-wide instance
+  // used before it was removed (Wave C, operator decision) -- "unknown
+  // stays na, never a guessed done" -- but scoped to this one device's
+  // assigned set, and derives ONLY from data
   // the drawer already has in hand when it opens: the device row `d`
   // (already fetched by refreshDevices) and the imageQuarantined map that
   // same fetch already populated. No per-image hash_verification state
   // reaches this view (only the quarantined flag does), so "Source
   // checked" can say FAILED for a quarantined assigned image but never
-  // claims a "done" it cannot back up; "Verified" has no on-device signal
-  // here either, exactly as the Overview instance admits.
+  // claims a "done" it cannot back up; "Verified" admits it has no
+  // on-device signal here either, same as it never did.
   function deviceBoundarySteps(d, devNow) {
     var ids = rowAssignedIds(d);
     if (!ids.length) return ['na', 'na', 'upcoming', 'na', 'na', 'na'];
@@ -2628,90 +2630,6 @@
     if (imgBtn) imgBtn.addEventListener('click', goToImagesFiltered);
   }
 
-  // ---- Overview: aggregate Staging Boundary (fleet-wide) -----------------
-  // Spec: "Overview: fleet/image progress and exception context" -- this is
-  // the AGGREGATE instance of the six-step lifecycle (Task 8 covers the
-  // per-device/per-image instance). Every step is derived independently
-  // from /api/overview + /api/images + /api/devices, the same three
-  // endpoints already backing this page's other bands. A step this data
-  // cannot honestly answer renders 'na', never a guessed 'done'; a step
-  // with a real zero (nothing assigned yet, nothing staged yet) renders
-  // 'upcoming' rather than 'na', since that IS known, just not started.
-  function overviewBoundarySteps(ov, devs, devNow, imgs) {
-    // Nothing catalogued at all -- a genuine first-run/no-data state, not
-    // "in progress" or "failed" for anything downstream either.
-    if (!ov.images) return ['na', 'na', 'na', 'na', 'na', 'na'];
-    var catalogued = 'done';
-
-    var checked = imgs.filter(function (i) {
-      return i.hash_verification && i.hash_verification.state;
-    });
-    var mismatched = imgs.filter(function (i) {
-      return i.quarantined && i.hash_verification && i.hash_verification.state === 'mismatch';
-    });
-    var sourceChecked;
-    if (mismatched.length) {
-      sourceChecked = { state: 'failed', pillHtml: levelPillHTML('negative',
-        mismatched.length + (mismatched.length === 1 ? ' image quarantined' : ' images quarantined')) };
-    } else if (!checked.length) sourceChecked = 'na';
-    else if (checked.length >= imgs.length) sourceChecked = 'done';
-    else sourceChecked = 'current';
-
-    var assigned;
-    if (!ov.devices) assigned = 'na';
-    else if (!ov.assigned) assigned = 'upcoming';
-    else if (ov.assigned >= ov.devices) assigned = 'done';
-    else assigned = 'current';
-
-    // Placement/image-failed only -- NOT onboard-failed/undeploy-failed,
-    // which belong to the agent-deployment lifecycle, a different one from
-    // target-software staging (HANDOFF §2: "distinguish two different
-    // lifecycles"). The Devices "Needs attention" filter above deliberately
-    // spans both; this boundary stays scoped to staging only.
-    var placementFailed = devs.filter(function (d) { return deviceStatus(d, devNow).key === 'placement-failed'; });
-    var imageFailed = devs.filter(function (d) { return deviceStatus(d, devNow).key === 'image-failed'; });
-    var transferring;
-    if (placementFailed.length) {
-      transferring = { state: 'failed', pillHtml: levelPillHTML('negative',
-        placementFailed.length + ' placement failed') };
-    } else if (imageFailed.length) {
-      // Fleet-wide ratio (failed devices / all assigned devices) -- NOT
-      // imageFailedRatio(d), which is one device's own errored/assigned
-      // ratio (used by deviceStatusHtml's row pill and by
-      // overviewDeviceAttention's per-device tally above). This step is a
-      // single aggregate pill for the whole fleet, so it needs the
-      // fleet-wide figure, not any one device's.
-      var ratio = ov.assigned ? imageFailed.length / ov.assigned : 0;
-      transferring = { state: 'failed', pillHtml: levelPillHTML(ratio >= 0.5 ? 'severe' : 'warning',
-        imageFailed.length + (imageFailed.length === 1 ? ' image failed' : ' images failed')) };
-    } else if (!ov.assigned) transferring = 'na';
-    else if (ov.staging_now) transferring = 'current';
-    else if (ov.staged >= ov.assigned) transferring = 'done';
-    // Assigned exists, nothing is actively transferring right now, yet not
-    // everything is staged either -- genuinely ambiguous (stalled? offline?
-    // never picked up the job?) with no signal here to say which, so 'na'
-    // rather than a guess in either direction.
-    else transferring = 'na';
-
-    // No distinct on-device post-transfer verification signal exists in
-    // this build, separate from the Cisco source check above and the final
-    // staged report below -- admitting that gap honestly (spec: "unknown
-    // ... stay explicit") beats inventing a proxy for it.
-    var verified = 'na';
-
-    var staged;
-    if (!ov.assigned) staged = 'na';
-    else if (ov.staged >= ov.assigned) staged = 'done';
-    else if (ov.staged > 0) staged = 'current';
-    else staged = 'upcoming';
-
-    return [catalogued, sourceChecked, assigned, transferring, verified, staged];
-  }
-  function renderOverviewBoundary(ov, devs, devNow, imgs) {
-    document.getElementById('ov-boundary').innerHTML =
-      stagingBoundaryHTML(overviewBoundarySteps(ov, devs, devNow, imgs));
-  }
-
   // ---- Overview ----
   // Same stale-response hazard refreshDevices() already guards against
   // (generation counter + AbortController, above): once the hash router
@@ -2778,7 +2696,6 @@
     var fleetDataUnavailable = !!(dbody.failed || imgsBody.failed);
 
     renderOverviewAttention(devs, devNow, imgs, fleetDataUnavailable);
-    renderOverviewBoundary(ov, devs, devNow, imgs);
 
     var devicesWord = ov.devices === 1 ? 'device' : 'devices';
     var cards = [
