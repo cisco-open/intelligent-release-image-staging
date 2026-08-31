@@ -172,10 +172,11 @@ ALLOWLIST = [
 
     # -- Task 6: CSS property name, not the retired business term ------
     # Line number moved from 425 (Task 6) to 491 (Task 7) to 497 (Task 8) to
-    # 538 when Task 9 parameterized the fade color (--scroll-fade) and added
-    # its explanatory comment above .table-scroll -- same property, re-pinned
-    # at its new location.
-    ("server/webroot/styles.css", frozenset({538}),
+    # 538 (Task 9, --scroll-fade parameterization) to 542 when the Wave A
+    # Magnetic table-fidelity fixes (type roles, right-align, divergence
+    # comment) added lines above it -- same property, re-pinned at its new
+    # location.
+    ("server/webroot/styles.css", frozenset({542}),
      "the CSS `background-attachment` property (Task 6's .table-scroll "
      "scroll-shadow gradients) -- unrelated to the retired attachment "
      "vocabulary, hard exclusion"),

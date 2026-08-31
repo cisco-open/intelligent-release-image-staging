@@ -20,6 +20,7 @@
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
   }
+  function dash(v) { return v ? esc(v) : '—'; }
   // Telemetry posture as the DEVICE last reported it (not what onboarding
   // asked for). Tri-state: an agent that predates the flag reports nothing,
   // which is "unknown" — never shown as "off", since off is a real choice.
@@ -547,8 +548,6 @@
 
   // ---- Images (unchanged behavior) ----
   var statusEl = document.getElementById('status');
-  var prog = document.getElementById('prog');
-  var bar = document.getElementById('bar');
   var imageJobGen = 0;
   // The full last-fetched /api/images rows, kept for the image-detail drawer
   // (KGV / Cisco Bulk Hash reconciler, Task 5) -- refreshImages() only ever
@@ -620,15 +619,15 @@
       : LAST_IMAGES;
     // Catalog rows lead with the exact filename + verdict pill; image id
     // stays adjacent (spec Task 7 Step 5).
-    document.getElementById('rows').innerHTML = imgs.map(function (i) {
-      return '<tr data-id="' + esc(i.id) + '"><td class="machine">' + esc(i.filename || '') + '</td><td>' +
+    document.getElementById('rows').innerHTML = imgs.length ? imgs.map(function (i) {
+      return '<tr data-id="' + esc(i.id) + '"><td class="machine">' + dash(i.filename) + '</td><td>' +
         bulkhashVerdictPillHTML(i.hash_verification, i.quarantined) + '</td><td class="machine">' + esc(i.id) +
         '</td><td class="machine">' + esc(fmtSize(i.size)) + '</td><td class="machine">' +
         esc((i.sha256 || '').slice(0, 16)) + '…</td><td class="machine">' + esc(fmtDate(i.published_at)) +
         '</td><td><button class="linkish img-info" title="Image details" aria-label="' +
         'Image details for ' + esc(i.id) + '">ⓘ</button> ' +
         '<button class="linkish danger-link del-img">delete</button></td></tr>';
-    }).join('');
+    }).join('') : '<tr><td colspan="7" class="muted">No images match.</td></tr>';
     document.querySelectorAll('#rows .del-img').forEach(function (btn) {
       btn.addEventListener('click', async function () {
         var id = btn.closest('tr').getAttribute('data-id');
@@ -753,8 +752,8 @@
         if (!r.ok) { statusEl.textContent = 'Publish status unavailable (' + r.status + '); retrying…'; next(); return; }
         var j = await r.json();
         if (gen !== imageJobGen) return;
-        if (j.state === 'done') { statusEl.textContent = 'Published ' + (j.image_id || '') + ' ✓'; prog.hidden = true; refreshImages().catch(function () {}); refreshImportable().catch(function () {}); }
-        else if (j.state === 'error') { statusEl.textContent = 'Publish failed: ' + j.message; prog.hidden = true; refreshImportable().catch(function () {}); }
+        if (j.state === 'done') { statusEl.textContent = 'Published ' + (j.image_id || '') + ' ✓'; refreshImages().catch(function () {}); refreshImportable().catch(function () {}); }
+        else if (j.state === 'error') { statusEl.textContent = 'Publish failed: ' + j.message; refreshImportable().catch(function () {}); }
         else { statusEl.textContent = 'Publishing ' + j.filename + '…'; next(); }
       } catch (e) { statusEl.textContent = 'Publish status unavailable; retrying…'; next(); }
     }
@@ -803,8 +802,9 @@
   }
   // Per-file upload rows: every picked/dropped file gets its OWN row (name,
   // progress bar, state text) and its OWN publish poller, so concurrent
-  // uploads never fight over shared elements. The legacy #status/#prog/#bar
-  // singletons above now serve only the import-from-disk flow.
+  // uploads never fight over shared elements. The legacy #status singleton
+  // above now serves only the import-from-disk flow (its own #prog/#bar
+  // progress bar was dead -- never unhidden -- and was removed).
   var uploadsEl = document.getElementById('uploads');
   function uploadRowUi(name) {
     var row = document.createElement('div');
@@ -1103,7 +1103,7 @@
     document.querySelectorAll('#dev-rows .mark:checked').forEach(function (cb) {
       marked[cb.getAttribute('data-id')] = true;
     });
-    document.getElementById('dev-rows').innerHTML = devs.map(function (d) {
+    document.getElementById('dev-rows').innerHTML = devs.length ? devs.map(function (d) {
       var rowIds = rowAssignedIds(d);
       var assignLabel = rowIds.length ? (rowIds.length + ' image(s)') : '— assign —';
       var credSel = ['<option value="">— no credential —</option>'].concat(credOpts.map(function (c) {
@@ -1128,8 +1128,8 @@
       return '<tr data-id="' + esc(d.device_id) + '">' +
         '<td><input type="checkbox" class="mark" data-id="' + esc(d.device_id) + '"' +
         (marked[d.device_id] ? ' checked' : '') + '></td>' +
-        '<td class="dev-id">' + esc(d.device_id) + '</td><td class="machine">' + esc(d.device_ip || '') + '</td>' +
-        '<td class="machine">' + esc(d.model || d.heartbeat_model || '') + '</td>' +
+        '<td class="dev-id">' + esc(d.device_id) + '</td><td class="machine">' + dash(d.device_ip) + '</td>' +
+        '<td class="machine">' + dash(d.model || d.heartbeat_model) + '</td>' +
         '<td>' + esc(managementTypeLabel) + '</td>' +
         '<td><select class="platform">' + platSel + '</select></td>' +
         '<td><select class="cred">' + credSel + '</select></td>' +
@@ -1143,7 +1143,8 @@
         (peerPolicyAssigned(d.device_id) ? 'Release' : 'Quarantine') + '</button></td>' +
         '<td>' + status +
         ' <button class="linkish dinfo" title="Deployment details">ⓘ</button></td></tr>';
-    }).join('');
+    }).join('') : '<tr><td colspan="11" class="muted">' +
+      (total ? 'No devices match the current filters.' : 'No devices yet.') + '</td></tr>';
     document.querySelectorAll('#dev-rows .assign-btn').forEach(function (btn) {
       btn.addEventListener('click', function () {
         openRowAssign(btn.closest('tr').getAttribute('data-id'), btn);

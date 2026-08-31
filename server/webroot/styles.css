@@ -101,12 +101,14 @@ select:focus-visible, textarea:focus-visible, button:focus-visible {
 #logout { margin-left:14px; }
 .upload { border:2px dashed var(--border); border-radius:10px; padding:22px; text-align:center; margin:8px 0 20px; color:var(--text-body); }
 .upload.drag { border-color:var(--action); background:var(--action-tint); }
-.muted { color:var(--text-secondary); font-size:13px; }
+.muted { color:var(--text-secondary); font-size:12px; line-height:18px; }
 .progress { height:8px; background:var(--rule); border-radius:5px; overflow:hidden; margin:12px auto; max-width:420px; }
 .progress .bar { height:100%; width:0; background:var(--action); transition:width .15s; }
-.tbl { width:100%; border-collapse:collapse; font-size:13px; }
-.tbl th { text-align:left; color:var(--text-secondary); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:.3px; border-bottom:1px solid var(--rule); padding:8px 10px; }
-.tbl td { border-bottom:1px solid var(--rule); padding:8px 10px; color:var(--text-body); }
+.tbl { width:100%; border-collapse:collapse; font-size:14px; line-height:20px; }
+.tbl th { text-align:left; color:var(--text-secondary); font-weight:600; font-size:12px; text-transform:none; letter-spacing:normal; border-bottom:1px solid var(--border); padding:8px 12px; }
+.tbl td { border-bottom:1px solid var(--rule); padding:8px 12px; color:var(--text-body); }
+.tbl td:last-child, .tbl th:last-child { text-align:right; }
+#images td:nth-child(4), #images th:nth-child(4) { text-align:right; }
 .toolbar { display:flex; gap:8px; align-items:center; margin:8px 0 16px; flex-wrap:wrap; }
 .nav { display:flex; align-items:center; height:32px; padding:0 18px; color:var(--text-body); text-decoration:none; font-size:14px; font-weight:500; cursor:pointer; }
 .nav:hover { background:var(--surface-subtle); }
@@ -122,7 +124,8 @@ select:focus-visible, textarea:focus-visible, button:focus-visible {
 .page-actions { display:flex; align-items:center; gap:8px; }
 .tbl .act { font-family:inherit; }
 .linkish { color:var(--action); background:none; border:0; cursor:pointer; font:inherit; padding:0; }
-.machine { font-family: var(--font-mono); }
+.machine { font-family: var(--font-mono); font-size:14px; line-height:20px; }
+.tbl .machine { font-size:12px; line-height:18px; }
 .log { background:#0b1626; color:#cfe3ff; font-family:var(--font-mono); font-size:12px; padding:12px; border-radius:8px; max-height:340px; overflow:auto; white-space:pre-wrap; }
 .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin:8px 0 20px; }
 /* Container card (spec §4: 24px padding, --radius-card, --shadow-xs -- the
@@ -311,7 +314,7 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
 .selbar { gap:8px; align-items:center; flex-wrap:wrap; background:var(--action-tint);
   border:1px solid var(--selected-tint); border-radius:8px; padding:8px 12px; margin:0 0 16px; }
 .selbar:not([hidden]) { display:flex; }
-.selbar .sel-count { font-weight:600; font-size:13px; color:var(--action); }
+.selbar .sel-count { font-weight:600; font-size:12px; line-height:18px; color:var(--action); }
 .btn.danger { background:var(--surface); color:var(--danger); border:1px solid var(--danger-tint);
   box-shadow:var(--shadow-xs); }
 .btn.danger:hover { background:var(--danger); border-color:var(--danger); color:#fff; }
@@ -326,6 +329,7 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
    ALSO hovered is spelled out explicitly rather than relying on source
    order to break the tie; selected uses the dedicated --selected-tint
    token rather than the --action-tint hover-adjacent one it used before. */
+/* row tint is a scan aid; rows are not click targets (deliberate divergence from tbl-dont-row-hover-interactive) */
 #dev-rows tr:hover td { background:var(--surface-subtle); }
 #dev-rows tr.sel td, #dev-rows tr.sel:hover td { background:var(--selected-tint); }
 
@@ -610,7 +614,7 @@ body.selecting #devices #mark-all { opacity: 1; }
    its default size/color everywhere else it is used (deploy-info drawer,
    batch panel, help popover, …). */
 #dev-rows .dev-id { font-family: var(--font-sans); font-size: 14px; font-weight: 500; color: var(--text-heading); }
-#dev-rows .machine { font-size: 12px; color: var(--text-secondary); }
+#dev-rows .machine { color: var(--text-secondary); }
 
 /* "More filters" disclosure: a native <details>, no JS needed to toggle it
    open/closed (CSP-clean by construction) -- the expanded body is an

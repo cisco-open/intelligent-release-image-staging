@@ -8195,7 +8195,10 @@ def test_rainbow_stripe_is_retired():
 
 def test_machine_class_replaces_blanket_table_monospace():
     css = _webroot("styles.css")
-    assert ".machine { font-family: var(--font-mono); }" in css
+    # Wave A Magnetic fixes gave .machine its own type-role size/line-height
+    # (P3: 14/20, uniform mono everywhere it's used) rather than leaving it
+    # a bare font-family switch.
+    assert ".machine { font-family: var(--font-mono); font-size:14px; line-height:20px; }" in css
     # the blanket rule that used to force every table cell into monospace,
     # regardless of whether the cell held prose or machine data, is gone
     tbl_td = css.split(".tbl td {", 1)[1].split("}", 1)[0]
@@ -8374,8 +8377,13 @@ def test_error_and_status_regions_carry_live_roles():
     for sid in status_ids:
         tag = html.split('id="%s"' % sid, 1)[1].split(">", 1)[0]
         assert 'role="status"' in tag and 'aria-live="polite"' in tag, sid
-    # progress bars are exposed as progressbar, not silent divs
-    for pid in ("prog", "iv-offline-progress"):
+    # progress bars are exposed as progressbar, not silent divs. #prog
+    # (the legacy publish progress bar this pin used to also cover) was
+    # removed in the Wave A Magnetic fixes -- dead markup, never unhidden,
+    # superseded by the per-file upload rows' own rowProg element (see the
+    # rowProg assertions right below) -- so only the offline-upload bar
+    # remains here.
+    for pid in ("iv-offline-progress",):
         tag = html.split('id="%s"' % pid, 1)[1].split(">", 1)[0]
         assert 'role="progressbar"' in tag, pid
         assert 'aria-valuemin="0"' in tag and 'aria-valuemax="100"' in tag, pid
@@ -8518,8 +8526,10 @@ def test_images_catalog_leads_with_filename_and_verdict_pill():
     row = fn.split("return '<tr data-id=", 1)[1].split("}).join('')", 1)[0]
     pill_idx = row.index("bulkhashVerdictPillHTML(")
     # filename leads (the FIRST esc(i.id) is the data-id attribute, not a
-    # displayed column -- the id column's own esc(i.id) comes after the pill)
-    assert row.index("esc(i.filename") < pill_idx
+    # displayed column -- the id column's own esc(i.id) comes after the pill).
+    # filename itself renders via dash() (Wave A item 8, em-dash fallback for
+    # an empty value) rather than a bare esc().
+    assert row.index("dash(i.filename") < pill_idx
     assert "esc(i.id)" in row[pill_idx:]
 
 
@@ -8810,3 +8820,17 @@ def test_bulk_bar_names_selection_scope():
     assert "markAll.checked = true;" in click_fn
     assert "markAll.dispatchEvent(new Event('change'));" in click_fn
     assert "querySelectorAll" not in click_fn
+
+
+def test_table_type_roles_are_magnetic_p3_p4():
+    """Wave A Magnetic table-fidelity fixes (post-walk audit, root cause of
+    the "fonts are off" complaint): .tbl body copy is P3 (14/20), dense
+    machine-data cells inside a table step down to P4 (12/18) via a scoped
+    .tbl .machine override, and headers use sentence case (the markup is
+    already written sentence-case) rather than an uppercase/letter-spaced
+    treatment."""
+    css = _webroot("styles.css")
+    assert ".tbl { width:100%; border-collapse:collapse; font-size:14px; line-height:20px; }" in css
+    assert ".tbl .machine { font-size:12px; line-height:18px; }" in css
+    tbl_th = css.split(".tbl th {", 1)[1].split("}", 1)[0]
+    assert "text-transform:uppercase" not in tbl_th
