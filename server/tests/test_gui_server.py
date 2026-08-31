@@ -8659,6 +8659,11 @@ def test_device_status_cell_carries_job_step_and_elapsed():
     assert "' h '" in fn
     assert "60" in fn
     assert "[" in fn and "]" in fn
+    # A queued job never carries started_at server-side (gui_onboard.py only
+    # stamps it once the job actually starts running) -- this early-return
+    # guard is what keeps a queued job from ever rendering an elapsed
+    # duration it hasn't accrued yet.
+    assert fn.strip().startswith("if (!job || !job.started_at) return '';")
     # wired into the status cell for an active job only, matched by action
     assert "jobPhaseSuffix(activeJob)" in js
     assert "LAST_JOBS_BY_DEVICE" in js
@@ -8670,10 +8675,23 @@ def test_offline_is_expected_during_active_undeploy():
     runs) must not read as a bare, alarming "Offline (no recent
     heartbeat)" -- that is the expected shape of a healthy undeploy, not a
     fault. The pill stays visible (never hidden) with an honest label and a
-    title explaining why."""
+    title explaining why.
+
+    Review finding (fix wave 1): deviceStatus() sets st.key 'undeploying'
+    for BOTH a queued and a running job -- it only reads d.onboard_state,
+    never the job record itself -- so gating on st.key alone mislabeled a
+    device stuck behind the onboard concurrency cap (job still queued, never
+    touched the device) as "expected offline" before teardown had even
+    started. The gate must additionally require the CROSS-REFERENCED job's
+    own state === 'running': a queued undeploy job's offline device keeps
+    the normal, honest "no recent heartbeat" pill."""
     js = _webroot("app.js")
     fn = js.split("function deviceStatusHtml(d, devNow) {", 1)[1].split(
         "\n  }", 1)[0]
     assert "Offline (expected during undeploy)" in fn
-    assert "st.key === 'undeploying'" in fn
     assert "[1/5]" in fn
+    # the actual gate: job state 'running' AND the status key, not either alone
+    assert "if (activeJob && activeJob.state === 'running' && st.key === 'undeploying') {" in fn
+    # regression guard: the old, insufficient gate (bare st.key, no job-state
+    # check) must not be what decides the label any more
+    assert "if (st.key === 'undeploying') {" not in fn

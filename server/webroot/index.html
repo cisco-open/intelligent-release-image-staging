@@ -382,11 +382,25 @@
             <span class="err" id="cf-err" role="alert"></span>
           </form>
         </div>
+        <!-- devices-table-wrap (fix wave 1): the Status legend popover
+             (#status-legend-pop below) must NOT be a descendant of
+             .table-scroll -- that container's overflow-x:auto forces its
+             overflow-y to the CSS-spec-mandated "auto" too (one axis
+             visible + one non-visible resolves both to non-visible), which
+             clipped the ~300px popover on any short table and forced a
+             stray vertical scrollbar. Moving it to a sibling of
+             .table-scroll, inside this position:relative wrapper, keeps it
+             out of that scroll/clip context entirely while still anchoring
+             it near the table's top-right (the button that opens it stays
+             in the Status header cell, the table's own rightmost column). -->
+        <div class="devices-table-wrap">
         <div class="table-scroll">
         <table class="tbl" id="devices">
-          <thead><tr><th><input type="checkbox" id="mark-all"></th><th>Device</th><th>IP</th><th>Model</th><th>Management type</th><th>Agent install</th><th>Credential</th><th>Assigned images</th><th>Telemetry</th><th>Peer policy</th><th>Status <span class="menu-wrap"><button class="linkish" type="button" id="status-legend-btn" aria-expanded="false" aria-label="Show status pill legend">ⓘ</button><div class="menu" id="status-legend-pop" hidden></div></span></th></tr></thead>
+          <thead><tr><th><input type="checkbox" id="mark-all"></th><th>Device</th><th>IP</th><th>Model</th><th>Management type</th><th>Agent install</th><th>Credential</th><th>Assigned images</th><th>Telemetry</th><th>Peer policy</th><th>Status <button class="linkish" type="button" id="status-legend-btn" aria-expanded="false" aria-label="Show status pill legend">ⓘ</button></th></tr></thead>
           <tbody id="dev-rows"></tbody>
         </table>
+        </div>
+        <div class="menu" id="status-legend-pop" hidden></div>
         </div>
         <!-- Slides in from the RIGHT, like the deployment-log drawer. It used
              to be appended below the devices table, so opening it on a fleet of

@@ -352,14 +352,21 @@
       html += ' <span class="muted" title="' + esc(st.detail) + '">' + esc(st.detail) + '</span>';
     }
     if (deviceIsOffline(d, devNow)) {
-      // carried fix #3: a device already offline/stale WHILE its own active
-      // undeploy job is still running is the expected shape of a healthy
-      // teardown -- undeploy step [1/5] deactivates the agent (EEM applets
-      // removed, or the appmgr app stopped on XR) well before the rest of
-      // the job finishes, so no heartbeat is exactly what should happen.
-      // Honest and visible, never hidden: same pill slot, a label and title
-      // that say why instead of reading as an unexplained fault.
-      if (st.key === 'undeploying') {
+      // carried fix #3: a device already offline/stale WHILE its own
+      // undeploy job is actually RUNNING is the expected shape of a
+      // healthy teardown -- undeploy step [1/5] deactivates the agent (EEM
+      // applets removed, or the appmgr app stopped on XR) well before the
+      // rest of the job finishes, so no heartbeat is exactly what should
+      // happen. deviceStatus() sets st.key 'undeploying' for BOTH a queued
+      // AND a running job (it only reads d.onboard_state, not the job's own
+      // record), so gating on st.key alone would label a device stuck
+      // behind the onboard concurrency cap as "expected offline" before its
+      // job has even started -- a false claim (review finding: a batch
+      // undeploy beyond max_concurrent showed step [1/5] deactivated on
+      // devices whose job never touched them). Gate on the CROSS-REFERENCED
+      // job's own state === 'running' instead; a queued job's offline
+      // device keeps the normal, honest "no recent heartbeat" treatment.
+      if (activeJob && activeJob.state === 'running' && st.key === 'undeploying') {
         html += ' ' + levelPillHTML('inactive', 'Offline (expected during undeploy)',
           { title: 'The agent is deactivated at undeploy step [1/5]; no heartbeat is expected again until it re-enrolls.' });
       } else {
@@ -990,16 +997,22 @@
     if (devicesRefreshController) devicesRefreshController.abort();
     devicesRefreshController = new AbortController();
     var signal = devicesRefreshController.signal;
+    // Optional job listing -- decoupled from the other four fetches below
+    // via its own .then/.catch (Task 7's refreshOverview pattern); see the
+    // full rationale where its result is consumed, past credOpts below.
+    var jobsPromise = fetch('/api/onboard/jobs', { signal: signal }).then(function (r) {
+      return r.ok ? r.json() : null;
+    }).catch(function () { return null; });
     var results;
     try {
-      results = await Promise.all([fetch('/api/devices', { signal: signal }), fetch('/api/images', { signal: signal }), fetch('/api/credentials', { signal: signal }), fetch('/api/peer-policy', { signal: signal }), fetch('/api/onboard/jobs', { signal: signal })]);
+      results = await Promise.all([fetch('/api/devices', { signal: signal }), fetch('/api/images', { signal: signal }), fetch('/api/credentials', { signal: signal }), fetch('/api/peer-policy', { signal: signal }), jobsPromise]);
     } catch (e) {
       // Superseding a refresh is expected; callers must not see an unhandled
       // AbortError. Other failures still reach their caller/status handling.
       if (e && e.name === 'AbortError') return;
       throw e;
     }
-    var dr = results[0], ir = results[1], cr = results[2], pr = results[3], jr = results[4];
+    var dr = results[0], ir = results[1], cr = results[2], pr = results[3], jobsBody = results[4];
     if (!dr.ok || mine !== devicesRefreshGeneration) return;
     var nextPolicy = pr.ok ? await pr.json() : peerPolicy;
     var dbody = await dr.json();
@@ -1017,13 +1030,20 @@
       imageQuarantined[i.id] = !!i.quarantined;
     });
     credOpts = cr.ok ? ((await cr.json()).profiles || []) : [];
-    // Optional: a failed/aborted fetch here just leaves the previous status-
-    // cell step/elapsed suffixes in place for this tick rather than blanking
-    // them -- the plain onboarding…/undeploying… pill underneath (from
-    // /api/devices, which DID gate this refresh above) is never affected.
-    if (jr.ok) {
-      var jobsListing = await jr.json();
-      var jobs = jobsListing.jobs || [];
+    // Fix wave 1 (reviewer finding): the job listing is OPTIONAL polish on
+    // top of the device rows /api/devices already returned above -- a
+    // network-level rejection on it must never take the other four fetches
+    // down with it, so jobsPromise (above) resolves to null on EITHER a
+    // rejection or a non-2xx response rather than rejecting the shared
+    // Promise.all; the other four keep their pre-existing coupling
+    // (a real failure on any of THEM still aborts this refresh via the
+    // outer catch, unchanged -- out of scope for this fix). jobsBody null
+    // here just leaves the previous status-cell step/elapsed suffixes in
+    // place for this tick rather than blanking them; the plain
+    // onboarding…/undeploying… pill underneath (from /api/devices, which
+    // DID gate this refresh above) is never affected.
+    if (jobsBody) {
+      var jobs = jobsBody.jobs || [];
       LAST_JOBS_BY_DEVICE = bestJobForDevice(jobs);
       var liveJobIds = {};
       jobs.forEach(function (j) { liveJobIds[j.id] = true; });

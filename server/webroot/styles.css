@@ -586,10 +586,17 @@ body.selecting #devices #mark-all { opacity: 1; }
   display: flex; gap: 8px; flex-wrap: wrap; background: var(--surface); border: 1px solid var(--border);
   border-radius: 8px; box-shadow: var(--shadow-md); padding: 10px; min-width: 280px; }
 
-/* Status column legend popover: reuses .menu-wrap/.menu (same CSP-safe
-   toggle machinery, wireMenu() in app.js) for the 12-level Magnetic
-   mapping legend. */
-#status-legend-pop { min-width: 230px; }
+/* Status column legend popover: reuses .menu's CSP-safe toggle machinery
+   (wireMenu() in app.js, [hidden] toggle) and chrome, but NOT .menu-wrap's
+   nesting -- the trigger button lives in the Status <th> (inside
+   .table-scroll) while the popover itself is a sibling of .table-scroll
+   (fix wave 1: a descendant would be clipped by that container's forced
+   overflow-y). .devices-table-wrap is its positioning parent instead;
+   top:0/right:0 anchors it to the wrapper's top-right corner, which lines
+   up with the Status column (the table's own rightmost) without needing to
+   track the button's live position. */
+.devices-table-wrap { position: relative; }
+#status-legend-pop { top: 0; left: auto; right: 0; min-width: 230px; }
 #status-legend-pop .legend-title { font-size: 11px; font-weight: 600; text-transform: uppercase;
   letter-spacing: .3px; color: var(--text-secondary); padding: 4px 8px 6px; }
 #status-legend-pop .legend-row { padding: 4px 8px; }
