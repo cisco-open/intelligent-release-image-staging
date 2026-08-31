@@ -47,6 +47,33 @@ def test_poll_seeder_maps_global_stat_and_sums_connections():
     assert totals["def"] == 4096
 
 
+def test_poll_seeder_reports_queued_torrents():
+    # aria2 caps concurrent downloads, and a SEEDING torrent never completes,
+    # so anything past that cap sits in the waiting queue forever -- never
+    # served, never an error. That starvation wedged an IE-3400 in staging for
+    # half an hour on 2026-08-31 with nothing logged anywhere. getGlobalStat
+    # already carries numWaiting on every poll; surfacing it is what makes the
+    # condition observable instead of silent.
+    rpc = _fake_rpc(
+        {"uploadSpeed": "0", "downloadSpeed": "0", "numActive": "5",
+         "numWaiting": "1"},
+        [{"connections": "0", "infoHash": "abc", "totalLength": "1",
+          "files": [{"path": "/img/cat9k.bin"}]}])
+    stats, _names, _totals = telemetry.poll_seeder(rpc)
+    assert stats["queued_torrents"] == 1
+
+
+def test_poll_seeder_queued_torrents_defaults_to_zero():
+    # An aria2 build that omits numWaiting must read as "nothing starved",
+    # never raise and never render a missing gauge.
+    rpc = _fake_rpc(
+        {"uploadSpeed": "0", "downloadSpeed": "0", "numActive": "1"},
+        [{"connections": "0", "infoHash": "abc", "totalLength": "1",
+          "files": [{"path": "/img/cat9k.bin"}]}])
+    stats, _names, _totals = telemetry.poll_seeder(rpc)
+    assert stats["queued_torrents"] == 0
+
+
 def test_poll_seeder_rpc_error_reports_down():
     def rpc(method, _params=None):
         raise OSError("no rpc")

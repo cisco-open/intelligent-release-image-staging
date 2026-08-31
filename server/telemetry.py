@@ -126,6 +126,12 @@ def poll_seeder(rpc):
         "upload_speed": _int(g.get("uploadSpeed")),
         "download_speed": _int(g.get("downloadSpeed")),
         "active_torrents": _int(g.get("numActive")),
+        # Torrents aria2 is holding back behind its concurrency cap. A seeding
+        # torrent never completes, so a queued one is never served at all and
+        # aria2 raises no error about it -- a device assigned that image just
+        # reports staging forever. Non-zero here means the seeder is refusing
+        # to serve a published image, which is otherwise invisible.
+        "queued_torrents": _int(g.get("numWaiting")),
         "connections": connections,
         "torrent_upload_bps": upload_bps,
     }, names, totals
@@ -1265,6 +1271,7 @@ class Telemetry:
                 "receive_bps": self._seeder["download_speed"],
                 "connections": self._seeder["connections"],
                 "active_torrents": self._seeder["active_torrents"],
+                "queued_torrents": self._seeder.get("queued_torrents", 0),
             }
             observation["torrent"] = torrents
         if service:

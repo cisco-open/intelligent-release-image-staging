@@ -43,6 +43,17 @@ def test_render_seeder_stats():
     assert "iris_seeder_rpc_up 1" in out
 
 
+def test_render_seeder_queued_torrents_gauge():
+    # Starved torrents are invisible without this: aria2 reports them as
+    # `waiting`, not as an error, so a device assigned a queued image hangs in
+    # staging with nothing logged. A nonzero value here means the seeder is
+    # refusing to serve a published image and is worth alerting on.
+    seeder = {"upload_speed": 0, "download_speed": 0, "active_torrents": 5,
+              "queued_torrents": 1, "connections": 0, "rpc_up": True}
+    out = metrics.render([], seeder, {})
+    assert "iris_seeder_queued_torrents 1" in out
+
+
 def test_render_seeder_rpc_down_is_zero():
     out = metrics.render([], {"rpc_up": False}, {})
     assert "iris_seeder_rpc_up 0" in out
