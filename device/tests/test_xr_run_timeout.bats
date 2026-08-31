@@ -166,48 +166,48 @@ _assert_full_request_delivered() {
 # instant kill (`sleep abc`/`sleep -5` fail immediately, and a naive
 # watchdog would read that as "the bound already elapsed" and fire rc 124
 # at t=0 for every session) or into a silently-unbounded session. Invalid
-# values fall back to the 900s default with one stderr warning; empty/unset
-# stays exactly as before (900s default, no warning).
+# values fall back to the 150s default with one stderr warning; empty/unset
+# stays exactly as before (150s default, no warning).
 # ---------------------------------------------------------------------------
 
-@test "IRIS_XR_SESSION_TIMEOUT=abc falls back to the 900s default with a warning, not an instant kill" {
+@test "IRIS_XR_SESSION_TIMEOUT=abc falls back to the 150s default with a warning, not an instant kill" {
   run env IRIS_XR_SESSION_TIMEOUT=abc FAKE_SLEEP=1 \
     bash -c "printf 'show version\n' | bash '$RUN' 192.0.2.10"
   [ "$status" -eq 0 ] || return 1
   [[ "$output" == *"IRIS_XR_SESSION_TIMEOUT"* ]] || return 1
-  grep -q '^900$' "$SLEEP_LOG"
+  grep -q '^150$' "$SLEEP_LOG"
 }
 
-@test "IRIS_XR_SESSION_TIMEOUT=-5 falls back to the 900s default with a warning, not an instant kill" {
+@test "IRIS_XR_SESSION_TIMEOUT=-5 falls back to the 150s default with a warning, not an instant kill" {
   run env IRIS_XR_SESSION_TIMEOUT=-5 FAKE_SLEEP=1 \
     bash -c "printf 'show version\n' | bash '$RUN' 192.0.2.10"
   [ "$status" -eq 0 ] || return 1
   [[ "$output" == *"IRIS_XR_SESSION_TIMEOUT"* ]] || return 1
-  grep -q '^900$' "$SLEEP_LOG"
+  grep -q '^150$' "$SLEEP_LOG"
 }
 
-@test "IRIS_XR_SESSION_TIMEOUT with embedded whitespace falls back to the 900s default with a warning" {
+@test "IRIS_XR_SESSION_TIMEOUT with embedded whitespace falls back to the 150s default with a warning" {
   run env IRIS_XR_SESSION_TIMEOUT=" 5 " FAKE_SLEEP=1 \
     bash -c "printf 'show version\n' | bash '$RUN' 192.0.2.10"
   [ "$status" -eq 0 ] || return 1
   [[ "$output" == *"IRIS_XR_SESSION_TIMEOUT"* ]] || return 1
-  grep -q '^900$' "$SLEEP_LOG"
+  grep -q '^150$' "$SLEEP_LOG"
 }
 
-@test "empty IRIS_XR_SESSION_TIMEOUT behaves exactly like unset: 900s default, no warning" {
+@test "empty IRIS_XR_SESSION_TIMEOUT behaves exactly like unset: 150s default, no warning" {
   run env IRIS_XR_SESSION_TIMEOUT= FAKE_SLEEP=1 \
     bash -c "printf 'show version\n' | bash '$RUN' 192.0.2.10"
   [ "$status" -eq 0 ] || return 1
   [[ "$output" != *"IRIS_XR_SESSION_TIMEOUT"* ]] || return 1
-  grep -q '^900$' "$SLEEP_LOG"
+  grep -q '^150$' "$SLEEP_LOG"
 }
 
-@test "unset IRIS_XR_SESSION_TIMEOUT behaves as the 900s default, no warning" {
+@test "unset IRIS_XR_SESSION_TIMEOUT behaves as the 150s default, no warning" {
   run env FAKE_SLEEP=1 \
     bash -c "printf 'show version\n' | bash '$RUN' 192.0.2.10"
   [ "$status" -eq 0 ] || return 1
   [[ "$output" != *"IRIS_XR_SESSION_TIMEOUT"* ]] || return 1
-  grep -q '^900$' "$SLEEP_LOG"
+  grep -q '^150$' "$SLEEP_LOG"
 }
 
 @test "IRIS_XR_SESSION_TIMEOUT=0 stays valid: no warning, bound disabled" {

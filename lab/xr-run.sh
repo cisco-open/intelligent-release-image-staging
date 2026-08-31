@@ -44,9 +44,17 @@
 # undeploy job hung 28+ minutes with no rc until the container was
 # restarted). ServerAliveInterval/ServerAliveCountMax make ssh itself notice
 # a dead peer, and the whole session additionally runs under a hard
-# wall-clock bound of IRIS_XR_SESSION_TIMEOUT seconds (default 900),
+# wall-clock bound of IRIS_XR_SESSION_TIMEOUT seconds (default 150),
 # env-overridable; set it to 0 to disable the bound entirely (lab debugging
-# escape hatch). GNU coreutils `timeout` is not assumed present: this repo's
+# escape hatch). The 150s default is the top of the recon-derived 120-150s
+# band (agentinfo/xr-support/teardown-speed-recon.md section 1.4): every
+# healthy session recovered or inferred from live .20 job logs runs ~15-20s,
+# so 150s carries 6-10x headroom over that ceiling for both install and
+# teardown (the install Up-poll is 30 short client-looped sessions, not one
+# long one -- same memo, section 1.3 -- so no separate install knob is
+# needed), while still capping a worst-case two-stall teardown (Task 2's
+# at-most-two-bounded-sessions composite, device/xr-uninstall.sh) at 300s
+# total, well under the old default's 1800s. GNU coreutils `timeout` is not assumed present: this repo's
 # bats suite runs on Darwin, which ships neither `timeout` nor `gtimeout` by
 # default, and nothing else in this tree depends on it -- so the bound below
 # is a small portable watchdog (background + kill) instead of a `timeout`
@@ -57,18 +65,18 @@ set -uo pipefail
 HOST="${1:?usage: xr-run.sh <device-ip>  (commands on stdin)}"
 DEVICE_USER="${DEVICE_USER:?set DEVICE_USER (device login user; export it or 'source' creds/)}"
 export SSHPASS="${DEVICE_PASS:?set DEVICE_PASS (export it or 'source' your gitignored creds file)}"
-SESSION_TIMEOUT="${IRIS_XR_SESSION_TIMEOUT:-900}"
+SESSION_TIMEOUT="${IRIS_XR_SESSION_TIMEOUT:-150}"
 # A garbage value here must fall back to the default, never turn into an
 # instant kill: `sleep abc` or `sleep -5` fails immediately, and a naive
 # watchdog would read that failed sleep as "the bound already elapsed" and
 # fire rc 124 on every single session at t=0. Empty/unset already became
-# "900" via the ${:-900} default above and is intentionally silent; only a
+# "150" via the ${:-150} default above and is intentionally silent; only a
 # genuinely-set-but-invalid value (non-digits, a leading '-', embedded
 # whitespace) warns and falls back.
 case "$SESSION_TIMEOUT" in
   *[!0-9]*)
-    echo "xr-run.sh: IRIS_XR_SESSION_TIMEOUT='$SESSION_TIMEOUT' is not a non-negative integer -- using the 900s default instead" >&2
-    SESSION_TIMEOUT=900
+    echo "xr-run.sh: IRIS_XR_SESSION_TIMEOUT='$SESSION_TIMEOUT' is not a non-negative integer -- using the 150s default instead" >&2
+    SESSION_TIMEOUT=150
     ;;
 esac
 

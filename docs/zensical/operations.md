@@ -282,13 +282,37 @@ or a truncated read — refuses to continue rather than guess, and a failed
 teardown leaves the device's deployment record in `needs-reconcile` (a red badge in
 the console); undeploy or Force is legal to run again directly from that
 state, and the re-run converges the same way. Every command session to the
-router is bounded by `IRIS_XR_SESSION_TIMEOUT` (default 900 seconds), so a
-wedged router fails the job with a real exit code instead of hanging it —
-in the worst case, undeploy opens roughly eight best-effort router
-sessions, so a completely unresponsive router can hold a teardown job for
-close to two hours at the default bound; a deployment with a tighter
-job-queue deadline can export a lower `IRIS_XR_SESSION_TIMEOUT` (e.g.
-`300`) in the server's environment. Undeploy itself never touches a bare
+router is bounded by `IRIS_XR_SESSION_TIMEOUT` (tracked default 150 seconds
+in `lab/xr-run.sh`; a value exported in the server's environment always
+takes precedence over that default, `0` disables the bound entirely, and an
+invalid value falls back to the default with a logged warning), so a
+wedged router fails the job with a real exit code instead of hanging it. The
+150-second default sits at the top of a recon-derived 120-150-second band:
+every healthy session measured or inferred from recovered `.20` job logs ran
+~15-20 seconds, so 150s carries 6-10x headroom over that ceiling for both
+install and teardown alike — the install Up-poll is 30 short,
+client-looped sessions rather than one long one, so it shares the same
+bound safely without a separate knob
+(`agentinfo/xr-support/teardown-speed-recon.md`, section 1.4). Undeploy
+composes at most two bounded sessions per run — a read-only probe,
+deactivate, and sidecar-listing session, then a destructive
+uninstall/remove/sweep/verify session — so a completely unresponsive router
+now holds a teardown job for at most 300 seconds (two stalled sessions) at
+the default bound, down from the roughly two-hour worst case the old
+six-to-eleven-session, 900-second-default design could reach. A deployment
+with a tighter job-queue deadline can still export a lower
+`IRIS_XR_SESSION_TIMEOUT` (e.g. `60`) in the server's environment.
+
+`.20` operators: its `server/docker-compose.override.yml` still carries
+`IRIS_XR_SESSION_TIMEOUT=300`, set back when the tracked default was 900
+seconds. That override is now redundant for teardown — the tracked
+150-second default already bounds a worst-case two-session teardown at 300
+seconds, the same ceiling the override alone used to buy against the old
+900-second default — but leaving it in place is harmless: it only widens
+the per-session bound back out to 300s (a 600s worst case across two
+stalls) rather than reintroducing the old multi-hour exposure. Removing it
+tightens the worst case back down to the tracked default; that edit is the
+operator's to make, not something this change makes for them. Undeploy itself never touches a bare
 image filename and reports, in one summary line, that any operator-staged
 image was left in place. Undeploy never unassigns an image, so it never
 produces the agent's own per-file record on its own: that line — the file
