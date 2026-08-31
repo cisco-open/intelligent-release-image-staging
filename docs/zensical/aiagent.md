@@ -128,10 +128,15 @@ At the end of every step, state the next action required from me.
    agent code change**, not only after a server certificate rotation: packages
    are prebuilt, so a stale package silently ships the old agent.
    `tools/check-package-freshness.sh` verifies the IOx tars pin the live
-   catalog certificate, and covers the XR RPM too — by build time against
-   that certificate's own mtime, since it cannot unpack the RPM to check what
-   it actually pins the way it does for the tars; contents are not inspected
-   either way.
+   catalog certificate, and covers the XR RPM too — by build time against the
+   moment that certificate came into existence (its `notBefore`), since it
+   cannot unpack the RPM to check what it actually pins the way it does for
+   the tars; contents are not inspected either way. The comparison is
+   deliberately against the certificate's own `notBefore` rather than the
+   mtime of the `iris-catalog.pem` file: that file is a staged copy rewritten
+   at every bring-up, so its mtime tracks the last staging rather than the
+   certificate, and using it reported a perfectly good RPM as needing a
+   rebuild simply because the pem had been re-copied.
 7. **Onboard devices.** Start one-click onboarding from the Console and watch
    each job to completion. A Catalyst 9300 can use either Guest Shell or IOx; an
    explicit IOx choice with an unknown model fails before it touches the device.

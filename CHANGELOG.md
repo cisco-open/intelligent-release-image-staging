@@ -84,9 +84,9 @@ top-level `VERSION` file.
 - `tools/check-package-freshness.sh` now also covers the XR RPM
   (`iris-xr.rpm`), previously left for an operator to check by hand: it
   cannot unpack the RPM the way it unpacks the two IOx tars' inner archive,
-  so it compares the RPM's build time against the live catalog certificate's
-  own mtime instead of inspecting pinned contents, and says so plainly in
-  its output. `tools/start-compose-server.sh` runs the same by-mtime
+  so it compares the RPM's build time against the moment the live catalog
+  certificate came into existence instead of inspecting pinned contents, and
+  says so plainly in its output. `tools/start-compose-server.sh` runs the same
   comparison at bring-up and warns when a staged `iris-xr.rpm` predates the
   certificate it just (re)provisioned, so a stale package is visible before
   a router is ever onboarded from it rather than only in a later manual
@@ -173,6 +173,36 @@ top-level `VERSION` file.
   `NOTICE` for full font/icon attribution.
 
 ### Fixed
+- The origin now seeds every published image instead of only the first five.
+  A seeding torrent never completes, so each one permanently occupied one of
+  aria2's five default concurrent-download slots and any image published after
+  that was queued and never served. A device assigned such an image reported
+  staging indefinitely with no error recorded anywhere, because aria2 reports a
+  held-back torrent as waiting rather than as a failure. The same cap is lifted
+  on every device-side launcher, where a device holding five staged images
+  would otherwise never start a sixth transfer. Both limits are overridable
+  (`SEED_MAX_CONCURRENT` on the origin, `IRIS_MAX_CONCURRENT` /
+  `MAX_CONCURRENT` on devices).
+- The seeder now reports how many published torrents it is holding back, as
+  `queued_torrents` in the swarm observation and as the
+  `iris_seeder_queued_torrents` metric. A non-zero value means the origin is
+  refusing to serve a published image, which previously had no signal at all.
+- IOS-XR undeploy no longer fails against a router it has just cleaned. The
+  transport stripped a carriage return only where it sat immediately before a
+  newline, but the router also emits one at the *start* of an output line, and
+  that leading character defeated the anchored patterns the verify step uses:
+  an empty `iris-work` directory was read as still holding artifacts and the
+  teardown exited non-zero. Carriage returns are now stripped wherever they
+  appear, which also closes the opposite risk of an end-anchored match missing
+  a leftover sidecar file.
+- XR RPM freshness is judged against the catalog certificate's own creation
+  time rather than the modification time of a copy of it. The served
+  `iris-catalog.pem` is restaged at every bring-up, so its mtime tracked the
+  last staging rather than the certificate, and re-copying it alone was enough
+  to report a current `iris-xr.rpm` as needing a rebuild. Both the Console's
+  setup card and `tools/check-package-freshness.sh` now compare against the
+  certificate's `notBefore`; when that cannot be read, the row reports unknown
+  rather than falling back to the mtime.
 - A forced router undeploy now reclaims the VirtualPortGroup, NAT ACL, overload
   rule and static mapping that IRIS itself created, identified by the description
   IRIS writes into every VPG it creates and by IRIS's own name on the NAT objects.

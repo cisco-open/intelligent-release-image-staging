@@ -243,6 +243,12 @@ Private BitTorrent reduces server load by letting devices exchange pieces after 
 
 On Catalyst 9300 IOx devices the final agent-to-IOS transfer uses the bind-mounted SSD share and runs at disk speed; Catalyst 9300 Guest Shell writes through the guest-share; Catalyst 8000 routers stage over Guest Shell to `bootflash:`. On IE-3400 (or a Catalyst 9300 that fell back to the scp push) that transfer is capped by the platform's default control-plane policing at roughly 1.4 MB/s; IRIS never modifies CoPP.
 
+### How many torrents are served at once
+
+Both the origin seeder and every device agent raise aria2's concurrency limit well above any realistic catalog, because a *seeding* torrent never finishes and so would otherwise hold one of aria2's five default slots forever. Left at the default, the sixth published image is never served at all and any device assigned it reports staging indefinitely — aria2 treats a held-back torrent as waiting rather than as an error, so nothing is logged. Override with `SEED_MAX_CONCURRENT` (origin, default 1000) or `IRIS_MAX_CONCURRENT` / `MAX_CONCURRENT` (devices, default 100). These are not throughput controls: bandwidth is governed by peer limits and transfer policy, and lowering these only starves images.
+
+`iris_seeder_queued_torrents` is the signal to watch. Any non-zero value means the origin is holding back a published image; alert on it.
+
 ## Cleanup
 
 Use `device/device-uninstall.sh` (Guest Shell devices), `device/router-uninstall.sh` (Catalyst 8000 routers), or the IOx uninstall path for device cleanup. Cleanup removes IRIS-owned EEM applets, Guest Shell or IOx agent wiring, trustpoint binding, and staged agent artifacts. It still does not reload the device.

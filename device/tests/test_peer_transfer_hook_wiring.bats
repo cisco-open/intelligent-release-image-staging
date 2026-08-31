@@ -13,10 +13,11 @@
 # changeable, and RpcMethod.cc:158-164 filters per-download options through
 # getInitialOption(), silently dropping the rest -- so passing it in
 # aria2.addTorrent's options dict would be discarded with no error at all.
-# There are exactly two launchers: device/guestshell-start.sh (Catalyst AND
-# router -- router-install.sh runs the same bootstrap chain, differing only in
-# the /bootflash prefix) and device/iox/entrypoint.sh (IE3400 arm64 and the
-# amd64 app-hosting package).
+# There are three launchers: device/guestshell-start.sh (Catalyst AND router --
+# router-install.sh runs the same bootstrap chain, differing only in the
+# /bootflash prefix), device/iox/entrypoint.sh (IE3400 arm64 and the amd64
+# app-hosting package), and device/xr/entrypoint.sh (Cisco 8000 series, added
+# with IOS-XR support after this file first said "exactly two").
 #
 # The Guest Shell launcher's own behaviour is covered in
 # device/test_guestshell_start.bats.
