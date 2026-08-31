@@ -2800,12 +2800,23 @@
   // rather than required, which the state alone cannot express.
   var SETUP_CHIP_LEVELS = {
     ok: 'positive',
-    unset: 'warning', stale: 'warning', absent: 'warning',
+    unset: 'warning', stale: 'warning',
     configured_unrun: 'warning',
     // "cannot determine" is an honest unknown, not a claimed problem -- it
     // reads closer to Magnetic's Inactive ("unknown ... indefinite holds")
     // than to a Warning this module has no evidence to justify.
-    unknown: 'inactive'
+    //
+    // 'absent' (fix wave, reviewer Critical): a package for an architecture
+    // this deployment does not use -- console.md's own words, "needs no
+    // action" -- not a gap the operator failed to fill. The server ranks
+    // absent above ok in packages.state's worst-of roll-up
+    // (setup_status._RANK), so any single-architecture deployment (the
+    // common case: one of iris-amd64.tar/iris-arm64.tar never gets built on
+    // purpose) rolled up to 'absent' and painted a PERSISTENT false amber
+    // Warning here, in both Settings > Setup and wizard step 3, with
+    // nothing an operator could do to clear it. Not-applicable, same as
+    // 'unknown'.
+    unknown: 'inactive', absent: 'inactive'
   };
   var SETUP_CHIP_LABELS = {
     ok: 'Done', unset: 'Not configured', stale: 'Needs rebuild',
@@ -2894,13 +2905,25 @@
   // them apart. A failed/thrown fetch here must never invent "configured"
   // without evidence, so it resolves to null (treated as "don't know",
   // never as configured).
+  // Fix wave (reviewer Minor): the wizard's own showWizardStep needs this
+  // same payload again the instant it lands on step 4 (to populate #iv-mode/
+  // #iv-hour/#iv-last-run) -- entering the wizard and clicking Next both call
+  // this via refreshSetupWizard immediately before showing the resulting
+  // step, so without this cache that step 4 landing fetched the identical
+  // endpoint twice in a row. wizardIvStatus is consumed (read, then cleared)
+  // by that one call site; any OTHER path to step 4 -- Back, a direct
+  // steplist click, neither of which refreshes first -- finds it null and
+  // falls through to its own fresh fetch, same as before this fix.
+  var wizardIvStatus = null;
   async function fetchIvScheduleConfigured() {
     try {
       var r = await fetch('/api/settings/image-verification');
-      if (!r.ok) return null;
+      if (!r.ok) { wizardIvStatus = null; return null; }
       var iv = await r.json();
+      wizardIvStatus = iv;
       return (iv.mode || 'off') !== 'off';
     } catch (e) {
+      wizardIvStatus = null;
       return null;
     }
   }
@@ -3016,7 +3039,15 @@
       // Moved, not cloned (see mountImageVerification) -- Settings reclaims
       // the same live nodes back on its own way in.
       mountImageVerification('wz-iv-mount');
-      refreshImageVerificationSettings();
+      if (wizardIvStatus) {
+        // fetchIvScheduleConfigured (called via refreshSetupWizard, just
+        // before this) already fetched this exact payload -- reuse it
+        // instead of a second GET. See wizardIvStatus's own comment.
+        renderIvStatusFields(wizardIvStatus);
+        wizardIvStatus = null;
+      } else {
+        refreshImageVerificationSettings();
+      }
     }
     document.getElementById('wz-progress').textContent =
       'Step ' + (wizardStep + 1) + ' of ' + WIZARD_STEPS.length;
@@ -3321,6 +3352,15 @@
       ? (' · ' + esc(String(lr.outcome).slice(String(lr.outcome).indexOf(':') + 1).trim())) : '';
     return esc(fmtDate(lr.at)) + ' · ' + esc(lr.source || 'unknown') + ' ' + badge + counts + detail;
   }
+  // Pure DOM write, factored out so a caller already holding a freshly
+  // fetched payload (the wizard's own showWizardStep, fix wave below) can
+  // populate these fields without a second, redundant GET to the same
+  // endpoint refreshImageVerificationSettings already just made.
+  function renderIvStatusFields(iv) {
+    document.getElementById('iv-mode').value = iv.mode || 'off';
+    document.getElementById('iv-hour').value = String(iv.hour_utc == null ? 0 : iv.hour_utc);
+    document.getElementById('iv-last-run').innerHTML = fmtBulkhashLastRun(iv.last_run);
+  }
   async function refreshImageVerificationSettings() {
     // Setup pane's never-render-stale-as-healthy pattern (setupShowUnknown):
     // a failed GET must not silently leave whatever was already in
@@ -3336,9 +3376,7 @@
     }
     if (!r.ok) { lastRun.textContent = 'Could not load status.'; return; }
     var iv = await r.json();
-    document.getElementById('iv-mode').value = iv.mode || 'off';
-    document.getElementById('iv-hour').value = String(iv.hour_utc == null ? 0 : iv.hour_utc);
-    lastRun.innerHTML = fmtBulkhashLastRun(iv.last_run);
+    renderIvStatusFields(iv);
   }
   // Hour select is built once here (00:00-23:00 UTC) rather than spelled out
   // as 24 <option> elements in index.html.

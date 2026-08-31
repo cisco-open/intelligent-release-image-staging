@@ -664,3 +664,21 @@ def test_setup_pills_route_through_the_real_status_pill_system():
         "\n  }", 1)[0]
     assert "levelPillHTML(" in fn
     assert "class=\"badge " not in fn
+
+
+def test_absent_package_state_renders_inactive_not_warning():
+    """Fix wave (reviewer Critical): 'absent' means a package for an
+    architecture this deployment does not build -- console.md's own words,
+    "needs no action" -- not an operator gap. setup_status._RANK ranks
+    absent ABOVE ok in the worst-of roll-up, so any single-architecture
+    deployment (one of iris-amd64.tar/iris-arm64.tar never built on
+    purpose) rolls packages.state up to 'absent' and would otherwise paint
+    a permanent false amber Warning in both Settings > Setup and wizard
+    step 3, with nothing the operator could do to clear it. The server side
+    only pins the raw state string (setup_status.py has no concept of a
+    client-side pill level at all) -- this is the client-side level pin
+    that was missing."""
+    js = _webroot("app.js")
+    levels = js.split("var SETUP_CHIP_LEVELS = {", 1)[1].split("\n  };", 1)[0]
+    assert "absent: 'inactive'" in levels
+    assert "absent: 'warning'" not in levels

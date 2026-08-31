@@ -389,19 +389,25 @@ tab strip. Each sub-page is deep-linkable: `#settings/setup`,
 
 ### Setup
 
-The **Setup** sub-page (`#settings/setup`) is a post-install status panel: four
+The **Setup** sub-page (`#settings/setup`) is a post-install status panel: five
 cards — **admin account**, **telemetry destination**, **stage-host
-credentials**, and **device packages** — each carrying a live status chip and a
-short rationale, meant to be revisited any time after installing a server
-rather than completed in one sitting. The admin card links to Settings ›
-General; the telemetry and stage-host cards open the setup flow (`#setup`),
-which hosts those forms. The telemetry card also names the endpoint in effect
-and whether it is a console override or the deployment default. Every card's
-status is one of `ok`, `unset`, `stale`, `absent`, or
-`unknown`. `absent` and `unknown` both mean the server could not determine
-the state; a failed or malformed status fetch shows every chip as `unknown`
-rather than leaving a previous, possibly stale, render on screen. Neither is
-ever presented as success.
+credentials**, **device packages**, and **image verification** — each
+carrying a live status chip and a short rationale, meant to be revisited any
+time after installing a server rather than completed in one sitting. The
+admin card links to Settings › General; the telemetry, stage-host, and image
+verification cards all open the setup flow (`#setup`), which hosts those
+controls as steps 1, 2, and 4. The telemetry card also names the endpoint in
+effect and whether it is a console override or the deployment default. Every
+card's status is one of `ok`, `unset`, `stale`, `absent`, or `unknown`, plus a
+sixth reading unique to image verification — a schedule that is configured
+but has not yet produced a successful run, worded distinctly ("Configured —
+no successful run yet") from one never configured at all. `absent` and
+`unknown` both mean the server could not determine the state; a failed or
+malformed status fetch shows every chip as `unknown` rather than leaving a
+previous, possibly stale, render on screen. Neither is ever presented as
+success — and `absent` is rendered as a neutral, not-applicable chip rather
+than a warning, since (as the device packages paragraph below explains) it
+routinely just means an architecture this deployment does not use.
 
 The **device packages** card exists because the IOx device packages
 (`iris-arm64.tar`, `iris-amd64.tar`) bake the catalog's TLS certificate in at
