@@ -38,6 +38,31 @@ fingerprint() {  # <pem file> -> bare sha256 fingerprint, or empty
     | sed 's/.*Fingerprint=//' || true
 }
 
+# <pem file> -> the certificate's OWN creation time as epoch seconds, or empty.
+#
+# This exists because a certificate's notBefore is the only baseline that
+# survives being copied. The obvious alternative -- the mtime of the pem file
+# on disk -- is wrong in a way that bites: /srv/artifacts/iris-catalog.pem is a
+# STAGED COPY, re-written on every bring-up, so its mtime records the last
+# staging operation and says nothing about when the certificate came into
+# existence. Baselining the XR RPM against it reported "Needs rebuild" for an
+# RPM built ELEVEN MINUTES AFTER the very certificate it was accused of
+# predating (operator report 2026-08-31), purely because a later bring-up
+# re-copied the pem. A false "rebuild me" is not harmless: it teaches the
+# operator to ignore the one signal that catches a real rotation.
+#
+# Both date dialects are tried because this runs on the Linux server (GNU date,
+# -d) and under the bats suite on Darwin (BSD date, -j -f).
+cert_notbefore_epoch() {  # <pem file> -> epoch seconds, or empty
+  local nb
+  nb="$(openssl x509 -in "$1" -noout -startdate 2>/dev/null \
+        | sed 's/^notBefore=//')" || true
+  [ -n "$nb" ] || return 0
+  date -u -d "$nb" '+%s' 2>/dev/null \
+    || date -u -j -f '%b %e %H:%M:%S %Y %Z' "$nb" '+%s' 2>/dev/null \
+    || true
+}
+
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -69,6 +94,14 @@ echo "catalog certificate in use"
 echo "  served by catalog   : ${SERVED:-<unreachable>}${HOSTPORT:+  ($HOSTPORT)}"
 echo "  handed to devices   : ${DISTRIBUTED:-<unavailable>}"
 REFERENCE="${SERVED:-$DISTRIBUTED}"
+# The pem file backing $REFERENCE, so the XR check below can read that same
+# certificate's notBefore. Prefer what the catalog actually serves.
+REFERENCE_PEM=""
+if [ -n "$SERVED" ]; then
+  REFERENCE_PEM="$TMP/served.pem"
+elif [ -n "$DISTRIBUTED" ]; then
+  REFERENCE_PEM="$TMP/dist.pem"
+fi
 CATALOG_DRIFT=0
 if [ -z "$REFERENCE" ]; then
   echo "!! cannot determine the live catalog certificate; is the server running?" >&2
@@ -138,20 +171,18 @@ else
   XR_BUILT_EPOCH="$(date -r "$XR_PATH" '+%s' 2>/dev/null || true)"
   XR_BUILT="$(date -r "$XR_PATH" '+%Y-%m-%d %H:%M' 2>/dev/null || echo '?')"
   CERT_EPOCH=""
-  if docker inspect "$IRIS_CONTAINER" >/dev/null 2>&1; then
-    CERT_EPOCH="$(docker exec "$IRIS_CONTAINER" stat -c %Y /srv/artifacts/iris-catalog.pem 2>/dev/null || true)"
-  fi
+  [ -n "$REFERENCE_PEM" ] && CERT_EPOCH="$(cert_notbefore_epoch "$REFERENCE_PEM")"
   if [ -z "$XR_BUILT_EPOCH" ]; then
     printf '  %-18s build time unreadable -- contents not inspected regardless\n' "$XR_PKG"
     XR_STATE="unknown"
   elif [ -z "$CERT_EPOCH" ]; then
-    printf '  %-18s built %s  UNKNOWN (live certificate mtime unavailable; contents not inspected)\n' "$XR_PKG" "$XR_BUILT"
+    printf '  %-18s built %s  UNKNOWN (certificate creation time unavailable; contents not inspected)\n' "$XR_PKG" "$XR_BUILT"
     XR_STATE="unknown"
   elif [ "$XR_BUILT_EPOCH" -ge "$CERT_EPOCH" ]; then
-    printf '  %-18s built %s  OK-BY-MTIME (built after the current certificate; contents not inspected)\n' "$XR_PKG" "$XR_BUILT"
+    printf '  %-18s built %s  OK-BY-MTIME (built after the certificate was created; contents not inspected)\n' "$XR_PKG" "$XR_BUILT"
     XR_STATE="ok"
   else
-    printf '  %-18s built %s  STALE-BY-MTIME (built before the current certificate; contents not inspected)\n' "$XR_PKG" "$XR_BUILT"
+    printf '  %-18s built %s  STALE-BY-MTIME (built before the certificate was created; contents not inspected)\n' "$XR_PKG" "$XR_BUILT"
     XR_STATE="stale"
   fi
 fi
@@ -174,7 +205,7 @@ if [ ${#STALE[@]} -gt 0 ]; then
 fi
 if [ "$XR_STATE" = "stale" ]; then
   echo "STALE (by mtime): $XR_PKG"
-  echo "Built before the current certificate; only build time was compared, never contents --"
+  echo "Built before the certificate was created; only build time was compared, never contents --"
   echo "a router onboarded from it may be pinning a certificate that has since rotated out."
   echo "Fix: $XR_REMEDY"
 fi

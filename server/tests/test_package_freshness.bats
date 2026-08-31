@@ -12,6 +12,16 @@ setup() {
 
   cat > "$STUB/openssl" <<'STUB'
 #!/usr/bin/env bash
+# notBefore is the certificate's own creation time -- the honest baseline for
+# XR RPM freshness, since the pem file's mtime only tracks the last time the
+# copy was staged. Default is far in the past so the common case is "the RPM
+# was built after the cert existed".
+for a in "$@"; do
+  if [ "$a" = -startdate ]; then
+    printf 'notBefore=%s\n' "${FAKE_CERT_NOTBEFORE:-Jan  1 00:00:00 2020 GMT}"
+    exit 0
+  fi
+done
 if [ "$1" = s_client ]; then
   printf 'served\n'
 elif [ "${2:-}" = -outform ]; then
@@ -80,30 +90,49 @@ STUB
 @test "XR RPM built after the live certificate is OK by mtime, contents not inspected" {
   : > "$ARTIFACTS/iris-xr.rpm"
   PATH="$STUB:$PATH" CATALOG_HOSTPORT=127.0.0.1:8443 ARTIFACTS_DIR="$ARTIFACTS" \
-    FAKE_CERT_EPOCH=0 run bash "$CHECK"
+    FAKE_CERT_NOTBEFORE="Jan  1 00:00:00 2020 GMT" run bash "$CHECK"
 
-  [[ "$output" == *"OK-BY-MTIME (built after the current certificate; contents not inspected)"* ]] || return 1
+  [[ "$output" == *"OK-BY-MTIME (built after the certificate was created; contents not inspected)"* ]] || return 1
   [[ "$output" == *"verified: the XR RPM was built after that certificate -- by build time only, contents not inspected."* ]] || return 1
   [ "$status" -eq 0 ]
 }
 
 @test "XR RPM built before the live certificate is stale by mtime, with the build-xr-package remedy" {
   : > "$ARTIFACTS/iris-xr.rpm"
-  # a cert mtime far in the future guarantees the RPM (just created) reads
+  # a cert CREATED far in the future guarantees the RPM (just created) reads
   # as built BEFORE it, regardless of the exact instant this test runs.
   PATH="$STUB:$PATH" CATALOG_HOSTPORT=127.0.0.1:8443 ARTIFACTS_DIR="$ARTIFACTS" \
-    FAKE_CERT_EPOCH=4102444800 run bash "$CHECK"
+    FAKE_CERT_NOTBEFORE="Jan  1 00:00:00 2035 GMT" run bash "$CHECK"
 
-  [[ "$output" == *"STALE-BY-MTIME (built before the current certificate; contents not inspected)"* ]] || return 1
+  [[ "$output" == *"STALE-BY-MTIME (built before the certificate was created; contents not inspected)"* ]] || return 1
   [[ "$output" == *"STALE (by mtime): iris-xr.rpm"* ]] || return 1
   [[ "$output" == *"Fix: tools/build-xr-package.sh --out artifacts/"* ]] || return 1
   [ "$status" -eq 1 ]
 }
 
+# The false positive reported by the operator on 2026-08-31. The certificate was
+# created long BEFORE this RPM was built, so the RPM is provably good -- but
+# /srv/artifacts/iris-catalog.pem is a STAGED COPY that a later bring-up
+# re-wrote, putting its mtime after the RPM's. Baselining on that mtime reported
+# "Needs rebuild" for an RPM built eleven minutes AFTER the very certificate it
+# was accused of predating. Only the certificate's own notBefore is immune: no
+# re-copy can move it.
+@test "a re-staged catalog pem does not make a good XR RPM look stale" {
+  : > "$ARTIFACTS/iris-xr.rpm"
+  PATH="$STUB:$PATH" CATALOG_HOSTPORT=127.0.0.1:8443 ARTIFACTS_DIR="$ARTIFACTS" \
+    FAKE_CERT_EPOCH=4102444800 FAKE_CERT_NOTBEFORE="Jan  1 00:00:00 2020 GMT" \
+    run bash "$CHECK"
+
+  [[ "$output" == *"OK-BY-MTIME"* ]] || return 1
+  [[ "$output" != *"STALE-BY-MTIME"* ]] || return 1
+  [[ "$output" != *"Needs rebuild"* ]] || return 1
+  [ "$status" -eq 0 ]
+}
+
 @test "XR RPM freshness never overclaims: the summary names tars and the RPM separately" {
   : > "$ARTIFACTS/iris-xr.rpm"
   PATH="$STUB:$PATH" CATALOG_HOSTPORT=127.0.0.1:8443 ARTIFACTS_DIR="$ARTIFACTS" \
-    FAKE_CERT_EPOCH=0 run bash "$CHECK"
+    FAKE_CERT_NOTBEFORE="Jan  1 00:00:00 2020 GMT" run bash "$CHECK"
 
   # the old blanket claim ("all served packages pin the live catalog
   # certificate") must be gone -- an RPM checked by mtime only was never

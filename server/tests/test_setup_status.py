@@ -9,17 +9,37 @@ import tarfile
 
 import setup_status
 
-# A tiny self-signed cert generated once and pinned here so the tests need no
-# openssl and no network. Any valid PEM works; only its bytes matter.
+# Two tiny self-signed certificates, generated once and pinned here so the
+# tests need no openssl and no network. These are REAL, well-formed
+# certificates: the XR rows read the certificate's own notBefore out of the
+# DER, so a hand-edited fixture whose declared lengths no longer match its
+# bytes (what used to live here) parses as garbage and can never be "ok".
 CERT_A = """-----BEGIN CERTIFICATE-----
-MIIBdzCCAR2gAwIBAgIUJ0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0YwCgYIKoZIzj0EAwIwFDES
-MBAGA1UEAwwJaXJpcy10ZXN0MB4XDTI2MDgyNDAwMDAwMFoXDTM2MDgyMTAwMDAwMFow
-FDESMBAGA1UEAwwJaXJpcy10ZXN0MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEZ0Z0
-Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0
-Z0Z0Z6NTMFEwHQYDVR0OBBYEFEZ0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0MB8GA1UdIwQYMBaA
-FEZ0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0Z0MA8GA1UdEwEB/wQFMAMBAf8wCgYIKoZIzj0EAwID
-SAAwRQIhAP//////////////////////////////////////AiAAAAAAAAAAAAAAAAAA
-AAAAAAAAAAAAAAAAAAAAAAAAAA==
+MIIBfTCCASKgAwIBAgITErjOyrGbWj2MCSGl3JsCCnYoIzAKBggqhkjOPQQDAjAU
+MRIwEAYDVQQDDAlpcmlzLXRlc3QwHhcNMjYwODMxMTUyMTMzWhcNMzYwODI4MTUy
+MTMzWjAUMRIwEAYDVQQDDAlpcmlzLXRlc3QwWTATBgcqhkjOPQIBBggqhkjOPQMB
+BwNCAARl74X5YjmZdXu85lF7yiiZ6yK/2phHS8bDSc5/6bvmT1e8VS7J5V8zYML7
+qXPAnxLFBC5J77AnycN4YgLiA0a5o1MwUTAdBgNVHQ4EFgQUDx/qTqyJr3SVpOuH
+ZVdWPozJD0EwHwYDVR0jBBgwFoAUDx/qTqyJr3SVpOuHZVdWPozJD0EwDwYDVR0T
+AQH/BAUwAwEB/zAKBggqhkjOPQQDAgNJADBGAiEAxKR9fRqeSmteizrr0liXRmHd
+UyFgIaahTtCo5admpTkCIQDunp+yV941ou62N8CO1s9sLIhY6kqVtDZqcYrn5TNy
+Eg==
+-----END CERTIFICATE-----
+"""
+
+# A DIFFERENT certificate, for the fingerprint-mismatch cases. A second real
+# certificate rather than a byte-twiddled copy of the first: a corrupted
+# CERT_A tests nothing a genuine rotation would produce.
+CERT_B = """-----BEGIN CERTIFICATE-----
+MIIBiDCCAS+gAwIBAgIUeqYVgs872IwwIFlZRKeGn0iz1dkwCgYIKoZIzj0EAwIw
+GjEYMBYGA1UEAwwPaXJpcy10ZXN0LW90aGVyMB4XDTI2MDgzMTE1MjE1N1oXDTM2
+MDgyODE1MjE1N1owGjEYMBYGA1UEAwwPaXJpcy10ZXN0LW90aGVyMFkwEwYHKoZI
+zj0CAQYIKoZIzj0DAQcDQgAE0dArL9DOeSceKhfGrPLT3SwjaIRwXtopX51Hzddd
+jMg8trdWWyCIW6O4r/+wqgQpET+HUU/C0XdqfJuV+Jo1b6NTMFEwHQYDVR0OBBYE
+FDqaJrZu91muTG5YiDGzaVIsrhSeMB8GA1UdIwQYMBaAFDqaJrZu91muTG5YiDGz
+aVIsrhSeMA8GA1UdEwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDRwAwRAIgCzWagQaC
+GlnxXdVQh386L+2NVnXMVYFeLnJ1Do5P4WcCIHgdOByAQN8abuZaEZ/qhYNDzOkE
+V7H1BW7MTLUDQL27
 -----END CERTIFICATE-----
 """
 
@@ -270,7 +290,7 @@ def test_telemetry_export_disabled_is_not_ok_even_with_an_endpoint(tmp_path):
 
 def test_stale_package_wins_over_ok_sibling(tmp_path):
     # arm64 pins a DIFFERENT cert than the one served -> stale
-    other = CERT_A.replace("MIIBdzCCAR2", "MIIBdzCCAR3")
+    other = CERT_B
     d, served = _artifacts(tmp_path, other, CERT_A)
     st = _call(d, served)
     assert st["packages"]["state"] == "stale"
@@ -288,7 +308,7 @@ def test_absent_package_is_not_ok(tmp_path):
 
 
 def test_stale_outranks_absent(tmp_path):
-    other = CERT_A.replace("MIIBdzCCAR2", "MIIBdzCCAR3")
+    other = CERT_B
     d, served = _artifacts(tmp_path, other, None)   # one stale, one absent
     st = _call(d, served)
     assert st["packages"]["state"] == "stale"
@@ -307,7 +327,7 @@ def test_served_vs_distributed_mismatch_is_unknown_not_stale(tmp_path):
     """If the cert we SERVE differs from the one we hand devices, new onboards
     are broken too -- rebuilding packages would not fix it, so this must not be
     reported as a mere stale package."""
-    other = CERT_A.replace("MIIBdzCCAR2", "MIIBdzCCAR3")
+    other = CERT_B
     d, served = _artifacts(tmp_path, CERT_A, CERT_A, distributed_pem=other)
     st = _call(d, served)
     assert st["packages"]["state"] == "unknown"
@@ -330,7 +350,7 @@ def test_stale_package_not_masked_by_missing_distributed_cert(tmp_path):
     """When one package is stale and distributed cert is missing, the stale
     finding must not be masked by the unknown state from missing cert. Stale
     is the more urgent fact: a rebuild is needed."""
-    other = CERT_A.replace("MIIBdzCCAR2", "MIIBdzCCAR3")
+    other = CERT_B
     d, served = _artifacts(tmp_path, other, CERT_A)  # arm64 stale, amd64 ok
     # Delete the distributed cert to simulate it being unavailable
     os.remove(os.path.join(d, "iris-catalog.pem"))
@@ -356,6 +376,10 @@ def test_stale_package_not_masked_by_missing_distributed_cert(tmp_path):
 # entire point of doing this differently from the tars.
 
 _BASE_TIME = 1_700_000_000.0
+# CERT_A's own notBefore (UTCTime 260831152133Z = 2026-08-31 15:21:33 UTC).
+# The XR rows anchor on this rather than on any file's mtime: the certificate's
+# creation time is the only baseline a re-copy of the pem cannot move.
+_CERT_A_NOT_BEFORE = 1_788_189_693.0
 
 
 def test_xr_package_absent_is_neutral_and_claims_nothing_checked(tmp_path):
@@ -376,40 +400,78 @@ def test_xr_package_absent_is_neutral_and_claims_nothing_checked(tmp_path):
 
 
 def test_xr_package_ok_when_built_after_the_current_certificate(tmp_path):
-    """Built after the served certificate's own mtime -- the best available
-    evidence (build time, not contents) that it was produced against the
-    live cert. 'ok' here must still say plainly that contents were never
+    """Built after the served certificate came into existence -- the best
+    available evidence (build time, not contents) that it was produced against
+    the live cert. 'ok' here must still say plainly that contents were never
     inspected, unlike an IOx tar's genuine fingerprint match."""
     d, served = _artifacts(tmp_path, CERT_A, CERT_A, xr=True)
-    os.utime(served, (_BASE_TIME, _BASE_TIME))
-    os.utime(os.path.join(d, "iris-xr.rpm"), (_BASE_TIME + 100, _BASE_TIME + 100))
+    os.utime(os.path.join(d, "iris-xr.rpm"),
+             (_CERT_A_NOT_BEFORE + 100, _CERT_A_NOT_BEFORE + 100))
     st = _call(d, served)
     by_name = {i["name"]: i for i in st["packages"]["items"]}
     xr = by_name["iris-xr.rpm"]
     assert xr["state"] == "ok"
     assert xr["fingerprint"] is None
-    assert xr["built_at"] == int(_BASE_TIME + 100)
+    assert xr["built_at"] == int(_CERT_A_NOT_BEFORE + 100)
     assert "not inspected" in xr["detail"]
     assert "certificate" in xr["detail"].lower()
     assert st["packages"]["state"] == "ok"
 
 
 def test_xr_package_stale_when_built_before_the_current_certificate(tmp_path):
-    """Built before the served certificate's mtime -- it may still pin
+    """Built before the served certificate existed -- it may still pin
     whatever certificate preceded a rotation. This must roll the whole
     packages card up to 'stale', the same as a genuinely mismatched tar
     fingerprint, even though only build time (never contents) was checked
     here."""
     d, served = _artifacts(tmp_path, CERT_A, CERT_A, xr=True)
-    os.utime(served, (_BASE_TIME, _BASE_TIME))
-    os.utime(os.path.join(d, "iris-xr.rpm"), (_BASE_TIME - 100, _BASE_TIME - 100))
+    os.utime(os.path.join(d, "iris-xr.rpm"),
+             (_CERT_A_NOT_BEFORE - 100, _CERT_A_NOT_BEFORE - 100))
     st = _call(d, served)
     by_name = {i["name"]: i for i in st["packages"]["items"]}
     xr = by_name["iris-xr.rpm"]
     assert xr["state"] == "stale"
-    assert xr["built_at"] == int(_BASE_TIME - 100)
+    assert xr["built_at"] == int(_CERT_A_NOT_BEFORE - 100)
     assert "not inspected" in xr["detail"]
     assert st["packages"]["state"] == "stale"
+
+
+def test_xr_package_survives_a_restaged_certificate_file(tmp_path):
+    """The operator-reported false positive of 2026-08-31.
+
+    The certificate itself is old -- the RPM was built well after it -- but
+    the pem on disk is a STAGED COPY that a later bring-up re-wrote, so its
+    mtime now sits far in the future. Baselining on that mtime reported
+    'Needs rebuild' for an RPM built eleven minutes after the very certificate
+    it was accused of predating. Only the certificate's own notBefore is
+    immune, because no re-copy can move it."""
+    d, served = _artifacts(tmp_path, CERT_A, CERT_A, xr=True)
+    # RPM built after the cert was created: genuinely fresh.
+    os.utime(os.path.join(d, "iris-xr.rpm"),
+             (_CERT_A_NOT_BEFORE + 100, _CERT_A_NOT_BEFORE + 100))
+    # ...but the pem file was re-staged long afterwards.
+    restaged = _CERT_A_NOT_BEFORE + 10_000_000
+    os.utime(served, (restaged, restaged))
+    st = _call(d, served)
+    by_name = {i["name"]: i for i in st["packages"]["items"]}
+    xr = by_name["iris-xr.rpm"]
+    assert xr["state"] == "ok"
+    assert st["packages"]["state"] == "ok"
+
+
+def test_xr_package_unknown_when_the_certificate_has_no_readable_not_before(tmp_path):
+    """Governing rule: never report ok on missing evidence. A pem whose
+    notBefore cannot be parsed leaves no honest baseline, so the row degrades
+    to unknown rather than silently falling back to a file mtime -- the very
+    baseline that produced the false positive above."""
+    d, served = _artifacts(tmp_path, CERT_A, CERT_A, xr=True)
+    with open(served, "w") as fh:
+        fh.write("-----BEGIN CERTIFICATE-----\nbm90YWNlcnQ=\n"
+                 "-----END CERTIFICATE-----\n")
+    st = _call(d, served)
+    by_name = {i["name"]: i for i in st["packages"]["items"]}
+    xr = by_name["iris-xr.rpm"]
+    assert xr["state"] == "unknown"
 
 
 def test_xr_package_unknown_when_served_cert_is_unreadable(tmp_path):
@@ -447,7 +509,7 @@ def test_xr_package_absent_does_not_outrank_a_stale_tar(tmp_path):
     because the XR row also rolled up to a non-ok state -- the same
     worst-of guarantee test_stale_outranks_absent already pins for the two
     tars, now with a third, absent-by-default row in the mix."""
-    other = CERT_A.replace("MIIBdzCCAR2", "MIIBdzCCAR3")
+    other = CERT_B
     d, served = _artifacts(tmp_path, other, CERT_A)   # xr=False -> absent
     st = _call(d, served)
     assert st["packages"]["state"] == "stale"
