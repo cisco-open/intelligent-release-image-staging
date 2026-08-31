@@ -12,27 +12,37 @@
 # per-step design that made 6-11 separate lab/xr-run.sh logins per teardown
 # collapsed into AT MOST TWO bounded logins, split on a SAFETY boundary, not
 # a topical one -- session 1/2 ("setup": early probe, unconditional-but-
-# adjudicated deactivate, sidecar listing -- NOTHING destructive to the
-# package or files rides this login) and session 2/2 ("sweep+verify": the
-# three destructive commands -- source uninstall, rm the RPM, rm the work
-# dir -- PLUS the sidecar sweep for whatever session 1 actually listed, PLUS
-# the final three-way verify). Session 2 is composed and sent ONLY when
+# adjudicated deactivate -- NOTHING destructive to the package or files
+# rides this login) and session 2/2 ("sweep+verify": the destructive
+# commands -- source uninstall, delete the RPM, empty-then-delete the work
+# dir -- PLUS the sidecar sweep (three unconditional harddisk: root globs),
+# PLUS the final three-way verify). Session 2 is composed and sent ONLY when
 # session 1's paired adjudication did NOT conclude the app is a confirmed
 # real failure -- a rejected-while-present deactivate exits before session 2
 # is ever built, so nothing destructive is ever composed, let alone sent, in
 # that case (this was a CRITICAL finding in review of this task's first
 # version: the destructive commands originally rode session 1's own blind
 # unconditional stream, so they had already executed by the time a real
-# failure was detected -- fixed by moving them into session 2's builder,
-# gated the same way the sidecar-rm lines already were).
+# failure was detected -- fixed by moving them into session 2's builder).
 #
-# Two, not one: the sidecar sweep needs session 1's own `ls` result to know
-# which bare paths to hand `rm` (never a glob), and there is no interactive
-# transport to react to a login's output before it ends -- see the long
-# design comment at the top of xr-uninstall.sh for the full justification
-# (this is a structural constraint the recon flagged as unresolved, not a
-# benign-error one, and lab/xr-run.sh is out of this script's own scope to
-# make interactive).
+# Run-free fix wave (agentinfo/specs/2026-08-31-xr-teardown-speed.md, live
+# hardware probe on 8010-R4/100.90.170.84, 2026-08-31): every 'run <cmd>'
+# line is GONE. 'run' EXECUTES its command but NEVER yields the piped -tt
+# session's prompt back, hanging every line typed after it in the same login
+# (deterministic on this box; the same signature as 8010-R1's intermittent
+# wedge). File removal now rides native XR EXEC 'delete /noprompt <path>'
+# (hardware-proven: 3s clean return, evaluates harddisk: globs); the old
+# ls-based list-then-targeted-rm sidecar sweep is GONE too -- replaced by
+# three unconditional glob deletes, so session 1 no longer lists anything.
+#
+# Two, not one: this is now purely a SAFETY-ordering constraint (the old
+# structural reason -- session 1's own `ls` result was needed to build
+# session 2's targeted deletes -- is gone along with the ls-based design).
+# There is no interactive transport to react to a login's output before it
+# ends, so "adjudicate deactivate, THEN decide whether to compose and send
+# anything destructive" can only happen BETWEEN two separate logins -- see
+# the long design comment at the top of xr-uninstall.sh for the full
+# justification.
 #
 # Final-line discipline: this Mac's bash (3.2) does not treat a failing
 # bare `[[ ... ]]` as fatal under `set -e` unless it is the last command
@@ -67,11 +77,12 @@ setup() {
   [[ "$output" != *"appmgr package uninstall package"* ]]
 }
 
-@test "dry-run removes only the two IRIS-named files, via run rm" {
+@test "dry-run removes the RPM and empties-then-removes the work dir, via native delete /noprompt" {
   run bash "$UNINSTALL" --dry-run
   [ "$status" -eq 0 ]
-  [[ "$output" == *"run rm -f /misc/disk1/iris-xr.rpm"* ]] || return 1
-  [[ "$output" == *"run rm -rf /misc/disk1/iris-work"* ]]
+  [[ "$output" == *"delete /noprompt harddisk:/iris-xr.rpm"* ]] || return 1
+  [[ "$output" == *"delete /noprompt harddisk:/iris-work/*"* ]] || return 1
+  [[ "$output" == *"delete /noprompt harddisk:/iris-work"* ]]
 }
 
 @test "dry-run never emits a startup-config persist step" {
@@ -87,7 +98,7 @@ setup() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"no appmgr application probe"* ]] || return 1
   [[ "$output" == *"appmgr package uninstall source probe-xr"* ]] || return 1
-  [[ "$output" == *"run rm -f /misc/disk1/probe-xr.rpm"* ]]
+  [[ "$output" == *"delete /noprompt harddisk:/probe-xr.rpm"* ]]
 }
 
 # Pin mapping (old -> new): "dry-run's [1/5] describes the probe-first,
@@ -119,7 +130,6 @@ setup() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"echo __IRIS_XR_VERIFY_APPS__"* ]] || return 1
   [[ "$output" == *"echo __IRIS_XR_VERIFY_DEACTIVATE_END__"* ]] || return 1
-  [[ "$output" == *"echo __IRIS_XR_VERIFY_SIDECARS_END__"* ]] || return 1
   [[ "$output" == *"echo __IRIS_XR_VERIFY_DONE__"* ]]
 }
 
@@ -132,7 +142,7 @@ setup() {
   run bash "$UNINSTALL" --dry-run
   [ "$status" -eq 0 ]
   session1="$(printf '%s\n' "$output" | sed '/composite session 2\/2/q')"
-  if printf '%s\n' "$session1" | grep -qE 'appmgr package uninstall source|run rm -f /misc/disk1/iris-xr\.rpm|run rm -rf /misc/disk1/iris-work'; then
+  if printf '%s\n' "$session1" | grep -qE 'appmgr package uninstall source|delete /noprompt harddisk:'; then
     return 1
   fi
 }
@@ -141,6 +151,25 @@ setup() {
   [ -r "$UNINSTALL" ] || return 1
   count="$(grep -c 'application summary' "$UNINSTALL" || true)"
   [ "$count" -eq 0 ]
+}
+
+# Run-free fix wave (agentinfo/specs/2026-08-31-xr-teardown-speed.md, live
+# hardware probe on 8010-R4/100.90.170.84, 2026-08-31): 'run <cmd>' executes
+# but NEVER yields the piped -tt session's prompt back, hanging every line
+# typed after it in the same login (deterministic on this box). No composed
+# stream may contain a bare XR 'run' command line ever again -- pinned here
+# against both dry-run modes' actual output text.
+@test "dry-run output (plain and FORCE) never contains a bare XR 'run' command line" {
+  run bash "$UNINSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  if printf '%s\n' "$output" | grep -qE '^run[[:space:]]'; then
+    return 1
+  fi
+  IRIS_FORCE_AGENT_ONLY=1 run bash "$UNINSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  if printf '%s\n' "$output" | grep -qE '^run[[:space:]]'; then
+    return 1
+  fi
 }
 
 @test "FORCE dry-run and record-driven dry-run touch the identical IRIS-named footprint" {
@@ -157,7 +186,7 @@ setup() {
   # router's VirtualPortGroup/NAT can be).
   for line in "show appmgr application-table" "no appmgr application iris" \
               "appmgr package uninstall source iris-xr" \
-              "run rm -f /misc/disk1/iris-xr.rpm" "run rm -rf /misc/disk1/iris-work"; do
+              "delete /noprompt harddisk:/iris-xr.rpm" "delete /noprompt harddisk:/iris-work"; do
     [[ "$plain" == *"$line"* ]] || return 1
     [[ "$forced" == *"$line"* ]] || return 1
   done
@@ -195,8 +224,8 @@ setup() {
 # Live path against a stubbed lab/xr-run.sh
 #
 # The composite sends exactly TWO logins per real teardown: session 1/2
-# ("setup") is the request that carries the SIDECARS marker (unique to it --
-# session 2/2 never lists the sidecar directory again); session 2/2
+# ("setup") is the request that carries the DEACTIVATE marker (unique to it
+# -- session 2/2 never touches configure/deactivate again); session 2/2
 # ("sweep+verify") is the request that carries the FILES marker (unique to
 # it -- session 1/2 never reads harddisk: directly). The stub below responds
 # to each based on which marker the request itself is asking for, exactly
@@ -234,12 +263,14 @@ next_app_row() {
 }
 
 case "$cmds" in
-  *"__IRIS_XR_VERIFY_SIDECARS__"*)
-    # session 1/2 (setup): APPS (early probe) -> DEACTIVATE -> SIDECARS.
-    # NOTHING destructive rides this request -- the stub does not need to
-    # (and does not) special-case that; it is the request body itself
-    # (asserted by the tests below) that proves the destructive commands
-    # were never composed into this call.
+  *"__IRIS_XR_VERIFY_DEACTIVATE__"*)
+    # session 1/2 (setup): APPS (early probe) -> DEACTIVATE. NOTHING
+    # destructive rides this request -- the stub does not need to (and does
+    # not) special-case that; it is the request body itself (asserted by the
+    # tests below) that proves the destructive commands were never composed
+    # into this call. No sidecar listing either (fix-wave rewrite): the
+    # sidecar sweep is three unconditional harddisk: root globs now, sent
+    # unconditionally in session 2 -- session 1 has nothing to list.
     if [ "${FAKE_VERIFY_OMIT_APPS:-no}" != "yes" ]; then
       row="$(next_app_row)"
       echo "__IRIS_XR_VERIFY_APPS__"
@@ -251,7 +282,7 @@ case "$cmds" in
       fi
       # FAKE_PROBE_RC simulates the transport dying with a nonzero exit
       # (e.g. rc 124, the session-bound timeout) after whatever partial
-      # output already made it out above -- before DEACTIVATE/SIDECARS.
+      # output already made it out above -- before DEACTIVATE.
       if [ -n "${FAKE_PROBE_RC:-}" ] && [ "${FAKE_PROBE_RC}" != "0" ]; then
         exit "$FAKE_PROBE_RC"
       fi
@@ -267,14 +298,11 @@ case "$cmds" in
     if [ "${FAKE_VERIFY_OMIT_DEACTIVATE_END:-no}" != "yes" ]; then
       echo "__IRIS_XR_VERIFY_DEACTIVATE_END__"
     fi
-    echo "__IRIS_XR_VERIFY_SIDECARS__"
-    printf '%s\n' "${FAKE_ROOT_LISTING-}"
-    echo "__IRIS_XR_VERIFY_SIDECARS_END__"
     ;;
   *"__IRIS_XR_VERIFY_FILES__"*)
-    # session 2/2 (sweep+verify): the three destructive commands (when
-    # composed at all -- gated client-side, not by this stub) -> sidecar
-    # sweep -> APPS (final re-probe) -> SOURCES -> FILES -> DONE.
+    # session 2/2 (sweep+verify): the destructive commands (when composed at
+    # all -- gated client-side, not by this stub) -> APPS (final re-probe)
+    # -> SOURCES -> FILES -> DONE.
     if [ "${FAKE_VERIFY_OMIT_APPS:-no}" != "yes" ]; then
       row="$(next_app_row)"
       echo "__IRIS_XR_VERIFY_APPS__"
@@ -334,7 +362,7 @@ next_app_row() {
 }
 
 case "$cmds" in
-  *"__IRIS_XR_VERIFY_SIDECARS__"*)
+  *"__IRIS_XR_VERIFY_DEACTIVATE__"*)
     if [ "${FAKE_VERIFY_OMIT_APPS:-no}" != "yes" ]; then
       row="$(next_app_row)"
       echo "__IRIS_XR_VERIFY_APPS__"
@@ -355,9 +383,6 @@ case "$cmds" in
       echo "% Invalid input detected"
     fi
     echo "__IRIS_XR_VERIFY_DEACTIVATE_END__"
-    echo "__IRIS_XR_VERIFY_SIDECARS__"
-    printf '%s\n' "${FAKE_ROOT_LISTING-}"
-    echo "__IRIS_XR_VERIFY_SIDECARS_END__"
     ;;
   *"__IRIS_XR_VERIFY_FILES__"*)
     if [ -n "${FAKE_VERIFY_RC:-}" ] && [ "${FAKE_VERIFY_RC}" != "0" ]; then
@@ -513,13 +538,13 @@ _xr_call_body() {
 # the sweep+verify login at all.
 #
 # CRITICAL fix-wave pin (restored): an earlier version of this task's
-# composite put the three destructive commands (source uninstall, rm the
-# RPM, rm the work dir) unconditionally in session 1's OWN blind stream, so
+# composite put the destructive commands (source uninstall, delete the RPM,
+# delete the work dir) unconditionally in session 1's OWN blind stream, so
 # by the time this exact real-failure verdict was reached they had ALREADY
 # executed against a device this script had just concluded was still
 # running the app -- confirmed by empirical transcript reproduction in
-# review. The anti-uninstall/rm assertion below is the direct regression pin
-# for that finding: it must fail the test if either destructive command
+# review. The anti-uninstall/delete assertion below is the direct regression
+# pin for that finding: it must fail the test if either destructive command
 # appears ANYWHERE in the transport log once real failure is concluded, not
 # just skip the check the way the earlier version did.
 @test "live: refuses to continue when the app is present and deactivate is rejected (paired adjudication, real failure)" {
@@ -534,9 +559,9 @@ _xr_call_body() {
   count="$(printf '%s\n' "$log" | grep -c '=== CALL START ===')"
   [ "$count" -eq 1 ] || return 1
   # RESTORED: nothing destructive was ever sent to the device in this run --
-  # session 2, the only place any of the three destructive commands can now
-  # live, was never composed at all.
-  if printf '%s\n' "$log" | grep -qE 'appmgr package uninstall source|run rm -f /misc/disk1/iris-xr\.rpm|run rm -rf /misc/disk1/iris-work'; then
+  # session 2, the only place any of the destructive commands can now live,
+  # was never composed at all.
+  if printf '%s\n' "$log" | grep -qE 'appmgr package uninstall source|delete /noprompt harddisk:'; then
     return 1
   fi
 }
@@ -555,7 +580,7 @@ _xr_call_body() {
   [ "$status" -eq 0 ] || return 1
   [[ "$output" == *"undeploy complete"* ]] || return 1
   first_call="$(_xr_call_body 1)"
-  if printf '%s\n' "$first_call" | grep -qE 'appmgr package uninstall source|run rm -f /misc/disk1/iris-xr\.rpm|run rm -rf /misc/disk1/iris-work'; then
+  if printf '%s\n' "$first_call" | grep -qE 'appmgr package uninstall source|delete /noprompt harddisk:'; then
     return 1
   fi
   # contrast: the destructive commands DID move somewhere -- call 2, once
@@ -563,8 +588,29 @@ _xr_call_body() {
   # outcome, not a silent deletion of the steps themselves.
   second_call="$(_xr_call_body 2)"
   [[ "$second_call" == *"appmgr package uninstall source iris-xr"* ]] || return 1
-  [[ "$second_call" == *"run rm -f /misc/disk1/iris-xr.rpm"* ]] || return 1
-  [[ "$second_call" == *"run rm -rf /misc/disk1/iris-work"* ]]
+  [[ "$second_call" == *"delete /noprompt harddisk:/iris-xr.rpm"* ]] || return 1
+  [[ "$second_call" == *"delete /noprompt harddisk:/iris-work/*"* ]] || return 1
+  [[ "$second_call" == *"delete /noprompt harddisk:/iris-work"* ]] || return 1
+  [[ "$second_call" == *"delete /noprompt harddisk:/*.torrent"* ]] || return 1
+  [[ "$second_call" == *"delete /noprompt harddisk:/*.aria2"* ]] || return 1
+  [[ "$second_call" == *"delete /noprompt harddisk:/*.peers.json"* ]]
+}
+
+# Run-free fix wave: pinned against the LIVE composed streams too (the
+# dry-run pin above only covers dry-run's own text) -- neither session's own
+# request body may ever contain a bare XR 'run' command line. 'run <cmd>'
+# executes but never yields the piped -tt session's prompt back, hanging
+# every line after it in the same login (hardware-proven, 8010-R4).
+@test "live: neither composed session's request body ever contains a bare XR 'run' command line" {
+  _xr_uninstall_stub_setup
+  run _xr_uninstall_run_live
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"undeploy complete"* ]] || return 1
+  first_call="$(_xr_call_body 1)"
+  second_call="$(_xr_call_body 2)"
+  if printf '%s\n%s\n' "$first_call" "$second_call" | grep -qE '^run[[:space:]]'; then
+    return 1
+  fi
 }
 
 # New pin (brief step 1(d), paired-adjudication half): probe-absent +
@@ -604,6 +650,25 @@ _xr_call_body() {
   log="$(cat "$FAKE_COMMAND_LOG")"
   count="$(printf '%s\n' "$log" | grep -c '=== CALL START ===')"
   [ "$count" -eq 1 ] || return 1
+}
+
+# Fix-wave ordering pin (live-reproduced twice, progress.md L2 RUN 1/2,
+# 100.90.170.84, 2026-08-31): a simulated rc-124 (session-bound timeout)
+# session 1 transcript must yield NO "[1/5] ... no appmgr application" line
+# at all. Before the fix, that line printed unconditionally before the rc
+# check below it, so a dead transport still let it reach stdout -- reading,
+# on any log that streams stdout without also surfacing the stderr ERROR
+# right after it, exactly like a genuine (false) "app absent" verdict. The
+# rc check now runs FIRST, so on rc 124 the script exits before [1/5] is
+# ever printed -- only the honest transport error appears.
+@test "live: a dead-transport (rc 124) session 1 mints NO false '[1/5] ... no appmgr application' line" {
+  _xr_uninstall_stub_setup
+  FAKE_PROBE_RC=124 run _xr_uninstall_run_live
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"transport exited 124"* ]] || return 1
+  if printf '%s\n' "$output" | grep -q '\[1/5\].*no appmgr application'; then
+    return 1
+  fi
 }
 
 @test "live: a probe truncated after its start marker (missing end marker) is a hard error, never absent" {
@@ -650,16 +715,15 @@ _xr_call_body() {
   [ "$count" -eq 1 ] || return 1
 }
 
-@test "live [echoing transport]: the sidecar sweep still issues its rm commands" {
+@test "live [echoing transport]: the sidecar sweep still issues its unconditional glob deletes" {
   _xr_uninstall_echoing_stub_setup
-  FAKE_ROOT_LISTING="8000-x64-26.2.1.iso
-8000-x64-26.2.1.iso.torrent
-notes.txt
-iris-work" run _xr_uninstall_run_live
+  run _xr_uninstall_run_live
   [ "$status" -eq 0 ] || return 1
   [[ "$output" == *"undeploy complete"* ]] || return 1
   log="$(cat "$FAKE_COMMAND_LOG")"
-  [[ "$log" == *"run rm -f /misc/disk1/8000-x64-26.2.1.iso.torrent"* ]]
+  [[ "$log" == *"delete /noprompt harddisk:/*.torrent"* ]] || return 1
+  [[ "$log" == *"delete /noprompt harddisk:/*.aria2"* ]] || return 1
+  [[ "$log" == *"delete /noprompt harddisk:/*.peers.json"* ]]
 }
 
 @test "live [echoing transport]: [5/5] still catches a planted forbidden artifact" {
@@ -803,9 +867,9 @@ iris  docker  iris-xr  Up  app_manager' run _xr_uninstall_run_live
 }
 
 # ---------------------------------------------------------------------------
-# MINOR 4: [5/5]'s FILES checks must be $-anchored per-line matches (the
-# sidecar sweep's own shape), not whole-blob substring tests -- an operator
-# file that merely CONTAINS the target text (notes.aria2.bak for ".aria2";
+# MINOR 4: [5/5]'s FILES checks must be $-anchored per-line matches, not
+# whole-blob substring tests -- an operator file that merely CONTAINS the
+# target text (notes.aria2.bak for ".aria2";
 # iris-workshop.txt for "iris-work") must never be flagged as a forbidden
 # IRIS leftover forever.
 # ---------------------------------------------------------------------------
@@ -823,46 +887,43 @@ iris  docker  iris-xr  Up  app_manager' run _xr_uninstall_run_live
 # F1: undeploy must also sweep IRIS's own *.torrent/*.aria2/*.peers.json
 # sidecars off the harddisk: root -- aria2 downloads straight there (no
 # placement step on this platform), so they never land inside iris-work/.
+#
+# Fix-wave rewrite: the sweep used to list harddisk: root first (`run ls`)
+# and hand `rm` one targeted bare name per match. That whole listing+match
+# step is GONE -- native XR `delete /noprompt` evaluates harddisk: globs
+# directly (hardware-proven: a verified-existing file was removed via
+# `delete /noprompt harddisk:/*.torrent`), so the sweep is now three
+# unconditional glob deletes, sent every time session 2 is composed at all.
+# Selectivity (which files a glob actually touches) is now the device's own
+# proven glob-evaluation behavior, not something this script's composed
+# command list can demonstrate directly -- these tests instead pin that the
+# three sanctioned globs are exactly what gets sent, with no listing step
+# and no per-name targeting.
 # ---------------------------------------------------------------------------
 
-@test "dry-run describes a glob-free sidecar sweep of harddisk: root" {
+@test "dry-run describes the unconditional glob-based sidecar sweep of harddisk: root" {
   run bash "$UNINSTALL" --dry-run
   [ "$status" -eq 0 ]
-  [[ "$output" == *"run ls -1 /misc/disk1"* ]] || return 1
-  if printf '%s\n' "$output" | grep -F 'run rm' | grep -q '[*?]'; then
+  [[ "$output" == *"delete /noprompt harddisk:/*.torrent"* ]] || return 1
+  [[ "$output" == *"delete /noprompt harddisk:/*.aria2"* ]] || return 1
+  [[ "$output" == *"delete /noprompt harddisk:/*.peers.json"* ]] || return 1
+  if printf '%s\n' "$output" | grep -q 'run ls'; then
     return 1
   fi
 }
 
-@test "live: sweeps torrent/aria2/peers.json sidecars but leaves operator files and the image alone" {
+@test "live: session 2 always composes the three sidecar glob deletes, never a listing or targeted name" {
   _xr_uninstall_stub_setup
-  FAKE_ROOT_LISTING="8000-x64-26.2.1.iso
-8000-x64-26.2.1.iso.torrent
-8000-x64-26.2.1.iso.aria2
-8000-x64-26.2.1.iso.peers.json
-notes.txt
-iris-work" run _xr_uninstall_run_live
+  run _xr_uninstall_run_live
   [ "$status" -eq 0 ]
   [[ "$output" == *"undeploy complete"* ]] || return 1
-  log="$(cat "$FAKE_COMMAND_LOG")"
-  [[ "$log" == *"run rm -f /misc/disk1/8000-x64-26.2.1.iso.torrent"* ]] || return 1
-  [[ "$log" == *"run rm -f /misc/disk1/8000-x64-26.2.1.iso.aria2"* ]] || return 1
-  [[ "$log" == *"run rm -f /misc/disk1/8000-x64-26.2.1.iso.peers.json"* ]] || return 1
-  if printf '%s\n' "$log" | grep -q 'run rm -f /misc/disk1/notes.txt'; then
-    return 1
-  fi
-  if printf '%s\n' "$log" | grep -qFx 'run rm -f /misc/disk1/8000-x64-26.2.1.iso'; then
-    return 1
-  fi
-}
-
-@test "live: no sidecar-removal call is made when nothing at root needs sweeping" {
-  _xr_uninstall_stub_setup
-  FAKE_ROOT_LISTING="notes.txt
-iris-work" run _xr_uninstall_run_live
-  [ "$status" -eq 0 ]
-  log="$(cat "$FAKE_COMMAND_LOG")"
-  if printf '%s\n' "$log" | grep -q 'run rm -f /misc/disk1/notes.txt'; then
+  second_call="$(_xr_call_body 2)"
+  [[ "$second_call" == *"delete /noprompt harddisk:/*.torrent"* ]] || return 1
+  [[ "$second_call" == *"delete /noprompt harddisk:/*.aria2"* ]] || return 1
+  [[ "$second_call" == *"delete /noprompt harddisk:/*.peers.json"* ]] || return 1
+  # session 1 (the only login that could have listed harddisk: root) never
+  # ran `run ls` -- it no longer exists anywhere in this script.
+  if printf '%s\n' "$(cat "$FAKE_COMMAND_LOG")" | grep -q 'run ls'; then
     return 1
   fi
 }

@@ -32,13 +32,18 @@
 # across platforms (agentinfo/xr-support/research/xrfact-appmgr-docker-hosting.md);
 # this script only ever uses the source form, which is unambiguous here.
 #
-# File removal rides 'run rm' at the Linux layer (proven:
-# agentinfo/xr-support/LAB-RESULTS-2026-08-27.md section 1.3 -- a Linux-layer
-# write/delete under /misc/disk1 is immediately visible at harddisk:) rather
-# than the native XR 'delete' EXEC command, whose confirmation-prompt and
-# recursive-delete syntax were never hardware-exercised. 'run' takes NO
-# quotes (same trap already recorded for IOS-XE Guest Shell); every argument
-# below is a bare path, so that trap does not apply here.
+# File removal rides the native XR EXEC 'delete /noprompt <path>' command
+# under harddisk: -- NEVER 'run' (see the teardown-speed composite section
+# below: 'run <cmd>' executes but never yields the piped -tt session's prompt
+# back, hanging every line typed after it in the same login; deterministic on
+# 8010-R4/100.90.170.84, intermittent on 8010-R1 -- same signature). 'delete
+# /noprompt' returns cleanly in seconds and evaluates harddisk: globs, both
+# hardware-proven (progress.md 8010-R4 probe matrix, 2026-08-31). 'delete'
+# WITHOUT /noprompt hangs on its own [confirm] prompt (a piped newline never
+# satisfies it) and 'rmdir' hangs the same way on its [y|n] prompt, so
+# neither is ever used here. '/recurse' is invalid syntax in both flag
+# orders -- an existing directory is emptied via its own glob
+# (harddisk:/<dir>/*) then removed as a bare path: two commands, not one.
 #
 # No 'copy running-config startup-config': IOS-XR has no running/startup
 # split to bridge -- 'commit' IS the persisted state.
@@ -56,15 +61,15 @@
 # boundary, not a topical one:
 #
 #   session 1/2 (setup_request/run_setup): READ-ONLY probe + the one
-#   genuinely unconditional-but-adjudicated write (deactivate) + the
-#   read-only sidecar listing. NOTHING DESTRUCTIVE to the package/files rides
-#   this login.
+#   genuinely unconditional-but-adjudicated write (deactivate). NOTHING
+#   DESTRUCTIVE to the package/files rides this login.
 #
-#   session 2/2 (sweep_verify_request/run_sweep_verify): the three
-#   destructive commands (source uninstall, rm the RPM, rm the work dir) +
-#   the sidecar sweep (for whatever session 1's listing actually matched) +
-#   the final three-way verify -- composed and sent ONLY when session 1's
-#   paired adjudication (below) did NOT conclude the app is a confirmed real
+#   session 2/2 (sweep_verify_request/run_sweep_verify): the destructive
+#   commands (source uninstall, delete the RPM, empty-then-delete the work
+#   dir) + the sidecar sweep (three unconditional harddisk: root globs --
+#   *.torrent, *.aria2, *.peers.json; no listing needed, see the fix-wave
+#   note below) + the final three-way verify -- composed and sent ONLY when
+#   session 1's paired adjudication (below) did NOT conclude the app is a confirmed real
 #   failure. A rejected-while-present deactivate exits before session 2 is
 #   even built, so in that case NOTHING destructive is ever composed, let
 #   alone sent -- table below.
@@ -83,23 +88,23 @@
 # running) can no longer be followed by an uninstall/rm against a device this
 # script has already concluded is still running the app.
 #
-# Why two logins, not one: the sidecar sweep needs session 1's own `ls`
-# result to know which bare paths to hand `rm` (never a glob -- see the
-# sidecar-sweep comment below), and there is no interactive transport here to
-# react to a login's output before it ends (lab/xr-run.sh pipes the whole
-# request in and reads the whole transcript back only once the session is
-# over; making it react mid-stream is out of this script's own scope). This
-# is a structural constraint, not a benign-error one -- flagged as an open
-# question in the recon (section 5, concern 2) with no resolution handed to
-# this script, so it stays exactly two-at-most bounded logins rather than
-# inventing unproven on-device shell/glob syntax to force it to one
-# (LAB-RESULTS-2026-08-27.md: bare `run` with no arguments HANGS a piped
-# session, and `run sh -c "..."` is REJECTED with `% Invalid input detected`
-# -- both hardware-proven dead ends for folding list+match+delete into a
-# single `run` line). At most two logins is still a large win over 6-11:
-# worst case, a wedged router now burns at most 2x the session bound per
-# teardown, not ~3x-11x, and a healthy teardown is one or two short logins
-# instead of six-to-eleven.
+# Why two logins, not one: this is now purely a SAFETY-ordering constraint,
+# not a structural one. (An earlier draft of this comment also cited a
+# structural reason -- session 1's own `ls` result was needed to know which
+# bare paths to hand a targeted `rm`. That reason is GONE: the fix-wave
+# rewrite below replaced the listing+targeted-delete design with three
+# unconditional harddisk: root globs, hardware-proven safe -- see
+# sweep_verify_request()'s comment.) The safety reason stands on its own:
+# there is no interactive transport here to react to a login's output before
+# it ends (lab/xr-run.sh pipes the whole request in and reads the whole
+# transcript back only once the session is over; making it react mid-stream
+# is out of this script's own scope), so "adjudicate deactivate, THEN decide
+# whether to compose and send anything destructive" can only happen BETWEEN
+# two separate logins -- never within a single one, no matter what CLI
+# syntax the destructive step itself uses. At most two logins is still a
+# large win over the old per-step design's 6-11: worst case, a wedged router
+# now burns at most 2x the session bound per teardown, not ~3x-11x, and a
+# healthy teardown is one or two short logins instead of six-to-eleven.
 #
 # Per-step honesty is unchanged in kind, not just carried over as a slogan:
 # every step still gets its own [n/5] marker on this script's OWN stdout (the
@@ -118,8 +123,8 @@
 # composed, let alone sent.
 #
 # Dry-run honesty: dry-run calls setup_request()/sweep_verify_request()
-# directly (with a placeholder sidecar name and include_destructive=1, since
-# dry-run has no live device to adjudicate against) and prints their REAL
+# directly (with include_destructive=1, since dry-run has no live device to
+# adjudicate against) and prints their REAL
 # output -- the same functions the live path sends over RUN(), not a
 # hand-maintained second copy of the command text. This was a plain
 # re-description in an earlier draft of this task; that risked exactly the
@@ -148,8 +153,9 @@
 #     proven rejection banner => a real failure, fail loud (refuse to
 #     continue -- the SAME "still active" exit this script has always used).
 #     Session 2 is NEVER composed, so NOTHING destructive -- not the source
-#     uninstall, not either `run rm`, not the sidecar sweep -- is ever sent
-#     to a device this script has just concluded is still running the app.
+#     uninstall, not either `delete /noprompt`, not the sidecar sweep -- is
+#     ever sent to a device this script has just concluded is still running
+#     the app.
 #   - probe showed the app PRESENT and deactivate was NOT rejected =>
 #     proceed; session 2 is composed (destructive commands included) and
 #     [5/5]'s own independent re-probe there is still the sole arbiter of
@@ -183,10 +189,11 @@ RPM_PATH="/misc/disk1/$SOURCE_NAME.rpm"
 VERIFY_MARKER="__IRIS_XR_VERIFY_"
 
 # ---------------------------------------------------------------------------
-# Session 1/2 (setup): early probe, unconditional-but-adjudicated deactivate,
-# sidecar listing. NOTHING destructive to the package or files rides this
-# login -- see the header comment's "why two, not one" and safety-boundary
-# discussion above.
+# Session 1/2 (setup): early probe, unconditional-but-adjudicated deactivate.
+# NOTHING destructive to the package or files rides this login -- see the
+# header comment's "why two, not one" and safety-boundary discussion above.
+# No sidecar listing here (fix-wave rewrite): the sidecar sweep no longer
+# needs one -- see sweep_verify_request() below.
 # ---------------------------------------------------------------------------
 setup_request() {
 cat <<EOF
@@ -198,34 +205,44 @@ configure
 no appmgr application $APPID
 commit
 echo ${VERIFY_MARKER}DEACTIVATE_END__
-echo ${VERIFY_MARKER}SIDECARS__
-run ls -1 /misc/disk1
-echo ${VERIFY_MARKER}SIDECARS_END__
 EOF
 }
 
 # ---------------------------------------------------------------------------
-# Session 2/2 (sweep+verify): the three destructive commands (only when
-# $include_destructive = 1 -- mirrors the sidecar-rm conditional below, and
-# is set to 1 by the live path ONLY once session 1's paired adjudication has
-# NOT concluded a real failure), the sidecar sweep (only the names session
-# 1's listing actually matched -- never a glob handed to 'run', unproven
-# quote/glob handling, same trap as IOS-XE Guest Shell), then the final
-# three-way verify. This is the SAME builder for FORCE and record-driven
-# paths -- FORCE only prepends a client-side banner before session 1, it
-# never changes either composed stream, so the byte-parity test compares
-# the real, complete streams.
+# Session 2/2 (sweep+verify): the destructive commands -- source uninstall,
+# delete the RPM, empty-then-delete the work dir, and the sidecar sweep --
+# only when $include_destructive = 1 (set to 1 by the live path ONLY once
+# session 1's paired adjudication has NOT concluded a real failure), then the
+# final three-way verify. Every destructive line here is native XR EXEC
+# 'delete /noprompt <path>' (never 'run' -- see the top-of-file header
+# comment and the teardown-speed composite comment above; both proven clean
+# on hardware, progress.md 8010-R4 probe matrix, 2026-08-31).
+#
+# Fix-wave rewrite (this task): the sidecar sweep used to need session 1's
+# own `ls` result to build one targeted `run rm -f <bare-name>` per matched
+# file (never a glob handed to `run` -- unproven quote/glob handling, same
+# trap as IOS-XE Guest Shell). That whole listing+match step is GONE: XR's
+# native `delete /noprompt` evaluates harddisk: globs directly
+# (hardware-proven: a verified-existing file was removed via
+# `delete /noprompt harddisk:/*.torrent`), so the sweep is now three
+# unconditional glob deletes at harddisk: root -- no listing, no per-name
+# match, and session 1 no longer needs to list anything for this step's
+# sake (see setup_request() above).
+#
+# This is the SAME builder for FORCE and record-driven paths -- FORCE only
+# prepends a client-side banner before session 1, it never changes either
+# composed stream, so the byte-parity test compares the real, complete
+# streams.
 # ---------------------------------------------------------------------------
 sweep_verify_request() {
-  local names="$1" include_destructive="$2"
+  local include_destructive="$1"
   local destructive=""
   if [ "$include_destructive" = "1" ]; then
-    destructive="$(printf 'appmgr package uninstall source %s\nrun rm -f %s\nrun rm -rf %s\n' \
-      "$SOURCE_NAME" "$RPM_PATH" "$WORK_DIR_PATH")"
+    destructive="$(printf 'appmgr package uninstall source %s\ndelete /noprompt harddisk:/%s\ndelete /noprompt harddisk:/%s/*\ndelete /noprompt harddisk:/%s\ndelete /noprompt harddisk:/*.torrent\ndelete /noprompt harddisk:/*.aria2\ndelete /noprompt harddisk:/*.peers.json\n' \
+      "$SOURCE_NAME" "${RPM_PATH##*/}" "${WORK_DIR_PATH##*/}" "${WORK_DIR_PATH##*/}")"
   fi
 cat <<EOF
 $destructive
-$( [ -n "$names" ] && printf '%s\n' "$names" | sed 's#^#run rm -f /misc/disk1/#' )
 echo ${VERIFY_MARKER}APPS__
 show appmgr application-table
 echo ${VERIFY_MARKER}SOURCES__
@@ -244,16 +261,16 @@ if [ "$DRY" -eq 1 ]; then
     echo "  XR activation (--net=host only) never creates anything else IRIS"
     echo "  would need a deployment record to prove ownership of."
   fi
-  echo "===== composite session 1/2 (setup): probe, deactivate, sidecar list -- NOTHING destructive ====="
+  echo "===== composite session 1/2 (setup): probe, deactivate -- NOTHING destructive ====="
   echo "===== [1/5] deactivate: probe app-table first; unconditional no appmgr application $APPID / commit ====="
   setup_request
   echo "  (already absent before deactivate: benign idempotent-skip; still active and rejected: fail-closed, refuse to continue -- session 2 is never composed or sent in that case)"
   echo "===== composite session 2/2 (sweep+verify): composed ONLY when session 1 did not conclude real failure ====="
   echo "===== [2/5] appmgr package uninstall source $SOURCE_NAME (Cisco 8000 form) ====="
-  echo "===== [3/5] remove IRIS files under harddisk: (Linux layer, proven write-through) ====="
-  echo "===== [4/5] sweep leftover IRIS sidecars (*.torrent, *.aria2, *.peers.json) at harddisk: root -- one call per matched name, never a glob ====="
+  echo "===== [3/5] remove IRIS files under harddisk: (native XR delete /noprompt, never run -- proven clean return) ====="
+  echo "===== [4/5] sweep leftover IRIS sidecars (*.torrent, *.aria2, *.peers.json) at harddisk: root -- three unconditional glob deletes, no listing needed ====="
   echo "===== [5/5] verify no '$APPID' app, '$SOURCE_NAME' source, IRIS file, or sidecar remains (dir harddisk:) ====="
-  sweep_verify_request "<name>" 1
+  sweep_verify_request 1
   echo "===== NOT DONE: no 'copy running-config startup-config' -- XR commit IS the persisted state ====="
   echo "===== LEFT IN PLACE: any operator-staged image already on harddisk: ====="
   exit 0
@@ -264,8 +281,8 @@ fi
 RUN() { "$HERE/../lab/xr-run.sh" "$DEVICE_IP"; }   # XR commands on stdin
 
 # Shared marker-section reader: every read-only/adjudicated section below (the
-# early app-table probe, the deactivate block, the sidecar listing, and the
-# final three-way verify) rides the SAME VERIFY_MARKER family
+# early app-table probe, the deactivate block, and the final three-way
+# verify) rides the SAME VERIFY_MARKER family
 # (`echo __IRIS_XR_VERIFY_<NAME>__`, defined above), so a missing marker is
 # always a hard transport error, never silently read as "nothing there" the
 # way an empty section otherwise could be.
@@ -335,11 +352,10 @@ table_contains() {
   printf '%s\n' "$1" | grep -v '#' | grep -qE "(^|[[:space:]])$(ere_escape "$2")([[:space:]]|$)"
 }
 
-# $-anchored, per-line match against the harddisk: file listing -- the same
-# shape the sidecar sweep above already uses (one dir-entry per line,
-# suffix-anchored) instead of a whole-blob substring test, which would
-# otherwise flag an unrelated operator file that merely CONTAINS the target
-# text as a forbidden IRIS leftover forever (iris-workshop.txt for
+# $-anchored, per-line match against the harddisk: file listing (one
+# dir-entry per line, suffix-anchored) instead of a whole-blob substring
+# test, which would otherwise flag an unrelated operator file that merely
+# CONTAINS the target text as a forbidden IRIS leftover forever (iris-workshop.txt for
 # "iris-work"; notes.aria2.bak for ".aria2"). Callers hand this a COMPLETE
 # ERE (metacharacters intentional, e.g. the anchors and the escaped literal
 # dot in the RPM-suffix patterns below) -- unlike table_contains(), this
@@ -370,8 +386,6 @@ if [ "$FORCE_AGENT_ONLY" = "1" ]; then
   echo "  Removing: app '$APPID', source '$SOURCE_NAME', $RPM_PATH, $WORK_DIR_PATH."
 fi
 
-echo "[1/5] deactivate: no appmgr application $APPID on $DEVICE_IP"
-
 SETUP_OUT="$(setup_request | RUN 2>/dev/null)"
 SETUP_RC=$?
 # The transport's own exit status matters here in the same way it does for
@@ -379,6 +393,18 @@ SETUP_RC=$?
 # the session bound kills (rc 124) or any other nonzero transport failure
 # must never be read as "app absent" or "nothing to report" just because the
 # captured text happens to be empty.
+#
+# Fix-wave ordering fix (live-reproduced twice, progress.md L2 RUN 1/2,
+# 100.90.170.84, 2026-08-31): the [1/5] step line below used to print
+# BEFORE this rc check, unconditionally, right after the step's own
+# announcement -- a dead transport (rc 124 at the session bound) still let
+# that line reach stdout first, and its wording ("no appmgr application
+# $APPID on $DEVICE_IP") reads exactly like a genuine absent-app verdict on
+# any log that streams stdout without also surfacing the stderr ERROR
+# right after it. The check now runs FIRST; on a transport failure this
+# function returns/exits before [1/5] is ever printed, so a dead transport
+# now yields ONLY the honest transport error below, never a line that could
+# be misread as a verdict.
 if [ "$SETUP_RC" -ne 0 ]; then
   echo "ERROR: teardown setup's transport exited $SETUP_RC; refusing to continue teardown on $DEVICE_IP" >&2
   exit 1
@@ -393,6 +419,9 @@ if xr_command_rejected "$APPS_BEFORE"; then
   echo "ERROR: the appmgr application-table probe was rejected by the device; refusing to continue teardown on $DEVICE_IP" >&2
   exit 1
 fi
+# Transport succeeded and the probe section's integrity is verified -- only
+# now is it honest to announce this step at all.
+echo "[1/5] deactivate: no appmgr application $APPID on $DEVICE_IP"
 PRESENT_BEFORE=0
 table_contains "$APPS_BEFORE" "$APPID" && PRESENT_BEFORE=1
 
@@ -420,19 +449,13 @@ fi
 # else: probe showed it present and deactivate was not rejected -- proceed;
 # [5/5] below is the sole arbiter of whether it actually worked.
 
-# Sidecar listing rides the SAME login (best-effort, matching today's
-# tolerance for a missing/short SIDECARS section -- this is a listing, not a
-# safety-critical read like APPS/DEACTIVATE above; a missing section here
-# just means no sidecar name is treated as swept-worthy this run, and [5/5]
-# still independently catches anything left over).
-SIDECAR_NAMES="$(printf '%s' "$SETUP_OUT" | verify_section SIDECARS 2>/dev/null \
-  | grep -E '\.(torrent|aria2|peers\.json)$' || true)"
-
 # Reaching here means session 1's paired adjudication did NOT conclude a
 # real failure (the elif branch above already exited otherwise) -- session 2
-# is safe to compose, destructive commands included.
+# is safe to compose, destructive commands included. No sidecar listing to
+# carry forward (fix-wave rewrite): sweep_verify_request()'s glob deletes
+# need nothing from session 1.
 echo "[2/5] appmgr package uninstall source $SOURCE_NAME"
-echo "[3/5] remove IRIS files under harddisk:"
+echo "[3/5] remove IRIS files under harddisk: (native XR delete /noprompt)"
 echo "[4/5] sweep leftover IRIS sidecars (*.torrent, *.aria2, *.peers.json) at harddisk: root"
 echo "[5/5] verify no '$APPID' app, '$SOURCE_NAME' source, IRIS file, or sidecar remains"
 
@@ -445,7 +468,7 @@ echo "[5/5] verify no '$APPID' app, '$SOURCE_NAME' source, IRIS file, or sidecar
 # echoed blob's own literal copy of every marker's text, so a plain
 # substring presence check for DONE would be fooled the same way a plain
 # APPS_END substring check would be; only the positional check catches it.
-VERIFY_OUT="$(sweep_verify_request "$SIDECAR_NAMES" 1 | RUN 2>/dev/null)"
+VERIFY_OUT="$(sweep_verify_request 1 | RUN 2>/dev/null)"
 VERIFY_RC=$?
 if [ "$VERIFY_RC" -ne 0 ]; then
   echo "ERROR: undeploy verify's transport exited $VERIFY_RC; refusing to declare $DEVICE_IP clean" >&2
