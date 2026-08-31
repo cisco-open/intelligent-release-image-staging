@@ -933,7 +933,14 @@ _xr_call_body() {
   # Session 2 must never have been composed, let alone sent.
   [ "$(printf '%s\n' "$log" | grep -c 'delete /noprompt')" -eq 0 ] || return 1
   [ "$(printf '%s\n' "$log" | grep -c 'appmgr package uninstall source')" -eq 0 ] || return 1
-  [ "$(printf '%s\n' "$log" | grep -c '=== CALL START ===')" -eq 1 ]
+  [ "$(printf '%s\n' "$log" | grep -c '=== CALL START ===')" -eq 1 ] || return 1
+  # And no step may be NARRATED either. The [n/5] lines are what the console
+  # streams as job progress, so printing [2/5]-[5/5] here would claim work
+  # that was never composed -- the same overclaim the [1/5] ordering fix
+  # removed on the transport-failure path.
+  if printf '%s\n' "$output" | grep -qE '^\[[2-5]/5\]'; then
+    return 1
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -1080,6 +1087,29 @@ _xr_call_body() {
   # not just "didn't error".
   count="$(printf '%s\n' "$log" | grep -c '^no appmgr application iris$')"
   [ "$count" -eq 1 ] || return 1
+}
+
+# The prompt filter dropped ANY line containing '#', so a real leftover file
+# whose name happens to contain one vanished from the listing and the work
+# directory read as empty -- a fail-open, and a direct contradiction of this
+# function's own documented bias toward "has entries" on anything it does not
+# recognize. A prompt is identifiable by position, not by the character alone:
+# XR's prompt has no whitespace before its '#', while a directory entry always
+# does.
+@test "live: a leftover file whose name contains '#' still counts as a non-empty work dir" {
+  _xr_uninstall_stub_setup
+  FAKE_DIR_HARDDISK="Directory of harddisk:/
+    12345 drwx------. 2 4096 Aug 31 14:24 iris-work" \
+  FAKE_WORKDIR_LISTING="Directory of harddisk:/iris-work
+    655365 -rw-------. 1 2037 Aug 31 14:24 iris#agent.state
+
+41968752 kbytes total (39714572 kbytes free)" \
+    run _xr_uninstall_run_live
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"artifacts still present"* ]] || return 1
+  if printf '%s\n' "$output" | grep -q 'empty iris-work'; then
+    return 1
+  fi
 }
 
 # The D2-3 guard itself had no test: deleting the session-1 probe-rejection
@@ -1441,6 +1471,14 @@ iris  docker  iris-xr  Up  app_manager' run _xr_uninstall_run_live
   [[ "$second_call" == *"delete /noprompt harddisk:/*.torrent"* ]] || return 1
   [[ "$second_call" == *"delete /noprompt harddisk:/*.aria2"* ]] || return 1
   [[ "$second_call" == *"delete /noprompt harddisk:/*.peers.json"* ]] || return 1
+  # Order matters and presence alone does not pin it: the sweep has to be
+  # composed BEFORE the verify reads, or [5/5] would be reporting on state
+  # from before the deletions and could call a device clean that never was.
+  last_delete="$(printf '%s\n' "$second_call" | grep -n '^delete /noprompt' | tail -1 | cut -d: -f1)"
+  first_read="$(printf '%s\n' "$second_call" | grep -n '^show appmgr application-table$' | head -1 | cut -d: -f1)"
+  [ -n "$last_delete" ] || return 1
+  [ -n "$first_read" ] || return 1
+  [ "$last_delete" -lt "$first_read" ] || return 1
   # session 1 (the only login that could have listed harddisk: root) never
   # ran `run ls` -- it no longer exists anywhere in this script.
   if printf '%s\n' "$(cat "$FAKE_COMMAND_LOG")" | grep -q 'run ls'; then

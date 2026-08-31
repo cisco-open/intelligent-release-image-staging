@@ -311,8 +311,12 @@ RUN() { "$HERE/../lab/xr-run.sh" "$DEVICE_IP"; }   # XR commands on stdin
 # absents too, under the pre-fix-wave code, before that banner's source was
 # understood). XR treats `! <text>` as a silent comment at BOTH exec and
 # config level -- proven on hardware with zero `% Invalid input` hits -- so
-# every marker line here, config-mode sections included (the DEACTIVATE_END
-# marker rides right after `commit`, still inside config mode), uses `!`.
+# every marker line here uses `!`, whichever mode it lands in. (The
+# DEACTIVATE_END marker follows `commit`, but NOT inside config mode as an
+# earlier version of this comment claimed: lab/xr-run.sh injects `show
+# configuration failed` and `abort` after every commit, so the session is
+# already back at exec by the time that marker is typed. `!` is a comment in
+# both modes, so nothing depended on the mistaken reading.)
 # The -tt pty still echoes the input line into the transcript, so a marker
 # now arrives as `RP/.../CPU0:hostname#! __IRIS_XR_VERIFY_APPS__` rather
 # than a bare line -- verify_section()/end_after_start() below need no
@@ -382,7 +386,7 @@ ere_escape() {
 # do. $2 is always a literal name (APPID or SOURCE_NAME) -- ere_escape()
 # keeps it that way inside the ERE grep -E builds.
 table_contains() {
-  printf '%s\n' "$1" | grep -v '#' | grep -qE "(^|[[:space:]])$(ere_escape "$2")([[:space:]]|$)"
+  printf '%s\n' "$1" | grep -vE '^[^[:space:]]*#' | grep -qE "(^|[[:space:]])$(ere_escape "$2")([[:space:]]|$)"
 }
 
 # $-anchored, per-line match against the harddisk: file listing (one
@@ -437,7 +441,7 @@ workdir_has_entries() {
     | grep -v '^Directory of ' \
     | grep -vF 'No files in directory' \
     | grep -vE '^[0-9]+ kbytes total \([0-9]+ kbytes free\)$' \
-    | grep -v '#' \
+    | grep -vE '^[^[:space:]]*#' \
     | grep -vE '^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) .*UTC$' \
     | grep -q .
 }
@@ -498,7 +502,7 @@ section_has_device_output() {
     | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
     | grep -v '^$' \
     | grep -v '^!$' \
-    | grep -v '#' \
+    | grep -vE '^[^[:space:]]*#' \
     | grep -Fxv -f <(printf '%s\n' "$2" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//') \
     | grep -q .
 }
