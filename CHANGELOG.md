@@ -127,6 +127,32 @@ top-level `VERSION` file.
   original wording, so a saved search over audit detail for either event
   should match both the old and the new phrasing until the old entries age
   out.
+- **Console facelift — Magnetic design system.** The operator console has a
+  new visual design built on Cisco Magnetic tokens: Sharp Sans headings over
+  Inter body copy, Roboto Mono reserved for machine-readable values (IPs,
+  hashes, filenames, IDs, timestamps) and never for prose, a 4px spacing
+  scale, and named elevation tiers in place of the previous dark theme. A
+  light product-bar-and-nav-rail shell replaces the old chrome. Every status
+  surface — the Devices table, Overview's attention cards, image
+  verification, the Cisco Bulk Hash verdict — now renders through one shared
+  icon-plus-sentence-case-label pill (`levelPillHTML`/`statusPillHTML`), so
+  status is never carried by color alone. The Staging Boundary (Catalogued →
+  Source checked → Assigned → Transferring → Verified → Staged, ending at a
+  hatched "Operator control" terminus marking where IRIS's own
+  responsibility stops — installation, activation, and reload stay with the
+  operator) is now a first-class rendered component, shared verbatim by
+  Overview and the device/image detail drawers. The device status
+  previously labelled `deployed` now displays as **Staged**: the wire key is
+  unchanged, only the rendered text moves to match the boundary's own last
+  step. Setup is now a guided stepper with inline image verification in
+  place of the old flat settings form. Devices-view polling is now owned
+  solely by the hash router, removing a second, redundant 10-second
+  `/api/devices` polling loop that ran unconditionally for the page's
+  lifetime alongside the router's own view-scoped one. All console fonts
+  are self-hosted under `server/webroot/fonts/`; Sharp Sans is licensed to
+  Cisco and excluded from this source distribution, so the console falls
+  back to Inter for headings when it is not staged separately. See
+  `NOTICE` for full font/icon attribution.
 
 ### Fixed
 - A forced router undeploy now reclaims the VirtualPortGroup, NAT ACL, overload
@@ -138,6 +164,33 @@ top-level `VERSION` file.
   banner. An IOS-XR device is refused with an explanatory error instead of being
   handed an IOS-XE recipe — previously an ASR 9000 matched the same `^ASR`
   prefix as an IOS-XE ASR 1000 and was onboarded as a Guest Shell device.
+- The Devices management-type filter's "Inventory only — management type not
+  chosen" option matched zero rows: every server path that creates an
+  unclassified device writes the truthy string `management_type:
+  "legacy_routed"`, and the filter's `d.management_type || 'legacy'`
+  fallback only substituted `'legacy'` when the field was empty, which
+  never happened. The comparison now normalizes `legacy_routed` to
+  `legacy` before comparing, matching the row label's own equivalence; the
+  filter option itself is unchanged.
+- A device's status cell now shows its running onboard/undeploy job's
+  current step and elapsed time (for example `Staging [2/5] · 4 min`)
+  instead of a bare status word, so a long-running job reads as making
+  progress instead of looking stuck.
+- "Offline (expected during undeploy)" is now gated on the device's own
+  undeploy job actually being in the `running` state, not merely on its
+  status key reading `undeploying` — previously a device still queued
+  behind the onboard concurrency cap could show the same "agent
+  deactivated, no heartbeat expected" pill before its job had touched the
+  device at all.
+- Overview's attention band now shows "Fleet status unavailable" instead of
+  a false all-clear "All clear" card when the device or image fetch it
+  depends on fails — "no data to report a problem from" and "confirmed no
+  problem" no longer render identically.
+- A package absent for an architecture a deployment does not build (for
+  example `iris-arm64.tar` on an amd64-only site) no longer rolls up to a
+  persistent, uncleanable amber Warning in Settings > Setup and the setup
+  wizard's package step; `absent` is now treated the same as `unknown` — an
+  honest not-applicable, not a claimed gap the operator failed to fill.
 
 ## [2026.08.26]
 
