@@ -85,11 +85,13 @@ worded distinctly from one never configured at all.
 | Settings | Shows server configuration, version, and operational settings. |
 | Audit | Records administrative and workflow actions. |
 
-For IOx devices, the Devices status distinguishes `copying to <filesystem>` from
-the torrent download phase while the app transfers a completed image from its
-container storage into IOS-visible storage. A final-placement failure is shown
-as `placement failed` with a bounded diagnostic; inspect the device's
-`IRIS ROOTCOPY-FAIL` syslog entry for the full device-side detail.
+For IOx devices, the Devices status distinguishes `Copying to <filesystem>`
+(sentence-cased render of the underlying `copying` wire status) from the
+torrent download phase while the app transfers a completed image from its
+container storage into IOS-visible storage. A final-placement failure is
+shown as `Placement failed` (wire status `placement-failed`) with a bounded
+diagnostic beside the pill; inspect the device's `IRIS ROOTCOPY-FAIL` syslog
+entry for the full device-side detail.
 
 On the Images screen, every picked or dropped file gets its own upload row —
 filename, progress bar, then publish state — with its own publish poller, so
@@ -196,10 +198,12 @@ listing every image currently assigned to the device with its own state:
 agent's last tick gave up on, and `staging` for one still in flight. That is
 the same resolution the Swarm Map's drawer uses, so the two never disagree
 about an image, and a device with any failed image reads `N of M image(s)
-failed` in the Status column rather than `deployed`. A device staging a
-single image shows that agent's own state string instead (for example
-`downloading`, `transferring_to_ios`), since a one-image heartbeat reports
-exactly one image. The reported error is one per heartbeat, for the tick
+failed` in the Status column rather than `Staged` (the rendered label for
+the underlying `deployed` wire status). A device staging a single image shows
+that agent's own state string instead, sentence-cased for display (for
+example the raw `downloading` or `transferring_to_ios` state renders
+`Downloading` or `Transferring_to_ios`), since a one-image heartbeat
+reports exactly one image. The reported error is one per heartbeat, for the tick
 rather than for a particular image, so a multi-image set carries it on its
 own **Last reported error** row below the images. Below that, it shows the deployment itself: the deployment record state (`active`,
 `removed`, `superseded`, `needs-reconcile`,
@@ -244,11 +248,17 @@ and model, plus management type, **Agent install**, credential, telemetry, peer 
 and status. Only matching rows are drawn, so filtering and then **select all**
 is how you act on a subset instead of hand-picking rows out of the whole fleet.
 The **Status** choices are generated from the same derivation the Status column
-renders, so every state a row can show can be filtered for: `onboarding`,
-`undeploying`, `waiting for heartbeat`, `onboard failed`, `undeploy failed`,
-`deployed`, `placement failed`, `image failed`, `copying to IOS storage`,
-`staging (other)`, `enrolled`, `not enrolled`, and `offline` — the last being a modifier, since a
-device can read `deployed` and still have gone quiet.
+renders, so every state a row can show can be filtered for. Each dropdown
+choice shows the same sentence-case label the column renders: `Onboarding`,
+`Undeploying`, `Waiting for heartbeat`, `Onboard failed`, `Undeploy failed`,
+`Staged`, `Placement failed`, `Image(s) failed`, `Copying to IOS storage`,
+`Staging (other)`, `Enrolled`, `Not enrolled`, and `Offline (no recent
+heartbeat)` — but its `<option>` value, and the wire status the cell itself
+carries, is the lowercase/kebab form underneath: `onboarding`, `undeploying`,
+`waiting-heartbeat`, `onboard-failed`, `undeploy-failed`, `deployed`,
+`placement-failed`, `image-failed`, `copying`, `staging`, `enrolled`,
+`not-enrolled`, and `offline` — the last being a modifier, since a device
+filtered on `deployed` (rendered `Staged`) can still have gone quiet.
 
 | Control | What it does | Confirms first |
 | --- | --- | --- |
