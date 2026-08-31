@@ -60,14 +60,21 @@ input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):focus-visibl
 select:focus-visible, textarea:focus-visible, button:focus-visible {
   outline: none; box-shadow: var(--focus-ring);
 }
-.product-bar { background:var(--surface); color:var(--text-heading); border-bottom:1px solid var(--rule); height:48px; display:flex; align-items:center; padding:0 18px; gap:10px; }
+/* Compact anatomy (user-directed, deliberate divergence): this console runs
+   .product-bar at 48px / .nav-rail at 200px rather than the boilerplate
+   Magnetic shell's 56px / 280px -- a denser bar and rail suit an
+   operator console read at arm's length across many rows of device/image
+   data, not a marketing-app shell. Every other nav anatomy fix in this
+   wave (icons, divider, flyouts, grid spacing) is layered on top of this
+   already-accepted compact frame, not a step toward the wider default. */
+.product-bar { background:var(--surface); color:var(--text-heading); border-bottom:1px solid var(--rule); height:48px; display:flex; align-items:center; padding:0 16px; gap:8px; }
 .product-bar .product-name { font-family:var(--font-display); font-size:16px; font-weight:700; color:var(--text-heading); }
 .product-bar .product-suite { font-size:13px; font-weight:500; color:var(--text-secondary); }
 .product-bar .spacer { flex:1; }
 .product-bar .who { font-size:13px; font-weight:400; color:var(--text-secondary); }
 .product-bar .tag { font-family:var(--font-sans); font-size:11px; font-weight:500; color:var(--text-secondary); border:1px solid var(--border); border-radius:4px; padding:1px 6px; margin-left:6px; vertical-align:1px; }
 .shell { display:flex; min-height:calc(100vh - 49px); }
-.nav-rail { width:200px; background:var(--surface); border-right:1px solid var(--rule); padding:10px 0; }
+.nav-rail { width:200px; background:var(--surface); border-right:1px solid var(--rule); padding:8px 0; position:relative; }
 .main { flex:1; padding:24px; }
 .btn { background:var(--action); color:#fff; border:0; border-radius:var(--radius-control); height:32px; padding:0 16px; font-size:14px; cursor:pointer;
   display:inline-flex; align-items:center; justify-content:center;
@@ -110,15 +117,29 @@ select:focus-visible, textarea:focus-visible, button:focus-visible {
 .tbl td:last-child, .tbl th:last-child { text-align:right; }
 #images td:nth-child(4), #images th:nth-child(4) { text-align:right; }
 .toolbar { display:flex; gap:8px; align-items:center; margin:8px 0 16px; flex-wrap:wrap; }
-.nav { display:flex; align-items:center; height:32px; padding:0 18px; color:var(--text-body); text-decoration:none; font-size:14px; font-weight:500; cursor:pointer; }
+/* Nav anatomy (post-walk Magnetic fidelity fixes, Wave B): every item leads
+   with a fixed 20px icon (currentColor, so it tracks default/hover/.active
+   state for free) -- icons are structural in Magnetic nav, not decoration.
+   The label lives in its own .nav-label span so a future collapsed
+   (icon-only) rail state has something to hide without touching the icon
+   or the anchor's own hit target. */
+.nav { display:flex; align-items:center; gap:8px; height:32px; padding:0 16px; color:var(--text-body); text-decoration:none; font-size:14px; font-weight:500; cursor:pointer; }
 .nav:hover { background:var(--surface-subtle); }
-.nav.active { background:var(--action-tint); color:var(--action-active); font-weight:600; border-left:3px solid var(--action); padding-left:15px; }
+.nav.active { background:var(--action-tint); color:var(--action-active); font-weight:600; border-left:3px solid var(--action); padding-left:13px; }
 .nav:focus-visible { outline:none; box-shadow:var(--focus-ring); }
-.nav-group { padding:14px 18px 2px; font-size:12px; font-weight:600; letter-spacing:.2px; color:var(--text-secondary); }
-.nav.sub { padding-left:30px; font-size:13px; }
-.nav.sub.active { padding-left:27px; }
-.nav.subsub { padding-left:44px; font-size:13px; color:var(--text-secondary); }
-.nav.subsub.active { padding-left:41px; }
+.nav-icon { width:20px; height:20px; flex:none; }
+/* Section divider (Wave B): a hairline above the "System" group label,
+   separating the four primary destinations from the Settings/Monitoring
+   pair below -- absent before, despite being structural in Magnetic nav. */
+.nav-divider { border:0; height:1px; background:var(--rule); margin:8px 16px 0; }
+.nav-group { padding:12px 16px 2px; font-size:12px; font-weight:600; letter-spacing:.2px; color:var(--text-secondary); }
+/* On-grid indent: .nav's own 16px left inset, +16px per nesting level
+   (--sp-lg, the console's base spacing unit) -- .nav.sub at one level,
+   .nav.subsub at two, rather than the old uneven 18/30/44px steps. */
+.nav.sub { padding-left:32px; font-size:13px; }
+.nav.sub.active { padding-left:29px; }
+.nav.subsub { padding-left:48px; font-size:13px; color:var(--text-secondary); }
+.nav.subsub.active { padding-left:45px; }
 .page-header { display:flex; align-items:center; justify-content:space-between; gap:16px; margin:0 0 16px; }
 .page-title { font-family:var(--font-display); font-size:24px; line-height:34px; font-weight:700; color:var(--text-heading); margin:0; }
 .page-actions { display:flex; align-items:center; gap:8px; }
@@ -309,6 +330,21 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
 .menu-item { display:block; width:100%; text-align:left; background:none; border:0;
   border-radius:6px; padding:8px 10px; font-size:13px; color:var(--text-body); cursor:pointer; }
 .menu-item:hover { background:var(--action-tint); color:var(--action); }
+/* Settings/Monitoring flyout submenus (Wave B): were inline in-rail
+   accordions -- the audit's biggest nav-fidelity break, since Magnetic sub-
+   navigation floats beside the rail rather than pushing the rest of the
+   rail's own items down. .nav-flyout reuses .menu's floating-panel chrome
+   verbatim (surface/border/radius8/--shadow-md, both classes on the same
+   element) and only overrides position -- anchored to .nav-rail (now
+   position:relative) rather than to its own trigger, at a static top per
+   trigger's row position (no JS position math, per the brief). The header
+   label inside is a plain .nav-group, reused rather than re-styled. Sub-
+   item markup/ids/hrefs inside are untouched; only this container's
+   placement changed -- see the byte-exact-marker note on the pin this
+   moved in test_gui_console_bulkhash.py. */
+.nav-flyout { left:200px; padding:6px 0; min-width:220px; }
+#settings-submenu { top:179px; }
+#monitoring-submenu { top:211px; }
 /* display lives on :not([hidden]) so the hidden attribute keeps working
    (same pattern as .inline-form above) */
 .selbar { gap:8px; align-items:center; flex-wrap:wrap; background:var(--action-tint);
@@ -569,6 +605,15 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
     transform: translateX(-100%); transition: transform .18s ease;
   }
   .nav-rail.open { transform: translateX(0); }
+  /* Off-canvas mode: revert the flyouts to the inline in-rail presentation
+     they replace above 768px -- a position:absolute flyout anchored to
+     .nav-rail would detach from the rail while it sits translateX(-100%)
+     off-screen (closed), or float over the content at the wrong offset
+     while it slides in (open). */
+  #settings-submenu, #monitoring-submenu {
+    position: static; left: auto; top: auto; box-shadow: none; border: 0;
+    border-radius: 0; min-width: 0; padding: 0; background: transparent;
+  }
   .main { padding: var(--sp-lg); }
   .drawer, #dl-drawer { width: 100vw; }
   .modal { width: calc(100% - 2 * var(--sp-lg)); }

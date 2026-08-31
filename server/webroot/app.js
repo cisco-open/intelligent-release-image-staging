@@ -1579,6 +1579,10 @@
   wireMenu('csv-menu-btn', 'csv-menu');
   wireMenu('onboard-menu-btn', 'onboard-pop');
   wireMenu('undeploy-menu-btn', 'undeploy-pop');
+  // Bulk-bar action cap (Wave B): Adopt/Quarantine/Release/Apply-credential
+  // live inside this popover now -- same generic menu machinery as every
+  // other menu-wrap on the page, no action-specific wiring here.
+  wireMenu('more-menu-btn', 'more-pop');
   wireMenu('help-btn', 'help-pop');
   wireMenu('status-legend-btn', 'status-legend-pop');
   // Status column legend (density pass, Task 8): one row per

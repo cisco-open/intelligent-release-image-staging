@@ -28,8 +28,20 @@ def _slice(container, start_marker, end_marker):
 # --- Settings sub-menu / sub-page registration -----------------------------
 
 def test_settings_submenu_has_image_verification_entry():
+    """PIN COLLISION (Wave B, post-walk Magnetic nav audit): the container's
+    byte-exact opening tag grew a `class="nav-flyout menu"` (the flyout now
+    reuses .menu's floating-panel chrome) and its first child is now a
+    `.nav-group` header label ("Settings") -- both deliberate per the audit,
+    both re-pinned here. `_slice`'s single-`</div>` search would have landed
+    on the header's own close instead of the container's, so this slices in
+    two steps: past the container's opening tag, then past the header's
+    `</div>`, before capturing up to the container's own `</div>` -- what
+    this test guards (the item anchors inside) is unchanged."""
     html = _read("index.html")
-    side = _slice(html, '<div id="settings-submenu" hidden>', "</div>")
+    after_open = html.split(
+        '<div class="nav-flyout menu" id="settings-submenu" hidden>', 1)[1]
+    after_header = after_open.split("</div>", 1)[1]  # past the .nav-group header
+    side = after_header.split("</div>", 1)[0]         # up to the container's own close
     assert 'id="nav-settings-bulkhash"' in side
     assert 'href="#settings/bulkhash"' in side
     assert ">Image verification<" in side

@@ -8834,3 +8834,184 @@ def test_table_type_roles_are_magnetic_p3_p4():
     assert ".tbl .machine { font-size:12px; line-height:18px; }" in css
     tbl_th = css.split(".tbl th {", 1)[1].split("}", 1)[0]
     assert "text-transform:uppercase" not in tbl_th
+
+
+# ---------------------------------------------------------------------------
+# Left nav: Magnetic anatomy fixes (post-walk audit, Wave B)
+# ---------------------------------------------------------------------------
+
+def test_nav_icon_symbols_vendored_in_sprite():
+    """Wave B fix 1: the 8 Phosphor BOLD glyphs the left nav needs (the six
+    primary destinations, the Setup sub-item, and the off-canvas hamburger)
+    are vendored as <symbol> entries in the existing icon-sprite <svg> --
+    same convention as the status-pill icons (Task 4): fill="currentColor",
+    viewBox 0 0 256 256, referenced by id from the nav's own anchors."""
+    html = _webroot("index.html")
+    sprite = html.split('<svg class="icon-sprite"', 1)[1].split("</svg>", 1)[0]
+    for icon in ("i-nav-gauge", "i-nav-stack", "i-nav-hard-drives",
+                 "i-nav-share-network", "i-nav-gear", "i-nav-pulse",
+                 "i-nav-list-checks", "i-nav-list"):
+        assert ('<symbol id="%s" viewBox="0 0 256 256" fill="currentColor">' % icon) \
+            in sprite, icon
+
+
+def test_nav_items_carry_leading_icons():
+    """Post-walk Magnetic nav audit, Wave B fix 1 (root cause of the
+    operator's "is the sidebar even Magnetic?" complaint): every top-level
+    destination plus the Setup sub-item leads with a 20px currentColor icon
+    -- icons are structural in Magnetic nav. Every OTHER sub-item inside a
+    flyout stays icon-less; only Setup was named in the audit's glyph
+    list. Each icon-bearing item's label also moves into its own
+    .nav-label span, ahead of a future collapsed (icon-only) rail state."""
+    html = _webroot("index.html")
+    side = html.split('<nav class="nav-rail">')[1].split("</nav>")[0]
+    icon_items = {
+        "nav-overview": "i-nav-gauge", "nav-images": "i-nav-stack",
+        "nav-devices": "i-nav-hard-drives", "nav-swarm": "i-nav-share-network",
+        "nav-settings": "i-nav-gear", "nav-monitoring": "i-nav-pulse",
+        "nav-settings-setup": "i-nav-list-checks",
+    }
+    for nav_id, icon in icon_items.items():
+        item = side.split('id="%s"' % nav_id, 1)[1].split("</a>", 1)[0]
+        assert ('<svg class="nav-icon" aria-hidden="true"><use href="#%s"/></svg>'
+                % icon) in item, nav_id
+        assert '<span class="nav-label">' in item, nav_id
+    for sub_id in ("nav-settings-general", "nav-settings-tls",
+                   "nav-settings-telemetry", "nav-settings-audit",
+                   "nav-settings-bulkhash", "nav-monitoring-audit",
+                   "nav-monitoring-deploylogs"):
+        item = side.split('id="%s"' % sub_id, 1)[1].split("</a>", 1)[0]
+        assert "nav-icon" not in item, sub_id
+
+
+def test_hamburger_uses_sprite_glyph_and_product_name_drops_diamond():
+    """Wave B fixes 2 + 7: the literal ☰ character in #nav-toggle is
+    replaced with the vendored i-nav-list sprite glyph (list-bold,
+    deliberately not hamburger-bold -- that glyph is a food icon in
+    Phosphor's set, not a menu control); the invented ◈ logomark is dropped
+    from the product name (OSPO branding rule: no invented logomark)."""
+    html = _webroot("index.html")
+    assert "☰" not in html  # ☰
+    assert "◈" not in html  # ◈
+    toggle = html.split('id="nav-toggle"', 1)[1].split("</button>", 1)[0]
+    assert '<use href="#i-nav-list"/>' in toggle
+    assert '<span class="product-name">Intelligent Release &amp; Image Staging' in html
+
+
+def test_settings_and_monitoring_flyouts_are_positioned_beside_the_rail():
+    """Wave B fix 5, the biggest anatomy break: Settings/Monitoring stop
+    being inline in-rail accordions and become floating flyout panels
+    beside the rail, reusing .menu's floating-panel chrome (surface/
+    border/radius8/--shadow-md) via a shared class rather than a
+    reimplementation, anchored to .nav-rail (position:relative) rather than
+    to their own trigger. A small header label styled like .nav-group sits
+    inside each. Off-canvas (<=768px) reverts them to the in-rail
+    presentation so a flyout can't detach from a hidden, translateX'd
+    rail. Item markup/ids/hrefs inside are unchanged -- guarded already by
+    test_settings_uses_sidebar_feature_submenus and
+    test_settings_submenu_has_image_verification_entry (bulkhash suite);
+    this pins only the container's own placement/presentation."""
+    html = _webroot("index.html")
+    css = _webroot("styles.css")
+    assert '<div class="nav-flyout menu" id="settings-submenu" hidden>' in html
+    assert '<div class="nav-flyout menu" id="monitoring-submenu" hidden>' in html
+    after_settings = html.split('id="settings-submenu" hidden>', 1)[1]
+    assert after_settings.lstrip().startswith('<div class="nav-group">Settings</div>')
+    after_monitoring = html.split('id="monitoring-submenu" hidden>', 1)[1]
+    assert after_monitoring.lstrip().startswith('<div class="nav-group">Monitoring</div>')
+    assert ".nav-rail { width:200px; background:var(--surface); " \
+        "border-right:1px solid var(--rule); padding:8px 0; position:relative; }" in css
+    assert ".nav-flyout { left:200px;" in css
+    assert "#settings-submenu { top:" in css
+    assert "#monitoring-submenu { top:" in css
+    mobile = css.split("@media (max-width: 768px)", 1)[1].split("\n}\n", 1)[0]
+    assert "#settings-submenu, #monitoring-submenu {" in mobile
+    assert "position: static;" in mobile
+
+
+def test_bulk_bar_action_buttons_capped_via_more_menu():
+    """Wave B fix 6 (table audit): #sel-bar showed 8 actions against
+    Magnetic's max-4 guidance for immediate actions. Adopt/Quarantine/
+    Release and the paired credential-Apply now live inside a 'More' menu,
+    the exact same .menu-wrap/.menu pattern as Onboard▾/Undeploy▾ --
+    every id, click handler and the shared bulk busy-lock stay put
+    (test_bulk_row_actions_wired / test_all_selected_actions_share_one_
+    busy_lock guard that already); this pins where they now live and that
+    at most 4 buttons in the bar act immediately with no menu in between."""
+    def _top_level_button_ids(container):
+        # IDs of buttons NOT nested inside a `.menu` floating popover -- a
+        # menu-wrap TRIGGER button stays visible in the bar at all times
+        # (only its popover's own contents are hidden until opened), so
+        # `.menu-wrap` itself is transparent to this count; depth only
+        # starts at a `.menu` popover's own opening tag (exact class
+        # match, so it does not fire on `.menu-wrap`/`.menu-note` too), and
+        # any <div> nested inside one (e.g. Undeploy's help-row note) still
+        # balances the count correctly via the generic branch below.
+        depth = 0
+        ids = []
+        i = 0
+        while i < len(container):
+            if depth == 0 and container.startswith('<div class="menu"', i):
+                depth = 1
+                i += 4
+            elif depth > 0 and container.startswith("<div", i):
+                depth += 1
+                i += 4
+            elif depth > 0 and container.startswith("</div>", i):
+                depth -= 1
+                i += 6
+            elif depth == 0 and container.startswith('<button class="btn', i):
+                m = re.search(r'id="([^"]+)"', container[i:i + 200])
+                ids.append(m.group(1) if m else None)
+                i += 1
+            else:
+                i += 1
+        return ids
+
+    html = _webroot("index.html")
+    selbar = html.split('id="sel-bar"', 1)[1].split('id="dev-form"', 1)[0]
+    ids = _top_level_button_ids(selbar)
+    assert ids == ['onboard-menu-btn', 'undeploy-menu-btn', 'more-menu-btn',
+                    'assign-images-selected', 'delete-selected'], ids
+    # of the 5 controls directly in the bar, only the two non-triggers
+    # perform an action with no menu in between -- comfortably under the
+    # 4-action cap the fold exists to satisfy
+    direct_actions = [i for i in ids if not i.endswith('-menu-btn')]
+    assert len(direct_actions) <= 4
+    more_pop = selbar.split('id="more-pop" hidden>', 1)[1].split(
+        'id="assign-images-selected"', 1)[0]
+    assert 'id="cred-selected"' in more_pop
+    for folded_id in ("adopt-selected", "quarantine-selected",
+                       "release-selected", "apply-cred-selected"):
+        assert ('id="%s"' % folded_id) in more_pop, folded_id
+        # menu-close so the popover closes the instant the action fires --
+        # without it .menu's own click handler stopPropagation()s and the
+        # outside-click closer (document listener) never sees the click
+        before = more_pop.split('id="%s"' % folded_id, 1)[0]
+        tag_start = before.rfind("<button")
+        assert "menu-close" in before[tag_start:], folded_id
+
+
+def test_nav_divider_grid_spacing_and_compact_anatomy_comment():
+    """Wave B fixes 3/4/8: a hairline divider separates the four primary
+    destinations from the Settings/Monitoring group; the rail's indent
+    steps to a consistent 16px per level (--sp-lg, was an uneven
+    18/30/44px); and the console's already-accepted compact 48px/200px
+    product-bar/nav-rail anatomy (vs. the boilerplate's 56px/280px) is
+    recorded in a comment, so it reads as a deliberate, user-directed
+    decision rather than something later fidelity work should "fix"."""
+    html = _webroot("index.html")
+    css = _webroot("styles.css")
+    assert '<hr class="nav-divider">' in html
+    assert ".nav-divider { border:0; height:1px; background:var(--rule); margin:8px 16px 0; }" \
+        in css
+    assert ".product-bar { background:var(--surface); color:var(--text-heading); " \
+        "border-bottom:1px solid var(--rule); height:48px; display:flex; " \
+        "align-items:center; padding:0 16px; gap:8px; }" in css
+    assert ".nav { display:flex; align-items:center; gap:8px; height:32px; padding:0 16px;" \
+        in css
+    assert ".nav-group { padding:12px 16px 2px;" in css
+    assert ".nav.sub { padding-left:32px; font-size:13px; }" in css
+    assert ".nav.subsub { padding-left:48px; font-size:13px; color:var(--text-secondary); }" \
+        in css
+    assert "56px" in css and "280px" in css and "48px" in css and "200px" in css
