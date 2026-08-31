@@ -29,7 +29,10 @@ top-level `VERSION` file.
   nothing is installed, activated, or reloaded, and no boot variable is touched.
   Onboarding refuses a router whose banner does not read IOS-XR, or one that
   still carries a previous IRIS deployment; undeploy removes the application,
-  its package source, the staged RPM, and the agent's own working directory.
+  its package source, the staged RPM, and everything inside the agent's working
+  directory. The empty directory itself is left in place: XR's CLI has no
+  prompt-free way to remove a directory, and undeploy reports the leftover
+  plainly rather than pretending it is gone.
   This platform is not lab-validated yet — see
   [Validation](docs/zensical/validation.md#validated-platforms).
 - Catalog images can now be checked against Cisco's published Bulk Hash feed:

@@ -145,9 +145,13 @@ Onboarding creates the appmgr application `iris`, registers the package
 source `iris-xr`, stages the agent RPM at `harddisk:iris-xr.rpm`, and creates
 the working directory `harddisk:iris-work`. Undeploy removes exactly those
 four resources from its deployment record; every other router setting, including its
-networking configuration, is preserved. A second undeploy run converges
-even after one was interrupted partway through — a state that can leave
-`harddisk:iris-work` behind — because each step re-probes the router's own
+networking configuration, is preserved. One qualification on the fourth:
+undeploy empties `harddisk:iris-work` but cannot delete the directory itself,
+because XR's CLI offers no prompt-free directory removal. An empty
+`harddisk:iris-work` left behind is therefore the **normal successful
+outcome**, reported as a note rather than a fault — not evidence of an
+interrupted run. A second undeploy run converges regardless, because each
+step re-probes the router's own
 state before acting instead of assuming its own prior success. Files an
 operator staged directly on the router (adopted, not downloaded by IRIS)
 are never removed by teardown or by the agent, with one exception: a

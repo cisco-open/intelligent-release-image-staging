@@ -452,7 +452,52 @@ workdir_has_entries() {
 # unknown, unmeasured appmgr-specific "remove an already-absent application"
 # error text (recon section 3, row 1) -- only this one proven, generic banner.
 xr_command_rejected() {
-  printf '%s\n' "$1" | grep -qF '% Invalid input'
+  printf '%s\n' "$1" \
+    | grep -qE '% Invalid input|Command authorization failed|% This command is not authorized|% Authorization failed'
+}
+
+# Positive evidence that a marker section carries output the DEVICE produced,
+# rather than the transport's own upfront echo of the request we typed.
+#
+# Why marker presence is not enough (C1, whole-series review 2026-08-31,
+# reproduced twice against the then-shipped script): the `!` marker lines emit
+# nothing of their own -- they reach the transcript ONLY because the pty echoes
+# the piped request back before anything executes. The composed request
+# therefore already contains every start marker before its end marker, so
+# end_after_start() was satisfied by that echo alone, verify_section()'s
+# last-match landed inside the same blob, and each "section" came back holding
+# the next line we had TYPED ($FILES became the literal string `dir harddisk:`).
+# Every residue check then read no-match as nothing-there and the run exited 0
+# announcing a clean teardown -- with all seven destructive commands already
+# sent and the app table never actually read. A marker proves what was typed,
+# never what ran.
+#
+# The test is content-based rather than positional: a line that is not blank
+# and does not appear verbatim in the request we sent can only have come from
+# the device. That deliberately admits refusal text -- "Command authorization
+# failed.", "% This command is not authorized" -- because a refusal IS device
+# output; it passes here and is then caught loudly by xr_command_rejected
+# above, instead of being silently read as an empty table.
+# Three classes are discarded before the verdict, and each is load-bearing:
+#   - blank lines;
+#   - the bare `!` left over when a section ends at the NEXT marker line --
+#     verify_section() stops at the marker TEXT, so that line's own `! `
+#     comment prefix trails the section. It is our own typed character, not
+#     the device's, and treating it as content defeated the whole guard on
+#     the first attempt (measured, not predicted);
+#   - anything carrying `#`, the router prompt. A prompt-prefixed command echo
+#     proves a pty rendered it but says nothing about the command being
+#     ACCEPTED, which is the very distinction this guard exists to draw. Real
+#     output always brings more than prompts: XR stamps every exec command
+#     with its own `... UTC` line before any table.
+section_has_device_output() {
+  printf '%s\n' "$1" \
+    | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+    | grep -v '^$' \
+    | grep -v '^!$' \
+    | grep -v '#' \
+    | grep -Fxv -f <(printf '%s\n' "$2" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//') \
+    | grep -q .
 }
 
 if [ "$FORCE_AGENT_ONLY" = "1" ]; then
@@ -460,7 +505,11 @@ if [ "$FORCE_AGENT_ONLY" = "1" ]; then
   echo "  Removing: app '$APPID', source '$SOURCE_NAME', $RPM_PATH, $WORK_DIR_PATH."
 fi
 
-SETUP_OUT="$(setup_request | RUN 2>/dev/null)"
+# The request is captured, not just piped: section_has_device_output() needs
+# the exact text we typed to tell the device's answer apart from the pty's
+# echo of the question.
+SETUP_REQ="$(setup_request)"
+SETUP_OUT="$(printf '%s\n' "$SETUP_REQ" | RUN 2>/dev/null)"
 SETUP_RC=$?
 # The transport's own exit status matters here in the same way it does for
 # every other read/adjudicated section in this login: a wedged session that
@@ -489,6 +538,10 @@ if ! printf '%s' "$SETUP_OUT" | end_after_start "${VERIFY_MARKER}APPS__" "${VERI
   echo "ERROR: deactivate probe was truncated before its end marker; refusing to continue teardown on $DEVICE_IP" >&2
   exit 1
 fi
+if ! section_has_device_output "$APPS_BEFORE" "$SETUP_REQ"; then
+  echo "ERROR: the appmgr application-table probe returned no device output (only the transport's echo of the request); refusing to continue teardown on $DEVICE_IP" >&2
+  exit 1
+fi
 if xr_command_rejected "$APPS_BEFORE"; then
   echo "ERROR: the appmgr application-table probe was rejected by the device; refusing to continue teardown on $DEVICE_IP" >&2
   exit 1
@@ -505,6 +558,10 @@ if ! printf '%s' "$SETUP_OUT" | end_after_start "${VERIFY_MARKER}DEACTIVATE__" "
   echo "ERROR: deactivate was truncated before its end marker; refusing to continue teardown on $DEVICE_IP" >&2
   exit 1
 fi
+# Deliberately NOT guarded by section_has_device_output: a successful
+# deactivate legitimately prints nothing between its markers, and an
+# echo-only session is already caught by the APPS_BEFORE guard above -- both
+# sections ride the same login, so the probe fails first.
 
 # Paired adjudication (agentinfo/specs/2026-08-31-xr-teardown-speed.md
 # section 2A): never trust deactivate's own (unmeasured) benign-vs-real
@@ -546,7 +603,8 @@ echo "[5/5] verify no '$APPID' app, '$SOURCE_NAME' source, IRIS file, or sidecar
 # (a single CLI session executes strictly in order), so this same
 # FILES-before-DONE positional check also guarantees WORKDIR executed for
 # real -- no separate WORKDIR/DONE position check is needed.
-VERIFY_OUT="$(sweep_verify_request 1 | RUN 2>/dev/null)"
+VERIFY_REQ="$(sweep_verify_request 1)"
+VERIFY_OUT="$(printf '%s\n' "$VERIFY_REQ" | RUN 2>/dev/null)"
 VERIFY_RC=$?
 if [ "$VERIFY_RC" -ne 0 ]; then
   echo "ERROR: undeploy verify's transport exited $VERIFY_RC; refusing to declare $DEVICE_IP clean" >&2
@@ -564,10 +622,31 @@ if ! printf '%s' "$VERIFY_OUT" | end_after_start "${VERIFY_MARKER}FILES__" "${VE
   echo "ERROR: undeploy verify was truncated before its end marker; refusing to declare $DEVICE_IP clean" >&2
   exit 1
 fi
-if xr_command_rejected "$APPS"; then
-  echo "ERROR: undeploy verify's appmgr application-table read was rejected by the device; refusing to declare $DEVICE_IP clean" >&2
-  exit 1
-fi
+# Every one of these four sections is a READ whose emptiness this script goes
+# on to interpret as "nothing left on the device". Each therefore has to prove
+# the device actually answered, not merely that the marker was typed -- the
+# positional checks above cannot tell those apart (see
+# section_has_device_output). This also covers an rc-0 session that dropped
+# BEFORE a given marker executed: that section then resolves inside the upfront
+# echo and carries no device content.
+for _section_name in APPS SOURCES FILES WORKDIR; do
+  eval "_section_text=\"\$$_section_name\""
+  if ! section_has_device_output "$_section_text" "$VERIFY_REQ"; then
+    echo "ERROR: undeploy verify's $_section_name read returned no device output (only the transport's echo of the request); refusing to declare $DEVICE_IP clean" >&2
+    exit 1
+  fi
+done
+# The rejection guard applies to every table/listing read, not just the app
+# table: a refused `show appmgr source-table` or `dir harddisk:` otherwise
+# reads as an empty table, which is exactly "nothing left" -- five residue
+# checks cleared at once by an error message.
+for _section_name in APPS SOURCES FILES; do
+  eval "_section_text=\"\$$_section_name\""
+  if xr_command_rejected "$_section_text"; then
+    echo "ERROR: undeploy verify's $_section_name read was rejected by the device; refusing to declare $DEVICE_IP clean" >&2
+    exit 1
+  fi
+done
 
 forbidden=""
 if table_contains "$APPS" "$APPID"; then

@@ -300,9 +300,9 @@ install and teardown alike — the install Up-poll is 30 short,
 client-looped sessions rather than one long one, so it shares the same
 bound safely without a separate knob
 (`agentinfo/xr-support/teardown-speed-recon.md`, section 1.4). Undeploy
-composes at most two bounded sessions per run — a read-only probe,
-deactivate, and sidecar-listing session, then a destructive
-uninstall/remove/sweep/verify session — so a completely unresponsive router
+composes at most two bounded sessions per run — a read-only probe and
+deactivate session, then a destructive uninstall/remove/sweep/verify
+session — so a completely unresponsive router
 now holds a teardown job for at most 300 seconds (two stalled sessions) at
 the default bound, down from the roughly two-hour worst case the old
 six-to-eleven-session, 900-second-default design could reach. A deployment

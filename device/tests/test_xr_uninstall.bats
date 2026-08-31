@@ -296,6 +296,12 @@ case "$cmds" in
     if [ "${FAKE_VERIFY_OMIT_APPS:-no}" != "yes" ]; then
       row="$(next_app_row)"
       echo "__IRIS_XR_VERIFY_APPS__"
+      # XR stamps every exec command with a timestamp line before its output,
+      # so even an EMPTY table still carries device-originated content. The
+      # stub must model that: without it an absent app is indistinguishable
+      # from a session that never executed anything, which is precisely the
+      # C1 fail-open the script now refuses.
+      echo "Mon Aug 31 14:24:08.136 UTC"
       printf '%s\n' "$row"
       # FAKE_VERIFY_OMIT_APPS_END simulates a probe truncated right after
       # its start marker + row -- a hard error, never read as absent.
@@ -328,12 +334,20 @@ case "$cmds" in
     if [ "${FAKE_VERIFY_OMIT_APPS:-no}" != "yes" ]; then
       row="$(next_app_row)"
       echo "__IRIS_XR_VERIFY_APPS__"
+      # XR stamps every exec command with a timestamp line before its output,
+      # so even an EMPTY table still carries device-originated content. The
+      # stub must model that: without it an absent app is indistinguishable
+      # from a session that never executed anything, which is precisely the
+      # C1 fail-open the script now refuses.
+      echo "Mon Aug 31 14:24:08.136 UTC"
       printf '%s\n' "$row"
     fi
     echo "__IRIS_XR_VERIFY_SOURCES__"
+    echo "Mon Aug 31 14:24:11.615 UTC"
     printf '%s\n' "${FAKE_SOURCE_ROW-}"
     if [ "${FAKE_VERIFY_OMIT_FILES:-no}" != "yes" ]; then
       echo "__IRIS_XR_VERIFY_FILES__"
+      echo "Mon Aug 31 14:24:15.440 UTC"
       printf '%s\n' "${FAKE_DIR_HARDDISK-Directory of harddisk:/}"
     fi
     # Run-4/5 fix wave: iris-work's own sub-listing. Default is the REAL
@@ -344,6 +358,7 @@ case "$cmds" in
     # has already confirmed iris-work is present.
     if [ "${FAKE_VERIFY_OMIT_WORKDIR:-no}" != "yes" ]; then
       echo "__IRIS_XR_VERIFY_WORKDIR__"
+      echo "Mon Aug 31 14:24:05.992 UTC"
       printf '%s\n' "${FAKE_WORKDIR_LISTING-Directory of harddisk:/iris-work
 No files in directory
 
@@ -386,6 +401,16 @@ if [ -n "${FAKE_COMMAND_LOG:-}" ]; then
 fi
 printf '%s\n' "$cmds"
 
+# FAKE_ECHO_ONLY: an rc-0 session that echoed the whole piped request back
+# and executed NOTHING -- the transcript is the upfront blob and nothing
+# else. Hardware-plausible: a login/banner state that closes early, or per
+# command AAA authorization refusing every line. The markers are `!` comments
+# that emit no output of their own, so marker PRESENCE cannot distinguish
+# this from a real run; only device-originated content can.
+if [ "${FAKE_ECHO_ONLY:-no}" = "yes" ]; then
+  exit 0
+fi
+
 next_app_row() {
   countfile="${BATS_TEST_TMPDIR:-.}/probe-count"
   n=0
@@ -401,6 +426,12 @@ case "$cmds" in
     if [ "${FAKE_VERIFY_OMIT_APPS:-no}" != "yes" ]; then
       row="$(next_app_row)"
       echo "__IRIS_XR_VERIFY_APPS__"
+      # XR stamps every exec command with a timestamp line before its output,
+      # so even an EMPTY table still carries device-originated content. The
+      # stub must model that: without it an absent app is indistinguishable
+      # from a session that never executed anything, which is precisely the
+      # C1 fail-open the script now refuses.
+      echo "Mon Aug 31 14:24:08.136 UTC"
       printf '%s\n' "$row"
       # FAKE_TRUNCATE_AFTER_APPS simulates the transport dying (rc 0) right
       # after the REAL start marker + row -- before its own end marker or
@@ -420,6 +451,11 @@ case "$cmds" in
     echo "__IRIS_XR_VERIFY_DEACTIVATE_END__"
     ;;
   *"__IRIS_XR_VERIFY_FILES__"*)
+    # Session 1 succeeds normally; only the sweep+verify session comes back
+    # echo-only at rc 0, so this isolates the verify-side half of the defect.
+    if [ "${FAKE_ECHO_ONLY_VERIFY:-no}" = "yes" ]; then
+      exit 0
+    fi
     if [ -n "${FAKE_VERIFY_RC:-}" ] && [ "${FAKE_VERIFY_RC}" != "0" ]; then
       # "blob-only output": nothing real is ever produced -- the echoed
       # upfront blob (already printed above) is ALL this call returns
@@ -429,12 +465,20 @@ case "$cmds" in
     if [ "${FAKE_VERIFY_OMIT_APPS:-no}" != "yes" ]; then
       row="$(next_app_row)"
       echo "__IRIS_XR_VERIFY_APPS__"
+      # XR stamps every exec command with a timestamp line before its output,
+      # so even an EMPTY table still carries device-originated content. The
+      # stub must model that: without it an absent app is indistinguishable
+      # from a session that never executed anything, which is precisely the
+      # C1 fail-open the script now refuses.
+      echo "Mon Aug 31 14:24:08.136 UTC"
       printf '%s\n' "$row"
     fi
     echo "__IRIS_XR_VERIFY_SOURCES__"
+    echo "Mon Aug 31 14:24:11.615 UTC"
     printf '%s\n' "${FAKE_SOURCE_ROW-}"
     if [ "${FAKE_VERIFY_OMIT_FILES:-no}" != "yes" ]; then
       echo "__IRIS_XR_VERIFY_FILES__"
+      echo "Mon Aug 31 14:24:15.440 UTC"
       printf '%s\n' "${FAKE_DIR_HARDDISK-Directory of harddisk:/}"
     fi
     # FAKE_TRUNCATE_AFTER_FILES simulates the transport dying (rc 0) right
@@ -449,6 +493,7 @@ case "$cmds" in
     # empty-directory shape captured live on hardware, run 5).
     if [ "${FAKE_VERIFY_OMIT_WORKDIR:-no}" != "yes" ]; then
       echo "__IRIS_XR_VERIFY_WORKDIR__"
+      echo "Mon Aug 31 14:24:05.992 UTC"
       printf '%s\n' "${FAKE_WORKDIR_LISTING-Directory of harddisk:/iris-work
 No files in directory
 
@@ -496,6 +541,7 @@ case "$cmds" in
     # exercises deactivate being sent for real -- every marker below arrives
     # prompt-echoed, never a bare line.
     printf '%s! __IRIS_XR_VERIFY_APPS__\n' "$PROMPT"
+    printf 'Mon Aug 31 14:24:08.136 UTC\n'
     printf 'iris  docker  iris-xr  Up  app_manager\n'
     printf '%s! __IRIS_XR_VERIFY_APPS_END__\n' "$PROMPT"
     printf '%s! __IRIS_XR_VERIFY_DEACTIVATE__\n' "$PROMPT"
@@ -503,8 +549,10 @@ case "$cmds" in
     ;;
   *"__IRIS_XR_VERIFY_FILES__"*)
     printf '%s! __IRIS_XR_VERIFY_APPS__\n' "$PROMPT"
+    printf 'Mon Aug 31 14:24:08.136 UTC\n'
     printf '\n'
     printf '%s! __IRIS_XR_VERIFY_SOURCES__\n' "$PROMPT"
+    printf 'Mon Aug 31 14:24:11.615 UTC\n'
     printf '\n'
     printf '%s! __IRIS_XR_VERIFY_FILES__\n' "$PROMPT"
     printf 'Directory of harddisk:/\n'
@@ -888,6 +936,47 @@ _xr_call_body() {
   fi
 }
 
+# C1 from the whole-series review (2026-08-31), reproduced twice against the
+# unmodified script: end_after_start() compares only marker POSITIONS, and the
+# composed request itself contains START before END for every pair, so a
+# transcript consisting of nothing but the transport's upfront echo satisfied
+# every integrity guard. verify_section()'s matches[-1] then landed inside that
+# same blob and returned the next TYPED line as the "section" ($FILES became
+# the literal string `dir harddisk:`), every residue check read no-match as
+# nothing-there, and the run exited 0 announcing a clean teardown with all
+# seven destructive commands already sent.
+#
+# The premise is not exotic. Since the markers became `!` comments they emit no
+# output of their own, so a marker only ever reaches the transcript via the pty
+# echo -- the guards structurally cannot tell "the command ran" from "the
+# command was refused". Any rc-0 session refused with wording other than
+# `% Invalid input` collapses identically: TACACS+ "Command authorization
+# failed.", XR "% This command is not authorized", an early session close.
+@test "live [echoing transport]: an rc-0 session that echoed the request but executed nothing is a hard error" {
+  _xr_uninstall_echoing_stub_setup
+  FAKE_ECHO_ONLY=yes run _xr_uninstall_run_live
+  [ "$status" -ne 0 ] || return 1
+  # It must NOT be read as "the app was already absent" -- that verdict is the
+  # gateway to composing and sending the destructive session.
+  if printf '%s\n' "$output" | grep -q 'already deactivated/absent'; then
+    return 1
+  fi
+  if printf '%s\n' "$output" | grep -q 'undeploy complete'; then
+    return 1
+  fi
+  [[ "$output" == *"returned no device output"* ]]
+}
+
+@test "live [echoing transport]: an echo-only rc-0 verify session never reports the device clean" {
+  _xr_uninstall_echoing_stub_setup
+  FAKE_ECHO_ONLY_VERIFY=yes run _xr_uninstall_run_live
+  [ "$status" -ne 0 ] || return 1
+  if printf '%s\n' "$output" | grep -q 'undeploy complete'; then
+    return 1
+  fi
+  [[ "$output" == *"returned no device output"* ]]
+}
+
 @test "live [echoing transport]: session 2/2's verify truncated after the executed FILES marker (rc 0) is a hard error, not clean" {
   _xr_uninstall_echoing_stub_setup
   FAKE_TRUNCATE_AFTER_FILES=yes run _xr_uninstall_run_live
@@ -919,6 +1008,54 @@ _xr_call_body() {
   # not just "didn't error".
   count="$(printf '%s\n' "$log" | grep -c '^no appmgr application iris$')"
   [ "$count" -eq 1 ] || return 1
+}
+
+# Review finding (2026-08-31): xr_command_rejected was applied to the app table
+# only. A refused `show appmgr source-table` or `dir harddisk:` therefore read
+# as an EMPTY table -- which is exactly "nothing left" -- clearing five residue
+# checks at once with an error message. Same D2-3 fail-open direction as the
+# app-table case that was already guarded.
+@test "live: a rejected appmgr source-table read is a hard error, never read as no sources" {
+  _xr_uninstall_stub_setup
+  FAKE_SOURCE_ROW="% Invalid input detected at '^' marker." run _xr_uninstall_run_live
+  [ "$status" -ne 0 ] || return 1
+  if printf '%s\n' "$output" | grep -q 'undeploy complete'; then
+    return 1
+  fi
+  [[ "$output" == *"SOURCES read was rejected"* ]]
+}
+
+@test "live: a rejected harddisk: listing is a hard error, never read as no files" {
+  _xr_uninstall_stub_setup
+  FAKE_DIR_HARDDISK="% Invalid input detected at '^' marker." run _xr_uninstall_run_live
+  [ "$status" -ne 0 ] || return 1
+  if printf '%s\n' "$output" | grep -q 'undeploy complete'; then
+    return 1
+  fi
+  [[ "$output" == *"FILES read was rejected"* ]]
+}
+
+# The rejection vocabulary was one literal, `% Invalid input`. AAA command
+# authorization is ordinary in production and refuses with entirely different
+# wording, which sailed through as an empty table.
+@test "live: a TACACS+ command-authorization refusal is recognized as a rejection" {
+  _xr_uninstall_stub_setup
+  FAKE_DIR_HARDDISK="Command authorization failed." run _xr_uninstall_run_live
+  [ "$status" -ne 0 ] || return 1
+  if printf '%s\n' "$output" | grep -q 'undeploy complete'; then
+    return 1
+  fi
+  [[ "$output" == *"rejected"* ]]
+}
+
+@test "live: an XR task-group authorization refusal is recognized as a rejection" {
+  _xr_uninstall_stub_setup
+  FAKE_SOURCE_ROW="% This command is not authorized" run _xr_uninstall_run_live
+  [ "$status" -ne 0 ] || return 1
+  if printf '%s\n' "$output" | grep -q 'undeploy complete'; then
+    return 1
+  fi
+  [[ "$output" == *"rejected"* ]]
 }
 
 @test "live: fails when the source is still listed after teardown" {
