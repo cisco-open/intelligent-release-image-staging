@@ -8,18 +8,31 @@
 # Task 3): the record-driven inverse of device/xr-install.sh.
 #
 # Teardown-speed composite (agentinfo/specs/2026-08-31-xr-teardown-speed.md
-# section 2A): the per-step design that made 6-11 separate lab/xr-run.sh
-# logins per teardown collapsed into TWO bounded logins -- session 1/2
-# ("setup": early probe, unconditional deactivate, unconditional source
-# uninstall, unconditional file rm, sidecar listing) and session 2/2
-# ("sweep+verify": sidecar sweep for whatever session 1 actually listed, then
-# the final three-way verify). Two, not one: the sidecar sweep needs session
-# 1's own `ls` result to know which bare paths to hand `rm` (never a glob),
-# and there is no interactive transport to react to a login's output before
-# it ends -- see the long design comment at the top of xr-uninstall.sh for
-# the full justification (this is a structural constraint the recon flagged
-# as unresolved, not a benign-error one, and lab/xr-run.sh is out of this
-# script's own scope to make interactive).
+# section 2A, amended after review to "at most two bounded sessions"): the
+# per-step design that made 6-11 separate lab/xr-run.sh logins per teardown
+# collapsed into AT MOST TWO bounded logins, split on a SAFETY boundary, not
+# a topical one -- session 1/2 ("setup": early probe, unconditional-but-
+# adjudicated deactivate, sidecar listing -- NOTHING destructive to the
+# package or files rides this login) and session 2/2 ("sweep+verify": the
+# three destructive commands -- source uninstall, rm the RPM, rm the work
+# dir -- PLUS the sidecar sweep for whatever session 1 actually listed, PLUS
+# the final three-way verify). Session 2 is composed and sent ONLY when
+# session 1's paired adjudication did NOT conclude the app is a confirmed
+# real failure -- a rejected-while-present deactivate exits before session 2
+# is ever built, so nothing destructive is ever composed, let alone sent, in
+# that case (this was a CRITICAL finding in review of this task's first
+# version: the destructive commands originally rode session 1's own blind
+# unconditional stream, so they had already executed by the time a real
+# failure was detected -- fixed by moving them into session 2's builder,
+# gated the same way the sidecar-rm lines already were).
+#
+# Two, not one: the sidecar sweep needs session 1's own `ls` result to know
+# which bare paths to hand `rm` (never a glob), and there is no interactive
+# transport to react to a login's output before it ends -- see the long
+# design comment at the top of xr-uninstall.sh for the full justification
+# (this is a structural constraint the recon flagged as unresolved, not a
+# benign-error one, and lab/xr-run.sh is out of this script's own scope to
+# make interactive).
 #
 # Final-line discipline: this Mac's bash (3.2) does not treat a failing
 # bare `[[ ... ]]` as fatal under `set -e` unless it is the last command
@@ -90,6 +103,38 @@ setup() {
   [[ "$output" == *"unconditional no appmgr application"* ]] || return 1
   [[ "$output" == *"already absent before deactivate: benign idempotent-skip"* ]] || return 1
   [[ "$output" == *"still active and rejected: fail-closed, refuse to continue"* ]]
+}
+
+# Fix-wave item 2 (dry-run honesty): dry-run calls setup_request()/
+# sweep_verify_request() directly and prints their REAL output, rather than
+# re-describing the composed streams by hand -- chosen over a superset-
+# containment bats test because it removes the drift risk structurally (one
+# builder, one source of truth for both the live and dry-run paths) instead
+# of just detecting drift after the fact. These internal
+# `echo __IRIS_XR_VERIFY_...__` marker lines are plumbing a hand-written
+# narration would never emit -- their presence is only possible if dry-run
+# is invoking the real builders.
+@test "dry-run prints the actual composed request bodies, not a hand-maintained description" {
+  run bash "$UNINSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"echo __IRIS_XR_VERIFY_APPS__"* ]] || return 1
+  [[ "$output" == *"echo __IRIS_XR_VERIFY_DEACTIVATE_END__"* ]] || return 1
+  [[ "$output" == *"echo __IRIS_XR_VERIFY_SIDECARS_END__"* ]] || return 1
+  [[ "$output" == *"echo __IRIS_XR_VERIFY_DONE__"* ]]
+}
+
+# Fix-wave item 1 (CRITICAL restructure): dry-run's session 1/2 portion
+# (everything before the "composite session 2/2" banner) must never contain
+# a destructive command -- the same safety boundary the live path now
+# enforces structurally via sweep_verify_request()'s include_destructive
+# gate.
+@test "dry-run's session 1/2 portion contains no destructive command" {
+  run bash "$UNINSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  session1="$(printf '%s\n' "$output" | sed '/composite session 2\/2/q')"
+  if printf '%s\n' "$session1" | grep -qE 'appmgr package uninstall source|run rm -f /misc/disk1/iris-xr\.rpm|run rm -rf /misc/disk1/iris-work'; then
+    return 1
+  fi
 }
 
 @test "xr-uninstall.sh never sends the invalid 'appmgr application summary' form" {
@@ -191,6 +236,10 @@ next_app_row() {
 case "$cmds" in
   *"__IRIS_XR_VERIFY_SIDECARS__"*)
     # session 1/2 (setup): APPS (early probe) -> DEACTIVATE -> SIDECARS.
+    # NOTHING destructive rides this request -- the stub does not need to
+    # (and does not) special-case that; it is the request body itself
+    # (asserted by the tests below) that proves the destructive commands
+    # were never composed into this call.
     if [ "${FAKE_VERIFY_OMIT_APPS:-no}" != "yes" ]; then
       row="$(next_app_row)"
       echo "__IRIS_XR_VERIFY_APPS__"
@@ -223,7 +272,9 @@ case "$cmds" in
     echo "__IRIS_XR_VERIFY_SIDECARS_END__"
     ;;
   *"__IRIS_XR_VERIFY_FILES__"*)
-    # session 2/2 (sweep+verify): APPS (final re-probe) -> SOURCES -> FILES -> DONE.
+    # session 2/2 (sweep+verify): the three destructive commands (when
+    # composed at all -- gated client-side, not by this stub) -> sidecar
+    # sweep -> APPS (final re-probe) -> SOURCES -> FILES -> DONE.
     if [ "${FAKE_VERIFY_OMIT_APPS:-no}" != "yes" ]; then
       row="$(next_app_row)"
       echo "__IRIS_XR_VERIFY_APPS__"
@@ -354,6 +405,19 @@ _xr_uninstall_run_live() {
     bash "$STUBDIR/device/xr-uninstall.sh"
 }
 
+# Isolates the Nth (1-indexed) login's own request body out of
+# FAKE_COMMAND_LOG, so a test can assert something about exactly ONE call's
+# content without the other call's lines being able to satisfy the same
+# substring check (the failure mode a whole-log grep can't rule out).
+_xr_call_body() {
+  local want="$1"
+  awk -v want="$want" '
+    /=== CALL START ===/ { c++; if (c == want) capture = 1; next }
+    /=== CALL END ===/   { if (c == want) capture = 0; next }
+    capture { print }
+  ' "$FAKE_COMMAND_LOG"
+}
+
 # Pin mapping (old -> new): this is a NEW pin (brief step 1(a)) with a
 # documented deviation from a literal "exactly once" -- see the design
 # comment at the top of xr-uninstall.sh and this file's own header comment.
@@ -447,6 +511,17 @@ _xr_uninstall_run_live() {
 # rejected (D2-3's own proven generic rejection banner standing in for the
 # unmeasured appmgr-specific text) -- fails loud and never composes/sends
 # the sweep+verify login at all.
+#
+# CRITICAL fix-wave pin (restored): an earlier version of this task's
+# composite put the three destructive commands (source uninstall, rm the
+# RPM, rm the work dir) unconditionally in session 1's OWN blind stream, so
+# by the time this exact real-failure verdict was reached they had ALREADY
+# executed against a device this script had just concluded was still
+# running the app -- confirmed by empirical transcript reproduction in
+# review. The anti-uninstall/rm assertion below is the direct regression pin
+# for that finding: it must fail the test if either destructive command
+# appears ANYWHERE in the transport log once real failure is concluded, not
+# just skip the check the way the earlier version did.
 @test "live: refuses to continue when the app is present and deactivate is rejected (paired adjudication, real failure)" {
   _xr_uninstall_stub_setup
   FAKE_APP_ROW_1="iris  docker  iris-xr  Up  app_manager" FAKE_DEACTIVATE_REJECTED=yes \
@@ -458,11 +533,38 @@ _xr_uninstall_run_live() {
   # composed or sent once the paired adjudication fails loud.
   count="$(printf '%s\n' "$log" | grep -c '=== CALL START ===')"
   [ "$count" -eq 1 ] || return 1
-  if printf '%s\n' "$log" | grep -qE 'appmgr package uninstall source|run rm -f /misc/disk1/iris-xr\.rpm'; then
-    : # source-uninstall/rm DO ride the same unconditional session 1/2 login
-      # as deactivate (recon table rows 2-3, unchanged best-effort) -- this
-      # branch intentionally does not fail the test on their presence.
+  # RESTORED: nothing destructive was ever sent to the device in this run --
+  # session 2, the only place any of the three destructive commands can now
+  # live, was never composed at all.
+  if printf '%s\n' "$log" | grep -qE 'appmgr package uninstall source|run rm -f /misc/disk1/iris-xr\.rpm|run rm -rf /misc/disk1/iris-work'; then
+    return 1
   fi
+}
+
+# CRITICAL fix-wave pin: the structural proof, independent of any particular
+# outcome -- session 1's own request body NEVER contains a destructive
+# command, whether the run goes on to succeed (this test, app absent so
+# adjudication is benign and session 2 IS composed) or fails loud (the test
+# above, session 2 never composed at all). Isolating call 1's own body (via
+# _xr_call_body) rather than grepping the whole log rules out the failure
+# mode review caught: a whole-log grep can't tell "absent from call 1" apart
+# from "present, but only in call 2".
+@test "live: session 1's own request body never contains a destructive command" {
+  _xr_uninstall_stub_setup
+  run _xr_uninstall_run_live
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"undeploy complete"* ]] || return 1
+  first_call="$(_xr_call_body 1)"
+  if printf '%s\n' "$first_call" | grep -qE 'appmgr package uninstall source|run rm -f /misc/disk1/iris-xr\.rpm|run rm -rf /misc/disk1/iris-work'; then
+    return 1
+  fi
+  # contrast: the destructive commands DID move somewhere -- call 2, once
+  # adjudication clears them -- proving this is a relocation gated on
+  # outcome, not a silent deletion of the steps themselves.
+  second_call="$(_xr_call_body 2)"
+  [[ "$second_call" == *"appmgr package uninstall source iris-xr"* ]] || return 1
+  [[ "$second_call" == *"run rm -f /misc/disk1/iris-xr.rpm"* ]] || return 1
+  [[ "$second_call" == *"run rm -rf /misc/disk1/iris-work"* ]]
 }
 
 # New pin (brief step 1(d), paired-adjudication half): probe-absent +
@@ -477,6 +579,11 @@ _xr_uninstall_run_live() {
   [ "$status" -eq 0 ] || return 1
   [[ "$output" == *"already deactivated/absent"* ]] || return 1
   [[ "$output" == *"undeploy complete"* ]] || return 1
+  # contrast with the real-failure test above: benign means session 2 IS
+  # composed and the destructive commands DO run -- there is nothing left on
+  # the device for them to endanger.
+  log="$(cat "$FAKE_COMMAND_LOG")"
+  [[ "$log" == *"appmgr package uninstall source iris-xr"* ]] || return 1
 }
 
 @test "live: a deactivate probe transport failure is a hard error, never read as absent" {
