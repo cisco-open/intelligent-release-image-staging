@@ -2343,7 +2343,7 @@
   // so offering it here would only produce a rejection after submit. It
   // appears the moment the model says IOS-XR, from the fetched options below.
   var AUTO_INSTALL_OPTIONS = ['guestshell', 'iox', 'router'];
-  var FULL_INSTALL_OPTIONS_HTML = '<option value="">Agent install - auto by model</option>' +
+  var FULL_INSTALL_OPTIONS_HTML = '<option value="" disabled selected>Choose an agent install</option>' +
     AUTO_INSTALL_OPTIONS.map(function (k) {
       return '<option value="' + esc(k) + '">' + esc(INSTALL_OPTION_LABELS[k]) + '</option>';
     }).join('');
@@ -2405,7 +2405,7 @@
       }
       var kept = platform.value;
       platform.disabled = false;
-      platform.innerHTML = '<option value="">Agent install - auto by model</option>' +
+      platform.innerHTML = '<option value="" disabled selected>Choose an agent install</option>' +
         options.map(function (o) {
           return '<option value="' + esc(o) + '">' + esc(INSTALL_OPTION_LABELS[o] || o) + '</option>';
         }).join('');
@@ -2443,6 +2443,16 @@
     var did = document.getElementById('df-id').value.trim();
     var derr = document.getElementById('df-err'); derr.textContent = '';
     if (!did) { derr.textContent = 'Device ID is required.'; return; }
+    // No automatic answer: the agent install is always chosen explicitly.
+    // Letting this through blank handed the decision to a model guess, which
+    // is how an IOS-XR router was sent down an install its hardware cannot run.
+    var platformSel = document.getElementById('df-platform');
+    if (!platformSel.value) {
+      derr.textContent = platformSel.disabled
+        ? 'No agent install is available for this model.'
+        : 'Choose an agent install for this device.';
+      return;
+    }
     var managementType = document.getElementById('df-management-type').value;
     var vlan = document.getElementById('df-vlan').value.trim();
     var mask = document.getElementById('df-mask').value.trim();

@@ -176,6 +176,11 @@ top-level `VERSION` file.
   `NOTICE` for full font/icon attribution.
 
 ### Fixed
+- The console no longer offers "auto by model" as an agent install. Picking it
+  handed the decision to a model guess, which is how an IOS-XR router was sent
+  down an install its hardware cannot run. The install is now chosen
+  explicitly, and saving a device without one is refused with a clear message
+  rather than resolved silently.
 - The origin now seeds every published image instead of only the first five.
   A seeding torrent never completes, so each one permanently occupied one of
   aria2's five default concurrent-download slots and any image published after
