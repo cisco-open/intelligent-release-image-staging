@@ -31,3 +31,24 @@ done
 
 [ -x "$REPO/tools/provision-iox-packages.sh" ] || { echo ">> IOx packaging tools not present (not shipped in the release tarball); skipping IOx package staging" >&2; exit 0; }
 "$REPO/tools/provision-iox-packages.sh"
+
+# XR RPM freshness (Cisco 8000 series, IOS-XR): this bring-up only stages
+# the two IOx tars above -- the XR RPM is built separately and out of band
+# (tools/build-xr-package.sh) and is entirely optional (a server with no
+# Cisco 8000 devices in scope never needs one). An ABSENT RPM is therefore
+# silent, same "absent = neutral" rule tools/check-package-freshness.sh
+# uses for it. A PRESENT RPM that predates the certificate this bring-up
+# just (re)provisioned is different: docker-entrypoint.sh mints iris-
+# catalog.pem fresh on every start, so a prebuilt RPM naturally cannot pin
+# a certificate that did not exist yet. Warn with the exact remedy rather
+# than rebuilding automatically -- building the RPM needs docker context
+# decisions (base image, CATALOG_PEM, ...) this deploy script does not own.
+XR_RPM="$REPO/artifacts/iris-xr.rpm"
+if [ -f "$XR_RPM" ]; then
+  CERT_EPOCH="$(docker exec iris stat -c %Y /srv/artifacts/iris-catalog.pem 2>/dev/null || true)"
+  RPM_EPOCH="$(date -r "$XR_RPM" '+%s' 2>/dev/null || true)"
+  if [ -n "$CERT_EPOCH" ] && [ -n "$RPM_EPOCH" ] && [ "$RPM_EPOCH" -lt "$CERT_EPOCH" ]; then
+    echo "WARNING: artifacts/iris-xr.rpm predates the live catalog certificate (build time only -- contents not inspected)." >&2
+    echo "  Rebuild it: tools/build-xr-package.sh --out artifacts/   (CATALOG_PEM: the live certificate, certificate block only)" >&2
+  fi
+fi

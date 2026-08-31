@@ -779,6 +779,30 @@ iris  docker  iris-xr  Up  app_manager' run _xr_uninstall_run_live
 }
 
 # ---------------------------------------------------------------------------
+# ERE hygiene: APPID/SOURCE_NAME are operator-supplied overrides, not fixed
+# literals -- table_contains() interpolates them into a grep -E pattern (the
+# word-anchored match used for the early probe and [5/5]'s own re-check), so
+# an override containing an ERE metacharacter must not widen what counts as
+# a match. A literal '.' is the sharpest case: unescaped, it matches ANY
+# character, so an APPID override of "iris.x" would otherwise treat an
+# unrelated table row spelling "irisAx" as the app being present.
+# ---------------------------------------------------------------------------
+
+@test "live: an APPID override containing an ERE metacharacter does not loosen the present-match" {
+  _xr_uninstall_stub_setup
+  APPID='iris.x' FAKE_APP_ROW_1='irisAx  docker  iris-xr  Up  app_manager' \
+    run _xr_uninstall_run_live
+  [ "$status" -eq 0 ] || return 1
+  # Correctly escaped: "iris.x" (literal dot) does NOT match a table row
+  # spelling "irisAx" -- the early probe must read the app as absent, not
+  # present, and log the idempotent-skip message. An unescaped '.' would
+  # match "irisAx" (any-character wildcard), skipping this message and
+  # proceeding as if the app were genuinely found present.
+  [[ "$output" == *"already deactivated/absent"* ]] || return 1
+  [[ "$output" == *"undeploy complete"* ]]
+}
+
+# ---------------------------------------------------------------------------
 # MINOR 4: [5/5]'s FILES checks must be $-anchored per-line matches (the
 # sidecar sweep's own shape), not whole-blob substring tests -- an operator
 # file that merely CONTAINS the target text (notes.aria2.bak for ".aria2";

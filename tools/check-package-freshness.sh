@@ -112,9 +112,58 @@ for PKG in iris-amd64.tar iris-arm64.tar; do
   fi
 done
 
+# 4. The XR RPM (Cisco 8000 series) has no filesystem shape this stdlib-only
+#    (openssl/tar) reader can unpack the way the two tars' inner
+#    artifacts.tar.gz is unpacked above -- see server/setup_status.py's
+#    _xr_package_item docstring for the same constraint on the console's
+#    setup-status card, which this mirrors. So this can never say "this RPM
+#    pins certificate X" the way the tar rows above do. What it CAN honestly
+#    check is the RPM's build time against the live catalog certificate's
+#    OWN mtime (the same container-side iris-catalog.pem already docker cp'd
+#    above for its fingerprint -- read here via `stat` instead): built
+#    at/after that mtime is the best available evidence the RPM was produced
+#    with the live cert (REMEDY_XR's CATALOG_PEM argument is how a real
+#    build ties the two together); built before it is evidence the RPM
+#    predates a rotation and may still pin the old one. Contents are never
+#    inspected either way -- the printed state says so plainly.
+XR_PKG="iris-xr.rpm"
+XR_PATH="$ARTIFACTS_DIR/$XR_PKG"
+XR_REMEDY="tools/build-xr-package.sh --out artifacts/   (CATALOG_PEM: the live certificate, certificate block only)"
+XR_STATE="absent"
 echo
-if [ ${#STALE[@]} -eq 0 ] && [ "$CATALOG_DRIFT" -eq 0 ]; then
-  echo "all served packages pin the live catalog certificate."
+echo "XR RPM freshness (build time only -- contents not inspected)"
+if [ ! -f "$XR_PATH" ]; then
+  printf '  %-18s %s\n' "$XR_PKG" "absent"
+else
+  XR_BUILT_EPOCH="$(date -r "$XR_PATH" '+%s' 2>/dev/null || true)"
+  XR_BUILT="$(date -r "$XR_PATH" '+%Y-%m-%d %H:%M' 2>/dev/null || echo '?')"
+  CERT_EPOCH=""
+  if docker inspect "$IRIS_CONTAINER" >/dev/null 2>&1; then
+    CERT_EPOCH="$(docker exec "$IRIS_CONTAINER" stat -c %Y /srv/artifacts/iris-catalog.pem 2>/dev/null || true)"
+  fi
+  if [ -z "$XR_BUILT_EPOCH" ]; then
+    printf '  %-18s build time unreadable -- contents not inspected regardless\n' "$XR_PKG"
+    XR_STATE="unknown"
+  elif [ -z "$CERT_EPOCH" ]; then
+    printf '  %-18s built %s  UNKNOWN (live certificate mtime unavailable; contents not inspected)\n' "$XR_PKG" "$XR_BUILT"
+    XR_STATE="unknown"
+  elif [ "$XR_BUILT_EPOCH" -ge "$CERT_EPOCH" ]; then
+    printf '  %-18s built %s  OK-BY-MTIME (built after the current certificate; contents not inspected)\n' "$XR_PKG" "$XR_BUILT"
+    XR_STATE="ok"
+  else
+    printf '  %-18s built %s  STALE-BY-MTIME (built before the current certificate; contents not inspected)\n' "$XR_PKG" "$XR_BUILT"
+    XR_STATE="stale"
+  fi
+fi
+
+echo
+if [ ${#STALE[@]} -eq 0 ] && [ "$CATALOG_DRIFT" -eq 0 ] && [ "$XR_STATE" != "stale" ]; then
+  echo "verified: both IOx tars pin the live catalog certificate (contents inspected)."
+  case "$XR_STATE" in
+    ok) echo "verified: the XR RPM was built after that certificate -- by build time only, contents not inspected." ;;
+    unknown) echo "unverified: the XR RPM's build time could not be compared against the live certificate." ;;
+    absent) echo "no XR RPM is staged; nothing to check for that package type." ;;
+  esac
   exit 0
 fi
 
@@ -123,12 +172,18 @@ if [ ${#STALE[@]} -gt 0 ]; then
   echo "Devices deployed from these packages will install and report RUNNING, then"
   echo "fail every catalog call with CERTIFICATE_VERIFY_FAILED and never heartbeat."
 fi
+if [ "$XR_STATE" = "stale" ]; then
+  echo "STALE (by mtime): $XR_PKG"
+  echo "Built before the current certificate; only build time was compared, never contents --"
+  echo "a router onboarded from it may be pinning a certificate that has since rotated out."
+  echo "Fix: $XR_REMEDY"
+fi
 if [ "$CATALOG_DRIFT" -eq 1 ]; then
   echo "Fix the served/distributed catalog certificate mismatch, then rerun this check."
   echo "Package rebuilding cannot repair the certificate handed to Guest Shell devices."
   exit 1
 fi
-if [ "$REBUILD" -eq 1 ]; then
+if [ "$REBUILD" -eq 1 ] && [ ${#STALE[@]} -gt 0 ]; then
   echo
   echo ">> rebuilding all IOx packages"
   "$HERE/provision-iox-packages.sh"
@@ -136,5 +191,7 @@ if [ "$REBUILD" -eq 1 ]; then
   echo ">> re-checking"
   exec "$0"
 fi
-echo "Fix: tools/provision-iox-packages.sh   (or re-run this with --rebuild)"
+if [ ${#STALE[@]} -gt 0 ]; then
+  echo "Fix: tools/provision-iox-packages.sh   (or re-run this with --rebuild)"
+fi
 exit 1

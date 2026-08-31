@@ -309,6 +309,18 @@ ei = text.rfind(end_marker)
 sys.exit(0 if (si != -1 and ei != -1 and ei > si) else 1)' "$1" "$2"
 }
 
+# ERE-metacharacter escape for a LITERAL string that is about to be
+# interpolated into a grep -E pattern below. APPID/SOURCE_NAME are
+# operator-supplied overrides (env vars), not fixed literals -- without
+# this, an override containing a regex metacharacter (e.g. APPID=iris.x)
+# would have its '.' read as "any character" by table_contains()'s ERE,
+# silently loosening the match: an unrelated table row like "irisAx" would
+# then count as the app being present/absent, defeating the very
+# word-anchoring this file's match functions exist to provide.
+ere_escape() {
+  printf '%s' "$1" | sed -e 's/[][\.^$*+?(){}|\\]/\\&/g'
+}
+
 # Word-anchored match against real table DATA lines only, excluding prompt
 # lines. A router hostname that happens to CONTAIN the search term (e.g.
 # host "iris-lab-8010" while probing for app "iris") would otherwise make
@@ -317,9 +329,10 @@ sys.exit(0 if (si != -1 and ei != -1 and ei > si) else 1)' "$1" "$2"
 # substring test reads that as a permanent false-positive and never
 # converges. Prompt lines always contain '#' (the XR exec prompt
 # terminator); real appmgr application-table/source-table data rows never
-# do.
+# do. $2 is always a literal name (APPID or SOURCE_NAME) -- ere_escape()
+# keeps it that way inside the ERE grep -E builds.
 table_contains() {
-  printf '%s\n' "$1" | grep -v '#' | grep -qE "(^|[[:space:]])$2([[:space:]]|$)"
+  printf '%s\n' "$1" | grep -v '#' | grep -qE "(^|[[:space:]])$(ere_escape "$2")([[:space:]]|$)"
 }
 
 # $-anchored, per-line match against the harddisk: file listing -- the same
@@ -327,7 +340,11 @@ table_contains() {
 # suffix-anchored) instead of a whole-blob substring test, which would
 # otherwise flag an unrelated operator file that merely CONTAINS the target
 # text as a forbidden IRIS leftover forever (iris-workshop.txt for
-# "iris-work"; notes.aria2.bak for ".aria2").
+# "iris-work"; notes.aria2.bak for ".aria2"). Callers hand this a COMPLETE
+# ERE (metacharacters intentional, e.g. the anchors and the escaped literal
+# dot in the RPM-suffix patterns below) -- unlike table_contains(), this
+# function does not escape $2 itself; any operator-supplied name folded
+# into a pattern must be ere_escape()'d at the call site first.
 files_line_match() {
   printf '%s\n' "$1" | grep -qE "$2"
 }
@@ -456,7 +473,7 @@ fi
 if table_contains "$SOURCES" "$SOURCE_NAME"; then
   forbidden="${forbidden}${forbidden:+, }appmgr source $SOURCE_NAME"
 fi
-if files_line_match "$FILES" "(^|[[:space:]])${SOURCE_NAME}\\.rpm\$"; then
+if files_line_match "$FILES" "(^|[[:space:]])$(ere_escape "$SOURCE_NAME")\\.rpm\$"; then
   forbidden="${forbidden}${forbidden:+, }$RPM_PATH"
 fi
 if files_line_match "$FILES" '(^|[[:space:]])iris-work$'; then
