@@ -991,12 +991,40 @@ _xr_call_body() {
   fi
 }
 
+# Run-6 fix: the same NONEMPTY case, but with the FULL live session chrome
+# around the real listing (prompt-echoed `dir` command, XR timestamp line,
+# trailing prompt) -- proves workdir_has_entries()'s chrome-stripping does
+# NOT over-filter a real entry row down to "empty". Entry line verbatim from
+# the coordinator's fixture.
+@test "live: iris-work present and NONEMPTY (with prompt/timestamp chrome) still fails verify" {
+  _xr_uninstall_stub_setup
+  FAKE_DIR_HARDDISK="Directory of harddisk:/
+    12345 -rw-------. 1 root root 512 Aug 27 12:00 iris-work" \
+    FAKE_WORKDIR_LISTING="RP/0/RP0/CPU0:8010-R4#dir harddisk:/iris-work
+Mon Aug 31 13:51:50.123 UTC
+
+Directory of harddisk:/iris-work
+    655365 -rw-------. 1  21 Aug 31 12:17 iris-agent.state
+
+41968752 kbytes total (39714572 kbytes free)
+RP/0/RP0/CPU0:8010-R4#" \
+    run _xr_uninstall_run_live
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"artifacts still present"* ]] || return 1
+  [[ "$output" == *"iris-work"* ]] || return 1
+  if printf '%s\n' "$output" | grep -q 'note: empty iris-work'; then
+    return 1
+  fi
+}
+
 # Real hardware shape for a genuinely empty directory on this platform
 # (captured live, run 5) -- the header alone is NOT what XR prints; it also
 # carries an explicit "No files in directory" line and a kbytes-total
 # footer, both of which an earlier version of workdir_has_entries()
 # misread as real entries (false branch-b FAIL on a genuinely empty
-# directory, live-reproduced run 5).
+# directory, live-reproduced run 5). This is the BARE listing, with no
+# session chrome around it -- kept alongside the run-6 fixture below, which
+# adds that chrome back.
 @test "live: iris-work present but EMPTY is accepted as inert residue -- note printed, still converges" {
   _xr_uninstall_stub_setup
   FAKE_DIR_HARDDISK="Directory of harddisk:/
@@ -1005,6 +1033,33 @@ _xr_call_body() {
 No files in directory
 
 41968752 kbytes total (39714572 kbytes free)" \
+    run _xr_uninstall_run_live
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"undeploy complete"* ]] || return 1
+  [[ "$output" == *"note: empty iris-work directory left behind"* ]] || return 1
+  if printf '%s\n' "$output" | grep -q 'artifacts still present'; then
+    return 1
+  fi
+}
+
+# Run-6 regression fixture, VERBATIM from the live session shape that still
+# failed branch (b) after the run-5 fix: the run-5 fixture had already
+# trimmed off the session chrome, so it never caught that the LIVE marker
+# section also carries the prompt-echoed `dir` command line, XR's own
+# timestamp line, and the trailing prompt -- all three misread as entries
+# on a directory that was genuinely empty.
+@test "live: iris-work present but EMPTY, full run-6 session chrome (prompt/timestamp/echoed command) is still accepted as inert residue" {
+  _xr_uninstall_stub_setup
+  FAKE_DIR_HARDDISK="Directory of harddisk:/
+    12345 -rw-------. 1 root root 512 Aug 27 12:00 iris-work" \
+    FAKE_WORKDIR_LISTING="RP/0/RP0/CPU0:8010-R4#dir harddisk:/iris-work
+Mon Aug 31 13:51:50.123 UTC
+
+Directory of harddisk:/iris-work
+No files in directory
+
+41968752 kbytes total (39714572 kbytes free)
+RP/0/RP0/CPU0:8010-R4#" \
     run _xr_uninstall_run_live
   [ "$status" -eq 0 ] || return 1
   [[ "$output" == *"undeploy complete"* ]] || return 1

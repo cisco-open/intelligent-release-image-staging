@@ -395,23 +395,36 @@ files_line_match() {
   printf '%s\n' "$1" | grep -qE "$2"
 }
 
-# Run-4/5 fix wave: distinguishes an EMPTY iris-work directory (inert
+# Run-4/5/6 fix wave: distinguishes an EMPTY iris-work directory (inert
 # residue -- see the [5/5] adjudication below) from a genuine leftover.
-# Real hardware output for a genuinely empty directory on this platform
-# (captured live, run 5):
+# Real hardware output for a genuinely empty directory on this platform,
+# the FULL session shape (captured live, run 6 -- run 5's fixture had
+# already trimmed off the session chrome around the real listing):
+#   RP/0/RP0/CPU0:8010-R4#dir harddisk:/iris-work
+#   Mon Aug 31 13:51:50.123 UTC
+#
 #   Directory of harddisk:/iris-work
 #   No files in directory
 #
 #   41968752 kbytes total (39714572 kbytes free)
-# -- an EARLIER version of this check only stripped the "Directory of ..."
-# header and blank lines, so it misread the "No files in directory" line
-# and the "<N> kbytes total (<M> kbytes free)" footer as entries (a false
-# branch-b FAIL on a genuinely empty directory, live-reproduced run 5). "Has
-# entries" now strips all four noise shapes -- blank lines, the header, the
-# literal "No files in directory" line, and the kbytes-total footer -- and
-# treats anything else as a real entry (this hardware's nonempty rows are
-# shaped "<inode> <perms>. <n> <size> <date> <name>", same family as [5/5]'s
-# own top-level `dir harddisk:` read -- see FAKE_DIR_HARDDISK in the bats
+#   RP/0/RP0/CPU0:8010-R4#
+# -- run 5's version stripped the header/blank/"No files in directory"/
+# kbytes-total noise but still ran against a trimmed fixture, so it never
+# saw that the LIVE marker section also carries the prompt-echoed `dir`
+# command line, XR's own timestamp line, and the trailing prompt -- all
+# three misread as entries (another false branch-b FAIL on a genuinely
+# empty directory, live-reproduced run 6). "Has entries" now ALSO strips:
+#   - prompt lines -- reusing table_contains()'s OWN prompt-line idiom
+#     (`grep -v '#'`, this file's one hostname-guard exclusion; XR's exec
+#     prompt terminator is always '#') rather than inventing a second prompt
+#     regex. This one filter also disposes of the echoed `dir` command line
+#     for free, since that line rides the SAME prompt.
+#   - XR timestamp lines, shaped "<weekday> <month> <day> <time> UTC"
+#     (`^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) .*UTC$`).
+# Anything else surviving that strip still counts as a real entry (this
+# hardware's nonempty rows are shaped
+# "<inode> <perms>. <n> <size> <date> <name>", same family as [5/5]'s own
+# top-level `dir harddisk:` read -- see FAKE_DIR_HARDDISK in the bats
 # suite). Still biased toward "has entries" on any OTHER unrecognized line,
 # so a genuinely new output shape fails closed (still forbidden) rather than
 # risking a real leftover being silently waved through as empty residue.
@@ -421,6 +434,8 @@ workdir_has_entries() {
     | grep -v '^Directory of ' \
     | grep -vF 'No files in directory' \
     | grep -vE '^[0-9]+ kbytes total \([0-9]+ kbytes free\)$' \
+    | grep -v '#' \
+    | grep -vE '^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) .*UTC$' \
     | grep -q .
 }
 
