@@ -122,15 +122,16 @@ setup() {
 # containment bats test because it removes the drift risk structurally (one
 # builder, one source of truth for both the live and dry-run paths) instead
 # of just detecting drift after the fact. These internal
-# `echo __IRIS_XR_VERIFY_...__` marker lines are plumbing a hand-written
-# narration would never emit -- their presence is only possible if dry-run
-# is invoking the real builders.
+# `! __IRIS_XR_VERIFY_...__` marker lines (XR silent-comment form -- see the
+# live-run-3 fix wave below; XR has no `echo` EXEC command) are plumbing a
+# hand-written narration would never emit -- their presence is only possible
+# if dry-run is invoking the real builders.
 @test "dry-run prints the actual composed request bodies, not a hand-maintained description" {
   run bash "$UNINSTALL" --dry-run
   [ "$status" -eq 0 ]
-  [[ "$output" == *"echo __IRIS_XR_VERIFY_APPS__"* ]] || return 1
-  [[ "$output" == *"echo __IRIS_XR_VERIFY_DEACTIVATE_END__"* ]] || return 1
-  [[ "$output" == *"echo __IRIS_XR_VERIFY_DONE__"* ]]
+  [[ "$output" == *"! __IRIS_XR_VERIFY_APPS__"* ]] || return 1
+  [[ "$output" == *"! __IRIS_XR_VERIFY_DEACTIVATE_END__"* ]] || return 1
+  [[ "$output" == *"! __IRIS_XR_VERIFY_DONE__"* ]]
 }
 
 # Fix-wave item 1 (CRITICAL restructure): dry-run's session 1/2 portion
@@ -168,6 +169,27 @@ setup() {
   IRIS_FORCE_AGENT_ONLY=1 run bash "$UNINSTALL" --dry-run
   [ "$status" -eq 0 ]
   if printf '%s\n' "$output" | grep -qE '^run[[:space:]]'; then
+    return 1
+  fi
+}
+
+# Live-run-3 fix wave (hardware root cause): XR has NO 'echo' EXEC command --
+# every 'echo __IRIS_XR_VERIFY_...__' marker line used to mint its own
+# '% Invalid input' banner INSIDE the section it delimits, which the
+# (correct) rejection check then honestly reported as "probe was rejected".
+# Markers now ride XR's '! <text>' silent-comment form instead (proven at
+# both exec and config level, zero banners). No composed stream may contain
+# a bare XR 'echo' command line ever again -- pinned here against both
+# dry-run modes' actual output text, mirroring the no-'run' pin above.
+@test "dry-run output (plain and FORCE) never contains an XR 'echo' command line (XR has no echo)" {
+  run bash "$UNINSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  if printf '%s\n' "$output" | grep -qE '^echo[[:space:]]'; then
+    return 1
+  fi
+  IRIS_FORCE_AGENT_ONLY=1 run bash "$UNINSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  if printf '%s\n' "$output" | grep -qE '^echo[[:space:]]'; then
     return 1
   fi
 }
@@ -420,6 +442,60 @@ STUB
   ln -sf "$UNINSTALL" "$STUBDIR/device/xr-uninstall.sh"
 }
 
+# Live-run-3 fix pin: a fake lab/xr-run.sh shaped like the EXACT hardware
+# evidence for the echo/comment fix -- a real marker line does not arrive
+# bare; the device's own prompt is echoed immediately ahead of it on the
+# SAME line (probe transcript evidence: "RP/.../CPU0:host#! __MARKER__",
+# grep 'Invalid input' = 0). This stub prefixes every emitted marker with a
+# synthetic XR prompt to prove verify_section()/end_after_start() -- which
+# search for the marker text as a substring anywhere in the captured blob,
+# never anchored to the start of a line -- parse this shape correctly with
+# no code changes of their own.
+_xr_uninstall_prompt_echoed_stub_setup() {
+  STUBDIR="$BATS_TEST_TMPDIR/stub"
+  mkdir -p "$STUBDIR/lab" "$STUBDIR/device"
+  FAKE_COMMAND_LOG="$BATS_TEST_TMPDIR/xr-commands.log"
+  : > "$FAKE_COMMAND_LOG"
+  export FAKE_COMMAND_LOG
+
+  cat > "$STUBDIR/lab/xr-run.sh" <<'STUB'
+#!/usr/bin/env bash
+cmds="$(cat)"
+if [ -n "${FAKE_COMMAND_LOG:-}" ]; then
+  { echo "=== CALL START ==="; printf '%s\n' "$cmds"; echo "=== CALL END ==="; } >> "$FAKE_COMMAND_LOG"
+fi
+
+PROMPT="RP/0/RP0/CPU0:iris-lab-8010#"
+
+case "$cmds" in
+  *"__IRIS_XR_VERIFY_DEACTIVATE__"*)
+    # session 1/2 (setup): a genuinely present app row, so this run also
+    # exercises deactivate being sent for real -- every marker below arrives
+    # prompt-echoed, never a bare line.
+    printf '%s! __IRIS_XR_VERIFY_APPS__\n' "$PROMPT"
+    printf 'iris  docker  iris-xr  Up  app_manager\n'
+    printf '%s! __IRIS_XR_VERIFY_APPS_END__\n' "$PROMPT"
+    printf '%s! __IRIS_XR_VERIFY_DEACTIVATE__\n' "$PROMPT"
+    printf '%s! __IRIS_XR_VERIFY_DEACTIVATE_END__\n' "$PROMPT"
+    ;;
+  *"__IRIS_XR_VERIFY_FILES__"*)
+    printf '%s! __IRIS_XR_VERIFY_APPS__\n' "$PROMPT"
+    printf '\n'
+    printf '%s! __IRIS_XR_VERIFY_SOURCES__\n' "$PROMPT"
+    printf '\n'
+    printf '%s! __IRIS_XR_VERIFY_FILES__\n' "$PROMPT"
+    printf 'Directory of harddisk:/\n'
+    printf '%s! __IRIS_XR_VERIFY_DONE__\n' "$PROMPT"
+    ;;
+  *)
+    echo "ok"
+    ;;
+esac
+STUB
+  chmod +x "$STUBDIR/lab/xr-run.sh"
+  ln -sf "$UNINSTALL" "$STUBDIR/device/xr-uninstall.sh"
+}
+
 _xr_uninstall_run_live() {
   # Fresh probe-call counter per script invocation -- two separate runs
   # against the same stub setup (the FORCE parity test below) must each see
@@ -613,6 +689,26 @@ _xr_call_body() {
   fi
 }
 
+# Live-run-3 fix wave: pinned against the LIVE composed streams too (the
+# dry-run pin above only covers dry-run's own text) -- neither session's own
+# request body may ever contain a bare XR 'echo' command line (XR has no
+# 'echo' EXEC command; every marker now rides '! <text>' instead -- see the
+# dry-run echo pin above for the root cause).
+@test "live: neither composed session's request body ever contains an XR 'echo' command line" {
+  _xr_uninstall_stub_setup
+  run _xr_uninstall_run_live
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"undeploy complete"* ]] || return 1
+  first_call="$(_xr_call_body 1)"
+  second_call="$(_xr_call_body 2)"
+  if printf '%s\n%s\n' "$first_call" "$second_call" | grep -qE '^echo[[:space:]]'; then
+    return 1
+  fi
+  # positive half: every marker line in both bodies is the '!' comment form.
+  [[ "$first_call" == *"! __IRIS_XR_VERIFY_APPS__"* ]] || return 1
+  [[ "$second_call" == *"! __IRIS_XR_VERIFY_DONE__"* ]]
+}
+
 # New pin (brief step 1(d), paired-adjudication half): probe-absent +
 # deactivate-rejected is BENIGN -- the idempotent-skip verdict, not a
 # failure, even though deactivate's own section carries the same rejection
@@ -775,6 +871,29 @@ _xr_call_body() {
   if printf '%s\n' "$output" | grep -q 'undeploy complete'; then
     return 1
   fi
+}
+
+# ---------------------------------------------------------------------------
+# Live-run-3 fix wave: a transcript whose markers arrive PROMPT-ECHOED
+# ("RP/.../CPU0:host#! __MARKER__", the exact hardware evidence shape) must
+# still parse correctly end to end -- both verify_section() and
+# end_after_start() search for marker text as a substring anywhere in the
+# captured blob, never anchored to a line start, so a prompt/`#!` prefix
+# ahead of the marker on the same line must not break extraction.
+# ---------------------------------------------------------------------------
+
+@test "live: a transcript whose markers arrive prompt-echoed ('...#! __X__') still parses correctly" {
+  _xr_uninstall_prompt_echoed_stub_setup
+  run _xr_uninstall_run_live
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"undeploy complete"* ]] || return 1
+  log="$(cat "$FAKE_COMMAND_LOG")"
+  # the present-app row (itself embedded right after a prompt-echoed APPS
+  # marker) was correctly extracted and deactivated exactly once -- proving
+  # session 1's prompt-echoed APPS/DEACTIVATE sections parsed for real,
+  # not just "didn't error".
+  count="$(printf '%s\n' "$log" | grep -c '^no appmgr application iris$')"
+  [ "$count" -eq 1 ] || return 1
 }
 
 @test "live: fails when the source is still listed after teardown" {

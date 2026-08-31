@@ -197,14 +197,14 @@ VERIFY_MARKER="__IRIS_XR_VERIFY_"
 # ---------------------------------------------------------------------------
 setup_request() {
 cat <<EOF
-echo ${VERIFY_MARKER}APPS__
+! ${VERIFY_MARKER}APPS__
 show appmgr application-table
-echo ${VERIFY_MARKER}APPS_END__
-echo ${VERIFY_MARKER}DEACTIVATE__
+! ${VERIFY_MARKER}APPS_END__
+! ${VERIFY_MARKER}DEACTIVATE__
 configure
 no appmgr application $APPID
 commit
-echo ${VERIFY_MARKER}DEACTIVATE_END__
+! ${VERIFY_MARKER}DEACTIVATE_END__
 EOF
 }
 
@@ -243,13 +243,13 @@ sweep_verify_request() {
   fi
 cat <<EOF
 $destructive
-echo ${VERIFY_MARKER}APPS__
+! ${VERIFY_MARKER}APPS__
 show appmgr application-table
-echo ${VERIFY_MARKER}SOURCES__
+! ${VERIFY_MARKER}SOURCES__
 show appmgr source-table
-echo ${VERIFY_MARKER}FILES__
+! ${VERIFY_MARKER}FILES__
 dir harddisk:
-echo ${VERIFY_MARKER}DONE__
+! ${VERIFY_MARKER}DONE__
 EOF
 }
 
@@ -283,9 +283,26 @@ RUN() { "$HERE/../lab/xr-run.sh" "$DEVICE_IP"; }   # XR commands on stdin
 # Shared marker-section reader: every read-only/adjudicated section below (the
 # early app-table probe, the deactivate block, and the final three-way
 # verify) rides the SAME VERIFY_MARKER family
-# (`echo __IRIS_XR_VERIFY_<NAME>__`, defined above), so a missing marker is
+# (`! __IRIS_XR_VERIFY_<NAME>__`, defined above), so a missing marker is
 # always a hard transport error, never silently read as "nothing there" the
 # way an empty section otherwise could be.
+#
+# `!`, not `echo` (live run 3 fix, hardware-proven): XR has NO `echo` EXEC
+# command -- every `echo __IRIS_XR_VERIFY_...__` line used to mint its own
+# `% Invalid input` banner INSIDE the very section it was meant to delimit,
+# which xr_command_rejected() then (correctly) read as a real rejection,
+# producing a false "probe was rejected" failure (this was runs 1-2's false
+# absents too, under the pre-fix-wave code, before that banner's source was
+# understood). XR treats `! <text>` as a silent comment at BOTH exec and
+# config level -- proven on hardware with zero `% Invalid input` hits -- so
+# every marker line here, config-mode sections included (the DEACTIVATE_END
+# marker rides right after `commit`, still inside config mode), uses `!`.
+# The -tt pty still echoes the input line into the transcript, so a marker
+# now arrives as `RP/.../CPU0:hostname#! __IRIS_XR_VERIFY_APPS__` rather
+# than a bare line -- verify_section()/end_after_start() below need no
+# change for this: both search for the marker text as a substring anywhere
+# in the captured blob, never anchored to the start of a line, so whatever
+# prompt/`#!` prefix rides ahead of it on the same line is irrelevant.
 #
 # LAST match, not first: the real transport (ssh -tt via lab/xr-run.sh)
 # echoes the ENTIRE piped request back as one upfront blob before anything
