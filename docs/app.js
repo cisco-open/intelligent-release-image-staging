@@ -69,6 +69,15 @@ const paths = {
       "Exposes fleet progress in the console.",
     ],
   },
+  xr: {
+    title: "Cisco 8000 Series appmgr",
+    copy: "Run the agent as an appmgr Docker application with host networking, pushing iris-xr.rpm to harddisk: over scp and bind-mounting the router's own filesystem — no Guest Shell involved.",
+    items: [
+      "Pushes iris-xr.rpm to harddisk: as an appmgr Docker application.",
+      "Downloads image pieces through the private swarm directly onto harddisk:.",
+      "Stages the software but does not install, activate, or reload the device.",
+    ],
+  },
 };
 
 function setActive(buttons, current) {

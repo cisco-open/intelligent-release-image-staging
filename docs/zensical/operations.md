@@ -329,31 +329,40 @@ including the fallback for entries published before that field existed.
 
 ## TLS rotation and IOx packages
 
-Rotating or regenerating the server's TLS certificate invalidates IOx packages
-that were already built: each `iris-arm64.tar` / `iris-amd64.tar` bakes the
-catalog's certificate in at **build** time, and the server only refreshes the
-*served* `iris-catalog.pem` on container start — it does not rebuild the
-tars. A rebuilt server, a fresh volume, or a deliberate certificate rotation
-all silently break every package that was built before the change.
+Rotating or regenerating the server's TLS certificate invalidates prebuilt
+device packages: each `iris-arm64.tar` / `iris-amd64.tar` bakes the catalog's
+certificate in at **build** time, and so does `iris-xr.rpm`, the IOS-XR agent
+package for Cisco 8000 Series Routers (`tools/build-xr-package.sh`). The
+server only refreshes the *served* `iris-catalog.pem` on container start — it
+does not rebuild any of the three. A rebuilt server, a fresh volume, or a
+deliberate certificate rotation all silently break every package that was
+built before the change.
 
-Symptom: the device installs cleanly and its IOx app reports RUNNING, and its
-TCP connection to the catalog even succeeds, but it can never authenticate and
-so never checks in. The only evidence is a `TOKEN-REFRESH-FAIL` line in the
-**device's own syslog** — nothing on the server distinguishes "never
-onboarded" from "onboarded but rejecting our certificate". Guest Shell
-devices are immune: their served artifacts, including `iris-catalog.pem`, are
-regenerated on every container start, and the installer always fetches
-whatever is current.
+Symptom: the device installs cleanly and its IOx app (or, on IOS-XR, its
+appmgr container) reports RUNNING, and its TCP connection to the catalog even
+succeeds, but it can never authenticate and so never checks in. The only
+evidence is a `TOKEN-REFRESH-FAIL` line in the **device's own syslog** —
+nothing on the server distinguishes "never onboarded" from "onboarded but
+rejecting our certificate". Guest Shell devices are immune: their served
+artifacts, including `iris-catalog.pem`, are regenerated on every container
+start, and the installer always fetches whatever is current.
 
 Two ways to catch this before it reaches a device:
 
 - Console **Settings → Setup** carries a *device packages* card showing each
   package's build time and state (`ok`, `stale`, `absent`, `unknown`) against
-  the server's live certificate — see [Setup](console.md#setup).
-- `tools/check-package-freshness.sh` is the read-only, scriptable equivalent.
-  It compares the certificate the catalog actually serves, the copy handed to
-  Guest Shell devices, and the certificate pinned inside each served IOx
-  package, and exits non-zero if any package is stale:
+  the server's live certificate, including the `iris-xr.rpm` row — see
+  [Setup](console.md#setup). That row is checked differently from the two
+  tars: this module has no RPM/cpio reader, so it can only compare the RPM's
+  build time against the live certificate, not pin the certificate baked
+  inside it the way it does for the tars.
+- `tools/check-package-freshness.sh` is the read-only, scriptable equivalent
+  for the two IOx tars only. It compares the certificate the catalog actually
+  serves, the copy handed to Guest Shell devices, and the certificate pinned
+  inside each served IOx package, and exits non-zero if any package is stale.
+  It does not check `iris-xr.rpm` — for the same reason the Setup card checks
+  that row differently, there is nothing baked inside the RPM this tool can
+  extract and pin, so XR package freshness is Console-only:
 
   ```bash
   tools/check-package-freshness.sh              # report only
@@ -363,9 +372,14 @@ Two ways to catch this before it reaches a device:
   Run it after any catalog certificate change.
 
 Remedy: re-run `tools/provision-iox-packages.sh`, then re-onboard the affected
-IOx devices. If instead the certificate the server currently serves disagrees
-with the copy already handed to devices, rebuilding packages alone will not
-fix it — new onboards are affected too — so reconcile the certificate first.
+IOx devices. For IOS-XR, rebuild the RPM with `tools/build-xr-package.sh
+--out artifacts/`, pointing `CATALOG_PEM` at the NEW live certificate
+(certificate block only — the same rebuild the fresh-volume reset sequence in
+[aiagent.md](aiagent.md) performs for IOS-XR after bring-up), then redeploy
+the affected Cisco 8000 Series routers. If instead the certificate the server
+currently serves disagrees with the copy already handed to devices,
+rebuilding packages alone will not fix it — new onboards are affected too —
+so reconcile the certificate first.
 
 ## Redeploying agents after an artifact rebuild
 
