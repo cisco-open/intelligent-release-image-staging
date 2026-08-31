@@ -2900,12 +2900,24 @@
     var parts = [];
     var reasonText = SETUP_PKG_REASON_TEXT[pkg.reason];
     if (reasonText) parts.push(reasonText);
-    // The rebuild remedy only applies once a package is confirmed stale --
-    // and never for a served-vs-distributed mismatch, where rebuilding
-    // packages would not fix anything.
-    if (pkg.state === 'stale' && pkg.reason !== 'served-vs-distributed-mismatch') {
-      parts.push('Rebuild on the Docker host, then re-onboard affected devices: '
-        + pkg.remedy);
+    // The rebuild remedy is per stale ITEM, never a single card-wide
+    // command -- the IOx tars and the IOS-XR RPM (iris-xr.rpm, Wave C) are
+    // rebuilt by two DIFFERENT scripts, so a cert rotation that stales both
+    // families needs BOTH commands named, not just whichever one
+    // pkg.remedy used to hardcode. Never fires for a served-vs-distributed
+    // mismatch, where rebuilding would not fix anything regardless of
+    // which item looks stale.
+    if (pkg.reason !== 'served-vs-distributed-mismatch') {
+      var remedies = [];
+      (pkg.items || []).forEach(function (i) {
+        if (i.state === 'stale' && i.remedy && remedies.indexOf(i.remedy) === -1) {
+          remedies.push(i.remedy);
+        }
+      });
+      if (remedies.length) {
+        parts.push('Rebuild on the Docker host, then re-onboard affected devices: '
+          + remedies.join('; '));
+      }
     }
     return parts.join(' ');
   }
@@ -3114,9 +3126,16 @@
     var body = document.querySelector('#wz-pkg-table tbody');
     if (!body) return;
     body.innerHTML = ((pkg && pkg.items) || []).map(function (i) {
+      // i.detail (iris-xr.rpm, Wave C): this module cannot pin the RPM's
+      // baked certificate the way it pins the IOx tars' (see
+      // setup_status._xr_package_item), so its row says plainly what was
+      // and was not verified rather than showing a bare ok/stale chip that
+      // would look like the same guarantee. Empty for the tar rows, which
+      // need no such caveat.
       return '<tr><td class="machine">' + esc(i.name || '') + '</td><td>' +
         setupChip(i.state) + '</td><td class="muted">built ' +
-        esc(i.built_at || 'unknown') + '</td></tr>';
+        esc(i.built_at || 'unknown') + '</td><td class="muted">' +
+        esc(i.detail || '') + '</td></tr>';
     }).join('');
     document.getElementById('wz-pkg-remedy').textContent = setupPkgRemedyText(pkg || {});
   }
@@ -3223,9 +3242,11 @@
       s.packages.items.map(function (i) {
         var when = i.built_at
           ? new Date(i.built_at * 1000).toLocaleString() : '—';
+        // i.detail: see the matching comment in renderWizardPackages.
         return '<tr><td class="muted machine">' + esc(i.name) + '</td><td>' +
                setupChip(i.state) + '</td><td class="muted">built ' +
-               esc(when) + '</td></tr>';
+               esc(when) + '</td><td class="muted">' + esc(i.detail || '') +
+               '</td></tr>';
       }).join('');
     document.getElementById('setup-pkg-remedy').textContent =
       setupPkgRemedyText(s.packages);

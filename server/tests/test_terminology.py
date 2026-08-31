@@ -144,11 +144,13 @@ ALLOWLIST = [
      "docstring names the pre-fix silent default (falling through as "
      "attachment=None) this regression test guards against -- historical, "
      "Task 2 / decision 6"),
-    ("server/tests/test_gui_server.py", frozenset({7124, 7135, 7136, 7139}),
+    ("server/tests/test_gui_server.py", frozenset({7125, 7136, 7137, 7140}),
      "deliberate hard-break pin: asserts app.js's deployRecordRows reads "
      "res.management_type and never falls back to the retired res.attachment "
-     "(decision 6); line 7090 is historical prose describing the pre-fix "
-     "rendering this test guards against"),
+     "(decision 6); line numbers shifted +1 by Wave C's unrelated edits "
+     "earlier in this file (setup-status packages.items test); the pinned "
+     "line is historical prose describing the pre-fix rendering this test "
+     "guards against"),
     ("server/tests/test_gui_onboard.py", frozenset({319}),
      "docstring names the pre-fix silent default (_build_env used to "
      "default a missing attachment/management_type to \"routed\") this "

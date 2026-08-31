@@ -3730,7 +3730,8 @@ def test_setup_status_route_returns_documented_shape(tmp_path, monkeypatch):
         assert st["admin"]["username"] == "admin"
         pkgs = st["packages"]
         assert set(("state", "items", "remedy")) <= set(pkgs)
-        assert len(pkgs["items"]) == len(setup_status.IOX_PACKAGES)
+        # +1: the IOx tars plus the IOS-XR agent RPM (iris-xr.rpm), Wave C.
+        assert len(pkgs["items"]) == len(setup_status.IOX_PACKAGES) + 1
         for item in pkgs["items"]:
             assert "name" in item and "state" in item
     finally:

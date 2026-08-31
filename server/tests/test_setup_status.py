@@ -113,7 +113,7 @@ def test_package_fingerprint_unreadable_tar(tmp_path):
 # --- status assembly -------------------------------------------------------
 
 def _artifacts(tmp_path, arm_pem, amd_pem, served_pem=CERT_A,
-               distributed_pem=None):
+               distributed_pem=None, xr=False):
     d = tmp_path / "artifacts"
     d.mkdir()
     if arm_pem is not None:
@@ -122,6 +122,10 @@ def _artifacts(tmp_path, arm_pem, amd_pem, served_pem=CERT_A,
         _make_iox_package(str(d / "iris-amd64.tar"), amd_pem)
     served = tmp_path / "cert.pem"
     served.write_text(served_pem)
+    if xr:
+        # Contents are irrelevant -- setup_status never parses this file,
+        # only its existence and mtime (see _xr_package_item).
+        (d / "iris-xr.rpm").write_bytes(b"not-a-real-rpm")
     # the copy handed to devices; defaults to matching the served cert
     (d / "iris-catalog.pem").write_text(
         distributed_pem if distributed_pem is not None else served_pem)
@@ -140,13 +144,16 @@ def _call(d, served, admin="admin", stage_host=None,
 
 
 def test_all_ok(tmp_path):
-    d, served = _artifacts(tmp_path, CERT_A, CERT_A)
+    # xr=True: a site WITH XR devices, package built fresh (its mtime, like
+    # every file this test just wrote, is >= the served cert's) -- the third
+    # row must not keep an otherwise-clean packages card from reading 'ok'.
+    d, served = _artifacts(tmp_path, CERT_A, CERT_A, xr=True)
     st = _call(d, served, stage_host={"configured": True, "username": "svc"})
     assert st["admin"]["state"] == "ok"
     assert st["admin"]["username"] == "admin"
     assert st["stage_host"]["state"] == "ok"
     assert st["packages"]["state"] == "ok"
-    assert len(st["packages"]["items"]) == 2
+    assert len(st["packages"]["items"]) == 3
 
 
 def test_stage_host_unset(tmp_path):
@@ -335,6 +342,117 @@ def test_stale_package_not_masked_by_missing_distributed_cert(tmp_path):
     assert by_name["iris-amd64.tar"]["state"] == "ok"
 
 
+# --- device-packages card: the third row, iris-xr.rpm ----------------------
+#
+# Wave C (post-walk fix): the packages card only ever enumerated the two IOx
+# tars, so an operator with Cisco 8000 (IOS-XR) devices in scope had no
+# signal that iris-xr.rpm -- which bakes the catalog certificate in exactly
+# like the tars do, but can silently ship a stale agent the same way -- was
+# never checked at all. Unlike the tars, this module cannot parse the RPM's
+# internal layout (no rpm/cpio reader, stdlib only), so it can only compare
+# build TIME against the served certificate's own mtime, never pin the
+# certificate the RPM actually contains. Every state below is paired with an
+# assertion on the item's "detail" text, because that honesty caveat is the
+# entire point of doing this differently from the tars.
+
+_BASE_TIME = 1_700_000_000.0
+
+
+def test_xr_package_absent_is_neutral_and_claims_nothing_checked(tmp_path):
+    """A site with no XR devices simply never builds this file -- 'absent',
+    same neutral state (not a warning) the tars already use for an
+    architecture a deployment does not build. No 'detail' key at all: unlike
+    every other non-ok state below, nothing here was actually examined, so
+    nothing is said about what was or was not verified."""
+    d, served = _artifacts(tmp_path, CERT_A, CERT_A)   # xr=False (default)
+    st = _call(d, served)
+    by_name = {i["name"]: i for i in st["packages"]["items"]}
+    xr = by_name["iris-xr.rpm"]
+    assert xr["state"] == "absent"
+    assert xr["reason"] == "absent"
+    assert xr["fingerprint"] is None
+    assert xr["built_at"] is None
+    assert "detail" not in xr
+
+
+def test_xr_package_ok_when_built_after_the_current_certificate(tmp_path):
+    """Built after the served certificate's own mtime -- the best available
+    evidence (build time, not contents) that it was produced against the
+    live cert. 'ok' here must still say plainly that contents were never
+    inspected, unlike an IOx tar's genuine fingerprint match."""
+    d, served = _artifacts(tmp_path, CERT_A, CERT_A, xr=True)
+    os.utime(served, (_BASE_TIME, _BASE_TIME))
+    os.utime(os.path.join(d, "iris-xr.rpm"), (_BASE_TIME + 100, _BASE_TIME + 100))
+    st = _call(d, served)
+    by_name = {i["name"]: i for i in st["packages"]["items"]}
+    xr = by_name["iris-xr.rpm"]
+    assert xr["state"] == "ok"
+    assert xr["fingerprint"] is None
+    assert xr["built_at"] == int(_BASE_TIME + 100)
+    assert "not inspected" in xr["detail"]
+    assert "certificate" in xr["detail"].lower()
+    assert st["packages"]["state"] == "ok"
+
+
+def test_xr_package_stale_when_built_before_the_current_certificate(tmp_path):
+    """Built before the served certificate's mtime -- it may still pin
+    whatever certificate preceded a rotation. This must roll the whole
+    packages card up to 'stale', the same as a genuinely mismatched tar
+    fingerprint, even though only build time (never contents) was checked
+    here."""
+    d, served = _artifacts(tmp_path, CERT_A, CERT_A, xr=True)
+    os.utime(served, (_BASE_TIME, _BASE_TIME))
+    os.utime(os.path.join(d, "iris-xr.rpm"), (_BASE_TIME - 100, _BASE_TIME - 100))
+    st = _call(d, served)
+    by_name = {i["name"]: i for i in st["packages"]["items"]}
+    xr = by_name["iris-xr.rpm"]
+    assert xr["state"] == "stale"
+    assert xr["built_at"] == int(_BASE_TIME - 100)
+    assert "not inspected" in xr["detail"]
+    assert st["packages"]["state"] == "stale"
+
+
+def test_xr_package_unknown_when_served_cert_is_unreadable(tmp_path):
+    """No reference certificate to compare build time against -- same
+    'no-reference' reason the tars use in this situation, and the same
+    never-ok rule (governing rule: never report ok on missing evidence)."""
+    d, served = _artifacts(tmp_path, CERT_A, CERT_A, xr=True)
+    st = setup_status.build_status(
+        d, str(tmp_path / "missing.pem"),
+        os.path.join(d, "iris-catalog.pem"), "admin", None)
+    by_name = {i["name"]: i for i in st["packages"]["items"]}
+    xr = by_name["iris-xr.rpm"]
+    assert xr["state"] == "unknown"
+    assert xr["reason"] == "no-reference"
+    assert "could not be read" in xr["detail"]
+
+
+def test_xr_package_carries_its_own_build_script_remedy(tmp_path):
+    """The XR RPM and the IOx tars are rebuilt by two DIFFERENT scripts, so
+    each item now carries its own remedy command rather than relying on the
+    single card-level packages.remedy (which stays the IOx script -- see
+    setupPkgRemedyText in app.js, which reads the per-item value so a stale
+    XR row is never handed the wrong rebuild command)."""
+    d, served = _artifacts(tmp_path, CERT_A, CERT_A, xr=True)
+    st = _call(d, served)
+    by_name = {i["name"]: i for i in st["packages"]["items"]}
+    assert by_name["iris-xr.rpm"]["remedy"] == setup_status.REMEDY_XR
+    assert by_name["iris-arm64.tar"]["remedy"] == setup_status.REMEDY
+    assert by_name["iris-amd64.tar"]["remedy"] == setup_status.REMEDY
+    assert setup_status.REMEDY_XR != setup_status.REMEDY
+
+
+def test_xr_package_absent_does_not_outrank_a_stale_tar(tmp_path):
+    """'absent' (rank 1) must not mask a genuinely stale tar (rank 4) just
+    because the XR row also rolled up to a non-ok state -- the same
+    worst-of guarantee test_stale_outranks_absent already pins for the two
+    tars, now with a third, absent-by-default row in the mix."""
+    other = CERT_A.replace("MIIBdzCCAR2", "MIIBdzCCAR3")
+    d, served = _artifacts(tmp_path, other, CERT_A)   # xr=False -> absent
+    st = _call(d, served)
+    assert st["packages"]["state"] == "stale"
+
+
 def test_response_carries_no_secret_material(tmp_path):
     d, served = _artifacts(tmp_path, CERT_A, CERT_A)
     st = _call(d, served, stage_host={"configured": True, "username": "svc"},
@@ -465,12 +583,30 @@ def test_mismatch_reason_gets_its_own_guidance_not_the_rebuild_remedy():
     assert "provision-iox-packages.sh" not in mismatch_text
 
     fn = _setup_pkg_remedy_fn(js)
-    # The rebuild-remedy push must require BOTH a confirmed-stale state AND
-    # that the reason isn't the mismatch. Losing either half of this guard
-    # (e.g. falling back to "any non-ok state gets the rebuild line") is
-    # exactly the bug this test guards against.
-    assert ("pkg.state === 'stale' && "
-            "pkg.reason !== 'served-vs-distributed-mismatch'") in fn
+    # Wave C generalized this from a single card-level pkg.remedy (one
+    # rebuild command for the whole card) to a per-ITEM remedy, because the
+    # IOx tars and the new iris-xr.rpm row are rebuilt by two DIFFERENT
+    # scripts -- a cert rotation can leave both families stale at once, and
+    # a single hardcoded command could no longer speak for the card. The
+    # push must still require BOTH the outer mismatch-reason gate AND each
+    # item's own state being 'stale' (not merely non-ok); losing either
+    # half of this guard (e.g. falling back to "any non-ok item gets the
+    # rebuild line", or dropping the outer mismatch gate) is exactly the
+    # bug this test guards against.
+    assert "if (pkg.reason !== 'served-vs-distributed-mismatch') {" in fn
+    assert "i.state === 'stale'" in fn
+
+
+def test_remedy_text_dedupes_and_joins_multiple_stale_remedies():
+    """A cert rotation can stale an IOx tar and iris-xr.rpm at once (both
+    bake the same certificate) -- their two DIFFERENT rebuild scripts must
+    both show up, deduplicated (two stale tars sharing REMEDY must not
+    print the same command twice), joined into one line rather than one
+    remedy silently winning over the other."""
+    js = _webroot("app.js")
+    fn = _setup_pkg_remedy_fn(js)
+    assert "remedies.indexOf(i.remedy) === -1" in fn
+    assert "remedies.join('; ')" in fn
 
 
 def test_distributed_cert_unavailable_reason_explains_itself():

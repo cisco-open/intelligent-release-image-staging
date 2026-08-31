@@ -40,7 +40,8 @@ own controls on the right — which walks the other four in order:
    builds and serves device onboarding material. Without them, onboarding over
    the Docker path cannot start.
 3. **Device packages** — whether each served IOx package still pins the
-   certificate this server hands to devices.
+   certificate this server hands to devices, plus the IOS-XR agent RPM
+   (`iris-xr.rpm`), checked differently — see below.
 4. **Image verification** — the Cisco Bulk Hash source check against every
    staged image. Configured inline: refresh now, enable the daily schedule, a
    pointer to downloading Cisco's Bulk Hash feed for air-gapped servers, and
@@ -420,20 +421,35 @@ than a warning, since (as the device packages paragraph below explains) it
 routinely just means an architecture this deployment does not use.
 
 The **device packages** card exists because the IOx device packages
-(`iris-arm64.tar`, `iris-amd64.tar`) bake the catalog's TLS certificate in at
-**build** time. If the server's certificate later changes — a rebuilt
-server, a fresh volume, a deliberate rotation — every package already built
-against the old certificate silently stops working: the device installs and
-its app reports RUNNING, but it can never authenticate to the catalog and so
-never checks in. See
+(`iris-arm64.tar`, `iris-amd64.tar`) — and the IOS-XR agent RPM
+(`iris-xr.rpm`) — bake the catalog's TLS certificate in at **build** time.
+If the server's certificate later changes — a rebuilt server, a fresh
+volume, a deliberate rotation — every package already built against the old
+certificate silently stops working: the device installs and its app reports
+RUNNING, but it can never authenticate to the catalog and so never checks
+in. See
 [TLS rotation and IOx packages](operations.md#tls-rotation-and-iox-packages)
 for the full failure mode and the fix. The card lists each package's build
 time and state against the server's live certificate; `absent` for an
 architecture you do not deploy (for example `iris-amd64.tar` at a site with
-no Catalyst 9300 IOx devices) needs no action. A `stale` row links to the
-rebuild command; if instead the certificate the server currently serves
-disagrees with the copy already handed to devices, the card names that
-condition specifically, because rebuilding packages alone would not fix it.
+no Catalyst 9300 IOx devices, or `iris-xr.rpm` with no Cisco 8000 devices)
+needs no action. A `stale` row links to the rebuild command; if instead the
+certificate the server currently serves disagrees with the copy already
+handed to devices, the card names that condition specifically, because
+rebuilding packages alone would not fix it.
+
+The `iris-xr.rpm` row is checked differently from the two tars, and its
+detail text says so: this module has no RPM/cpio reader, so it cannot pin
+the certificate baked *inside* the RPM the way it does for the tars — it can
+only compare the RPM's build time against the server's live certificate.
+`ok` means the RPM was built after the current certificate (the best
+available evidence, not a contents check); `stale` means it predates the
+certificate and may still pin an old one. Either way the row says plainly
+that only build time was verified, never contents. Its rebuild command is
+`tools/build-xr-package.sh --out artifacts/`, not the IOx tars' — a
+different script for a different package format — and needs `CATALOG_PEM`
+pointed at the live certificate (certificate block only) the same way the
+tars' rebuild does.
 
 ### TLS & trust
 

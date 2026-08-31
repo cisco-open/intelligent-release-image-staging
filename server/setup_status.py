@@ -32,6 +32,16 @@ import tarfile
 IOX_PACKAGES = ("iris-amd64.tar", "iris-arm64.tar")
 _CERT_MEMBER = "iris-catalog.pem"
 
+# The IOS-XR agent package (device/xr-install.sh, tools/build-xr-package.sh).
+# Unlike the two IOx tars, it is not a plain tar of a tar.gz -- it is an RPM
+# produced by the ios-xr/xr-appmgr-build tool, whose internal layout this
+# stdlib-only module has no way to parse (no rpm/cpio reader here, and this
+# module does not shell out). So its baked certificate can never be PINNED
+# the way package_fingerprint() pins the IOx tars -- see _xr_package_item's
+# docstring for what is checked instead, and its "detail" text for exactly
+# what is not.
+XR_PACKAGE = "iris-xr.rpm"
+
 
 _CERT_BEGIN = "-----BEGIN CERTIFICATE-----"
 _CERT_END = "-----END CERTIFICATE-----"
@@ -129,6 +139,10 @@ def package_fingerprint(tar_path):
 _RANK = {"ok": 0, "absent": 1, "unknown": 2, "unset": 3, "stale": 4}
 
 REMEDY = "tools/provision-iox-packages.sh"
+# CATALOG_PEM must point at the CURRENT live certificate (certificate block
+# only) when this runs -- see docs/zensical/aiagent.md step 6 and its reset-
+# flow note for the full discipline.
+REMEDY_XR = "tools/build-xr-package.sh --out artifacts/"
 
 _REASON_STATE = {
     "absent": "absent",
@@ -138,12 +152,79 @@ _REASON_STATE = {
     "bad-cert": "unknown",
 }
 
+_XR_DETAIL_FRESH = "Built after the current certificate; contents not inspected."
+_XR_DETAIL_STALE = "Built before the current certificate; contents not inspected."
+_XR_DETAIL_NO_REFERENCE = (
+    "Current certificate could not be read, so build time cannot be "
+    "compared against it; contents are not inspected for this package "
+    "type regardless.")
+_XR_DETAIL_UNREADABLE = (
+    "Build time could not be read; contents are not inspected for this "
+    "package type regardless.")
+
 
 def _worst(states):
     """The most severe state in *states*; 'ok' only when everything is ok."""
     if not states:
         return "unknown"
     return max(states, key=lambda s: _RANK.get(s, 2))
+
+
+def _xr_package_item(artifacts_dir, served_cert_path, reference):
+    """The device-packages row for the IOS-XR agent RPM.
+
+    HONESTY CONSTRAINT: package_fingerprint()'s cert-pinning check reads a
+    named member out of the IOx tars' inner artifacts.tar.gz -- a shape the
+    XR RPM (built by ios-xr/xr-appmgr-build, see tools/build-xr-package.sh)
+    does not share, and this stdlib-only module has no RPM/cpio reader to
+    give it one. So this can never say "this RPM pins certificate X" the
+    way the two tar rows do. What it CAN honestly check is the RPM's build
+    time against the certificate currently served: built at/after the
+    certificate's own mtime is the best available evidence the RPM was
+    produced with the live cert (REMEDY_XR's CATALOG_PEM argument is how a
+    real build ties the two together); built before it is evidence the RPM
+    predates a rotation and may still pin the old one. Either way, "detail"
+    says plainly that only build time was compared, never contents -- the
+    governing rule (never report ok on missing evidence) applies to what
+    "ok" is allowed to imply, not just to whether it fires at all.
+    """
+    path = os.path.join(artifacts_dir, XR_PACKAGE)
+    entry = {"name": XR_PACKAGE, "fingerprint": None, "built_at": None,
+             "remedy": REMEDY_XR}
+    if not os.path.exists(path):
+        entry["state"] = "absent"
+        entry["reason"] = "absent"
+        return entry
+    try:
+        built_at = os.path.getmtime(path)
+    except OSError:
+        entry["state"] = "unknown"
+        entry["reason"] = "unreadable"
+        entry["detail"] = _XR_DETAIL_UNREADABLE
+        return entry
+    entry["built_at"] = int(built_at)
+    if reference is None:
+        # Same condition IOX_PACKAGES rows use for "no-reference": the
+        # served certificate itself could not be read, so there is nothing
+        # to compare against -- not specific to this package.
+        entry["state"] = "unknown"
+        entry["reason"] = "no-reference"
+        entry["detail"] = _XR_DETAIL_NO_REFERENCE
+        return entry
+    try:
+        cert_mtime = os.path.getmtime(served_cert_path)
+    except OSError:
+        entry["state"] = "unknown"
+        entry["reason"] = "no-reference"
+        entry["detail"] = _XR_DETAIL_NO_REFERENCE
+        return entry
+    if built_at >= cert_mtime:
+        entry["state"] = "ok"
+        entry["detail"] = _XR_DETAIL_FRESH
+    else:
+        entry["state"] = "stale"
+        entry["detail"] = _XR_DETAIL_STALE
+    return entry
 
 
 def _telemetry_status(override_endpoint, override_enabled,
@@ -204,7 +285,8 @@ def build_status(artifacts_dir, served_cert_path, distributed_cert_path,
     for name in IOX_PACKAGES:
         fingerprint, reason = package_fingerprint(
             os.path.join(artifacts_dir, name))
-        entry = {"name": name, "fingerprint": fingerprint, "built_at": None}
+        entry = {"name": name, "fingerprint": fingerprint, "built_at": None,
+                 "remedy": REMEDY}
         path = os.path.join(artifacts_dir, name)
         try:
             entry["built_at"] = int(os.path.getmtime(path))
@@ -223,6 +305,10 @@ def build_status(artifacts_dir, served_cert_path, distributed_cert_path,
         else:
             entry["state"] = "stale"
         items.append(entry)
+    # The XR agent RPM (device/xr-install.sh) ships from this same directory
+    # and is exactly as vulnerable to a stale-cert build as the two tars --
+    # see _xr_package_item's docstring for why it is checked differently.
+    items.append(_xr_package_item(artifacts_dir, served_cert_path, reference))
 
     packages = {
         "state": _worst([i["state"] for i in items]),
