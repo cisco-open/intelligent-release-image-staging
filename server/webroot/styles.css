@@ -312,7 +312,13 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
 .joined select { border:1px solid var(--border); border-radius:var(--radius-control) 0 0 var(--radius-control); border-right:0;
   padding:6px 8px; font-size:13px; background:var(--surface); }
 .joined .btn { border-radius:0 var(--radius-control) var(--radius-control) 0; }
-#dev-rows tr.sel td { background:var(--action-tint); }
+/* Row hover/selected (density pass, Task 8): equal specificity
+   (#dev-rows tr:hover td vs #dev-rows tr.sel td), so a selected row that is
+   ALSO hovered is spelled out explicitly rather than relying on source
+   order to break the tie; selected uses the dedicated --selected-tint
+   token rather than the --action-tint hover-adjacent one it used before. */
+#dev-rows tr:hover td { background:var(--surface-subtle); }
+#dev-rows tr.sel td, #dev-rows tr.sel:hover td { background:var(--selected-tint); }
 
 /* Settings: certificate / trust store / telemetry destination (2026-08-19) */
 .inline-form textarea { flex:1 1 100%; max-width:640px; min-height:88px; resize:vertical;
@@ -520,8 +526,70 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
   .main { padding: var(--sp-lg); }
   .drawer, #dl-drawer { width: 100vw; }
   .modal { width: calc(100% - 2 * var(--sp-lg)); }
+  /* Touch/narrow (density pass, Task 8): the selection-gutter fade below is
+     a hover affordance a touch viewport cannot produce, so the checkboxes
+     stay always visible here regardless of body.selecting. */
+  #devices .mark, #devices #mark-all { opacity: 1; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .nav-rail, .btn, .chip, .dropzone, .progress .bar { transition: none; }
+  .nav-rail, .btn, .chip, .dropzone, .progress .bar, #devices .mark, #devices #mark-all { transition: none; }
 }
+
+/* ---------------------------------------------------------------------
+   Devices: density pass (Task 8) -- selection gutter, scan hierarchy,
+   "More filters" disclosure, Status column legend popover. Row
+   hover/selected is defined earlier, alongside the rest of the pre-
+   existing #dev-rows/.selbar rules. Carried fixes M2 / step+elapsed /
+   expected-offline are pure app.js changes and need no CSS of their own
+   beyond the existing status-pill levels.
+   --------------------------------------------------------------------- */
+
+/* Selection gutter: checkbox column fades to transparent except on row
+   hover/focus-within, when checked, or while body.selecting is set (the
+   "Select devices" toggle, app.js) -- opacity only, never
+   display/visibility, so every native input stays exactly as
+   clickable/focusable/tabbable as before. The <=768px override above
+   always shows them (touch has no hover to reveal them with). */
+#devices .mark, #devices #mark-all { opacity: 0; transition: opacity .12s ease; vertical-align: middle; }
+#devices tbody tr:hover .mark,
+#devices tbody tr:focus-within .mark,
+#devices .mark:checked,
+#devices thead:hover #mark-all,
+#devices thead:focus-within #mark-all,
+#devices #mark-all:checked,
+body.selecting #devices .mark,
+body.selecting #devices #mark-all { opacity: 1; }
+
+/* Scan hierarchy: device id leads each row (14/500 sans, Magnetic body
+   type); IP/model are secondary machine data (12px, --text-secondary) --
+   scoped to #dev-rows so the shared .machine utility (pinned elsewhere at
+   its bare ".machine { font-family: var(--font-mono); }" definition) keeps
+   its default size/color everywhere else it is used (deploy-info drawer,
+   batch panel, help popover, …). */
+#dev-rows .dev-id { font-family: var(--font-sans); font-size: 14px; font-weight: 500; color: var(--text-heading); }
+#dev-rows .machine { font-size: 12px; color: var(--text-secondary); }
+
+/* "More filters" disclosure: a native <details>, no JS needed to toggle it
+   open/closed (CSP-clean by construction) -- the expanded body is an
+   absolutely-positioned dropdown (mirrors .menu below) so opening it never
+   reflows the rest of the toolbar. */
+#more-filters { position: relative; }
+#more-filters summary { cursor: pointer; list-style: none; display: inline-flex; align-items: center;
+  height: 32px; padding: 0 12px; font-size: 14px; color: var(--action); background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius-control); }
+#more-filters summary::-webkit-details-marker { display: none; }
+#more-filters summary:hover { background: var(--action-tint); border-color: var(--action); }
+#more-filters summary:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+#more-filters[open] summary { background: var(--action-tint); border-color: var(--action); }
+#more-filters .more-filters-body { position: absolute; top: calc(100% + 4px); left: 0; z-index: 30;
+  display: flex; gap: 8px; flex-wrap: wrap; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; box-shadow: var(--shadow-md); padding: 10px; min-width: 280px; }
+
+/* Status column legend popover: reuses .menu-wrap/.menu (same CSP-safe
+   toggle machinery, wireMenu() in app.js) for the 12-level Magnetic
+   mapping legend. */
+#status-legend-pop { min-width: 230px; }
+#status-legend-pop .legend-title { font-size: 11px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .3px; color: var(--text-secondary); padding: 4px 8px 6px; }
+#status-legend-pop .legend-row { padding: 4px 8px; }

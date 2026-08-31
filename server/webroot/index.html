@@ -239,15 +239,6 @@
         </div>
         <div class="toolbar" id="dev-filters">
           <input id="dev-filter-q" placeholder="Filter devices, IP, model…" aria-label="Filter by device, IP or model">
-          <select id="dev-filter-management-type" aria-label="Filter by management type">
-            <option value="">Management type: any</option>
-            <option value="routed">routed</option>
-            <option value="inband">inband</option>
-            <option value="router-routed">router-routed</option>
-            <option value="router-nat">router-nat</option>
-            <option value="xr-host">XR host</option>
-            <option value="legacy">Inventory only — management type not chosen</option>
-          </select>
           <select id="dev-filter-platform" aria-label="Filter by agent install">
             <option value="">Agent install: any</option>
             <option value="guestshell">Guest Shell</option>
@@ -256,27 +247,55 @@
             <option value="xr-appmgr">XR appmgr container</option>
             <option value="__none">— unset —</option>
           </select>
-          <select id="dev-filter-cred" aria-label="Filter by credential profile">
-            <option value="">Credential: any</option>
-            <option value="__none">— none —</option>
-          </select>
-          <select id="dev-filter-telemetry" aria-label="Filter by telemetry state">
-            <option value="">Telemetry: any</option>
-            <option value="on">on</option>
-            <option value="off">off</option>
-          </select>
-          <select id="dev-filter-peer" aria-label="Filter by peer policy">
-            <option value="">Peer policy: any</option>
-            <option value="quarantined">quarantined</option>
-            <option value="not-quarantined">not quarantined</option>
-          </select>
           <!-- Options are generated in app.js from DEVICE_STATUS_OPTIONS, the
                same list the Status cell derives from. -->
           <select id="dev-filter-status" aria-label="Filter by status">
             <option value="">Status: any</option>
           </select>
+          <!-- Density pass (Task 8): Search/Agent install/Status stay
+               visible above the fold; the remaining, less-frequently-used
+               filters live in this native disclosure panel, summary text
+               updated live by updateMoreFiltersSummary() (app.js). Every
+               field id/value below is byte-identical to before -- only its
+               DOM position moved. -->
+          <details id="more-filters">
+            <summary id="more-filters-summary">More filters</summary>
+            <div class="more-filters-body">
+              <select id="dev-filter-management-type" aria-label="Filter by management type">
+                <option value="">Management type: any</option>
+                <option value="routed">routed</option>
+                <option value="inband">inband</option>
+                <option value="router-routed">router-routed</option>
+                <option value="router-nat">router-nat</option>
+                <option value="xr-host">XR host</option>
+                <option value="legacy">Inventory only — management type not chosen</option>
+              </select>
+              <select id="dev-filter-cred" aria-label="Filter by credential profile">
+                <option value="">Credential: any</option>
+                <option value="__none">— none —</option>
+              </select>
+              <select id="dev-filter-telemetry" aria-label="Filter by telemetry state">
+                <option value="">Telemetry: any</option>
+                <option value="on">on</option>
+                <option value="off">off</option>
+              </select>
+              <select id="dev-filter-peer" aria-label="Filter by peer policy">
+                <option value="">Peer policy: any</option>
+                <option value="quarantined">quarantined</option>
+                <option value="not-quarantined">not quarantined</option>
+              </select>
+            </div>
+          </details>
           <button class="linkish" id="dev-filter-clear">clear filters</button>
           <span class="muted push" id="dev-filter-count"></span>
+          <!-- Selection-gutter toggle (Task 8 density pass): the per-row
+               checkbox column fades to transparent except on row
+               hover/focus-within/checked, or while body.selecting is set by
+               this button -- always visible at <=768px regardless (CSS,
+               styles.css). Purely a visibility toggle: it never touches
+               checked state, the filtered-select-all copy, or any bulk
+               action. -->
+          <button class="btn ghost" type="button" id="dev-select-toggle" aria-pressed="false">Select devices</button>
         </div>
         <div class="selbar" id="sel-bar" hidden>
           <span class="sel-count" id="sel-count"></span>
@@ -365,7 +384,7 @@
         </div>
         <div class="table-scroll">
         <table class="tbl" id="devices">
-          <thead><tr><th><input type="checkbox" id="mark-all"></th><th>Device</th><th>IP</th><th>Model</th><th>Management type</th><th>Agent install</th><th>Credential</th><th>Assigned images</th><th>Telemetry</th><th>Peer policy</th><th>Status</th></tr></thead>
+          <thead><tr><th><input type="checkbox" id="mark-all"></th><th>Device</th><th>IP</th><th>Model</th><th>Management type</th><th>Agent install</th><th>Credential</th><th>Assigned images</th><th>Telemetry</th><th>Peer policy</th><th>Status <span class="menu-wrap"><button class="linkish" type="button" id="status-legend-btn" aria-expanded="false" aria-label="Show status pill legend">ⓘ</button><div class="menu" id="status-legend-pop" hidden></div></span></th></tr></thead>
           <tbody id="dev-rows"></tbody>
         </table>
         </div>
@@ -385,6 +404,12 @@
           </div>
           <div class="drawer-body">
             <p class="muted" id="di-note" role="status" aria-live="polite"></p>
+            <!-- Per-device instance of the Staging Boundary (Task 7's
+                 stagingBoundaryHTML, reused verbatim per its own contract):
+                 derived ONLY from data this drawer already has (the device
+                 row + the quarantined map refreshDevices() already fetched),
+                 never a new request. See deviceBoundarySteps() in app.js. -->
+            <div class="card"><div id="di-boundary"></div></div>
             <h3>Images</h3>
             <div class="table-scroll">
             <table class="tbl" id="di-img-tbl">

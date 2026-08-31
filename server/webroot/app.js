@@ -30,6 +30,14 @@
   // in the row data, so the periodic re-render never clears it.
   var LAST_DEVICES = [];
   var LAST_DEV_NOW = 0;
+  // device_id -> the most relevant retained onboard/undeploy job (facelift
+  // carried fix #2, step/elapsed in the status cell). Refreshed alongside
+  // the devices table from the EXISTING GET /api/onboard/jobs listing
+  // (already used by the batch panel) -- the /api/devices merge itself
+  // (_device_view()/latest_jobs_by_device() server-side) deliberately trims
+  // started_at and last_line off (facelift-contracts.md §8c), so this is a
+  // client-side-only cross-reference by device_id, never a server change.
+  var LAST_JOBS_BY_DEVICE = {};
 
   function deviceFilterState() {
     function val(id) {
@@ -317,20 +325,100 @@
     });
     return assigned.length ? errored.length / assigned.length : 0;
   }
+  // key deviceStatus() can return while an onboard/undeploy job is active ->
+  // the job action that must match it, so a stale/superseded job for this
+  // device (a different action, or one that already finished) can never be
+  // mistaken for the one the cell is describing right now.
+  var JOB_ACTION_FOR_STATUS_KEY = { onboarding: 'onboard', undeploying: 'undeploy' };
   function deviceStatusHtml(d, devNow) {
     var st = deviceStatus(d, devNow);
     var ratio = st.key === 'image-failed' ? imageFailedRatio(d) : undefined;
-    var html = statusPillHTML(st, { title: st.detail, ratio: ratio });
+    var job = LAST_JOBS_BY_DEVICE[d.device_id];
+    var activeJob = (job && (job.state === 'queued' || job.state === 'running') &&
+      job.action === JOB_ACTION_FOR_STATUS_KEY[st.key]) ? job : null;
+    var html;
+    if (activeJob) {
+      // carried fix #2: append " [n/m] · Xm" to the in-progress label
+      // itself, rather than going through statusPillHTML/STATUS_DYNAMIC_KEYS
+      // (which would sentence-case a label deviceStatus() never set for
+      // onboarding/undeploying) -- every other status key's rendering below
+      // is byte-identical to before.
+      var disp = statusDisplay(st, ratio);
+      html = levelPillHTML(disp.level, disp.label + jobPhaseSuffix(activeJob), { title: st.detail });
+    } else {
+      html = statusPillHTML(st, { title: st.detail, ratio: ratio });
+    }
     if (st.detail) {
       html += ' <span class="muted" title="' + esc(st.detail) + '">' + esc(st.detail) + '</span>';
     }
     if (deviceIsOffline(d, devNow)) {
-      html += ' ' + statusPillHTML('offline');
+      // carried fix #3: a device already offline/stale WHILE its own active
+      // undeploy job is still running is the expected shape of a healthy
+      // teardown -- undeploy step [1/5] deactivates the agent (EEM applets
+      // removed, or the appmgr app stopped on XR) well before the rest of
+      // the job finishes, so no heartbeat is exactly what should happen.
+      // Honest and visible, never hidden: same pill slot, a label and title
+      // that say why instead of reading as an unexplained fault.
+      if (st.key === 'undeploying') {
+        html += ' ' + levelPillHTML('inactive', 'Offline (expected during undeploy)',
+          { title: 'The agent is deactivated at undeploy step [1/5]; no heartbeat is expected again until it re-enrolls.' });
+      } else {
+        html += ' ' + statusPillHTML('offline');
+      }
     }
     return html;
   }
   function deviceIsOffline(d, devNow) {
     return !!(d.last_seen && (devNow - d.last_seen) >= 600);
+  }
+  // device_id -> job for every RETAINED onboard/undeploy job (from GET
+  // /api/onboard/jobs, already fetched by refreshDevices) -> the one job
+  // deviceStatusHtml should read for that device: mirrors gui_onboard.py's
+  // own latest_jobs_by_device() tie-break exactly (an ACTIVE queued/running
+  // job wins outright, else the most recently queued one), just kept on the
+  // client so started_at and last_line survive the trip -- the server's own
+  // merge into /api/devices deliberately strips both (facelift-contracts.md
+  // §8c: "the raw data already exists... it is simply not in the trimmed
+  // latest_jobs_by_device() dict").
+  function bestJobForDevice(jobs) {
+    var best = {};
+    (jobs || []).forEach(function (j) {
+      var did = j.device_id, cur = best[did];
+      var active = j.state === 'queued' || j.state === 'running';
+      if (!cur) { best[did] = j; return; }
+      var curActive = cur.state === 'queued' || cur.state === 'running';
+      if ((active && !curActive) ||
+          (active === curActive && j.queued_at > cur.queued_at)) {
+        best[did] = j;
+      }
+    });
+    return best;
+  }
+  // A job's freshest log line (last_line) carries a "[n/m]" step marker only
+  // on the tick its install/uninstall script actually echoes one
+  // (device-install.sh etc., facelift-contracts.md §8b) -- most ticks in
+  // between (e.g. the guestshell-enable step, which can take several
+  // minutes on a cold IOx start) show plain progress text with no bracket.
+  // Remembering the newest step seen PER JOB keeps the status cell's step
+  // count steady between brackets instead of flickering in and out every
+  // ~10s poll; pruned back in refreshDevices() as jobs age out.
+  var lastJobStep = {};
+  function jobPhaseSuffix(job) {
+    if (!job || !job.started_at) return '';
+    var m = /\[(\d+\/\d+)\]/.exec(job.last_line || '');
+    if (m) lastJobStep[job.id] = m[1];
+    var step = lastJobStep[job.id];
+    // Elapsed is SERVER clock minus SERVER clock (job.started_at is the
+    // job's own started_at timestamp; LAST_DEV_NOW is the same server "now"
+    // refreshDevices() already reads for offline-freshness math) -- never a
+    // client-clock delta, so a page refresh (or a skewed lab VM) never
+    // resets or distorts what looks like elapsed progress.
+    var now = LAST_DEV_NOW || (Date.now() / 1000);
+    var elapsedMin = Math.max(0, Math.round((now - job.started_at) / 60));
+    var elapsed = elapsedMin >= 60
+      ? Math.floor(elapsedMin / 60) + ' h ' + (elapsedMin % 60) + ' min'
+      : elapsedMin + ' min';
+    return (step ? ' [' + step + ']' : '') + ' · ' + elapsed;
   }
 
   function deviceMatchesFilters(d, f, devNow) {
@@ -339,8 +427,15 @@
         .filter(Boolean).join(' ').toLowerCase();
       if (hay.indexOf(f.q) === -1) return false;
     }
-    if (f.managementType &&
-        (d.management_type || 'legacy') !== f.managementType) return false;
+    // Mirrors managementTypeLabel's own legacy_routed/legacy equivalence
+    // (below, in the row renderer) without touching that pinned line: the
+    // wire value for an unclassified device is always the truthy
+    // "legacy_routed" (gui_fleet.py's _legacy_record/_legacy_like), so the
+    // naive `d.management_type || 'legacy'` fallback here never actually
+    // fires and the value="legacy" filter option matched zero rows every
+    // time an operator picked it (facelift M2, ADJUDICATED repair-not-
+    // remove: the option itself stays exactly as it is).
+    if (f.managementType && (d.management_type === 'legacy_routed' ? 'legacy' : (d.management_type || 'legacy')) !== f.managementType) return false;
     if (f.platform) {
       var plat = d.platform || '';
       if (f.platform === '__none' ? plat !== '' : plat !== f.platform) return false;
@@ -897,14 +992,14 @@
     var signal = devicesRefreshController.signal;
     var results;
     try {
-      results = await Promise.all([fetch('/api/devices', { signal: signal }), fetch('/api/images', { signal: signal }), fetch('/api/credentials', { signal: signal }), fetch('/api/peer-policy', { signal: signal })]);
+      results = await Promise.all([fetch('/api/devices', { signal: signal }), fetch('/api/images', { signal: signal }), fetch('/api/credentials', { signal: signal }), fetch('/api/peer-policy', { signal: signal }), fetch('/api/onboard/jobs', { signal: signal })]);
     } catch (e) {
       // Superseding a refresh is expected; callers must not see an unhandled
       // AbortError. Other failures still reach their caller/status handling.
       if (e && e.name === 'AbortError') return;
       throw e;
     }
-    var dr = results[0], ir = results[1], cr = results[2], pr = results[3];
+    var dr = results[0], ir = results[1], cr = results[2], pr = results[3], jr = results[4];
     if (!dr.ok || mine !== devicesRefreshGeneration) return;
     var nextPolicy = pr.ok ? await pr.json() : peerPolicy;
     var dbody = await dr.json();
@@ -922,6 +1017,20 @@
       imageQuarantined[i.id] = !!i.quarantined;
     });
     credOpts = cr.ok ? ((await cr.json()).profiles || []) : [];
+    // Optional: a failed/aborted fetch here just leaves the previous status-
+    // cell step/elapsed suffixes in place for this tick rather than blanking
+    // them -- the plain onboarding…/undeploying… pill underneath (from
+    // /api/devices, which DID gate this refresh above) is never affected.
+    if (jr.ok) {
+      var jobsListing = await jr.json();
+      var jobs = jobsListing.jobs || [];
+      LAST_JOBS_BY_DEVICE = bestJobForDevice(jobs);
+      var liveJobIds = {};
+      jobs.forEach(function (j) { liveJobIds[j.id] = true; });
+      Object.keys(lastJobStep).forEach(function (id) {
+        if (!liveJobIds[id]) delete lastJobStep[id];
+      });
+    }
     if (mine !== devicesRefreshGeneration) return;
     syncCredSelected();
     LAST_DEVICES = devs;
@@ -951,6 +1060,20 @@
     if (sel.value !== keep) sel.value = '';
   }
 
+  // The four filter fields living inside the <details id="more-filters">
+  // disclosure panel (density pass, Task 8) -- Search/Agent
+  // install/Status stay above the fold and are not counted here.
+  var MORE_FILTER_IDS = ['dev-filter-management-type', 'dev-filter-cred',
+                          'dev-filter-telemetry', 'dev-filter-peer'];
+  function updateMoreFiltersSummary() {
+    var el = document.getElementById('more-filters-summary');
+    if (!el) return;
+    var n = MORE_FILTER_IDS.filter(function (id) {
+      var f = document.getElementById(id);
+      return f && f.value !== '';
+    }).length;
+    el.textContent = 'More filters' + (n ? ' (' + n + ')' : '');
+  }
   function renderDevices(devs, devNow) {
     var filters = deviceFilterState();
     var total = devs.length;
@@ -985,8 +1108,8 @@
       return '<tr data-id="' + esc(d.device_id) + '">' +
         '<td><input type="checkbox" class="mark" data-id="' + esc(d.device_id) + '"' +
         (marked[d.device_id] ? ' checked' : '') + '></td>' +
-        '<td class="machine">' + esc(d.device_id) + '</td><td class="machine">' + esc(d.device_ip || '') + '</td>' +
-        '<td>' + esc(d.model || d.heartbeat_model || '') + '</td>' +
+        '<td class="dev-id">' + esc(d.device_id) + '</td><td class="machine">' + esc(d.device_ip || '') + '</td>' +
+        '<td class="machine">' + esc(d.model || d.heartbeat_model || '') + '</td>' +
         '<td>' + esc(managementTypeLabel) + '</td>' +
         '<td><select class="platform">' + platSel + '</select></td>' +
         '<td><select class="cred">' + credSel + '</select></td>' +
@@ -1042,6 +1165,7 @@
       fc.textContent = devs.length === total ? ''
         : ('showing ' + devs.length + ' of ' + total);
     }
+    updateMoreFiltersSummary();
     updateSelBar();
   }
   // ---- Device deployment details (per-row ⓘ) ----
@@ -1147,6 +1271,50 @@
     }
     return rows;
   }
+  // Per-device instance of the Staging Boundary (Task 7's
+  // stagingBoundaryHTML, spec: "device and image detail contexts in Task
+  // 8" -- reused verbatim, never re-implemented). Mirrors
+  // overviewBoundarySteps()'s OWN per-step reasoning (same six steps, same
+  // deviceStatus() keys, same "unknown stays na, never a guessed done") but
+  // scoped to this one device's assigned set, and derives ONLY from data
+  // the drawer already has in hand when it opens: the device row `d`
+  // (already fetched by refreshDevices) and the imageQuarantined map that
+  // same fetch already populated. No per-image hash_verification state
+  // reaches this view (only the quarantined flag does), so "Source
+  // checked" can say FAILED for a quarantined assigned image but never
+  // claims a "done" it cannot back up; "Verified" has no on-device signal
+  // here either, exactly as the Overview instance admits.
+  function deviceBoundarySteps(d, devNow) {
+    var ids = rowAssignedIds(d);
+    if (!ids.length) return ['na', 'na', 'upcoming', 'na', 'na', 'na'];
+    var catalogued = 'done';
+    var assigned = 'done';
+
+    var quarantined = ids.filter(function (iid) { return imageQuarantined[iid]; });
+    var sourceChecked = quarantined.length
+      ? { state: 'failed', pillHtml: levelPillHTML('negative',
+          quarantined.length + (quarantined.length === 1 ? ' image quarantined' : ' images quarantined')) }
+      : 'na';
+
+    var st = deviceStatus(d, devNow);
+    var transferring, staged;
+    if (st.key === 'placement-failed') {
+      transferring = { state: 'failed', pillHtml: levelPillHTML('negative', 'placement failed') };
+      staged = 'na';
+    } else if (st.key === 'image-failed') {
+      var ratio = imageFailedRatio(d);
+      transferring = { state: 'failed', pillHtml: levelPillHTML(ratio >= 0.5 ? 'severe' : 'warning', st.label) };
+      staged = 'na';
+    } else if (st.key === 'deployed') {
+      transferring = 'done'; staged = 'done';
+    } else if (st.key === 'copying' || st.key === 'staging') {
+      transferring = 'current'; staged = 'upcoming';
+    } else {
+      transferring = 'na'; staged = 'na';
+    }
+    var verified = 'na';
+    return [catalogued, sourceChecked, assigned, transferring, verified, staged];
+  }
   async function openDeployInfo(id) {
     deployInfoDev = id;
     deployInfoOpener = document.activeElement;
@@ -1156,6 +1324,8 @@
     document.getElementById('di-log-rows').innerHTML = '';
     var d = LAST_DEVICES.filter(function (x) { return x.device_id === id; })[0] || {};
     document.getElementById('di-img-rows').innerHTML = deployImageRows(d);
+    document.getElementById('di-boundary').innerHTML =
+      stagingBoundaryHTML(deviceBoundarySteps(d, LAST_DEV_NOW));
     var lt = document.getElementById('di-log-text');
     lt.hidden = true; lt.textContent = '';
     note.textContent = 'Loading…';
@@ -1334,6 +1504,22 @@
     document.querySelectorAll('#dev-rows .mark').forEach(function (cb) { cb.checked = e.target.checked; });
     updateSelBar();
   });
+  // Selection-gutter visibility toggle (density pass, Task 8): purely
+  // cosmetic -- body.selecting only drives the checkbox-column opacity in
+  // styles.css. It never touches which boxes are checked, the filtered-
+  // select-all copy, checked-id retention across refresh, or any busy lock;
+  // a checkbox stays a real, always-clickable/focusable native input either
+  // way (opacity, never display/visibility), and still shows on its own via
+  // :hover/:focus-within/:checked even with this off.
+  (function () {
+    var toggle = document.getElementById('dev-select-toggle');
+    if (!toggle) return;
+    toggle.addEventListener('click', function () {
+      var on = !document.body.classList.contains('selecting');
+      document.body.classList.toggle('selecting', on);
+      toggle.setAttribute('aria-pressed', String(on));
+    });
+  })();
   // ---- menus / selection bar (toolbar rework, spec 2026-08-12) ----
   // CSP-safe popovers: static hidden panels toggled by their trigger; a click
   // on .menu-close (menu items, the Start button) closes; outside click and
@@ -1365,6 +1551,23 @@
   wireMenu('onboard-menu-btn', 'onboard-pop');
   wireMenu('undeploy-menu-btn', 'undeploy-pop');
   wireMenu('help-btn', 'help-pop');
+  wireMenu('status-legend-btn', 'status-legend-pop');
+  // Status column legend (density pass, Task 8): one row per
+  // DEVICE_STATUS_OPTIONS entry (the SAME 12-level Magnetic mapping the
+  // Status filter and the cell itself already derive from -- STATUS_LEVELS,
+  // Task 4), so the legend can never list a level a real pill cannot show.
+  // image-failed's own ratio-driven warning/severe split is per-row, not
+  // meaningful for a static legend, so it renders at its base 'warning'
+  // level here.
+  (function () {
+    var pop = document.getElementById('status-legend-pop');
+    if (!pop) return;
+    pop.innerHTML = '<div class="legend-title">Status legend</div>' +
+      DEVICE_STATUS_OPTIONS.map(function (o) {
+        return '<div class="legend-row">' +
+          levelPillHTML(STATUS_LEVELS[o[0]] || 'inactive', o[1]) + '</div>';
+      }).join('');
+  })();
   function updateSelBar() {
     var n = document.querySelectorAll('#dev-rows .mark:checked').length;
     document.getElementById('sel-bar').hidden = n === 0;
@@ -1377,10 +1580,12 @@
       tr.classList.toggle('sel', !!(cb && cb.checked));
     });
     // An empty selection closes the selection-scoped popovers — but never
-    // the header help popover: the 10s devices poll re-renders the (empty)
-    // table and lands here with n === 0, and yanking an open "?" panel out
-    // from under the operator reads as a broken control.
-    if (n === 0 && openMenuPanel && openMenuPanel.id !== 'help-pop') closeMenus();
+    // the header help popover, or the Status legend (density pass, Task 8):
+    // the 10s devices poll re-renders the (empty) table and lands here with
+    // n === 0, and yanking an open informational panel out from under the
+    // operator reads as a broken control.
+    if (n === 0 && openMenuPanel && openMenuPanel.id !== 'help-pop' &&
+        openMenuPanel.id !== 'status-legend-pop') closeMenus();
   }
   document.getElementById('dev-rows').addEventListener('change', function (e) {
     if (e.target.classList.contains('mark')) updateSelBar();

@@ -8610,3 +8610,70 @@ def test_overview_attention_band_distinguishes_no_data_from_all_clear():
     assert "failed: true" in overview_fn
     assert "dbody.failed || imgsBody.failed" in overview_fn
     assert "renderOverviewAttention(devs, devNow, imgs, fleetDataUnavailable)" in overview_fn
+
+
+# ---------------------------------------------------------------------------
+# Task 8: Devices density + the three carried status fixes (facelift Phase
+# 4b/5) -- Step 1 pins, written against real recon (facelift-contracts.md §7
+# for M2, §8 for job wiring), watched RED before the fix landed.
+# ---------------------------------------------------------------------------
+
+def test_devices_filter_offers_only_producible_options():
+    """M2 is ADJUDICATED as repair, not removal: the value="legacy" option
+    describes a real fleet state (an unclassified device, which the server
+    always stores as the truthy 'legacy_routed' -- gui_fleet.py's
+    _legacy_record/_legacy_like) and stays exactly where it is. What was
+    broken is the FILTER COMPARISON at deviceMatchesFilters(): it fell back
+    to the string 'legacy' only when d.management_type was falsy, which
+    never happens, so selecting the option always returned zero rows. Pin
+    both halves: the option survives verbatim, and the comparison now
+    folds 'legacy_routed' into 'legacy' the same way the row label already
+    does (managementTypeLabel, app.js) -- without touching that label
+    line, which test_devices_table_renders_honest_xr_host_label pins
+    character-for-character already."""
+    html = _webroot("index.html")
+    js = _webroot("app.js")
+    assert ('<option value="legacy">Inventory only — management type not '
+            'chosen</option>') in html
+    filter_fn = js.split("function deviceMatchesFilters(d, f, devNow) {", 1)[1].split(
+        "\n  }", 1)[0]
+    # the repaired comparison: legacy_routed and legacy compare equal, the
+    # same equivalence class managementTypeLabel already grants the row label
+    assert ("d.management_type === 'legacy_routed' ? 'legacy' : "
+            "(d.management_type || 'legacy')") in filter_fn
+
+
+def test_device_status_cell_carries_job_step_and_elapsed():
+    """jobPhaseSuffix(job) formats the "[n/m] · Xm" suffix an in-progress
+    onboard/undeploy pill carries, e.g. "Undeploying [3/5] · 12 min"; at or
+    above 60 minutes it switches to "1 h 12 min". Elapsed derives from the
+    job's own SERVER started_at timestamp (never a client-clock delta that
+    would reset on refresh) -- LAST_DEV_NOW is the same server clock
+    refreshDevices() already reads for offline-freshness math."""
+    js = _webroot("app.js")
+    assert "function jobPhaseSuffix(job) {" in js
+    fn = js.split("function jobPhaseSuffix(job) {", 1)[1].split("\n  }", 1)[0]
+    assert "job.started_at" in fn
+    assert "LAST_DEV_NOW" in fn
+    assert "' min'" in fn
+    assert "' h '" in fn
+    assert "60" in fn
+    assert "[" in fn and "]" in fn
+    # wired into the status cell for an active job only, matched by action
+    assert "jobPhaseSuffix(activeJob)" in js
+    assert "LAST_JOBS_BY_DEVICE" in js
+
+
+def test_offline_is_expected_during_active_undeploy():
+    """A device mid-undeploy that has already gone stale/offline (its agent
+    is deactivated at undeploy step [1/5], well before the rest of teardown
+    runs) must not read as a bare, alarming "Offline (no recent
+    heartbeat)" -- that is the expected shape of a healthy undeploy, not a
+    fault. The pill stays visible (never hidden) with an honest label and a
+    title explaining why."""
+    js = _webroot("app.js")
+    fn = js.split("function deviceStatusHtml(d, devNow) {", 1)[1].split(
+        "\n  }", 1)[0]
+    assert "Offline (expected during undeploy)" in fn
+    assert "st.key === 'undeploying'" in fn
+    assert "[1/5]" in fn
