@@ -21,6 +21,16 @@ HOOK_SRC="${HOOK_SRC:-$STAGE_DIR/agent/peer-transfer-hook.sh}"
 HOOK_DST="${HOOK_DST:-$EXEC_DIR/iris-peer-transfer-hook}"
 LOG="${LOG:-$STAGE_DIR/aria2c.log}"
 MAX_PEERS="${MAX_PEERS:-10}"     # cap BT peer connections per torrent on a device
+# Lift aria2's concurrency cap, which defaults to 5. A SEEDING torrent counts
+# against that cap and never completes (--seed-ratio=0.0 below means seed
+# forever, which is the point -- staged devices seed to their peers), so a
+# device holding five staged images would queue the download for a sixth and
+# never start it. A device may be assigned up to ten. The starvation is silent:
+# aria2 reports the extra as `waiting`, not an error, so the device would report
+# staging indefinitely with no fault recorded anywhere. Bandwidth is bounded by
+# --bt-max-peers and transfer limits, never by this; using it as a throttle only
+# starves. Same defect fixed on the origin in server/seed-launch.sh.
+MAX_CONCURRENT="${MAX_CONCURRENT:-100}"
 BT_LISTEN_PORT="${BT_LISTEN_PORT:-}"
 
 if [ -n "$BT_LISTEN_PORT" ]; then
@@ -132,6 +142,7 @@ exec "$ARIA2" \
   --enable-peer-exchange=false \
   --bt-enable-lpd=false \
   --bt-max-peers="$MAX_PEERS" \
+  --max-concurrent-downloads="$MAX_CONCURRENT" \
   "$@" \
   --bt-seed-unverified=true \
   --seed-ratio=0.0 \

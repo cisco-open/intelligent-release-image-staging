@@ -147,6 +147,7 @@ start_aria2c() {
     --rpc-listen-port="$RPC_PORT" --rpc-secret="$secret" \
     --enable-dht=false --enable-peer-exchange=false --bt-enable-lpd=false \
     --bt-max-peers="$MAX_PEERS" --bt-seed-unverified=true --seed-ratio=0.0 \
+    --max-concurrent-downloads="${IRIS_MAX_CONCURRENT:-100}" \
     "$@" \
     --file-allocation=none --dir="$STAGE_DIR" \
     --log-level=warn --summary-interval=0 \

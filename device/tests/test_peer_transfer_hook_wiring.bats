@@ -73,10 +73,26 @@ run_start_aria2c() {
 @test "entrypoint still passes the private-swarm flags alongside the hook" {
   run run_start_aria2c "/opt/iris/agent/peer-transfer-hook.sh"
   out="$(cat "$TMPD/launched.txt")"
-  [[ "$out" == *"--enable-dht=false"* ]]
-  [[ "$out" == *"--bt-seed-unverified=true"* ]]
-  [[ "$out" == *"--rpc-secret=supervisorsecret"* ]]
+  # `|| return 1`: a bare failing [[ ]] that is not the test's LAST command does
+  # not fail a bats test under bash 3.2, so without these the first three
+  # assertions here could never go red.
+  [[ "$out" == *"--enable-dht=false"* ]] || return 1
+  [[ "$out" == *"--bt-seed-unverified=true"* ]] || return 1
+  [[ "$out" == *"--rpc-secret=supervisorsecret"* ]] || return 1
   [[ "$out" == *"--dir=$TMPD/stage"* ]]
+}
+
+# aria2's max-concurrent-downloads defaults to 5 and a SEEDING torrent counts
+# against it while never completing (--seed-ratio=0.0 -- staged devices seed to
+# their peers by design). A device may be assigned up to ten images, so once it
+# holds five, the download for the sixth is queued and never starts. Silently:
+# aria2 calls it `waiting`, not an error, and the agent only enumerates that
+# queue rather than reporting it, so the device reports staging forever with no
+# fault recorded. Measured in exactly this shape on the origin 2026-08-31.
+@test "entrypoint lifts aria2's default concurrency cap so a multi-image device is never starved" {
+  run run_start_aria2c "/opt/iris/agent/peer-transfer-hook.sh"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$(cat "$TMPD/launched.txt")" == *"--max-concurrent-downloads=100"* ]]
 }
 
 @test "entrypoint hands the hook the secret the daemon is being started with" {
