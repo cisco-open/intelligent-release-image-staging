@@ -43,9 +43,21 @@ done
 # a certificate that did not exist yet. Warn with the exact remedy rather
 # than rebuilding automatically -- building the RPM needs docker context
 # decisions (base image, CATALOG_PEM, ...) this deploy script does not own.
+# The baseline is the certificate's OWN notBefore, never the mtime of
+# /srv/artifacts/iris-catalog.pem. That file is a staged COPY rewritten at every
+# bring-up, so its mtime records the last staging rather than the certificate,
+# and comparing against it warned about a current RPM purely because this script
+# had just re-copied the pem -- measured 2026-08-31, where the RPM was built
+# eleven minutes AFTER the very certificate it was accused of predating.
 XR_RPM="$REPO/artifacts/iris-xr.rpm"
 if [ -f "$XR_RPM" ]; then
-  CERT_EPOCH="$(docker exec iris stat -c %Y /srv/artifacts/iris-catalog.pem 2>/dev/null || true)"
+  CERT_NB="$(docker exec iris openssl x509 -in /srv/artifacts/iris-catalog.pem \
+               -noout -startdate 2>/dev/null | sed 's/^notBefore=//' || true)"
+  CERT_EPOCH=""
+  if [ -n "$CERT_NB" ]; then
+    CERT_EPOCH="$(date -u -d "$CERT_NB" '+%s' 2>/dev/null \
+      || date -u -j -f '%b %e %H:%M:%S %Y %Z' "$CERT_NB" '+%s' 2>/dev/null || true)"
+  fi
   RPM_EPOCH="$(date -r "$XR_RPM" '+%s' 2>/dev/null || true)"
   if [ -n "$CERT_EPOCH" ] && [ -n "$RPM_EPOCH" ] && [ "$RPM_EPOCH" -lt "$CERT_EPOCH" ]; then
     echo "WARNING: artifacts/iris-xr.rpm predates the live catalog certificate (build time only -- contents not inspected)." >&2
