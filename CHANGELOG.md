@@ -60,14 +60,18 @@ top-level `VERSION` file.
   everything else, including the router's networking configuration, alone.
 - Undeploy on IOS-XR routers is now bounded, idempotent, and provenance-aware.
   Every command session to the router runs under a wall-clock bound,
-  `IRIS_XR_SESSION_TIMEOUT` (default 900 seconds; 0 disables it), on top of
+  `IRIS_XR_SESSION_TIMEOUT` (default 150 seconds; 0 disables it), on top of
   SSH keepalives, so a wedged router yields a failed job with a real exit
-  code instead of an unbounded run. Deactivating the appmgr application
-  verifies its own effect by re-reading the router's own application table
-  rather than trusting the config commit's exit status, retries once, and
-  refuses to continue rather than uninstall under a still-running
-  application; a teardown interrupted partway through converges cleanly on
-  a second run, receipted or forced. The agent now records whether each
+  code instead of an unbounded run. Teardown composes at most two such
+  bounded sessions per run: a read-only session that probes the appmgr
+  application table and unconditionally deactivates the application, and a
+  second, destructive session (uninstall, file removal, sidecar sweep, and
+  final verify) that is only ever composed once the first session's
+  deactivate has been adjudicated by pairing it against that same early
+  probe, rather than trusted on its own reported exit status; a still-
+  running application after a rejected deactivate refuses to continue
+  before anything destructive is sent. A teardown interrupted partway
+  through converges cleanly on a second run, receipted or forced. The agent now records whether each
   staged image was downloaded by IRIS or adopted from a file an operator
   already staged, and an adopted (or legacy, origin-unknown) file is never
   deleted by teardown or by the agent's own cleanup paths, except when the

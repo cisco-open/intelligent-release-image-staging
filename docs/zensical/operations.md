@@ -305,14 +305,19 @@ with a tighter job-queue deadline can still export a lower
 
 `.20` operators: its `server/docker-compose.override.yml` still carries
 `IRIS_XR_SESSION_TIMEOUT=300`, set back when the tracked default was 900
-seconds. That override is now redundant for teardown — the tracked
-150-second default already bounds a worst-case two-session teardown at 300
-seconds, the same ceiling the override alone used to buy against the old
-900-second default — but leaving it in place is harmless: it only widens
-the per-session bound back out to 300s (a 600s worst case across two
-stalls) rather than reintroducing the old multi-hour exposure. Removing it
-tightens the worst case back down to the tracked default; that edit is the
-operator's to make, not something this change makes for them. Undeploy itself never touches a bare
+seconds and per-teardown session counts ran six to eleven. That override was
+always a per-session cap, not a total-teardown one: at that same 300-second
+override, live runs recovered from the old design still took 929-964
+seconds end to end (`agentinfo/xr-support/teardown-speed-recon.md`, section
+1.2 — roughly three stalled-to-the-bound sessions each), not 300 seconds.
+It is now redundant for teardown — Task 2's at-most-two-session composite
+plus the tracked 150-second default already keep a stalled teardown's
+worst case to a comfortable 300 seconds without any override in play — but
+leaving it in place is harmless: it only widens the per-session bound back
+out to 300s (a 600s worst case across two stalls) rather than
+reintroducing the old multi-hour exposure. Removing it tightens the worst
+case back down to the tracked default; that edit is the operator's to
+make, not something this change makes for them. Undeploy itself never touches a bare
 image filename and reports, in one summary line, that any operator-staged
 image was left in place. Undeploy never unassigns an image, so it never
 produces the agent's own per-file record on its own: that line — the file
