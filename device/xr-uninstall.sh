@@ -233,6 +233,17 @@ EOF
 # prepends a client-side banner before session 1, it never changes either
 # composed stream, so the byte-parity test compares the real, complete
 # streams.
+#
+# Run-4 fix wave (hardware ruling, 2026-08-31): the FILES read alone can no
+# longer decide whether a present iris-work is a real leftover -- XR's CLI
+# has NO prompt-free directory removal (bare `delete /noprompt <dir>` does
+# NOT remove a directory -- its earlier apparent "success" was against a
+# path already gone; `rmdir` prompts `[y|n]` and hangs; `rmdir /noprompt` is
+# invalid syntax), so an iris-work that survives session 2's own
+# empty-then-delete attempt may legitimately be empty, inert residue. The
+# WORKDIR section (`dir harddisk:/iris-work`) rides right after FILES so
+# [5/5] can disambiguate that from a genuine leftover -- see the
+# adjudication below.
 # ---------------------------------------------------------------------------
 sweep_verify_request() {
   local include_destructive="$1"
@@ -249,6 +260,8 @@ show appmgr application-table
 show appmgr source-table
 ! ${VERIFY_MARKER}FILES__
 dir harddisk:
+! ${VERIFY_MARKER}WORKDIR__
+dir harddisk:/iris-work
 ! ${VERIFY_MARKER}DONE__
 EOF
 }
@@ -382,6 +395,20 @@ files_line_match() {
   printf '%s\n' "$1" | grep -qE "$2"
 }
 
+# Run-4 fix wave: distinguishes an EMPTY iris-work directory (inert residue
+# -- see the [5/5] adjudication below) from a genuine leftover. "Has
+# entries" means the WORKDIR section (`dir harddisk:/iris-work`) contains
+# any line beyond a blank line or the "Directory of ..." header XR's own
+# `dir` command always prints, whether or not the directory holds anything
+# (the same header shape [5/5]'s own top-level `dir harddisk:` read already
+# carries -- see FAKE_DIR_HARDDISK in the bats suite). Biased toward
+# "has entries" on any unrecognized line, so an unexpected output shape
+# fails closed (still forbidden) rather than risking a real leftover being
+# silently waved through as empty residue.
+workdir_has_entries() {
+  printf '%s\n' "$1" | grep -v '^[[:space:]]*$' | grep -v '^Directory of ' | grep -q .
+}
+
 # D2-3 regression guard, generalized to every app-table read in this script
 # (not just the first one): XR's generic CLI command-rejection banner is
 # hardware-proven (LAB-RESULTS-2026-08-27.md -- `run sh -c "..."` came back
@@ -485,6 +512,10 @@ echo "[5/5] verify no '$APPID' app, '$SOURCE_NAME' source, IRIS file, or sidecar
 # echoed blob's own literal copy of every marker's text, so a plain
 # substring presence check for DONE would be fooled the same way a plain
 # APPS_END substring check would be; only the positional check catches it.
+# WORKDIR sits physically between FILES and DONE in the composed stream
+# (a single CLI session executes strictly in order), so this same
+# FILES-before-DONE positional check also guarantees WORKDIR executed for
+# real -- no separate WORKDIR/DONE position check is needed.
 VERIFY_OUT="$(sweep_verify_request 1 | RUN 2>/dev/null)"
 VERIFY_RC=$?
 if [ "$VERIFY_RC" -ne 0 ]; then
@@ -497,6 +528,8 @@ SOURCES="$(printf '%s' "$VERIFY_OUT" | verify_section SOURCES)" \
   || { echo "ERROR: undeploy verify did not return the appmgr source-table; refusing to declare $DEVICE_IP clean" >&2; exit 1; }
 FILES="$(printf '%s' "$VERIFY_OUT" | verify_section FILES)" \
   || { echo "ERROR: undeploy verify did not return the harddisk: file check; refusing to declare $DEVICE_IP clean" >&2; exit 1; }
+WORKDIR="$(printf '%s' "$VERIFY_OUT" | verify_section WORKDIR)" \
+  || { echo "ERROR: undeploy verify did not return the iris-work directory listing; refusing to declare $DEVICE_IP clean" >&2; exit 1; }
 if ! printf '%s' "$VERIFY_OUT" | end_after_start "${VERIFY_MARKER}FILES__" "${VERIFY_MARKER}DONE__"; then
   echo "ERROR: undeploy verify was truncated before its end marker; refusing to declare $DEVICE_IP clean" >&2
   exit 1
@@ -517,7 +550,24 @@ if files_line_match "$FILES" "(^|[[:space:]])$(ere_escape "$SOURCE_NAME")\\.rpm\
   forbidden="${forbidden}${forbidden:+, }$RPM_PATH"
 fi
 if files_line_match "$FILES" '(^|[[:space:]])iris-work$'; then
-  forbidden="${forbidden}${forbidden:+, }$WORK_DIR_PATH"
+  # Three-way adjudication (run-4 hardware ruling, 2026-08-31): iris-work
+  # existing at root is no longer automatically forbidden. XR's CLI has NO
+  # prompt-free directory removal (see sweep_verify_request()'s comment
+  # above), so a present iris-work may legitimately be empty, inert residue
+  # rather than a real leftover -- its own WORKDIR sub-listing (dir
+  # harddisk:/iris-work) disambiguates the two. The SAME D2-3
+  # rejected-must-never-read-as-empty discipline applies here: a rejected
+  # WORKDIR read is a hard error, never silently read as "empty, therefore
+  # benign".
+  if xr_command_rejected "$WORKDIR"; then
+    echo "ERROR: undeploy verify's iris-work directory listing was rejected by the device; refusing to declare $DEVICE_IP clean" >&2
+    exit 1
+  fi
+  if workdir_has_entries "$WORKDIR"; then
+    forbidden="${forbidden}${forbidden:+, }$WORK_DIR_PATH"
+  else
+    echo "note: empty iris-work directory left behind (XR CLI has no prompt-free directory removal); contents removed"
+  fi
 fi
 if files_line_match "$FILES" '\.torrent$'; then
   forbidden="${forbidden}${forbidden:+, }leftover *.torrent sidecar on harddisk:"

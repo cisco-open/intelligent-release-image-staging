@@ -301,7 +301,11 @@ now holds a teardown job for at most 300 seconds (two stalled sessions) at
 the default bound, down from the roughly two-hour worst case the old
 six-to-eleven-session, 900-second-default design could reach. A deployment
 with a tighter job-queue deadline can still export a lower
-`IRIS_XR_SESSION_TIMEOUT` (e.g. `60`) in the server's environment.
+`IRIS_XR_SESSION_TIMEOUT` (e.g. `60`) in the server's environment. XR's CLI
+has no prompt-free way to remove a directory, so a completed teardown may
+honestly leave an empty `iris-work/` directory behind on harddisk: rather
+than failing over it — a later onboarding simply reuses that same directory
+(it only ever ensures the directory exists, never requires it be absent).
 
 `.20` operators: its `server/docker-compose.override.yml` still carries
 `IRIS_XR_SESSION_TIMEOUT=300`, set back when the tracked default was 900

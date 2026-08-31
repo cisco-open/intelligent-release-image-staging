@@ -324,7 +324,7 @@ case "$cmds" in
   *"__IRIS_XR_VERIFY_FILES__"*)
     # session 2/2 (sweep+verify): the destructive commands (when composed at
     # all -- gated client-side, not by this stub) -> APPS (final re-probe)
-    # -> SOURCES -> FILES -> DONE.
+    # -> SOURCES -> FILES -> WORKDIR -> DONE.
     if [ "${FAKE_VERIFY_OMIT_APPS:-no}" != "yes" ]; then
       row="$(next_app_row)"
       echo "__IRIS_XR_VERIFY_APPS__"
@@ -335,6 +335,15 @@ case "$cmds" in
     if [ "${FAKE_VERIFY_OMIT_FILES:-no}" != "yes" ]; then
       echo "__IRIS_XR_VERIFY_FILES__"
       printf '%s\n' "${FAKE_DIR_HARDDISK-Directory of harddisk:/}"
+    fi
+    # Run-4 fix wave: iris-work's own sub-listing. Default is an
+    # empty-directory listing (just the header XR's own `dir` always
+    # prints) -- harmless for every test that never puts "iris-work" into
+    # FAKE_DIR_HARDDISK, since [5/5] only ever consults this once the
+    # root-level FILES check has already confirmed iris-work is present.
+    if [ "${FAKE_VERIFY_OMIT_WORKDIR:-no}" != "yes" ]; then
+      echo "__IRIS_XR_VERIFY_WORKDIR__"
+      printf '%s\n' "${FAKE_WORKDIR_LISTING-Directory of harddisk:/iris-work}"
     fi
     if [ -n "${FAKE_VERIFY_RC:-}" ] && [ "${FAKE_VERIFY_RC}" != "0" ]; then
       exit "$FAKE_VERIFY_RC"
@@ -425,11 +434,19 @@ case "$cmds" in
       printf '%s\n' "${FAKE_DIR_HARDDISK-Directory of harddisk:/}"
     fi
     # FAKE_TRUNCATE_AFTER_FILES simulates the transport dying (rc 0) right
-    # after the REAL FILES section -- before its own DONE marker. The
-    # echoed upfront blob still has a literal copy of DONE's text, so only
-    # the positional (last-DONE-after-last-FILES) check catches this.
+    # after the REAL FILES section -- before WORKDIR or DONE ever execute.
+    # The echoed upfront blob still has a literal copy of every later
+    # marker's text, so only the positional (last-DONE-after-last-FILES)
+    # check catches this.
     if [ "${FAKE_TRUNCATE_AFTER_FILES:-no}" = "yes" ]; then
       exit 0
+    fi
+    # Run-4 fix wave: iris-work's own sub-listing (default: an
+    # empty-directory listing, just the header XR's own `dir` always
+    # prints).
+    if [ "${FAKE_VERIFY_OMIT_WORKDIR:-no}" != "yes" ]; then
+      echo "__IRIS_XR_VERIFY_WORKDIR__"
+      printf '%s\n' "${FAKE_WORKDIR_LISTING-Directory of harddisk:/iris-work}"
     fi
     echo "__IRIS_XR_VERIFY_DONE__"
     ;;
@@ -485,6 +502,8 @@ case "$cmds" in
     printf '\n'
     printf '%s! __IRIS_XR_VERIFY_FILES__\n' "$PROMPT"
     printf 'Directory of harddisk:/\n'
+    printf '%s! __IRIS_XR_VERIFY_WORKDIR__\n' "$PROMPT"
+    printf 'Directory of harddisk:/iris-work\n'
     printf '%s! __IRIS_XR_VERIFY_DONE__\n' "$PROMPT"
     ;;
   *)
@@ -917,6 +936,78 @@ _xr_call_body() {
   FAKE_VERIFY_OMIT_FILES=yes run _xr_uninstall_run_live
   [ "$status" -ne 0 ]
   [[ "$output" == *"did not return the harddisk: file check"* ]]
+}
+
+@test "live: verify fails closed when the iris-work sub-listing marker never comes back" {
+  _xr_uninstall_stub_setup
+  FAKE_VERIFY_OMIT_WORKDIR=yes run _xr_uninstall_run_live
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"did not return the iris-work directory listing"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# Run-4 fix wave (hardware ruling, 2026-08-31): XR's CLI has no prompt-free
+# directory removal (bare `delete /noprompt <dir>` does not remove a
+# directory -- its earlier apparent "success" was against an already-gone
+# path; `rmdir` prompts [y|n] and hangs; `rmdir /noprompt` is invalid
+# syntax), so an iris-work that survives session 2's own empty-then-delete
+# attempt may legitimately be empty, inert residue rather than a real
+# leftover. [5/5]'s adjudication is now three-way: absent (clean, as
+# always), present+nonempty (still FAIL, unchanged strictness),
+# present+empty (accepted -- an explicit note is printed, teardown still
+# converges).
+# ---------------------------------------------------------------------------
+
+@test "live: iris-work absent from harddisk: root is clean, no residue note printed" {
+  _xr_uninstall_stub_setup
+  run _xr_uninstall_run_live
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"undeploy complete"* ]] || return 1
+  if printf '%s\n' "$output" | grep -q 'note: empty iris-work'; then
+    return 1
+  fi
+}
+
+@test "live: iris-work present and NONEMPTY still fails verify (unchanged strictness)" {
+  _xr_uninstall_stub_setup
+  FAKE_DIR_HARDDISK="Directory of harddisk:/
+    12345 -rw-------. 1 root root 512 Aug 27 12:00 iris-work" \
+    FAKE_WORKDIR_LISTING="Directory of harddisk:/iris-work
+    12345 -rw-------. 1 root root 100 Aug 27 12:00 leftover.txt" \
+    run _xr_uninstall_run_live
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"artifacts still present"* ]] || return 1
+  [[ "$output" == *"iris-work"* ]] || return 1
+  if printf '%s\n' "$output" | grep -q 'note: empty iris-work'; then
+    return 1
+  fi
+}
+
+@test "live: iris-work present but EMPTY is accepted as inert residue -- note printed, still converges" {
+  _xr_uninstall_stub_setup
+  FAKE_DIR_HARDDISK="Directory of harddisk:/
+    12345 -rw-------. 1 root root 512 Aug 27 12:00 iris-work" \
+    FAKE_WORKDIR_LISTING="Directory of harddisk:/iris-work" \
+    run _xr_uninstall_run_live
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"undeploy complete"* ]] || return 1
+  [[ "$output" == *"note: empty iris-work directory left behind"* ]] || return 1
+  if printf '%s\n' "$output" | grep -q 'artifacts still present'; then
+    return 1
+  fi
+}
+
+@test "live: a rejected iris-work directory listing is a hard error, never read as empty" {
+  _xr_uninstall_stub_setup
+  FAKE_DIR_HARDDISK="Directory of harddisk:/
+    12345 -rw-------. 1 root root 512 Aug 27 12:00 iris-work" \
+    FAKE_WORKDIR_LISTING="% Invalid input detected" \
+    run _xr_uninstall_run_live
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"iris-work directory listing was rejected"* ]] || return 1
+  if printf '%s\n' "$output" | grep -q 'undeploy complete'; then
+    return 1
+  fi
 }
 
 # ---------------------------------------------------------------------------
