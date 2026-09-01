@@ -20,25 +20,42 @@ export SSHPASS="${DEVICE_PASS:?set DEVICE_PASS (export it or 'source' your gitig
 CMDS="$(cat)"
 DEVICE_ENABLE="${DEVICE_ENABLE:-$DEVICE_PASS}"
 
-# Do not send the enable password to a device that is already in enable mode.
-# These logins land at `#`, so `enable` is a no-op and the password line that
-# follows is executed as an EXEC command. IOS then tries to resolve it as a
-# hostname, and where that lookup black-holes instead of failing fast it blocks
-# for ~40 s: measured on a lab C8000v, an identical session cost 3.13 s without
-# these two lines and 43.32 s with them. router-uninstall.sh opens 17 sessions,
-# so this alone was ~11 minutes of a teardown -- and it is why installs
-# outlived the artifact server's staging TTL.
+# Never write a line into an IOS session that is not a valid command in the
+# mode we are actually in. A login that lands at `#` is already privileged, so
+# `enable` is a no-op and the password line after it is executed as an EXEC
+# command; IOS then tries to resolve it as a hostname, and where that lookup
+# black-holes instead of failing fast it blocks for ~45 s. Measured 2026-09-01
+# on the lab fleet, identical sessions, no config difference between the boxes:
 #
-# Privilege is learned from the prompt IOS echoes back and cached per
-# user+device: the first call still sends enable (nothing is known yet), later
-# calls skip it. The cache self-corrects in both directions, so a device that
-# starts requiring enable again -- after a reload or a config change -- is
-# picked up on the next call. IRIS_DEVICE_ENABLE_ALWAYS=1 restores the old
-# unconditional behaviour.
-PRIV_CACHE="${TMPDIR:-/tmp}/iris-priv-$(id -u)-${DEVICE_USER}-${HOST}"
-SEND_ENABLE=1
-if [ "${IRIS_DEVICE_ENABLE_ALWAYS:-0}" != "1" ] && [ -f "$PRIV_CACHE" ]; then
-  SEND_ENABLE=0
+#     100.90.168.114   3.06 s clean / 3.19 s with the pair   (+0.13 s)
+#     100.90.170.101   3.41 s clean / 51.79 s with the pair   (+48.4 s)
+#
+# The .168 segment is fast only because something there answers the default
+# 255.255.255.255 broadcast; NEITHER box has `no ip domain lookup`, and adding
+# it would only hide this. So the fix is to stop typing the wrong line.
+#
+# Default: send NOTHING. `enable` goes out only for a device already known to
+# need it, and then the password IS a valid answer to the prompt `enable` is
+# about to raise -- correct by construction rather than by luck of the segment.
+#
+# This inverts the previous cache, which defaulted to sending and learned to
+# stop: that still paid one full stall per device on first contact, and being
+# in /tmp it re-armed on every container restart (measured: all 32 devices of
+# the 2026-09-01 06:49 wave paid it, because the container had restarted at
+# 06:27). The marker filename changed with the meaning so a stale file from the
+# old scheme can never be read as its opposite.
+#
+# The learning step reads the prompt IOS itself emitted, never our own echo --
+# a `>` before our first command means we ran at user EXEC and this device does
+# need enable. It self-corrects in both directions, so a device that gains or
+# loses an enable requirement is picked up on the next call. A device that
+# genuinely needs enable fails its first session LOUDLY (its commands ran
+# unprivileged) and succeeds on the retry -- fail-closed, and no stray token
+# either way. IRIS_DEVICE_ENABLE_ALWAYS=1 forces the old unconditional pair.
+NEEDS_ENABLE="${TMPDIR:-/tmp}/iris-needsenable-$(id -u)-${DEVICE_USER}-${HOST}"
+SEND_ENABLE=0
+if [ "${IRIS_DEVICE_ENABLE_ALWAYS:-0}" = "1" ] || [ -f "$NEEDS_ENABLE" ]; then
+  SEND_ENABLE=1
 fi
 OUT_COPY="$(mktemp "${TMPDIR:-/tmp}/iris-run.XXXXXX")"
 
@@ -67,12 +84,27 @@ RUN_STATUS=$?
 
 # Learn from the prompt IOS echoed alongside our own commands. `tee` keeps the
 # caller's output streaming; only this bookkeeping reads the copy.
-if [ "$SEND_ENABLE" = "1" ]; then
-  # "sw1#enable" -- the device was ALREADY privileged, so stop paying for it.
-  grep -qE '#[[:space:]]*enable[[:space:]]*$' "$OUT_COPY" && : > "$PRIV_CACHE"
+if [ "$SEND_ENABLE" = "0" ]; then
+  # "sw1>terminal length 0" -- we ran at USER exec, so this device really does
+  # need enable. Remember it; the next call sends the pair, and there the
+  # password is answering a prompt that will actually appear.
+  grep -qE '>[[:space:]]*terminal length 0' "$OUT_COPY" && : > "$NEEDS_ENABLE"
 else
-  # "sw1>terminal length 0" -- it wants enable after all; forget what we cached.
-  grep -qE '>[[:space:]]*terminal length 0' "$OUT_COPY" && rm -f "$PRIV_CACHE"
+  # "sw1#enable" -- already privileged after all, so stop sending the pair.
+  grep -qE '#[[:space:]]*enable[[:space:]]*$' "$OUT_COPY" && rm -f "$NEEDS_ENABLE"
+fi
+
+# Guard, not a test: this is the fingerprint IOS leaves when we typed something
+# that was not a command in the current mode, and it is the only direct
+# evidence of the whole bug class. Warn rather than fail -- one known site
+# remains (the bare `y` after `guestshell destroy`, which can only be fixed by
+# reading the prompt in-session) and a hard failure there would break
+# re-onboard. Several callers redirect stderr, so this is a floor, not a net.
+if grep -qE '% (Bad IP address or host name|Unknown command or computer name)' \
+     "$OUT_COPY"; then
+  echo "  WARNING: $HOST resolved one of our lines as a hostname -- a line was" \
+       "sent that is not a valid command in the current mode (this costs ~45 s" \
+       "per occurrence on a segment where DNS black-holes)" >&2
 fi
 rm -f "$OUT_COPY"
 exit "$RUN_STATUS"

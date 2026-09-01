@@ -24,6 +24,7 @@ real captured IE-3400 transcript.
 `select_cli` is the runtime-mode seam: container mode -> this SSH transport;
 otherwise the Guest Shell `cli` import (C9300 path, byte-identical). Stdlib only."""
 import os
+import re
 import subprocess
 
 
@@ -70,8 +71,17 @@ class SSHCli(object):
     Commands and SCP transfers reuse an OpenSSH control connection for a short
     time. A single agent tick makes several IOS calls (filesystem checks,
     transfer, plain copy, telemetry); reconnecting per call creates a login
-    storm on the device. The login may land at priv-1 or priv-15; each CLI
-    channel still sends `enable` + the enable secret before its command.
+    storm on the device.
+
+    The login may land at priv-1 or priv-15, and channels used to send
+    `enable` + the enable secret unconditionally. On a priv-15 login -- which
+    is what every box in the fleet gives us -- `enable` is a no-op and the
+    secret is then executed as an EXEC command, so IOS tries to resolve it as
+    a hostname: +48 s per session where that lookup black-holes, on every one
+    of the ~4 calls a steady tick makes. This class now sends neither by
+    default and escalates only for a device that has shown it runs us at user
+    EXEC, learned from the device's own prompt (`_learn_privilege`). See
+    lab/device-run.sh for the same inversion and the measurements.
 
     `runner(script:str) -> transcript:str` is injectable for unit tests; the
     default shells out to sshpass+ssh with the legacy kex/cipher options these
@@ -94,6 +104,11 @@ class SSHCli(object):
             stage_dir, "ios-ssh-%r@%h:%p")
         self._runner = runner or self._default_runner
         self._scp = scp_runner or self._default_scp
+        # Escalation state, not a cache of privilege: False means "send nothing
+        # extra", which is correct for every priv-15 login and costs a device
+        # that genuinely needs enable one loud failure before it escalates.
+        self._needs_enable = (
+            os.environ.get("IRIS_DEVICE_ENABLE_ALWAYS", "0") == "1")
 
     def _hostkey_options(self):
         # verify-if-present, same shape as make_catalog_context's TLS pinning
@@ -116,22 +131,52 @@ class SSHCli(object):
         return ["-o", "ControlMaster=auto", "-o", "ControlPersist=120",
                 "-o", "ControlPath=" + self.control_path]
 
+    def _enable_prefix(self):
+        """`enable` + secret, but ONLY for a device known to need it.
+
+        Empty by default: on a priv-15 login the pair is not just useless but
+        actively harmful (the secret becomes a hostname lookup). When it IS
+        sent, `enable` really will raise a password prompt, so the secret is
+        answering a prompt rather than being typed at EXEC."""
+        if not self._needs_enable:
+            return ""
+        return "enable\n%s\n" % (self.enable or "")
+
     def _exec_script(self, cmd):
-        # enable -> secret -> disable paging/wrapping -> the command -> log out.
+        # [enable -> secret ->] disable paging/wrapping -> command -> log out.
         # `terminal width 0` is defensive: keep long `show file systems` / `dir`
         # rows from soft-wrapping (which would corrupt the text-exact parsers).
-        return "enable\n%s\nterminal length 0\nterminal width 0\n%s\nexit\n" % (
-            self.enable or "", cmd)
+        return "%sterminal length 0\nterminal width 0\n%s\nexit\n" % (
+            self._enable_prefix(), cmd)
 
     def _config_script(self, lines):
-        return "enable\n%s\nconfigure terminal\n%s\nend\nexit\n" % (
-            self.enable or "", "\n".join(lines))
+        # `terminal length 0` leads here too, and not only for paging: it gives
+        # every session -- exec and config alike -- the same first command, so
+        # _learn_privilege has one anchor to read the prompt against.
+        return "%sterminal length 0\nconfigure terminal\n%s\nend\nexit\n" % (
+            self._enable_prefix(), "\n".join(lines))
+
+    def _learn_privilege(self, transcript):
+        """Read the prompt the DEVICE emitted next to our first command.
+
+        `>terminal length 0` means we ran at user EXEC and this device needs
+        enable after all; `#enable` means we sent the pair to a device that was
+        already privileged and can stop. Anchored on our known first command so
+        the prompt character is positional, not merely present -- a banner
+        containing `>` or `#` cannot move this."""
+        text = transcript or ""
+        if not self._needs_enable:
+            if re.search(r">[ \t]*terminal length 0", text):
+                self._needs_enable = True
+        elif re.search(r"#[ \t]*enable[ \t]*$", text, re.M):
+            self._needs_enable = False
 
     def execute(self, cmd):
         try:
             transcript = self._runner(self._exec_script(cmd))
         except Exception as e:
             raise CliTransportError("ssh transport failed: %s" % e)
+        self._learn_privilege(transcript)
         return extract_output(transcript, cmd)
 
     def configure(self, lines):
@@ -140,9 +185,10 @@ class SSHCli(object):
         # (config-level `% ...` messages -- e.g. removing an absent applet --
         # are benign, exactly as on the Guest Shell path).
         try:
-            self._runner(self._config_script(list(lines)))
+            transcript = self._runner(self._config_script(list(lines)))
         except Exception as e:
             raise CliTransportError("ssh transport failed: %s" % e)
+        self._learn_privilege(transcript)
         return None
 
     def put(self, local_path, remote_dest):
