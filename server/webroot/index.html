@@ -429,7 +429,7 @@
           <label class="field" for="df-mask"><span class="field-label">App mask</span><input id="df-mask" placeholder="e.g. 255.255.255.0"></label>
           <label class="field" for="df-gateway"><span class="field-label">App gateway (VPG IP for routers)</span><input id="df-gateway" placeholder="e.g. 10.0.2.1" title="For router modes, this is the IP configured on VirtualPortGroup<N>"></label>
           <label class="field" for="df-model"><span class="field-label">Model (optional)</span><input id="df-model" placeholder="e.g. C9300-48UXM / IE-3400 / C8000V"></label>
-          <label class="field" for="df-platform"><span class="field-label">Agent install</span><select id="df-platform"><option value="">Agent install - auto by model</option><option value="guestshell">Guest Shell</option><option value="iox">IOx</option><option value="router">Router (Guest Shell via VirtualPortGroup)</option><option value="xr-appmgr">XR appmgr container</option></select></label>
+          <label class="field" for="df-platform"><span class="field-label">Agent install</span><select id="df-platform"><option value="" disabled selected>Choose an agent install</option><option value="guestshell">Guest Shell</option><option value="iox">IOx</option><option value="router">Router (Guest Shell via VirtualPortGroup)</option><option value="xr-appmgr">XR appmgr container</option></select></label>
           <label class="field" for="df-cred"><span class="field-label">Credential</span><select id="df-cred"><option value="">— no credential —</option></select></label>
           <button class="btn" type="submit">Save device</button>
           <button class="btn ghost" type="button" id="df-cancel">Cancel</button>

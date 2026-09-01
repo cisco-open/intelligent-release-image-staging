@@ -144,7 +144,7 @@ ALLOWLIST = [
      "docstring names the pre-fix silent default (falling through as "
      "attachment=None) this regression test guards against -- historical, "
      "Task 2 / decision 6"),
-    ("server/tests/test_gui_server.py", frozenset({7141, 7152, 7153, 7156}),
+    ("server/tests/test_gui_server.py", frozenset({7142, 7153, 7154, 7157}),
      "deliberate hard-break pin: asserts app.js's deployRecordRows reads "
      "res.management_type and never falls back to the retired res.attachment "
      "(decision 6); line numbers shifted +1 by Wave C's unrelated edits "

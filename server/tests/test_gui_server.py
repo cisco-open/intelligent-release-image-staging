@@ -6947,7 +6947,8 @@ def test_agent_install_rename_and_inventory_only_label():
     assert 'aria-label="Filter by agent install"' in html
     assert '<option value="">Agent install: any</option>' in html
     assert '<th>Agent install</th>' in html
-    assert 'Agent install - auto by model' in html
+    assert '<option value="" disabled selected>Choose an agent install</option>' in html
+    assert 'Agent install - auto by model' not in html
     # the old wording is gone everywhere it used to appear as a label
     assert '>Platform<' not in html
     assert 'Platform: any' not in html
