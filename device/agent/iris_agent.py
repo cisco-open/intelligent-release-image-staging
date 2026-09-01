@@ -1795,13 +1795,12 @@ def _refresh_impl(cfg, conf_path, catalog, emit_fn):
     1. POST token-refresh (catalog.refresh_token) -> {catalog_token,
        expires_at, announce_token, rpc_secret}.
     2. Re-point catalog.token at the new bearer IMMEDIATELY: the server
-       rotates on the POST, and the device-bound routes (heartbeat,
-       telemetry, token-refresh) reject the rolled token even inside the
-       overlap window (catalog.py's _guard requires secret_name ==
-       "catalog_token"; catalog_token_prev passes shared routes only). The
-       rest of THIS tick — the heartbeat is its last step — must therefore
-       authenticate with the new token; leaving the client on the old one
-       ends every refresh tick in a spurious HTTP 401 heartbeat.
+       rotates on the POST, and heartbeat/telemetry reject the rolled token
+       even inside the overlap window. token-refresh alone can reissue the
+       current bag to recover a lost response or failed conf write, but the
+       rest of THIS tick — the heartbeat is its last step — must authenticate
+       with the new token; leaving the client on the old one ends every refresh
+       tick in a spurious HTTP 401 heartbeat.
     3. Merge into a copy of cfg, atomically rewrite conf_path, return the
        reloaded cfg.
 
@@ -1812,7 +1811,8 @@ def _refresh_impl(cfg, conf_path, catalog, emit_fn):
     client still keeps the NEW bearer — the server has already rotated, so
     the new token is the only one the device-bound routes will accept for
     the rest of this process; the stale on-disk conf is the next process's
-    problem, not this tick's.
+    problem for the next tick, which can now recover the current bag using the
+    previous token until that token's original expiry.
     Module-level + injected client/emit so it's unit-testable; build_deps
     passes the real CatalogClient + emit."""
     sid = cfg["device_id"]

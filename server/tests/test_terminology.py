@@ -168,7 +168,7 @@ ALLOWLIST = [
      "response-object family; NOT break 8, which is audit-string wording)"),
 
     # -- declared break 6: old-agent peer_receipts compatibility -------
-    ("server/tests/test_catalog.py", frozenset({2118, 2119, 2126, 2129}),
+    ("server/tests/test_catalog.py", frozenset({2351, 2352, 2359, 2362}),
      "deliberate hard-break pin: an old, not-yet-redeployed agent's stale "
      "peer_receipts key is dropped silently, not rejected (declared break 6)"),
 

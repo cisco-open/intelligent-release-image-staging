@@ -260,6 +260,16 @@ trusted network until you have.
 
 Server secret material is encrypted at rest with age recipients. Plaintext lives only in `/run/iris` while the container runs. Device enrollment tokens are short-lived and generated per device by the running server.
 
+Catalog-token rotation is recoverable without making a rolled token a general
+device credential. If the server commits a rotation but the response or the
+device's atomic config write is lost, that device's one previous token may ask
+only the token-refresh route to reissue the already-current secret bag. It
+cannot heartbeat or submit telemetry, its access to shared catalog routes still
+ends after the short overlap, and recovery ends at the token's original expiry.
+The normal clock-skew allowance still applies. The retry is revalidated under
+the server's secrets-store lock, so revocation or a newer successful rotation
+takes precedence.
+
 The age private key is deliberately kept outside the directory holding the
 ciphertext it opens. Co-locating them would mean any backup, snapshot, or read
 of the config directory yields both halves at once, making the at-rest

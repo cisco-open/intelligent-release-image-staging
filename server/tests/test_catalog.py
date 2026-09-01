@@ -667,6 +667,9 @@ def test_token_refresh_prev_stash_uses_int_epochs(tmp_path):
     int('...9') ValueError in the agent's run_once on the next tick."""
     os.environ["IRIS_AGE_RECIPIENTS"] = ""
     srv, port, old_tok = _serve_with_device(tmp_path, "dev-int")
+    original_expiry = secrets_store.load(
+        _secrets_path(tmp_path))["devices"]["dev-int"]["catalog_token"][
+            "expires_at"]
     try:
         status, _, body = _req(
             port, "POST", "/v1/devices/dev-int/token-refresh",
@@ -683,6 +686,8 @@ def test_token_refresh_prev_stash_uses_int_epochs(tmp_path):
     assert isinstance(prev["created_at"], int), (
         "catalog_token_prev.created_at must be int, got %r"
         % type(prev["created_at"]))
+    assert isinstance(prev["refresh_expires_at"], int)
+    assert prev["refresh_expires_at"] == original_expiry
 
 
 # ---------------------------------------------------------------------------
@@ -800,14 +805,135 @@ def test_old_token_still_valid_within_overlap_after_refresh(tmp_path):
         srv.shutdown()
 
 
+def test_lost_refresh_response_retry_reissues_current_token(tmp_path):
+    """Losing the first 200 must not make a retry rotate a second time.
+
+    The caller deliberately discards the first response, then retries with the
+    only token it durably knows.  The previous token may recover the current
+    bag on this route, but it must not mint another token.
+    """
+    os.environ["IRIS_AGE_RECIPIENTS"] = ""
+    srv, port, old_tok = _serve_with_device(tmp_path, "dev-lost")
+    try:
+        status, _, first_body = _req(
+            port, "POST", "/v1/devices/dev-lost/token-refresh",
+            token=old_tok, body=b"{}")
+        assert status == 200, first_body
+        first_bag = json.loads(first_body)
+        current_tok = first_bag["catalog_token"]
+
+        # Model a lost/truncated response: the next request still carries OLD.
+        status, _, retry_body = _req(
+            port, "POST", "/v1/devices/dev-lost/token-refresh",
+            token=old_tok, body=b"{}")
+        assert status == 200, retry_body
+        assert json.loads(retry_body) == first_bag
+    finally:
+        srv.shutdown()
+
+    final = secrets_store.load(_secrets_path(tmp_path))["devices"]["dev-lost"]
+    assert final["catalog_token"]["value"] == current_tok
+    assert final["catalog_token_prev"]["value"] == old_tok
+
+
+def test_previous_token_recovers_after_conf_write_failure_on_next_tick(
+        tmp_path):
+    """A next process may recover even after the shared-route overlap elapsed.
+
+    This models _refresh_impl receiving the new bag but failing its atomic conf
+    rewrite: the next one-shot process reloads OLD from disk.  Recovery is
+    scoped to token-refresh and lasts while the missed CURRENT token itself is
+    valid; it does not extend OLD's access to shared catalog routes.
+    """
+    os.environ["IRIS_AGE_RECIPIENTS"] = ""
+    srv, port, old_tok = _serve_with_device(tmp_path, "dev-write-fail")
+    sp = _secrets_path(tmp_path)
+    try:
+        status, _, body = _req(
+            port, "POST", "/v1/devices/dev-write-fail/token-refresh",
+            token=old_tok, body=b"{}")
+        assert status == 200, body
+        current_tok = json.loads(body)["catalog_token"]
+
+        # Advance only the persisted previous-token deadline beyond overlap
+        # (and the normal skew grace) without expiring the current token.
+        with secrets_store.store_lock(sp):
+            store = secrets_store.load(sp)
+            store["devices"]["dev-write-fail"]["catalog_token_prev"][
+                "expires_at"] = int(time.time()) - 1000
+            secrets_store.save(store, sp)
+
+        assert _req(port, "GET", "/v1/images", token=old_tok)[0] == 401
+        status, _, retry_body = _req(
+            port, "POST", "/v1/devices/dev-write-fail/token-refresh",
+            token=old_tok, body=b"{}")
+        assert status == 200, retry_body
+        assert json.loads(retry_body)["catalog_token"] == current_tok
+    finally:
+        srv.shutdown()
+
+
+def test_previous_token_recovery_does_not_outlive_original_expiry(tmp_path):
+    os.environ["IRIS_AGE_RECIPIENTS"] = ""
+    srv, port, old_tok = _serve_with_device(tmp_path, "dev-expired-recovery")
+    sp = _secrets_path(tmp_path)
+    try:
+        assert _req(
+            port, "POST", "/v1/devices/dev-expired-recovery/token-refresh",
+            token=old_tok, body=b"{}")[0] == 200
+        with secrets_store.store_lock(sp):
+            store = secrets_store.load(sp)
+            prev = store["devices"]["dev-expired-recovery"][
+                "catalog_token_prev"]
+            # Keep ordinary overlap auth live while expiring recovery itself.
+            # token-refresh must honor the original credential deadline rather
+            # than accidentally inheriting the later shared-route deadline.
+            prev["expires_at"] = int(time.time()) + 1000
+            prev["refresh_expires_at"] = int(time.time()) - 1000
+            secrets_store.save(store, sp)
+
+        assert _req(
+            port, "GET", "/v1/images", token=old_tok)[0] == 200
+        assert _req(
+            port, "POST", "/v1/devices/dev-expired-recovery/token-refresh",
+            token=old_tok, body=b"{}")[0] == 401
+    finally:
+        srv.shutdown()
+
+
+def test_previous_token_cannot_reissue_an_expired_current_token(tmp_path):
+    os.environ["IRIS_AGE_RECIPIENTS"] = ""
+    srv, port, old_tok = _serve_with_device(tmp_path, "dev-current-expired")
+    sp = _secrets_path(tmp_path)
+    try:
+        assert _req(
+            port, "POST", "/v1/devices/dev-current-expired/token-refresh",
+            token=old_tok, body=b"{}")[0] == 200
+        with secrets_store.store_lock(sp):
+            store = secrets_store.load(sp)
+            current = store["devices"]["dev-current-expired"][
+                "catalog_token"]
+            current["expires_at"] = int(time.time()) - 1000
+            secrets_store.save(store, sp)
+
+        assert _req(
+            port, "POST", "/v1/devices/dev-current-expired/token-refresh",
+            token=old_tok, body=b"{}")[0] == 401
+    finally:
+        srv.shutdown()
+
+
 # ---------------------------------------------------------------------------
-# Task 5 NEW: overlap asymmetry — old token rejected on device-bound routes
+# Task 5 NEW: overlap asymmetry — recovery is token-refresh-only
 # ---------------------------------------------------------------------------
 
-def test_old_token_rejected_on_device_bound_after_refresh(tmp_path):
-    """After a token-refresh, the OLD token is rejected on device-bound routes
-    (heartbeat) but still accepted on shared routes (GET /v1/images) within the
-    overlap window — the asymmetry is intentional per _guard design."""
+def test_old_token_rejected_on_heartbeat_and_telemetry_after_refresh(tmp_path):
+    """Recovery never grants OLD access to heartbeat or telemetry.
+
+    The previous token remains accepted on shared routes during the ordinary
+    overlap and on token-refresh for idempotent recovery only.  The two
+    state-mutating device-bound report routes still require CURRENT.
+    """
     os.environ["IRIS_AGE_RECIPIENTS"] = ""
     srv, port, old_tok = _serve_with_device(tmp_path, "dev-asym")
     try:
@@ -820,17 +946,124 @@ def test_old_token_rejected_on_device_bound_after_refresh(tmp_path):
         new_tok = json.loads(body_bytes)["catalog_token"]
         assert new_tok != old_tok
 
-        # OLD token on device-bound heartbeat → 401 (auth.authorize rejects
-        # catalog_token_prev because it has no SECRET_TYPES entry)
+        # OLD token on device-bound heartbeat → 401.
         status, _, _ = _req(port, "POST",
                             "/v1/devices/dev-asym/heartbeat",
                             token=old_tok,
                             body=json.dumps({"current_image_id": "img1"}))
         assert status == 401, "old token must be rejected on heartbeat"
 
+        status, _, _ = _req(port, "POST",
+                            "/v1/devices/dev-asym/telemetry",
+                            token=old_tok, body=b"{}")
+        assert status == 401, "old token must be rejected on telemetry"
+
         # OLD token on shared route GET /v1/images → still 200 within overlap
         status, _, _ = _req(port, "GET", "/v1/images", token=old_tok)
         assert status == 200, "old token must still work on shared route within overlap"
+
+        # Recovery is the sole device-bound exception and reissues CURRENT.
+        status, _, body = _req(
+            port, "POST", "/v1/devices/dev-asym/token-refresh",
+            token=old_tok, body=b"{}")
+        assert status == 200
+        assert json.loads(body)["catalog_token"] == new_tok
+    finally:
+        srv.shutdown()
+
+
+def test_previous_token_cannot_recover_a_different_device(tmp_path):
+    os.environ["IRIS_AGE_RECIPIENTS"] = ""
+    sp = _secrets_path(tmp_path)
+    now = time.time()
+    store = secrets_store.load(sp)
+    tok_a = secrets_store.mint(store, "dev-a", "catalog_token", now)
+    tok_b = secrets_store.mint(store, "dev-b", "catalog_token", now)
+    secrets_store.save(store, sp)
+    srv = catalog.make_server(
+        "127.0.0.1", 0, _store(tmp_path), sp,
+        audit_path=str(tmp_path / "audit.jsonl"))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+    try:
+        status, _, _ = _req(
+            port, "POST", "/v1/devices/dev-b/token-refresh",
+            token=tok_b, body=b"{}")
+        assert status == 200
+
+        status, _, _ = _req(
+            port, "POST", "/v1/devices/dev-a/token-refresh",
+            token=tok_b, body=b"{}")
+        assert status == 401
+        # Device A's own current token remains usable.
+        assert _req(
+            port, "POST", "/v1/devices/dev-a/token-refresh",
+            token=tok_a, body=b"{}")[0] == 200
+    finally:
+        srv.shutdown()
+
+
+def test_concurrent_same_token_refresh_reissues_one_rotation(tmp_path):
+    """Two in-flight requests carrying one token converge on one successor."""
+    os.environ["IRIS_AGE_RECIPIENTS"] = ""
+    srv, port, old_tok = _serve_with_device(tmp_path, "dev-same")
+    barrier = threading.Barrier(2)
+    results = []
+    errors = []
+
+    def refresh():
+        try:
+            barrier.wait()
+            status, _, body = _req(
+                port, "POST", "/v1/devices/dev-same/token-refresh",
+                token=old_tok, body=b"{}")
+            results.append((status, json.loads(body)))
+        except Exception as exc:  # pragma: no cover - surfaced via assert
+            errors.append(exc)
+
+    try:
+        threads = [threading.Thread(target=refresh) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+        assert not errors, errors
+        assert all(not thread.is_alive() for thread in threads)
+        assert [status for status, _ in results] == [200, 200]
+        assert results[0][1] == results[1][1]
+    finally:
+        srv.shutdown()
+
+
+def test_revoke_wins_over_previous_token_recovery(tmp_path):
+    """Recovery must re-check the current store after taking its write lock."""
+    os.environ["IRIS_AGE_RECIPIENTS"] = ""
+    srv, port, old_tok = _serve_with_device(tmp_path, "dev-recover-revoke")
+    sp = _secrets_path(tmp_path)
+    try:
+        status, _, body = _req(
+            port, "POST", "/v1/devices/dev-recover-revoke/token-refresh",
+            token=old_tok, body=b"{}")
+        assert status == 200, body
+
+        result = {}
+
+        def recover():
+            result["status"], _, result["body"] = _req(
+                port, "POST",
+                "/v1/devices/dev-recover-revoke/token-refresh",
+                token=old_tok, body=b"{}")
+
+        with secrets_store.store_lock(sp):
+            thread = threading.Thread(target=recover)
+            thread.start()
+            time.sleep(0.3)
+            store = secrets_store.load(sp)
+            secrets_store.revoke(store, "dev-recover-revoke")
+            secrets_store.save(store, sp)
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert result.get("status") == 409, result.get("body")
     finally:
         srv.shutdown()
 

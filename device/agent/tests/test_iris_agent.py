@@ -2705,10 +2705,10 @@ def test_run_once_uses_refreshed_cfg_for_device_id():
 # unit-testable). Returns the reloaded cfg on success, None on any failure
 # (best-effort). Takes the live CatalogClient itself, not a bare callable:
 # the impl must re-point the client's bearer after the POST, because the
-# server rotates immediately and the device-bound routes (heartbeat,
-# telemetry, token-refresh) reject the rolled token even inside the overlap
-# window — the old wiring left the live client on the stale bearer for the
-# rest of the tick (one spurious HTTP 401 heartbeat per refresh tick,
+# server rotates immediately and heartbeat/telemetry reject the rolled token
+# even inside the overlap window — the old wiring left the live client on the
+# stale bearer for the rest of the tick (one spurious HTTP 401 heartbeat per
+# refresh tick,
 # observed live on the c8000v fleet 2026-09-01). ---
 
 class _RefreshClient:
@@ -2785,10 +2785,12 @@ def test_refresh_impl_returns_none_and_logs_on_post_failure(tmp_path):
 def test_refresh_impl_rebinds_the_client_even_when_the_conf_write_fails(
         tmp_path):
     # POST succeeded -> the server has ALREADY rotated; the old bearer is
-    # half-dead (shared routes only, 120s overlap). Whatever happens to the
-    # conf write, the live client must follow the server. The next process
-    # still loads the stale conf — that stranding hazard is a separate,
-    # pre-existing issue — but THIS tick's heartbeat/telemetry must not 401.
+    # half-dead (shared routes only after 120s; refresh recovery lasts until
+    # the token's original expiry). Whatever happens to the conf write, the
+    # live client must follow the server. The next process
+    # still loads the stale conf, then recovers the current bag through the
+    # token-refresh-only recovery path; THIS tick's heartbeat/telemetry must
+    # not 401 either.
     conf_in_missing_dir = tmp_path / "no-such-dir" / "iris-agent.conf"
     cfg = {"catalog_url": "https://x", "catalog_token": "OLD",
            "device_id": "sw1", "token_expires_at": "0"}
@@ -2801,6 +2803,56 @@ def test_refresh_impl_rebinds_the_client_even_when_the_conf_write_fails(
     assert out is None
     assert client.token == "NEW"
     assert any(m == "TOKEN-REFRESH-FAIL" for m, _ in emitted)
+
+
+def test_refresh_impl_next_process_recovers_after_conf_write_failure(
+        tmp_path, monkeypatch):
+    """A lost local write must converge on the next one-shot process."""
+    import agent_config
+
+    conf = tmp_path / "iris-agent.conf"
+    conf.write_text(
+        "catalog_url = https://x\ncatalog_token = OLD\ndevice_id = sw1\n"
+        "token_expires_at = 0\n")
+    bag = {"catalog_token": "NEW", "expires_at": 1750000000}
+    server = {"rotated": False}
+
+    class RecoveringClient:
+        def __init__(self, token):
+            self.token = token
+
+        def refresh_token(self, device_id):
+            assert device_id == "sw1"
+            assert self.token == "OLD"
+            server["rotated"] = True
+            return bag
+
+    real_write = agent_config.write_conf
+    writes = []
+
+    def fail_first_write(path, cfg):
+        writes.append(cfg["catalog_token"])
+        if len(writes) == 1:
+            raise OSError("disk full")
+        return real_write(path, cfg)
+
+    monkeypatch.setattr(agent_config, "write_conf", fail_first_write)
+    old_cfg = agent_config.load(str(conf))
+    first = RecoveringClient(old_cfg["catalog_token"])
+    assert iris_agent._refresh_impl(
+        old_cfg, str(conf), first, lambda m, msg: None) is None
+    assert server["rotated"] is True
+    assert agent_config.load(str(conf))["catalog_token"] == "OLD"
+
+    # A fresh one-shot process rebuilds its client from the unchanged conf.
+    next_cfg = agent_config.load(str(conf))
+    second = RecoveringClient(next_cfg["catalog_token"])
+    recovered = iris_agent._refresh_impl(
+        next_cfg, str(conf), second, lambda m, msg: None)
+    assert recovered["catalog_token"] == "NEW"
+    assert second.token == "NEW"
+    assert agent_config.load(str(conf))["catalog_token"] == "NEW"
+    assert writes == ["NEW", "NEW"]
 
 
 # ---------------------------------------------------------------------------

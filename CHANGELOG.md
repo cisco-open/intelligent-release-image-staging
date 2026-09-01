@@ -176,12 +176,19 @@ top-level `VERSION` file.
   `NOTICE` for full font/icon attribution.
 
 ### Fixed
+- A device no longer needs manual re-onboarding when a catalog-token refresh
+  commits on the server but its response or the device's atomic config rewrite
+  is lost. The one previous token may now reissue the already-current secret
+  bag on the same device's token-refresh route, without rotating again, until
+  that previous token's original expiry. This recovery permission does not
+  extend to heartbeat or telemetry, does not extend the short shared-route
+  overlap, and is revalidated under the secrets-store lock so revocation and a
+  newer rotation still win.
 - A tick that refreshes the catalog token no longer ends in a spurious
   `%IRIS-6-HEARTBEAT-FAIL` HTTP 401. The refresh rewrote the conf and the
   local cfg but left the live catalog client on the pre-rotation bearer,
-  which the server's device-bound routes (heartbeat, telemetry,
-  token-refresh) reject even inside the 120-second overlap window — the
-  rolled token passes shared routes only, so staging proceeded while the
+  which the server's heartbeat and telemetry routes reject even inside the
+  120-second overlap window — so staging proceeded while the
   tick's closing heartbeat failed, once per refresh, since the first
   release. The refresh now re-points the client at the new bearer the
   moment the server mints it, on both the IOS-XE and IOS-XR builders, and

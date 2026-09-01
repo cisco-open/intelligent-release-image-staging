@@ -9,7 +9,8 @@ Store schema:
   {
     "devices": {
       "<device_id>": {
-        "<secret_name>": {"value", "created_at", "expires_at"(0=never), "revoked"}
+        "<secret_name>": {"value", "created_at", "expires_at"(0=never),
+                          "revoked", ["refresh_expires_at"]}
       }
     },
     "seeder": {"<secret_name>": {...}}
@@ -246,6 +247,8 @@ def build_catalog_auth_index(store):
     """Return {value: (Principal, secret_name, record)} for catalog auth.
 
     Covers ``catalog_token`` and ``catalog_token_prev`` across every device.
+    A previous record may also carry ``refresh_expires_at``: its original
+    pre-rotation expiry, used only by catalog.py's token-refresh recovery.
     Raises DuplicateCredentialError (token-free) on duplicate value ownership.
     """
     Principal = _principal()

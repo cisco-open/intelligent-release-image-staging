@@ -57,6 +57,46 @@ def _audit_id(value):
     return hashlib.sha256(value.encode()).hexdigest()[:8]
 
 
+def _resolve_refresh_auth(store, index, token, now, grace):
+    """Resolve a token for the same-device refresh route.
+
+    Current credentials use ordinary catalog auth. A previous credential may
+    recover after its shared-route overlap only until its original expiry, and
+    only while the current successor remains valid. Keeping this exception out
+    of the canonical resolver makes it impossible for another route to enable
+    recovery accidentally.
+    """
+    ctx = auth.resolve_catalog_auth(store, index, token, now, grace)
+    if token is None:
+        return None
+    if ctx is not None and ctx.secret_name != "catalog_token_prev":
+        return ctx
+    entry = index.get(token)
+    if entry is None:
+        return None
+    principal, secret_name, record = entry
+    if secret_name != "catalog_token_prev" or record.get("revoked"):
+        return None
+    deadline = record.get("refresh_expires_at")
+    try:
+        # Old persisted records lack a recovery deadline. They remain usable
+        # here only during their ordinary overlap (ctx is non-None), which is
+        # enough for a rolling deployment without granting an indefinite retry.
+        if deadline is None and ctx is None:
+            return None
+        if deadline is not None and deadline != 0 \
+                and not now < deadline + grace:
+            return None
+    except TypeError:
+        return None
+    current = store.get("devices", {}).get(
+        principal.id, {}).get("catalog_token")
+    if not isinstance(current, dict) or not secrets_store.valid(
+            current, now, grace):
+        return None
+    return auth.AuthContext(principal, secret_name, "catalog")
+
+
 def _atomic_write_json(path, obj):
     """Atomically write *obj* as JSON to *path* via a UNIQUE temp file in the
     same directory + os.replace, so concurrent writers never share — and
@@ -1627,12 +1667,13 @@ class Catalog:
         if len(parts) == 4 and parts[:2] == ["v1", "devices"] \
                 and parts[3] == "token-refresh":
             return self._handle_token_refresh(
-                parts[2], src_ip=src_ip, store=store, index=index)
+                parts[2], src_ip=src_ip, store=store, index=index,
+                token=token)
         return self._json(404, {"error": "not found"})
 
     def _handle_token_refresh(self, device_id, src_ip=None, store=None,
-                               index=None):
-        """Rotate the catalog token for device_id and return the secret bag.
+                               index=None, token=None):
+        """Rotate or recover the catalog token and return the secret bag.
 
         The *store* passed in was loaded (pre-lock) by _guard for auth.  The
         mutation here must NOT operate on that snapshot: under the threaded
@@ -1642,18 +1683,19 @@ class Catalog:
         RE-READ the store fresh under it, so the load->mutate->save->encrypt
         cycle is serialized and never loses a concurrent rotation/revoke.
         """
-        now = time.time()
         overlap = int(os.environ.get("IRIS_TOKEN_OVERLAP", "120"))
+        grace = int(os.environ.get("IRIS_TOKEN_SKEW_GRACE", "300"))
         secrets_path = self.secrets_path
 
         with secrets_store.store_lock(secrets_path):
             # Re-read under the lock; discard the pre-lock auth snapshot.
             store = secrets_store.load(secrets_path)
+            now = time.time()
 
-            # Capture the old token value for audit (before rotate overwrites it)
             device_secrets = store.get("devices", {}).get(device_id, {})
-            old_record = device_secrets.get("catalog_token")
-            old_val = old_record["value"] if old_record else ""
+            current_record = device_secrets.get("catalog_token")
+            current_val = current_record.get("value", "") \
+                if isinstance(current_record, dict) else ""
 
             # Re-check revoke status under the lock.  _guard authorized against
             # a PRE-LOCK snapshot; if iris-revoke won the lock first and marked
@@ -1661,12 +1703,12 @@ class Catalog:
             # rotate_catalog/mint always write revoked=False, so rotating now
             # would silently un-revoke the device (hand it a fresh live token).
             # Abort instead — this closes the TOCTOU the lock made deterministic.
-            if old_record is not None and old_record.get("revoked"):
+            if current_record is not None and current_record.get("revoked"):
                 try:
                     audit.append_event(
                         self.audit_path, "refresh_fail", device_id,
                         secret_name="catalog_token",
-                        old_id=_audit_id(old_val),
+                        old_id=_audit_id(current_val),
                         src_ip=src_ip,
                         detail="device is revoked",
                         result="fail",
@@ -1675,65 +1717,90 @@ class Catalog:
                     pass
                 return self._json(409, {"error": "device revoked"})
 
-            # Stash the old token under catalog_token_prev with overlap expiry
-            # so the reverse index still finds it for the duration of the
-            # overlap window.  rotate_catalog mutates old_record.expires_at then
-            # REPLACES the store slot with the new record, so without this stash
-            # the old token would be lost on the next per-request load.
-            if old_record:
-                # Coerce to int: now is time.time() (float); the store schema
-                # holds int epoch seconds.  A float expires_at would trip
-                # int('...9') ValueError in the agent on the next tick.
-                store["devices"][device_id]["catalog_token_prev"] = {
-                    "value": old_val,
-                    "created_at": int(old_record.get("created_at", now)),
-                    "expires_at": int(now) + overlap,
-                    "revoked": False,
-                    "_scope": "catalog",   # so the guard can accept it
-                }
-
-            new_val = secrets_store.rotate_catalog(
-                store, device_id, now, overlap)
-
-            # Persist durable-FIRST: the at-rest .age ciphertext is the only
-            # copy that survives a restart, so it must be written (and confirmed)
-            # before the live tmpfs plaintext is swapped in.  If the durable
-            # write fails, persist_store leaves the tmpfs store untouched and
-            # raises; we then report failure rather than a phantom rotation that
-            # a restart would silently roll back.
-            recipients = os.environ.get("IRIS_AGE_RECIPIENTS", "")
-            enc_path = os.environ.get(
-                "IRIS_SECRETS_ENC", "/etc/iris/secrets.json.age")
+            # Re-resolve against the fresh, under-lock store. Two requests can
+            # both pass _guard with the same current token; after the first
+            # rotates, the second must recover that successor rather than mint
+            # another one. Revoke and a newer rotation also win here.
             try:
-                secretfs.persist_store(
-                    store, secrets_path,
-                    recipients_csv=recipients, enc_path=enc_path)
-            except Exception as exc:
-                # Durable write failed: nothing was committed to the live store,
-                # so there is no rotation to roll back and no divergence.  Audit
-                # the failed persist and refuse to report success.
-                try:
-                    audit.append_event(
-                        self.audit_path, "refresh_fail", device_id,
-                        secret_name="catalog_token",
-                        old_id=_audit_id(old_val),
-                        src_ip=src_ip,
-                        detail="durable persist failed",
-                        result="fail",
-                    )
-                except Exception:
-                    pass
-                return self._json(
-                    500, {"error": "durable persist failed: %s" % exc})
+                strict = secrets_store.build_catalog_auth_index(store)
+            except secrets_store.DuplicateCredentialError:
+                strict = {}
+            ctx = _resolve_refresh_auth(store, strict, token, now, grace)
+            if (ctx is None or ctx.principal.type != "device"
+                    or ctx.principal.id != device_id
+                    or ctx.secret_name not in (
+                        "catalog_token", "catalog_token_prev")):
+                return self._json(401, {"error": "unauthorized"})
 
-            # Audit the refresh (only after the rotation is durably committed)
-            audit.append_event(
-                self.audit_path, "refresh", device_id,
-                secret_name="catalog_token",
-                old_id=_audit_id(old_val),
-                new_id=_audit_id(new_val),
-                src_ip=src_ip,
-            )
+            recovering = ctx.secret_name == "catalog_token_prev"
+            if recovering:
+                # The server already committed this successor. Reissue the
+                # current bag unchanged so a lost 200 or failed device conf
+                # rewrite can converge on the next tick.
+                new_val = current_val
+            else:
+                old_record = current_record
+                old_val = current_val
+                # Shared routes retain the old token for only the short overlap.
+                # token-refresh additionally remembers the token's ORIGINAL
+                # expiry: recovery cannot outlive the credential the device
+                # presented, but a 120-second delivery failure cannot strand a
+                # token that otherwise had days left.
+                if old_record:
+                    recovery_expires_at = int(float(
+                        old_record.get("expires_at", 0) or 0))
+                    store["devices"][device_id]["catalog_token_prev"] = {
+                        "value": old_val,
+                        "created_at": int(float(
+                            old_record.get("created_at", now))),
+                        "expires_at": int(now) + overlap,
+                        "refresh_expires_at": recovery_expires_at,
+                        "revoked": False,
+                        "_scope": "catalog",
+                    }
+
+                new_val = secrets_store.rotate_catalog(
+                    store, device_id, now, overlap)
+
+                # Persist durable-FIRST: the at-rest .age ciphertext is the only
+                # copy that survives a restart, so it must be written (and confirmed)
+                # before the live tmpfs plaintext is swapped in.  If the durable
+                # write fails, persist_store leaves the tmpfs store untouched and
+                # raises; we then report failure rather than a phantom rotation that
+                # a restart would silently roll back.
+                recipients = os.environ.get("IRIS_AGE_RECIPIENTS", "")
+                enc_path = os.environ.get(
+                    "IRIS_SECRETS_ENC", "/etc/iris/secrets.json.age")
+                try:
+                    secretfs.persist_store(
+                        store, secrets_path,
+                        recipients_csv=recipients, enc_path=enc_path)
+                except Exception as exc:
+                    # Durable write failed: nothing was committed to the live store,
+                    # so there is no rotation to roll back and no divergence.  Audit
+                    # the failed persist and refuse to report success.
+                    try:
+                        audit.append_event(
+                            self.audit_path, "refresh_fail", device_id,
+                            secret_name="catalog_token",
+                            old_id=_audit_id(old_val),
+                            src_ip=src_ip,
+                            detail="durable persist failed",
+                            result="fail",
+                        )
+                    except Exception:
+                        pass
+                    return self._json(
+                        500, {"error": "durable persist failed: %s" % exc})
+
+                # Audit the refresh (only after the rotation is durably committed)
+                audit.append_event(
+                    self.audit_path, "refresh", device_id,
+                    secret_name="catalog_token",
+                    old_id=_audit_id(old_val),
+                    new_id=_audit_id(new_val),
+                    src_ip=src_ip,
+                )
 
         # Build the response bag: catalog_token + expires_at, plus
         # announce_token / rpc_secret ONLY when the device actually has them.
@@ -1776,8 +1843,10 @@ def make_server(host, port, store, secrets_path, certfile=None,
         def _guard(self, parts, token):
             """Route-aware guard.
 
-            Device-bound routes (heartbeat, token-refresh, telemetry): require
-            a device catalog_token resolving to that device's principal.
+            Device-bound routes (heartbeat, telemetry): require the current
+            device catalog_token resolving to that device's principal.
+            token-refresh additionally accepts that same device's one previous
+            token for idempotent delivery recovery; it grants no other route.
 
             Shared routes (images, torrents, devices-list, policy): require
             any valid catalog-scoped record.
@@ -1807,12 +1876,17 @@ def make_server(host, port, store, secrets_path, certfile=None,
 
             if is_device_bound:
                 device_id = parts[2]
-                ctx = auth.resolve_catalog_auth(
-                    store_dict, strict, token, now, grace)
+                is_refresh = parts[3] == "token-refresh"
+                ctx = _resolve_refresh_auth(
+                    store_dict, strict, token, now, grace) if is_refresh \
+                    else auth.resolve_catalog_auth(
+                        store_dict, strict, token, now, grace)
                 ok = (ctx is not None
                       and ctx.principal.type == "device"
                       and ctx.principal.id == device_id
-                      and ctx.secret_name == "catalog_token")
+                      and (ctx.secret_name == "catalog_token"
+                           or (is_refresh and ctx.secret_name
+                               == "catalog_token_prev")))
                 if not ok:
                     # Audit auth failure for token-refresh routes
                     if parts[3] == "token-refresh":
@@ -1829,9 +1903,9 @@ def make_server(host, port, store, secrets_path, certfile=None,
 
             # Shared route: accept any valid catalog credential resolved through
             # the strict index (device catalog_token OR catalog_token_prev). A
-            # rolled-old token (catalog_token_prev) works here because the strict
-            # index covers it; it is rejected on device-bound routes above
-            # because those require secret_name == "catalog_token".
+            # rolled-old token (catalog_token_prev) works here during its short
+            # overlap because the strict index covers it. After overlap it can
+            # resolve only when token-refresh explicitly enables recovery above.
             ctx = auth.resolve_catalog_auth(
                 store_dict, strict, token, now, grace)
             if ctx is None:

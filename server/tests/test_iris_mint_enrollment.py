@@ -152,6 +152,30 @@ def test_valid_stable_secrets_are_retained(tmp_path, monkeypatch):
     assert after["catalog_token"]["value"] != before["catalog_token"]["value"]
 
 
+def test_reenrollment_clears_previous_catalog_recovery_token(
+        tmp_path, monkeypatch):
+    """An explicit re-enrollment starts a new catalog-token lineage."""
+    sp = str(tmp_path / "secrets.json")
+    monkeypatch.setenv("IRIS_SECRETS", sp)
+    monkeypatch.setenv("IRIS_AGE_RECIPIENTS", "")
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path))
+    mod = _load_cli()
+    assert mod.main(["existing"]) == 0
+
+    store = secrets_store.load(sp)
+    store["devices"]["existing"]["catalog_token_prev"] = {
+        "value": "a" * 32,
+        "created_at": int(time.time()) - 10,
+        "expires_at": int(time.time()) + 120,
+        "revoked": False,
+    }
+    secrets_store.save(store, sp)
+
+    assert mod.main(["existing"]) == 0
+    assert "catalog_token_prev" not in (
+        secrets_store.load(sp)["devices"]["existing"])
+
+
 def test_reserved_seeder_device_id_is_rejected(tmp_path, monkeypatch, capsys):
     sp = str(tmp_path / "secrets.json")
     monkeypatch.setenv("IRIS_SECRETS", sp)
