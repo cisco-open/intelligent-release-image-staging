@@ -6,12 +6,23 @@ documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project uses **Calendar Versioning (CalVer)**: `YYYY.0M.0D` with an optional
 `.MICRO` counter for multiple releases on the same day (e.g. `2026.06.11`, then
-`2026.06.11.1`). Releases are tagged `vYYYY.0M.0D`. The current version is in the
-top-level `VERSION` file.
+`2026.06.11.1`). A release tag is `v` plus the exact value in `VERSION`, including
+any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+## [2026.09.01]
+
 ### Added
+- The console now shows an enrolled device with no image assigned as its own
+  "unassigned" status, and the status filter can select them — previously they
+  read simply as "enrolled", so there was no way to ask the table which devices
+  still need an image. The status filter is now ordered alphabetically by label,
+  with "Status: any" first and "Needs attention (any)" last.
+- Import from disk now recognizes the explicit Cisco software suffixes `.bin`,
+  `.iso`, `.tar`, and `.rpm`. IOS-XR base images, GISOs, and package bundles no
+  longer disappear from the import panel solely because they are not `.bin`;
+  other extensions and compound archives such as `.tar.gz` remain hidden.
 - A device can now stage up to ten images at once: pick them per device or for a
   whole selection in the console, transfers run in parallel, and each image
   reports its own state. Unchecking an image stops its torrent and frees the
@@ -33,7 +44,7 @@ top-level `VERSION` file.
   directory. The empty directory itself is left in place: XR's CLI has no
   prompt-free way to remove a directory, and undeploy reports the leftover
   plainly rather than pretending it is gone.
-  This platform is not lab-validated yet — see
+  The full lifecycle is lab-validated on Cisco 8201 hardware — see
   [Validation](docs/zensical/validation.md#validated-platforms).
 - Catalog images can now be checked against Cisco's published Bulk Hash feed:
   a scheduled run (off/daily/weekly, weekly anchored to Monday UTC), a manual
@@ -176,6 +187,40 @@ top-level `VERSION` file.
   `NOTICE` for full font/icon attribution.
 
 ### Fixed
+- A dead tracker, catalog, artifact server, or console no longer leaves the
+  server container reporting itself healthy. Those run as separate listeners, so
+  `/healthz` — which answers 200 unconditionally, by contract, because container
+  and orchestrator probes read the status code — only ever proved the metrics
+  server was alive; under Kubernetes a pod whose artifact server had died stayed
+  Ready and was never restarted, and devices failed at [5/7] with "cannot
+  connect". A new `/readyz` endpoint connects to each expected listener and
+  answers 503 naming the ones that are down, and the Kubernetes startup,
+  readiness, and liveness probes now use it. Set `IRIS_HEALTH_LISTENERS` to
+  `name:port,…` to change what is expected, or to `off` for a deployment that
+  runs only some of the services.
+- A freshly onboarded device no longer reports a transient rejected aria2 RPC
+  token as a staging failure. Before bootstrap has copied the first refreshed
+  RPC secret and bounced aria2c, aria2-next returns HTTP 400; IRIS now reports
+  that short window as staging with an `ARIA2-AUTH` breadcrumb and no
+  `stage_error`, while connection-refused and genuinely unreachable RPC still
+  remain errors.
+- Artifact downloads no longer serialize their TLS handshakes on the server's
+  single accept thread. Handshakes now complete in per-connection workers under
+  a 30-second bound, the listen backlog is 128, staging cleanup runs on a timer
+  instead of on each GET, and every artifact access logs method, path, status,
+  duration, and in-flight count. One stalled client can no longer block a fleet
+  wave before worker threads are even created.
+- IOS-XE sessions no longer send `enable` and its secret before knowing that the
+  device is at user EXEC. On already-privileged devices the secret had been
+  executed as a command and resolved as a hostname, adding about 48 seconds per
+  session on a segment where that lookup black-holed. IRIS now learns the prompt
+  emitted by the device, escalates only when required, and warns when IOS reports
+  that any submitted line was resolved as a hostname.
+- Persisted onboard and undeploy logs now prefix every captured line with its
+  offset from the job start, making the slow phase visible without changing the
+  live stream or line-matching contract. Guest Shell readiness polling starts at
+  two seconds and ramps to fifteen instead of always overshooting by fifteen;
+  first-contact probe budgets were raised to cover a genuinely slow SSH session.
 - A device no longer needs manual re-onboarding when a catalog-token refresh
   commits on the server but its response or the device's atomic config rewrite
   is lost. The one previous token may now reissue the already-current secret
