@@ -1590,6 +1590,35 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
             # including this, next tick).
             state.setdefault(img_id, {})["download_started"] = True
         except OSError as e:
+            # An HTTP 400/401 from the RPC endpoint is NOT a dead daemon: it is
+            # aria2c rejecting our token, which is the ordinary state of a
+            # freshly-onboarded device. The installer bakes rpc-secret EMPTY on
+            # purpose, guestshell-start.sh seeds aria2c from that file, and the
+            # real secret only arrives on this agent's first token refresh --
+            # so until bootstrap.sh's step 2 syncs the file and bounces the
+            # daemon, every RPC we make is unauthorized. aria2-next answers
+            # that with HTTP 400 (upstream aria2 returns a JSON-RPC error
+            # object instead, which is why this never showed up before the
+            # fork), and urllib's HTTPError is an OSError subclass -- so this
+            # arm reported a healthy device mid-bringup as a staging FAILURE,
+            # "aria2c RPC unreachable: HTTP Error 400: Bad Request", which
+            # cleared itself a tick or two later once bootstrap ran again.
+            #
+            # Reported as 'staging' with NO stage_error: the device really is
+            # in the staging lifecycle and nothing has failed. 'staging' is
+            # also an already-valid wire value (catalog.py _V2_STAGE_STATES),
+            # so this cannot make a heartbeat get rejected. The return string
+            # stays "aria2-down" because bootstrap logs and tests key off that
+            # vocabulary -- what changes is what the OPERATOR is told, not the
+            # control flow.
+            if getattr(e, "code", None) in (400, 401):
+                deps.emit("ARIA2-AUTH",
+                          "aria2c has not adopted the rotated RPC secret yet; "
+                          "bootstrap will resync and bounce it (%s)" % e)
+                tick.heartbeat(image, deps, "staging",
+                               target_fs=state.get("stage_fs"),
+                               tele_on=tele_on, stream_on=stream_on)
+                return "aria2-down"
             deps.emit("ARIA2-DOWN",
                       "aria2c RPC unreachable; cannot stage %s: %s"
                       % (image["filename"], e))

@@ -600,6 +600,52 @@ def test_aria_add_rpc_down_heartbeats_error_instead_of_crashing():
     assert "aria2c" in hb["stage_error"]
 
 
+def test_aria_rpc_400_reports_staging_not_a_staging_failure():
+    """A rejected RPC TOKEN is not a dead daemon.
+
+    The installer bakes rpc-secret EMPTY on purpose and the real secret only
+    reaches the device on this agent's first token refresh, so until
+    bootstrap.sh resyncs the file and bounces aria2c every RPC we make is
+    unauthorized. aria2-next answers that with HTTP 400 (upstream aria2
+    returns a JSON-RPC error object instead). HTTPError is an OSError
+    subclass, so it used to land in the same arm as connection-refused and a
+    healthy device mid-bringup reported "aria2c RPC unreachable: HTTP Error
+    400: Bad Request" as a staging FAILURE, clearing itself a tick later.
+    """
+    import urllib.error
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin",
+                       "size": 1000, "sha256": "abc"})
+    deps, emitted, _, _, _, _, _, _ = make_deps(cat, {}, free=9_000_000_000)
+
+    def _unauthorized(torrent, dest):
+        raise urllib.error.HTTPError(
+            "http://127.0.0.1:6800/jsonrpc", 400, "Bad Request", {}, None)
+
+    deps = deps._replace(aria_add=_unauthorized)
+    # return vocabulary is deliberately unchanged -- bootstrap logs key off it
+    assert iris_agent.run_once(CFG, deps, {}) == "aria2-down"
+    hb = cat.heartbeats[-1]
+    assert hb["stage_state"] == "staging", \
+        "a rejected token must not be reported as a staging failure"
+    assert not hb.get("stage_error"), \
+        "no stage_error: nothing has actually failed"
+    assert any("ARIA2-AUTH" in str(e) for e in emitted), emitted
+    # and a genuinely unreachable daemon must STILL be an error (guards the
+    # fix from swallowing the 2026-08-20 incident class it sits next to)
+    cat2 = FakeCatalog({"approved_image_id": "img1"},
+                       {"id": "img1", "filename": "img1.bin",
+                        "size": 1000, "sha256": "abc"})
+    deps2, _, _, _, _, _, _, _ = make_deps(cat2, {}, free=9_000_000_000)
+
+    def _refused(torrent, dest):
+        raise ConnectionRefusedError(111, "Connection refused")
+
+    deps2 = deps2._replace(aria_add=_refused)
+    assert iris_agent.run_once(CFG, deps2, {}) == "aria2-down"
+    assert cat2.heartbeats[-1]["stage_state"] == "error"
+
+
 def test_aria_remove_rpc_down_heartbeats_error_instead_of_crashing():
     # Same failure class one call earlier: the stale-entry clear hits the RPC
     # first, and urllib wraps the refusal in URLError. Must not crash either.
