@@ -59,22 +59,27 @@ def test_csv_download_buttons_and_multiselect_onboard_wired():
 
 
 def test_devices_toolbar_regrouped():
-    """Option-A layout (2026-08-12 spec §1-§4): quiet permanent toolbar; bulk
-    actions live in a selection bar that is hidden in static HTML; the three
-    CSV controls live inside the CSV menu; the telemetry checkboxes live
-    inside the onboard popover; Delete carries destructive styling; the
-    per-row action-links column is gone."""
+    """Option-A layout (2026-08-12 spec S1-S4) as revised by the Magnetic
+    action-layout pass (2026-09-01): bulk actions live in a selection bar that
+    is hidden in static HTML; the three CSV controls live inside the CSV menu;
+    the telemetry checkboxes live inside the onboard MODAL (Magnetic Dropdown
+    forbids a menu whose items need "another button to submit or apply", and
+    names modals as the bulk bar's own escape hatch); Delete is a destructive
+    item in the overflow dropdown (Dropdown > Types); the per-row action-links
+    column is gone."""
     with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
         html = f.read()
     assert '<div class="selbar" id="sel-bar" hidden>' in html
     csv_menu = html.split('id="csv-menu"')[1].split('</div>')[0]
     for cid in ('id="import-csv"', 'id="export-csv"', 'id="example-csv"'):
         assert cid in csv_menu, cid + " must live inside the CSV menu"
-    pop = html.split('id="onboard-pop"')[1].split('</div>')[0]
+    modal = html.split('id="onboard-modal"')[1].split('id="undeploy-modal"')[0]
     for cid in ('id="onboard-telemetry"', 'id="onboard-telemetry-stream"',
-                'id="onboard-selected"'):
-        assert cid in pop, cid + " must live inside the onboard popover"
-    assert 'class="btn danger push" id="delete-selected"' in html
+                'id="onboard-confirm"'):
+        assert cid in modal, cid + " must live inside the onboard modal"
+    # the onboard/undeploy options are not reachable from a dropdown any more
+    assert 'id="onboard-pop"' not in html and 'id="undeploy-pop"' not in html
+    assert 'class="menu-item danger menu-close" type="button" id="delete-selected"' in html
     devices_thead = html.split('id="devices"')[1].split('</thead>')[0]
     # '<th' alone also matches the '<thead>' tag itself; use '<th>' to count
     # only real header cells.
@@ -187,9 +192,20 @@ def test_all_selected_actions_share_one_busy_lock():
     assert "var BULK_BTNS = [" in js
     block = js.split("var BULK_BTNS = [")[1].split("]")[0]
     actions = re.findall(r"'([a-z-]+)'", block)
-    for el in ("onboard-selected", "undeploy-selected", "adopt-selected",
+    # Onboard and undeploy now FIRE from inside their modal (Magnetic Dropdown
+    # sends bulk-bar options to a modal rather than a menu), so the ids that
+    # claim the lock are the modal primaries.
+    for el in ("onboard-confirm", "undeploy-confirm", "adopt-selected",
                "delete-selected", "apply-cred-selected", "assign-images-selected"):
         assert el in actions, "%s is not covered by the bulk busy lock" % el
+    # The bar's own Onboard…/Undeploy…/Set credential… only OPEN those modals,
+    # so they claim nothing -- but a batch already starting must not be able to
+    # hand out a second one, so setBulkBusy has to disable them too.
+    openers = re.findall(r"'([a-z-]+)'",
+                         js.split("var BULK_OPENERS = [")[1].split("]")[0])
+    for el in ("onboard-selected", "undeploy-selected", "set-cred-selected"):
+        assert el in openers, "%s is not disabled while a bulk action runs" % el
+    assert "BULK_BTNS.concat(BULK_OPENERS).forEach" in js
     # Every action claims the lock rather than reading another button's state.
     # Counted against BULK_BTNS itself rather than a fixed number, so a new bulk
     # action cannot be added without also claiming the lock -- quarantine and
@@ -6801,7 +6817,7 @@ def test_force_undeploy_delivers_the_force_flag_to_xr_uninstall(tmp_path):
 
 def test_undeploy_force_help_and_confirm_text_cover_xr_alongside_router():
     """Source guard for the force-undeploy operator-facing text (Directive 2
-    Task 4): both the undeploy-pop help copy (index.html) and the confirm()
+    Task 4): both the undeploy modal's help copy (index.html) and the confirm()
     dialog text (app.js) must say, in the same breath as the pre-existing
     router/IOx wording, what force actually does on an IOS-XR device --
     strips only the IRIS-named appmgr footprint (app `iris`, source
@@ -6827,8 +6843,8 @@ def test_undeploy_force_help_and_confirm_text_cover_xr_alongside_router():
 
     with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
         html = f.read()
-    help_row = html.split('id="undeploy-pop"', 1)[1].split(
-        "</div>", 1)[0]
+    help_row = html.split('id="undeploy-modal"', 1)[1].split(
+        'class="modal-foot"', 1)[0]
     collapsed = " ".join(help_row.split())
     assert xr_sentence in collapsed
     assert ("VirtualPortGroup and NAT are left untouched, because nothing "
@@ -8815,9 +8831,15 @@ def test_bulk_bar_names_selection_scope():
     second copy of the header checkbox's select-all logic. The click just
     flips #mark-all and replays that checkbox's own 'change' listener."""
     html = _webroot("index.html")
-    selbar = html.split('id="sel-bar"', 1)[1].split('id="onboard-menu-btn"', 1)[0]
+    selbar = html.split('id="sel-bar"', 1)[1].split('class="selbar-actions"', 1)[0]
     assert '<span class="muted" id="sel-scope-text" hidden></span>' in selbar
-    assert '<button class="linkish" type="button" id="sel-scope-all" hidden></button>' in selbar
+    # A tertiary BUTTON, not the .linkish text link it used to be: Magnetic
+    # Button > Usage keeps text links for navigation inside a paragraph and
+    # gives standalone actions a button. Cancel is its neighbour because
+    # Magnetic Table > Bulk action bar dismisses the bar either by deselecting
+    # every row or by "the 'Cancel' button".
+    assert '<button class="btn tertiary" type="button" id="sel-scope-all" hidden></button>' in selbar
+    assert '<button class="btn tertiary" type="button" id="sel-clear">Cancel</button>' in selbar
     assert 'onclick=' not in selbar
 
     js = _webroot("app.js")
@@ -8945,14 +8967,23 @@ def test_settings_and_monitoring_flyouts_are_positioned_beside_the_rail():
 
 
 def test_bulk_bar_action_buttons_capped_via_more_menu():
-    """Wave B fix 6 (table audit): #sel-bar showed 8 actions against
-    Magnetic's max-4 guidance for immediate actions. Adopt/Quarantine/
-    Release and the paired credential-Apply now live inside a 'More' menu,
-    the exact same .menu-wrap/.menu pattern as Onboard▾/Undeploy▾ --
+    """Magnetic Table > Bulk action bar: "When row checkboxes are selected,
+    the bulk action bar appears, allowing up to 4 specific actions for the
+    selected rows... The bulk action bar stays visible until all rows are
+    deselected or the 'Cancel' button is clicked."
+
+    So .selbar-actions holds exactly four controls, the fourth being the
+    overflow (Magnetic Dropdown lists "List actions from a horizontal 3-dot
+    icon" as a dropdown use case, and Table > Action column reaches for an
+    overflow icon button once there are more than two). The single primary
+    sits on the group's outside edge per Button > Button group > Alignment.
+    Selection state -- the count, the select-all-beyond-this-page shortcut and
+    Cancel -- sits outside that group and is not one of the four.
+
+    Adopt/Quarantine/Release/Set-credential/Delete live inside the overflow;
     every id, click handler and the shared bulk busy-lock stay put
-    (test_bulk_row_actions_wired / test_all_selected_actions_share_one_
-    busy_lock guard that already); this pins where they now live and that
-    at most 4 buttons in the bar act immediately with no menu in between."""
+    (test_bulk_row_actions_wired / test_all_selected_actions_share_one_busy_
+    lock guard those already)."""
     def _top_level_button_ids(container):
         # IDs of buttons NOT nested inside a `.menu` floating popover -- a
         # menu-wrap TRIGGER button stays visible in the bar at all times
@@ -8960,8 +8991,8 @@ def test_bulk_bar_action_buttons_capped_via_more_menu():
         # `.menu-wrap` itself is transparent to this count; depth only
         # starts at a `.menu` popover's own opening tag (exact class
         # match, so it does not fire on `.menu-wrap`/`.menu-note` too), and
-        # any <div> nested inside one (e.g. Undeploy's help-row note) still
-        # balances the count correctly via the generic branch below.
+        # any <div> nested inside one still balances the count correctly
+        # via the generic branch below.
         depth = 0
         ids = []
         i = 0
@@ -8976,7 +9007,7 @@ def test_bulk_bar_action_buttons_capped_via_more_menu():
                 depth -= 1
                 i += 6
             elif depth == 0 and container.startswith('<button class="btn', i):
-                m = re.search(r'id="([^"]+)"', container[i:i + 200])
+                m = re.search(r'id="([^"]+)"', container[i:i + 260])
                 ids.append(m.group(1) if m else None)
                 i += 1
             else:
@@ -8985,19 +9016,28 @@ def test_bulk_bar_action_buttons_capped_via_more_menu():
 
     html = _webroot("index.html")
     selbar = html.split('id="sel-bar"', 1)[1].split('id="dev-form"', 1)[0]
-    ids = _top_level_button_ids(selbar)
-    assert ids == ['onboard-menu-btn', 'undeploy-menu-btn', 'more-menu-btn',
-                    'assign-images-selected', 'delete-selected'], ids
-    # of the 5 controls directly in the bar, only the two non-triggers
-    # perform an action with no menu in between -- comfortably under the
-    # 4-action cap the fold exists to satisfy
-    direct_actions = [i for i in ids if not i.endswith('-menu-btn')]
-    assert len(direct_actions) <= 4
-    more_pop = selbar.split('id="more-pop" hidden>', 1)[1].split(
-        'id="assign-images-selected"', 1)[0]
-    assert 'id="cred-selected"' in more_pop
+    state, actions = selbar.split('class="selbar-actions"', 1)
+
+    # selection state, not actions on the selection
+    assert _top_level_button_ids(state) == ['sel-scope-all', 'sel-clear']
+
+    # exactly four, primary last (right-aligned group, outside edge)
+    ids = _top_level_button_ids(actions)
+    assert ids == ['assign-images-selected', 'undeploy-selected',
+                   'onboard-selected', 'more-menu-btn'], ids
+    assert len(ids) <= 4
+    assert actions.count('<button class="btn"') == 1, "one primary per group"
+
+    # the fourth is an icon-only overflow trigger with an accessible name
+    trigger = actions.split('id="more-menu-btn"', 1)[0]
+    assert 'class="btn ghost icon-only"' in trigger[trigger.rfind("<button"):]
+    assert 'aria-label="More actions"' in actions.split(
+        'id="more-menu-btn"', 1)[1].split(">", 1)[0]
+
+    more_pop = actions.split('id="more-pop" hidden>', 1)[1].split("</div>", 1)[0]
     for folded_id in ("adopt-selected", "quarantine-selected",
-                       "release-selected", "apply-cred-selected"):
+                      "release-selected", "set-cred-selected",
+                      "delete-selected"):
         assert ('id="%s"' % folded_id) in more_pop, folded_id
         # menu-close so the popover closes the instant the action fires --
         # without it .menu's own click handler stopPropagation()s and the
@@ -9005,6 +9045,75 @@ def test_bulk_bar_action_buttons_capped_via_more_menu():
         before = more_pop.split('id="%s"' % folded_id, 1)[0]
         tag_start = before.rfind("<button")
         assert "menu-close" in before[tag_start:], folded_id
+    # Dropdown > Types: destructive menu items are a supported type, and the
+    # divider groups Delete away from the reversible actions above it
+    assert '<hr class="menu-divider">' in more_pop
+    assert 'class="menu-item danger menu-close" type="button" id="delete-selected"' in more_pop
+    # the credential picker moved out of the menu and into its own modal --
+    # Dropdown items act immediately, they never carry a select + Apply pair
+    assert 'id="cred-selected"' not in more_pop
+    cred_modal = html.split('id="cred-modal"', 1)[1].split('id="img-picker"', 1)[0]
+    assert 'id="cred-selected"' in cred_modal
+    assert 'id="apply-cred-selected"' in cred_modal
+
+
+def test_bulk_modals_close_cleanly_and_the_total_agrees_with_the_total():
+    """Three defects found reviewing the Magnetic action-layout pass, all in
+    the new modal/filter-bar code and none of them reachable by the static
+    guards around them.
+
+    1. The merged filter-bar Total agreed its noun with the MATCHED count, so
+       filtering twelve devices down to one read "1 of 12 result". In the
+       "X of N" form the noun belongs to N, and #dev-count is the page's only
+       count now, so the wrong form sat on screen for the most common thing
+       the search box is used for.
+    2. openModal captured document.activeElement as the element to restore
+       focus to -- but "Set credential…" lives inside the #more-pop dropdown
+       and carries .menu-close, so wireMenu hides it immediately afterwards.
+       focus() on a display:none element is a no-op, so keyboard focus was
+       dropped to the document every single time that modal closed. The opener
+       is resolved to the popover's own trigger, which stays visible.
+    3. A backdrop `e.target === overlay` click-closer misfires on the second
+       click of a double-click (the backdrop the first click raised is now
+       under the pointer) and on a drag-selection released past the dialog
+       edge (a click is dispatched at the mousedown/mouseup common ancestor) --
+       the latter closing the undeploy modal while its force help text is
+       being read. There is no backdrop closer; ✕ / Cancel / Escape are the
+       ways out, matching the pre-existing image picker on this same page."""
+    js = _webroot("app.js")
+
+    # 1 -- both branches pluralise on `total`
+    assert "(devs.length === total ? String(total) : devs.length + ' of ' + total) +" in js
+    assert "' result' + (total === 1 ? '' : 's');" in js
+    # the old form agreed with the matched count
+    assert "((devs.length === total ? total : devs.length) === 1 ? '' : 's')" not in js
+
+    # 2 -- a menu-hosted opener resolves to the popover's trigger
+    fn = js.split("function openModal(id) {", 1)[1].split("\n  }", 1)[0]
+    assert "var opener = document.activeElement;" in fn
+    assert "opener.closest('.menu')" in fn
+    assert "menu.closest('.menu-wrap')" in fn
+    assert "wrap.querySelector('[aria-expanded]')" in fn
+    assert "modalOpener = opener;" in fn
+    assert "modalOpener = document.activeElement;" not in js
+
+    # 3 -- no backdrop click-to-close anywhere (the phrase appears in the
+    # comment explaining why, so pin the code form, not the words)
+    assert "if (e.target === overlay) closeModal" not in js
+    assert "overlay.addEventListener('click'" not in js
+    wire = js.split("function wireModal(id, closerIds) {", 1)[1].split("\n  }", 1)[0]
+    assert "addEventListener('click'" in wire, "the ✕/Cancel closers must stay"
+    assert "e.key === 'Escape'" in wire
+    assert "trapDialogFocus(overlay);" in wire
+    # every modal still offers an explicit close control, per Magnetic Modal
+    html = _webroot("index.html")
+    for mid, closers in (("onboard-modal", ("onboard-cancel", "onboard-modal-x")),
+                         ("undeploy-modal", ("undeploy-cancel", "undeploy-modal-x")),
+                         ("cred-modal", ("cred-modal-cancel", "cred-modal-x"))):
+        block = html.split('id="%s"' % mid, 1)[1].split("<!--", 1)[0]
+        for cid in closers:
+            assert 'id="%s"' % cid in block, "%s must offer %s" % (mid, cid)
+        assert "wireModal('%s', ['%s', '%s']);" % (mid, closers[0], closers[1]) in js
 
 
 def test_nav_divider_grid_spacing_and_compact_anatomy_comment():

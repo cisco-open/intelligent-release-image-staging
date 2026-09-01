@@ -254,145 +254,168 @@
         <div class="page-header">
           <h2 class="page-title">Devices</h2>
         </div>
-        <div class="toolbar">
-          <button class="btn" id="add-dev">+ Add device</button>
-          <span class="sep"></span>
-          <div class="menu-wrap">
-            <button class="btn ghost" id="csv-menu-btn" aria-expanded="false">CSV ▾</button>
-            <div class="menu" id="csv-menu" hidden>
-              <button class="menu-item menu-close" id="import-csv">Import CSV…</button>
-              <button class="menu-item menu-close" id="export-csv">Export CSV</button>
-              <button class="menu-item menu-close" id="example-csv">Download example</button>
-            </div>
+        <!-- One control row for the whole table. Magnetic Table > Placement >
+             Table-level actions: "When a table includes a filter bar, place
+             table-level actions on the right side of the filter bar to keep
+             all table controls in a single, consistent location." This page
+             used to stack two .toolbar rows -- table-level actions (Add
+             device / CSV / Credentials) above, filters below -- so the
+             controls for one table sat in two places and the page opened
+             with two competing button rows. .filter-bar and .table-actions
+             are those two halves on one line now, separated by the 36px
+             minimum gap Magnetic Filter bar > Spacing with other elements
+             asks for (styles.css). -->
+        <div class="table-controls">
+          <div class="filter-bar" id="dev-filters">
+            <input id="dev-filter-q" placeholder="Filter devices, IP, model…" aria-label="Filter by device, IP or model">
+            <select id="dev-filter-platform" aria-label="Filter by agent install">
+              <option value="">Agent install: any</option>
+              <option value="guestshell">Guest Shell</option>
+              <option value="iox">IOx</option>
+              <option value="router">Router</option>
+              <option value="xr-appmgr">XR appmgr container</option>
+              <option value="__none">— unset —</option>
+            </select>
+            <!-- Options are generated in app.js from DEVICE_STATUS_OPTIONS, the
+                 same list the Status cell derives from. -->
+            <select id="dev-filter-status" aria-label="Filter by status">
+              <option value="">Status: any</option>
+            </select>
+            <!-- Overflow filters (Magnetic Filter bar > Anatomy): the
+                 less-frequently-used filters live behind one overflow control
+                 whose label format the spec fixes as "<icon> + Filters". It
+                 read "More filters" before, which collided with the bulk
+                 bar's own "More ▾" -- two unrelated controls wearing the same
+                 word on the same screen. Summary text (the applied-filter
+                 count) is still updated live by updateMoreFiltersSummary()
+                 (app.js); every field id/value below is unchanged. -->
+            <details id="more-filters">
+              <summary id="more-filters-summary">
+                <svg class="ico" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M2.5 4h11M4.5 8h7M6.5 12h3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                <span id="more-filters-label">Filters</span>
+              </summary>
+              <div class="more-filters-body">
+                <select id="dev-filter-management-type" aria-label="Filter by management type">
+                  <option value="">Management type: any</option>
+                  <option value="routed">routed</option>
+                  <option value="inband">inband</option>
+                  <option value="router-routed">router-routed</option>
+                  <option value="router-nat">router-nat</option>
+                  <option value="xr-host">XR host</option>
+                  <option value="legacy">Inventory only — management type not chosen</option>
+                </select>
+                <select id="dev-filter-cred" aria-label="Filter by credential profile">
+                  <option value="">Credential: any</option>
+                  <option value="__none">— none —</option>
+                </select>
+                <select id="dev-filter-telemetry" aria-label="Filter by telemetry state">
+                  <option value="">Telemetry: any</option>
+                  <option value="on">on</option>
+                  <option value="off">off</option>
+                </select>
+                <select id="dev-filter-peer" aria-label="Filter by peer policy">
+                  <option value="">Peer policy: any</option>
+                  <option value="quarantined">quarantined</option>
+                  <option value="not-quarantined">not quarantined</option>
+                </select>
+              </div>
+            </details>
+            <!-- Reset (Magnetic Filter bar > Anatomy: "Displayed when at least
+                 one filter has been selected or a search term has been
+                 entered"), so it stops sitting there permanently offering to
+                 clear nothing; updateFilterBarState() (app.js) shows it. A
+                 tertiary BUTTON, not the bare text link it used to be:
+                 Magnetic Button reserves text links for navigation inside a
+                 paragraph and gives standalone actions a button. -->
+            <button class="btn tertiary" type="button" id="dev-filter-clear" hidden>Reset</button>
+            <!-- Total (Magnetic Filter bar > Anatomy, format "<number> +
+                 results"). One count for the table now: the old layout carried
+                 two, "12 devices" in the top toolbar and "showing 6 of 12"
+                 down in the filter row, which disagreed on wording and made
+                 the reader check both. -->
+            <span class="filter-total" id="dev-count"></span>
           </div>
-          <input type="file" id="csv-file" accept=".csv" hidden>
-          <button class="btn ghost" id="manage-creds">Credentials</button>
-          <span class="muted push" id="dev-count"></span>
-          <span class="muted" id="dev-status" role="status" aria-live="polite"></span>
-        </div>
-        <div class="toolbar" id="dev-filters">
-          <input id="dev-filter-q" placeholder="Filter devices, IP, model…" aria-label="Filter by device, IP or model">
-          <select id="dev-filter-platform" aria-label="Filter by agent install">
-            <option value="">Agent install: any</option>
-            <option value="guestshell">Guest Shell</option>
-            <option value="iox">IOx</option>
-            <option value="router">Router</option>
-            <option value="xr-appmgr">XR appmgr container</option>
-            <option value="__none">— unset —</option>
-          </select>
-          <!-- Options are generated in app.js from DEVICE_STATUS_OPTIONS, the
-               same list the Status cell derives from. -->
-          <select id="dev-filter-status" aria-label="Filter by status">
-            <option value="">Status: any</option>
-          </select>
-          <!-- Density pass (Task 8): Search/Agent install/Status stay
-               visible above the fold; the remaining, less-frequently-used
-               filters live in this native disclosure panel, summary text
-               updated live by updateMoreFiltersSummary() (app.js). Every
-               field id/value below is byte-identical to before -- only its
-               DOM position moved. -->
-          <details id="more-filters">
-            <summary id="more-filters-summary">More filters</summary>
-            <div class="more-filters-body">
-              <select id="dev-filter-management-type" aria-label="Filter by management type">
-                <option value="">Management type: any</option>
-                <option value="routed">routed</option>
-                <option value="inband">inband</option>
-                <option value="router-routed">router-routed</option>
-                <option value="router-nat">router-nat</option>
-                <option value="xr-host">XR host</option>
-                <option value="legacy">Inventory only — management type not chosen</option>
-              </select>
-              <select id="dev-filter-cred" aria-label="Filter by credential profile">
-                <option value="">Credential: any</option>
-                <option value="__none">— none —</option>
-              </select>
-              <select id="dev-filter-telemetry" aria-label="Filter by telemetry state">
-                <option value="">Telemetry: any</option>
-                <option value="on">on</option>
-                <option value="off">off</option>
-              </select>
-              <select id="dev-filter-peer" aria-label="Filter by peer policy">
-                <option value="">Peer policy: any</option>
-                <option value="quarantined">quarantined</option>
-                <option value="not-quarantined">not quarantined</option>
-              </select>
+          <!-- Table-level actions. Magnetic Button > Button group > Alignment:
+               "Alignment affects button order, with the primary button on the
+               outside edge" -- right-aligned here, so the one primary (Add
+               device) is rightmost and CSV/Manage credentials are secondary.
+               Magnetic Content design > CTAs asks for verb + object and no
+               articles, which is why "Credentials" (a bare noun) is now
+               "Manage credentials". -->
+          <div class="table-actions">
+            <div class="menu-wrap">
+              <!-- A dropdown trigger, not a button wearing a text caret.
+                   Magnetic Button > Usage is explicit: "Don't use buttons for
+                   multiple actions. Don't use a caret as a trailing icon.
+                   (Use a dropdown to present a list of related options for a
+                   topic or object.)" .dropdown draws the chevron as an icon
+                   that rotates with aria-expanded (styles.css). -->
+              <button class="btn ghost dropdown" id="csv-menu-btn" type="button" aria-expanded="false" aria-haspopup="true">CSV<svg class="caret" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M4.5 6.5 8 10l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+              <div class="menu right" id="csv-menu" hidden>
+                <button class="menu-item menu-close" id="import-csv">Import CSV…</button>
+                <button class="menu-item menu-close" id="export-csv">Export CSV</button>
+                <button class="menu-item menu-close" id="example-csv">Download example</button>
+              </div>
             </div>
-          </details>
-          <button class="linkish" id="dev-filter-clear">clear filters</button>
-          <span class="muted push" id="dev-filter-count"></span>
-          <!-- Selection-gutter toggle (Task 8 density pass): the per-row
-               checkbox column fades to transparent except on row
-               hover/focus-within/checked, or while body.selecting is set by
-               this button -- always visible at <=768px regardless (CSS,
-               styles.css). Purely a visibility toggle: it never touches
-               checked state, the filtered-select-all copy, or any bulk
-               action. -->
-          <button class="btn ghost" type="button" id="dev-select-toggle" aria-pressed="false">Select devices</button>
+            <input type="file" id="csv-file" accept=".csv" hidden>
+            <button class="btn ghost" id="manage-creds">Manage credentials</button>
+            <button class="btn" id="add-dev">Add device</button>
+          </div>
         </div>
+        <!-- Job/action feedback gets its own line under the controls instead of
+             competing for width inside them (Magnetic Filter bar: elements
+             sharing the bar's row reduce the space its filters get). -->
+        <div class="dev-status-line muted" id="dev-status" role="status" aria-live="polite"></div>
+        <!-- Bulk action bar (Magnetic Table > Anatomy > Bulk action bar):
+             "When row checkboxes are selected, the bulk action bar appears,
+             allowing up to 4 specific actions for the selected rows. An
+             indicator displays the number of selected rows, and an option to
+             select all rows across all pages is available. The bulk action bar
+             is positioned above the table header. The bulk action bar stays
+             visible until all rows are deselected or the 'Cancel' button is
+             clicked."
+             Selection state (count, scope, Cancel) sits on the left; the four
+             actions sit on the right with the single primary (Onboard) on the
+             group's outside edge, per Button > Button group > Alignment.
+             The fourth is the overflow -- Magnetic Dropdown names "List
+             actions from a horizontal 3-dot icon" as a dropdown use case, and
+             Table > Action column uses an overflow icon button for the same
+             job. It replaces the labelled "More ▾" that used to clash by name
+             with the filter bar's "More filters". -->
         <div class="selbar" id="sel-bar" hidden>
           <span class="sel-count" id="sel-count"></span>
           <span class="muted" id="sel-scope-text" hidden></span>
-          <button class="linkish" type="button" id="sel-scope-all" hidden></button>
-          <button class="linkish" id="sel-clear">clear</button>
-          <span class="sep"></span>
-          <div class="menu-wrap">
-            <button class="btn" id="onboard-menu-btn" aria-expanded="false">Onboard ▾</button>
-            <div class="menu" id="onboard-pop" hidden>
-              <label class="muted"><input type="checkbox" id="onboard-telemetry" checked> Telemetry reports</label>
-              <label class="muted"><input type="checkbox" id="onboard-telemetry-stream"> Telemetry streaming (live samples)</label>
-              <button class="btn menu-close" id="onboard-selected">Start onboard</button>
-            </div>
-          </div>
-          <div class="menu-wrap">
-            <button class="btn ghost" id="undeploy-menu-btn" aria-expanded="false">Undeploy ▾</button>
-            <div class="menu" id="undeploy-pop" hidden>
-              <label class="muted"><input type="checkbox" id="undeploy-force"> Force (no usable deployment record)</label>
-              <div class="help-row muted menu-note">
-                Use when a device is stranded — an onboard that died before its
-                record was written, or a box that was rebuilt or replaced, so the
-                record names hardware that is no longer there and the teardown
-                refuses it on an identity mismatch. Force skips the record
-                entirely and removes the IRIS agent footprint only: the
-                VirtualPortGroup and NAT are left untouched, because nothing here
-                proves IRIS created them. On an IOS-XR device, force removes the
-                same IRIS-named footprint a normal undeploy would — the appmgr
-                application iris, its iris-xr package source, the RPM,
-                iris-work/, and the IRIS sidecar files at harddisk: root — but a
-                staged image file there is never removed by IRIS teardown, and
-                the agent deletes an adopted file only when the catalog
-                republishes new content under that same image id — never
-                otherwise. Any record for the device is abandoned once the
-                teardown succeeds, so it can be onboarded again.
+          <button class="btn tertiary" type="button" id="sel-scope-all" hidden></button>
+          <button class="btn tertiary" type="button" id="sel-clear">Cancel</button>
+          <div class="selbar-actions">
+            <!-- Each of these opens a modal (Magnetic Modal > Usage: "Use
+                 modals for simple tasks that inform, confirm, or complete a
+                 simple action"). They used to be .btn + "▾" popovers holding
+                 checkboxes and their own nested Start button -- a shape
+                 Magnetic Button forbids on a button and Magnetic Dropdown
+                 forbids in a menu, whose items must fire immediately and
+                 "don't require another element, like a button, to trigger an
+                 action". -->
+            <button class="btn ghost" type="button" id="assign-images-selected">Assign images…</button>
+            <button class="btn ghost" type="button" id="undeploy-selected">Undeploy…</button>
+            <button class="btn" type="button" id="onboard-selected">Onboard…</button>
+            <div class="menu-wrap">
+              <button class="btn ghost icon-only" type="button" id="more-menu-btn" aria-expanded="false" aria-haspopup="true" aria-label="More actions" title="More actions"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="3.5" cy="8" r="1.35" fill="currentColor"/><circle cx="8" cy="8" r="1.35" fill="currentColor"/><circle cx="12.5" cy="8" r="1.35" fill="currentColor"/></svg></button>
+              <div class="menu right" id="more-pop" hidden>
+                <button class="menu-item menu-close" type="button" id="adopt-selected">Adopt</button>
+                <button class="menu-item menu-close" type="button" id="quarantine-selected">Quarantine</button>
+                <button class="menu-item menu-close" type="button" id="release-selected">Release</button>
+                <button class="menu-item menu-close" type="button" id="set-cred-selected">Set credential…</button>
+                <hr class="menu-divider">
+                <!-- Magnetic Dropdown > Types: "A dropdown menu can contain
+                     regular, disabled, and destructive menu item types." Delete
+                     keeps its confirmation step (Button > Best practices:
+                     "Allow a user to back out of important destructive
+                     actions"); the ellipsis says another step follows. -->
+                <button class="menu-item danger menu-close" type="button" id="delete-selected">Delete…</button>
               </div>
-              <button class="btn menu-close" id="undeploy-selected">Start undeploy</button>
             </div>
           </div>
-          <!-- Bulk-bar action cap (post-walk Magnetic table audit, Wave B):
-               the bar was showing 8 actions against Magnetic's 4-action cap.
-               Adopt/Quarantine/Release and the paired credential-Apply fold
-               into this one More menu, the same .menu-wrap/.menu pattern as
-               Onboard/Undeploy above -- every id, click handler and the
-               shared bulk busy-lock (BULK_BTNS, app.js) are unchanged, only
-               the container moved. menu-close on each so the popover closes
-               the moment an action fires (mirrors Start onboard/Start
-               undeploy above; without it, .menu's own click handler would
-               stopPropagation() and the outside-click closer would never
-               see the click). -->
-          <div class="menu-wrap">
-            <button class="btn ghost" id="more-menu-btn" aria-expanded="false">More ▾</button>
-            <div class="menu" id="more-pop" hidden>
-              <button class="btn ghost menu-close" id="adopt-selected">Adopt</button>
-              <button class="btn ghost menu-close" id="quarantine-selected">Quarantine</button>
-              <button class="btn ghost menu-close" id="release-selected">Release</button>
-              <span class="joined">
-                <select id="cred-selected"><option value="">— credential for selected —</option></select>
-                <button class="btn ghost menu-close" id="apply-cred-selected">Apply</button>
-              </span>
-            </div>
-          </div>
-          <button class="btn ghost" id="assign-images-selected">Assign images to 0 devices…</button>
-          <button class="btn danger push" id="delete-selected">Delete…</button>
         </div>
         <form class="inline-form" id="dev-form" hidden>
           <label class="field" for="df-id"><span class="field-label">Device ID / IP</span><input id="df-id" placeholder="e.g. 10.0.0.5"></label>
@@ -499,6 +522,85 @@
              (openImagePicker in app.js). A centred modal, not a drawer -- it
              is a choice to make and confirm, not a panel to read alongside
              the table it was opened from. role=dialog + aria-modal (Task 6). -->
+        <!-- Bulk-action modals (Magnetic Modal > Usage: "Use modals for
+             simple tasks that inform, confirm, or complete a simple action").
+             Onboard/Undeploy/Set credential used to be .menu popovers hanging
+             off caret buttons in the bulk bar, each holding form controls and
+             its own nested submit -- which Magnetic Dropdown rules out
+             ("Selecting an item from the menu starts an action without
+             requiring the use of another button to submit or apply") and
+             names modals as the right home for: "provide features in bulk
+             action bar that open modals". Same chrome as the image picker
+             below; every control id is unchanged, so telemetryFlags(),
+             startBatch() and the credential handler read exactly what they
+             read before. -->
+        <div id="onboard-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="onboard-modal-title">
+          <div class="modal">
+            <div class="modal-head">
+              <span id="onboard-modal-title">Onboard devices <span id="onboard-modal-count" class="muted"></span></span>
+              <button class="btn ghost icon-only" type="button" id="onboard-modal-x" aria-label="Close">&#10005;</button>
+            </div>
+            <div class="modal-body">
+              <p class="muted">Installs the IRIS agent on each selected device and starts staging its assigned images.</p>
+              <label class="check-row"><input type="checkbox" id="onboard-telemetry" checked> Telemetry reports</label>
+              <label class="check-row"><input type="checkbox" id="onboard-telemetry-stream"> Telemetry streaming (live samples)</label>
+            </div>
+            <div class="modal-foot">
+              <button class="btn ghost" type="button" id="onboard-cancel">Cancel</button>
+              <button class="btn" type="button" id="onboard-confirm">Start onboard</button>
+            </div>
+          </div>
+        </div>
+        <div id="undeploy-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="undeploy-modal-title">
+          <div class="modal">
+            <div class="modal-head">
+              <span id="undeploy-modal-title">Undeploy devices <span id="undeploy-modal-count" class="muted"></span></span>
+              <button class="btn ghost icon-only" type="button" id="undeploy-modal-x" aria-label="Close">&#10005;</button>
+            </div>
+            <div class="modal-body">
+              <p class="muted">Removes the IRIS agent and record-owned resources from each selected device. Staged images at the filesystem root are left in place, and running jobs are never interrupted.</p>
+              <label class="check-row"><input type="checkbox" id="undeploy-force"> Force (no usable deployment record)</label>
+              <div class="help-row muted menu-note">
+                Use when a device is stranded — an onboard that died before its
+                record was written, or a box that was rebuilt or replaced, so the
+                record names hardware that is no longer there and the teardown
+                refuses it on an identity mismatch. Force skips the record
+                entirely and removes the IRIS agent footprint only: the
+                VirtualPortGroup and NAT are left untouched, because nothing here
+                proves IRIS created them. On an IOS-XR device, force removes the
+                same IRIS-named footprint a normal undeploy would — the appmgr
+                application iris, its iris-xr package source, the RPM,
+                iris-work/, and the IRIS sidecar files at harddisk: root — but a
+                staged image file there is never removed by IRIS teardown, and
+                the agent deletes an adopted file only when the catalog
+                republishes new content under that same image id — never
+                otherwise. Any record for the device is abandoned once the
+                teardown succeeds, so it can be onboarded again.
+              </div>
+            </div>
+            <div class="modal-foot">
+              <button class="btn ghost" type="button" id="undeploy-cancel">Cancel</button>
+              <button class="btn danger" type="button" id="undeploy-confirm">Start undeploy</button>
+            </div>
+          </div>
+        </div>
+        <div id="cred-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="cred-modal-title">
+          <div class="modal">
+            <div class="modal-head">
+              <span id="cred-modal-title">Set credential <span id="cred-modal-count" class="muted"></span></span>
+              <button class="btn ghost icon-only" type="button" id="cred-modal-x" aria-label="Close">&#10005;</button>
+            </div>
+            <div class="modal-body">
+              <label class="field" for="cred-selected"><span class="field-label">Credential profile</span>
+                <select id="cred-selected"><option value="">— credential for selected —</option></select>
+              </label>
+            </div>
+            <div class="modal-foot">
+              <button class="btn ghost" type="button" id="cred-modal-cancel">Cancel</button>
+              <button class="btn" type="button" id="apply-cred-selected">Apply</button>
+            </div>
+          </div>
+        </div>
         <div id="img-picker" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-label="Choose images">
           <div class="modal">
             <div class="modal-head">

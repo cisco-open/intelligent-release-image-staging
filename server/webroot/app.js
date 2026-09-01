@@ -1087,13 +1087,32 @@
   var MORE_FILTER_IDS = ['dev-filter-management-type', 'dev-filter-cred',
                           'dev-filter-telemetry', 'dev-filter-peer'];
   function updateMoreFiltersSummary() {
-    var el = document.getElementById('more-filters-summary');
+    // Magnetic Filter bar > Anatomy fixes the overflow button's format as
+    // "<icon> + Filters", so the label lives in its own span and the icon
+    // beside it survives the write -- textContent on the <summary> itself
+    // would delete the svg. The applied-filter count stays appended: the
+    // panel is closed most of the time and the operator has to be able to
+    // see that something inside it is narrowing the table.
+    var el = document.getElementById('more-filters-label');
     if (!el) return;
     var n = MORE_FILTER_IDS.filter(function (id) {
       var f = document.getElementById(id);
       return f && f.value !== '';
     }).length;
-    el.textContent = 'More filters' + (n ? ' (' + n + ')' : '');
+    el.textContent = 'Filters' + (n ? ' (' + n + ')' : '');
+  }
+  // Reset is "displayed when at least one filter has been selected or a
+  // search term has been entered" (Magnetic Filter bar > Anatomy) -- it used
+  // to sit there permanently, offering to clear nothing.
+  var ALL_FILTER_IDS = ['dev-filter-q', 'dev-filter-platform', 'dev-filter-status']
+    .concat(MORE_FILTER_IDS);
+  function updateFilterBarState() {
+    var reset = document.getElementById('dev-filter-clear');
+    if (!reset) return;
+    reset.hidden = !ALL_FILTER_IDS.some(function (id) {
+      var f = document.getElementById(id);
+      return f && f.value !== '';
+    });
   }
   function renderDevices(devs, devNow) {
     var filters = deviceFilterState();
@@ -1180,14 +1199,21 @@
       btn.addEventListener('click', function () { setQuarantine(btn); });
     });
     document.getElementById('mark-all').checked = false;
+    // The filter bar's Total (Magnetic Filter bar > Anatomy, "<number> +
+    // results"). One readout, in the bar the filters live in: the page used
+    // to carry two, "N devices" up in the table-level toolbar and "showing X
+    // of N" down in the filter row, which said the same thing twice in two
+    // different vocabularies and left the reader checking both.
+    // Plural agreement follows `total` in BOTH branches: in the "X of N"
+    // form the noun belongs to N, so filtering twelve devices down to one
+    // reads "1 of 12 results", not "1 of 12 result". Agreeing with the
+    // matched count instead put a grammar error on screen for the single
+    // most common thing the search box does.
     document.getElementById('dev-count').textContent =
-      total + ' device' + (total === 1 ? '' : 's');
-    var fc = document.getElementById('dev-filter-count');
-    if (fc) {
-      fc.textContent = devs.length === total ? ''
-        : ('showing ' + devs.length + ' of ' + total);
-    }
+      (devs.length === total ? String(total) : devs.length + ' of ' + total) +
+      ' result' + (total === 1 ? '' : 's');
     updateMoreFiltersSummary();
+    updateFilterBarState();
     updateSelBar();
   }
   // ---- Device deployment details (per-row ⓘ) ----
@@ -1535,22 +1561,6 @@
     markAll.checked = true;
     markAll.dispatchEvent(new Event('change'));
   });
-  // Selection-gutter visibility toggle (density pass, Task 8): purely
-  // cosmetic -- body.selecting only drives the checkbox-column opacity in
-  // styles.css. It never touches which boxes are checked, the filtered-
-  // select-all copy, checked-id retention across refresh, or any busy lock;
-  // a checkbox stays a real, always-clickable/focusable native input either
-  // way (opacity, never display/visibility), and still shows on its own via
-  // :hover/:focus-within/:checked even with this off.
-  (function () {
-    var toggle = document.getElementById('dev-select-toggle');
-    if (!toggle) return;
-    toggle.addEventListener('click', function () {
-      var on = !document.body.classList.contains('selecting');
-      document.body.classList.toggle('selecting', on);
-      toggle.setAttribute('aria-pressed', String(on));
-    });
-  })();
   // ---- menus / selection bar (toolbar rework, spec 2026-08-12) ----
   // CSP-safe popovers: static hidden panels toggled by their trigger; a click
   // on .menu-close (menu items, the Start button) closes; outside click and
@@ -1588,12 +1598,91 @@
   document.addEventListener('click', function () { if (openMenuPanel) closeMenus(); });
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && openMenuPanel) closeMenus(); });
   wireMenu('csv-menu-btn', 'csv-menu');
-  wireMenu('onboard-menu-btn', 'onboard-pop');
-  wireMenu('undeploy-menu-btn', 'undeploy-pop');
-  // Bulk-bar action cap (Wave B): Adopt/Quarantine/Release/Apply-credential
-  // live inside this popover now -- same generic menu machinery as every
-  // other menu-wrap on the page, no action-specific wiring here.
+  // Bulk-bar action cap (Magnetic Table > Bulk action bar allows up to four
+  // actions): Adopt/Quarantine/Release/Set-credential/Delete live inside this
+  // overflow dropdown -- same generic menu machinery as every other menu-wrap
+  // on the page, no action-specific wiring here.
   wireMenu('more-menu-btn', 'more-pop');
+  // ---- bulk-action modals -------------------------------------------------
+  // Onboard / Undeploy / Set credential used to be .menu popovers hanging off
+  // caret buttons in the bulk bar, each carrying form controls and its own
+  // nested submit button. Magnetic Dropdown rules that shape out -- "Selecting
+  // an item from the menu starts an action without requiring the use of
+  // another button to submit or apply" -- and names the replacement in the
+  // same breath: "provide features in bulk action bar that open modals".
+  // Magnetic Modal > Usage agrees ("Use modals for simple tasks that inform,
+  // confirm, or complete a simple action"). Every control id inside moved
+  // unchanged, so telemetryFlags(), startBatch() and the credential handler
+  // read exactly what they read before.
+  var modalOpener = null;
+  function openModal(id) {
+    var overlay = document.getElementById(id);
+    if (!overlay) return;
+    // Remember what to hand focus back to on close. An opener that lives
+    // INSIDE a .menu popover -- "Set credential…" in the bulk bar's overflow
+    // -- carries .menu-close, so wireMenu's own panel handler runs closeMenus()
+    // a moment after this line and hides it. focus() on a display:none element
+    // is a spec'd no-op, so restoring to it would silently drop the operator
+    // at the top of the document instead of back in the bulk bar. Fall back to
+    // the popover's trigger, which stays on screen.
+    var opener = document.activeElement;
+    var menu = opener && opener.closest ? opener.closest('.menu') : null;
+    if (menu) {
+      var wrap = menu.closest('.menu-wrap');
+      opener = (wrap && wrap.querySelector('[aria-expanded]')) || opener;
+    }
+    modalOpener = opener;
+    overlay.hidden = false;
+    var first = overlay.querySelector('.modal-body input, .modal-body select') ||
+                overlay.querySelector('.modal-foot .btn');
+    if (first) first.focus();
+  }
+  function closeModal(id) {
+    var overlay = document.getElementById(id);
+    if (!overlay || overlay.hidden) return;
+    overlay.hidden = true;
+    // Return focus to whatever opened it -- if that button has since been
+    // hidden with the bulk bar (the batch cleared the selection), focus()
+    // on it is simply a no-op and the browser falls back to the document.
+    if (modalOpener && modalOpener.focus) modalOpener.focus();
+    modalOpener = null;
+  }
+  function wireModal(id, closerIds) {
+    var overlay = document.getElementById(id);
+    if (!overlay) return;
+    closerIds.forEach(function (cid) {
+      var el = document.getElementById(cid);
+      if (el) el.addEventListener('click', function () { closeModal(id); });
+    });
+    // Deliberately NO backdrop click-to-close. The head's ✕, the foot's Cancel
+    // and Escape are the ways out, which is what Magnetic Modal asks for ("Do
+    // include a button to close the modal in all cases") -- and it is what the
+    // image picker below, this page's pre-existing modal, already does.
+    // A bare `e.target === overlay` closer misfires twice: the second click of
+    // a double-click on the opener lands on the backdrop that the first click
+    // just raised over it, so the dialog flashes open and shut and the button
+    // reads as dead; and a click is dispatched at the common ancestor of its
+    // mousedown and mouseup, so drag-selecting the undeploy modal's force
+    // help text and releasing past the dialog edge targets the overlay and
+    // closes it mid-read.
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && !overlay.hidden) closeModal(id);
+    });
+    trapDialogFocus(overlay);
+  }
+  var BULK_MODALS = ['onboard-modal', 'undeploy-modal', 'cred-modal'];
+  wireModal('onboard-modal', ['onboard-cancel', 'onboard-modal-x']);
+  wireModal('undeploy-modal', ['undeploy-cancel', 'undeploy-modal-x']);
+  wireModal('cred-modal', ['cred-modal-cancel', 'cred-modal-x']);
+  document.getElementById('onboard-selected').addEventListener('click', function () {
+    openModal('onboard-modal');
+  });
+  document.getElementById('undeploy-selected').addEventListener('click', function () {
+    openModal('undeploy-modal');
+  });
+  document.getElementById('set-cred-selected').addEventListener('click', function () {
+    openModal('cred-modal');
+  });
   wireMenu('help-btn', 'help-pop');
   wireMenu('status-legend-btn', 'status-legend-pop');
   // Settings/Monitoring flyouts (Wave D fix 2, operator: "does not
@@ -1642,9 +1731,17 @@
     if (allSelected) scopeText.textContent = '· All ' + m + ' filtered devices selected';
     scopeAll.hidden = allSelected || n === 0;
     if (!scopeAll.hidden) scopeAll.textContent = '· Select all ' + m + ' filtered devices';
-    document.getElementById('onboard-selected').textContent = 'Start onboard (' + n + ')';
-    document.getElementById('assign-images-selected').textContent =
-      'Assign images to ' + n + ' devices…';
+    // The count lives in the bar's own indicator (Magnetic Table > Bulk
+    // action bar: "An indicator displays the number of selected rows"), so
+    // the buttons stop restating it. They used to read "Start onboard (3)"
+    // and "Assign images to 3 devices…", which re-measured and reflowed the
+    // whole bar on every checkbox click -- Magnetic Button > Wrapping and
+    // truncation wants button text brief and settled. Each modal repeats the
+    // count in its own title instead, where it is the thing being confirmed.
+    ['onboard', 'undeploy', 'cred'].forEach(function (k) {
+      var el = document.getElementById(k + '-modal-count');
+      if (el) el.textContent = n + ' selected';
+    });
     document.querySelectorAll('#dev-rows tr').forEach(function (tr) {
       var cb = tr.querySelector('.mark');
       tr.classList.toggle('sel', !!(cb && cb.checked));
@@ -1656,6 +1753,10 @@
     // operator reads as a broken control.
     if (n === 0 && openMenuPanel && openMenuPanel.id !== 'help-pop' &&
         openMenuPanel.id !== 'status-legend-pop') closeMenus();
+    // The bulk modals are scoped to the selection exactly the way those
+    // popovers were: with the last row deselected they are asking the
+    // operator to confirm an action on nothing, so they close with the bar.
+    if (n === 0) BULK_MODALS.forEach(closeModal);
   }
   document.getElementById('dev-rows').addEventListener('change', function (e) {
     if (e.target.classList.contains('mark')) updateSelBar();
@@ -1819,8 +1920,16 @@
     renderOnboardOutcome(action, Object.keys(batchJobs).length, failed);
     if (await pollBatch()) startBatchPoll(gen);
   }
-  document.getElementById('onboard-selected').addEventListener('click', function () { startBatch('onboard'); });
-  document.getElementById('undeploy-selected').addEventListener('click', function () { startBatch('undeploy'); });
+  // The bulk-bar buttons open their modal (wired above); the modal's own
+  // primary is what actually starts the batch.
+  document.getElementById('onboard-confirm').addEventListener('click', function () {
+    closeModal('onboard-modal');
+    startBatch('onboard');
+  });
+  document.getElementById('undeploy-confirm').addEventListener('click', function () {
+    closeModal('undeploy-modal');
+    startBatch('undeploy');
+  });
 
   // ---- bulk row actions (adopt / delete / assign credential) ----
   function selectedIds() {
@@ -1830,14 +1939,22 @@
   // Every selected-action shares one lock. Without it a delete could fire while
   // an onboard batch is still starting, removing inventory out from under a
   // running job — onboard/undeploy previously guarded only each other.
-  var BULK_BTNS = ['onboard-selected', 'undeploy-selected', 'adopt-selected',
+  // The controls that actually FIRE a bulk action and claim the lock. Onboard
+  // and undeploy now fire from inside their modal, so the ids here are the
+  // modal primaries; the bulk bar's own Onboard…/Undeploy… buttons only open
+  // those modals and are listed as openers below.
+  var BULK_BTNS = ['onboard-confirm', 'undeploy-confirm', 'adopt-selected',
                    'delete-selected', 'apply-cred-selected',
                    'assign-images-selected',
                    'quarantine-selected', 'release-selected'];
+  // Openers claim no lock of their own -- there is nothing to claim until the
+  // modal's primary is pressed -- but they must not hand out a second modal
+  // while a batch is still starting.
+  var BULK_OPENERS = ['onboard-selected', 'undeploy-selected', 'set-cred-selected'];
   var bulkBusy = false;
   function setBulkBusy(busy) {
     bulkBusy = busy;
-    BULK_BTNS.forEach(function (id) {
+    BULK_BTNS.concat(BULK_OPENERS).forEach(function (id) {
       var el = document.getElementById(id);
       if (el) el.disabled = busy;
     });
@@ -2272,6 +2389,7 @@
   document.getElementById('apply-cred-selected').addEventListener('click', async function () {
     var ids = claimSelection();
     if (!ids) return;
+    closeModal('cred-modal');
     var pid = document.getElementById('cred-selected').value;
     await forSelected(pid ? 'Assigned ' + pid + ' to' : 'Cleared credential on', ids,
       function (id) {

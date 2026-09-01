@@ -130,21 +130,21 @@ ALLOWLIST = [
     ("server/tests/test_gui_fleet.py", frozenset({636, 637, 648, 652}),
      "deliberate hard-break pin: the removed network_attachment read-alias "
      "no longer classifies a fleet.json row (decision 1)"),
-    ("server/tests/test_gui_server.py", frozenset({2363, 2368, 2384}),
+    ("server/tests/test_gui_server.py", frozenset({2379, 2384, 2400}),
      "deliberate hard-break pin: a fleet row carrying only the retired "
      "network_attachment alias plans as unclassified, not migrated "
      "(decision 1)"),
-    ("server/tests/test_gui_server.py", frozenset({2398, 2400, 2411}),
+    ("server/tests/test_gui_server.py", frozenset({2414, 2416, 2427}),
      "deliberate hard-break pin: same alias-retirement boundary on the "
      "xr-appmgr/xr-host mutual-requirement side (decision 1)"),
 
     # -- Task 2 / decision 6: docstrings that name the pre-fix silent --
     # -- default a regression test guards against (historical prose) --
-    ("server/tests/test_gui_server.py", frozenset({2458}),
+    ("server/tests/test_gui_server.py", frozenset({2474}),
      "docstring names the pre-fix silent default (falling through as "
      "attachment=None) this regression test guards against -- historical, "
      "Task 2 / decision 6"),
-    ("server/tests/test_gui_server.py", frozenset({7125, 7136, 7137, 7140}),
+    ("server/tests/test_gui_server.py", frozenset({7141, 7152, 7153, 7156}),
      "deliberate hard-break pin: asserts app.js's deployRecordRows reads "
      "res.management_type and never falls back to the retired res.attachment "
      "(decision 6); line numbers shifted +1 by Wave C's unrelated edits "
@@ -162,7 +162,7 @@ ALLOWLIST = [
 
     # -- declared break 7 family: receipt_id -> record_id on wire --------
     # -- responses (break 8 is the separate audit-detail-string wording) --
-    ("server/tests/test_gui_server.py", frozenset({2625, 2630, 2643, 2649}),
+    ("server/tests/test_gui_server.py", frozenset({2641, 2646, 2659, 2665}),
      "deliberate hard-break pin: asserts the retired receipt_id key never "
      "leaks onto the onboard-job-status wire response (declared break 7's "
      "response-object family; NOT break 8, which is audit-string wording)"),
@@ -179,8 +179,9 @@ ALLOWLIST = [
     # 578 when Wave B's left-nav fixes (icons, divider, on-grid indent,
     # flyout submenus, compact-anatomy comment) added lines above it to 593
     # when Wave E's flyout-indent review fix added its own comment+rule
-    # above it -- same property, re-pinned at its new location.
-    ("server/webroot/styles.css", frozenset({593}),
+    # above it to 598 when the Magnetic action-layout pass added the
+    # .btn[hidden] guard above it -- same property, re-pinned each time.
+    ("server/webroot/styles.css", frozenset({598}),
      "the CSS `background-attachment` property (Task 6's .table-scroll "
      "scroll-shadow gradients) -- unrelated to the retired attachment "
      "vocabulary, hard exclusion"),

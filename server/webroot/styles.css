@@ -82,6 +82,11 @@ select:focus-visible, textarea:focus-visible, button:focus-visible {
 .btn:hover { background:var(--action-hover); }
 .btn:active { transform:translateY(1px); box-shadow:inset 0 1px 3px rgba(0,0,0,.25); }
 .btn:focus-visible { outline:none; box-shadow:var(--focus-ring); }
+/* .btn's own display:inline-flex outranks the [hidden] attribute's UA
+   display:none, so any button toggled with .hidden -- the filter bar's Reset,
+   the bulk bar's "Select all N filtered devices" -- would stay on screen
+   forever without this. */
+.btn[hidden] { display:none; }
 .btn.ghost { background:var(--surface); color:var(--action); border:1px solid var(--border); box-shadow:var(--shadow-xs); }
 .btn.ghost:hover { background:var(--action-tint); border-color:var(--action); }
 .btn.ghost:active { transform:translateY(1px); box-shadow:inset 0 1px 2px rgba(0,0,0,.12); }
@@ -642,14 +647,10 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
   .main { padding: var(--sp-lg); }
   .drawer, #dl-drawer { width: 100vw; }
   .modal { width: calc(100% - 2 * var(--sp-lg)); }
-  /* Touch/narrow (density pass, Task 8): the selection-gutter fade below is
-     a hover affordance a touch viewport cannot produce, so the checkboxes
-     stay always visible here regardless of body.selecting. */
-  #devices .mark, #devices #mark-all { opacity: 1; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .nav-rail, .btn, .chip, .dropzone, .progress .bar, #devices .mark, #devices #mark-all { transition: none; }
+  .nav-rail, .btn, .chip, .dropzone, .progress .bar { transition: none; }
 }
 
 /* ---------------------------------------------------------------------
@@ -661,21 +662,15 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
    beyond the existing status-pill levels.
    --------------------------------------------------------------------- */
 
-/* Selection gutter: checkbox column fades to transparent except on row
-   hover/focus-within, when checked, or while body.selecting is set (the
-   "Select devices" toggle, app.js) -- opacity only, never
-   display/visibility, so every native input stays exactly as
-   clickable/focusable/tabbable as before. The <=768px override above
-   always shows them (touch has no hover to reveal them with). */
-#devices .mark, #devices #mark-all { opacity: 0; transition: opacity .12s ease; vertical-align: middle; }
-#devices tbody tr:hover .mark,
-#devices tbody tr:focus-within .mark,
-#devices .mark:checked,
-#devices thead:hover #mark-all,
-#devices thead:focus-within #mark-all,
-#devices #mark-all:checked,
-body.selecting #devices .mark,
-body.selecting #devices #mark-all { opacity: 1; }
+/* Selection gutter: always visible. It used to fade to transparent unless
+   the row was hovered/focused/checked or the operator had pressed a
+   "Select devices" toggle -- a control with no counterpart in Magnetic,
+   which treats the checkbox as one of the table's fixed, non-adjustable
+   columns (Table > Columns: "the checkbox, #, status, action, row
+   reordering, and expand columns are not adjustable") and shows it
+   whenever a table supports selection. Hiding it bought a few pixels of
+   density and cost the page a button nobody could explain. */
+#devices .mark, #devices #mark-all { vertical-align: middle; }
 
 /* Dense-table modifier (Wave D fix 1, operator: "different fonts" persisted
    even after the Wave A type-role fix): a single Devices row was mixing
@@ -714,9 +709,11 @@ body.selecting #devices #mark-all { opacity: 1; }
    reflows the rest of the toolbar. */
 #more-filters { position: relative; }
 #more-filters summary { cursor: pointer; list-style: none; display: inline-flex; align-items: center;
-  height: 32px; padding: 0 12px; font-size: 14px; color: var(--action); background: var(--surface);
-  border: 1px solid var(--border); border-radius: var(--radius-control); }
+  gap: 6px; height: 32px; padding: 0 12px; font-size: 14px; color: var(--action);
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-control);
+  box-shadow: var(--shadow-xs); white-space: nowrap; }
 #more-filters summary::-webkit-details-marker { display: none; }
+#more-filters summary .ico { width: 16px; height: 16px; flex: none; }
 #more-filters summary:hover { background: var(--action-tint); border-color: var(--action); }
 #more-filters summary:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 #more-filters[open] summary { background: var(--action-tint); border-color: var(--action); }
@@ -738,3 +735,103 @@ body.selecting #devices #mark-all { opacity: 1; }
 #status-legend-pop .legend-title { font-size: 11px; font-weight: 600; text-transform: uppercase;
   letter-spacing: .3px; color: var(--text-secondary); padding: 4px 8px 6px; }
 #status-legend-pop .legend-row { padding: 4px 8px; }
+
+/* ---------------------------------------------------------------------
+   Devices: Magnetic action-layout pass (2026-09-01). The page had grown
+   three separate rows of controls -- a table-level toolbar, a filter
+   toolbar, and the selection bar -- carrying buttons in four different
+   visual weights, two unrelated controls both labelled "More", and a
+   "Select devices" toggle with no counterpart anywhere in Magnetic. The
+   rules applied here, all from the Magnetic archive under agentinfo/:
+
+     Table > Placement > Table-level actions -- with a filter bar present,
+       table-level actions belong on the RIGHT SIDE of that filter bar,
+       "to keep all table controls in a single, consistent location".
+     Filter bar > Anatomy -- Search, persistent filters, an overflow
+       button labelled "<icon> + Filters", a Total of the form "<number>
+       results", and a Reset shown only once a filter or search is active.
+     Filter bar > Spacing with other elements -- 36px minimum gap between
+       the bar and whatever sits to its right.
+     Table > Bulk action bar -- up to FOUR actions, a selected-row count,
+       a select-all-beyond-this-page option, sits above the table header,
+       dismissed by deselecting or by a "Cancel" button.
+     Button > Usage -- one action per button; no caret as a trailing icon
+       (that shape is a Dropdown); text links are for navigation inside a
+       paragraph, standalone actions get a button.
+     Button > Button group > Alignment -- the primary sits on the group's
+       outside edge; 8px between primary/secondary, 16px around tertiary.
+   --------------------------------------------------------------------- */
+
+/* The single control row: filter bar left, table-level actions right.
+   Both halves wrap internally before the row itself breaks, and the row
+   only stacks once the viewport can no longer hold the two side by side. */
+.table-controls { display:flex; align-items:flex-start; justify-content:space-between;
+  gap:36px; flex-wrap:wrap; margin:8px 0 12px; }
+.filter-bar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; flex:1 1 460px; min-width:0; }
+.filter-bar > input { min-width:200px; flex:0 1 260px; }
+/* Total, per Filter bar > Anatomy. Secondary text, not a control, so it
+   reads as a readout of the bar rather than another thing to click. */
+.filter-total { font-size:12px; line-height:18px; color:var(--text-secondary); white-space:nowrap; }
+/* Button group, right-aligned: 8px between the primary/secondary buttons
+   (Button > Button group > Sizes, medium). */
+.table-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; flex:0 0 auto; }
+/* Action/job feedback gets the row under the controls -- inside the bar it
+   competed with the filters for width and shoved them around as it grew. */
+.dev-status-line { font-size:12px; line-height:18px; margin:0 0 12px; min-height:18px; }
+.dev-status-line.err { color:var(--danger); }
+
+/* Tertiary button (Button > Variants: "Primary and primary destructive /
+   Secondary and secondary destructive / Tertiary and tertiary
+   destructive"). The console only had solid and outlined, so every quiet
+   standalone action -- Reset, Cancel, Select all -- had been reaching for
+   .linkish, a text link, which Button > Usage reserves for navigation
+   inside body copy. Same 32px box as the other two so a mixed group
+   still sits on one baseline. */
+.btn.tertiary { background:none; color:var(--action); border:1px solid transparent; box-shadow:none;
+  padding:0 8px; }
+.btn.tertiary:hover { background:var(--action-tint); }
+.btn.tertiary:active { transform:translateY(1px); box-shadow:none; }
+.btn.tertiary:focus-visible { outline:none; box-shadow:var(--focus-ring); }
+.btn.tertiary.danger-text { color:var(--danger); }
+.btn.tertiary.danger-text:hover { background:var(--danger-tint); }
+
+/* Dropdown trigger. Button > Usage forbids a caret as a button's trailing
+   icon and points at the Dropdown component instead; its trigger is a
+   button that carries a chevron and flips it while the menu is open. The
+   triggers here used to be plain .btn with a literal "▾" typed into the
+   label. */
+.btn.dropdown { gap:6px; padding-right:12px; }
+.btn.dropdown .caret { width:14px; height:14px; flex:none; transition:transform .12s ease; }
+.btn.dropdown[aria-expanded="true"] .caret { transform:rotate(180deg); }
+.btn.dropdown[aria-expanded="true"] { background:var(--action-tint); border-color:var(--action); }
+
+/* Dropdown menu: dividers and destructive items (Dropdown > Types: "A
+   dropdown menu can contain regular, disabled, and destructive menu item
+   types" and "With dividers, groups"). */
+.menu-divider { border:0; height:1px; background:var(--rule); margin:6px 4px; }
+.menu-item.danger { color:var(--danger); }
+.menu-item.danger:hover { background:var(--danger-tint); color:var(--danger); }
+
+/* Bulk action bar: selection state on the left, the four actions on the
+   right with the primary on that group's outside edge. */
+.selbar-actions { display:flex; align-items:center; gap:8px; margin-left:auto; flex-wrap:wrap; }
+
+/* Modal option rows (the onboard/undeploy checkboxes that used to hang
+   inside dropdown popovers). */
+.modal-body .check-row { display:flex; align-items:center; gap:8px; padding:6px 0; font-size:14px; }
+.modal-body .menu-note { max-width:none; margin-top:4px; }
+/* Icon-only button (Button > Variants: "Each type has a text version
+   (default) with optional icons and an icon-only version"). Square, on the
+   same 32px box and the same corner radius as every other button -- unlike
+   the pre-existing round .btn.icon, which is the header's "?" pill. */
+.btn.icon-only { width:32px; height:32px; padding:0; flex:none; }
+.btn.icon-only svg { width:16px; height:16px; }
+.modal-head .btn.icon-only { margin-left:12px; }
+
+@media (max-width: 768px) {
+  /* Stacked, the 36px inter-group gap is dead vertical space -- the row
+     break itself already separates the two halves. */
+  .table-controls { gap:12px; }
+  .table-actions { width:100%; }
+  .selbar-actions { margin-left:0; width:100%; }
+}

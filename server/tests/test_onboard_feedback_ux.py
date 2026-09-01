@@ -43,13 +43,13 @@ def test_app_js_defines_onboard_outcome_render_hook():
 
 
 def test_app_js_startbatch_uses_the_render_hook_and_device_reason_format():
-    """startBatch (fired by both "Start onboard" and "Undeploy" on the
-    selection bar) must route through the hook above -- not print a bare
+    """startBatch (fired by the "Start onboard" and "Start undeploy"
+    primaries in the bulk bar's modals) must route through the hook above -- not print a bare
     success count with failures silently dropped -- and each refusal must
     read "<device_id>: <reason>", not a bare id or a mystery blob."""
     js = _read("app.js")
     body = js.split("async function startBatch(action) {", 1)[1].split(
-        "\n  document.getElementById('onboard-selected')", 1)[0]
+        "\n  // The bulk-bar buttons open their modal", 1)[0]
     assert "renderOnboardOutcome(action, Object.keys(batchJobs).length, failed)" in body
     # "<device_id>: <reason>" -- not the old "<device_id> (<reason>)" shape
     assert "id + ': ' + reason" in body
@@ -62,7 +62,7 @@ def test_app_js_never_swallows_a_refused_device():
     dropped on the floor between the fetch and the status line."""
     js = _read("app.js")
     body = js.split("async function startBatch(action) {", 1)[1].split(
-        "\n  document.getElementById('onboard-selected')", 1)[0]
+        "\n  // The bulk-bar buttons open their modal", 1)[0]
     assert "if (r.ok) { batchJobs[(await r.json()).job_id] = id; } else {" in body
     branch = body.split("if (r.ok) { batchJobs[(await r.json()).job_id] = id; } else {", 1)[1]
     branch = branch.split("} catch (e) { failed.push(id); }", 1)[0]
