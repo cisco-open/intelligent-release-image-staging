@@ -441,7 +441,12 @@ def _default_probe(dev, env, repo_root):
         out = subprocess.run(
             ["bash", os.path.join(repo_root, "lab", "device-run.sh"), device_ip],
             input="show version\n", capture_output=True, text=True, env=env,
-            timeout=45)
+            # 45s was under a measured 49.5s first-contact session on a
+            # segment where a stray DNS lookup black-holes: the
+            # TimeoutExpired is swallowed below and the caller then reports
+            # "cannot reach device", sending the operator after the IP and
+            # the credentials instead of the real cause.
+            timeout=75)
     except Exception:
         return ""
     text = out.stdout or ""
@@ -484,8 +489,10 @@ def _probe_sections(runner, env, commands, label):
     request = "\n".join(
         "echo %s%s__\n%s" % (marker, name.upper(), command)
         for name, command in commands) + "\n"
+    # 90s, not 60s: the preflight is a job's FIRST session against a device,
+    # and it blew the old 60s budget three times in one measured fleet wave.
     out = subprocess.run(["bash", runner, env["DEVICE_IP"]], input=request,
-                         capture_output=True, text=True, env=env, timeout=60)
+                         capture_output=True, text=True, env=env, timeout=90)
     if out.returncode != 0:
         raise ValueError("%s preflight could not run" % label)
     sections = {}
@@ -571,8 +578,10 @@ def _default_router_preflight(dev, env, resolved, repo_root):
     request = "\n".join(
         "echo %s%s__\n%s" % (marker, name.upper(), command)
         for name, command in commands) + "\n"
+    # 90s, not 60s: the preflight is a job's FIRST session against a device,
+    # and it blew the old 60s budget three times in one measured fleet wave.
     out = subprocess.run(["bash", runner, env["DEVICE_IP"]], input=request,
-                         capture_output=True, text=True, env=env, timeout=60)
+                         capture_output=True, text=True, env=env, timeout=90)
     if out.returncode != 0:
         raise ValueError("router preflight could not run")
     sections = {}
@@ -1143,6 +1152,16 @@ class OnboardService:
         job = {"id": job_id, "device_id": device_id, "action": action,
                  "state": "queued", "lines": [], "returncode": None,
                  "_line_bytes": 0, "_log_truncated": False,
+                # Wall-clock of each captured line, kept PARALLEL to "lines"
+                # rather than prefixed into it: the SSE stream, the console and
+                # every caller that matches on line content (e.g. the
+                # "ERROR:" scan in _finish) stay byte-identical, and only the
+                # persisted log gains the offsets. Without these the recipes'
+                # [n/7] banners carry no timing at all, so the only evidence
+                # for where a slow onboard spent its time is the job's total
+                # duration -- which cannot tell a slow guestshell bring-up
+                # from a slow artifact fetch.
+                "_line_ts": [],
                 "queued_at": int(self._now()),
                 "started_at": None, "finished_at": None, "record_id": None,
                 "resolved": resolved, "env_extra": env_extra}
@@ -1414,9 +1433,13 @@ class OnboardService:
 
     def _append_locked(self, job, line):
         size = len(line.encode("utf-8", "replace"))
+        # Kept in lockstep with job["lines"] on every path below, including
+        # the pops, so _persist_log can zip the two without checking.
+        stamps = job.setdefault("_line_ts", [])
         if len(job["lines"]) < _MAX_JOB_LOG_LINES \
                 and job["_line_bytes"] + size <= _MAX_JOB_LOG_BYTES:
             job["lines"].append(line)
+            stamps.append(self._now())
             job["_line_bytes"] += size
         elif not job["_log_truncated"]:
             marker_bytes = len(_LOG_TRUNCATED.encode())
@@ -1424,8 +1447,11 @@ class OnboardService:
             while job["lines"] and (len(job["lines"]) >= _MAX_JOB_LOG_LINES
                     or job["_line_bytes"] + marker_bytes > _MAX_JOB_LOG_BYTES):
                 removed = job["lines"].pop()
+                if stamps:
+                    stamps.pop()
                 job["_line_bytes"] -= len(removed.encode("utf-8", "replace"))
             job["lines"].append(_LOG_TRUNCATED)
+            stamps.append(self._now())
             job["_line_bytes"] += marker_bytes
             job["_log_truncated"] = True
 
@@ -1514,7 +1540,8 @@ class OnboardService:
                     # snapshot under the lock; the disk write happens outside
                     # it. The job dict does not carry the terminal state yet,
                     # so the header's state comes from the argument.
-                    log_job = dict(j, state=state, lines=list(j["lines"]))
+                    log_job = dict(j, state=state, lines=list(j["lines"]),
+                                   _line_ts=list(j.get("_line_ts") or []))
         try:
             if log_job is not None:
                 # Best-effort: a full or read-only state volume must never
@@ -1562,11 +1589,21 @@ class OnboardService:
                      job.get("state"), job.get("returncode"),
                      job.get("queued_at"), job.get("started_at"),
                      job.get("finished_at"), job.get("platform")))
+        # Each line is prefixed with its offset in seconds from started_at, so
+        # a slow job says WHERE it was slow. Falls back to the bare line when
+        # a stamp is missing (a job dict from an older in-memory generation, or
+        # an injected test double), never dropping the line itself.
+        stamps = job.get("_line_ts") or []
+        base = job.get("started_at") or job.get("queued_at")
         with open(os.path.join(self.log_dir, fname), "w",
                   encoding="utf-8") as f:
             f.write(header + "\n")
-            for line in job["lines"]:
-                f.write(line + "\n")
+            for i, line in enumerate(job["lines"]):
+                ts = stamps[i] if i < len(stamps) else None
+                if ts is None or base is None:
+                    f.write(line + "\n")
+                else:
+                    f.write("[+%7.1fs] %s\n" % (float(ts) - float(base), line))
         logs = sorted(
             (n for n in os.listdir(self.log_dir) if n.endswith(".log")),
             key=lambda n: os.path.getmtime(os.path.join(self.log_dir, n)),

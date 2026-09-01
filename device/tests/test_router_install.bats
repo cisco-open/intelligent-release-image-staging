@@ -351,7 +351,13 @@ PY2
   # loop and was not folded into verify_request()/the step [6/7] merge.
   step4_line="$(grep -n '^echo "\[4/7\] guestshell enable' "$INSTALL" | head -1 | cut -d: -f1)"
   step5_line="$(grep -n '^echo "\[5/7\] install trustpoint' "$INSTALL" | head -1 | cut -d: -f1)"
-  for_line="$(grep -n 'for i in \$(seq 1 30); do' "$INSTALL" | head -1 | cut -d: -f1)"
+  # The iteration count is a tunable (it moved when the flat 15s wait became a
+  # ramp), so match the loop, not the number -- and search inside the step
+  # [4/7] window so the earlier destroy-wait loop cannot be picked up instead.
+  for_rel="$(sed -n "${step4_line},${step5_line}p" "$INSTALL" \
+    | grep -n 'for i in \$(seq 1 [0-9][0-9]*); do' | head -1 | cut -d: -f1)"
+  for_line=""
+  [ -n "$for_rel" ] && for_line=$((step4_line + for_rel - 1))
   poll_call_line="$(sed -n "${step4_line},${step5_line}p" "$INSTALL" \
     | grep -n 'show app-hosting list' | head -1 | cut -d: -f1)"
   [ -n "$step4_line" ] && [ -n "$for_line" ] && [ -n "$poll_call_line" ]

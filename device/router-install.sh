@@ -259,7 +259,15 @@ printf 'mkdir %s\n\n' "$IOS_ROOT" \
   | "$HERE/../lab/device-run.sh" "$DEVICE_IP" >/dev/null 2>&1 || true
 
 echo "[4/7] guestshell enable"
-for i in $(seq 1 30); do
+# Every iteration is its own login, deliberately: this is a state-gated poll,
+# and collapsing repeated observations into one session is precisely what the
+# 2026-08-29..31 fail-open wave was about (a marker proves what was typed,
+# never what ran). What IS wrong here is the flat wait -- a guest that came up
+# in 20 s still paid a full 15 s of overshoot, and the first observation was
+# 15 s late for no reason. The sleep ramps 2,4,6..15 instead, which keeps the
+# same overall budget (~431 s of sleep across 32 steps vs 450 s across 30)
+# while finding a fast bring-up almost immediately.
+for i in $(seq 1 32); do
   state="$(printf 'show app-hosting list\n' \
     | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>/dev/null \
     | grep -i guestshell || true)"
@@ -268,9 +276,11 @@ for i in $(seq 1 30); do
     printf 'guestshell enable\n' \
       | "$HERE/../lab/device-run.sh" "$DEVICE_IP" >/dev/null 2>&1 || true
   fi
-  [ "$i" -ne 30 ] \
-    || { echo "ERROR: guestshell not RUNNING after ~7 minutes" >&2; exit 1; }
-  sleep 15
+  [ "$i" -ne 32 ] \
+    || { echo "ERROR: guestshell not RUNNING after ~9 minutes" >&2; exit 1; }
+  backoff=$((i * 2))
+  [ "$backoff" -gt 15 ] && backoff=15
+  sleep "$backoff"
 done
 
 echo "[5/7] install trustpoint and copy agent artifacts over verified HTTPS"

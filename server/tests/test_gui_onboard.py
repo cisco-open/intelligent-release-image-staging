@@ -3,6 +3,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 import os
+import re
 import threading
 import time
 from types import SimpleNamespace
@@ -2621,7 +2622,14 @@ def test_finish_persists_log_file_with_header_and_lines(tmp_path):
         "started_at=%s finished_at=%s platform=guestshell"
         % (job["id"], job["queued_at"], job["started_at"],
            job["finished_at"]))
-    assert lines[1:] == job["lines"]
+    # Each body line carries its offset from started_at, so a slow job says
+    # WHERE it was slow; the in-memory lines the console streams stay bare.
+    assert len(lines[1:]) == len(job["lines"])
+    for written, raw in zip(lines[1:], job["lines"]):
+        m = re.match(r"^\[\+ *(\d+\.\d)s\] (.*)$", written)
+        assert m, "no elapsed prefix on %r" % written
+        assert m.group(2) == raw
+        assert float(m.group(1)) >= 0.0
 
 
 def test_failed_job_log_persisted_with_error_state(tmp_path):

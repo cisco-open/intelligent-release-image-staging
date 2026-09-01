@@ -151,11 +151,11 @@ ALLOWLIST = [
      "earlier in this file (setup-status packages.items test); the pinned "
      "line is historical prose describing the pre-fix rendering this test "
      "guards against"),
-    ("server/tests/test_gui_onboard.py", frozenset({319}),
+    ("server/tests/test_gui_onboard.py", frozenset({320}),
      "docstring names the pre-fix silent default (_build_env used to "
      "default a missing attachment/management_type to \"routed\") this "
      "regression test guards against -- historical, Task 2 / decision 6"),
-    ("server/tests/test_gui_onboard.py", frozenset({1437, 1440}),
+    ("server/tests/test_gui_onboard.py", frozenset({1438, 1441}),
      "docstring names the pre-fix three-level fallback chain "
      "(attachment -> management_type -> network_attachment) this "
      "regression test guards against -- historical, Task 2 / decision 6"),
