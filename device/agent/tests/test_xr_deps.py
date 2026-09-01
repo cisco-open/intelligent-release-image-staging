@@ -415,6 +415,21 @@ def test_build_deps_ios_escape_hatch_refuses_instead_of_pretending(tmp_path):
         assert "IOS-XR" in str(exc)
 
 
+def test_build_deps_refresh_rebinds_the_live_catalog_client(tmp_path):
+    """The refresh closure must hand _refresh_impl the CLIENT, not a bound
+    method: after the POST the server has already rotated, and the
+    device-bound routes reject the rolled token, so the same tick's
+    heartbeat/telemetry 401s unless the live bearer is re-pointed. This is
+    the wiring the unit tests around _refresh_impl cannot see."""
+    _cfg_out, deps = _build(tmp_path)
+    bag = {"catalog_token": "NEW", "expires_at": 1750000000}
+    deps.catalog.refresh_token = lambda device_id: bag
+
+    out = deps.refresh()
+    assert out["catalog_token"] == "NEW"
+    assert deps.catalog.token == "NEW"
+
+
 # --- the dispatch in iris_agent.build_deps -------------------------------
 
 def test_iris_agent_build_deps_dispatches_xr_mode_to_this_module(tmp_path, monkeypatch):

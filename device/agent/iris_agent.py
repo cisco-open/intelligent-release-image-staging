@@ -1629,10 +1629,11 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
 def run_once(cfg, deps, state):
     # Self-refresh the catalog token BEFORE any catalog work, once it's past
     # half-life (or its expiry is unknown). Best-effort: deps.refresh() does the
-    # POST + atomic conf rewrite and returns the updated cfg, or None on failure
-    # — on failure we log and proceed on the CURRENT token (a 7d TTL + half-life
-    # refresh leaves a ~3.5d retry buffer, so a few failed ticks never strand
-    # the device).
+    # POST + client rebind + atomic conf rewrite and returns the updated cfg,
+    # or None on failure — on failure we log and proceed on the current
+    # in-memory cfg (a 7d TTL + half-life refresh leaves a ~3.5d retry buffer,
+    # so a few failed ticks never strand the device; the live client's bearer
+    # is _refresh_impl's concern, see its docstring for the failure split).
     if needs_refresh(time.time(),
                      int(float(cfg.get("token_expires_at", 0) or 0)),
                      _TOKEN_TTL, _TOKEN_REFRESH_AT):
@@ -1788,25 +1789,42 @@ def needs_refresh(now, expires_at, ttl, refresh_at):
     return now >= expires_at - ttl * (1 - refresh_at)
 
 
-def _refresh_impl(cfg, conf_path, refresh_token_fn, emit_fn):
-    """Refresh the catalog token and persist the new secret bag.
+def _refresh_impl(cfg, conf_path, catalog, emit_fn):
+    """Refresh the catalog token, re-point the live client, persist the bag.
 
-    1. POST token-refresh (refresh_token_fn) -> {catalog_token, expires_at,
-       announce_token, rpc_secret}.
-    2. Merge into a copy of cfg, atomically rewrite conf_path, return the
+    1. POST token-refresh (catalog.refresh_token) -> {catalog_token,
+       expires_at, announce_token, rpc_secret}.
+    2. Re-point catalog.token at the new bearer IMMEDIATELY: the server
+       rotates on the POST, and the device-bound routes (heartbeat,
+       telemetry, token-refresh) reject the rolled token even inside the
+       overlap window (catalog.py's _guard requires secret_name ==
+       "catalog_token"; catalog_token_prev passes shared routes only). The
+       rest of THIS tick — the heartbeat is its last step — must therefore
+       authenticate with the new token; leaving the client on the old one
+       ends every refresh tick in a spurious HTTP 401 heartbeat.
+    3. Merge into a copy of cfg, atomically rewrite conf_path, return the
        reloaded cfg.
 
     Best-effort: ANY failure (network, write) logs TOKEN-REFRESH-FAIL and
     returns None so the caller proceeds on the current in-memory cfg. On the
-    POST-failure path the on-disk conf is never touched (no partial write).
-    Module-level + injected callables so it's unit-testable; build_deps wires
-    the real CatalogClient.refresh_token + emit."""
+    POST-failure path the on-disk conf is never touched (no partial write)
+    and the client keeps its current bearer. On a conf-WRITE failure the
+    client still keeps the NEW bearer — the server has already rotated, so
+    the new token is the only one the device-bound routes will accept for
+    the rest of this process; the stale on-disk conf is the next process's
+    problem, not this tick's.
+    Module-level + injected client/emit so it's unit-testable; build_deps
+    passes the real CatalogClient + emit."""
     sid = cfg["device_id"]
+    refresh_token_fn = catalog.refresh_token  # attr lookup outside the try:
+    # a mis-wired catalog (e.g. a bare callable) must fail loud, not be
+    # swallowed into a best-effort TOKEN-REFRESH-FAIL every tick.
     try:
         bag = refresh_token_fn(sid)
     except Exception as e:
         emit_fn("TOKEN-REFRESH-FAIL", "%s refresh POST failed: %s" % (sid, e))
         return None
+    catalog.token = bag["catalog_token"]
     new_cfg = dict(cfg)
     new_cfg["catalog_token"] = bag["catalog_token"]
     new_cfg["token_expires_at"] = str(bag["expires_at"])
@@ -2531,10 +2549,12 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
         cfg["catalog_url"], cfg["catalog_token"], context=ctx)
 
     def refresh():
-        # Thin wrapper — the POST + atomic conf rewrite + reload lives in the
-        # module-level _refresh_impl so it's unit-testable. Returns the reloaded
-        # cfg or None (best-effort).
-        return _refresh_impl(cfg, conf_path, catalog.refresh_token, emit)
+        # Thin wrapper — the POST + client rebind + atomic conf rewrite +
+        # reload lives in the module-level _refresh_impl so it's unit-testable.
+        # Pass the CLIENT, not a bound method: _refresh_impl re-points
+        # catalog.token after the POST. Returns the reloaded cfg or None
+        # (best-effort).
+        return _refresh_impl(cfg, conf_path, catalog, emit)
 
     # IE3x00 IOx app: IOx can't bind-mount sdflash: into the container, and inbound
     # to the container is blocked, so the agent can't write the IOS-visible SD

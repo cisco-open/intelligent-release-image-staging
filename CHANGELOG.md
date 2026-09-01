@@ -176,6 +176,18 @@ top-level `VERSION` file.
   `NOTICE` for full font/icon attribution.
 
 ### Fixed
+- A tick that refreshes the catalog token no longer ends in a spurious
+  `%IRIS-6-HEARTBEAT-FAIL` HTTP 401. The refresh rewrote the conf and the
+  local cfg but left the live catalog client on the pre-rotation bearer,
+  which the server's device-bound routes (heartbeat, telemetry,
+  token-refresh) reject even inside the 120-second overlap window — the
+  rolled token passes shared routes only, so staging proceeded while the
+  tick's closing heartbeat failed, once per refresh, since the first
+  release. The refresh now re-points the client at the new bearer the
+  moment the server mints it, on both the IOS-XE and IOS-XR builders, and
+  it does so even when the conf rewrite then fails, because the server has
+  already rotated by that point and the new token is the only one the
+  device-bound routes will accept for the rest of the tick.
 - The console no longer offers "auto by model" as an agent install. Picking it
   handed the decision to a model guess, which is how an IOS-XR router was sent
   down an install its hardware cannot run. The install is now chosen

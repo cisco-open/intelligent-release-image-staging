@@ -2701,10 +2701,33 @@ def test_run_once_uses_refreshed_cfg_for_device_id():
 
 
 # --- Phase 2: _refresh_impl (the on-box refresh body, injectable so the
-# POST -> atomic conf rewrite -> reload flow is unit-testable). Returns the
-# reloaded cfg on success, None on any failure (best-effort). ---
+# POST -> client rebind -> atomic conf rewrite -> reload flow is
+# unit-testable). Returns the reloaded cfg on success, None on any failure
+# (best-effort). Takes the live CatalogClient itself, not a bare callable:
+# the impl must re-point the client's bearer after the POST, because the
+# server rotates immediately and the device-bound routes (heartbeat,
+# telemetry, token-refresh) reject the rolled token even inside the overlap
+# window — the old wiring left the live client on the stale bearer for the
+# rest of the tick (one spurious HTTP 401 heartbeat per refresh tick,
+# observed live on the c8000v fleet 2026-09-01). ---
 
-def test_refresh_impl_writes_new_secrets_and_returns_reloaded_cfg(tmp_path):
+class _RefreshClient:
+    """The seam _refresh_impl needs from CatalogClient: the live bearer it
+    must re-point, and the POST that mints the new bag."""
+    def __init__(self, bag=None, exc=None):
+        self.token = "OLD"
+        self.calls = []
+        self._bag = bag
+        self._exc = exc
+
+    def refresh_token(self, device_id):
+        self.calls.append(device_id)
+        if self._exc is not None:
+            raise self._exc
+        return self._bag
+
+
+def test_refresh_impl_writes_new_secrets_and_rebinds_the_live_client(tmp_path):
     conf = tmp_path / "iris-agent.conf"
     conf.write_text(
         "catalog_url = https://x\n"
@@ -2714,23 +2737,23 @@ def test_refresh_impl_writes_new_secrets_and_returns_reloaded_cfg(tmp_path):
         "rpc_secret = \n")
     cfg = {"catalog_url": "https://x", "catalog_token": "OLD",
            "device_id": "sw1", "token_expires_at": "0", "rpc_secret": ""}
-    bag = {"catalog_token": "NEW", "expires_at": 1750000000,
-           "announce_token": "anntok", "rpc_secret": "rpcsecret"}
-    written = []
+    client = _RefreshClient(bag={"catalog_token": "NEW",
+                                 "expires_at": 1750000000,
+                                 "announce_token": "anntok",
+                                 "rpc_secret": "rpcsecret"})
 
-    def refresh_token_fn(device_id):
-        written.append(device_id)
-        return bag
-
-    out = iris_agent._refresh_impl(
-        cfg, str(conf), refresh_token_fn, lambda m, msg: None)
-    assert written == ["sw1"]
+    out = iris_agent._refresh_impl(cfg, str(conf), client, lambda m, msg: None)
+    assert client.calls == ["sw1"]
     # returned cfg reflects the new secrets...
     assert out["catalog_token"] == "NEW"
     assert out["token_expires_at"] == "1750000000"
     assert out["rpc_secret"] == "rpcsecret"
     assert out["announce_token"] == "anntok"
-    # ...and they were persisted to disk (next process reads them)
+    # ...the LIVE client now carries the new bearer, so the rest of THIS tick
+    # (heartbeat, telemetry — device-bound routes that reject the rolled
+    # token) authenticates with the token the server now expects...
+    assert client.token == "NEW"
+    # ...and the secrets were persisted to disk (next process reads them)
     import agent_config
     disk = agent_config.load(str(conf))
     assert disk["catalog_token"] == "NEW"
@@ -2745,17 +2768,38 @@ def test_refresh_impl_returns_none_and_logs_on_post_failure(tmp_path):
         "token_expires_at = 0\n")
     cfg = {"catalog_url": "https://x", "catalog_token": "OLD",
            "device_id": "sw1", "token_expires_at": "0"}
-
-    def boom(device_id):
-        raise catalog_client.CatalogError("unreachable")
+    client = _RefreshClient(exc=catalog_client.CatalogError("unreachable"))
 
     emitted = []
-    out = iris_agent._refresh_impl(cfg, str(conf), boom,
+    out = iris_agent._refresh_impl(cfg, str(conf), client,
                                    lambda m, msg: emitted.append((m, msg)))
     assert out is None
+    # nothing was minted, so the live client keeps its current bearer
+    assert client.token == "OLD"
     # the conf on disk is UNCHANGED (still OLD) — no partial write
     import agent_config
     assert agent_config.load(str(conf))["catalog_token"] == "OLD"
+    assert any(m == "TOKEN-REFRESH-FAIL" for m, _ in emitted)
+
+
+def test_refresh_impl_rebinds_the_client_even_when_the_conf_write_fails(
+        tmp_path):
+    # POST succeeded -> the server has ALREADY rotated; the old bearer is
+    # half-dead (shared routes only, 120s overlap). Whatever happens to the
+    # conf write, the live client must follow the server. The next process
+    # still loads the stale conf — that stranding hazard is a separate,
+    # pre-existing issue — but THIS tick's heartbeat/telemetry must not 401.
+    conf_in_missing_dir = tmp_path / "no-such-dir" / "iris-agent.conf"
+    cfg = {"catalog_url": "https://x", "catalog_token": "OLD",
+           "device_id": "sw1", "token_expires_at": "0"}
+    client = _RefreshClient(bag={"catalog_token": "NEW",
+                                 "expires_at": 1750000000})
+
+    emitted = []
+    out = iris_agent._refresh_impl(cfg, str(conf_in_missing_dir), client,
+                                   lambda m, msg: emitted.append((m, msg)))
+    assert out is None
+    assert client.token == "NEW"
     assert any(m == "TOKEN-REFRESH-FAIL" for m, _ in emitted)
 
 

@@ -308,8 +308,9 @@ def build_deps(cfg, conf_path, state_path=None):
         cfg["catalog_url"], cfg["catalog_token"], context=ctx)
 
     def refresh():
-        return iris_agent._refresh_impl(cfg, conf_path, catalog.refresh_token,
-                                        emit)
+        # The CLIENT, not a bound method: _refresh_impl re-points
+        # catalog.token after the POST (same wiring as the IOS-XE builder).
+        return iris_agent._refresh_impl(cfg, conf_path, catalog, emit)
 
     def _rpc(method, params):
         payload = json.dumps({"jsonrpc": "2.0", "id": "p", "method": method,
