@@ -16,12 +16,13 @@ operator's existing SSH session delivers the fetch command to the device. Stdlib
 only."""
 import os
 import ssl
+import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 # Subdirectory (relative to the artifacts root) that holds per-device staging
-# configs.  Files under this prefix are swept lazily after STAGING_MAX_AGE_SECONDS
-# rather than deleted immediately after the first GET.  This lets device-install.sh
+# configs.  Files under this prefix are swept on a timer (start_sweeper) after
+# STAGING_MAX_AGE_SECONDS rather than deleted immediately after the first GET.  This lets device-install.sh
 # retry 'copy https://' up to 3 times (with 10 s sleeps) within the install window
 # if the SSH pipe drops the first transfer's output — while still bounding how long
 # per-device credentials are reachable from the network.
@@ -31,7 +32,8 @@ _STAGING_PREFIX = "staging" + os.sep
 # the whole span from STAGING a file to the LAST retry of FETCHING it -- not, as
 # it was originally sized, the copy retry loop alone.  A recipe stages at step 2
 # and fetches at step 5, with `guestshell enable` in between: router-install.sh
-# alone budgets 12x10 s + 30x15 s = 570 s of polling there, and that is before
+# alone budgets 12x10 s + a ramped 32-step wait (~431 s) = ~551 s of polling
+# there, and that is before
 # any SSH round-trip (~3 s each, and it makes many), the IOS config apply, or
 # the copy retries.  A measured router onboard ran 900 s against that 570 s
 # budget.  At 600 s the file expired mid-install and the device's own GET
@@ -45,9 +47,11 @@ STAGING_MAX_AGE_SECONDS = 3600
 def sweep_staging(directory, now=None):
     """Delete staging/ files whose mtime is older than STAGING_MAX_AGE_SECONDS.
 
-    Called lazily on each incoming GET for a staging path so no background
-    thread is needed.  Ignores errors (e.g. concurrent deletion by another
-    process) so it never raises.
+    Driven by start_sweeper's timer thread.  It used to run inline on each
+    incoming GET for a staging path, which put a directory scan on the request
+    path and let a device trigger the deletion of the file it was fetching.
+    Ignores errors (e.g. concurrent deletion by another process) so it never
+    raises.
     """
     if now is None:
         now = time.time()
@@ -111,6 +115,72 @@ def secure_staging_permissions(directory):
                 pass
 
 
+# In-flight GET accounting, reported on every access-log line. The artifact
+# server is the one component a fleet onboard hits simultaneously, and the
+# concurrency at the moment of a slow fetch is the number you actually need to
+# diagnose it -- a duration on its own does not distinguish "the server is
+# slow" from "twenty devices arrived at once".
+_inflight = 0
+_inflight_lock = threading.Lock()
+
+# How long a client gets to complete the TLS handshake. Bounded because an
+# unbounded handshake is what let one stalled device hold up the whole fleet
+# (see _Server.process_request_thread). Generous: the peers are embedded IOS
+# TLS clients on a management network, not browsers.
+HANDSHAKE_TIMEOUT_SECONDS = 30
+
+
+class _Server(ThreadingHTTPServer):
+    """ThreadingHTTPServer that completes TLS in the WORKER thread.
+
+    The obvious spelling -- ``srv.socket = ctx.wrap_socket(srv.socket)`` --
+    wraps the LISTENING socket, and ``socketserver`` then reaches the
+    handshake through ``self.socket.accept()``. On an ``SSLSocket`` that call
+    performs the entire handshake before it returns, on the single accept
+    thread, so the per-connection threads only ever start once the expensive
+    part is already done: every handshake in a fleet onboard serialized behind
+    every other one, and one client that stalled mid-handshake blocked every
+    other device's `copy` for as long as it cared to. That is the mechanism
+    behind the 75x latency spike device/router-install.sh's artifact_preflight
+    comment records at 30 simultaneous fetches.
+
+    So ``get_request`` hands back the plain accepted socket and the wrap
+    happens in ``process_request_thread``, which is already per-connection.
+    """
+
+    # socketserver's default of 5 is a listen backlog, not a worker count: in a
+    # 20-device wave connections 6+ were SYN-dropped and left to TCP's own
+    # 1s/3s/7s retry, which the serialized handshake above kept full.
+    request_queue_size = 128
+
+    tls_context = None
+
+    def get_request(self):
+        sock, addr = self.socket.accept()
+        if self.tls_context is not None:
+            # Bounds the handshake only; cleared below so a slow but healthy
+            # transfer to an embedded client is never cut off mid-file.
+            sock.settimeout(HANDSHAKE_TIMEOUT_SECONDS)
+        return sock, addr
+
+    def process_request_thread(self, request, client_address):
+        if self.tls_context is not None:
+            try:
+                request = self.tls_context.wrap_socket(
+                    request, server_side=True)
+            except (ssl.SSLError, OSError, ValueError):
+                # A failed or timed-out handshake is this connection's problem
+                # and nobody else's -- which is the entire point of doing it
+                # here rather than in accept().
+                self.shutdown_request(request)
+                return
+            try:
+                request.settimeout(None)
+            except OSError:
+                pass
+        super().process_request_thread(request, client_address)
+
+
 def make_server(host, port, directory, certfile=None):
     class Handler(SimpleHTTPRequestHandler):
         def __init__(self, *args, **kwargs):
@@ -121,8 +191,35 @@ def make_server(host, port, directory, certfile=None):
             self.send_error(404, "Not Found")
             return None
 
+        def send_response_only(self, code, message=None):
+            # Stashed so the access-log line below can report the status the
+            # response actually carried, including errors raised by send_error.
+            self._status = code
+            super().send_response_only(code, message)
+
         def do_GET(self):
-            """Serve the file; lazily sweep expired staging files."""
+            """Serve the file, with the staging permission check in front."""
+            global _inflight
+            with _inflight_lock:
+                _inflight += 1
+                peak = _inflight
+            started = time.time()
+            try:
+                self._do_GET()
+            finally:
+                with _inflight_lock:
+                    _inflight -= 1
+                # The one thing this server never recorded. Without a duration
+                # here the only evidence a fetch was slow is the whole
+                # onboarding job's wall clock, which is why the [5/7] share of
+                # a slow fleet onboard could only ever be inferred.
+                print("artifacts %s %s -> %s in %.3fs (inflight %d)"
+                      % (self.command, self.path,
+                         getattr(self, "_status", "?"),
+                         time.time() - started, peak),
+                      flush=True)
+
+        def _do_GET(self):
             resolved = self.translate_path(self.path)
             # Sweep staging/ for expired files before serving — this limits
             # credential exposure without breaking retries within the window.
@@ -169,19 +266,50 @@ def make_server(host, port, directory, certfile=None):
                 # attempted. If this uid still can't read it, that surfaces
                 # as its own read failure below rather than a gratuitous 403
                 # here.
-                sweep_staging(directory)
+                #
+                # The sweep itself used to run HERE, once per staging GET: a
+                # listdir + getmtime over the whole directory on the request
+                # path, twice per device (iris-agent.conf and rpc-secret both
+                # live under staging/), and able to unlink a file another
+                # device was mid-fetch on -- the failure this function's own
+                # STAGING_MAX_AGE_SECONDS comment records. It runs on a timer
+                # from main() now; the permission check above, which is a
+                # security property of THIS response, stays where it is.
             super().do_GET()
 
         def log_message(self, *args):
             pass
 
     secure_staging_permissions(directory)
-    srv = ThreadingHTTPServer((host, port), Handler)
+    ctx = None
     if certfile:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(certfile)
-        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+    srv = _Server((host, port), Handler)
+    # Set AFTER construction: _Server.get_request consults it, and nothing can
+    # be accepted before serve_forever().
+    srv.tls_context = ctx
     return srv
+
+
+def start_sweeper(directory, interval=300):
+    """Sweep staging/ on a timer instead of on the request path.
+
+    Returns the daemon thread (started). The sweep is a directory scan that
+    deletes credentials past STAGING_MAX_AGE_SECONDS; nothing about it needs
+    to be synchronous with a fetch, and doing it per-GET meant a device could
+    trigger the deletion of the very file it was asking for."""
+    def _loop():
+        while True:
+            try:
+                sweep_staging(directory)
+            except Exception:
+                pass    # a sweep failure must never take the server down
+            time.sleep(interval)
+
+    t = threading.Thread(target=_loop, name="staging-sweeper", daemon=True)
+    t.start()
+    return t
 
 
 def main():
@@ -191,6 +319,7 @@ def main():
     cert = os.environ.get("IRIS_CERT", "/etc/iris/tls/cert.pem")
     certfile = cert if os.path.exists(cert) else None
     srv = make_server(host, port, directory, certfile=certfile)
+    start_sweeper(directory)
     scheme = "https" if certfile else "http"
     print("artifacts on %s://%s:%d (dir %s)" % (scheme, host, port, directory),
           flush=True)
