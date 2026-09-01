@@ -5,6 +5,7 @@
 import http.client
 import json
 import os
+import socket
 import threading
 
 import metrics
@@ -601,6 +602,153 @@ def test_metrics_server_healthz_without_health_provider():
         assert json.loads(body)["ok"] is True
     finally:
         srv.shutdown()
+
+
+# --- /readyz + listener probing ---
+
+def _listening():
+    """A real bound+listening loopback socket. Returns (sock, port).
+
+    Backlog is generous because nothing here ever accept()s: each probe leaves
+    its connection sitting in the queue, so a backlog of 1 would refuse the
+    second probe and read as "down". A real service accepts and drains.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    s.listen(16)
+    return s, s.getsockname()[1]
+
+
+def _dead_port():
+    """A port with nothing on it: bind to get one free, then release it."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def test_parse_health_listeners_blank_falls_back_to_default():
+    default = {"tracker": 6969}
+    assert telemetry.parse_health_listeners(None, default) == default
+    assert telemetry.parse_health_listeners("", default) == default
+    assert telemetry.parse_health_listeners("   ", default) == default
+    # a copy, not the caller's dict -- a later edit must not mutate the default
+    got = telemetry.parse_health_listeners(None, default)
+    got["catalog"] = 8443
+    assert default == {"tracker": 6969}
+
+
+def test_parse_health_listeners_off_probes_nothing():
+    # explicit opt-out for a deployment running a subset of the services:
+    # {} is "check nothing", which is NOT the same as None -> default
+    assert telemetry.parse_health_listeners("off", {"tracker": 6969}) == {}
+    assert telemetry.parse_health_listeners("OFF", {"tracker": 6969}) == {}
+
+
+def test_parse_health_listeners_parses_pairs_and_skips_malformed():
+    # a malformed entry is ignored, not fatal: a typo in one env pair must not
+    # take down probing for the listeners that DID parse
+    got = telemetry.parse_health_listeners(
+        "tracker:6969, catalog:8443 ,nope,bad:port,,artifacts:8000")
+    assert got == {"tracker": 6969, "catalog": 8443, "artifacts": 8000}
+
+
+def test_readyz_200_when_every_listener_is_up():
+    sock, port = _listening()
+    srv = telemetry.make_metrics_server("127.0.0.1", 0, lambda: "",
+                                        listeners={"tracker": port})
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        status, body = _get(srv.server_address[1], "/readyz")
+        assert status == 200
+        data = json.loads(body)
+        assert data["ok"] is True
+        assert data["listeners"] == {"tracker": "up"}
+        assert "down" not in data
+    finally:
+        srv.shutdown()
+        sock.close()
+
+
+def test_readyz_503_names_the_listener_that_is_down():
+    # the whole point of the endpoint: a dead sub-service must fail the probe
+    # by STATUS CODE (/healthz stays 200 by contract), and say which one.
+    sock, up_port = _listening()
+    srv = telemetry.make_metrics_server(
+        "127.0.0.1", 0, lambda: "",
+        listeners={"tracker": up_port, "artifacts": _dead_port()})
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        status, body = _get(srv.server_address[1], "/readyz")
+        assert status == 503
+        data = json.loads(body)
+        assert data["ok"] is False
+        assert data["down"] == ["artifacts"]
+        assert data["listeners"] == {"artifacts": "down", "tracker": "up"}
+    finally:
+        srv.shutdown()
+        sock.close()
+
+
+def test_readyz_is_inert_until_a_deployment_declares_listeners():
+    # listeners=None -> nothing probed, 200. Keeps the endpoint harmless for
+    # a deployment that has not opted in.
+    srv = telemetry.make_metrics_server("127.0.0.1", 0, lambda: "")
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        status, body = _get(srv.server_address[1], "/readyz")
+        assert status == 200
+        data = json.loads(body)
+        assert data["ok"] is True
+        assert "listeners" not in data
+    finally:
+        srv.shutdown()
+
+
+def test_readyz_listeners_can_be_a_callable_read_per_request():
+    # read per request, so a port learned after startup is still probed
+    sock, port = _listening()
+    calls = []
+
+    def listeners():
+        calls.append(1)
+        return {"tracker": port}
+
+    srv = telemetry.make_metrics_server("127.0.0.1", 0, lambda: "",
+                                        listeners=listeners)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        for _ in range(2):
+            assert _get(srv.server_address[1], "/readyz")[0] == 200
+        assert len(calls) == 2
+    finally:
+        srv.shutdown()
+        sock.close()
+
+
+def test_healthz_reports_listeners_but_keeps_its_200_contract():
+    # a down listener must NOT flip /healthz's status: container HEALTHCHECK
+    # and existing orchestrator probes read that code (spec 7.7).
+    srv = telemetry.make_metrics_server(
+        "127.0.0.1", 0, lambda: "",
+        listeners={"artifacts": _dead_port()})
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        status, body = _get(srv.server_address[1], "/healthz")
+        assert status == 200
+        assert json.loads(body)["listeners"] == {"artifacts": "down"}
+    finally:
+        srv.shutdown()
+
+
+def test_probe_listeners_never_raises_on_a_nonsense_port():
+    # called from a request handler: a failure to MEASURE must not become a
+    # 500 that looks like a failure of the thing being measured
+    assert telemetry._probe_listeners({"bogus": 0}) == {"bogus": "down"}
+    assert telemetry._probe_listeners({"bogus": 999999}) == {"bogus": "down"}
+    assert telemetry._probe_listeners({}) == {}
+    assert telemetry._probe_listeners(None) == {}
 
 
 def test_metrics_server_unknown_path_404():
