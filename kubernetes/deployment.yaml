@@ -31,6 +31,11 @@ spec:
       securityContext:
         seccompProfile:
           type: RuntimeDefault
+        # readOnlyRootFilesystem is NOT set here, and turning it on needs the
+        # /tmp emptyDir below to already be mounted: lab/device-run.sh (the
+        # single path every server-side device session takes) writes there.
+        # Enabling it without /tmp breaks ALL device access, silently, at the
+        # first onboard.
         # Match the unprivileged uid/gid baked into the server image. fsGroup
         # makes the kubelet group-own the mounted volumes: without it the
         # PVC-backed /data arrives root-owned and the 0400 age-key secret is
@@ -71,6 +76,12 @@ spec:
               memory: 512Mi
       containers:
         - name: iris
+          # PLACEHOLDER TAG. This repo has no image-publish step, so nothing
+          # keeps `iris:docker-alpha` in step with the source tree -- the
+          # Compose path builds `iris:latest` locally and this tag is whatever
+          # was last built by hand under that name. Re-tag/rebuild from the
+          # current tree before deploying, or a cluster silently runs old
+          # code. Same applies to the initContainer above.
           image: iris:docker-alpha
           imagePullPolicy: IfNotPresent
           envFrom:
@@ -98,25 +109,41 @@ spec:
             - name: health
               containerPort: 9101
               protocol: TCP
+          # /readyz, NOT /healthz. /healthz answers 200 unconditionally by
+          # design (telemetry.py: "container HEALTHCHECK and orchestrator
+          # probes are status-code based"), and it only ever proved that the
+          # telemetry server on :9101 was alive. The tracker, catalog, artifact
+          # server and console are SEPARATE listeners started by
+          # docker-entrypoint.sh, so any of them could die with all three
+          # probes still passing: a pod whose artifact server was gone stayed
+          # Ready, was never restarted, and every device failed at [5/7] with
+          # "cannot connect". /readyz TCP-probes the listeners named by
+          # IRIS_HEALTH_LISTENERS and answers 503 with the offenders listed.
+          #
+          # timeoutSeconds is 10, not 3: /readyz makes one TCP connect per
+          # declared listener with a 2s timeout each, so its own worst case
+          # (everything down) is ~8s. At 3s the probe would time out exactly
+          # when it had the most to report and restart-loop the pod.
           startupProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: health
             periodSeconds: 5
+            timeoutSeconds: 10
             failureThreshold: 60
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: health
             periodSeconds: 10
-            timeoutSeconds: 3
+            timeoutSeconds: 10
             failureThreshold: 3
           livenessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: health
             periodSeconds: 20
-            timeoutSeconds: 3
+            timeoutSeconds: 10
             failureThreshold: 3
           securityContext:
             allowPrivilegeEscalation: false
@@ -131,11 +158,28 @@ spec:
             - name: age-key
               mountPath: /run/secrets
               readOnly: true
+            # Every server-side device session shells out to lab/device-run.sh,
+            # which writes a mktemp transcript copy AND its enable-escalation
+            # marker under ${TMPDIR:-/tmp}. Those land in the container's
+            # writable layer today, which works but is invisible; giving /tmp
+            # its own emptyDir makes the requirement explicit and is what lets
+            # readOnlyRootFilesystem be turned on (see securityContext note
+            # above) without breaking all device access.
+            - name: tmp
+              mountPath: /tmp
           resources:
             requests:
               cpu: 250m
               memory: 256Mi
             limits:
+              # NOTE (unmeasured): the artifact server's TLS handshakes used to
+              # serialize on the accept thread, so it could not exceed roughly
+              # one core whatever the load. They now run in parallel across
+              # per-connection worker threads, so a fleet-scale onboard can
+              # actually reach this ceiling and get CFS-throttled -- which
+              # would reintroduce the latency the change removed, by a
+              # different route. Left at "2" deliberately rather than guessed
+              # upward: raise it against a measured fleet onboard.
               cpu: "2"
               memory: 1Gi
       volumes:
@@ -146,6 +190,9 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 32Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
         - name: age-key
           secret:
             secretName: iris-age

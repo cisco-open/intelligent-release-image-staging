@@ -863,7 +863,24 @@ def main():
                 swarm_provider=hub.swarm_snapshot,
                 html=telemetry.moved_page,   # map page retired -> console pointer
                 health=hub.export_health.as_dict,
-                swarm_public=swarm_public)
+                swarm_public=swarm_public,
+                # What /readyz TCP-probes. /healthz answering 200 only ever
+                # proved :9101 was alive, so a dead artifact server or tracker
+                # left the container "healthy" and, under Kubernetes, never
+                # restarted. Overridable with IRIS_HEALTH_LISTENERS
+                # ("name:port,..." or "off") for a deployment that runs a
+                # subset of the services.
+                listeners=telemetry.parse_health_listeners(
+                    os.environ.get("IRIS_HEALTH_LISTENERS"),
+                    default={
+                        "tracker": port,
+                        "catalog": int(os.environ.get(
+                            "IRIS_CATALOG_PORT", "8443")),
+                        "artifacts": int(os.environ.get(
+                            "IRIS_ARTIFACTS_PORT", "8000")),
+                        "console": int(os.environ.get(
+                            "IRIS_CONSOLE_PORT", "8080")),
+                    }))
             threading.Thread(target=msrv.serve_forever, daemon=True).start()
             print("swarm JSON on http://%s:%d/swarm %s%s"
                   % (mhost, mport,

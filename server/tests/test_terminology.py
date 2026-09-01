@@ -76,7 +76,7 @@ ALLOWLIST = [
     ("server/live_samples.py", frozenset({26, 258, 270, 314, 348}),
      "time-of-receipt sense (spec section 3A/3B/4/10.1c) -- hard exclusion, "
      "decision 5"),
-    ("server/telemetry.py", frozenset({1654, 1856, 1917}),
+    ("server/telemetry.py", frozenset({1655, 1857, 1918}),
      "time-of-receipt sense (spec section 3B/4) -- hard exclusion, decision 5"),
     ("server/tests/test_docs_map.py", frozenset({242}),
      "time-of-receipt sense (\"the server stamps it on receipt\") -- hard "

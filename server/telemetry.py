@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import secrets
+import socket
 import threading
 import time
 import urllib.request
@@ -2036,11 +2037,71 @@ def moved_page():
             % (console, console)).encode("ascii")
 
 
+def _probe_listeners(listeners):
+    """TCP-connect each name->port on loopback. Returns {name: "up"|"down"}.
+
+    Loopback only, 2s, never raises: this is called from a probe handler, so a
+    failure to MEASURE must not itself look like a failure of the thing being
+    measured (an unknown port is reported "down" only because it could not be
+    connected to, which is exactly the question being asked).
+    """
+    out = {}
+    for name, prt in sorted((listeners or {}).items()):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        try:
+            sock.connect(("127.0.0.1", int(prt)))
+            out[name] = "up"
+        except Exception:
+            out[name] = "down"
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+    return out
+
+
+def parse_health_listeners(spec, default=None):
+    """Parse "name:port,name:port" (IRIS_HEALTH_LISTENERS) -> {name: port}.
+
+    Blank/unset -> *default*. The literal "off" -> {} (checks nothing), for a
+    deployment that runs a subset of the services and does not want the
+    missing ones reported down."""
+    text = (spec or "").strip()
+    if not text:
+        return dict(default or {})
+    if text.lower() == "off":
+        return {}
+    out = {}
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        name, _, prt = part.partition(":")
+        try:
+            out[name.strip()] = int(prt)
+        except ValueError:
+            continue        # ignore a malformed entry rather than fail closed
+    return out
+
+
 def make_metrics_server(host, port, provider, swarm_provider=None, html=None,
-                        health=None, swarm_public=False):
+                        health=None, swarm_public=False, listeners=None):
     """HTTP server. `/healthz` is always served (JSON; `health` is an optional
     zero-arg callable adding the otlp_export block — spec 7.7. Status stays
     200: container HEALTHCHECK and orchestrator probes are status-code based);
+
+    `/readyz` is the STATUS-CODE probe /healthz deliberately is not. `/healthz`
+    answering 200 only ever proved that THIS server (:9101) was alive: the
+    tracker, catalog, artifact server, console and seeder are separate
+    listeners started by docker-entrypoint.sh, so any of them could die with
+    the container still reporting healthy and, under Kubernetes, never being
+    restarted -- devices would fail at [5/7] with "cannot connect" against a
+    pod marked Ready. `/readyz` TCP-probes `listeners` ({name: port}, or a
+    zero-arg callable returning one) and answers 503 with the offenders named
+    when any is down. `listeners=None` -> 200 and nothing probed, so the
+    endpoint is inert until a deployment declares what it expects;
     `/metrics` is served only when `provider` is given (None -> 404, the
     observability-off posture); /swarm answers only loopback peers unless
     `swarm_public` (the console proxies it over container loopback — swarm
@@ -2070,7 +2131,23 @@ def make_metrics_server(host, port, provider, swarm_provider=None, html=None,
                         doc["otlp_export"] = health()
                     except Exception:
                         pass
+                # Informational here, load-bearing on /readyz below: the status
+                # code for THIS path stays 200 by contract (above).
+                want = listeners() if callable(listeners) else listeners
+                if want:
+                    doc["listeners"] = _probe_listeners(want)
                 self._send(200, json.dumps(doc).encode(),
+                           "application/json; charset=utf-8")
+            elif path == "/readyz":
+                want = listeners() if callable(listeners) else listeners
+                state = _probe_listeners(want) if want else {}
+                down = sorted(n for n, v in state.items() if v != "up")
+                doc = {"ok": not down}
+                if state:
+                    doc["listeners"] = state
+                if down:
+                    doc["down"] = down
+                self._send(503 if down else 200, json.dumps(doc).encode(),
                            "application/json; charset=utf-8")
             elif path == "/swarm" and swarm_provider is not None:
                 if not swarm_peer_allowed(self.client_address[0],
