@@ -72,7 +72,7 @@ sequenceDiagram
     DeviceB->>Server: Download initial pieces
     DeviceA<<->>DeviceB: Exchange missing pieces
     DeviceA->>DeviceA: Verify downloaded image hash
-    DeviceA->>IOS: Place at platform storage root (copy on IOS-XE; direct bind mount on IOS-XR)
+    DeviceA->>IOS: Place at platform storage root (copy on IOS-XE, direct bind mount on IOS-XR)
     DeviceA->>Server: Report staged status
 ```
 
