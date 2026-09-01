@@ -84,6 +84,7 @@
     ['image-failed', 'Image(s) failed'],
     ['copying', 'Copying to IOS storage'],
     ['staging', 'Staging (other)'],
+    ['unassigned', 'Unassigned'],
     ['enrolled', 'Enrolled'],
     ['not-enrolled', 'Not enrolled'],
     ['offline', 'Offline (no recent heartbeat)']
@@ -166,8 +167,27 @@
       return { key: 'copying', label: 'copying to ' + (d.target_fs || 'IOS storage'),
                cls: 'badge badge-running' };
     }
+    // A legacy single-image agent reports this literal stage_state (it is
+    // absent from catalog.py's _V2_STAGE_STATES, so no current agent sends
+    // it). It used to fall through to the catch-all below, which rendered the
+    // raw word under the PROGRESS level -- an idle device dressed as one mid
+    // transfer, and selectable only via "Staging (other)" along with every
+    // other raw state.
+    if (d.stage_state === 'unassigned') {
+      return { key: 'unassigned', label: 'unassigned', cls: 'muted' };
+    }
     if (d.stage_state) {
       return { key: 'staging', label: d.stage_state, cls: 'badge badge-running' };
+    }
+    // Enrolled with an empty assigned set. This read "enrolled" before, which
+    // is true but hides the one thing an operator can act on -- and nothing
+    // else in the row distinguishes them, so there was no way to ask the table
+    // "which devices have I not assigned an image to yet". Ordered AFTER every
+    // staging/error branch (a device mid-stage is not unassigned) and BEFORE
+    // 'enrolled', but never ahead of 'not-enrolled': an agent that has never
+    // checked in is not yet an assignment problem.
+    if (d.last_seen && !assignedIds.length) {
+      return { key: 'unassigned', label: 'unassigned', cls: 'muted' };
     }
     if (d.last_seen) {
       return { key: 'enrolled', label: 'enrolled', cls: 'badge badge-queued' };
@@ -199,6 +219,9 @@
     'placement-failed': 'negative',
     deployed: 'positive', enrolled: 'positive',
     'image-failed': 'warning',   // overridden to 'severe' by ratio below
+    // A resting state that wants an operator, not a transfer in flight --
+    // same family as not-enrolled, deliberately not 'progress'.
+    unassigned: 'inactive',
     'not-enrolled': 'inactive', offline: 'inactive'
   };
   var STATUS_ICONS = {
@@ -2220,8 +2243,15 @@
     // produce" (test_every_status_the_cell_can_show_is_filterable enforces
     // it), and '__attention' is a rollup over several of those keys, not a
     // producible status of its own.
+    // Alphabetical by LABEL, which is what an operator scans. The array itself
+    // stays in derivation order next to deviceStatus() (that order documents
+    // the precedence, and the status legend reads it), so this sorts a COPY.
+    // "Status: any" stays pinned first and the '__attention' rollup stays
+    // pinned last: neither is a status, so neither belongs in the alphabet.
     sel.innerHTML = '<option value="">Status: any</option>' +
-      DEVICE_STATUS_OPTIONS.map(function (o) {
+      DEVICE_STATUS_OPTIONS.slice().sort(function (a, b) {
+        return a[1].localeCompare(b[1]);
+      }).map(function (o) {
         return '<option value="' + esc(o[0]) + '">' + esc(o[1]) + '</option>';
       }).join('') +
       '<option value="__attention">Needs attention (any)</option>';
