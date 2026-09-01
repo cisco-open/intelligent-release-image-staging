@@ -29,7 +29,7 @@ for _ in $(seq 1 24); do
 done
 [ "$health" = healthy ] || { echo "!! iris did not become healthy" >&2; exit 1; }
 
-[ -x "$REPO/tools/provision-iox-packages.sh" ] || { echo ">> IOx packaging tools not present (not shipped in the release tarball); skipping IOx package staging" >&2; exit 0; }
+[ -x "$REPO/tools/provision-iox-packages.sh" ] || { echo ">> IOx packaging tools not present; skipping IOx package staging" >&2; exit 0; }
 "$REPO/tools/provision-iox-packages.sh"
 
 # XR RPM freshness (Cisco 8000 series, IOS-XR): this bring-up only stages

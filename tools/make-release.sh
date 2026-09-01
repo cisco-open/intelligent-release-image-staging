@@ -15,9 +15,17 @@ TARBALL="$REPO/release/iris.tgz"
 rm -rf "$OUT"; mkdir -p "$OUT"
 
 # top-level docs + build version (the VERSION file is the single source of truth)
-cp "$REPO/README.md" "$REPO/VERSION" "$OUT/"
+cp "$REPO/README.md" "$REPO/CHANGELOG.md" "$REPO/DEVELOPMENT.md" "$REPO/CONTRIBUTING.md" \
+   "$REPO/TESTING.md" "$REPO/VERSION" "$OUT/"
 cp "$REPO/LICENSE" "$REPO/NOTICE" "$REPO/SECURITY.md" "$REPO/CODE_OF_CONDUCT.md" "$OUT/"
 cp "$REPO/.gitignore" "$REPO/.dockerignore" "$OUT/"
+
+# The README links into the Zensical source tree. Ship the source, static public
+# site, and exact build inputs so those links work in the unpacked release and
+# recipients can build the same manual published by CI.
+mkdir -p "$OUT/docs"
+cp -R "$REPO/docs/." "$OUT/docs/"
+cp "$REPO/zensical.toml" "$REPO/requirements-docs.txt" "$OUT/"
 
 # server (everything; tests included — no secrets live here)
 mkdir -p "$OUT/server"
@@ -31,7 +39,9 @@ cp -R "$REPO/device/." "$OUT/device/"
 mkdir -p "$OUT/tools"
 for f in get-aria2c.sh aria2c.sha256 make-torrent.sh make-agent-bundle.sh \
          gen-device-installers.sh apply-assignments.sh \
-         start-compose-server.sh; do
+         get-ioxclient.sh stage-iox-package.sh provision-iox-packages.sh \
+         build-xr-package.sh check-package-freshness.sh \
+         start-compose-server.sh make-release.sh; do
   cp "$REPO/tools/$f" "$OUT/tools/"
 done
 # corresponding source for the handed-in (GPL) aria2c binary — NOTICE and the
@@ -39,9 +49,9 @@ done
 mkdir -p "$OUT/tools/aria2c-patches"
 cp -R "$REPO/tools/aria2c-patches/." "$OUT/tools/aria2c-patches/"
 
-# the one lab helper the installers drive devices through
+# The IOS-XE and IOS-XR transports the install/undeploy recipes call.
 mkdir -p "$OUT/lab"
-cp "$REPO/lab/device-run.sh" "$OUT/lab/"
+cp "$REPO/lab/device-run.sh" "$REPO/lab/xr-run.sh" "$OUT/lab/"
 
 # optional Kubernetes seed-server deployment
 mkdir -p "$OUT/kubernetes"
