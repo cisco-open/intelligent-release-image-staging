@@ -128,7 +128,7 @@ SPDX-License-Identifier: Apache-2.0
         <article>
           <span>03</span>
           <h3>Safer change control</h3>
-          <p>IRIS only stages the approved image. Install, activation, boot changes, and reloads stay outside the tool and under operator control. On an existing management VLAN (inband), IRIS also never creates, changes, or removes that VLAN, its SVI, gateway, routes, or VRF. <a href="docs/network-attachment/">Management type and VLAN ownership</a>.</p>
+          <p>IRIS only stages the approved image. Install, activation, boot changes, and reloads stay outside the tool and under operator control. On an existing management VLAN (inband), IRIS also never creates, changes, or removes that VLAN, its SVI, gateway, routes, or VRF. <a href="docs/management-type/">Management type and VLAN ownership</a>.</p>
         </article>
       </section>
 
@@ -161,6 +161,7 @@ SPDX-License-Identifier: Apache-2.0
           <div class="path-tabs" role="tablist" aria-label="Operator paths">
             <button class="path-tab active" type="button" role="tab" aria-selected="true" data-path="guest">Catalyst 9000</button>
             <button class="path-tab" type="button" role="tab" aria-selected="false" data-path="router">Catalyst 8000</button>
+            <button class="path-tab" type="button" role="tab" aria-selected="false" data-path="xr">Cisco 8000 Series</button>
             <button class="path-tab" type="button" role="tab" aria-selected="false" data-path="iox">Industrial Ethernet</button>
             <button class="path-tab" type="button" role="tab" aria-selected="false" data-path="server">Server</button>
           </div>
@@ -178,7 +179,7 @@ SPDX-License-Identifier: Apache-2.0
           <p class="eyebrow">Platforms</p>
           <h2>Same delivery model, platform-specific staging.</h2>
           <p>
-            Catalyst 9000 switches run the agent in Guest Shell, or as an IOx app where app-hosting storage is available. Industrial Ethernet platforms run the IOx app. Catalyst 8000 routers run Guest Shell through a VirtualPortGroup, in routed or NAT attachment. Every platform stages to its own device storage. Router preflight repeats before token mint, receipts bind management IP and processor-board identity, and router adoption requires re-onboarding. Visibility is built in, not bolted on: every transfer is live on the Swarm Map, and open OpenTelemetry export streams the same signals into Cisco Splunk in the reference deployment — or any OTLP destination you choose. Every path downloads by swarm, verifies on the device, and stops before activation.
+            Supported switches and routers run the agent in either Guest Shell or an IOx application, depending on the platform and available application-hosting capabilities. Cisco 8000 Series Routers running IOS-XR run the agent as an appmgr container that stages software directly to harddisk: through the swarm. Software is downloaded using the swarm and staged in local device storage. Before a router receives an access token, the system repeats its preflight checks and records the device’s management address and hardware identity. Replacing or re-enrolling a router requires it to complete onboarding again. Transfer status is available through the Swarm Map and can also be exported using OpenTelemetry to Cisco Splunk or another OTLP-compatible platform. After downloading, each device verifies the software locally. The process stages the software but does not install, activate, or reload the device.
           </p>
         </div>
       </section>

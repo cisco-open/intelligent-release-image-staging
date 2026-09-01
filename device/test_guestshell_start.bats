@@ -25,6 +25,45 @@
   [[ "$out" != *"--listen-port="* ]]
 }
 
+# Same defect class as server/seed-launch.sh, reachable here because a device
+# may be assigned up to ten images. aria2's max-concurrent-downloads defaults to
+# 5, and a SEEDING torrent counts against it while never completing
+# (--seed-ratio=0.0 below means seed forever, which is the whole point: staged
+# devices seed to their peers). So once a device holds five staged images, the
+# download for a sixth is queued and never starts -- silently, since aria2 calls
+# it `waiting`, not an error, and the agent only ever enumerates that queue
+# (_aria_downloads) rather than reporting it. The device would sit in staging
+# forever with no fault recorded. Measured in exactly this shape on the server
+# side 2026-08-31: tellActive pinned at five, the sixth image in tellWaiting.
+@test "guestshell-start lifts aria2's default concurrency cap so a multi-image device is never starved" {
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/stage" "$tmp/home"
+  echo "rpcsecret" > "$tmp/stage/rpc-secret"
+  printf '#!/usr/bin/env bash\necho "$@" > "%s/launched.txt"\n' "$tmp" > "$tmp/aria2c-stub"
+  chmod +x "$tmp/aria2c-stub"
+  run env STAGE_DIR="$tmp/stage" EXEC_DIR="$tmp/home" ARIA2_SRC="$tmp/aria2c-stub" \
+      RPC_SECRET_FILE="$tmp/stage/rpc-secret" SKIP_RPC_PROBE=1 \
+      bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
+  [ "$status" -eq 0 ] || return 1
+  out="$(cat "$tmp/launched.txt")"
+  [[ "$out" == *"--max-concurrent-downloads=100"* ]]
+}
+
+@test "the device concurrency cap is env-overridable" {
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/stage" "$tmp/home"
+  echo "rpcsecret" > "$tmp/stage/rpc-secret"
+  printf '#!/usr/bin/env bash\necho "$@" > "%s/launched.txt"\n' "$tmp" > "$tmp/aria2c-stub"
+  chmod +x "$tmp/aria2c-stub"
+  run env STAGE_DIR="$tmp/stage" EXEC_DIR="$tmp/home" ARIA2_SRC="$tmp/aria2c-stub" \
+      RPC_SECRET_FILE="$tmp/stage/rpc-secret" SKIP_RPC_PROBE=1 \
+      MAX_CONCURRENT=12 \
+      bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
+  [ "$status" -eq 0 ] || return 1
+  out="$(cat "$tmp/launched.txt")"
+  [[ "$out" == *"--max-concurrent-downloads=12"* ]]
+}
+
 @test "an empty baked rpc-secret launches aria2c with the placeholder secret" {
   # Field incident 2026-08-20: every Guest Shell device fell silent after
   # redeploy. The installer bakes rpc-secret EMPTY by design (the agent
@@ -99,7 +138,7 @@
 }
 
 # ---------------------------------------------------------------------------
-# --on-bt-download-complete: the per-peer receipt hook
+# --on-bt-download-complete: the per-peer transfer-record hook
 #
 # aria2 execs the option value directly (execlp, no shell), so the value must
 # be a real executable FILE. /flash denies chmod, which is why the launcher
@@ -116,7 +155,7 @@ _gs_fixture() {           # $1 = tmpdir; stages a hook unless $2 = "nohook"
     "$1" "$1" > "$1/aria2c-stub"
   chmod +x "$1/aria2c-stub"
   if [ "${2:-}" != "nohook" ]; then
-    printf '#!/bin/sh\nexit 0\n' > "$1/stage/agent/peer-receipt-hook.sh"
+    printf '#!/bin/sh\nexit 0\n' > "$1/stage/agent/peer-transfer-hook.sh"
   fi
 }
 
@@ -126,7 +165,7 @@ _gs_fixture() {           # $1 = tmpdir; stages a hook unless $2 = "nohook"
       RPC_SECRET_FILE="$tmp/stage/rpc-secret" SKIP_RPC_PROBE=1 \
       bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
   [ "$status" -eq 0 ]
-  [[ "$(cat "$tmp/launched.txt")" == *"--on-bt-download-complete=$tmp/home/iris-peer-receipt-hook"* ]]
+  [[ "$(cat "$tmp/launched.txt")" == *"--on-bt-download-complete=$tmp/home/iris-peer-transfer-hook"* ]]
 }
 
 @test "the hook is installed on an exec-capable fs with the exec bit" {
@@ -138,7 +177,7 @@ _gs_fixture() {           # $1 = tmpdir; stages a hook unless $2 = "nohook"
       RPC_SECRET_FILE="$tmp/stage/rpc-secret" SKIP_RPC_PROBE=1 \
       bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
   [ "$status" -eq 0 ]
-  [ -x "$tmp/home/iris-peer-receipt-hook" ]
+  [ -x "$tmp/home/iris-peer-transfer-hook" ]
 }
 
 @test "no staged hook means NO --on-bt-download-complete flag at all" {
@@ -157,15 +196,15 @@ _gs_fixture() {           # $1 = tmpdir; stages a hook unless $2 = "nohook"
 
 @test "a hook that cannot be installed is reported but never blocks the launch" {
   # Telemetry must not be able to silence a device. Without the hook the report
-  # simply omits the receipts ("not measured") and the transfer is unaffected.
+  # simply omits the transfer records ("not measured") and the transfer is unaffected.
   tmp="$(mktemp -d)"; _gs_fixture "$tmp"
   # an undeliverable destination: the copy fails, nothing else does
   run env STAGE_DIR="$tmp/stage" EXEC_DIR="$tmp/home" ARIA2_SRC="$tmp/aria2c-stub" \
       RPC_SECRET_FILE="$tmp/stage/rpc-secret" SKIP_RPC_PROBE=1 \
-      HOOK_DST="$tmp/no-such-dir/iris-peer-receipt-hook" \
+      HOOK_DST="$tmp/no-such-dir/iris-peer-transfer-hook" \
       bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"peer-receipt hook"* ]]
+  [[ "$output" == *"peer-transfer hook"* ]]
   [ -f "$tmp/launched.txt" ]
   [[ "$(cat "$tmp/launched.txt")" != *"--on-bt-download-complete"* ]]
 }
@@ -176,7 +215,7 @@ _gs_fixture() {           # $1 = tmpdir; stages a hook unless $2 = "nohook"
   # 'already up?' early exit or an upgraded hook could never reach the path the
   # running daemon already holds.
   tmp="$(mktemp -d)"; _gs_fixture "$tmp"
-  printf '#!/bin/sh\n# v2\nexit 0\n' > "$tmp/stage/agent/peer-receipt-hook.sh"
+  printf '#!/bin/sh\n# v2\nexit 0\n' > "$tmp/stage/agent/peer-transfer-hook.sh"
   mkdir -p "$tmp/bin"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/bin/curl"     # RPC answers: already up
   chmod +x "$tmp/bin/curl"
@@ -186,7 +225,7 @@ _gs_fixture() {           # $1 = tmpdir; stages a hook unless $2 = "nohook"
   [ "$status" -eq 0 ]
   [[ "$output" == *"already up"* ]]        # took the early exit
   [ ! -f "$tmp/launched.txt" ]             # and did NOT relaunch aria2c
-  grep -q "v2" "$tmp/home/iris-peer-receipt-hook"
+  grep -q "v2" "$tmp/home/iris-peer-transfer-hook"
 }
 
 @test "the hook inherits the secret the daemon is actually launched with" {

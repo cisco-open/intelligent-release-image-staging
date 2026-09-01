@@ -25,10 +25,24 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import audit
 import auth
+import bulkhash
 import live_samples
 import secretfs
 import secrets_store
 import torrent_personalize
+
+# A device may hold an ordered set of approved images at once (issue: multi-
+# image assignment); this bounds the set so policy.json rows and the console
+# stay a fixed, glanceable size rather than an unbounded list.
+MAX_ASSIGNED_IMAGES = 10
+
+# Cisco Bulk Hash reconciliation (KGV reconciler): the only three
+# provenances apply_hash_verification() accepts, matching the pipeline call
+# sites later tasks wire in -- a periodic scheduler, an operator-triggered
+# manual recheck, and an offline/air-gapped import. An unrecognised source
+# is refused rather than silently accepted, so a typo in a caller can never
+# masquerade as a real provenance in the audit trail.
+HASH_VERIFICATION_SOURCES = ("scheduled", "manual", "offline")
 
 
 def _audit_id(value):
@@ -41,6 +55,46 @@ def _audit_id(value):
     if not value:
         return ""
     return hashlib.sha256(value.encode()).hexdigest()[:8]
+
+
+def _resolve_refresh_auth(store, index, token, now, grace):
+    """Resolve a token for the same-device refresh route.
+
+    Current credentials use ordinary catalog auth. A previous credential may
+    recover after its shared-route overlap only until its original expiry, and
+    only while the current successor remains valid. Keeping this exception out
+    of the canonical resolver makes it impossible for another route to enable
+    recovery accidentally.
+    """
+    ctx = auth.resolve_catalog_auth(store, index, token, now, grace)
+    if token is None:
+        return None
+    if ctx is not None and ctx.secret_name != "catalog_token_prev":
+        return ctx
+    entry = index.get(token)
+    if entry is None:
+        return None
+    principal, secret_name, record = entry
+    if secret_name != "catalog_token_prev" or record.get("revoked"):
+        return None
+    deadline = record.get("refresh_expires_at")
+    try:
+        # Old persisted records lack a recovery deadline. They remain usable
+        # here only during their ordinary overlap (ctx is non-None), which is
+        # enough for a rolling deployment without granting an indefinite retry.
+        if deadline is None and ctx is None:
+            return None
+        if deadline is not None and deadline != 0 \
+                and not now < deadline + grace:
+            return None
+    except TypeError:
+        return None
+    current = store.get("devices", {}).get(
+        principal.id, {}).get("catalog_token")
+    if not isinstance(current, dict) or not secrets_store.valid(
+            current, now, grace):
+        return None
+    return auth.AuthContext(principal, secret_name, "catalog")
 
 
 def _atomic_write_json(path, obj):
@@ -87,16 +141,16 @@ _REPORT_STORE_MAX = 16384       # bytes STORED per report (transport stays 64K)
 _V2_PEER_CAP = 64
 _STATE_PEER_SET_CAP = 512
 _CONTENT_CAP = 2 ** 53
-# Exact per-peer received bytes (``peer_receipts``, hook contract section 1).
+# Exact per-peer received bytes (``peer_transfer_records``, hook contract section 1).
 # The device hook reads aria2-next's own cumulative per-peer session counters
 # ONCE, at --on-bt-download-complete: the instant the last piece lands, before
 # enableSeedOnly(), while the peers that fed us are still connected. These are
 # NOT the 2026.08.20 rx_bytes/tx_bytes/avg_bps numbers, which were integrated
 # from instantaneous rates and were removed for being estimates; nothing here
 # is integrated, estimated or split evenly.
-_V2_PEER_RECEIPT_ROWS = 32      # named receipt rows STORED per report
-_RECEIPT_SOURCES = ("aria2_session_counters",)
-_RECEIPT_ROWS_CAP = 512         # bound on the declared receipt row counts
+_V2_PEER_TRANSFER_ROWS = 32      # named transfer-record rows STORED per report
+_PEER_TRANSFER_SOURCES = ("aria2_session_counters",)
+_PEER_TRANSFER_ROWS_CAP = 512         # bound on the declared transfer-record row counts
 _PORT_CAP = 65535
 
 
@@ -116,8 +170,8 @@ def _strict_bool(value, field):
     return value
 
 
-def _sanitize_peer_receipts(block, win_start, created):
-    """Strict re-validation of the optional v2 ``peer_receipts`` block: exact
+def _sanitize_peer_transfer_records(block, win_start, created):
+    """Strict re-validation of the optional v2 ``peer_transfer_records`` block: exact
     per-peer bytes RECEIVED by the reporting device, measured on the device.
 
     Provenance, stated so no reader has to guess which kind of number this is:
@@ -158,7 +212,7 @@ def _sanitize_peer_receipts(block, win_start, created):
     peer-delivered and reported ~100% peer-to-peer for a wave that was 28.9%.
     Splitting origin from device is a SERVER-side question (only the server
     knows which address is the authenticated ``service:seeder`` principal) and
-    is answered by ``telemetry.classify_peer_receipts``, not here: this
+    is answered by ``telemetry.classify_peer_transfer_records``, not here: this
     function stores the device's measurement verbatim.
 
     No cross-check against ``content.completed_content_bytes``: aria2 counts
@@ -167,40 +221,40 @@ def _sanitize_peer_receipts(block, win_start, created):
     would discard the entire measurement.
     """
     if not isinstance(block, dict):
-        raise ValueError("bad peer_receipts")
-    if block.get("source") not in _RECEIPT_SOURCES:
-        raise ValueError("bad peer_receipts.source")
+        raise ValueError("bad peer_transfer_records")
+    if block.get("source") not in _PEER_TRANSFER_SOURCES:
+        raise ValueError("bad peer_transfer_records.source")
     captured = block.get("captured_at")
     if isinstance(captured, bool) or not isinstance(captured, (int, float)):
-        raise ValueError("bad peer_receipts.captured_at")
+        raise ValueError("bad peer_transfer_records.captured_at")
     if not math.isfinite(captured) or captured < 0:
-        raise ValueError("bad peer_receipts.captured_at")
+        raise ValueError("bad peer_transfer_records.captured_at")
     # The capture instant is the hook's, minutes before the one-shot agent tick
     # that assembles the report -- but it can never precede the transfer window
     # or postdate the report that carries it.
     if not win_start <= captured <= created:
-        raise ValueError("bad peer_receipts.captured_at range")
-    complete = _strict_bool(block.get("complete"), "peer_receipts.complete")
+        raise ValueError("bad peer_transfer_records.captured_at range")
+    complete = _strict_bool(block.get("complete"), "peer_transfer_records.complete")
 
     rows_in = block.get("rows")
     if not isinstance(rows_in, list):
-        raise ValueError("bad peer_receipts.rows")
+        raise ValueError("bad peer_transfer_records.rows")
     rows = []
     seen = set()
     for row in rows_in:
         if not isinstance(row, dict):
-            raise ValueError("bad peer_receipts row")
+            raise ValueError("bad peer_transfer_records row")
         ip = row.get("ip")
         if not isinstance(ip, str) or not ip or len(ip) > 64:
-            raise ValueError("bad peer_receipts ip")
+            raise ValueError("bad peer_transfer_records ip")
         try:
             ipaddress.ip_address(ip)
         except ValueError:
-            raise ValueError("bad peer_receipts ip")
+            raise ValueError("bad peer_transfer_records ip")
         if ip in seen:
-            # Two receipts for one peer have no defined meaning: summing them
+            # Two transfer records for one peer have no defined meaning: summing them
             # would invent bytes, picking one would discard measured ones.
-            raise ValueError("duplicate peer_receipts ip")
+            raise ValueError("duplicate peer_transfer_records ip")
         seen.add(ip)
         clean = {"ip": ip,
                  "session_bytes_from_peer": _bounded_report_int(
@@ -215,30 +269,30 @@ def _sanitize_peer_receipts(block, win_start, created):
             # aria2's peer->isSeeder(): this peer holds the whole file. That is
             # NOT "this peer is the origin" -- in a multi-device wave every
             # device that finishes early raises it. Origin identification is
-            # telemetry.classify_peer_receipts's job, off the authenticated
+            # telemetry.classify_peer_transfer_records's job, off the authenticated
             # service:seeder principal.
             clean["has_complete_file"] = _strict_bool(
-                row.get("has_complete_file"), "peer_receipts has_complete_file")
+                row.get("has_complete_file"), "peer_transfer_records has_complete_file")
         rows.append(clean)
 
     rows_total = _bounded_report_int(block.get("rows_total"),
-                                     _RECEIPT_ROWS_CAP)
+                                     _PEER_TRANSFER_ROWS_CAP)
     rows_omitted = _bounded_report_int(block.get("rows_omitted"),
-                                       _RECEIPT_ROWS_CAP)
+                                       _PEER_TRANSFER_ROWS_CAP)
     if rows_total != len(rows) + rows_omitted:
-        raise ValueError("peer_receipts rows do not sum to rows_total")
+        raise ValueError("peer_transfer_records rows do not sum to rows_total")
     total = _bounded_report_int(block.get("bytes_from_all_senders_total"),
                                 _CONTENT_CAP)
     omitted = _bounded_report_int(block.get("bytes_from_all_senders_omitted"),
                                   _CONTENT_CAP)
     if sum(r["session_bytes_from_peer"] for r in rows) + omitted != total:
-        raise ValueError("peer_receipts bytes do not sum to total")
+        raise ValueError("peer_transfer_records bytes do not sum to total")
 
     # Canonical stored order, and the order the server's own cap trims from:
     # bytes descending, ip as the tiebreak so the result is deterministic.
     rows.sort(key=lambda r: (-r["session_bytes_from_peer"], r["ip"]))
-    extra = rows[_V2_PEER_RECEIPT_ROWS:]
-    rows = rows[:_V2_PEER_RECEIPT_ROWS]
+    extra = rows[_V2_PEER_TRANSFER_ROWS:]
+    rows = rows[:_V2_PEER_TRANSFER_ROWS]
     rows_omitted += len(extra)
     omitted += sum(r["session_bytes_from_peer"] for r in extra)
     # rows_omitted counts transport loss; ``complete`` describes the capture.
@@ -257,8 +311,8 @@ def _sanitize_report_v2(data):
 
     Exact types/enums/ids/timestamps; content/verification/sampling/stage/peer
     caps; stored body bounded at _REPORT_STORE_MAX. Tags ``schema:"v2"``.
-    The optional ``peer_receipts`` block (exact device-measured per-peer
-    received bytes) is validated by _sanitize_peer_receipts and stored only
+    The optional ``peer_transfer_records`` block (exact device-measured per-peer
+    received bytes) is validated by _sanitize_peer_transfer_records and stored only
     when it was sent -- absent means not measured, never zero.
     ``report_id`` is the ring dedupe key. No token/secret ever appears in a
     raised message (a report carries none, but the discipline is explicit)."""
@@ -399,12 +453,12 @@ def _sanitize_report_v2(data):
               "peers_rows_dropped": peers_dropped,
               "peers_truncated": data["peers_truncated"] or peers_dropped > 0,
               "peers_saturated": data["peers_saturated"]}
-    receipts = data.get("peer_receipts")
-    if receipts is not None:
+    transfer_records = data.get("peer_transfer_records")
+    if transfer_records is not None:
         # Optional and stored only when sent: an absent block means NOT
         # MEASURED and must stay absent all the way to the reader.
-        report["peer_receipts"] = _sanitize_peer_receipts(
-            receipts, float(win["start"]), float(created))
+        report["peer_transfer_records"] = _sanitize_peer_transfer_records(
+            transfer_records, float(win["start"]), float(created))
     agent = data.get("agent")
     if isinstance(agent, dict):
         report["agent"] = _cap_strings(agent)
@@ -493,12 +547,57 @@ def _sanitize_report(data):
     return report
 
 
+class PolicyConflict(Exception):
+    """A conditional set_policy() whose expectation no longer held.
+
+    Deliberately NOT a ValueError: callers map ValueError to "the request was
+    malformed" (400), and a lost race is neither malformed nor the caller's
+    mistake -- it is a concurrent edit the caller must be shown before it
+    decides again. ``current_ids`` carries what is actually stored, so the
+    answer can say so without a second read racing the first."""
+
+    def __init__(self, current_ids):
+        super().__init__("assignment changed since it was read")
+        self.current_ids = list(current_ids)
+
+
+class QuarantinedImage(Exception):
+    """Raised by set_policy() when the requested assignment set names an
+    image currently quarantined by the Cisco Bulk Hash reconciler -- a NEW
+    apply_hash_verification() mismatch, or one release_quarantine() has not
+    (yet, or successfully) lifted. Carries the image's current
+    ``hash_verification`` so an HTTP caller can surface WHY the assign was
+    refused (state/checked_at/feed_published_at/source/deferral) rather
+    than a bare 400."""
+
+    def __init__(self, image_id, hash_verification):
+        super().__init__("image %s is quarantined" % image_id)
+        self.image_id = image_id
+        self.hash_verification = hash_verification
+
+
+class QuarantineStillMismatched(Exception):
+    """Raised by release_quarantine() when the image's CURRENT sha512 still
+    disagrees with the feed sha512 recorded by the last
+    apply_hash_verification() call and the caller did not pass
+    override=True. Carries the same ``hash_verification`` shape as
+    QuarantinedImage so a caller can show the operator what still fails
+    before deciding to force it."""
+
+    def __init__(self, image_id, hash_verification):
+        super().__init__(
+            "image %s still fails hash verification; override required"
+            % image_id)
+        self.image_id = image_id
+        self.hash_verification = hash_verification
+
+
 class CatalogStore:
     TELEMETRY_RING = 5      # newest reports kept per device (hard disk bound)
     SEEN_REPORT_IDS = 256   # durable per-device seen v2 report_id ledger bound
     PULL_TTL = 600          # seconds a console pull directive stays pending
 
-    def __init__(self, state_dir):
+    def __init__(self, state_dir, audit_path=None, seeder_remove_fn=None):
         self.state_dir = state_dir
         self.torrents_dir = os.path.join(state_dir, "torrents")
         os.makedirs(self.torrents_dir, exist_ok=True)
@@ -515,6 +614,28 @@ class CatalogStore:
         # oldest purged FIFO) and is purged with the device.
         self.report_ledger_path = os.path.join(state_dir,
                                                 "report_ledger.json")
+        # Cisco Bulk Hash reconciliation (KGV reconciler): the FULL last
+        # verdict reconcile() produced for each image, keyed by image_id --
+        # {state, feed_sha512, publish_date, deferral, checked_at, source}.
+        # This is deliberately a separate store from the narrower wire-compat
+        # `hash_verification` projection written onto the catalog entry
+        # itself (state/checked_at/feed_published_at/source/deferral):
+        # release_quarantine() needs feed_sha512 to re-run the sha512
+        # comparison later without re-fetching the feed, and keeping that
+        # internal-bookkeeping-only field off the wire-facing entry means
+        # nothing downstream ever has to know it exists.
+        self.hash_verdicts_path = os.path.join(state_dir, "hash_verdicts.json")
+        # Both None by default: a CatalogStore constructed for anything
+        # OTHER than the Bulk Hash quarantine path (most existing callers
+        # and tests) must never attempt a real audit write or seeder call it
+        # was never asked to make. gui_server.py's main() injects both
+        # explicitly, mirroring exactly how gui_images.ImageService is
+        # already wired for the identical seeder-teardown + audit concern
+        # (this module cannot default seeder_remove_fn to publish.py itself
+        # -- publish.py imports this module, so importing it back here would
+        # be a cycle; the caller that wants the side effect injects it).
+        self.audit_path = audit_path
+        self._seeder_remove = seeder_remove_fn
 
     def _read(self, path):
         try:
@@ -611,40 +732,481 @@ class CatalogStore:
         with set_policy."""
         return secrets_store.store_lock(self.catalog_path + ".assign")
 
-    def set_policy(self, device_id, approved_image_id=None):
-        """Approve an image for a device. Approval is the whole policy: IRIS
-        stages and verifies, and never installs, activates or reloads, so there
-        is nothing further to authorise.
+    def set_policy(self, device_id, approved_image_id=None,
+                   approved_image_ids=None, expect_image_ids=None):
+        """Approve an ordered set of images (max MAX_ASSIGNED_IMAGES) for a
+        device. Approval is the whole policy: IRIS stages and verifies, and
+        never installs, activates or reloads, so there is nothing further to
+        authorise.
+
+        The singular kwarg remains for callers/rows from the single-image
+        era and means a one-element set; passing both is a programming
+        error.
 
         There used to be an ``install_allowed`` flag here. It gated nothing --
         no code in server/ or device/ ever read it -- and it was always written
         False, because the scope decision had already been made. Displayed to an
         operator as a False beside an approved image it read as a second gate
         still to be opened, which is worse than absent: it invited people to go
-        looking for the switch that would let staging proceed."""
+        looking for the switch that would let staging proceed.
+
+        ``expect_image_ids`` makes the write CONDITIONAL: the stored set must
+        still equal it, or PolicyConflict is raised and nothing is written.
+        Two operators with the image picker open on the same device used to
+        overwrite each other in silence, the later Apply simply winning. The
+        comparison is by sequence, since applying rewrites order as well as
+        membership, and an empty list is a real expectation ("I saw nothing
+        assigned"), distinct from None ("I am not checking"). Passing None
+        keeps the unconditional write every existing caller relies on.
+
+        Raises QuarantinedImage if *ids* names an image the Cisco Bulk Hash
+        reconciler currently has quarantined (see apply_hash_verification()/
+        release_quarantine()) -- unassigning (an *ids* that DROPS a
+        quarantined id, or an empty *ids*) is always allowed; only naming
+        one in the set being written is refused."""
+        if approved_image_id is not None and approved_image_ids is not None:
+            raise ValueError(
+                "pass approved_image_id or approved_image_ids, not both")
+        if approved_image_ids is None:
+            ids = [approved_image_id] if approved_image_id else []
+        else:
+            ids = [str(i) for i in approved_image_ids]
+        if len(ids) > MAX_ASSIGNED_IMAGES:
+            raise ValueError("at most %d images per device" % MAX_ASSIGNED_IMAGES)
+        if len(set(ids)) != len(ids):
+            raise ValueError("duplicate image id in assignment")
         with self.image_policy_lock():
             # Re-check at persistence time. Missing catalog.json remains valid
             # for legacy bootstrap callers; an existing catalog fails closed.
-            if approved_image_id and os.path.exists(self.catalog_path) \
-                    and self.get_image(approved_image_id) is None:
-                raise ValueError("no such image")
+            # This is also the single enforcement point for "a quarantined
+            # image may never be assigned" (KGV reconciler): every caller --
+            # the console's /assign route, the iris-assign CLI, and this
+            # class's own quarantine auto-unassign below -- goes through
+            # set_policy, so the rule can only be gotten wrong in one place.
+            if ids and os.path.exists(self.catalog_path):
+                for iid in ids:
+                    entry = self.get_image(iid)
+                    if entry is None:
+                        raise ValueError("no such image")
+                    if entry.get("quarantined"):
+                        raise QuarantinedImage(iid, entry.get("hash_verification"))
             with secrets_store.store_lock(self.policy_path):
+                # Inside the same lock the write takes: a check outside it
+                # would be a compare-and-set with a gap wide enough for the
+                # very race it exists to catch.
+                if expect_image_ids is not None:
+                    current = self.get_policy(device_id)["approved_image_ids"]
+                    if [str(i) for i in expect_image_ids] != current:
+                        raise PolicyConflict(current)
                 pol = self._read(self.policy_path)
-                pol[device_id] = {"approved_image_id": approved_image_id}
+                # Keep writing approved_image_id (first-or-None) alongside
+                # approved_image_ids: raw policy.json readers that predate the
+                # ordered set (gui_server's device-view merge and Overview
+                # aggregation both read list_policies() directly, not through
+                # get_policy()'s normalisation) must keep seeing an assignment
+                # without themselves knowing about the plural key.
+                pol[device_id] = {"approved_image_id": ids[0] if ids else None,
+                                  "approved_image_ids": ids}
                 _atomic_write_json(self.policy_path, pol)
 
     def get_policy(self, device_id):
-        """The device's approval, normalised. A record written before
-        ``install_allowed`` was removed still carries the key on disk; it is
-        dropped on the way out so callers never see a field that means nothing,
-        and the row rewrites itself in the new shape at the next set_policy."""
+        """The device's approvals, normalised: every historical row shape
+        reads as ``{approved_image_id: first-or-None, approved_image_ids:
+        [..]}``. A record written before ``install_allowed`` was removed
+        still carries the key on disk; it is dropped on the way out so
+        callers never see a field that means nothing. A row written by the
+        single-image release carries only ``approved_image_id`` and reads
+        back as its one-element list, with no migration step -- the row
+        rewrites itself in the new shape at the next set_policy. When a row
+        carries BOTH keys (the shape set_policy now writes), the plural is
+        authoritative: ``approved_image_id`` is recomputed here as its first
+        element and never trusted from disk, so a raw edit or a stale write
+        that leaves the two keys disagreeing can't desync what callers see."""
         rec = self._read(self.policy_path).get(device_id)
         if not isinstance(rec, dict):
-            return {"approved_image_id": None}
-        return {"approved_image_id": rec.get("approved_image_id")}
+            return {"approved_image_id": None, "approved_image_ids": []}
+        ids = rec.get("approved_image_ids")
+        if not isinstance(ids, list):
+            one = rec.get("approved_image_id")
+            ids = [one] if one else []
+        ids = [str(i) for i in ids if i]
+        return {"approved_image_id": ids[0] if ids else None,
+                "approved_image_ids": ids}
 
     def list_policies(self):
         return self._read(self.policy_path)
+
+    # --- Cisco Bulk Hash reconciliation: verdict storage + quarantine ---
+    # (KGV reconciler). apply_hash_verification() is the only writer of
+    # hash_verification/cisco_signature_verified and the only place a NEW
+    # mismatch can START a quarantine; release_quarantine() is the only
+    # place one can END. set_policy() (above) is the single enforcement
+    # point for "a quarantined image may never be assigned".
+
+    def _audit_event(self, **kwargs):
+        """Best-effort audit emit for the quarantine path. self.audit_path
+        is None for any CatalogStore not explicitly wired for it (most
+        existing callers/tests) -- silently skip rather than fall back to a
+        real on-disk path nothing asked for. A logging failure must never
+        undo or block an action that has already taken effect on disk."""
+        if self.audit_path is None:
+            return
+        try:
+            audit.append_event(self.audit_path, **kwargs)
+        except Exception:
+            pass
+
+    def _stop_seeding(self, entry):
+        """Best-effort seeder teardown for *entry* -- the same call
+        gui_images.ImageService.delete_image() makes, reused here so a
+        quarantined image stops being served WITHOUT touching the catalog
+        entry itself. self._seeder_remove is None for any CatalogStore not
+        wired with one (most existing callers/tests): a no-op then, not a
+        forced import of publish.py (see __init__).
+
+        Returns True on success (including the not-wired no-op -- that is
+        an intentional configuration, not a failure to keep retrying
+        forever) and False when a WIRED seeder call raised. The caller
+        (_fire_quarantine) uses this to decide whether the quarantine's
+        actions have all converged, so a transiently unreachable seeder
+        gets retried on the next apply run instead of being forgotten."""
+        if self._seeder_remove is None:
+            return True
+        try:
+            self._seeder_remove(entry.get("info_hash_hex"))
+            return True
+        except Exception:   # seeder unreachable is non-fatal, but retried
+            return False
+
+    def apply_hash_verification(self, verdicts, source, now=None):
+        """Apply Cisco Bulk Hash reconciliation *verdicts* -- Task 1's
+        bulkhash.reconcile() output, ``{image_id: {state, feed_sha512,
+        publish_date, deferral}}`` -- from *source* (one of
+        HASH_VERIFICATION_SOURCES) onto the catalog.
+
+        For every image_id present in BOTH *verdicts* and the catalog,
+        writes the wire-compat ``hash_verification`` field onto its entry --
+        ``{state, checked_at, feed_published_at, source, deferral}`` -- and
+        keeps ``cisco_signature_verified = (state == "verified")`` in sync.
+        An image_id in *verdicts* with no catalog entry is skipped (nothing
+        to update, not an error); an image with no verdict entry in this
+        call is left completely untouched -- this is a partial update, never
+        a full resync.
+
+        Quarantine -- stop seeding (the delete-image path's teardown,
+        WITHOUT deleting the entry), block future assignment (enforced in
+        set_policy(), above), and auto-unassign from every device currently
+        holding it (one audit entry per affected device) -- fires iff, for a
+        given image, its new state is "mismatch", it is NOT deferred, it is
+        not ALREADY quarantined, AND the reported feed_sha512 is not one an
+        operator has already overridden (see release_quarantine()). Not raw
+        prior-state-changed, which is what makes this idempotent AND handles
+        deferral correctly:
+
+        - re-applying the same (or a different, still-mismatching) verdict
+          never re-fires: the image is already quarantined.
+        - not_in_feed and a deferred mismatch never quarantine at all.
+        - a mismatch that WAS suppressed by deferral=True still fires the
+          moment a LATER verdict reports the same mismatch with
+          deferral=False -- it was never actually acted on, so "deferral
+          flapping" cannot be used to dodge quarantine forever.
+        - a mismatch an operator has override-released is NOT re-fired by
+          re-applying the byte-identical verdict (the SAME feed_sha512) --
+          an override would otherwise survive only until the next scheduled
+          check. A DIFFERENT feed_sha512 is a new problem and still fires.
+          The acknowledgement is cleared the moment a verdict reports the
+          image verified, so a later regression back to that same value (a
+          genuinely new occurrence, not a repeat of the acknowledged one)
+          is not wrongly suppressed by a stale ack.
+
+        Once quarantined, only release_quarantine() clears the block: a
+        LATER verdict reporting "verified" here still updates
+        hash_verification/cisco_signature_verified (the informational feed
+        comparison is always kept truthful) but never silently lifts an
+        active quarantine -- that would let the feed's own churn undo an
+        operator-visible gate without anyone deciding to.
+
+        Convergence: on EVERY call (regardless of what *verdicts* names),
+        also retries the quarantine actions for any image that is
+        quarantined but whose actions never fully completed -- a crash
+        between the durable quarantined=True write and _fire_quarantine
+        ever running, or a per-device set_policy failure a previous call
+        could not finish, must not leave an image blocked-from-new-
+        assignment while still actively assigned and seeding forever.
+        _fire_quarantine() is itself safe to re-run: it only acts on
+        devices/seeding that still need it.
+
+        Raises ValueError, before writing anything, if *source* is not one
+        of HASH_VERIFICATION_SOURCES or if any verdict's state is not one of
+        bulkhash.STATE_VERIFIED/STATE_MISMATCH/STATE_NOT_IN_FEED -- an
+        all-or-nothing validation pass, so a malformed call can never
+        quarantine (or fail to record) only SOME of the images it names.
+
+        Returns ``{"quarantined": [image_id, ...]}`` -- every image whose
+        quarantine actions were (re-)fired in THIS call, whether newly
+        transitioned or a retried leftover; ``{"newly_quarantined": [...]}``
+        -- the subset that transitioned into quarantine JUST NOW."""
+        if source not in HASH_VERIFICATION_SOURCES:
+            raise ValueError(
+                "source must be one of %s" % (HASH_VERIFICATION_SOURCES,))
+        valid_states = (bulkhash.STATE_VERIFIED, bulkhash.STATE_MISMATCH,
+                        bulkhash.STATE_NOT_IN_FEED)
+        for image_id, v in verdicts.items():
+            if v.get("state") not in valid_states:
+                raise ValueError("verdict for %r has an unknown state: %r"
+                                 % (image_id, v.get("state")))
+        now = time.time() if now is None else now
+        newly_quarantined = []
+        # catalog.json is shared with save_image()/delete_image() (and the
+        # separate-process iris-publish CLI), none of which take
+        # image_policy_lock() -- only secrets_store.store_lock(catalog_path)
+        # -- so the read-modify-write below must take BOTH, nested exactly
+        # as image_policy_lock()'s own docstring documents (a distinct
+        # sidecar file so the holder can still take the per-store lock
+        # underneath) and as gui_images.ImageService.delete_image already
+        # does. Without the inner lock, a concurrent publish landing between
+        # this method's read and write is silently clobbered (or clobbers
+        # this method's own write).
+        with self.image_policy_lock():
+            with secrets_store.store_lock(self.catalog_path):
+                cat = self._read(self.catalog_path)
+                images = cat.get("images", {})
+                verdict_store = self._read(self.hash_verdicts_path)
+                touched = False
+                for image_id, v in verdicts.items():
+                    entry = images.get(image_id)
+                    if entry is None:
+                        continue
+                    state = v["state"]
+                    deferral = bool(v.get("deferral"))
+                    feed_sha512_norm = (v.get("feed_sha512") or "").strip().lower()
+                    entry["hash_verification"] = {
+                        "state": state,
+                        "checked_at": int(now),
+                        "feed_published_at": v.get("publish_date"),
+                        "source": source,
+                        "deferral": deferral,
+                    }
+                    entry["cisco_signature_verified"] = (
+                        state == bulkhash.STATE_VERIFIED)
+                    if state == bulkhash.STATE_VERIFIED:
+                        # a resolved verdict retires any prior override ack --
+                        # a LATER regression to that same value is a fresh
+                        # occurrence, not a repeat of the one acknowledged.
+                        entry.pop("quarantine_override_sha512", None)
+                    already_acked = (
+                        state == bulkhash.STATE_MISMATCH and feed_sha512_norm
+                        and entry.get("quarantine_override_sha512")
+                        == feed_sha512_norm)
+                    if (state == bulkhash.STATE_MISMATCH and not deferral
+                            and not entry.get("quarantined")
+                            and not already_acked):
+                        entry["quarantined"] = True
+                        entry["quarantine_actions_complete"] = False
+                        newly_quarantined.append(image_id)
+                    images[image_id] = entry
+                    verdict_store[image_id] = {
+                        "state": state, "feed_sha512": v.get("feed_sha512"),
+                        "publish_date": v.get("publish_date"),
+                        "deferral": deferral, "checked_at": int(now),
+                        "source": source,
+                    }
+                    touched = True
+                if touched:
+                    cat["images"] = images
+                    _atomic_write_json(self.catalog_path, cat)
+                    _atomic_write_json(self.hash_verdicts_path, verdict_store)
+                # Convergence scan: every quarantined-but-incomplete image in
+                # the WHOLE catalog, not just ones named by *verdicts* this
+                # call -- see docstring.
+                to_retry = sorted(
+                    iid for iid, e in images.items()
+                    if e.get("quarantined")
+                    and not e.get("quarantine_actions_complete"))
+        # Everything below runs OUTSIDE image_policy_lock (acting on state
+        # the write above has ALREADY made durable -- the block-assignment
+        # rule in set_policy() is live from that write onward) because
+        # _fire_quarantine() calls set_policy() itself, which takes the same
+        # lock; flock is not reentrant within one process, so nesting it
+        # here would deadlock.
+        for image_id in newly_quarantined:
+            self._audit_event(
+                event="image_quarantine", category="image",
+                action="quarantine", target=image_id, actor="system",
+                result="ok",
+                detail="quarantined: sha512 mismatch against Cisco Bulk "
+                       "Hash feed")
+        for image_id in to_retry:
+            if self._fire_quarantine(image_id):
+                self._mark_quarantine_actions_complete(image_id)
+        return {"quarantined": to_retry, "newly_quarantined": newly_quarantined}
+
+    def _fire_quarantine(self, image_id):
+        """Quarantine side effects for image_id, which
+        apply_hash_verification() has ALREADY marked quarantined=True on
+        disk (durably, before this ever runs). Stop seeding, then
+        auto-unassign the image from every device that currently has it
+        approved (set_policy minus the id, minus any OTHER already-
+        quarantined id also sitting in that device's set -- set_policy
+        refuses to write a set containing any quarantined id at all, so
+        leaving a second one in would make this very cleanup call refuse
+        itself), one audit entry per affected device -- ok on success,
+        FAIL (never silently skipped) on a set_policy error, so a
+        transient failure is on the record rather than vanishing.
+
+        Idempotent/re-runnable by construction, which is what makes
+        convergence (apply_hash_verification's docstring) safe: `affected`
+        is recomputed fresh every call, so a device already cleaned up by a
+        PRIOR call simply will not be in it, and re-attempting seeder
+        teardown on an already-stopped torrent is a harmless no-op.
+
+        Returns True iff EVERY action -- stop-seeding and every currently-
+        affected device's auto-unassign -- succeeded this call. The caller
+        only marks the quarantine's actions complete (so it stops being
+        retried on future apply runs) when this is True."""
+        entry = self.get_image(image_id)
+        if entry is None:
+            return True   # deleted since -- nothing left to converge toward
+        ok = self._stop_seeding(entry)
+        pol = self.list_policies()
+        affected = sorted(
+            did for did, p in pol.items()
+            if image_id in (p.get("approved_image_ids") or
+                            ([p["approved_image_id"]]
+                             if p.get("approved_image_id") else [])))
+        for did in affected:
+            current = self.get_policy(did)["approved_image_ids"]
+            remaining = [i for i in current
+                        if not (self.get_image(i) or {}).get("quarantined")]
+            try:
+                self.set_policy(did, approved_image_ids=remaining)
+            except Exception as exc:
+                ok = False
+                self._audit_event(
+                    event="image_quarantine_auto_unassign", category="device",
+                    action="unassign", target=did, actor="system",
+                    result="fail",
+                    detail="failed to auto-unassign %s: %s -- will retry "
+                           "on the next apply run"
+                           % (image_id, exc.__class__.__name__))
+                continue   # keep trying the OTHER affected devices regardless
+            self._audit_event(
+                event="image_quarantine_auto_unassign", category="device",
+                action="unassign", target=did, actor="system", result="ok",
+                detail="auto-unassigned %s: failed Cisco Bulk Hash "
+                       "verification" % image_id)
+        return ok
+
+    def _mark_quarantine_actions_complete(self, image_id):
+        """Durably record that _fire_quarantine()'s actions for image_id
+        have ALL converged -- called only when it returns True. Nested
+        locking matches every other catalog.json read-modify-write (see
+        apply_hash_verification); a no-op if the image was released or
+        deleted in the meantime (nothing to mark)."""
+        with self.image_policy_lock():
+            with secrets_store.store_lock(self.catalog_path):
+                cat = self._read(self.catalog_path)
+                images = cat.get("images", {})
+                entry = images.get(image_id)
+                if entry is None or not entry.get("quarantined"):
+                    return
+                entry["quarantine_actions_complete"] = True
+                images[image_id] = entry
+                cat["images"] = images
+                _atomic_write_json(self.catalog_path, cat)
+
+    def release_quarantine(self, image_id, actor, override=False):
+        """Lift an active quarantine on image_id -- the ONLY way one is
+        lifted (apply_hash_verification() never auto-clears one; see its
+        docstring).
+
+        Re-runs the sha512 comparison against the STORED last feed verdict
+        (from the most recent apply_hash_verification() call -- this never
+        re-fetches or re-parses the feed itself, which is the pipeline's job
+        and out of this module's reach) rather than trusting whatever
+        hash_verification.state currently says, so an operator who has since
+        corrected the catalog's own sha512 (replaced the bad file, fixed a
+        publish-time error) sees that reflected immediately:
+
+        - still mismatching -- including when no feed sha512 was ever
+          recorded, e.g. a durably corrupted verdict record; that fails
+          CLOSED, never treated as an implicit match -- requires
+          override=True; without it, raises QuarantineStillMismatched and
+          changes nothing. WITH it, the quarantine is lifted but
+          hash_verification.state is left exactly as apply_hash_verification
+          last wrote it ("mismatch" stays "mismatch"): overriding is a
+          deliberate operator decision to permit assignment despite that,
+          never a claim that it now verifies. The acknowledged feed_sha512
+          is recorded on the entry so apply_hash_verification() does not
+          silently re-quarantine on the next scheduled run's byte-identical
+          verdict -- only a DIFFERENT feed_sha512 (a new problem) fires
+          again; see its docstring.
+        - now matching: a clean release. hash_verification.state and
+          cisco_signature_verified are updated to "verified" (untouched
+          since the quarantining apply_hash_verification() call), and the
+          stored verdict is updated too, so a later call reads a consistent
+          record rather than re-deriving "still mismatching" from a state
+          that is no longer true.
+
+        Either path is audited, with the override flag STRUCTURAL
+        (action="release_override" vs "release"), not just prose in the
+        detail, so it can be queried/alerted on.
+
+        Raises KeyError if image_id is not in the catalog; ValueError if it
+        is not currently quarantined (release is only ever a response to an
+        active quarantine)."""
+        # Nested locking: see apply_hash_verification's docstring/comment --
+        # catalog.json is shared with save_image()/delete_image()/
+        # iris-publish, none of which take image_policy_lock().
+        with self.image_policy_lock():
+            with secrets_store.store_lock(self.catalog_path):
+                cat = self._read(self.catalog_path)
+                images = cat.get("images", {})
+                entry = images.get(image_id)
+                if entry is None:
+                    raise KeyError(image_id)
+                if not entry.get("quarantined"):
+                    raise ValueError("image %r is not quarantined" % image_id)
+                verdict_store = self._read(self.hash_verdicts_path)
+                stored = verdict_store.get(image_id) or {}
+                feed_sha512 = (stored.get("feed_sha512") or "").strip().lower()
+                current_sha512 = (entry.get("sha512") or "").strip().lower()
+                still_mismatching = (
+                    (not feed_sha512) or feed_sha512 != current_sha512)
+                if still_mismatching and not override:
+                    raise QuarantineStillMismatched(
+                        image_id, entry.get("hash_verification"))
+                entry["quarantined"] = False
+                # No pending quarantine actions once released -- otherwise
+                # apply_hash_verification's convergence scan (which keys
+                # only on quarantined=True) simply never looks at this entry
+                # again anyway, but leaving a stale False here would read as
+                # "still incomplete" to anyone inspecting the entry directly.
+                entry["quarantine_actions_complete"] = True
+                if still_mismatching:
+                    entry["quarantine_override_sha512"] = feed_sha512
+                else:
+                    entry.pop("quarantine_override_sha512", None)
+                    hv = dict(entry.get("hash_verification") or {})
+                    hv["state"] = bulkhash.STATE_VERIFIED
+                    entry["hash_verification"] = hv
+                    entry["cisco_signature_verified"] = True
+                    if stored:
+                        verdict_store[image_id] = dict(
+                            stored, state=bulkhash.STATE_VERIFIED)
+                images[image_id] = entry
+                cat["images"] = images
+                _atomic_write_json(self.catalog_path, cat)
+                _atomic_write_json(self.hash_verdicts_path, verdict_store)
+        self._audit_event(
+            event="image_quarantine_release", category="image",
+            action="release_override" if still_mismatching else "release",
+            target=image_id, actor=actor, result="ok",
+            detail=("override: sha512 still does not match the Cisco Bulk "
+                    "Hash feed" if still_mismatching else
+                    "released: sha512 now matches the Cisco Bulk Hash feed"))
+        return {"released": True, "override": still_mismatching,
+                "state": entry["hash_verification"]["state"]}
 
     # --- device telemetry reports (bounded ring, issue #13) ---
     def record_telemetry(self, device_id, report):
@@ -801,6 +1363,37 @@ class CatalogStore:
             _atomic_write_json(self.pull_path, pr)
 
 
+def _id_list(value, cap=16):
+    """A device-supplied list of image ids, sanitised: None when absent or
+    malformed (absence is meaningful — a legacy agent — so never invent []),
+    else up to *cap* non-empty strings. cap > MAX_ASSIGNED_IMAGES so a
+    misbehaving agent cannot bloat the heartbeat store unbounded.
+
+    A non-list, or a list holding anything other than strings, is rejected
+    wholesale as None rather than silently filtered down to [] — a filtered
+    [] would be indistinguishable from a real agent's "nothing staged yet",
+    turning malformed input into meaningful data instead of failing closed."""
+    if not isinstance(value, list) or not all(isinstance(i, str) for i in value):
+        return None
+    return [i for i in value[:cap] if i]
+
+
+def _device_image_view(entry):
+    """Wire projection of one catalog image entry served to devices by
+    Catalog.route_get (KGV / Cisco Bulk Hash reconciler review wave):
+    every field the entry carries MINUS the two that exist purely for
+    catalog.py's own internal bookkeeping (quarantine_actions_complete --
+    convergence-retry state; quarantine_override_sha512 -- the
+    re-quarantine-suppression ack) and were never meant to be wire-visible
+    -- mirrors gui_server._image_view's console-side projection rationale.
+    hash_verification and quarantined stay: an agent benefits from knowing
+    its own assigned image's verification state same as a console operator
+    does."""
+    return {k: v for k, v in entry.items()
+           if k not in ("quarantine_actions_complete",
+                        "quarantine_override_sha512")}
+
+
 class Catalog:
     def __init__(self, store, secrets_path,
                  audit_path=None, live_table=None, stream_settings=None,
@@ -876,10 +1469,11 @@ class Catalog:
     def route_get(self, path, auth_ctx=None, store_dict=None):
         parts = path.strip("/").split("/")
         if parts == ["v1", "images"]:
-            return self._json(200, {"images": self.store.list_images()})
+            return self._json(200, {"images": [
+                _device_image_view(i) for i in self.store.list_images()]})
         if len(parts) == 3 and parts[:2] == ["v1", "images"]:
             img = self.store.get_image(parts[2])
-            return self._json(200, img) if img else \
+            return self._json(200, _device_image_view(img)) if img else \
                 self._json(404, {"error": "no such image"})
         if len(parts) == 3 and parts[:2] == ["v1", "torrents"]:
             image_id = parts[2][:-len(".torrent")] \
@@ -967,6 +1561,14 @@ class Catalog:
                 "model": data.get("model"),
                 "telemetry_enabled": data.get("telemetry_enabled"),
                 "telemetry_stream_enabled": data.get("telemetry_stream_enabled"),
+                # Multi-image staging state (issue: multi-image assignment).
+                # Sanitised via _id_list: absence/malformed input stores None
+                # (a legacy or misbehaving agent), never an invented [] --
+                # the console's fallback logic keys off staged_image_ids
+                # being None to fall back to the singular stage_state/
+                # current_image_id pair.
+                "staged_image_ids": _id_list(data.get("staged_image_ids")),
+                "errored_image_ids": _id_list(data.get("errored_image_ids")),
                 # The heartbeat's source IP is the agent's Guest Shell IP — the
                 # SAME IP it announces to the tracker with — so the swarm map can
                 # join this device's model onto its swarm peer by IP.
@@ -980,8 +1582,12 @@ class Catalog:
             # paused / unassigned / errored -> WITHDRAW the live value even if
             # an `observed` envelope arrived, without inventing transfer fields.
             if self.live_table is not None:
+                # Membership against the WHOLE assigned set, not just the
+                # first (singular) member -- a live sample for a device's
+                # 2nd+ assigned image must sanitize clean, matching the v2
+                # telemetry-report ingest check above.
                 approved = self.store.get_policy(parts[2]).get(
-                    "approved_image_id")
+                    "approved_image_ids") or []
                 every, paused = 1, False
                 if self.stream_settings is not None:
                     every, paused = self.stream_settings.read()
@@ -1053,20 +1659,21 @@ class Catalog:
                 return self._json(400, {"error": "bad report"})
             if report.get("schema") == "v2":
                 assigned = self.store.get_policy(parts[2]).get(
-                    "approved_image_id")
-                if not assigned or report.get("image_id") != assigned:
+                    "approved_image_ids") or []
+                if report.get("image_id") not in assigned:
                     return self._json(400, {"error": "bad report"})
             self.store.record_telemetry(parts[2], report)
             return self._json(200, {"ok": True})
         if len(parts) == 4 and parts[:2] == ["v1", "devices"] \
                 and parts[3] == "token-refresh":
             return self._handle_token_refresh(
-                parts[2], src_ip=src_ip, store=store, index=index)
+                parts[2], src_ip=src_ip, store=store, index=index,
+                token=token)
         return self._json(404, {"error": "not found"})
 
     def _handle_token_refresh(self, device_id, src_ip=None, store=None,
-                               index=None):
-        """Rotate the catalog token for device_id and return the secret bag.
+                               index=None, token=None):
+        """Rotate or recover the catalog token and return the secret bag.
 
         The *store* passed in was loaded (pre-lock) by _guard for auth.  The
         mutation here must NOT operate on that snapshot: under the threaded
@@ -1076,18 +1683,19 @@ class Catalog:
         RE-READ the store fresh under it, so the load->mutate->save->encrypt
         cycle is serialized and never loses a concurrent rotation/revoke.
         """
-        now = time.time()
         overlap = int(os.environ.get("IRIS_TOKEN_OVERLAP", "120"))
+        grace = int(os.environ.get("IRIS_TOKEN_SKEW_GRACE", "300"))
         secrets_path = self.secrets_path
 
         with secrets_store.store_lock(secrets_path):
             # Re-read under the lock; discard the pre-lock auth snapshot.
             store = secrets_store.load(secrets_path)
+            now = time.time()
 
-            # Capture the old token value for audit (before rotate overwrites it)
             device_secrets = store.get("devices", {}).get(device_id, {})
-            old_record = device_secrets.get("catalog_token")
-            old_val = old_record["value"] if old_record else ""
+            current_record = device_secrets.get("catalog_token")
+            current_val = current_record.get("value", "") \
+                if isinstance(current_record, dict) else ""
 
             # Re-check revoke status under the lock.  _guard authorized against
             # a PRE-LOCK snapshot; if iris-revoke won the lock first and marked
@@ -1095,12 +1703,12 @@ class Catalog:
             # rotate_catalog/mint always write revoked=False, so rotating now
             # would silently un-revoke the device (hand it a fresh live token).
             # Abort instead — this closes the TOCTOU the lock made deterministic.
-            if old_record is not None and old_record.get("revoked"):
+            if current_record is not None and current_record.get("revoked"):
                 try:
                     audit.append_event(
                         self.audit_path, "refresh_fail", device_id,
                         secret_name="catalog_token",
-                        old_id=_audit_id(old_val),
+                        old_id=_audit_id(current_val),
                         src_ip=src_ip,
                         detail="device is revoked",
                         result="fail",
@@ -1109,65 +1717,90 @@ class Catalog:
                     pass
                 return self._json(409, {"error": "device revoked"})
 
-            # Stash the old token under catalog_token_prev with overlap expiry
-            # so the reverse index still finds it for the duration of the
-            # overlap window.  rotate_catalog mutates old_record.expires_at then
-            # REPLACES the store slot with the new record, so without this stash
-            # the old token would be lost on the next per-request load.
-            if old_record:
-                # Coerce to int: now is time.time() (float); the store schema
-                # holds int epoch seconds.  A float expires_at would trip
-                # int('...9') ValueError in the agent on the next tick.
-                store["devices"][device_id]["catalog_token_prev"] = {
-                    "value": old_val,
-                    "created_at": int(old_record.get("created_at", now)),
-                    "expires_at": int(now) + overlap,
-                    "revoked": False,
-                    "_scope": "catalog",   # so the guard can accept it
-                }
-
-            new_val = secrets_store.rotate_catalog(
-                store, device_id, now, overlap)
-
-            # Persist durable-FIRST: the at-rest .age ciphertext is the only
-            # copy that survives a restart, so it must be written (and confirmed)
-            # before the live tmpfs plaintext is swapped in.  If the durable
-            # write fails, persist_store leaves the tmpfs store untouched and
-            # raises; we then report failure rather than a phantom rotation that
-            # a restart would silently roll back.
-            recipients = os.environ.get("IRIS_AGE_RECIPIENTS", "")
-            enc_path = os.environ.get(
-                "IRIS_SECRETS_ENC", "/etc/iris/secrets.json.age")
+            # Re-resolve against the fresh, under-lock store. Two requests can
+            # both pass _guard with the same current token; after the first
+            # rotates, the second must recover that successor rather than mint
+            # another one. Revoke and a newer rotation also win here.
             try:
-                secretfs.persist_store(
-                    store, secrets_path,
-                    recipients_csv=recipients, enc_path=enc_path)
-            except Exception as exc:
-                # Durable write failed: nothing was committed to the live store,
-                # so there is no rotation to roll back and no divergence.  Audit
-                # the failed persist and refuse to report success.
-                try:
-                    audit.append_event(
-                        self.audit_path, "refresh_fail", device_id,
-                        secret_name="catalog_token",
-                        old_id=_audit_id(old_val),
-                        src_ip=src_ip,
-                        detail="durable persist failed",
-                        result="fail",
-                    )
-                except Exception:
-                    pass
-                return self._json(
-                    500, {"error": "durable persist failed: %s" % exc})
+                strict = secrets_store.build_catalog_auth_index(store)
+            except secrets_store.DuplicateCredentialError:
+                strict = {}
+            ctx = _resolve_refresh_auth(store, strict, token, now, grace)
+            if (ctx is None or ctx.principal.type != "device"
+                    or ctx.principal.id != device_id
+                    or ctx.secret_name not in (
+                        "catalog_token", "catalog_token_prev")):
+                return self._json(401, {"error": "unauthorized"})
 
-            # Audit the refresh (only after the rotation is durably committed)
-            audit.append_event(
-                self.audit_path, "refresh", device_id,
-                secret_name="catalog_token",
-                old_id=_audit_id(old_val),
-                new_id=_audit_id(new_val),
-                src_ip=src_ip,
-            )
+            recovering = ctx.secret_name == "catalog_token_prev"
+            if recovering:
+                # The server already committed this successor. Reissue the
+                # current bag unchanged so a lost 200 or failed device conf
+                # rewrite can converge on the next tick.
+                new_val = current_val
+            else:
+                old_record = current_record
+                old_val = current_val
+                # Shared routes retain the old token for only the short overlap.
+                # token-refresh additionally remembers the token's ORIGINAL
+                # expiry: recovery cannot outlive the credential the device
+                # presented, but a 120-second delivery failure cannot strand a
+                # token that otherwise had days left.
+                if old_record:
+                    recovery_expires_at = int(float(
+                        old_record.get("expires_at", 0) or 0))
+                    store["devices"][device_id]["catalog_token_prev"] = {
+                        "value": old_val,
+                        "created_at": int(float(
+                            old_record.get("created_at", now))),
+                        "expires_at": int(now) + overlap,
+                        "refresh_expires_at": recovery_expires_at,
+                        "revoked": False,
+                        "_scope": "catalog",
+                    }
+
+                new_val = secrets_store.rotate_catalog(
+                    store, device_id, now, overlap)
+
+                # Persist durable-FIRST: the at-rest .age ciphertext is the only
+                # copy that survives a restart, so it must be written (and confirmed)
+                # before the live tmpfs plaintext is swapped in.  If the durable
+                # write fails, persist_store leaves the tmpfs store untouched and
+                # raises; we then report failure rather than a phantom rotation that
+                # a restart would silently roll back.
+                recipients = os.environ.get("IRIS_AGE_RECIPIENTS", "")
+                enc_path = os.environ.get(
+                    "IRIS_SECRETS_ENC", "/etc/iris/secrets.json.age")
+                try:
+                    secretfs.persist_store(
+                        store, secrets_path,
+                        recipients_csv=recipients, enc_path=enc_path)
+                except Exception as exc:
+                    # Durable write failed: nothing was committed to the live store,
+                    # so there is no rotation to roll back and no divergence.  Audit
+                    # the failed persist and refuse to report success.
+                    try:
+                        audit.append_event(
+                            self.audit_path, "refresh_fail", device_id,
+                            secret_name="catalog_token",
+                            old_id=_audit_id(old_val),
+                            src_ip=src_ip,
+                            detail="durable persist failed",
+                            result="fail",
+                        )
+                    except Exception:
+                        pass
+                    return self._json(
+                        500, {"error": "durable persist failed: %s" % exc})
+
+                # Audit the refresh (only after the rotation is durably committed)
+                audit.append_event(
+                    self.audit_path, "refresh", device_id,
+                    secret_name="catalog_token",
+                    old_id=_audit_id(old_val),
+                    new_id=_audit_id(new_val),
+                    src_ip=src_ip,
+                )
 
         # Build the response bag: catalog_token + expires_at, plus
         # announce_token / rpc_secret ONLY when the device actually has them.
@@ -1210,8 +1843,10 @@ def make_server(host, port, store, secrets_path, certfile=None,
         def _guard(self, parts, token):
             """Route-aware guard.
 
-            Device-bound routes (heartbeat, token-refresh, telemetry): require
-            a device catalog_token resolving to that device's principal.
+            Device-bound routes (heartbeat, telemetry): require the current
+            device catalog_token resolving to that device's principal.
+            token-refresh additionally accepts that same device's one previous
+            token for idempotent delivery recovery; it grants no other route.
 
             Shared routes (images, torrents, devices-list, policy): require
             any valid catalog-scoped record.
@@ -1241,12 +1876,17 @@ def make_server(host, port, store, secrets_path, certfile=None,
 
             if is_device_bound:
                 device_id = parts[2]
-                ctx = auth.resolve_catalog_auth(
-                    store_dict, strict, token, now, grace)
+                is_refresh = parts[3] == "token-refresh"
+                ctx = _resolve_refresh_auth(
+                    store_dict, strict, token, now, grace) if is_refresh \
+                    else auth.resolve_catalog_auth(
+                        store_dict, strict, token, now, grace)
                 ok = (ctx is not None
                       and ctx.principal.type == "device"
                       and ctx.principal.id == device_id
-                      and ctx.secret_name == "catalog_token")
+                      and (ctx.secret_name == "catalog_token"
+                           or (is_refresh and ctx.secret_name
+                               == "catalog_token_prev")))
                 if not ok:
                     # Audit auth failure for token-refresh routes
                     if parts[3] == "token-refresh":
@@ -1263,9 +1903,9 @@ def make_server(host, port, store, secrets_path, certfile=None,
 
             # Shared route: accept any valid catalog credential resolved through
             # the strict index (device catalog_token OR catalog_token_prev). A
-            # rolled-old token (catalog_token_prev) works here because the strict
-            # index covers it; it is rejected on device-bound routes above
-            # because those require secret_name == "catalog_token".
+            # rolled-old token (catalog_token_prev) works here during its short
+            # overlap because the strict index covers it. After overlap it can
+            # resolve only when token-refresh explicitly enables recovery above.
             ctx = auth.resolve_catalog_auth(
                 store_dict, strict, token, now, grace)
             if ctx is None:

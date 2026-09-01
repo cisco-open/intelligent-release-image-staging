@@ -8,7 +8,10 @@ import live_samples
 
 
 class _Store:
-    """Minimal CatalogStore stand-in for route_post heartbeat tests."""
+    """Minimal CatalogStore stand-in for route_post heartbeat tests.
+    *approved* is a single image id (the common case) or a list of ids for a
+    multi-image assignment -- get_policy normalises either into the real
+    store's {approved_image_id, approved_image_ids} shape."""
     def __init__(self, approved="img-1", stage_error=None,
                  stage_state="ready"):
         self.approved = approved
@@ -20,7 +23,12 @@ class _Store:
         self.heartbeats.append((device_id, data))
 
     def get_policy(self, device_id):
-        return {"approved_image_id": self.approved}
+        if isinstance(self.approved, (list, tuple)):
+            ids = list(self.approved)
+        else:
+            ids = [self.approved] if self.approved else []
+        return {"approved_image_id": ids[0] if ids else None,
+                "approved_image_ids": ids}
 
     def pending_report(self, device_id, now):
         return None
@@ -61,6 +69,27 @@ class TestHeartbeatSampleIngest:
             assert status == 200 and resp["ok"] is True
         snap = table.snapshot(0.0)
         assert snap["counters"]["samples_rejected_total"] == 3
+        assert table.size() == 0
+
+    def test_sample_for_second_assigned_image_accepted(self):
+        # A device assigned MULTIPLE images (approved_image_ids) must accept a
+        # live sample for any member, not just the first -- membership, not
+        # singular equality against approved_image_id.
+        table = live_samples.LiveTable()
+        cat = _cat(store=_Store(approved=["img-1", "img-2"]), table=table)
+        status, resp = _post(cat, {"current_image_id": "img-2",
+                                   "sample": dict(SAMPLE, image_id="img-2")})
+        assert status == 200 and resp["ok"] is True
+        assert table.size() == 1                       # accepted, not rejected
+
+    def test_sample_for_unassigned_image_still_rejected(self):
+        # An id outside the whole assigned set stays rejected even when the
+        # device carries a multi-image assignment.
+        table = live_samples.LiveTable()
+        cat = _cat(store=_Store(approved=["img-1", "img-2"]), table=table)
+        status, resp = _post(cat, {"sample": dict(SAMPLE, image_id="img-3")})
+        assert status == 200 and resp["ok"] is True
+        assert table.snapshot(0.0)["counters"]["samples_rejected_total"] == 1
         assert table.size() == 0
 
     def test_no_sample_key_untouched_path(self):
@@ -119,6 +148,31 @@ class TestV2ObservationIngest:
         assert table.size() == 1
         ent = table.snapshot(1.0)["samples"]["d1"]
         assert ent["obs_state"] == "observed" and ent["schema"] == "v2"
+
+    def test_observation_for_second_assigned_image_accepted(self):
+        # Same membership fix as the v1 sample path: a v2 observation for the
+        # device's SECOND assigned image must land, not be silently rejected.
+        table = live_samples.LiveTable()
+        cat = _cat(store=_Store(approved=["img-1", "img-2"]), table=table)
+        status, resp = _post(cat, {"current_image_id": "img-2",
+                                   "telemetry_enabled": True,
+                                   "telemetry_stream_enabled": True,
+                                   "telemetry_observation": _obs(image_id="img-2")})
+        assert status == 200 and resp["ok"] is True
+        assert table.size() == 1
+        ent = table.snapshot(1.0)["samples"]["d1"]
+        assert ent["valid"] is True and ent["image_id"] == "img-2"
+
+    def test_observation_for_unassigned_image_still_rejected(self):
+        table = live_samples.LiveTable()
+        cat = _cat(store=_Store(approved=["img-1", "img-2"]), table=table)
+        status, resp = _post(cat, {"current_image_id": "img-3",
+                                   "telemetry_enabled": True,
+                                   "telemetry_stream_enabled": True,
+                                   "telemetry_observation": _obs(image_id="img-3")})
+        assert status == 200 and resp["ok"] is True
+        assert table.snapshot(1.0)["counters"]["samples_rejected_total"] == 1
+        assert table.size() == 0
 
     def test_bad_observation_rejected_heartbeat_still_200(self):
         table = live_samples.LiveTable()

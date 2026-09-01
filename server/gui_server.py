@@ -15,6 +15,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import ssl
 import tempfile
 import threading
@@ -26,6 +27,9 @@ from urllib.parse import unquote, parse_qs, urlsplit
 
 import audit
 import audit_export
+import bulkhash_refresh
+# aliased: `catalog` is the injected STORE everywhere below
+import catalog as catalog_mod
 import gui_app
 import gui_auth
 import gui_onboard
@@ -49,6 +53,12 @@ _IRIS_CERT_DEFAULT = "/run/iris/tls/cert.pem"
 # this is what the UI badges "offline" (app.js uses the same 600), so the
 # overview must not count it as actively staging
 _HEARTBEAT_FRESH = 600
+# stage_states that are a failure the agent RETRIES rather than a terminal
+# one: it is alive, out of room, and will place the image as soon as space
+# appears, so the device is still staging. The agent reports these images in
+# errored_image_ids alongside genuinely dead ones, which is why the precise
+# tier below cannot read that list alone.
+_RETRYABLE_STAGE_STATES = ("flash_full", "flash_full_seeding_only")
 # GET /swarmmap swaps this exact placeholder line in the single-source
 # server/swarmmap.html for the console config line (the file on disk keeps
 # working standalone; only the served copy is rewritten):
@@ -78,11 +88,21 @@ def _telemetry_status_args():
     return (dest["endpoint"], dest["enabled"],
             os.environ.get("IRIS_OTLP_ENDPOINT", "").strip(),
             telemetry.observability_enabled())
+def _image_verification_last_run():
+    """last_run for setup_status.build_status's Image verification card
+    (KGV / Cisco Bulk Hash reconciler, console Task 5) -- read fresh at
+    request time from the same settings file the /api/settings/
+    image-verification GET route reads, so the setup checklist never
+    disagrees with the Settings pane."""
+    state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
+    return bulkhash_refresh.read_settings(
+        bulkhash_refresh.settings_path(state_dir))["last_run"]
 _CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".js": "application/javascript",
     ".css": "text/css",
     ".svg": "image/svg+xml",
+    ".woff2": "font/woff2",
 }
 _MAX_BODY = 64 * 1024  # cap request bodies (esp. the pre-auth /api/login POST) — DoS guard
 _SSE_IDLE = 600   # close an onboard log stream after this long with NO progress
@@ -91,6 +111,12 @@ _SSE_IDLE = 600   # close an onboard log stream after this long with NO progress
 _SSE_KEEPALIVE = 15  # comment-frame interval so proxies don't reap a quiet stream
 _MAX_CSV = 8 * 1024 * 1024  # 8 MiB — bulk devices.csv import (all-or-nothing, held in memory)
 _MAX_UPLOAD = 4 * 1024 * 1024 * 1024  # 4 GiB — streamed image uploads (not the JSON cap)
+# 256 MiB — streamed offline Cisco Bulk Hash tar upload (KGV reconciler
+# Task 4). The real feed tar was ~46 MB on 2026-08-29 (bulkhash_refresh.py's
+# FEED_URL provenance note); this stays a comfortable multiple of that while
+# matching bulkhash._MAX_CSV_BYTES's own 256 MiB per-member structural cap —
+# a bigger HTTP body could never produce a tar verify_tar/parse would accept.
+_MAX_OFFLINE_TAR = 256 * 1024 * 1024
 _SECURITY_HEADERS = [
     ("X-Content-Type-Options", "nosniff"),
     ("X-Frame-Options", "DENY"),
@@ -195,6 +221,44 @@ def _fmt_bytes(n):
         n /= 1024.0
         if n < 1024 or unit == "TiB":
             return "%s %s" % (("%.1f" % n).rstrip("0").rstrip("."), unit)
+
+
+def _refresh_http_status(result):
+    """HTTP status for a bulkhash_refresh.run_refresh() result dict (KGV
+    reconciler Task 4), returned to the caller verbatim as the body: "ok" is
+    200, the single-flight guard's "already_running" is 409 (a real,
+    resolvable conflict -- another run is genuinely in flight right now,
+    matching the peer-policy revision-conflict precedent's use of 409), and
+    "fail" (fetch/verify/parse/reconcile/apply all fail closed the same way,
+    per run_refresh's own contract) is 502 -- the reconciler acting as a
+    client of an upstream feed/artifact that this run could not use, the
+    Bad Gateway reading fits better than a 500 this server did not itself
+    cause."""
+    outcome = result.get("outcome")
+    if outcome == "ok":
+        return 200
+    if outcome == "already_running":
+        return 409
+    return 502
+
+
+def _image_view(entry):
+    """Console/API-safe projection of one catalog image entry (KGV
+    reconciler Task 4): every field the entry already carries, PLUS a
+    guaranteed-present top-level `quarantined` bool and `hash_verification`
+    verdict (both default to falsy/None for an image the reconciler has
+    never touched -- apply_hash_verification()/release_quarantine() only
+    ever set them, never pre-seed them), MINUS the two fields that exist
+    purely for catalog.py's own internal bookkeeping
+    (quarantine_actions_complete -- convergence-retry state;
+    quarantine_override_sha512 -- the re-quarantine-suppression ack) and
+    were never meant to be wire-visible."""
+    view = {k: v for k, v in entry.items()
+           if k not in ("quarantine_actions_complete",
+                        "quarantine_override_sha512")}
+    view["quarantined"] = bool(entry.get("quarantined"))
+    view["hash_verification"] = entry.get("hash_verification")
+    return view
 
 
 def _csrf_ok(provided, expected):
@@ -596,7 +660,7 @@ def ca_trust_refresh_loop(stop_event, state_dir, audit_fn=None,
 
 def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=None,
                  onboard=None, swarm_fetch=None, certfile=None, audit_path=None,
-                 receipts=None, now_fn=time.time):
+                 record_store=None, now_fn=time.time):
     login_limiter = gui_auth.LoginRateLimiter()
 
     def policy_state_dir():
@@ -673,55 +737,87 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
 
         def _plan(self, device_id, device):
             """Resolve immutable, non-secret installer input before token minting."""
-            attachment = device.get("management_type",
-                                    device.get("network_attachment", "legacy_routed"))
-            if attachment == "legacy_routed":
-                attachment = "routed"
-            if attachment not in ("routed", "inband", "router-routed", "router-nat"):
-                raise ValueError("unknown network attachment")
+            management_type = device.get("management_type", "legacy_routed")
+            if management_type == "legacy_routed":
+                management_type = "routed"
+            if management_type not in ("routed", "inband", "router-routed", "router-nat",
+                                       "xr-host"):
+                raise ValueError("unknown management type")
             platform = gui_onboard.resolve_platform(device)
-            router_attachment = attachment in ("router-routed", "router-nat")
+            router_management_type = management_type in ("router-routed", "router-nat")
             if device.get("model") and re.match(
                     r"^C8[0-9]{3}", device["model"], re.IGNORECASE) \
-                    and not router_attachment:
+                    and not router_management_type:
                 raise ValueError("Catalyst 8000 models require management_type "
                                  "router-routed or router-nat")
-            if (platform == "router") != router_attachment:
+            if (platform == "router") != router_management_type:
                 raise ValueError("platform router requires management_type "
                                  "router-routed or router-nat")
             if platform == "router" and device.get("model") and not re.match(
                     r"^C8[0-9]{3}", device["model"], re.IGNORECASE):
                 raise ValueError("router modes support the Catalyst 8000 family only; "
                                  "%s is not yet supported" % device["model"])
-            network = {
-                "attachment": attachment,
-                "device_ip": device.get("device_ip", ""),
-                "iris_vlan": device.get("iris_vlan", device.get("vlan", "")),
-                "svi_ip": device.get("svi_ip", ""),
-                "svi_mask": device.get("svi_mask", ""),
-                "app_ip": device.get("app_ip", device.get("guest_ip", "")),
-                "app_mask": device.get("app_mask", device.get("svi_mask", "")),
-                "app_gateway": device.get("app_gateway", device.get("svi_ip", "")),
-                "inband_vlan": device.get("inband_vlan", ""),
-                "vpg_number": device.get("vpg_number", ""),
-                "nat_interface": device.get("nat_interface", ""),
-                "swarm_port": "6881",
-                # The inband IOx app reaches IOS at the switch's management IP
-                # (which is on the same existing management VLAN); ios_ssh_host is
-                # an optional advanced override for asymmetric topologies.
-                "ios_ssh_host": (device.get("ios_ssh_host")
-                                 or (device.get("device_ip", "") if attachment == "inband" else "")),
-                "model": device.get("model", ""),
-                "platform": platform,
-                "renderer": "v1",
-            }
-            if attachment == "inband":
+            # xr-host <-> xr-appmgr is mutually required (gui_fleet.validate_record
+            # enforces this on any FULLY-CLASSIFIED record), but a record reaching
+            # this platform-only, e.g. the /platform route or legacy CSV import
+            # (fleet.upsert with just {"platform": ...}) stays management_type
+            # legacy_routed, which never runs that check. Left ungated here, such
+            # a row planned straight through as 'routed': XE addressing keys, a
+            # VLAN/SVI ownership narrative, and vlan/svi/guestshell owned
+            # resources on an IOS-XR box. Gate on the RESOLVED platform, the same
+            # way the 'router' coupling above already does.
+            if (platform == "xr-appmgr") != (management_type == "xr-host"):
+                raise ValueError("platform xr-appmgr requires management_type "
+                                 "xr-host (the two are mutually required)")
+            if management_type == "xr-host":
+                # The appmgr container runs on the router's own network stack
+                # (--net=host): no VLAN, SVI, app IP/mask/gateway, VPG, or NAT
+                # interface is ever configured, so this dict must not carry
+                # any of those keys -- not even with an empty-string value.
+                # validate_record already rejects a non-empty one on the
+                # stored record (gui_fleet.py); this is the same honesty
+                # requirement applied to the plan a caller actually reads.
+                network = {
+                    "management_type": management_type,
+                    "device_ip": device.get("device_ip", ""),
+                    "swarm_port": "6881",
+                    "model": device.get("model", ""),
+                    "platform": platform,
+                    "renderer": "v1",
+                }
+            else:
+                network = {
+                    "management_type": management_type,
+                    "device_ip": device.get("device_ip", ""),
+                    "iris_vlan": device.get("iris_vlan", device.get("vlan", "")),
+                    "svi_ip": device.get("svi_ip", ""),
+                    "svi_mask": device.get("svi_mask", ""),
+                    "app_ip": device.get("app_ip", device.get("guest_ip", "")),
+                    "app_mask": device.get("app_mask", device.get("svi_mask", "")),
+                    "app_gateway": device.get("app_gateway", device.get("svi_ip", "")),
+                    "inband_vlan": device.get("inband_vlan", ""),
+                    "vpg_number": device.get("vpg_number", ""),
+                    "nat_interface": device.get("nat_interface", ""),
+                    "swarm_port": "6881",
+                    # The inband IOx app reaches IOS at the switch's management IP
+                    # (which is on the same existing management VLAN); ios_ssh_host is
+                    # an optional advanced override for asymmetric topologies.
+                    "ios_ssh_host": (device.get("ios_ssh_host")
+                                     or (device.get("device_ip", "") if management_type == "inband" else "")),
+                    "model": device.get("model", ""),
+                    "platform": platform,
+                    "renderer": "v1",
+                }
+            if management_type == "inband":
                 ownership = "preserves existing VLAN, SVI, gateway, routes, and VRF"
-            elif attachment == "routed":
+            elif management_type == "routed":
                 ownership = "creates only a clean IRIS-owned VLAN and SVI"
-            elif attachment == "router-nat":
+            elif management_type == "router-nat":
                 ownership = ("creates an IRIS-owned VPG and NAT rules; preserves the "
-                             "outside interface except for a receipt-owned NAT marking")
+                             "outside interface except for a record-owned NAT marking")
+            elif management_type == "xr-host":
+                ownership = ("XR host networking — the agent shares the router's "
+                             "own network stack; no app-network fields")
             else:
                 ownership = "creates only a clean IRIS-owned VirtualPortGroup"
             plan = {"device_id": device_id, "inventory_revision": fleet.revision(),
@@ -744,18 +840,45 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
 
         @staticmethod
         def _owned_resources(resolved):
-            """Resources IRIS may later remove, per attachment. Inband owns only
-            the app; it never claims the operator's VLAN/SVI."""
-            attachment = resolved.get("attachment")
+            """Resources IRIS may later remove, per management type. Inband owns
+            only the app; it never claims the operator's VLAN/SVI. XR host owns
+            exactly what device/xr-uninstall.sh removes: the appmgr
+            application, its registered package source, the RPM staged at
+            harddisk: root, and the agent's iris-work/ control-file
+            directory. Every other management type here is IOS-XE and runs its
+            agent inside a guestshell resource; IOS-XR has no such feature,
+            so xr-host must NOT claim one."""
+            management_type = resolved["management_type"]
+            if management_type == "xr-host":
+                # Sidecar files (*.torrent/*.aria2/*.peers.json at harddisk:
+                # root) are also part of xr-uninstall.sh's sweep, but are
+                # deliberately NOT claimed as an owned resource here: they
+                # are swept as IRIS-derived artifacts, not record-claimed
+                # ones. Image files are a different story entirely -- a
+                # staged image file is never removed by IRIS teardown
+                # (recorded or forced), and the agent deletes an adopted
+                # file only when the catalog republishes new content under
+                # that same image id -- never otherwise -- so there is no
+                # image-file resource kind to claim here either.
+                return [
+                    {"kind": "appmgr-application", "ownership": "iris-created",
+                     "name": gui_onboard._XR_APPID},
+                    {"kind": "appmgr-source", "ownership": "iris-created",
+                     "name": gui_onboard._XR_SOURCE_NAME},
+                    {"kind": "agent-rpm", "ownership": "iris-created",
+                     "path": "harddisk:iris-xr.rpm"},
+                    {"kind": "agent-work-dir", "ownership": "iris-created",
+                     "path": "harddisk:iris-work"},
+                ]
             resources = [{"kind": "guestshell", "ownership": "iris-created"}]
-            if attachment == "routed":
+            if management_type == "routed":
                 resources = [
                     {"kind": "vlan", "ownership": "iris-created",
                      "id": resolved.get("iris_vlan", "")},
                     {"kind": "svi", "ownership": "iris-created",
                      "ip": resolved.get("svi_ip", "")},
                 ] + resources
-            elif attachment in ("router-routed", "router-nat"):
+            elif management_type in ("router-routed", "router-nat"):
                 vpg = resolved.get("vpg_number", "")
                 resources = [
                     {"kind": "virtualportgroup", "ownership": "iris-created",
@@ -777,7 +900,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                    if resolved.get("file_prompt_quiet_preexisting") == "1"
                                    else "iris-added-preserved")},
                 ] + resources
-                if attachment == "router-nat":
+                if management_type == "router-nat":
                     outside_ownership = ("iris-created"
                                          if resolved.get("nat_outside_owned") in (True, 1, "1")
                                          else "pre-existing")
@@ -793,33 +916,40 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             return resources
 
         @staticmethod
-        def _router_teardown_resolved(receipt):
-            """Authorize router teardown strictly from receipt-owned resources."""
-            resolved = dict(receipt.get("resolved") or {})
+        def _router_teardown_resolved(record):
+            """Authorize router teardown strictly from record-owned resources."""
+            resolved = dict(record.get("resolved") or {})
             if resolved.get("platform") != "router":
                 return resolved
+            # A raw KeyError here would escape do_POST as an unhandled 500
+            # instead of the clean 409 + needs-reconcile transition the
+            # caller's except ValueError expects (gui_server.py:3084-3098) --
+            # so every management_type read below this point is guaranteed
+            # safe by this one explicit, idiomatic raise.
+            if "management_type" not in resolved:
+                raise ValueError("plan is missing management_type")
             required = {"virtualportgroup", "eem-applets", "agent-files",
                         "logging-discriminator", "pki-trustpoint",
                         "http-client-trustpoint", "iox-global",
                         "file-prompt-quiet", "guestshell"}
-            if resolved.get("attachment") == "router-nat":
+            if resolved["management_type"] == "router-nat":
                 required.update(("nat-acl", "nat-overload", "nat-static",
                                  "nat-outside-marking"))
-            resources = receipt.get("resources") or []
+            resources = record.get("resources") or []
             by_kind = {resource.get("kind"): resource for resource in resources}
             missing = sorted(required - set(by_kind))
             if missing:
-                raise ValueError("router receipt does not prove ownership of: %s"
+                raise ValueError("router record does not prove ownership of: %s"
                                  % ", ".join(missing))
             preserved = {"nat-outside-marking", "iox-global", "file-prompt-quiet"}
             for kind in required - preserved:
                 if by_kind[kind].get("ownership") != "iris-created":
-                    raise ValueError("router receipt does not prove IRIS ownership of %s"
+                    raise ValueError("router record does not prove IRIS ownership of %s"
                                      % kind)
             for kind in ("iox-global", "file-prompt-quiet"):
                 if by_kind[kind].get("ownership") not in (
                         "pre-existing", "iris-added-preserved"):
-                    raise ValueError("router receipt has ambiguous ownership of %s"
+                    raise ValueError("router record has ambiguous ownership of %s"
                                      % kind)
             expected = {
                 "virtualportgroup": ("id", str(resolved.get("vpg_number", ""))),
@@ -828,7 +958,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 "pki-trustpoint": ("name", "IRIS"),
                 "http-client-trustpoint": ("name", "IRIS"),
             }
-            if resolved.get("attachment") == "router-nat":
+            if resolved["management_type"] == "router-nat":
                 expected.update({
                     "nat-acl": ("name", "IRIS-NAT-%s" % resolved.get("vpg_number", "")),
                     "nat-static": ("port", str(resolved.get("swarm_port", "6881"))),
@@ -836,15 +966,15 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 })
             for kind, (field, value) in expected.items():
                 if str(by_kind[kind].get(field, "")) != str(value):
-                    raise ValueError("router receipt %s does not match resolved plan"
+                    raise ValueError("router record %s does not match resolved plan"
                                      % kind)
             if not resolved.get("device_ip") or not resolved.get("device_identity"):
-                raise ValueError("router receipt is missing deployed device identity")
+                raise ValueError("router record is missing deployed device identity")
             resolved["router_resources_owned"] = "1"
-            if resolved.get("attachment") == "router-nat":
+            if resolved["management_type"] == "router-nat":
                 marking = by_kind["nat-outside-marking"]
                 if marking.get("ownership") not in ("iris-created", "pre-existing"):
-                    raise ValueError("router receipt has ambiguous NAT outside ownership")
+                    raise ValueError("router record has ambiguous NAT outside ownership")
                 resolved["nat_outside_owned"] = (
                     "1" if marking.get("ownership") == "iris-created" else "0")
                 resolved["nat_interface"] = marking.get("interface") or ""
@@ -1057,7 +1187,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 elif images is None:
                     self._json(200, {"images": []})
                 else:
-                    self._json(200, {"images": images.list_images()})
+                    self._json(200, {"images": [_image_view(e)
+                                                for e in images.list_images()]})
                 return
             if path == "/api/images/importable":
                 if app.session_info(self._sid()) is None:
@@ -1082,6 +1213,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 # server-clock-to-server-clock in the UI (skewed lab VMs)
                 self._json(200, {"devices": self._device_view(),
                                   "now": int(time.time())}); return
+            if path == "/api/install-options":
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                qs = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                model = (qs.get("model") or [""])[0]
+                self._json(200, {"options": gui_onboard.install_options_for(model)}); return
             if path.startswith("/api/devices/") and path.endswith("/plan"):
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
@@ -1123,24 +1260,24 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             if path.startswith("/api/devices/") and path.endswith("/deployment"):
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
-                if receipts is None:
-                    self._json(404, {"error": "receipts unavailable"}); return
+                if record_store is None:
+                    self._json(404, {"error": "records unavailable"}); return
                 did = unquote(path[len("/api/devices/"):-len("/deployment")])
-                records = receipts.list(did)
+                records = record_store.list(did)
                 # The record that best describes the device: the active one,
                 # else the recoverable teardown-authorizing one — both can
-                # raise on ambiguity (duplicate receipts), and this is a
+                # raise on ambiguity (duplicate records), and this is a
                 # read-only visibility panel, so fall back to the newest
                 # record rather than erroring it.
                 try:
-                    record = receipts.recoverable_for_device(did)
+                    record = record_store.recoverable_for_device(did)
                 except ValueError:
                     record = None
                 if record is None and records:
                     record = max(records,
                                  key=lambda r: (r.get("timestamps") or {})
                                  .get("planned_at") or 0)
-                self._json(200, {"receipt": record, "total": len(records)})
+                self._json(200, {"record": record, "total": len(records)})
                 return
             if path == "/api/credentials":
                 if app.session_info(self._sid()) is None:
@@ -1303,7 +1440,19 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     os.path.join(artifacts_dir, "iris-catalog.pem"),
                     info["username"],
                     creds.get_stage_host() if creds is not None else None,
-                    *_telemetry_status_args()))
+                    *_telemetry_status_args(),
+                    image_verification_last_run=_image_verification_last_run()))
+                return
+            if path == "/api/settings/image-verification":
+                # KGV reconciler Task 4: schedule config + last_run, its own
+                # dedicated GET (unlike audit-export/ca-trust, which are read
+                # only via the big /api/settings blob above) -- the brief
+                # calls for GET+POST at this exact path.
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
+                self._json(200, bulkhash_refresh.read_settings(
+                    bulkhash_refresh.settings_path(state_dir)))
                 return
             if path == "/api/settings":
                 info = app.session_info(self._sid())
@@ -1351,10 +1500,20 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 h = hb.get(did, {})
                 row = dict(d)
                 row["assigned_image_id"] = pol.get("approved_image_id")
+                row["assigned_image_ids"] = pol.get("approved_image_ids")
                 row["last_seen"] = h.get("last_seen")
                 row["stage_state"] = h.get("stage_state")
                 row["stage_error"] = h.get("stage_error")
                 row["current_image_id"] = h.get("current_image_id")
+                # the ordered set of images the agent reports as staged
+                # (Task 3); absent from an agent that predates the field, in
+                # which case rollout falls back to current_image_id/stage_state
+                row["staged_image_ids"] = h.get("staged_image_ids")
+                # which assigned images hit a terminal per-image failure on
+                # the agent's last tick; absent from an agent that predates
+                # the field, in which case staging falls back to guessing
+                # from the single aggregate stage_state (_row_is_staging)
+                row["errored_image_ids"] = h.get("errored_image_ids")
                 row["heartbeat_model"] = h.get("model")
                 # the "copying to <fs>" badge needs the heartbeat's target FS
                 row["target_fs"] = h.get("target_fs")
@@ -1373,6 +1532,19 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             return out
 
         @staticmethod
+        def _audit_image_names(cat, ids):
+            """Audit-facing names for a list of image ids: the catalog
+            filename when the catalog still has the image, else the bare id.
+            A policy row can outlive its images, and an audit entry that
+            silently drops the ids it could not resolve would understate what
+            was removed -- the one thing this text exists to record."""
+            out = []
+            for iid in ids:
+                entry = cat.get_image(iid) if cat else None
+                out.append((entry or {}).get("filename") or iid)
+            return ", ".join(out)
+
+        @staticmethod
         def _awaiting_heartbeat(row):
             """True when the device finished an ONBOARD but no heartbeat has
             arrived since — the agent is still bootstrapping on-box."""
@@ -1380,6 +1552,97 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     and row.get("onboard_state") == "done"
                     and (row.get("last_seen") is None
                          or row["last_seen"] < (row.get("onboard_finished_at") or 0)))
+
+        @staticmethod
+        def _row_assigned_ids(row):
+            """The device's approved image ids. assigned_image_ids is None
+            for a policy row that predates the ordered set, so fall back to
+            the singular field it still carries."""
+            ids = row.get("assigned_image_ids")
+            if ids:
+                return ids
+            single = row.get("assigned_image_id")
+            return [single] if single else []
+
+        @staticmethod
+        def _row_has_staged(row, iid):
+            """Whether *row*'s device has staged image *iid*: the heartbeat's
+            staged_image_ids set when the agent reports it directly (Task 3),
+            else the legacy current_image_id/stage_state pair."""
+            sids = row.get("staged_image_ids")
+            if sids is not None:
+                return iid in sids
+            return (row.get("stage_state") == "ready"
+                    and row.get("current_image_id") == iid)
+
+        def _row_is_staging(self, row):
+            """Whether *row* is actively staging, given its last (fresh)
+            heartbeat.
+
+            Task 3's set heartbeat (_send_set_heartbeat) reports the single
+            MOST ACTIONABLE stage_state across every image in the tick, so a
+            bare stage_state can no longer tell "one image failed, another is
+            still downloading" from "every assigned image is stuck" -- both
+            collapse to the same "error". Which tier below applies depends on
+            what the agent's last heartbeat was actually able to report:
+
+            1. staged_image_ids ABSENT: a legacy single-image agent, which
+               only ever stages the first (and only) approved image --
+               singular semantics are correct here regardless of how many
+               images the POLICY assigns, since a legacy agent ignores the
+               rest. This is the pre-multi-image check, verbatim -- and, as a
+               side effect, it fixes a legacy-agent overcount: a
+               permanently-errored single-image device whose POLICY still
+               named several images used to read as staging forever, because
+               the multi-image math below ran on the policy's id count
+               instead of stopping at what this agent can even attempt.
+
+            2. staged_image_ids present, errored_image_ids ABSENT: this
+               branch's multi-image agent BEFORE errored_image_ids existed.
+               No fleet has ever run it, so this tier only covers the brief
+               in-branch window before every agent picks up the field --
+               kept exactly as it was: a set pinned to a collapsed "error" is
+               called wholly failed only once at most one assigned image is
+               still unstaged (with more than one outstanding, one of them
+               could be the one actually still in flight -- an honest guess,
+               not a derivation).
+
+            3. Both present: no guessing needed. staged_image_ids marks what
+               finished; errored_image_ids marks what is stuck THIS tick; an
+               assigned image in neither is genuinely still in flight, so the
+               set is staging iff at least one such image exists."""
+            sids = row.get("staged_image_ids")
+            if sids is None:
+                # Tier 1: legacy single-image agent.
+                state = row.get("stage_state")
+                return state not in (None, "", "unassigned", "ready", "error")
+            eids = row.get("errored_image_ids")
+            if eids is None:
+                # Tier 2: multi-image agent that predates errored_image_ids.
+                state = row.get("stage_state")
+                if state in (None, "", "unassigned", "ready"):
+                    return False
+                if state != "error":
+                    return True
+                ids = self._row_assigned_ids(row)
+                if len(ids) <= 1:
+                    return False
+                staged = [iid for iid in ids if self._row_has_staged(row, iid)]
+                return (len(ids) - len(staged)) > 1
+            # Tier 3: precise -- derived from this tick's own verdicts.
+            ids = self._row_assigned_ids(row)
+            if not ids:
+                return False
+            # errored_image_ids carries the retryable failures too, so a set
+            # entirely blocked on space is fully "accounted for" while the
+            # agent is in fact still working it -- the one failure both tiers
+            # above deliberately count. Reading the list alone dropped exactly
+            # those devices out of staging_now the moment their agent grew the
+            # field, so an operator freeing room saw nothing happening.
+            if row.get("stage_state") in _RETRYABLE_STAGE_STATES:
+                return True
+            staged, errored = set(sids), set(eids)
+            return any(iid not in staged and iid not in errored for iid in ids)
 
         def _overview(self):
             imgs = catalog.list_images() if catalog else []
@@ -1390,15 +1653,29 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             rollout = []
             for img in imgs:
                 iid = img.get("id")
-                assigned = [r for r in rows
-                            if r.get("assigned_image_id") == iid]
-                staged = [r for r in assigned
-                          if r.get("stage_state") == "ready"
-                          and r.get("current_image_id") == iid]
+                # a device counts under EVERY image in its approved set, not
+                # just a single "the" assignment
+                assigned = [r for r in rows if iid in self._row_assigned_ids(r)]
+                staged = [r for r in assigned if self._row_has_staged(r, iid)]
                 rollout.append({"image_id": iid, "filename": img.get("filename"),
                                 "assigned": len(assigned), "staged": len(staged)})
-            assigned_total = sum(r["assigned"] for r in rollout)
-            staged_total = sum(r["staged"] for r in rollout)
+            # The aggregate cards are about DEVICES, not (image, device)
+            # pairs -- app.js renders "Staged" as a device count. Summing the
+            # per-image rollout rows double-counts a device across every
+            # image it's assigned, so tally devices directly here instead: a
+            # device counts once in assigned_total if its set is non-empty,
+            # and once in staged_total only if EVERY image in that set is
+            # staged (the per-image rollout rows above stay per-pair, which
+            # is what the rollout table is specced to show).
+            assigned_total = 0
+            staged_total = 0
+            for r in rows:
+                ids = self._row_assigned_ids(r)
+                if not ids:
+                    continue
+                assigned_total += 1
+                if all(self._row_has_staged(r, iid) for iid in ids):
+                    staged_total += 1
             # "Staging" must mean devices ACTUALLY staging: enrolled (their
             # agent heartbeats), FRESH (last_seen inside the same 600s the
             # UI uses for its "offline" badge — a device that died mid-stage
@@ -1414,8 +1691,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 1 for row in rows
                 if row.get("last_seen") is not None
                 and (now - row["last_seen"]) < _HEARTBEAT_FRESH
-                and row.get("stage_state") not in (None, "", "unassigned",
-                                                   "ready", "error"))
+                and self._row_is_staging(row))
             # devices freshly onboarded whose agent hasn't heartbeated yet —
             # surfaced so an operator doesn't read the gap as "undeployed"
             awaiting = sum(1 for row in rows
@@ -1539,6 +1815,81 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             except (BrokenPipeError, ConnectionError):
                 return
 
+        def _handle_offline_refresh(self, length):
+            """POST /api/image-verification/offline (KGV reconciler Task 4):
+            a size-capped tar upload, streamed straight to a private temp
+            file in bounded chunks (the image-upload PUT route's
+            _body_reader idiom -- never held whole in memory, even though
+            _MAX_OFFLINE_TAR allows tens of MB), then run through the exact
+            same fetch-less pipeline a scheduled/manual run uses
+            (bulkhash_refresh.run_refresh with tar_path=..., source=
+            "offline"). Session+CSRF gated like every other state-changing
+            route, and the session/size checks happen before this ever
+            touches the socket body, so an unauthenticated or oversized
+            request never makes this server buffer or write anything.
+            run_refresh calls its audit_fn with the event fully formed as
+            keywords (including actor="system", the source-agnostic
+            default) -- relayed verbatim below but with actor overridden to
+            the console session that uploaded THIS tar, the same pattern
+            /api/settings/audit-export/run and /api/settings/ca-trust/
+            refresh use for their own completion audit."""
+            info = self._require_session_csrf()
+            if info is None:
+                return
+            actor = "console:" + info["username"]
+            if catalog is None:
+                self._json(404, {"error": "not found"}); return
+            if length <= 0 or length > _MAX_OFFLINE_TAR:
+                # rejected before ever touching the socket body -- audited
+                # the same way the PUT image-upload route audits its own
+                # oversize rejection, so a hostile/mistaken huge upload
+                # attempt still leaves a trail even though it never reaches
+                # run_refresh's own audit_fn call.
+                self._audit("bulkhash-offline-upload", "settings",
+                           action="upload", target="bulkhash", actor=actor,
+                           result="fail",
+                           detail="rejected: %s" % (
+                               "empty body" if length <= 0
+                               else "oversized (cap 256 MiB)"))
+                self._json(413, {"error": "missing or oversized body"}); return
+            state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
+            reader = self._body_reader(length)
+            tmp_dir = tempfile.mkdtemp(prefix="bulkhash-offline-")
+            try:
+                tmp_path = os.path.join(tmp_dir, "offline-feed.tar")
+                total = 0
+                try:
+                    with open(tmp_path, "wb") as f:
+                        while True:
+                            chunk = reader()
+                            if not chunk:
+                                break
+                            total += len(chunk)
+                            f.write(chunk)
+                except (TimeoutError, ConnectionError):
+                    self._json(408, {"error":
+                               "upload timed out or connection dropped"})
+                    return
+                if total != length:
+                    self._json(408, {"error":
+                               "upload timed out or connection dropped"})
+                    return
+                result = bulkhash_refresh.run_refresh(
+                    "offline", state_dir, catalog, tar_path=tmp_path,
+                    audit_fn=lambda **kw: self._audit(
+                        **dict(kw, actor=actor)))
+                status = _refresh_http_status(result)
+                # Remove the temp dir BEFORE responding, not after: a test
+                # (or any other caller) that reads this response and
+                # immediately asserts the temp dir is gone must never race
+                # the client's own read against this cleanup -- the finally
+                # below is a best-effort backstop for the early-return paths
+                # above, not the primary cleanup for the success path.
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                self._json(status, result)
+            finally:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+
         def do_PUT(self):
             path = self.path.split("?", 1)[0]
             quarantine_prefix = "/api/peer-policy/quarantine/"
@@ -1648,6 +1999,14 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 length = int(self.headers.get("Content-Length", "0") or 0)
             except ValueError:
                 self._json(400, {"error": "bad content-length"})
+                return
+            if path == "/api/image-verification/offline":
+                # KGV reconciler Task 4: a large (tens-of-MB) tar upload --
+                # diverted before the generic cap/eager-read below (sized and
+                # built for small JSON bodies) so it is streamed to a private
+                # temp file in bounded chunks (the image-upload PUT idiom)
+                # rather than held whole in memory.
+                self._handle_offline_refresh(length)
                 return
             cap = _MAX_CSV if path == "/api/devices/import-csv" else _MAX_BODY
             if length > cap:
@@ -2122,6 +2481,113 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                      entry["subject"], entry["fingerprint_sha256"]),
                            src_ip=self.client_address[0])
                 self._json(200, {"entry": entry}); return
+            if path == "/api/settings/image-verification":
+                # KGV reconciler Task 4: schedule config (mode/hour_utc). A
+                # full replace like every other settings-write route above
+                # (ca-trust, telemetry-destination) -- last_run is system-
+                # managed (only run_refresh ever writes it) and is preserved
+                # here, never accepted from the request body.
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                mode = data.get("mode")
+                if mode not in bulkhash_refresh.MODES:
+                    self._json(400, {"error": "mode must be one of %s"
+                                     % (", ".join(bulkhash_refresh.MODES))})
+                    return
+                hour_utc = data.get("hour_utc", 0)
+                if not isinstance(hour_utc, int) or isinstance(hour_utc, bool) \
+                        or not 0 <= hour_utc <= 23:
+                    self._json(400, {"error": "hour_utc must be an integer 0-23"})
+                    return
+                state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
+                spath = bulkhash_refresh.settings_path(state_dir)
+                with bulkhash_refresh.SETTINGS_LOCK:
+                    prev = bulkhash_refresh.read_settings(spath)
+                    bulkhash_refresh.write_settings(
+                        spath, mode, hour_utc, prev["last_run"])
+                self._audit("bulkhash-schedule-config", "settings",
+                           action="set", target="bulkhash", actor=actor,
+                           detail="mode %s -> %s, hour_utc %s -> %s"
+                                  % (prev["mode"], mode, prev["hour_utc"],
+                                     hour_utc))
+                self._json(200, bulkhash_refresh.read_settings(spath)); return
+            if path == "/api/image-verification/refresh":
+                # KGV reconciler Task 4: run the reconciler synchronously on
+                # this request's own thread (ThreadingHTTPServer -- a slow
+                # run blocks only this one connection) and hand back
+                # run_refresh's result dict verbatim; run_refresh's own
+                # single-flight lock covers concurrency, so this handler
+                # stays a thin pass-through. run_refresh calls its audit_fn
+                # with the event fully formed as keywords (including
+                # actor="system", the source-agnostic default every caller
+                # gets) -- relay every field verbatim but override actor to
+                # the console session that asked for THIS run, the same
+                # pattern /api/settings/audit-export/run and
+                # /api/settings/ca-trust/refresh use for their own
+                # completion audit (scheduled runs, wired straight to
+                # _bg_audit in main(), are untouched and still record
+                # "system").
+                if catalog is None:
+                    self._json(404, {"error": "not found"}); return
+                state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
+                result = bulkhash_refresh.run_refresh(
+                    "manual", state_dir, catalog,
+                    audit_fn=lambda **kw: self._audit(
+                        **dict(kw, actor=actor)))
+                self._json(_refresh_http_status(result), result); return
+            if path.startswith("/api/images/") \
+                    and path.endswith("/release-quarantine"):
+                # KGV reconciler Task 4: lift an active Cisco Bulk Hash
+                # quarantine. override=False re-runs the sha512 comparison
+                # (catalog.release_quarantine's job) and 409s with the
+                # stored verdict if it still disagrees; override=True
+                # requires a typed confirmation (confirm_text == the
+                # image's own filename) BEFORE catalog is ever touched --
+                # catalog.release_quarantine() already audits with the real
+                # actor, so this handler does not audit a second time.
+                if catalog is None:
+                    self._json(404, {"error": "not found"}); return
+                image_id = unquote(path[len("/api/images/"):
+                                        -len("/release-quarantine")])
+                if not image_id or "/" in image_id:
+                    self._json(400, {"error": "bad image id"}); return
+                body = self._json_body(raw)
+                if body is None:
+                    return
+                override = body.get("override", False)
+                if not isinstance(override, bool):
+                    self._json(400, {"error": "override must be a bool"})
+                    return
+                confirm_text = body.get("confirm_text", "")
+                if not isinstance(confirm_text, str):
+                    self._json(400, {"error": "confirm_text must be a string"})
+                    return
+                entry = catalog.get_image(image_id)
+                if entry is None:
+                    self._json(404, {"error": "no such image"}); return
+                if override and confirm_text != (entry.get("filename") or ""):
+                    self._json(400, {"error": "confirm_text must exactly "
+                                              "match the image filename to "
+                                              "confirm the override"})
+                    return
+                try:
+                    result = catalog.release_quarantine(
+                        image_id, actor, override=override)
+                except KeyError:
+                    # TOCTOU: deleted between the get_image() pre-check
+                    # above and this call -- answer the same 404 the
+                    # pre-check itself would have given, not a dropped
+                    # connection.
+                    self._json(404, {"error": "no such image"}); return
+                except ValueError as exc:
+                    self._json(400, {"error": str(exc)}); return
+                except catalog_mod.QuarantineStillMismatched as exc:
+                    self._json(409, {"error": "quarantine_still_mismatched",
+                                     "image_id": exc.image_id,
+                                     "verdict": exc.hash_verification})
+                    return
+                self._json(200, result); return
             if path == "/api/devices":
                 if fleet is None:
                     self._json(404, {"error": "not found"}); return
@@ -2180,31 +2646,116 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 body = self._json_body(raw)
                 if body is None:
                     return
-                image_id = str(body.get("image_id") or "")
-                if not image_id:
+                if catalog is None:
+                    self._json(404, {"error": "not found"}); return
+                # `image_ids` (plural, the ordered-set body) takes priority
+                # when present; `image_id` (singular) is the pre-multi-image
+                # compat shape and always means a one-element set. Either an
+                # explicit `image_id: null` or an empty `image_ids` means
+                # unassign.
+                # Optional compare-and-set. The console's picker sends the
+                # set it was opened on, so an assignment another operator (or
+                # another tab) wrote in between is refused rather than
+                # overwritten in silence -- the same guard the peer-policy PUT
+                # carries as if_revision. Absent = the unconditional write
+                # older clients and API callers already depend on.
+                expect = None
+                if "expect_image_ids" in body:
+                    expect = body.get("expect_image_ids")
+                    if not isinstance(expect, list) or not all(
+                            isinstance(i, str) and i for i in expect):
+                        self._json(400, {"error": "expect_image_ids must be "
+                                                  "a list of image ids"})
+                        return
+                plural = "image_ids" in body
+                if plural:
+                    # validate the SHAPE before iterating anything: a bare
+                    # int isn't iterable (TypeError -> the connection used to
+                    # die instead of answering 400), a bare string iterates
+                    # into one-character "ids", and a falsy/non-string
+                    # element used to be silently filtered out rather than
+                    # rejected. image_ids must be a JSON array whose every
+                    # element is a non-empty string; anything else is 400.
+                    raw_ids = body.get("image_ids")
+                    if not isinstance(raw_ids, list) or not all(
+                            isinstance(i, str) and i for i in raw_ids):
+                        self._json(400, {"error":
+                                   "image_ids must be a list of image ids"})
+                        return
+                    ids = raw_ids
+                else:
+                    image_id = str(body.get("image_id") or "")
+                    ids = [image_id] if image_id else []
+                if not ids:
                     # explicit unassign: clear the approval so the agent stops
                     # staging without deleting the device
-                    if catalog is None:
-                        self._json(404, {"error": "not found"}); return
-                    old = catalog.get_policy(did).get("approved_image_id")
-                    catalog.set_policy(did, approved_image_id=None)
-                    old_entry = catalog.get_image(old) if old else None
+                    old_ids = catalog.get_policy(did).get("approved_image_ids") or []
+                    try:
+                        catalog.set_policy(did, approved_image_ids=[],
+                                           expect_image_ids=expect)
+                    except catalog_mod.PolicyConflict as exc:
+                        self._json(409, {"error": "assignment_conflict",
+                                         "assigned_image_ids": exc.current_ids})
+                        return
+                    # EVERY image this cleared, not just the set's first: the
+                    # audit trail is the record of what was done to the
+                    # device, and naming one of three removed images made it
+                    # read as a far smaller change than it was.
                     self._audit("device_assign", "device", action="unassign",
                                target=did, actor=actor,
                                detail="unassigned (was %s)"
-                                      % ((old_entry or {}).get("filename")
-                                         or old or "none"))
+                                      % (self._audit_image_names(catalog, old_ids)
+                                         or "none"))
                     self._json(200, {"ok": True}); return
-                entry = catalog.get_image(image_id) if catalog is not None else None
-                if entry is None:
-                    self._json(400, {"error": "no such image"}); return
-                old = catalog.get_policy(did).get("approved_image_id")
-                catalog.set_policy(did, approved_image_id=image_id)  # approval is the whole policy: IRIS stages, never installs
-                detail = "assigned %s (%s) id=%s" % (
-                    entry.get("filename"), _fmt_bytes(entry.get("size")), image_id)
-                if old and old != image_id:
-                    old_entry = catalog.get_image(old)
-                    detail += ", was %s" % ((old_entry or {}).get("filename") or old)
+                entries = {}
+                for iid in ids:
+                    entry = catalog.get_image(iid)
+                    if entry is None:
+                        self._json(400, {"error": "no such image"}); return
+                    entries[iid] = entry
+                old_pol = catalog.get_policy(did)
+                old = old_pol.get("approved_image_id")
+                old_ids = old_pol.get("approved_image_ids") or []
+                try:
+                    # approval is the whole policy: IRIS stages, never installs
+                    catalog.set_policy(did, approved_image_ids=ids,
+                                       expect_image_ids=expect)
+                except catalog_mod.PolicyConflict as exc:
+                    # a lost race, not a bad request: answer with what is
+                    # really stored so the client can show it and decide again
+                    self._json(409, {"error": "assignment_conflict",
+                                     "assigned_image_ids": exc.current_ids})
+                    return
+                except catalog_mod.QuarantinedImage as exc:
+                    # a Cisco Bulk Hash sha512 mismatch blocked this id --
+                    # surface the verdict so the operator sees WHY, not just
+                    # a bare 400 (KGV reconciler).
+                    self._json(400, {"error": "image_quarantined",
+                                     "image_id": exc.image_id,
+                                     "verdict": exc.hash_verification})
+                    return
+                except ValueError as exc:
+                    self._json(400, {"error": str(exc)}); return
+                if plural:
+                    detail = "assigned %d image(s): %s" % (
+                        len(ids), ", ".join(entries[i].get("filename") for i in ids))
+                    # Narrowing a set is an assign, and what it REMOVED is the
+                    # consequential half of that edit: an operator reading
+                    # "assigned 1 image(s): A" had no way to tell it from a
+                    # fresh assignment that dropped nothing.
+                    removed = [i for i in old_ids if i not in ids]
+                    if removed:
+                        detail += "; removed: %s" % self._audit_image_names(
+                            catalog, removed)
+                else:
+                    # singular compat: keep the pre-multi-image detail shape
+                    # (existing audit tests assert this text verbatim)
+                    entry = entries[ids[0]]
+                    detail = "assigned %s (%s) id=%s" % (
+                        entry.get("filename"), _fmt_bytes(entry.get("size")), ids[0])
+                    if old and old != ids[0]:
+                        old_entry = catalog.get_image(old)
+                        detail += ", was %s" % ((old_entry or {}).get("filename") or old)
                 self._audit("device_assign", "device", action="assign", target=did,
                            detail=detail, actor=actor)
                 self._json(200, {"ok": True}); return
@@ -2243,11 +2794,15 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if body is None:
                     return
                 plat = str(body.get("platform", "")).strip()
-                if plat and plat not in ("guestshell", "iox", "router"):
-                    self._json(400, {"error": "platform must be empty, "
-                                     "guestshell, iox, or router"}); return
+                if plat and plat not in gui_onboard._PLATFORM_RECIPES:
+                    self._json(400, {"error": "platform must be empty or one "
+                                     "of: %s" % ", ".join(sorted(
+                                         gui_onboard._PLATFORM_RECIPES))}); return
                 old = dev.get("platform") or ""
-                # Empty value CLEARS the override (falls back to Auto/model).
+                # Empty value CLEARS the override (falls back to Auto/model)
+                # -- except on a classified xr-host row, where platform
+                # xr-appmgr is mutually required and clearing it is refused
+                # below with that mutual-requirement message instead.
                 try:
                     fleet.upsert({"device_id": did, "platform": plat})
                 except (ValueError, KeyError) as exc:
@@ -2302,15 +2857,15 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                  "stream_pause": pause})
                 return
             if path.startswith("/api/devices/") and path.endswith("/adopt"):
-                # Adopt an already-deployed device that predates receipts, so it
-                # can be undeployed. Creates an ACTIVE receipt from the current
+                # Adopt an already-deployed device that predates records, so it
+                # can be undeployed. Creates an ACTIVE record from the current
                 # validated inventory; it is an explicit, acknowledged operator
                 # action (audited), never an implicit fallback.
                 did = unquote(path[len("/api/devices/"):-len("/adopt")])
                 if not did.strip():
                     self._json(400, {"error": "bad device id"}); return
-                if receipts is None:
-                    self._json(503, {"error": "receipt store unavailable"}); return
+                if record_store is None:
+                    self._json(503, {"error": "record store unavailable"}); return
                 device = fleet.get_device(did) if fleet else None
                 if device is None:
                     self._json(404, {"error": "no such device"}); return
@@ -2320,8 +2875,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if body.get("acknowledge_adopt") is not True:
                     self._json(400, {"error": "adoption acknowledgement is required"}); return
                 try:
-                    if receipts.active_for_device(did) is not None:
-                        self._json(409, {"error": "device already has an active receipt"}); return
+                    if record_store.active_for_device(did) is not None:
+                        self._json(409, {"error": "device already has an active deployment record"}); return
                 except ValueError as exc:
                     # duplicate actives (legacy store not yet healed) — surface
                     # the reason like the undeploy branch, not a dropped request
@@ -2333,15 +2888,15 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if plan["resolved"].get("platform") == "router":
                     self._json(409, {"error": "router deployments cannot be adopted; "
                                      "re-onboard to record live ownership evidence"}); return
-                receipt = receipts.adopt({"controller_id": "iris", "device_id": did,
+                record = record_store.adopt({"controller_id": "iris", "device_id": did,
                     "inventory_revision": fleet.revision(), "plan_hash": plan["plan_hash"],
                     "resolved": plan["resolved"],
                     "preflight": {"status": "adopted"},
                     "resources": self._owned_resources(plan["resolved"])})
                 self._audit("device_adopt", "onboard", action="adopt", target=did,
-                           actor=actor, detail="receipt %s (%s)"
-                           % (receipt["receipt_id"], plan["resolved"]["attachment"]))
-                self._json(200, {"receipt_id": receipt["receipt_id"]}); return
+                           actor=actor, detail="record %s (%s)"
+                           % (record["record_id"], plan["resolved"]["management_type"]))
+                self._json(200, {"record_id": record["record_id"]}); return
             if path.startswith("/api/devices/") and (
                     path.endswith("/onboard") or path.endswith("/undeploy")):
                 if onboard is None:
@@ -2370,7 +2925,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if fleet is not None and fleet.get_device(did) is None:
                     _reject(404, "no such device"); return
                 resolved = None
-                receipt_ref = {}
+                record_ref = {}
                 prepare = None
                 pre_apply = None
                 on_success = None
@@ -2381,8 +2936,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if body_flags is None:
                     return
                 # Force teardown: an onboard that died after enabling the
-                # agent but before its receipt was written leaves a router that
-                # cannot be undeployed (no receipt), cannot be adopted (routers
+                # agent but before its record was written leaves a router that
+                # cannot be undeployed (no record), cannot be adopted (routers
                 # never can) and cannot be re-onboarded (preflight refuses the
                 # existing Guest Shell). Force removes ONLY the agent footprint.
                 force = body_flags.get("force", False) is True
@@ -2397,10 +2952,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 # teardown recipe. env_extra is the only channel into it.
                 undeploy_env = None
                 if act == "onboard":
-                    # With a receipt store (always in production via main()), an
-                    # onboard resolves an immutable plan and records a receipt.
+                    # With a record store (always in production via main()), an
+                    # onboard resolves an immutable plan and persists a record.
                     # Without one (embedded/degraded), it stays one-click legacy.
-                    if receipts is not None:
+                    if record_store is not None:
                         device = fleet.get_device(did)
                         try:
                             plan = self._plan(did, device)
@@ -2408,17 +2963,17 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             _reject(409, str(exc)); return
                         if plan["resolved"].get("platform") == "router":
                             try:
-                                # Any receipt IRIS already applied blocks a
+                                # Any record IRIS already applied blocks a
                                 # re-onboard, not just an active one: the box is
                                 # configured either way, so preflight would fail
                                 # with a confusing "guestshell is already
                                 # enabled" instead of naming the real fix.
-                                existing = receipts.recoverable_for_device(did)
+                                existing = record_store.recoverable_for_device(did)
                             except ValueError as exc:
                                 _reject(409, str(exc)); return
                             if existing is not None:
                                 _reject(409, "router already has a %s "
-                                        "deployment receipt; undeploy it before "
+                                        "deployment record; undeploy it before "
                                         "onboarding again — if this device was "
                                         "replaced, undeploy with force, or "
                                         "delete and re-add it"
@@ -2428,8 +2983,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                         def prepare():
                             # Runs under the onboard job lock only when a genuinely
                             # new job is registered, so a concurrent double-onboard
-                            # cannot leave an orphan planned receipt.
-                            rid = receipts.create({"controller_id": "iris",
+                            # cannot leave an orphan planned record.
+                            rid = record_store.create({"controller_id": "iris",
                                 "device_id": did, "inventory_revision": fleet.revision(),
                                 "plan_hash": plan["plan_hash"], "resolved": plan["resolved"],
                                 # Router preflight runs in the bounded worker pool,
@@ -2438,20 +2993,20 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                 "preflight": ({"status": "pending"}
                                               if resolved.get("platform") == "router"
                                               else {"status": "not-required"}),
-                                "resources": self._owned_resources(plan["resolved"])})["receipt_id"]
-                            receipt_ref["id"] = rid
+                                "resources": self._owned_resources(plan["resolved"])})["record_id"]
+                            record_ref["id"] = rid
                             return rid
 
                         if resolved.get("platform") == "router":
                             def pre_apply(evidence):
                                 # The job may have waited in the queue. Refresh
                                 # live ownership immediately before apply, then
-                                # atomically replace the planned receipt inputs.
+                                # atomically replace the planned record inputs.
                                 final_plan = self._apply_router_preflight(plan, evidence)
-                                rid = receipt_ref.get("id")
+                                rid = record_ref.get("id")
                                 if not rid:
-                                    raise ValueError("planned receipt is unavailable")
-                                receipts.update_planned(
+                                    raise ValueError("planned record is unavailable")
+                                record_store.update_planned(
                                     rid, plan_hash=final_plan["plan_hash"],
                                     resolved=final_plan["resolved"],
                                     preflight=evidence,
@@ -2465,18 +3020,18 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             _reject(409, str(exc)); return
                         if degraded_plan["resolved"].get("platform") == "router":
                             _reject(503, "router onboarding requires the "
-                                    "deployment receipt store"); return
+                                    "deployment record store"); return
                 else:
-                    # Undeploy renders exclusively from an active receipt so a
+                    # Undeploy renders exclusively from an active record so a
                     # post-deploy inventory edit cannot retarget cleanup. Without
-                    # a receipt store, fall back to legacy fleet-driven teardown.
-                    if receipts is not None:
-                        # FORCE is decided BEFORE the receipt is read, because a
-                        # forced teardown never uses a receipt as authority: it
+                    # a record store, fall back to legacy fleet-driven teardown.
+                    if record_store is not None:
+                        # FORCE is decided BEFORE the record is read, because a
+                        # forced teardown never uses a record as authority: it
                         # strips only what is identifiably IRIS's by name and
                         # leaves the operator's network exactly as it is. Force
-                        # used to be consulted only on the no-receipt branch,
-                        # which defeated the one case it exists for — a receipt
+                        # used to be consulted only on the no-record branch,
+                        # which defeated the one case it exists for — a record
                         # that describes a device no longer there. A rebuilt VM
                         # keeps its id and address but gets a new board ID, so
                         # the teardown recipe's identity guard refused it every
@@ -2493,32 +3048,32 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
 
                             # Retired only once the box is actually clean (see
                             # OnboardService.start's on_success). EVERY
-                            # non-terminal receipt goes, which is also the only
-                            # exit from "multiple recoverable receipts" — that
+                            # non-terminal record goes, which is also the only
+                            # exit from "multiple recoverable records" — that
                             # state refuses onboard, undeploy and adopt alike,
                             # and nothing else in the product resolves it.
                             def on_success(_did=did):
-                                receipts.retire_device(
+                                record_store.retire_device(
                                     _did, "forced agent-only teardown; the "
-                                    "receipt no longer describes this device")
+                                    "record no longer describes this device")
 
                             self._audit("undeploy_forced", "onboard",
                                         action="start", target=did,
                                         actor=actor, result="ok",
                                         detail="forced agent-footprint teardown;"
                                                " VPG/NAT left untouched, any "
-                                               "deployment receipt abandoned "
+                                               "deployment record abandoned "
                                                "once the teardown succeeds")
                         else:
                             try:
-                                # Not just the ACTIVE receipt: a controller
-                                # restart during an onboard leaves the receipt
+                                # Not just the ACTIVE record: a controller
+                                # restart during an onboard leaves the record
                                 # "unknown" while the device is already
-                                # configured, and that receipt still records
+                                # configured, and that record still records
                                 # what IRIS created. Teardown must accept it, or
                                 # the device is stranded — a router cannot be
                                 # adopted and its preflight refuses a re-onboard.
-                                receipt = receipts.recoverable_for_device(did)
+                                record = record_store.recoverable_for_device(did)
                             except ValueError as exc:
                                 # duplicate actives should be impossible
                                 # (activation supersedes siblings; startup
@@ -2528,30 +3083,30 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                 # a state the console cannot resolve.
                                 _reject(409, "%s; retry with force to remove "
                                         "the agent footprint only" % exc); return
-                            if receipt is None:
-                                _reject(409, "no deployment receipt for this "
+                            if record is None:
+                                _reject(409, "no deployment record for this "
                                         "device; adopt it first, then undeploy, "
                                         "or retry with force to remove the "
                                         "agent footprint only"); return
                             try:
-                                resolved = self._router_teardown_resolved(receipt)
+                                resolved = self._router_teardown_resolved(record)
                             except ValueError as exc:
-                                # Best effort: the receipt may already BE
+                                # Best effort: the record may already BE
                                 # needs-reconcile, from an earlier attempt at
                                 # this same broken teardown, and that self-edge
                                 # is not a legal transition. Letting it raise
                                 # turned every retry after the first into an
                                 # unhandled 500 with no JSON body to explain it.
                                 try:
-                                    receipts.transition(receipt["receipt_id"],
+                                    record_store.transition(record["record_id"],
                                                         "needs-reconcile")
                                 except ValueError:
                                     pass
                                 _reject(409, str(exc)); return
 
                             def prepare():
-                                receipt_ref["id"] = receipt["receipt_id"]
-                                return receipt["receipt_id"]
+                                record_ref["id"] = record["record_id"]
+                                return record["record_id"]
                     else:
                         try:
                             degraded_plan = self._plan(did, fleet.get_device(did))
@@ -2559,7 +3114,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             _reject(409, str(exc)); return
                         if degraded_plan["resolved"].get("platform") == "router":
                             _reject(503, "router undeploy requires an "
-                                    "active deployment receipt"); return
+                                    "active deployment record"); return
                 try:
                     jid = onboard.start(
                         did, action=act, resolved=resolved, prepare=prepare,
@@ -2567,16 +3122,16 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                         env_extra=(env_extra if act == "onboard"
                                    else undeploy_env))
                 except ValueError as exc:
-                    if receipt_ref.get("id") and act == "onboard":
+                    if record_ref.get("id") and act == "onboard":
                         # Best effort, for the same reason as the teardown-
-                        # resolve handler above: start() retires the receipt
+                        # resolve handler above: start() retires the record
                         # itself when the work queue is full, so this would be
                         # removed -> needs-reconcile, which is not a legal edge.
                         # An illegal transition raised from inside an except
                         # handler escapes do_POST entirely — the operator gets a
                         # dropped request instead of the 409 that explains why.
                         try:
-                            receipts.transition(receipt_ref["id"],
+                            record_store.transition(record_ref["id"],
                                                 "needs-reconcile")
                         except ValueError:
                             pass
@@ -2763,22 +3318,22 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 except Exception:
                     purged = False
                     degraded.append("catalog")
-                # Retire the deployment receipts for the same reason the catalog
-                # state goes: a receipt outlives the fleet row, and the NEXT
+                # Retire the deployment records for the same reason the catalog
+                # state goes: a record outlives the fleet row, and the NEXT
                 # device registered under this id inherits it. That strands the
                 # device rather than merely confusing it — onboard refuses while
-                # a recoverable receipt exists and names undeploy as the fix,
+                # a recoverable record exists and names undeploy as the fix,
                 # while that teardown refuses the (replaced) box on an identity
-                # mismatch. Abandoned, not dropped: the receipt stays the record
+                # mismatch. Abandoned, not dropped: the record stays the account
                 # of what IRIS built there, which an operator who deleted a
                 # still-configured device is the one person who needs.
                 retired = []
                 try:
-                    if receipts is not None:
-                        retired = receipts.retire_device(
+                    if record_store is not None:
+                        retired = record_store.retire_device(
                             did, "device deleted from the fleet")
                 except Exception:
-                    degraded.append("receipts")
+                    degraded.append("records")
                 # Work in flight outlives the device for the same reason: a job
                 # record is keyed on the device id alone, so one left behind
                 # keeps the busy guard armed against the NEXT device registered
@@ -2797,9 +3352,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     suffix = (", secrets revoked" if revoke_state == "ok"
                               else "")
                     suffix += ", endpoints retained"
-                    suffix += (", %d deployment receipt%s abandoned"
+                    suffix += (", %d deployment record%s abandoned"
                                % (len(retired), "" if len(retired) == 1 else "s")
-                               if retired else ", no deployment receipt")
+                               if retired else ", no deployment record")
                     if stopped:
                         suffix += (", %d in-flight job%s stopped"
                                    % (stopped, "" if stopped == 1 else "s"))
@@ -2928,8 +3483,9 @@ def main():
     import gui_images
     import gui_fleet
     import gui_creds
-    import deployment_receipts
+    import deployment_records
     import catalog as catalog_mod
+    import publish as publish_mod
     host = os.environ.get("IRIS_GUI_HOST", "0.0.0.0")
     port = int(os.environ.get("IRIS_GUI_PORT", "8080"))
     secrets_path = os.environ.get("IRIS_SECRETS", "/run/iris/secrets.json")
@@ -2953,20 +3509,32 @@ def main():
     fleet = gui_fleet.FleetStore(state_dir)
     creds = gui_creds.CredentialStore(secrets_path, recipients_csv=recipients,
                                       secrets_enc=secrets_enc)
-    catalog = catalog_mod.CatalogStore(state_dir)
-    receipts = deployment_receipts.ReceiptStore(state_dir)
-    receipts.recover_interrupted()
+    # audit_path + seeder_remove_fn: the Cisco Bulk Hash quarantine path
+    # (KGV reconciler) stops seeding and writes audit entries through THIS
+    # instance -- mirrors exactly how `images` (gui_images.ImageService,
+    # above) is wired for the identical seeder-teardown + audit concern.
+    catalog = catalog_mod.CatalogStore(
+        state_dir, audit_path=audit_path,
+        seeder_remove_fn=publish_mod.remove_torrent_rpc)
+    record_store = deployment_records.DeploymentRecordStore(state_dir)
+    record_store.recover_interrupted()
     onboard = gui_onboard.OnboardService(
         fleet, creds, audit_fn=_bg_audit,
-        clear_state_fn=catalog.forget_device, receipts=receipts,
+        clear_state_fn=catalog.forget_device, record_store=record_store,
         log_dir=os.path.join(state_dir, "deploy-logs"))
     srv = make_server(host, port, app, images, fleet, creds, catalog, onboard,
-                       None, certfile=certfile, audit_path=audit_path, receipts=receipts)
+                       None, certfile=certfile, audit_path=audit_path, record_store=record_store)
     # Daily public-CA bundle auto-refresh (spec A3): in-process daemon
     # thread, the repo's periodic-work idiom -- no cron/timer/extra process.
     ca_stop = threading.Event()     # never set in production; loop dies with us
     threading.Thread(target=ca_trust_refresh_loop,
                      args=(ca_stop, state_dir, _bg_audit),
+                     daemon=True).start()
+    # Cisco Bulk Hash reconciliation schedule (KGV reconciler Task 3): same
+    # daemon-thread idiom as ca_trust_refresh_loop, immediately above.
+    bulkhash_stop = threading.Event()  # never set in production either
+    threading.Thread(target=bulkhash_refresh.bulkhash_refresh_loop,
+                     args=(bulkhash_stop, state_dir, catalog, _bg_audit),
                      daemon=True).start()
     # Daily audit-trail export (F5): same daemon-thread idiom. The password
     # accessor is passed as a callable so each run reads the current secret.

@@ -68,6 +68,10 @@ _PLATFORM_RECIPES = {
     "guestshell": "device/device-install.sh",
     "iox": "device/iox/install.sh",
     "router": "device/router-install.sh",
+    # The only IOS-XR recipe: an appmgr Docker app bind-mounting harddisk:.
+    # Every other value in this table is IOS-XE, which is why os_family
+    # decides between them (see _refuse_xr / resolve_platform).
+    "xr-appmgr": "device/xr-install.sh",
 }
 # Teardown recipe per platform — the inverse of _PLATFORM_RECIPES, so undeploy
 # is fleet-wide (Guest Shell C9300/ISR/ASR AND IOx IE-3x00/IR1101/IR18xx).
@@ -75,22 +79,118 @@ _UNINSTALL_RECIPES = {
     "guestshell": "device/device-uninstall.sh",
     "iox": "device/iox/uninstall.sh",
     "router": "device/router-uninstall.sh",
+    "xr-appmgr": "device/xr-uninstall.sh",
 }
-_MODEL_PLATFORMS = (          # first match wins; case-insensitive prefix regexes
-    (r"^IE-?3", "iox"),       # IE-3x00: no Guest Shell on IOS-XE >=17.9
-    (r"^IR1[018]", "iox"),    # IR1101/IR18xx are IOx-hosted the same way
-    (r"^C9[0-9]{3}", "guestshell"),
-    (r"^C8[0-9]{3}", "router"),
-    (r"^(ISR|ASR|CSR)", "guestshell"),  # legacy router mapping; not yet supported
+# One shared table drives both auto-resolution (_MODEL_PLATFORMS, a single
+# default platform per family) and the install-options guardrail
+# (install_options_for, below -- every platform a family may explicitly run),
+# so the two views of "what can this model run" cannot drift apart. First
+# match wins; case-insensitive prefix regexes. A family's first option is its
+# auto-resolution default.
+_MODEL_INSTALL_TABLE = (
+    (r"^IE-?3", ("iox",)),        # IE-3x00: no Guest Shell on IOS-XE >=17.9
+    (r"^IR1[018]", ("iox",)),     # IR1101/IR18xx are IOx-hosted the same way
+    (r"^C9[0-9]{3}", ("guestshell", "iox")),
+    (r"^C8[0-9]{3}", ("router",)),
+    (r"^(ISR|ASR|CSR)", ("guestshell",)),  # legacy router mapping; not yet supported
 )
+_MODEL_PLATFORMS = tuple((pattern, options[0])
+                         for pattern, options in _MODEL_INSTALL_TABLE)
+
+# ASR1000/ISR/CSR are IOS-XE, but ASR9000 is IOS-XR: this prefix spans both
+# families, so a model match alone cannot decide which recipe applies. Only
+# the show version banner can.
+_FAMILY_AMBIGUOUS_MODEL = re.compile(r"^(ISR|ASR|CSR)", re.IGNORECASE)
+
+# Cisco 8000-series (IOS-XR) model numbers: bare digits, not a letter prefix,
+# so no _MODEL_INSTALL_TABLE row covers them, and they are never a valid
+# agent-install target. Matching the model number directly is a
+# belt-and-suspenders check that still refuses an explicit platform even when
+# os_family was never probed -- the incident this closes: an 8201 offered iox
+# and dying on an XE-flavoured arch error.
+_XR_MODEL_RE = re.compile(r"^8[0-9]{2,3}(-SYS)?$")
+# The one platform value that is IOS-XR rather than IOS-XE.
+_XR_PLATFORM = "xr-appmgr"
+# Some contexts report the '-SYS' suffix on that same model number
+# ('8201-SYS'), others just the bare number ('8201'). Normalized to the bare
+# number so the fleet's stored model reads consistently regardless of which
+# path recorded it (console form, CSV import, live probe).
+_SYS_SUFFIX_RE = re.compile(r"^(8[0-9]{2,3})-SYS$")
+
+
+def normalize_model(model):
+    """Strip the '-SYS' suffix some Cisco 8000-series banners carry, so
+    '8201-SYS' and '8201' are stored identically everywhere a model is
+    recorded (validate_record, the onboarding probe)."""
+    return _SYS_SUFFIX_RE.sub(r"\1", (model or "").strip())
+
+
+def install_options_for(model, os_family=None):
+    """Return the agent-install platform values ``model``/``os_family`` may
+    explicitly run.
+
+    ``["xr-appmgr"]`` -- the appmgr container agent, and nothing else -- is
+    the answer for IOS-XR, but ONLY for the Cisco 8000 series: v1 is
+    validated on that hardware alone (agentinfo plan scope: "8000-series
+    first, capability-gated"), so a blank model (nothing to check yet) or an
+    XR-shaped 8xxx/8xxx-SYS number gets it, whether XR-ness is known via
+    ``os_family`` or inferred from the model number alone. It is the one
+    platform in this table that is not IOS-XE, so it is offered
+    EXCLUSIVELY: no XR device may run an IOS-XE recipe, and no IOS-XE device
+    may run this one (the inverse guard lives in resolve_platform). Unlike
+    the model-table families below, it is never an auto-resolution default
+    -- an XR model number matches no _MODEL_PLATFORMS row, so the operator
+    picks it explicitly.
+
+    An ``os_family == "xr"`` device whose model does NOT match the 8xxx
+    shape (an ASR-9906, an NCS box) is refused outright -- ``[]``, never a
+    fall-through to an IOS-XE recipe (os_family is authoritative regardless
+    of what the model prefix would otherwise suggest) and never ``None``
+    (which would read as "no opinion" and let validate_record wave it
+    through). Widening past the 8000 series is a v2 change to this one
+    branch, not a rewrite of the guardrail. The console's model-driven
+    auto-select and its symmetric exit (app.js's refreshInstallOptions)
+    key on this answer being the exact single-element list ``["xr-appmgr"]``
+    too, so widening XR support to return anything else -- more platforms,
+    or a family beyond the 8000 series -- must update that client-side
+    coupling in lockstep.
+
+    None means the model is blank or not a family this table recognizes, so no
+    guardrail applies -- the console still offers Auto, and validate_record
+    does not restrict the explicit platform choice for hardware this table has
+    no opinion on. Otherwise, the list is every platform _MODEL_INSTALL_TABLE
+    names for that family (not just its auto-resolution default -- e.g. a
+    C9xxx may run guestshell OR iox, though guestshell alone is what Auto
+    picks).
+
+    Note: ASR1000/ASR9000 are distinguished only by 'show version' output; the
+    model prefix alone cannot tell them apart. An XR-family ASR (e.g. ASR9906)
+    passes this check deliberately and returns guestshell -- it is the onboard
+    probe's live classification (resolve_platform and/or the guestshell
+    preflight's family check) that refuses XR as a final guardrail. Keep both
+    rejection sites in sync."""
+    model = (model or "").strip()
+    if (os_family or "") == "xr":
+        if not model or _XR_MODEL_RE.match(model):
+            return [_XR_PLATFORM]
+        return []
+    if model and _XR_MODEL_RE.match(model):
+        return [_XR_PLATFORM]
+    if not model:
+        return None
+    for pattern, options in _MODEL_INSTALL_TABLE:
+        if re.match(pattern, model, re.IGNORECASE):
+            return list(options)
+    return None
+
 
 # Model families that take the arm64 IOx package (installer defaults: iris-arm64.tar,
 # AppGigabitEthernet1/1, sdflash:). Used ONLY after platform has resolved to iox.
 _ARM_IOX_MODELS = (r"^IE-?3", r"^IR1[018]")
 # Catalyst 9000 -> amd64 IOx package; the app-hosting SSD share
 # (usbflash1:iox_host_data_share, host-side /vol/usb1) is bind-mounted into
-# the app so image transfer is a local disk write + an IOS-internal
-# `copy /verify` onto bootflash — same final placement as Guest Shell, and no
+# the app so image transfer is a local disk write + an IOS-internal plain
+# `copy` onto bootflash — same final placement as Guest Shell, and no
 # CoPP-policed punt traffic. Stacked-member-overridable APP_INTF.
 _C9K_MODEL = r"^C9[0-9]{3}"
 _C9K_IOX_ENV = {
@@ -106,8 +206,16 @@ def _iox_arch_env(device_id, model):
     """Given a device that has ALREADY resolved to the iox platform, return the
     env overrides for its architecture. C9k -> the amd64 mapping; IE-3k/IR ->
     an EMPTY mapping (installer arm64 defaults apply); blank/unclassifiable ->
-    raise ValueError with guidance (NO silent arm fallback). No probe-for-arch."""
+    raise ValueError with guidance (NO silent arm fallback). No probe-for-arch.
+
+    An XR-shaped model (8xxx/8xxx-SYS, case-insensitive) refuses via
+    _refuse_xr instead of falling through to the generic guidance below --
+    the live incident this closes: an 8201 resolved to iox (no preflight
+    had run yet to catch it) and died on an XE-flavoured "needs a
+    recognized device model" arch error that never named IOS-XR."""
     model = (model or "").strip()
+    if model and re.match(_XR_MODEL_RE.pattern, model, re.IGNORECASE):
+        _refuse_xr(device_id)
     if model and re.match(_C9K_MODEL, model, re.IGNORECASE):
         return dict(_C9K_IOX_ENV)
     if model and any(re.match(p, model, re.IGNORECASE) for p in _ARM_IOX_MODELS):
@@ -118,21 +226,74 @@ def _iox_arch_env(device_id, model):
         % device_id)
 
 
-def resolve_platform(dev, probe=None):
+def _refuse_xr(device_id):
+    """Refuse an IOS-XR device that is not set to the IOS-XR platform.
+
+    IRIS stages to IOS-XR now, so this no longer says "wait for XR support"
+    -- it names the one thing that works. Every OTHER platform value in
+    _PLATFORM_RECIPES is an IOS-XE recipe, and no model prefix can tell the
+    families apart, so this refusal stands for all of them.
+
+    xr-host <-> xr-appmgr is now a mutual requirement on any fully-validated
+    fleet record (gui_fleet.validate_record), so naming the platform alone
+    is incomplete advice: a device with platform=xr-appmgr but no
+    management_type stays unclassified (legacy_routed) and cannot plan or
+    deploy. Both settings are named so the operator does the whole job in
+    one edit."""
+    raise ValueError(
+        "%s runs IOS-XR: every other agent install here is IOS-XE. Set the "
+        "device's platform to 'xr-appmgr' (the appmgr container agent, which "
+        "stages straight to harddisk:) and its management type to 'xr-host' "
+        "(the two are mutually required) -- no IOS-XE recipe will work on it."
+        % device_id)
+
+
+def _refuse_xr_platform_on_xe(device_id):
+    """The inverse guard: device/xr-install.sh speaks appmgr and IOS-XR
+    config mode, so it must never be pointed at an IOS-XE box."""
+    raise ValueError(
+        "%s runs IOS-XE: platform 'xr-appmgr' is the IOS-XR agent. Pick an "
+        "IOS-XE agent install (%s)."
+        % (device_id, ", ".join(sorted(p for p in _PLATFORM_RECIPES
+                                       if p != _XR_PLATFORM))))
+
+
+def resolve_platform(dev, probe=None, os_family=None):
     """Resolve which onboarding platform drives a device.
 
-    Resolution order: (a) explicit dev['platform'] if it names a known recipe;
-    (b) dev['model'] matched against _MODEL_PLATFORMS; (c) if a probe callable
-    is given, call it with dev -- if it returns a model string, match that
-    (the CALLER is responsible for caching the probed model, e.g. into the
-    fleet store); (d) ValueError telling the operator how to unblock."""
+    Resolution order: (a) an IOS-XR device resolves to 'xr-appmgr' when that
+    is what its record explicitly asks for, and is refused otherwise -- every
+    OTHER recipe here is IOS-XE and no model prefix can tell the families
+    apart; the family is read from the os_family argument or, failing that,
+    dev['os_family']; (b) explicit dev['platform'] if it names a known recipe
+    (and 'xr-appmgr' is refused on a device already classified IOS-XE);
+    (c) dev['model'] matched against _MODEL_PLATFORMS; (d) if a probe callable
+    is given, call it with dev -- if it returns a model string, match that (the
+    CALLER is responsible for caching the probed model, e.g. into the fleet
+    store); (e) ValueError telling the operator how to unblock.
+
+    Auto-resolution never picks 'xr-appmgr': an XR model number is bare digits
+    and matches no _MODEL_PLATFORMS row, so an XR device that has not been set
+    to the XR platform is refused with advice naming it."""
     device_id = dev.get("device_id", "?")
+    # The parameter supplements the record, it does not replace it: callers
+    # that pass a stored device (gui_server._plan) never pass os_family, and
+    # a cached family must refuse there too.
+    family = os_family or dev.get("os_family")
+    if family == "xr":
+        # The ONE platform an IOS-XR device may run. Anything else -- an
+        # IOS-XE recipe, or no choice at all -- is refused exactly as before.
+        if dev.get("platform") == _XR_PLATFORM:
+            return _XR_PLATFORM
+        _refuse_xr(device_id)
     explicit = dev.get("platform")
     if explicit:
         if explicit not in _PLATFORM_RECIPES:
             raise ValueError(
                 "unknown platform %r for %s: valid platforms are %s"
                 % (explicit, device_id, ", ".join(sorted(_PLATFORM_RECIPES))))
+        if explicit == _XR_PLATFORM and family == "xe":
+            _refuse_xr_platform_on_xe(device_id)
         if re.match(r"^C8[0-9]{3}", dev.get("model") or "", re.IGNORECASE) \
                 and explicit != "router":
             raise ValueError("Catalyst 8000 models require platform router")
@@ -148,7 +309,25 @@ def resolve_platform(dev, probe=None):
     if model:
         platform = _match(model)
         if platform:
+            if not os_family and probe is not None \
+                    and _FAMILY_AMBIGUOUS_MODEL.match(model):
+                # A cached model short-circuits here on every later onboard, so
+                # a device whose family was never classified would stay
+                # misrouted forever. Ask the device before trusting the prefix.
+                probe(dev)
+                if dev.get("os_family") == "xr":
+                    _refuse_xr(device_id)
             return platform
+        if dev.get("os_family") == "xr":
+            # A cached record can carry a family the entry guard above
+            # missed: that check is (os_family or dev.get("os_family")), so
+            # an explicit os_family= argument that disagrees with the
+            # record short-circuits it before dev's own field is ever read.
+            # A model this table does not recognize proves nothing either
+            # way, so the record's family is the only honest answer here --
+            # and "set 'platform' (guestshell|iox|router)" is advice no XR
+            # box could ever act on.
+            _refuse_xr(device_id)
         raise ValueError(
             "cannot determine platform for %s: unrecognized model %r -- set "
             "'platform' (guestshell|iox|router) or a recognized 'model' on the device"
@@ -156,6 +335,12 @@ def resolve_platform(dev, probe=None):
 
     if probe is not None:
         probed_model = probe(dev)
+        # The probe is the first thing that can learn the family. A
+        # first-contact device had no cached os_family, so the guard at the
+        # top saw None -- re-check here or the very first onboard of an XR
+        # device still resolves to an IOS-XE recipe.
+        if dev.get("os_family") == "xr":
+            _refuse_xr(device_id)
         if probed_model:
             platform = _match(probed_model)
             if platform:
@@ -197,6 +382,38 @@ def _default_runner(install_path, env, on_line, on_proc=None):
 _MODEL_RE = re.compile(r"^cisco\s+(\S+)\s+\(", re.MULTILINE)
 _DEVICE_IDENTITY_RE = re.compile(r"(?im)^Processor board ID\s+(\S+)\s*$")
 
+# 'IOS XE' and 'IOS XR' differ by a single character, and no model prefix can
+# separate the families: ^ASR matches both an ASR 1000 (IOS-XE, Guest Shell
+# capable) and an ASR 9000 (IOS-XR, which has no Guest Shell at all). The
+# banner is the only authority, so match the whole token and never a prefix.
+#
+# Anchored to a BANNER LINE, not to free text. lab/device-run.sh runs `ssh -tt`,
+# so what reaches the classifier is the whole transcript -- MOTD, login banner,
+# and the prompt echoed with every command. A C9300 named 'ios-xr-lab-01' (or a
+# MOTD naming the family) would otherwise classify as 'xr', and that verdict is
+# unrecoverable: _refuse_xr tells the operator that forcing 'platform' will not
+# work, and the family is cached onto the fleet row. A version banner always
+# starts its line with 'cisco'; nothing else may decide the family.
+_OS_XR_RE = re.compile(r"(?im)^\s*cisco\s+IOS[\s-]*XRv?\b")
+_OS_XE_RE = re.compile(r"(?im)^\s*cisco\s+IOS[\s-]*XE\b")
+_OS_CLASSIC_RE = re.compile(r"(?im)^\s*cisco\s+IOS\s+Software\b")
+
+
+def parse_os_family(version_text):
+    """Classify 'show version' output as 'xe', 'xr', or '' (unknown).
+
+    Classic IOS (no XE/XR token) reports 'xe': it is driven by the same
+    recipes, and the distinction that matters here is XE-family vs XR-family,
+    not XE vs classic. XR is checked before XE, so a banner containing both
+    tokens is classified 'xr'; this precedence is intentional, not
+    incidental."""
+    text = version_text or ""
+    if _OS_XR_RE.search(text):
+        return "xr"
+    if _OS_XE_RE.search(text) or _OS_CLASSIC_RE.search(text):
+        return "xe"
+    return ""
+
 
 def _parse_show_version(version_text):
     """Extract (model, device_identity) from 'show version' output. Either
@@ -211,19 +428,33 @@ def _parse_show_version(version_text):
 
 def _default_probe(dev, env, repo_root):
     """Best-effort live 'show version' probe over lab/device-run.sh, using the
-    DEVICE_USER/DEVICE_PASS already resolved into env. ANY failure -> None
-    (never raises) -- an unreachable device just falls through to the
-    resolve_platform ValueError telling the operator to set platform/model."""
+    DEVICE_USER/DEVICE_PASS already resolved into env. Returns the model string
+    ('' when it cannot be read) and records the operating-system family on
+    ``dev['os_family']`` as a side effect -- the return value stays a plain
+    string because the reachability check in OnboardService.start()'s worker
+    uses it as a truthiness reachability test.
+    ANY failure -> '' (never raises) -- an unreachable device just falls
+    through to the resolve_platform ValueError telling the operator to set
+    platform/model."""
     device_ip = env.get("DEVICE_IP", "")
     try:
         out = subprocess.run(
             ["bash", os.path.join(repo_root, "lab", "device-run.sh"), device_ip],
             input="show version\n", capture_output=True, text=True, env=env,
-            timeout=45)
+            # 45s was under a measured 49.5s first-contact session on a
+            # segment where a stray DNS lookup black-holes: the
+            # TimeoutExpired is swallowed below and the caller then reports
+            # "cannot reach device", sending the operator after the IP and
+            # the credentials instead of the real cause.
+            timeout=75)
     except Exception:
-        return None
-    m = _MODEL_RE.search(out.stdout or "")
-    return m.group(1) if m else None
+        return ""
+    text = out.stdout or ""
+    family = parse_os_family(text)
+    if family:
+        dev["os_family"] = family
+    m = _MODEL_RE.search(text)
+    return m.group(1) if m else ""
 
 
 # Collisions that mean the same thing on EVERY platform: each carries IRIS's
@@ -258,19 +489,28 @@ def _probe_sections(runner, env, commands, label):
     request = "\n".join(
         "echo %s%s__\n%s" % (marker, name.upper(), command)
         for name, command in commands) + "\n"
+    # 90s, not 60s: the preflight is a job's FIRST session against a device,
+    # and it blew the old 60s budget three times in one measured fleet wave.
     out = subprocess.run(["bash", runner, env["DEVICE_IP"]], input=request,
-                         capture_output=True, text=True, env=env, timeout=60)
+                         capture_output=True, text=True, env=env, timeout=90)
     if out.returncode != 0:
         raise ValueError("%s preflight could not run" % label)
     sections = {}
     for name, _command in commands:
         start = "%s%s__" % (marker, name.upper())
-        match = re.search(re.escape(start) + r"\r?\n?(.*?)(?=" +
-                          re.escape(marker) + r"[A-Z_]+__|\Z)",
-                          out.stdout or "", re.DOTALL)
-        if not match:
+        # Take the LAST occurrence of each marker. An ssh -tt transport (the
+        # XR runner) echoes the ENTIRE piped request at the top of the
+        # transcript before any command executes, so the first occurrence of
+        # every marker sits in that input-echo blob and its "section" is just
+        # the next typed line. The executed marker is always the final one.
+        # XE transcripts carry no upfront echo, so last == only there and
+        # this is behaviour-identical for every existing caller.
+        matches = list(re.finditer(re.escape(start) + r"\r?\n?(.*?)(?=" +
+                                   re.escape(marker) + r"[A-Z_]+__|\Z)",
+                                   out.stdout or "", re.DOTALL))
+        if not matches:
             raise ValueError("%s preflight did not return %s" % (label, name))
-        sections[name] = match.group(1)
+        sections[name] = matches[-1].group(1)
     return sections
 
 
@@ -285,6 +525,24 @@ def _default_guestshell_preflight(dev, env, resolved, repo_root):
         ("apps", "show app-hosting list"),
         ("files", "dir bootflash:guest-share"),
     ), "guestshell")
+    # Classify from the banner already in hand -- no extra SSH round trip. The
+    # console resolves the platform before a job starts, so resolve_platform
+    # took its explicit branch and never saw the family; this preflight is the
+    # last gate before device-install.sh runs an IOS-XE recipe on the box.
+    family = parse_os_family(sections["version"])
+    if family:
+        dev["os_family"] = family
+    if family == "xr":
+        # This used to be THE guardrail of last resort for family-ambiguous
+        # models (e.g. ASR-9906) that install_options_for lets through
+        # deliberately -- the console onboard path resolves the platform
+        # before probing, so resolve_platform never sees the family. It no
+        # longer stands alone: _default_router_preflight and
+        # _default_iox_preflight run this exact same check on their own
+        # already-fetched 'show version' section, and _iox_arch_env refuses
+        # an XR-shaped model number even when no preflight ran first. Keep
+        # all of them in sync.
+        _refuse_xr(dev.get("device_id") or env.get("DEVICE_IP", "?"))
     model, device_identity = _parse_show_version(sections["version"])
     if not device_identity:
         raise ValueError("could not determine the device's processor board ID")
@@ -311,7 +569,7 @@ def _default_router_preflight(dev, env, resolved, repo_root):
         ("apps", "show app-hosting list"),
         ("guest_share", "dir bootflash:guest-share"),
     ]
-    if resolved.get("attachment") == "router-nat":
+    if resolved["management_type"] == "router-nat":
         commands.append(("interfaces", "show interfaces %s" % resolved["nat_interface"]))
     # One SSH login per router is essential for large fleet submissions. IOS XE
     # echoes these markers verbatim, letting the same fail-closed checks consume
@@ -320,8 +578,10 @@ def _default_router_preflight(dev, env, resolved, repo_root):
     request = "\n".join(
         "echo %s%s__\n%s" % (marker, name.upper(), command)
         for name, command in commands) + "\n"
+    # 90s, not 60s: the preflight is a job's FIRST session against a device,
+    # and it blew the old 60s budget three times in one measured fleet wave.
     out = subprocess.run(["bash", runner, env["DEVICE_IP"]], input=request,
-                         capture_output=True, text=True, env=env, timeout=60)
+                         capture_output=True, text=True, env=env, timeout=90)
     if out.returncode != 0:
         raise ValueError("router preflight could not run")
     sections = {}
@@ -335,6 +595,15 @@ def _default_router_preflight(dev, env, resolved, repo_root):
         sections[name] = match.group(1)
 
     version = sections["version"]
+    # Classify from the banner already in hand, exactly like the Guest Shell
+    # preflight -- no extra SSH round trip. The router preflight never probed
+    # the family before, so a C8xxx-shaped model whose banner actually reads
+    # IOS-XR would fall through to device/router-install.sh unrefused.
+    family = parse_os_family(version)
+    if family:
+        dev["os_family"] = family
+    if family == "xr":
+        _refuse_xr(dev.get("device_id") or env.get("DEVICE_IP", "?"))
     model, device_identity = _parse_show_version(version)
     if not re.match(r"^C8[0-9]{3}", model, re.IGNORECASE):
         raise ValueError("router modes support the Catalyst 8000 family only; %s is not yet supported"
@@ -376,7 +645,7 @@ def _default_router_preflight(dev, env, resolved, repo_root):
                 "file_prompt_quiet_preexisting": bool(
                     re.search(r"(?m)^file prompt quiet\s*$", running)),
                 "nat_outside_preexisting": False}
-    if resolved.get("attachment") != "router-nat":
+    if resolved["management_type"] != "router-nat":
         return evidence
 
     requested_outside = resolved["nat_interface"]
@@ -424,9 +693,7 @@ def apply_router_preflight(resolved, evidence):
     if not identity or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", identity):
         raise ValueError("router preflight did not return a safe device identity")
     result = dict(resolved)
-    attachment = result.get(
-        "attachment", result.get("management_type",
-                                 result.get("network_attachment", "")))
+    management_type = result["management_type"]
     bound_identity = str(result.get("device_identity") or "").strip()
     if bound_identity and bound_identity != identity:
         raise ValueError("router device identity changed while the job was queued")
@@ -440,7 +707,7 @@ def apply_router_preflight(resolved, evidence):
         if not re.match(r"^C8[0-9]{3}", detected_model, re.IGNORECASE):
             raise ValueError("router preflight returned a non-Catalyst-8000 model")
         result["model"] = detected_model
-    if attachment == "router-nat":
+    if management_type == "router-nat":
         outside = str(evidence.get("nat_interface") or "").strip()
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9./_-]{0,63}", outside):
             raise ValueError("router preflight did not resolve nat_interface")
@@ -469,6 +736,16 @@ def _default_iox_preflight(dev, env, resolved, repo_root):
         ("running", "show running-config"),
         ("apps", "show app-hosting list"),
     ), "iox")
+    # Classify from the banner already in hand, exactly like the Guest Shell
+    # preflight -- no extra SSH round trip. This is the fix for the live
+    # incident: the IOx path never asked the device what it runs, so an XR
+    # 8201 sailed through this preflight and only failed later, deep inside
+    # _iox_arch_env, on an XE-flavoured package/architecture error.
+    family = parse_os_family(sections["version"])
+    if family:
+        dev["os_family"] = family
+    if family == "xr":
+        _refuse_xr(dev.get("device_id") or env.get("DEVICE_IP", "?"))
     model, device_identity = _parse_show_version(sections["version"])
     if not device_identity:
         raise ValueError("could not determine the device's processor board ID")
@@ -503,14 +780,77 @@ def apply_iox_preflight(resolved, evidence):
     return result
 
 
+# The names device/xr-install.sh gives IRIS's two artifacts on the router
+# (its APPID and SOURCE_NAME defaults). The console never overrides them, so
+# finding either already there means a previous deployment is still on the
+# box -- the XR spelling of the IRIS-named collision check every other
+# platform runs.
+_XR_APPID = "iris"
+_XR_SOURCE_NAME = "iris-xr"
+
+
+def _default_xr_preflight(dev, env, resolved, repo_root):
+    """Read-only collision check for an IOS-XR appmgr deployment.
+
+    Driven over lab/xr-run.sh, not lab/device-run.sh: XR has no enable dance
+    and a different config model, and this is the same transport the recipe
+    itself uses.
+
+    Two things it deliberately does NOT do:
+
+      * probe free space. device/xr-install.sh's own step [1/5] reads
+        `dir harddisk:` and refuses below XR_MIN_FREE_BYTES moments later;
+        asking here would be a second SSH login per device for a number the
+        recipe re-reads anyway (and would be staler than the one it acts on).
+      * demand a processor board ID. The XE recipes hard-require
+        EXPECTED_DEVICE_IDENTITY as a wrong-device guard; xr-install.sh does
+        not consume one, and inventing a requirement the recipe ignores would
+        refuse good devices for nothing.
+
+    Fails closed on a banner it cannot classify: the recipe about to run
+    speaks appmgr and IOS-XR config mode, so "probably XR" is not good
+    enough."""
+    runner = os.path.join(repo_root, "lab", "xr-run.sh")
+    sections = _probe_sections(runner, env, (
+        ("version", "show version"),
+        ("apps", "show appmgr application-table"),
+        ("sources", "show appmgr source-table"),
+    ), "xr")
+    family = parse_os_family(sections["version"])
+    if family:
+        dev["os_family"] = family
+    device_id = dev.get("device_id") or env.get("DEVICE_IP", "?")
+    if family == "xe":
+        _refuse_xr_platform_on_xe(device_id)
+    if family != "xr":
+        raise ValueError(
+            "could not confirm %s runs IOS-XR from its 'show version' banner; "
+            "refusing to run the IOS-XR agent install against it" % device_id)
+    # Each table's rows START with the name, so anchor there: it is what
+    # keeps the lab's leftover 'irisprobe' source (and any operator app whose
+    # name merely contains ours) from reading as a collision.
+    for section, name, description in (
+            ("apps", _XR_APPID, "the appmgr application %r" % _XR_APPID),
+            ("sources", _XR_SOURCE_NAME,
+             "the appmgr package source %r" % _XR_SOURCE_NAME)):
+        if re.search(r"(?im)^\s*%s(?:\s|$)" % re.escape(name),
+                     sections[section]):
+            raise ValueError("%s already exists" % description)
+    evidence = {"status": "passed"}
+    model = normalize_model(_parse_show_version(sections["version"])[0])
+    if model:
+        evidence["detected_model"] = model
+    return evidence
+
+
 class OnboardService:
     def __init__(self, fleet, creds, server_dir=None, device_install=None,
                  crt_public=None, host_ip=None, catalog_url=None,
                  mint_fn=None, run_fn=_default_runner, now_fn=time.time,
                  probe_fn=None, artifacts_dir=None, audit_fn=None,
-                 max_concurrent=None, clear_state_fn=None, receipts=None,
+                 max_concurrent=None, clear_state_fn=None, record_store=None,
                  preflight_fn=None, iox_preflight_fn=None, log_dir=None,
-                 guestshell_preflight_fn=None):
+                 guestshell_preflight_fn=None, xr_preflight_fn=None):
         self.fleet = fleet
         self.creds = creds
         self.server_dir = server_dir or os.path.dirname(os.path.abspath(__file__))
@@ -539,6 +879,9 @@ class OnboardService:
         self._iox_preflight = iox_preflight_fn or (
             lambda dev, env, resolved: _default_iox_preflight(
                 dev, env, resolved, self.repo_root))
+        self._xr_preflight = xr_preflight_fn or (
+            lambda dev, env, resolved: _default_xr_preflight(
+                dev, env, resolved, self.repo_root))
         self.artifacts_dir = artifacts_dir or os.environ.get("IRIS_ARTIFACTS_DIR", "/srv/artifacts")
         self._audit = audit_fn
         # Injected callback(device_id) run after a successful undeploy to drop
@@ -546,7 +889,7 @@ class OnboardService:
         # CatalogStore.forget_device in main()). Injected, like mint/run/audit,
         # so orchestration stays unit-testable without a catalog.
         self._clear_state = clear_state_fn
-        self.receipts = receipts
+        self.record_store = record_store
         # Directory for persisted per-job logs (None disables persistence —
         # unit tests and legacy callers keep the purely in-memory behavior).
         self.log_dir = log_dir
@@ -606,17 +949,15 @@ class OnboardService:
         token = self._mint(device_id) if mint else ""
         env = dict(os.environ)
         target = resolved or dev
-        attachment = target.get("attachment",
-                                target.get("management_type",
-                                           target.get("network_attachment", "routed")))
-        if attachment == "legacy_routed":
-            attachment = "routed"
+        management_type = target["management_type"]
+        if management_type == "legacy_routed":
+            management_type = "routed"
         target_ip = (target.get("device_ip")
-                     if attachment in ("router-routed", "router-nat") else None)
+                     if management_type in ("router-routed", "router-nat") else None)
         env.update({
             "DEVICE_IP": target_ip or dev["device_ip"],
             "DEVICE_ID": device_id,
-            "NETWORK_ATTACHMENT": attachment,
+            "MANAGEMENT_TYPE": management_type,
             "VLAN": str(target.get("iris_vlan", target.get("vlan", ""))),
             "SVI_IP": target.get("svi_ip", ""),
             "SVI_MASK": target.get("svi_mask", target.get("app_mask", "")),
@@ -628,13 +969,13 @@ class OnboardService:
             "VPG_NUMBER": str(target.get("vpg_number", "")),
             "NAT_INTERFACE": target.get("nat_interface", ""),
             "BT_LISTEN_PORT": str(target.get("swarm_port", "6881"))
-                              if attachment == "router-nat" else "",
+                              if management_type == "router-nat" else "",
             "NAT_OUTSIDE_OWNED": str(target.get("nat_outside_owned", "0")),
             "EXPECTED_DEVICE_IDENTITY": target.get("device_identity", ""),
             "ROUTER_RESOURCES_OWNED": str(target.get("router_resources_owned", "0")),
             # inband IOx reaches IOS at the switch's management IP by default
             "IOS_SSH_HOST": (target.get("ios_ssh_host", "")
-                             or (dev["device_ip"] if attachment == "inband" else "")),
+                             or (dev["device_ip"] if management_type == "inband" else "")),
             "CATALOG_URL": self.catalog_url,
             "STAGE_HOST": self.host_ip,
             "CATALOG_TOKEN": token,
@@ -686,6 +1027,8 @@ class OnboardService:
             return self._iox_preflight(dev, env, resolved)
         if platform == "guestshell":
             return self._guestshell_preflight(dev, env, resolved)
+        if platform == _XR_PLATFORM:
+            return self._xr_preflight(dev, env, resolved)
         return {"status": "not-required"}
 
     def _resolve(self, device_id, dev, env, action="onboard"):
@@ -701,11 +1044,24 @@ class OnboardService:
         def probe(d):
             model = self._probe(d, env)
             if model:
-                self.fleet.upsert({"device_id": device_id, "model": model})
+                # Normalize '8201-SYS' -> '8201' so the stored model reads
+                # the same whether it arrived via a live probe or console/CSV
+                # entry (validate_record does the same normalization there).
+                model = normalize_model(model)
+                # Only record a family we actually determined. Writing "" here
+                # would overwrite a previously cached family (upsert filters
+                # None, not empty strings) and silently reopen the misroute
+                # this guard exists to close.
+                record = {"device_id": device_id, "model": model}
+                family = d.get("os_family")
+                if family:
+                    record["os_family"] = family
+                self.fleet.upsert(record)
                 dev["model"] = model   # so the job line reports what was found
             return model
 
-        platform = resolve_platform(dev, probe=probe)
+        platform = resolve_platform(dev, probe=probe,
+                                    os_family=dev.get("os_family"))
         # For iox, derive the arch env (C9k->amd64, IE-3k/IR->arm defaults,
         # blank/unclassifiable -> raise). Runs for BOTH onboard and undeploy so
         # teardown deletes the RESOLVED package (iris-arm64.tar vs iris-amd64.tar).
@@ -725,22 +1081,42 @@ class OnboardService:
             env["DEVICE_SSH_USER"] = env["DEVICE_USER"]
         return platform, script
 
-    def _transition_or_note(self, job_id, receipt_id, state):
-        """Advance the job's receipt, downgrading lifecycle races to a job
-        line. A concurrent action can retire the bound receipt between this
+    def _persist_os_family(self, device_id, dev, prior_family):
+        """Best-effort cache of a freshly classified os_family onto the
+        fleet row. Mirrors the guard in _resolve's probe() closure: only
+        write a family we actually determined AND that is new -- writing ""
+        would overwrite a previously cached family (upsert filters None, not
+        empty strings) and silently reopen the misroute that guard exists to
+        close. Called after the router/iox execution preflights, on both
+        their success and refusal paths, so an XR device short-circuits at
+        resolve_platform's cached-family guard on the next attempt instead of
+        being re-probed over SSH every time. Swallows store errors: a hiccup
+        here must never mask the preflight's own success or refusal, which
+        the caller has already decided by the time this runs."""
+        family = dev.get("os_family")
+        if not family or family == prior_family:
+            return
+        try:
+            self.fleet.upsert({"device_id": device_id, "os_family": family})
+        except Exception:
+            pass
+
+    def _transition_or_note(self, job_id, record_id, state):
+        """Advance the job's record, downgrading lifecycle races to a job
+        line. A concurrent action can retire the bound record between this
         worker's steps — e.g. a re-onboard's activation supersedes it, or an
         operator adopt replaces it. The transition then raises, and an
         uncaught raise here would kill the worker thread BEFORE _finish(),
         wedging the job "running" and the device "busy" until a restart.
         Returns True iff the transition applied."""
-        if self.receipts is None or not receipt_id:
+        if self.record_store is None or not record_id:
             return True
         try:
-            self.receipts.transition(receipt_id, state)
+            self.record_store.transition(record_id, state)
             return True
         except Exception as exc:
-            self._append(job_id, "receipt %s -> %s not applied: %s"
-                         % (receipt_id, state, exc))
+            self._append(job_id, "record %s -> %s not applied: %s"
+                         % (record_id, state, exc))
             return False
 
     def start(self, device_id, action="onboard", resolved=None, prepare=None,
@@ -762,9 +1138,9 @@ class OnboardService:
 
         prepare() (optional) is called EXACTLY ONCE, under the job lock, only
         when a genuinely new job is registered — never when this start joins an
-        already-active same-action job. It returns the receipt id to bind to the
-        job. Creating the receipt there (instead of before start) means a
-        concurrent double-onboard cannot leave an orphan planned receipt behind.
+        already-active same-action job. It returns the record id to bind to the
+        job. Creating the record there (instead of before start) means a
+        concurrent double-onboard cannot leave an orphan planned record behind.
 
         Jobs are in-memory and per-process: a server restart loses all job state
         and abandons any in-flight job (re-running either script is
@@ -776,8 +1152,18 @@ class OnboardService:
         job = {"id": job_id, "device_id": device_id, "action": action,
                  "state": "queued", "lines": [], "returncode": None,
                  "_line_bytes": 0, "_log_truncated": False,
+                # Wall-clock of each captured line, kept PARALLEL to "lines"
+                # rather than prefixed into it: the SSE stream, the console and
+                # every caller that matches on line content (e.g. the
+                # "ERROR:" scan in _finish) stay byte-identical, and only the
+                # persisted log gains the offsets. Without these the recipes'
+                # [n/7] banners carry no timing at all, so the only evidence
+                # for where a slow onboard spent its time is the job's total
+                # duration -- which cannot tell a slow guestshell bring-up
+                # from a slow artifact fetch.
+                "_line_ts": [],
                 "queued_at": int(self._now()),
-                "started_at": None, "finished_at": None, "receipt_id": None,
+                "started_at": None, "finished_at": None, "record_id": None,
                 "resolved": resolved, "env_extra": env_extra}
         # Reap BEFORE the busy guard, not after it. The reaper used to run
         # further down, past every path that returns or raises — so it could
@@ -800,8 +1186,8 @@ class OnboardService:
                         "device %s is busy with an active %s job (%s)"
                         % (device_id, j.get("action", "onboard"), j["id"]))
             # Only now, holding the lock and past the dedup guard, do we mint the
-            # receipt — so exactly one receipt exists per genuinely started job.
-            job["receipt_id"] = prepare() if prepare else None
+            # record — so exactly one record exists per genuinely started job.
+            job["record_id"] = prepare() if prepare else None
             self._evict_old(self._now())
             self._jobs[job_id] = job
 
@@ -816,7 +1202,7 @@ class OnboardService:
             try:
                 # Build credentials and resolve the recipe without minting. A
                 # Router preflight runs only here, in the bounded worker pool,
-                # immediately before its receipt becomes applying and before an
+                # immediately before its record becomes applying and before an
                 # enrollment token is created. Batch submissions therefore do
                 # not block their HTTP requests on individual routers' SSH.
                 dev, env = self._build_env(device_id, mint=False,
@@ -833,6 +1219,17 @@ class OnboardService:
                             "cannot reach device %s — ping/SSH probe "
                             "failed; check the device IP and credentials"
                             % env.get("DEVICE_IP", device_id))
+                    # That probe just read 'show version'. A console onboard
+                    # arrives with plan["resolved"]["platform"] already set, so
+                    # _build_env copied it onto the device and resolve_platform
+                    # returned from its EXPLICIT branch -- none of the family
+                    # checks inside resolution ran. This is the first place the
+                    # classification exists, and no existing fleet row carries
+                    # one. Cache it so later calls short-circuit at resolution.
+                    if dev.get("os_family") == "xr":
+                        self.fleet.upsert({"device_id": device_id,
+                                           "os_family": "xr"})
+                        _refuse_xr(device_id)
                     # Guest Shell used to stop there, so a device still
                     # carrying IRIS config was refused as a router and
                     # silently accepted here.
@@ -842,11 +1239,21 @@ class OnboardService:
                     except Exception as exc:
                         raise ValueError("preflight failed: %s" % exc)
                 if action == "onboard" and platform == "router":
+                    # The router preflight classifies os_family from the
+                    # banner it just read (_default_router_preflight), same
+                    # as Guest Shell above -- but only onto this LOCAL dev
+                    # dict. Persist it on BOTH the success and the refusal
+                    # path: the classification happened even when refused,
+                    # and that is exactly the case that must short-circuit a
+                    # retry instead of re-probing an XR router over SSH again.
+                    prior_family = dev.get("os_family")
                     try:
                         evidence = self._router_preflight(
                             dev, env, j.get("resolved") or dev)
                     except Exception as exc:
+                        self._persist_os_family(device_id, dev, prior_family)
                         raise ValueError("preflight failed: %s" % exc)
+                    self._persist_os_family(device_id, dev, prior_family)
                     final_resolved = (pre_apply(evidence) if pre_apply else
                                       apply_router_preflight(
                                           j.get("resolved") or dev, evidence))
@@ -860,6 +1267,21 @@ class OnboardService:
                             env_extra=j.get("env_extra"))
                         platform, script = self._resolve(
                             device_id, dev, env, action)
+                elif action == "onboard" and platform == _XR_PLATFORM:
+                    # The XR collision check, and the last gate that can tell
+                    # this really is an IOS-XR box before an appmgr recipe
+                    # runs against it: the console resolved the platform from
+                    # the operator's explicit choice, so resolution took its
+                    # EXPLICIT branch and no family check inside it ran.
+                    # Persist the classification on both paths, exactly like
+                    # the router/iox flows -- see _persist_os_family.
+                    prior_family = dev.get("os_family")
+                    try:
+                        self._xr_preflight(dev, env, j.get("resolved") or dev)
+                    except Exception as exc:
+                        self._persist_os_family(device_id, dev, prior_family)
+                        raise ValueError("preflight failed: %s" % exc)
+                    self._persist_os_family(device_id, dev, prior_family)
                 elif action == "onboard" and platform == "iox":
                     # The console never supplies device_identity for IOx
                     # devices (unlike router, there is no separate
@@ -869,11 +1291,16 @@ class OnboardService:
                     # EXPECTED_DEVICE_IDENTITY -- a no-op guard against
                     # reconfiguring the wrong switch. Probe live here, at
                     # execution time, the same as the router flow.
+                    # Persist a classification the same way as the router
+                    # path above -- see _persist_os_family.
+                    prior_family = dev.get("os_family")
                     try:
                         evidence = self._iox_preflight(
                             dev, env, j.get("resolved") or dev)
                     except Exception as exc:
+                        self._persist_os_family(device_id, dev, prior_family)
                         raise ValueError("preflight failed: %s" % exc)
+                    self._persist_os_family(device_id, dev, prior_family)
                     final_resolved = apply_iox_preflight(
                         j.get("resolved") or dev, evidence)
                     with self._lock:
@@ -887,12 +1314,12 @@ class OnboardService:
                         device_id, dev, env, action)
             except Exception as exc:
                 # Nothing has reached the device yet. A planned onboarding
-                # receipt must not become teardown authority: another actor
+                # record must not become teardown authority: another actor
                 # may own the resources that caused this pre-apply failure.
-                # An undeploy receipt already describes the live deployment,
+                # An undeploy record already describes the live deployment,
                 # so leave it unchanged when teardown never started.
                 if action == "onboard":
-                    self._transition_or_note(job_id, j.get("receipt_id"),
+                    self._transition_or_note(job_id, j.get("record_id"),
                                              "removed")
                 self._append(job_id, "ERROR: " + str(exc))
                 self._finish(job_id, "error", None)
@@ -912,15 +1339,15 @@ class OnboardService:
                     self._append(job_id, "ERROR: %s not found in artifacts dir "
                                  "-- build device/iox/build.sh%s and place it in "
                                  "artifacts/ (device untouched)" % (pkg, flag))
-                    self._transition_or_note(job_id, j.get("receipt_id"),
+                    self._transition_or_note(job_id, j.get("record_id"),
                                              "removed")
                     self._finish(job_id, "error", None)
                     return
             # An operator abort can land while the job is "running" but the
             # installer has not been spawned yet (env build, preflight, the
             # artifacts guard). Stop here, before minting a token or touching
-            # the device: an onboard's planned receipt is retired outright; an
-            # undeploy receipt still describes the live deployment, so leave
+            # the device: an onboard's planned record is retired outright; an
+            # undeploy record still describes the live deployment, so leave
             # it, as in the pre-apply error path above.
             with self._lock:
                 cur = self._jobs.get(job_id)
@@ -930,18 +1357,18 @@ class OnboardService:
                 self._append(job_id, "ERROR: aborted by operator before the "
                              "installer started; device untouched")
                 if action == "onboard":
-                    self._transition_or_note(job_id, j.get("receipt_id"),
+                    self._transition_or_note(job_id, j.get("record_id"),
                                              "removed")
                 self._finish(job_id, "error", None)
                 return
             try:
-                receipt_id = j.get("receipt_id")
-                if not self._transition_or_note(job_id, receipt_id, "applying"):
-                    # The bound receipt is no longer usable (a newer action
+                record_id = j.get("record_id")
+                if not self._transition_or_note(job_id, record_id, "applying"):
+                    # The bound record is no longer usable (a newer action
                     # superseded it). Running a script rendered from a STALE
-                    # receipt would act on a box someone else just changed —
+                    # record would act on a box someone else just changed —
                     # abort before touching the device.
-                    self._append(job_id, "ERROR: the job's receipt is no "
+                    self._append(job_id, "ERROR: the job's record is no "
                                  "longer active; aborting without touching "
                                  "the device")
                     self._finish(job_id, "error", None)
@@ -955,7 +1382,7 @@ class OnboardService:
                 else:
                     rc = self._run(script, env, lambda line: self._append(job_id, line))
             except Exception as exc:
-                self._transition_or_note(job_id, receipt_id, "needs-reconcile")
+                self._transition_or_note(job_id, record_id, "needs-reconcile")
                 self._append(job_id, "ERROR: " + str(exc))
                 self._finish(job_id, "error", None)
                 return
@@ -968,10 +1395,10 @@ class OnboardService:
                 except Exception:
                     pass   # a bookkeeping failure must never fail the job
             # Same contract for the caller's own success bookkeeping. A forced
-            # teardown retires its receipts here rather than at submit time:
-            # force means "that receipt does not describe this box", but a
+            # teardown retires its records here rather than at submit time:
+            # force means "that record does not describe this box", but a
             # transient failure to reach the device is not proof of that, and
-            # voiding a healthy deployment's receipt on a network blip would
+            # voiding a healthy deployment's record on a network blip would
             # strand it exactly the way this whole path exists to prevent.
             if rc == 0 and on_success is not None:
                 try:
@@ -979,11 +1406,11 @@ class OnboardService:
                 except Exception:
                     pass   # as above: never fail a job that already succeeded
             if rc != 0:
-                self._transition_or_note(job_id, receipt_id, "needs-reconcile")
+                self._transition_or_note(job_id, record_id, "needs-reconcile")
             elif action == "onboard":
-                self._transition_or_note(job_id, receipt_id, "active")
+                self._transition_or_note(job_id, record_id, "active")
             else:
-                self._transition_or_note(job_id, receipt_id, "removed")
+                self._transition_or_note(job_id, record_id, "removed")
             self._finish(job_id, "done" if rc == 0 else "error", rc)
 
         try:
@@ -991,8 +1418,8 @@ class OnboardService:
         except queue.Full:
             with self._lock:
                 self._jobs.pop(job_id, None)
-            if job.get("receipt_id"):
-                self._transition_or_note(job_id, job["receipt_id"], "removed")
+            if job.get("record_id"):
+                self._transition_or_note(job_id, job["record_id"], "removed")
             raise ValueError("onboarding queue is full")
         with self._lock:
             self._ensure_workers()
@@ -1006,9 +1433,13 @@ class OnboardService:
 
     def _append_locked(self, job, line):
         size = len(line.encode("utf-8", "replace"))
+        # Kept in lockstep with job["lines"] on every path below, including
+        # the pops, so _persist_log can zip the two without checking.
+        stamps = job.setdefault("_line_ts", [])
         if len(job["lines"]) < _MAX_JOB_LOG_LINES \
                 and job["_line_bytes"] + size <= _MAX_JOB_LOG_BYTES:
             job["lines"].append(line)
+            stamps.append(self._now())
             job["_line_bytes"] += size
         elif not job["_log_truncated"]:
             marker_bytes = len(_LOG_TRUNCATED.encode())
@@ -1016,8 +1447,11 @@ class OnboardService:
             while job["lines"] and (len(job["lines"]) >= _MAX_JOB_LOG_LINES
                     or job["_line_bytes"] + marker_bytes > _MAX_JOB_LOG_BYTES):
                 removed = job["lines"].pop()
+                if stamps:
+                    stamps.pop()
                 job["_line_bytes"] -= len(removed.encode("utf-8", "replace"))
             job["lines"].append(_LOG_TRUNCATED)
+            stamps.append(self._now())
             job["_line_bytes"] += marker_bytes
             job["_log_truncated"] = True
 
@@ -1037,7 +1471,7 @@ class OnboardService:
     def abort(self, job_id):
         """Terminate a running installer subprocess. Returns True if a running
         job's process was signalled. The run loop then finishes with a non-zero
-        rc, so the job errors and its receipt moves to needs-reconcile.
+        rc, so the job errors and its record moves to needs-reconcile.
 
         A job reports "running" before its installer process exists (env
         build, preflight). An abort in that window is recorded instead of
@@ -1077,7 +1511,12 @@ class OnboardService:
             self._procs.pop(job_id, None)   # drop the (now-dead) installer handle
             j = self._jobs.get(job_id)
             if j is not None:
-                j["state"] = state
+                # The terminal state is deliberately NOT set here. Pollers
+                # (the console, and readers of /api/deploy-logs) treat a
+                # terminal state as "the log is readable now", so the log
+                # must be fully on disk BEFORE the flip is visible — the old
+                # order raced them into a created-but-empty file. The flip
+                # happens in the finally below, after _persist_log returns.
                 j["returncode"] = rc
                 j["finished_at"] = int(self._now())
                 device_id = j.get("device_id")
@@ -1098,16 +1537,29 @@ class OnboardService:
                     if err:
                         detail += " -- " + err[:120]
                 if self.log_dir:
-                    # snapshot under the lock; the disk write happens outside it
-                    log_job = dict(j, lines=list(j["lines"]))
-        if log_job is not None:
-            # Best-effort: a full or read-only state volume must never fail
-            # the job (or block the audit emit below). Log lines are the
-            # installer's stdout, which never echoes passwords (see above).
-            try:
-                self._persist_log(log_job)
-            except Exception:
-                pass
+                    # snapshot under the lock; the disk write happens outside
+                    # it. The job dict does not carry the terminal state yet,
+                    # so the header's state comes from the argument.
+                    log_job = dict(j, state=state, lines=list(j["lines"]),
+                                   _line_ts=list(j.get("_line_ts") or []))
+        try:
+            if log_job is not None:
+                # Best-effort: a full or read-only state volume must never
+                # fail the job (or block the audit emit below). Log lines are
+                # the installer's stdout, which never echoes passwords (see
+                # above).
+                try:
+                    self._persist_log(log_job)
+                except Exception:
+                    pass
+        finally:
+            # Only now does the job report done/error — with the log already
+            # readable. The finally guarantees a persist crash can never
+            # wedge the job in "running".
+            with self._lock:
+                j = self._jobs.get(job_id)
+                if j is not None:
+                    j["state"] = state
         if self._audit is not None:
             try:
                 self._audit(event="%s_finished" % action, category="onboard",
@@ -1137,11 +1589,21 @@ class OnboardService:
                      job.get("state"), job.get("returncode"),
                      job.get("queued_at"), job.get("started_at"),
                      job.get("finished_at"), job.get("platform")))
+        # Each line is prefixed with its offset in seconds from started_at, so
+        # a slow job says WHERE it was slow. Falls back to the bare line when
+        # a stamp is missing (a job dict from an older in-memory generation, or
+        # an injected test double), never dropping the line itself.
+        stamps = job.get("_line_ts") or []
+        base = job.get("started_at") or job.get("queued_at")
         with open(os.path.join(self.log_dir, fname), "w",
                   encoding="utf-8") as f:
             f.write(header + "\n")
-            for line in job["lines"]:
-                f.write(line + "\n")
+            for i, line in enumerate(job["lines"]):
+                ts = stamps[i] if i < len(stamps) else None
+                if ts is None or base is None:
+                    f.write(line + "\n")
+                else:
+                    f.write("[+%7.1fs] %s\n" % (float(ts) - float(base), line))
         logs = sorted(
             (n for n in os.listdir(self.log_dir) if n.endswith(".log")),
             key=lambda n: os.path.getmtime(os.path.join(self.log_dir, n)),
@@ -1210,7 +1672,7 @@ class OnboardService:
         parked thread exits without running when it eventually wins a slot.
         Returns the count cancelled."""
         n = 0
-        receipt_ids = []
+        record_ids = []
         with self._lock:
             now = int(self._now())
             for jid, j in self._jobs.items():
@@ -1220,12 +1682,12 @@ class OnboardService:
                     j["state"] = "cancelled"
                     j["finished_at"] = now
                     self._append_locked(j, "cancelled before start")
-                    if j.get("receipt_id"):
-                        receipt_ids.append((jid, j["receipt_id"]))
+                    if j.get("record_id"):
+                        record_ids.append((jid, j["record_id"]))
                     n += 1
-        for jid, receipt_id in receipt_ids:
-            if not self._transition_or_note(jid, receipt_id, "removed"):
-                self._append(jid, "cancelled job receipt could not be retired")
+        for jid, record_id in record_ids:
+            if not self._transition_or_note(jid, record_id, "removed"):
+                self._append(jid, "cancelled job record could not be retired")
         return n
 
     def reap_overdue_jobs(self):
@@ -1274,7 +1736,7 @@ class OnboardService:
         that did nothing. It self-healed only after _JOB_DEADLINE.
 
         Queued jobs are cancelled through the same path the console's cancel
-        uses, so their receipts are retired too."""
+        uses, so their records are retired too."""
         with self._lock:
             queued = [jid for jid, j in self._jobs.items()
                       if j.get("device_id") == device_id
@@ -1299,9 +1761,10 @@ class OnboardService:
 
         A hung recipe is indistinguishable from a slow one from here, so the
         bound is deliberately generous. What matters is that the job becomes
-        TERMINAL: that releases the busy guard, lets the record be evicted, and
-        leaves the receipt in a state teardown can read -- turning a permanent
-        strand into an ordinary failure. Caller must hold self._lock."""
+        TERMINAL: that releases the busy guard, lets the job record be
+        evicted, and leaves the deployment record in a state teardown can
+        read -- turning a permanent strand into an ordinary failure. Caller
+        must hold self._lock."""
         overdue = []
         for jid, j in self._jobs.items():
             if j.get("state") not in _TERMINAL and j.get("finished_at") is None:

@@ -45,6 +45,25 @@ def _store(tmp_path):
     return s
 
 
+def _store_with_images(tmp_path, ids):
+    """A CatalogStore whose catalog.json carries a minimal published entry
+    for each id in *ids* (multi-image assignment tests need more than the
+    single img1 that _store() seeds)."""
+    s = catalog.CatalogStore(str(tmp_path))
+    for iid in ids:
+        s.save_image({"id": iid, "filename": iid + ".bin", "size": 5,
+                      "sha256": "ab" * 32, "cisco_signature_verified": False,
+                      "info_hash_hex": "cc" * 20, "published_at": 111})
+    return s
+
+
+def _write_policy_json(store, rows):
+    """Write *rows* (device_id -> raw policy record) straight to
+    policy.json, bypassing set_policy -- stands in for a row written by a
+    previous release."""
+    catalog._atomic_write_json(store.policy_path, rows)
+
+
 # ---------------------------------------------------------------------------
 # Ported CatalogStore unit tests (unchanged behaviour)
 # ---------------------------------------------------------------------------
@@ -62,7 +81,8 @@ def test_store_heartbeat_and_policy(tmp_path):
                                 "free_flash_bytes": 9, "version": "17.18"}, now=222)
     assert s.get_device("sw-1")["last_seen"] == 222
     s.set_policy("sw-1", approved_image_id="img1")
-    assert s.get_policy("sw-1") == {"approved_image_id": "img1"}
+    assert s.get_policy("sw-1") == {"approved_image_id": "img1",
+                                     "approved_image_ids": ["img1"]}
 
 
 def test_set_policy_serializes_with_image_deletion_across_processes(tmp_path):
@@ -125,12 +145,101 @@ def test_purge_device_clears_all_state(tmp_path):
     # deleted-and-re-added devices must come back unassigned: EVERY
     # per-device store is emptied, unlike forget_device()
     assert s.get_device("sw-1") is None
-    assert s.get_policy("sw-1") == {"approved_image_id": None}
+    assert s.get_policy("sw-1") == {"approved_image_id": None,
+                                     "approved_image_ids": []}
     assert s.get_telemetry("sw-1") == []
     assert s.pending_report("sw-1", now=1001) is None
     # idempotent on a purged / never-seen device
     assert s.purge_device("sw-1") is False
     assert s.purge_device("never-seen") is False
+
+
+# ---------------------------------------------------------------------------
+# Multi-image assignment: policy holds an ordered set (issue: multi-image
+# assignment, task 1 -- storage layer only)
+# ---------------------------------------------------------------------------
+
+def test_policy_list_round_trip_and_order(tmp_path):
+    store = _store_with_images(tmp_path, ["img-a", "img-b", "img-c"])
+    store.set_policy("d1", approved_image_ids=["img-c", "img-a"])
+    pol = store.get_policy("d1")
+    assert pol["approved_image_ids"] == ["img-c", "img-a"]   # order preserved
+    assert pol["approved_image_id"] == "img-c"               # singular = first
+
+
+def test_policy_singular_write_reads_as_one_element_list(tmp_path):
+    store = _store_with_images(tmp_path, ["img-a"])
+    store.set_policy("d1", approved_image_id="img-a")
+    assert store.get_policy("d1")["approved_image_ids"] == ["img-a"]
+
+
+def test_policy_legacy_row_on_disk_reads_as_list(tmp_path):
+    # A row written by the PREVIOUS release must read cleanly.
+    store = _store_with_images(tmp_path, ["img-a"])
+    _write_policy_json(store, {"d1": {"approved_image_id": "img-a"}})
+    assert store.get_policy("d1")["approved_image_ids"] == ["img-a"]
+    assert store.get_policy("d1")["approved_image_id"] == "img-a"
+
+
+def test_policy_cap_ten(tmp_path):
+    ids = ["img-%02d" % i for i in range(11)]
+    store = _store_with_images(tmp_path, ids)
+    with pytest.raises(ValueError, match="at most 10"):
+        store.set_policy("d1", approved_image_ids=ids)
+    store.set_policy("d1", approved_image_ids=ids[:10])      # 10 is fine
+
+
+def test_policy_rejects_unknown_and_duplicate_ids(tmp_path):
+    store = _store_with_images(tmp_path, ["img-a"])
+    with pytest.raises(ValueError):
+        store.set_policy("d1", approved_image_ids=["img-a", "nope"])
+    with pytest.raises(ValueError):
+        store.set_policy("d1", approved_image_ids=["img-a", "img-a"])
+
+
+def test_policy_unassign_with_empty_list(tmp_path):
+    store = _store_with_images(tmp_path, ["img-a"])
+    store.set_policy("d1", approved_image_ids=["img-a"])
+    store.set_policy("d1", approved_image_ids=[])
+    assert store.get_policy("d1") == {"approved_image_id": None,
+                                      "approved_image_ids": []}
+
+
+def test_policy_compare_and_set_refuses_a_stale_expectation(tmp_path):
+    """Two operators with the picker open on the same device both applied and
+    the second silently overwrote the first: the write path had no
+    compare-and-set at all, unlike the peer-policy PUT beside it in the API.
+
+    Passing the set the caller believes is stored makes the write conditional:
+    it goes through when the expectation still holds, and raises
+    PolicyConflict carrying the CURRENT set when it does not, with nothing
+    written. Omitting it keeps the unconditional write older callers rely
+    on."""
+    store = _store_with_images(tmp_path, ["img-a", "img-b", "img-c"])
+    # a device with nothing assigned: the empty list is a real expectation,
+    # not "no expectation"
+    store.set_policy("d1", approved_image_ids=["img-a"], expect_image_ids=[])
+    assert store.get_policy("d1")["approved_image_ids"] == ["img-a"]
+
+    with pytest.raises(catalog.PolicyConflict) as exc:
+        store.set_policy("d1", approved_image_ids=["img-b"],
+                         expect_image_ids=[])
+    assert exc.value.current_ids == ["img-a"]
+    assert store.get_policy("d1")["approved_image_ids"] == ["img-a"]
+
+    # order is part of the set: applying rewrites it, so a caller that saw a
+    # different order did not see this row
+    with pytest.raises(catalog.PolicyConflict):
+        store.set_policy("d1", approved_image_ids=["img-c"],
+                         expect_image_ids=["img-a", "img-b"])
+
+    # unassign is conditional the same way, and no expectation still writes
+    with pytest.raises(catalog.PolicyConflict):
+        store.set_policy("d1", approved_image_ids=[], expect_image_ids=["img-b"])
+    store.set_policy("d1", approved_image_ids=[], expect_image_ids=["img-a"])
+    assert store.get_policy("d1")["approved_image_ids"] == []
+    store.set_policy("d1", approved_image_ids=["img-c"])
+    assert store.get_policy("d1")["approved_image_ids"] == ["img-c"]
 
 
 def test_heartbeat_stores_stage_state(tmp_path):
@@ -277,6 +386,43 @@ def test_list_and_get_image(tmp_path):
         assert json.loads(body)["sha256"] == "ab" * 32
         status, _, _ = _req(port, "GET", "/v1/images/none", token="tok")
         assert status == 404
+    finally:
+        srv.shutdown()
+
+
+def test_device_wire_strips_internal_quarantine_bookkeeping_fields(tmp_path):
+    """The device-facing /v1/images and /v1/images/<id> routes must not leak
+    catalog.py's own internal bookkeeping fields to agents --
+    quarantine_actions_complete (convergence-retry state) and
+    quarantine_override_sha512 (the re-quarantine-suppression ack). Mirrors
+    gui_server._image_view's console-side projection rationale;
+    hash_verification and quarantined stay wire-visible -- an agent
+    benefits from knowing its own image's verification state."""
+    srv, port = _serve(tmp_path, "tok")
+    try:
+        store = catalog.CatalogStore(str(tmp_path))
+        entry = store.get_image("img1")
+        entry["quarantined"] = True
+        entry["quarantine_actions_complete"] = False
+        entry["quarantine_override_sha512"] = "aa" * 64
+        entry["hash_verification"] = {
+            "state": "mismatch", "checked_at": 1, "feed_published_at": None,
+            "source": "scheduled", "deferral": False}
+        store.save_image(entry)
+
+        status, _, body = _req(port, "GET", "/v1/images", token="tok")
+        img = json.loads(body)["images"][0]
+        assert img["quarantined"] is True
+        assert img["hash_verification"]["state"] == "mismatch"
+        assert "quarantine_actions_complete" not in img
+        assert "quarantine_override_sha512" not in img
+
+        status, _, body = _req(port, "GET", "/v1/images/img1", token="tok")
+        img2 = json.loads(body)
+        assert img2["quarantined"] is True
+        assert img2["hash_verification"]["state"] == "mismatch"
+        assert "quarantine_actions_complete" not in img2
+        assert "quarantine_override_sha512" not in img2
     finally:
         srv.shutdown()
 
@@ -521,6 +667,9 @@ def test_token_refresh_prev_stash_uses_int_epochs(tmp_path):
     int('...9') ValueError in the agent's run_once on the next tick."""
     os.environ["IRIS_AGE_RECIPIENTS"] = ""
     srv, port, old_tok = _serve_with_device(tmp_path, "dev-int")
+    original_expiry = secrets_store.load(
+        _secrets_path(tmp_path))["devices"]["dev-int"]["catalog_token"][
+            "expires_at"]
     try:
         status, _, body = _req(
             port, "POST", "/v1/devices/dev-int/token-refresh",
@@ -537,6 +686,8 @@ def test_token_refresh_prev_stash_uses_int_epochs(tmp_path):
     assert isinstance(prev["created_at"], int), (
         "catalog_token_prev.created_at must be int, got %r"
         % type(prev["created_at"]))
+    assert isinstance(prev["refresh_expires_at"], int)
+    assert prev["refresh_expires_at"] == original_expiry
 
 
 # ---------------------------------------------------------------------------
@@ -654,14 +805,135 @@ def test_old_token_still_valid_within_overlap_after_refresh(tmp_path):
         srv.shutdown()
 
 
+def test_lost_refresh_response_retry_reissues_current_token(tmp_path):
+    """Losing the first 200 must not make a retry rotate a second time.
+
+    The caller deliberately discards the first response, then retries with the
+    only token it durably knows.  The previous token may recover the current
+    bag on this route, but it must not mint another token.
+    """
+    os.environ["IRIS_AGE_RECIPIENTS"] = ""
+    srv, port, old_tok = _serve_with_device(tmp_path, "dev-lost")
+    try:
+        status, _, first_body = _req(
+            port, "POST", "/v1/devices/dev-lost/token-refresh",
+            token=old_tok, body=b"{}")
+        assert status == 200, first_body
+        first_bag = json.loads(first_body)
+        current_tok = first_bag["catalog_token"]
+
+        # Model a lost/truncated response: the next request still carries OLD.
+        status, _, retry_body = _req(
+            port, "POST", "/v1/devices/dev-lost/token-refresh",
+            token=old_tok, body=b"{}")
+        assert status == 200, retry_body
+        assert json.loads(retry_body) == first_bag
+    finally:
+        srv.shutdown()
+
+    final = secrets_store.load(_secrets_path(tmp_path))["devices"]["dev-lost"]
+    assert final["catalog_token"]["value"] == current_tok
+    assert final["catalog_token_prev"]["value"] == old_tok
+
+
+def test_previous_token_recovers_after_conf_write_failure_on_next_tick(
+        tmp_path):
+    """A next process may recover even after the shared-route overlap elapsed.
+
+    This models _refresh_impl receiving the new bag but failing its atomic conf
+    rewrite: the next one-shot process reloads OLD from disk.  Recovery is
+    scoped to token-refresh and lasts while the missed CURRENT token itself is
+    valid; it does not extend OLD's access to shared catalog routes.
+    """
+    os.environ["IRIS_AGE_RECIPIENTS"] = ""
+    srv, port, old_tok = _serve_with_device(tmp_path, "dev-write-fail")
+    sp = _secrets_path(tmp_path)
+    try:
+        status, _, body = _req(
+            port, "POST", "/v1/devices/dev-write-fail/token-refresh",
+            token=old_tok, body=b"{}")
+        assert status == 200, body
+        current_tok = json.loads(body)["catalog_token"]
+
+        # Advance only the persisted previous-token deadline beyond overlap
+        # (and the normal skew grace) without expiring the current token.
+        with secrets_store.store_lock(sp):
+            store = secrets_store.load(sp)
+            store["devices"]["dev-write-fail"]["catalog_token_prev"][
+                "expires_at"] = int(time.time()) - 1000
+            secrets_store.save(store, sp)
+
+        assert _req(port, "GET", "/v1/images", token=old_tok)[0] == 401
+        status, _, retry_body = _req(
+            port, "POST", "/v1/devices/dev-write-fail/token-refresh",
+            token=old_tok, body=b"{}")
+        assert status == 200, retry_body
+        assert json.loads(retry_body)["catalog_token"] == current_tok
+    finally:
+        srv.shutdown()
+
+
+def test_previous_token_recovery_does_not_outlive_original_expiry(tmp_path):
+    os.environ["IRIS_AGE_RECIPIENTS"] = ""
+    srv, port, old_tok = _serve_with_device(tmp_path, "dev-expired-recovery")
+    sp = _secrets_path(tmp_path)
+    try:
+        assert _req(
+            port, "POST", "/v1/devices/dev-expired-recovery/token-refresh",
+            token=old_tok, body=b"{}")[0] == 200
+        with secrets_store.store_lock(sp):
+            store = secrets_store.load(sp)
+            prev = store["devices"]["dev-expired-recovery"][
+                "catalog_token_prev"]
+            # Keep ordinary overlap auth live while expiring recovery itself.
+            # token-refresh must honor the original credential deadline rather
+            # than accidentally inheriting the later shared-route deadline.
+            prev["expires_at"] = int(time.time()) + 1000
+            prev["refresh_expires_at"] = int(time.time()) - 1000
+            secrets_store.save(store, sp)
+
+        assert _req(
+            port, "GET", "/v1/images", token=old_tok)[0] == 200
+        assert _req(
+            port, "POST", "/v1/devices/dev-expired-recovery/token-refresh",
+            token=old_tok, body=b"{}")[0] == 401
+    finally:
+        srv.shutdown()
+
+
+def test_previous_token_cannot_reissue_an_expired_current_token(tmp_path):
+    os.environ["IRIS_AGE_RECIPIENTS"] = ""
+    srv, port, old_tok = _serve_with_device(tmp_path, "dev-current-expired")
+    sp = _secrets_path(tmp_path)
+    try:
+        assert _req(
+            port, "POST", "/v1/devices/dev-current-expired/token-refresh",
+            token=old_tok, body=b"{}")[0] == 200
+        with secrets_store.store_lock(sp):
+            store = secrets_store.load(sp)
+            current = store["devices"]["dev-current-expired"][
+                "catalog_token"]
+            current["expires_at"] = int(time.time()) - 1000
+            secrets_store.save(store, sp)
+
+        assert _req(
+            port, "POST", "/v1/devices/dev-current-expired/token-refresh",
+            token=old_tok, body=b"{}")[0] == 401
+    finally:
+        srv.shutdown()
+
+
 # ---------------------------------------------------------------------------
-# Task 5 NEW: overlap asymmetry — old token rejected on device-bound routes
+# Task 5 NEW: overlap asymmetry — recovery is token-refresh-only
 # ---------------------------------------------------------------------------
 
-def test_old_token_rejected_on_device_bound_after_refresh(tmp_path):
-    """After a token-refresh, the OLD token is rejected on device-bound routes
-    (heartbeat) but still accepted on shared routes (GET /v1/images) within the
-    overlap window — the asymmetry is intentional per _guard design."""
+def test_old_token_rejected_on_heartbeat_and_telemetry_after_refresh(tmp_path):
+    """Recovery never grants OLD access to heartbeat or telemetry.
+
+    The previous token remains accepted on shared routes during the ordinary
+    overlap and on token-refresh for idempotent recovery only.  The two
+    state-mutating device-bound report routes still require CURRENT.
+    """
     os.environ["IRIS_AGE_RECIPIENTS"] = ""
     srv, port, old_tok = _serve_with_device(tmp_path, "dev-asym")
     try:
@@ -674,17 +946,124 @@ def test_old_token_rejected_on_device_bound_after_refresh(tmp_path):
         new_tok = json.loads(body_bytes)["catalog_token"]
         assert new_tok != old_tok
 
-        # OLD token on device-bound heartbeat → 401 (auth.authorize rejects
-        # catalog_token_prev because it has no SECRET_TYPES entry)
+        # OLD token on device-bound heartbeat → 401.
         status, _, _ = _req(port, "POST",
                             "/v1/devices/dev-asym/heartbeat",
                             token=old_tok,
                             body=json.dumps({"current_image_id": "img1"}))
         assert status == 401, "old token must be rejected on heartbeat"
 
+        status, _, _ = _req(port, "POST",
+                            "/v1/devices/dev-asym/telemetry",
+                            token=old_tok, body=b"{}")
+        assert status == 401, "old token must be rejected on telemetry"
+
         # OLD token on shared route GET /v1/images → still 200 within overlap
         status, _, _ = _req(port, "GET", "/v1/images", token=old_tok)
         assert status == 200, "old token must still work on shared route within overlap"
+
+        # Recovery is the sole device-bound exception and reissues CURRENT.
+        status, _, body = _req(
+            port, "POST", "/v1/devices/dev-asym/token-refresh",
+            token=old_tok, body=b"{}")
+        assert status == 200
+        assert json.loads(body)["catalog_token"] == new_tok
+    finally:
+        srv.shutdown()
+
+
+def test_previous_token_cannot_recover_a_different_device(tmp_path):
+    os.environ["IRIS_AGE_RECIPIENTS"] = ""
+    sp = _secrets_path(tmp_path)
+    now = time.time()
+    store = secrets_store.load(sp)
+    tok_a = secrets_store.mint(store, "dev-a", "catalog_token", now)
+    tok_b = secrets_store.mint(store, "dev-b", "catalog_token", now)
+    secrets_store.save(store, sp)
+    srv = catalog.make_server(
+        "127.0.0.1", 0, _store(tmp_path), sp,
+        audit_path=str(tmp_path / "audit.jsonl"))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+    try:
+        status, _, _ = _req(
+            port, "POST", "/v1/devices/dev-b/token-refresh",
+            token=tok_b, body=b"{}")
+        assert status == 200
+
+        status, _, _ = _req(
+            port, "POST", "/v1/devices/dev-a/token-refresh",
+            token=tok_b, body=b"{}")
+        assert status == 401
+        # Device A's own current token remains usable.
+        assert _req(
+            port, "POST", "/v1/devices/dev-a/token-refresh",
+            token=tok_a, body=b"{}")[0] == 200
+    finally:
+        srv.shutdown()
+
+
+def test_concurrent_same_token_refresh_reissues_one_rotation(tmp_path):
+    """Two in-flight requests carrying one token converge on one successor."""
+    os.environ["IRIS_AGE_RECIPIENTS"] = ""
+    srv, port, old_tok = _serve_with_device(tmp_path, "dev-same")
+    barrier = threading.Barrier(2)
+    results = []
+    errors = []
+
+    def refresh():
+        try:
+            barrier.wait()
+            status, _, body = _req(
+                port, "POST", "/v1/devices/dev-same/token-refresh",
+                token=old_tok, body=b"{}")
+            results.append((status, json.loads(body)))
+        except Exception as exc:  # pragma: no cover - surfaced via assert
+            errors.append(exc)
+
+    try:
+        threads = [threading.Thread(target=refresh) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+        assert not errors, errors
+        assert all(not thread.is_alive() for thread in threads)
+        assert [status for status, _ in results] == [200, 200]
+        assert results[0][1] == results[1][1]
+    finally:
+        srv.shutdown()
+
+
+def test_revoke_wins_over_previous_token_recovery(tmp_path):
+    """Recovery must re-check the current store after taking its write lock."""
+    os.environ["IRIS_AGE_RECIPIENTS"] = ""
+    srv, port, old_tok = _serve_with_device(tmp_path, "dev-recover-revoke")
+    sp = _secrets_path(tmp_path)
+    try:
+        status, _, body = _req(
+            port, "POST", "/v1/devices/dev-recover-revoke/token-refresh",
+            token=old_tok, body=b"{}")
+        assert status == 200, body
+
+        result = {}
+
+        def recover():
+            result["status"], _, result["body"] = _req(
+                port, "POST",
+                "/v1/devices/dev-recover-revoke/token-refresh",
+                token=old_tok, body=b"{}")
+
+        with secrets_store.store_lock(sp):
+            thread = threading.Thread(target=recover)
+            thread.start()
+            time.sleep(0.3)
+            store = secrets_store.load(sp)
+            secrets_store.revoke(store, "dev-recover-revoke")
+            secrets_store.save(store, sp)
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert result.get("status") == 409, result.get("body")
     finally:
         srv.shutdown()
 
@@ -1591,6 +1970,101 @@ def test_telemetry_oversized_sanitized_report_is_400(tmp_path):
     assert len(stored) == 1              # only the normal report was stored
 
 
+def test_v2_report_accepted_for_any_member_of_the_set(tmp_path):
+    """A device holding an ORDERED SET of approved images (multi-image
+    assignment) must accept a v2 terminal report naming ANY member, not just
+    the first -- the old equality-with-singular check would 400 a truthful
+    report for the second image. A report for an id NOT in the set stays
+    400. Uses the file's _v2() v2-report fixture (defined below, alongside
+    the other _sanitize_report/v2 unit tests it already serves)."""
+    srv, port = _serve(tmp_path, "tok", device_id="sw-9")
+    try:
+        store = catalog.CatalogStore(str(tmp_path))
+        store.save_image({"id": "img2", "filename": "img2.bin", "size": 5,
+                          "sha256": "cd" * 32, "info_hash_hex": "dd" * 20,
+                          "published_at": 112})
+        store.set_policy("sw-9", approved_image_ids=["img1", "img2"])
+        status, resp = _post(port, "/v1/devices/sw-9/telemetry", "tok",
+                             json.dumps(_v2(image_id="img2")).encode())
+        assert status == 200 and resp == {"ok": True}
+        # an id NOT in the assigned set is still rejected
+        status, resp = _post(
+            port, "/v1/devices/sw-9/telemetry", "tok",
+            json.dumps(_v2(image_id="img-not-assigned",
+                           report_id="8c1f0b9a2d3e4f5061728394a5b6c7d9")
+                      ).encode())
+        assert status == 400
+    finally:
+        srv.shutdown()
+
+
+# --- heartbeat: staged_image_ids / errored_image_ids whitelist -------------
+#
+# Task 3/4 land staged_image_ids and errored_image_ids on the multi-image
+# heartbeat, and every consumer (device rows, the deployed badge, rollout,
+# staging counts) reads them off the STORED record. record_heartbeat() itself
+# has no allowlist -- but the real HTTP ingest handler above builds the
+# stored record from an explicit key whitelist, so a field missing from that
+# whitelist is silently dropped in production even though a direct
+# record_heartbeat() call (as most consumer-side tests use) would see it.
+# Same rationale as test_route_post_forwards_target_fs.
+
+def test_route_post_forwards_staged_and_errored_image_ids(tmp_path):
+    """The HTTP heartbeat path must forward both multi-image fields through
+    the whitelist to record_heartbeat."""
+    srv, port = _serve(tmp_path, "tok", device_id="sw-1")
+    try:
+        status, _, _ = _req(
+            port, "POST", "/v1/devices/sw-1/heartbeat", token="tok",
+            body=json.dumps({"current_image_id": "img1",
+                             "staged_image_ids": ["img1", "img2"],
+                             "errored_image_ids": ["img3"]}))
+        assert status == 200
+    finally:
+        srv.shutdown()
+    rec = catalog.CatalogStore(str(tmp_path)).get_device("sw-1")
+    assert rec["staged_image_ids"] == ["img1", "img2"]
+    assert rec["errored_image_ids"] == ["img3"]
+
+
+def test_route_post_absent_staged_errored_image_ids_stores_none(tmp_path):
+    """A heartbeat that omits the fields (a legacy single-image agent) must
+    store None, not []  -- consumers key the legacy fallback off the field
+    being absent/None; an invented [] would read as 'a multi-image agent
+    that has staged nothing', not 'a legacy agent'."""
+    srv, port = _serve(tmp_path, "tok", device_id="sw-1")
+    try:
+        status, _, _ = _req(
+            port, "POST", "/v1/devices/sw-1/heartbeat", token="tok",
+            body=json.dumps({"current_image_id": "img1"}))
+        assert status == 200
+    finally:
+        srv.shutdown()
+    rec = catalog.CatalogStore(str(tmp_path)).get_device("sw-1")
+    assert rec["staged_image_ids"] is None
+    assert rec["errored_image_ids"] is None
+
+
+def test_route_post_malformed_staged_errored_image_ids_sanitised(tmp_path):
+    """Malformed device-supplied values -- a bare string instead of a list,
+    or a list of non-string entries -- must sanitise to None (not crash the
+    request with a 500, and not silently filter down to a meaningful-looking
+    [])."""
+    srv, port = _serve(tmp_path, "tok", device_id="sw-1")
+    try:
+        status, _, _ = _req(
+            port, "POST", "/v1/devices/sw-1/heartbeat", token="tok",
+            body=json.dumps({"current_image_id": "img1",
+                             "staged_image_ids": "junk-string",
+                             "errored_image_ids": [1, 2]}))
+        assert status == 200
+    finally:
+        srv.shutdown()
+    rec = catalog.CatalogStore(str(tmp_path)).get_device("sw-1")
+    assert rec["staged_image_ids"] is None
+    assert rec["errored_image_ids"] is None
+
+
 # --- heartbeat: telemetry_enabled whitelist + report_requested flag ---------
 
 def test_heartbeat_forwards_telemetry_enabled(tmp_path):
@@ -1792,7 +2266,7 @@ def test_service_principal_receives_canonical_bytes(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# v2 peer_receipts: exact device-measured per-peer received bytes
+# v2 peer_transfer_records: exact device-measured per-peer received bytes
 #
 # These are aria2-next session counters read ONCE by the
 # --on-bt-download-complete hook, not the rates-integrated rx_bytes/tx_bytes
@@ -1820,7 +2294,7 @@ def _v2(**over):
     return rep
 
 
-def _receipts(rows=None, **over):
+def _transfer_records(rows=None, **over):
     rows = [{"ip": "10.0.0.7", "port": 6881,
              "session_bytes_from_peer": 41943040,
              "session_bytes_to_peer": 1048576, "has_complete_file": True}] \
@@ -1837,12 +2311,12 @@ def _receipts(rows=None, **over):
     return block
 
 
-def test_peer_receipts_total_includes_the_origin_and_says_so():
+def test_peer_transfer_records_total_includes_the_origin_and_says_so():
     """The origin seeder is an ordinary BitTorrent peer of the device, so its
-    row is in the receipts and its bytes are in the total. The field is named
+    row is in the transfer records and its bytes are in the total. The field is named
     bytes_from_all_senders_total for exactly that reason: a "from peers" total
     here would have read as peer-delivered. Splitting origin from device is
-    telemetry.classify_peer_receipts's job, off the authenticated
+    telemetry.classify_peer_transfer_records's job, off the authenticated
     service:seeder principal -- the sanitizer stores the measurement as made
     and adds no attribution of its own."""
     rows = [{"ip": "100.90.168.20", "session_bytes_from_peer": 7110,
@@ -1850,7 +2324,7 @@ def test_peer_receipts_total_includes_the_origin_and_says_so():
             {"ip": "10.0.0.7", "session_bytes_from_peer": 2890,
              "session_bytes_to_peer": 0, "has_complete_file": True}]
     block = catalog._sanitize_report(
-        _v2(peer_receipts=_receipts(rows=rows)))["peer_receipts"]
+        _v2(peer_transfer_records=_transfer_records(rows=rows)))["peer_transfer_records"]
     assert block["bytes_from_all_senders_total"] == 10000
     assert {r["ip"] for r in block["rows"]} == {"100.90.168.20", "10.0.0.7"}
     # has_complete_file is aria2's isSeeder(): "holds the whole file", true for
@@ -1860,28 +2334,49 @@ def test_peer_receipts_total_includes_the_origin_and_says_so():
     assert not any(k.startswith(("origin", "peer_bytes")) for k in block)
 
 
-def test_peer_receipts_absent_stays_absent():
+def test_peer_transfer_records_absent_stays_absent():
     """Absent means NOT MEASURED — the sanitizer must not invent an empty
     block or a zero total, because 0 bytes from peers is a real, different
     answer (origin served everything)."""
     out = catalog._sanitize_report(_v2())
-    assert "peer_receipts" not in out
+    assert "peer_transfer_records" not in out
     # ... and a measured zero survives as a measured zero
-    zero = _receipts(rows=[{"ip": "10.0.0.7", "session_bytes_from_peer": 0,
+    zero = _transfer_records(rows=[{"ip": "10.0.0.7", "session_bytes_from_peer": 0,
                             "session_bytes_to_peer": 0}])
-    out = catalog._sanitize_report(_v2(peer_receipts=zero))
-    assert out["peer_receipts"]["rows"][0]["session_bytes_from_peer"] == 0
-    assert out["peer_receipts"]["bytes_from_all_senders_total"] == 0
+    out = catalog._sanitize_report(_v2(peer_transfer_records=zero))
+    assert out["peer_transfer_records"]["rows"][0]["session_bytes_from_peer"] == 0
+    assert out["peer_transfer_records"]["bytes_from_all_senders_total"] == 0
 
 
-def test_peer_receipts_round_trip_whitelisted():
+def test_old_agent_peer_receipts_key_is_dropped_not_rejected():
+    """The rename retired the wire key `peer_receipts` in favour of
+    `peer_transfer_records` with no compatibility alias (declared break 6): an
+    old, not-yet-redeployed agent still sends the OLD key. The allow-list
+    reconstruction in _sanitize_report_v2 only ever reads the NEW key, so the
+    old one is silently absent from the stored report -- exactly like a device
+    that measured nothing -- rather than raising and losing the whole report
+    over one obsolete field."""
+    stale = _v2(peer_receipts=_transfer_records())
+    out = catalog._sanitize_report(stale)          # must not raise
+    assert "peer_transfer_records" not in out
+    assert "peer_receipts" not in out
+    # Dropping the stale key must be surgical: every other field -- report_id,
+    # peers_total, and the rest -- sanitizes identically to a report that
+    # never carried the obsolete key at all.
+    clean = catalog._sanitize_report(_v2())
+    assert out == clean
+    assert out["report_id"] == clean["report_id"]
+    assert out["peers_total"] == clean["peers_total"]
+
+
+def test_peer_transfer_records_round_trip_whitelisted():
     """Rows are rebuilt from a whitelist: the exact byte counters, ip, and the
     optional port/has_complete_file survive; anything else the device sends is dropped."""
     rows = [{"ip": "10.0.0.7", "port": 6881, "session_bytes_from_peer": 41943040,
              "session_bytes_to_peer": 1048576, "has_complete_file": True,
              "rx_bytes": 999, "peerClientName": "<script>"}]
-    out = catalog._sanitize_report(_v2(peer_receipts=_receipts(rows=rows)))
-    block = out["peer_receipts"]
+    out = catalog._sanitize_report(_v2(peer_transfer_records=_transfer_records(rows=rows)))
+    block = out["peer_transfer_records"]
     assert block["source"] == "aria2_session_counters"
     assert block["captured_at"] == 50.0
     assert block["complete"] is True
@@ -1898,33 +2393,33 @@ def test_peer_receipts_round_trip_whitelisted():
     assert out["peers"] == []
 
 
-def test_peer_receipts_optional_row_fields_stay_absent():
+def test_peer_transfer_records_optional_row_fields_stay_absent():
     """port/has_complete_file absent must not materialize as 0/False — an unknown port is
     not port 0 and an unknown role is not "leecher"."""
     rows = [{"ip": "10.0.0.7", "session_bytes_from_peer": 5,
              "session_bytes_to_peer": 0}]
     block = catalog._sanitize_report(
-        _v2(peer_receipts=_receipts(rows=rows)))["peer_receipts"]
+        _v2(peer_transfer_records=_transfer_records(rows=rows)))["peer_transfer_records"]
     assert block["rows"][0] == {"ip": "10.0.0.7", "session_bytes_from_peer": 5,
                                 "session_bytes_to_peer": 0}
 
 
-def test_peer_receipts_device_omission_preserved():
+def test_peer_transfer_records_device_omission_preserved():
     """The device's own cap already omitted rows: their count AND their byte
     mass arrive as numbers, and the server stores both verbatim."""
     rows = [{"ip": "10.0.0.7", "session_bytes_from_peer": 100,
              "session_bytes_to_peer": 0}]
-    block = catalog._sanitize_report(_v2(peer_receipts=_receipts(
+    block = catalog._sanitize_report(_v2(peer_transfer_records=_transfer_records(
         rows=rows, rows_total=9, rows_omitted=8,
         bytes_from_all_senders_total=1100,
-        bytes_from_all_senders_omitted=1000)))["peer_receipts"]
+        bytes_from_all_senders_omitted=1000)))["peer_transfer_records"]
     assert block["rows_total"] == 9 and block["rows_omitted"] == 8
     assert block["bytes_from_all_senders_total"] == 1100
     assert block["bytes_from_all_senders_omitted"] == 1000
     assert block["rows_dropped_by_server"] == 0
 
 
-def test_peer_receipts_server_truncation_is_lossless_and_counted():
+def test_peer_transfer_records_server_truncation_is_lossless_and_counted():
     """The server's own 32-row cap keeps the LARGEST contributors, moves the
     dropped tail into the omitted counters (never discarding its bytes), and
     reports its own drop as an explicit count."""
@@ -1932,7 +2427,7 @@ def test_peer_receipts_server_truncation_is_lossless_and_counted():
              "session_bytes_to_peer": 0} for i in range(50)]
     total = sum(r["session_bytes_from_peer"] for r in rows)
     block = catalog._sanitize_report(
-        _v2(peer_receipts=_receipts(rows=rows)))["peer_receipts"]
+        _v2(peer_transfer_records=_transfer_records(rows=rows)))["peer_transfer_records"]
     assert len(block["rows"]) == 32
     assert block["rows_dropped_by_server"] == 18
     # kept rows are the biggest, sorted descending — what is lost is the tail
@@ -1946,15 +2441,15 @@ def test_peer_receipts_server_truncation_is_lossless_and_counted():
     assert block["rows_total"] == len(block["rows"]) + block["rows_omitted"]
 
 
-def test_peer_receipts_server_truncation_adds_to_device_omission():
+def test_peer_transfer_records_server_truncation_adds_to_device_omission():
     """Device-omitted and server-omitted mass accumulate in the same counters
     rather than either one overwriting the other."""
     rows = [{"ip": "10.0.1.%d" % i, "session_bytes_from_peer": 1000,
              "session_bytes_to_peer": 0} for i in range(40)]
-    block = catalog._sanitize_report(_v2(peer_receipts=_receipts(
+    block = catalog._sanitize_report(_v2(peer_transfer_records=_transfer_records(
         rows=rows, rows_total=45, rows_omitted=5,
         bytes_from_all_senders_total=40000 + 77,
-        bytes_from_all_senders_omitted=77)))["peer_receipts"]
+        bytes_from_all_senders_omitted=77)))["peer_transfer_records"]
     assert block["rows_omitted"] == 5 + 8
     assert block["bytes_from_all_senders_omitted"] == 77 + 8000
     assert block["rows_dropped_by_server"] == 8
@@ -1963,88 +2458,88 @@ def test_peer_receipts_server_truncation_adds_to_device_omission():
             == block["bytes_from_all_senders_total"] == 40077)
 
 
-def test_peer_receipts_incomplete_capture_is_carried_not_repaired():
+def test_peer_transfer_records_incomplete_capture_is_carried_not_repaired():
     """complete:false says the hook could not read the whole peer list, so the
     total is a floor.  The server stores that fact; it never patches it up."""
-    block = catalog._sanitize_report(_v2(peer_receipts=_receipts(
-        complete=False)))["peer_receipts"]
+    block = catalog._sanitize_report(_v2(peer_transfer_records=_transfer_records(
+        complete=False)))["peer_transfer_records"]
     assert block["complete"] is False
     assert block["bytes_from_all_senders_total"] == 41943040
 
 
-def test_peer_receipts_bytes_may_exceed_content_bytes():
+def test_peer_transfer_records_bytes_may_exceed_content_bytes():
     """aria2 counts WIRE bytes, so hashfailed/duplicate pieces can push the
     peer sum above the content length.  Rejecting the report over that would
     throw away the whole measurement — it is explicitly allowed."""
     rows = [{"ip": "10.0.0.7", "session_bytes_from_peer": 10 ** 6,
              "session_bytes_to_peer": 0}]
-    out = catalog._sanitize_report(_v2(peer_receipts=_receipts(rows=rows)))
+    out = catalog._sanitize_report(_v2(peer_transfer_records=_transfer_records(rows=rows)))
     assert out["content"]["completed_content_bytes"] == 10
-    assert out["peer_receipts"]["bytes_from_all_senders_total"] == 10 ** 6
+    assert out["peer_transfer_records"]["bytes_from_all_senders_total"] == 10 ** 6
 
 
-def test_peer_receipts_rejects_malformed_block():
+def test_peer_transfer_records_rejects_malformed_block():
     """A malformed block is a device bug and must raise, never be dropped —
     a silently missing block would be indistinguishable from "not measured"."""
     bad = [
-        _receipts(source="guesswork"),                     # unknown provenance
-        _receipts(source=None),
+        _transfer_records(source="guesswork"),                     # unknown provenance
+        _transfer_records(source=None),
         {"captured_at": 50.0, "complete": True, "rows": []},   # no source
-        _receipts(complete="true"),                        # not a strict bool
-        _receipts(captured_at="50"),
-        _receipts(captured_at=float("inf")),
-        _receipts(captured_at=0.5),        # before window.start
-        _receipts(captured_at=101.0),      # after report_created_at
-        _receipts(rows="nope"),
-        _receipts(rows=[{"ip": "not-an-ip", "session_bytes_from_peer": 1,
+        _transfer_records(complete="true"),                        # not a strict bool
+        _transfer_records(captured_at="50"),
+        _transfer_records(captured_at=float("inf")),
+        _transfer_records(captured_at=0.5),        # before window.start
+        _transfer_records(captured_at=101.0),      # after report_created_at
+        _transfer_records(rows="nope"),
+        _transfer_records(rows=[{"ip": "not-an-ip", "session_bytes_from_peer": 1,
                          "session_bytes_to_peer": 0}]),
-        _receipts(rows=["junk"]),
-        _receipts(rows=[{"session_bytes_from_peer": 1,
+        _transfer_records(rows=["junk"]),
+        _transfer_records(rows=[{"session_bytes_from_peer": 1,
                          "session_bytes_to_peer": 0}]),     # no ip
-        _receipts(rows=[{"ip": "10.0.0.7", "session_bytes_from_peer": -1,
+        _transfer_records(rows=[{"ip": "10.0.0.7", "session_bytes_from_peer": -1,
                          "session_bytes_to_peer": 0}]),
-        _receipts(rows=[{"ip": "10.0.0.7", "session_bytes_from_peer": True,
+        _transfer_records(rows=[{"ip": "10.0.0.7", "session_bytes_from_peer": True,
                          "session_bytes_to_peer": 0}]),     # bool is not a count
-        _receipts(rows=[{"ip": "10.0.0.7", "session_bytes_from_peer": 2 ** 53 + 1,
+        _transfer_records(rows=[{"ip": "10.0.0.7", "session_bytes_from_peer": 2 ** 53 + 1,
                          "session_bytes_to_peer": 0}]),
-        _receipts(rows=[{"ip": "10.0.0.7", "session_bytes_from_peer": 1,
+        _transfer_records(rows=[{"ip": "10.0.0.7", "session_bytes_from_peer": 1,
                          "session_bytes_to_peer": 0, "port": 70000}]),
-        _receipts(rows=[{"ip": "10.0.0.7", "session_bytes_from_peer": 1,
+        _transfer_records(rows=[{"ip": "10.0.0.7", "session_bytes_from_peer": 1,
                          "session_bytes_to_peer": 0, "has_complete_file": 1}]),
     ]
     for block in bad:
         with pytest.raises(ValueError):
-            catalog._sanitize_report(_v2(peer_receipts=block))
+            catalog._sanitize_report(_v2(peer_transfer_records=block))
     for block in ("nope", 5, ["rows"]):
         with pytest.raises(ValueError):
-            catalog._sanitize_report(_v2(peer_receipts=block))
+            catalog._sanitize_report(_v2(peer_transfer_records=block))
 
 
-def test_peer_receipts_rejects_duplicate_peer_ip():
-    """Two receipts for one peer have no defined meaning: summing them would
+def test_peer_transfer_records_rejects_duplicate_peer_ip():
+    """Two transfer records for one peer have no defined meaning: summing them would
     invent bytes, choosing one would discard measured bytes."""
     rows = [{"ip": "10.0.0.7", "session_bytes_from_peer": 5,
              "session_bytes_to_peer": 0},
             {"ip": "10.0.0.7", "session_bytes_from_peer": 7,
              "session_bytes_to_peer": 0}]
     with pytest.raises(ValueError):
-        catalog._sanitize_report(_v2(peer_receipts=_receipts(rows=rows)))
+        catalog._sanitize_report(_v2(peer_transfer_records=_transfer_records(rows=rows)))
 
 
-def test_peer_receipts_rejects_broken_arithmetic():
+def test_peer_transfer_records_rejects_broken_arithmetic():
     """The aggregate identities are the whole point: a total that does not
     account for its rows is not a measurement."""
     rows = [{"ip": "10.0.0.7", "session_bytes_from_peer": 100,
              "session_bytes_to_peer": 0}]
     with pytest.raises(ValueError):        # bytes do not add up
-        catalog._sanitize_report(_v2(peer_receipts=_receipts(
+        catalog._sanitize_report(_v2(peer_transfer_records=_transfer_records(
             rows=rows, bytes_from_all_senders_total=999,
             bytes_from_all_senders_omitted=0)))
     with pytest.raises(ValueError):        # rows do not add up
-        catalog._sanitize_report(_v2(peer_receipts=_receipts(
+        catalog._sanitize_report(_v2(peer_transfer_records=_transfer_records(
             rows=rows, rows_total=9, rows_omitted=0)))
     with pytest.raises(ValueError):        # rows_total below named rows
-        catalog._sanitize_report(_v2(peer_receipts=_receipts(
+        catalog._sanitize_report(_v2(peer_transfer_records=_transfer_records(
             rows=rows, rows_total=0, rows_omitted=0)))
 
 
@@ -2074,8 +2569,8 @@ def test_v2_peers_total_checked_before_truncation():
         catalog._sanitize_report(_v2(peers=rows, peers_total=64))
 
 
-def test_peer_receipts_survives_the_store_bound(tmp_path):
-    """A full report — 64 participation rows plus 32 receipt rows — still fits
+def test_peer_transfer_records_survives_the_store_bound(tmp_path):
+    """A full report — 64 participation rows plus 32 transfer-record rows — still fits
     the per-report store bound, and is stored and read back intact."""
     peers = [{"ip": "10.0.3.%d" % i, "first_observed": 1.0,
               "last_observed": 2.0, "observations": 3} for i in range(64)]
@@ -2083,11 +2578,11 @@ def test_peer_receipts_survives_the_store_bound(tmp_path):
              "session_bytes_from_peer": (i + 1) * 4096,
              "session_bytes_to_peer": 512, "has_complete_file": bool(i % 2)}
             for i in range(32)]
-    rep = _v2(peers=peers, peers_total=64, peer_receipts=_receipts(rows=rows))
+    rep = _v2(peers=peers, peers_total=64, peer_transfer_records=_transfer_records(rows=rows))
     s = catalog.CatalogStore(str(tmp_path))
     s.record_telemetry("d1", catalog._sanitize_report(rep))
     stored = s.get_telemetry("d1")[0]
     assert len(stored["peers"]) == 64
-    assert len(stored["peer_receipts"]["rows"]) == 32
-    assert stored["peer_receipts"]["bytes_from_all_senders_total"] == sum(
+    assert len(stored["peer_transfer_records"]["rows"]) == 32
+    assert stored["peer_transfer_records"]["bytes_from_all_senders_total"] == sum(
         r["session_bytes_from_peer"] for r in rows)

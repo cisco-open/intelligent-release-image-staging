@@ -21,6 +21,13 @@ from gui_onboard import _fmt_dur
 # applet), so the whole pipeline whitelists this charset. Match it here at the
 # upload boundary too.
 _FILENAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+# Cisco ships software in more than one shape: IOS-XE as .bin, IOS-XR as an
+# .iso (base image or a customer-built GISO) plus .tar/.rpm package bundles.
+# The scan used to accept .bin only, so an XR image dropped into the import
+# root was silently invisible with no reason given. Kept to an explicit list
+# rather than "any file" so the import root does not become a file browser --
+# a compound suffix like .tar.gz still fails, which is deliberate.
+_IMAGE_SUFFIXES = (".bin", ".iso", ".tar", ".rpm")
 _MAX_IMAGE_BYTES = 4 * 1024 * 1024 * 1024  # 4 GiB hard cap on an uploaded image
 _JOB_TTL = 3600  # seconds a terminal (done/error) job is retained before eviction
 # Where an image may already be sitting when the operator asks to import it:
@@ -97,9 +104,16 @@ class ImageService:
             if entry is None:
                 raise KeyError(image_id)
             pol = store.list_policies()
+            # Raw rows, not get_policy()'s normalised shape: a row written by
+            # the single-image release carries only approved_image_id, a row
+            # written since carries approved_image_ids. Block while the id is
+            # in EITHER shape's set -- a device with a multi-image assignment
+            # still guards every member, not just the first.
             assigned = sorted(
                 did for did, p in pol.items()
-                if p.get("approved_image_id") == image_id
+                if image_id in (p.get("approved_image_ids") or
+                                ([p["approved_image_id"]]
+                                 if p.get("approved_image_id") else []))
                 and (live_device_ids is None or did in live_device_ids))
             if assigned:
                 return assigned
@@ -137,7 +151,8 @@ class ImageService:
 
     def _scan_roots(self):
         """Every on-disk file that structurally looks like an importable image,
-        before identity filtering. A file qualifies if it is a .bin whose
+        before identity filtering. A file qualifies if it carries a Cisco
+        image suffix (_IMAGE_SUFFIXES: .bin, .iso, .tar, .rpm) and its
         basename passes the same charset gate as an upload (catalog filenames
         reach IOS commands on the device), is not a sidecar/temp/dotfile, and
         whose resolved path is still inside the root it was found under -- so a
@@ -162,7 +177,7 @@ class ImageService:
             for dirpath, dirnames, filenames in os.walk(root):
                 dirnames[:] = [d for d in dirnames if not d.startswith(".")]
                 for name in filenames:
-                    if not name.endswith(".bin") or name.startswith("."):
+                    if not name.endswith(_IMAGE_SUFFIXES) or name.startswith("."):
                         continue
                     if not self.valid_filename(name):
                         continue

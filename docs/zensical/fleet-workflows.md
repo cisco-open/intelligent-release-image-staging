@@ -21,8 +21,9 @@ cp fleet/devices.csv.example fleet/devices.csv
 The inventory is a management-type-aware, named-header **CSV v2**. Every device
 declares a `management_type`: `routed` (IRIS creates a dedicated VLAN and SVI),
 `inband` (the agent attaches to an existing operator-owned management VLAN),
-`router-routed` (an IRIS-managed VirtualPortGroup subnet), or `router-nat`
-(that VPG subnet behind NAT):
+`router-routed` (an IRIS-managed VirtualPortGroup subnet), `router-nat` (that
+VPG subnet behind NAT), or `xr-host` (an IOS-XR appmgr container sharing the
+router's own network stack):
 
 ```text
 device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,vpg_number,nat_interface,platform
@@ -35,17 +36,24 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
   DHCP is not supported. For inband **IOx**, `ios_ssh_host` (the IOS endpoint
   the app SSHes to) defaults to the device's management IP — only set it for
   an asymmetric topology (Guest Shell leaves it blank).
-- `model`/`platform` are optional; blank `platform` auto-selects from the model.
+- `model` and `platform` may be blank in imported inventory. The Add Device form
+  requires an explicit `guestshell`, `iox`, `router`, or `xr-appmgr` choice and
+  filters those choices by model. A blank imported platform remains an
+  inventory transition state: onboarding may resolve a known IOS-XE model, but
+  it refuses an unclassified or uncertain device rather than guessing.
 - **router-routed** — fill `app_ip`, `app_mask`, `app_gateway`, and
-  `vpg_number`; use `platform=router` (automatic for a known Catalyst 8000 (C8xxx) model). The
+  `vpg_number`; use `platform=router`. The
   operator must route the VPG subnet to IRIS and peers.
 - **router-nat** — additionally fill `nat_interface`. It creates static PAT
   for TCP 6881; the interface is canonicalized and teardown preserves an
   outside NAT marking that pre-dates IRIS. The router path targets the Catalyst
   8000 family and is lab-tested on Catalyst 8000V; see
-  [Router routed and router NAT](network-attachment.md#router-routed-and-router-nat-iris-managed-virtualportgroup).
+  [Router routed and router NAT](management-type.md#router-routed-and-router-nat-iris-managed-virtualportgroup).
+- **xr-host** — use `platform=xr-appmgr` on supported Cisco 8000-series IOS-XR
+  routers and leave every addressing, VPG, and NAT field empty. Onboarding
+  requires a current `artifacts/iris-xr.rpm`.
 
-See [Management Type and VLAN Ownership](network-attachment.md) for the full
+See [Management Type and VLAN Ownership](management-type.md) for the full
 ownership rules. Older positional CSVs (e.g. `device_id,device_ip,vlan,...`)
 still import, but are classified `legacy_routed` and must be adopted before they
 can be undeployed — they are never inferred as inband.
@@ -67,8 +75,15 @@ reviewable, Git-friendly file.
 ### Batch operations in the Console
 
 The Devices toolbar finishes a CSV import in bulk: onboard, undeploy, adopt,
-delete, and credential assignment all act on the checked rows and report
-per-device refusals instead of failing the whole batch. See
+delete, credential assignment, and image assignment all act on the checked
+rows and report per-device refusals instead of failing the whole batch. Image
+assignment applies a *set* — up to ten images — to the whole selection in one
+pick, not one image per device: the toolbar opens the same checkbox picker as
+each row's own control, pre-checked with the intersection of what the selection
+already has assigned, so applying never adds an image outside what you see
+checked. It does replace each selected device's whole set, dropping anything
+left unchecked, so a selection whose assignments differ is flagged in the
+picker and confirmed on apply. See
 [Bulk device actions](console.md#bulk-device-actions).
 
 Deleting inventory rows is not an undeploy — undeploy the devices first. See
@@ -77,8 +92,8 @@ Deleting inventory rows is not an undeploy — undeploy the devices first. See
 ### Onboarding path
 
 Management-type-aware onboarding runs through the **Console / API**, which resolves
-an immutable plan, records a durable *receipt* of what it applies, and drives
-teardown from that receipt (not from the editable inventory). Every
+an immutable plan, creates a durable *deployment record* of what it applies, and drives
+teardown from that deployment record (not from the editable inventory). Every
 deployment's preflight runs once, at job execution in the bounded onboarding
 worker pool — not inside the onboard request itself — so submitting a large
 batch returns a job per device promptly instead of the request waiting on live
@@ -86,13 +101,13 @@ SSH to each one. Guest Shell, IOx and router deployments all run the same
 IRIS-named collision checks (a device still carrying IRIS configuration is
 refused until it is undeployed), each plus its own extras; a router deployment
 cannot be adopted afterwards. See
-[Router preflight and ownership](network-attachment.md#router-preflight-and-ownership),
+[Router preflight and ownership](management-type.md#router-preflight-and-ownership),
 [Onboarding at scale](operations.md#onboarding-at-scale), and
 [Web Console](console.md#onboarding-from-the-console).
 
 The legacy CLI generator is **routed-only** and deliberately refuses a v2
-(`management_type`) header, because a self-contained installer cannot record
-a receipt or run preflight before minting an enrollment token:
+(`management_type`) header, because a self-contained installer cannot create
+a deployment record or run preflight before minting an enrollment token:
 
 ```bash
 # legacy routed inventory only (old positional columns)
@@ -109,7 +124,9 @@ Start from the template:
 cp fleet/assignments.csv.example fleet/assignments.csv
 ```
 
-Assignments are release intent:
+Assignments are release intent, one image per device per row — this CSV path
+does not carry the console's multi-image set; assign more than one image to a
+device from the console instead (see [Bulk device actions](console.md#bulk-device-actions)):
 
 ```text
 device_id,image_id
@@ -127,7 +144,7 @@ The script validates all rows first, then applies assignments. That avoids parti
 
 ```mermaid
 flowchart LR
-    Inventory["fleet/devices.csv"] --> Console["Console / API onboarding (receipts)"]
+    Inventory["fleet/devices.csv"] --> Console["Console / API onboarding (deployment records)"]
     Console --> Device["Device onboarded"]
     Inventory -. legacy, routed-only .-> Installers["fleet/dist/install-*.sh"]
     Installers -.-> Device

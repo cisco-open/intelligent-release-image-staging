@@ -41,6 +41,21 @@ LISTEN_PORT="${LISTEN_PORT:-6881}"
 EXT_FLAG=""
 [ -n "${IRIS_HOST_IP:-}" ] && EXT_FLAG="--bt-external-ip=$IRIS_HOST_IP"
 
+# Lift aria2's concurrency cap, which defaults to 5 and would otherwise starve
+# this catalog. A SEEDING torrent never completes -- --seed-ratio=0.0 below means
+# "seed forever" -- so each torrent holds one of those slots permanently, and
+# every published image past the fifth is left queued, never seeded, forever.
+# That failure is completely silent: aria2 reports the extras as `waiting`, not
+# as an error, so a device assigned a starved image just reports staging
+# indefinitely with no error recorded anywhere (live incident 2026-08-31: six
+# published images, ie3x00 stuck in tellWaiting, an IE-3400 wedged in staging).
+# This process only ever seeds, so the cap protects nothing here.
+#
+# A constant well above any plausible catalog, deliberately NOT a count derived
+# from the input file: `iris-publish` adds torrents over RPC while this process
+# runs, and a launch-time count would starve exactly those runtime additions.
+SEED_MAX_CONCURRENT="${SEED_MAX_CONCURRENT:-1000}"
+
 # Re-seed EVERY published torrent from its image's ACTUAL directory. Images live
 # in per-model subdirs (/opt/images/iosxe/{c9300,IE3400,...}), so a single global
 # --dir can't cover them: a torrent whose image isn't under --dir errors out
@@ -69,6 +84,7 @@ exec "$ARIA2" \
   --bt-enable-lpd=false \
   --bt-seed-unverified=true \
   --seed-ratio=0.0 \
+  --max-concurrent-downloads="$SEED_MAX_CONCURRENT" \
   --file-allocation=none \
   --dir="$IMAGES_DIR" \
   --log="$LOGFILE" \

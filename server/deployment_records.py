@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Durable, non-secret deployment receipt lifecycle state."""
+"""Durable, non-secret deployment record lifecycle state."""
 import copy
 import json
 import os
@@ -24,19 +24,19 @@ _NONTERMINAL = frozenset(("planned", "applying"))
 # resolved plan and owned resources teardown validates. Without it the marker
 # was readable only after recover_interrupted() ran at process start, so with no
 # restart a device stayed stranded forever -- not undeployable (no readable
-# receipt), not adoptable (routers never are), not re-onboardable (preflight
+# record), not adoptable (routers never are), not re-onboardable (preflight
 # refuses the live Guest Shell). A genuinely in-flight onboard is NOT at risk:
 # its job is still non-terminal, so the busy guard in gui_onboard refuses the
 # undeploy before teardown is ever rendered.
 _RECOVERABLE = frozenset(("unknown", "drifted", "needs-reconcile", "applying"))
-# States from which nothing further can happen: the receipt is history.
+# States from which nothing further can happen: the record is history.
 _TERMINAL = frozenset(("removed", "superseded", "abandoned"))
 # Every non-terminal state can also be ABANDONED. That edge is reached when the
 # device leaves the fleet (console delete) or when a forced teardown strips only
-# the agent footprint: the receipt then stops describing anything IRIS manages,
+# the agent footprint: the record then stops describing anything IRIS manages,
 # so it must stop being teardown authority and must stop blocking a re-onboard.
 # It is deliberately NOT "removed" (which asserts IRIS tore the deployment down)
-# and NOT "superseded" (which asserts a newer receipt replaced it) -- the record
+# and NOT "superseded" (which asserts a newer record replaced it) -- the record
 # is kept because it is the only list of resources IRIS created on that box.
 _TRANSITIONS = {
     "planned": frozenset(("applying", "unknown", "needs-reconcile", "removed",
@@ -46,10 +46,10 @@ _TRANSITIONS = {
     "active": frozenset(("drifted", "needs-reconcile", "applying", "removed",
                          "superseded", "abandoned")),
     # unknown/drifted/needs-reconcile must all still reach "applying", because
-    # reconciling a deployment IS tearing it down. Without that edge a receipt
+    # reconciling a deployment IS tearing it down. Without that edge a record
     # interrupted by a controller restart became a permanent dead end: the
     # device is already configured, so a re-onboard fails preflight, a router
-    # cannot be adopted, and undeploy had no receipt to authorize it — leaving
+    # cannot be adopted, and undeploy had no record to authorize it — leaving
     # no Console path to the device at all.
     "unknown": frozenset(("applying", "drifted", "needs-reconcile", "abandoned")),
     "drifted": frozenset(("applying", "needs-reconcile", "abandoned")),
@@ -71,7 +71,7 @@ def _atomic_write_json(path, obj):
         mode = os.stat(path).st_mode
     except OSError:
         pass
-    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".receipts-", suffix=".tmp")
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".records-", suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as stream:
             json.dump(obj, stream, indent=2, sort_keys=True)
@@ -93,255 +93,255 @@ def _contains_secret(value):
     return False
 
 
-class ReceiptStore:
-    """Lock-protected receipt store persisted beneath ``IRIS_STATE``."""
+class DeploymentRecordStore:
+    """Lock-protected record store persisted beneath ``IRIS_STATE``."""
     def __init__(self, state_dir, now_fn=time.time):
         os.makedirs(state_dir, exist_ok=True)
-        self.path = os.path.join(state_dir, "deployment_receipts.json")
+        self.path = os.path.join(state_dir, "deployment_records.json")
         self._now = now_fn
 
     def _read(self):
         try:
             with open(self.path) as stream:
                 data = json.load(stream)
-            receipts = data.get("receipts", {}) if isinstance(data, dict) else {}
-            return {"receipts": receipts} if isinstance(receipts, dict) else {"receipts": {}}
+            records = data.get("records", {}) if isinstance(data, dict) else {}
+            return {"records": records} if isinstance(records, dict) else {"records": {}}
         except (OSError, ValueError):
-            return {"receipts": {}}
+            return {"records": {}}
 
     @staticmethod
-    def _validate(receipt):
-        if not isinstance(receipt, dict):
-            raise ValueError("receipt must be an object")
-        missing = [key for key in _REQUIRED if key not in receipt]
+    def _validate(record):
+        if not isinstance(record, dict):
+            raise ValueError("record must be an object")
+        missing = [key for key in _REQUIRED if key not in record]
         if missing:
-            raise ValueError("receipt missing %s" % ", ".join(missing))
-        if receipt.get("state", "planned") != "planned":
-            raise ValueError("new receipts must start planned")
-        if not isinstance(receipt["inventory_revision"], int):
+            raise ValueError("record missing %s" % ", ".join(missing))
+        if record.get("state", "planned") != "planned":
+            raise ValueError("new records must start planned")
+        if not isinstance(record["inventory_revision"], int):
             raise ValueError("inventory_revision must be an integer")
-        if not isinstance(receipt["resolved"], dict):
+        if not isinstance(record["resolved"], dict):
             raise ValueError("resolved must be an object")
-        if not isinstance(receipt["preflight"], dict):
+        if not isinstance(record["preflight"], dict):
             raise ValueError("preflight must be an object")
-        if not isinstance(receipt["resources"], list):
+        if not isinstance(record["resources"], list):
             raise ValueError("resources must be a list")
-        if _contains_secret(receipt):
-            raise ValueError("receipts must not contain secrets")
+        if _contains_secret(record):
+            raise ValueError("records must not contain secrets")
 
-    def _supersede_other_actives(self, data, device_id, keep_receipt_id):
-        """Retire every OTHER active receipt of ``device_id`` (caller holds the
-        store lock). A device has ONE live deployment: when a new receipt goes
+    def _supersede_other_actives(self, data, device_id, keep_record_id):
+        """Retire every OTHER active record of ``device_id`` (caller holds the
+        store lock). A device has ONE live deployment: when a new record goes
         active — a re-onboard's idempotent teardown+redeploy, or an explicit
         adopt — the previous active record no longer describes what is on the
         box. Without this, actives accumulate and active_for_device() refuses
         undeploy for the device."""
         timestamp = int(self._now())
-        for receipt in data["receipts"].values():
-            if (receipt.get("device_id") == device_id
-                    and receipt.get("state") == "active"
-                    and receipt.get("receipt_id") != keep_receipt_id):
-                receipt["state"] = "superseded"
-                receipt.setdefault("timestamps", {})["finished_at"] = timestamp
+        for record in data["records"].values():
+            if (record.get("device_id") == device_id
+                    and record.get("state") == "active"
+                    and record.get("record_id") != keep_record_id):
+                record["state"] = "superseded"
+                record.setdefault("timestamps", {})["finished_at"] = timestamp
 
-    def create(self, receipt):
-        """Persist a new planned receipt and return its immutable initial record."""
-        self._validate(receipt)
-        record = copy.deepcopy(receipt)
-        record["receipt_id"] = record.get("receipt_id") or secrets.token_hex(16)
-        if not isinstance(record["receipt_id"], str) or not record["receipt_id"]:
-            raise ValueError("receipt_id must be a non-empty string")
+    def create(self, record_in):
+        """Persist a new planned record and return its immutable initial record."""
+        self._validate(record_in)
+        record = copy.deepcopy(record_in)
+        record["record_id"] = record.get("record_id") or secrets.token_hex(16)
+        if not isinstance(record["record_id"], str) or not record["record_id"]:
+            raise ValueError("record_id must be a non-empty string")
         timestamp = int(self._now())
         record["state"] = "planned"
         record["timestamps"] = {"planned_at": timestamp, "finished_at": None}
         with secrets_store.store_lock(self.path):
             data = self._read()
-            if record["receipt_id"] in data["receipts"]:
-                raise ValueError("receipt already exists: %s" % record["receipt_id"])
-            data["receipts"][record["receipt_id"]] = record
+            if record["record_id"] in data["records"]:
+                raise ValueError("record already exists: %s" % record["record_id"])
+            data["records"][record["record_id"]] = record
             _atomic_write_json(self.path, data)
         return copy.deepcopy(record)
 
-    def adopt(self, receipt):
-        """Create a receipt directly in ``active`` for an already-deployed device
-        that predates receipts. This is the ONLY path that bypasses the planned
+    def adopt(self, record_in):
+        """Create a record directly in ``active`` for an already-deployed device
+        that predates records. This is the ONLY path that bypasses the planned
         start; callers must gate it behind an explicit, audited operator action."""
-        self._validate(receipt)
-        record = copy.deepcopy(receipt)
-        record["receipt_id"] = record.get("receipt_id") or secrets.token_hex(16)
-        if not isinstance(record["receipt_id"], str) or not record["receipt_id"]:
-            raise ValueError("receipt_id must be a non-empty string")
+        self._validate(record_in)
+        record = copy.deepcopy(record_in)
+        record["record_id"] = record.get("record_id") or secrets.token_hex(16)
+        if not isinstance(record["record_id"], str) or not record["record_id"]:
+            raise ValueError("record_id must be a non-empty string")
         timestamp = int(self._now())
         record["state"] = "active"
         record["adopted"] = True
         record["timestamps"] = {"planned_at": timestamp, "finished_at": timestamp}
         with secrets_store.store_lock(self.path):
             data = self._read()
-            if record["receipt_id"] in data["receipts"]:
-                raise ValueError("receipt already exists: %s" % record["receipt_id"])
+            if record["record_id"] in data["records"]:
+                raise ValueError("record already exists: %s" % record["record_id"])
             self._supersede_other_actives(data, record["device_id"],
-                                          record["receipt_id"])
-            data["receipts"][record["receipt_id"]] = record
+                                          record["record_id"])
+            data["records"][record["record_id"]] = record
             _atomic_write_json(self.path, data)
         return copy.deepcopy(record)
 
-    def get(self, receipt_id):
-        receipt = self._read()["receipts"].get(receipt_id)
-        return copy.deepcopy(receipt) if receipt else None
+    def get(self, record_id):
+        record = self._read()["records"].get(record_id)
+        return copy.deepcopy(record) if record else None
 
-    def update_planned(self, receipt_id, *, plan_hash, resolved, preflight,
+    def update_planned(self, record_id, *, plan_hash, resolved, preflight,
                        resources):
-        """Atomically refresh execution-time evidence on a planned receipt.
+        """Atomically refresh execution-time evidence on a planned record.
 
         Router jobs can wait in the onboarding queue, so ownership-sensitive
         preflight is repeated immediately before apply. Only a still-planned
-        receipt may be refreshed; once applying starts its renderer inputs are
+        record may be refreshed; once applying starts its renderer inputs are
         immutable.
         """
         with secrets_store.store_lock(self.path):
             data = self._read()
-            receipt = data["receipts"].get(receipt_id)
-            if receipt is None:
-                raise ValueError("unknown receipt: %s" % receipt_id)
-            if receipt.get("state") != "planned":
-                raise ValueError("only planned receipts may refresh preflight")
-            candidate = copy.deepcopy(receipt)
+            record = data["records"].get(record_id)
+            if record is None:
+                raise ValueError("unknown record: %s" % record_id)
+            if record.get("state") != "planned":
+                raise ValueError("only planned records may refresh preflight")
+            candidate = copy.deepcopy(record)
             candidate.update({"plan_hash": plan_hash,
                               "resolved": copy.deepcopy(resolved),
                               "preflight": copy.deepcopy(preflight),
                               "resources": copy.deepcopy(resources)})
             self._validate(candidate)
-            data["receipts"][receipt_id] = candidate
+            data["records"][record_id] = candidate
             _atomic_write_json(self.path, data)
             return copy.deepcopy(candidate)
 
     def list(self, device_id=None):
-        receipts = self._read()["receipts"].values()
+        records = self._read()["records"].values()
         if device_id is not None:
-            receipts = (receipt for receipt in receipts
-                        if receipt.get("device_id") == device_id)
-        return [copy.deepcopy(receipt) for receipt in receipts]
+            records = (record for record in records
+                        if record.get("device_id") == device_id)
+        return [copy.deepcopy(record) for record in records]
 
-    def transition(self, receipt_id, state, evidence=None):
-        """Advance a receipt through its fail-closed lifecycle state machine."""
+    def transition(self, record_id, state, evidence=None):
+        """Advance a record through its fail-closed lifecycle state machine."""
         if state not in _STATES:
-            raise ValueError("unknown receipt state: %s" % state)
+            raise ValueError("unknown record state: %s" % state)
         if evidence is not None and _contains_secret(evidence):
-            raise ValueError("receipt evidence must not contain secrets")
+            raise ValueError("record evidence must not contain secrets")
         with secrets_store.store_lock(self.path):
             data = self._read()
-            receipt = data["receipts"].get(receipt_id)
-            if receipt is None:
-                raise ValueError("unknown receipt: %s" % receipt_id)
-            current = receipt.get("state")
+            record = data["records"].get(record_id)
+            if record is None:
+                raise ValueError("unknown record: %s" % record_id)
+            current = record.get("state")
             if state not in _TRANSITIONS.get(current, frozenset()):
-                raise ValueError("invalid receipt transition: %s -> %s" % (current, state))
-            receipt["state"] = state
+                raise ValueError("invalid record transition: %s -> %s" % (current, state))
+            record["state"] = state
             if evidence is not None:
-                receipt["evidence"] = copy.deepcopy(evidence)
+                record["evidence"] = copy.deepcopy(evidence)
             if state in ("active", "unknown", "drifted", "needs-reconcile", "removed"):
-                receipt.setdefault("timestamps", {})["finished_at"] = int(self._now())
+                record.setdefault("timestamps", {})["finished_at"] = int(self._now())
             if state == "active":
-                self._supersede_other_actives(data, receipt.get("device_id"),
-                                              receipt_id)
+                self._supersede_other_actives(data, record.get("device_id"),
+                                              record_id)
             _atomic_write_json(self.path, data)
-            return copy.deepcopy(receipt)
+            return copy.deepcopy(record)
 
     def recover_interrupted(self):
         """Mark planned/applying work unknown after a controller restart, and
         collapse legacy duplicate actives (written before activation superseded
         siblings): keep each device's NEWEST active — by activation time, then
-        plan time, then receipt id, so the choice is deterministic — and retire
+        plan time, then record id, so the choice is deterministic — and retire
         the rest, restoring the one-active-per-device invariant undeploy needs."""
         changed = []
         with secrets_store.store_lock(self.path):
             data = self._read()
-            for receipt in data["receipts"].values():
-                if receipt.get("state") in _NONTERMINAL:
-                    receipt["state"] = "unknown"
-                    receipt.setdefault("timestamps", {})["finished_at"] = int(self._now())
-                    changed.append(receipt["receipt_id"])
+            for record in data["records"].values():
+                if record.get("state") in _NONTERMINAL:
+                    record["state"] = "unknown"
+                    record.setdefault("timestamps", {})["finished_at"] = int(self._now())
+                    changed.append(record["record_id"])
             actives = {}
-            for receipt in data["receipts"].values():
-                if receipt.get("state") == "active":
-                    actives.setdefault(receipt.get("device_id"), []).append(receipt)
+            for record in data["records"].values():
+                if record.get("state") == "active":
+                    actives.setdefault(record.get("device_id"), []).append(record)
             for duplicates in actives.values():
                 if len(duplicates) < 2:
                     continue
-                def _age(receipt):
-                    timestamps = receipt.get("timestamps") or {}
+                def _age(record):
+                    timestamps = record.get("timestamps") or {}
                     return (timestamps.get("finished_at") or 0,
                             timestamps.get("planned_at") or 0,
-                            receipt.get("receipt_id") or "")
-                for receipt in sorted(duplicates, key=_age)[:-1]:
-                    receipt["state"] = "superseded"
-                    receipt.setdefault("timestamps", {})["finished_at"] = int(self._now())
-                    changed.append(receipt["receipt_id"])
+                            record.get("record_id") or "")
+                for record in sorted(duplicates, key=_age)[:-1]:
+                    record["state"] = "superseded"
+                    record.setdefault("timestamps", {})["finished_at"] = int(self._now())
+                    changed.append(record["record_id"])
             if changed:
                 _atomic_write_json(self.path, data)
         return changed
 
     def retire_device(self, device_id, reason):
-        """Abandon every receipt of *device_id* that is not already terminal.
+        """Abandon every record of *device_id* that is not already terminal.
 
         Called when the device leaves the fleet (console delete) and after a
-        forced agent-only teardown. Both leave a receipt that no longer
-        describes a device IRIS manages, and a receipt in a recoverable state
+        forced agent-only teardown. Both leave a record that no longer
+        describes a device IRIS manages, and a record in a recoverable state
         is what onboard refuses on and what undeploy renders teardown from --
         so leaving one behind hands the NEXT device registered under this id a
         dead predecessor's deployment. That is not hypothetical: it strands the
         device outright, because onboard says "undeploy it first" while the
         teardown it names refuses the box on an identity mismatch.
 
-        The rows are kept, not dropped: a receipt is the only record of the
+        The rows are kept, not dropped: a record is the only account of the
         resources IRIS created on that box (the VirtualPortGroup, the NAT
         stanza, the app address), and an operator who deletes a device that is
         still configured needs that list. *reason* is recorded as non-secret
         evidence so the trail says which of the two paths retired it.
 
-        Returns the ids of the receipts retired, newest first."""
+        Returns the ids of the records retired, newest first."""
         retired = []
         with secrets_store.store_lock(self.path):
             data = self._read()
             timestamp = int(self._now())
-            for receipt in data["receipts"].values():
-                if (receipt.get("device_id") != device_id
-                        or receipt.get("state") in _TERMINAL):
+            for record in data["records"].values():
+                if (record.get("device_id") != device_id
+                        or record.get("state") in _TERMINAL):
                     continue
-                receipt["state"] = "abandoned"
-                receipt["evidence"] = {"status": "abandoned", "reason": reason}
-                receipt.setdefault("timestamps", {})["finished_at"] = timestamp
-                retired.append(receipt["receipt_id"])
+                record["state"] = "abandoned"
+                record["evidence"] = {"status": "abandoned", "reason": reason}
+                record.setdefault("timestamps", {})["finished_at"] = timestamp
+                retired.append(record["record_id"])
             if retired:
                 _atomic_write_json(self.path, data)
         return sorted(retired, reverse=True)
 
     def active_for_device(self, device_id):
-        active = [receipt for receipt in self.list(device_id)
-                  if receipt.get("state") == "active"]
+        active = [record for record in self.list(device_id)
+                  if record.get("state") == "active"]
         if len(active) > 1:
-            raise ValueError("multiple active receipts for device: %s" % device_id)
+            raise ValueError("multiple active records for device: %s" % device_id)
         return active[0] if active else None
 
     def recoverable_for_device(self, device_id):
-        """The receipt that may authorize a TEARDOWN of *device_id*: the active
-        one, or — when there is none — a single receipt left in a recoverable
+        """The record that may authorize a TEARDOWN of *device_id*: the active
+        one, or — when there is none — a single record left in a recoverable
         state (unknown after a controller restart, or drifted/needs-reconcile).
         Those states still record the resolved plan and the owned resources,
         which is exactly the ownership proof teardown validates, and without
         this the device would be unmanageable.
 
         Returns None when nothing is left to reconcile. Raises when more than
-        one candidate exists: two receipts mean we cannot prove which one
+        one candidate exists: two records mean we cannot prove which one
         describes the box, and tearing down the wrong one could remove
         resources the other still owns."""
         active = self.active_for_device(device_id)
         if active is not None:
             return active
-        candidates = [receipt for receipt in self.list(device_id)
-                      if receipt.get("state") in _RECOVERABLE]
+        candidates = [record for record in self.list(device_id)
+                      if record.get("state") in _RECOVERABLE]
         if len(candidates) > 1:
             raise ValueError(
-                "multiple recoverable receipts for device: %s — resolve them "
+                "multiple recoverable records for device: %s — resolve them "
                 "before undeploying" % device_id)
         return candidates[0] if candidates else None

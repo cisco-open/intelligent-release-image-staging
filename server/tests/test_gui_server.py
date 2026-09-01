@@ -5,6 +5,7 @@ import os
 import re
 
 import gui_server
+import pytest
 
 
 def test_webroot_assets_exist():
@@ -58,22 +59,27 @@ def test_csv_download_buttons_and_multiselect_onboard_wired():
 
 
 def test_devices_toolbar_regrouped():
-    """Option-A layout (2026-08-12 spec §1-§4): quiet permanent toolbar; bulk
-    actions live in a selection bar that is hidden in static HTML; the three
-    CSV controls live inside the CSV menu; the telemetry checkboxes live
-    inside the onboard popover; Delete carries destructive styling; the
-    per-row action-links column is gone."""
+    """Option-A layout (2026-08-12 spec S1-S4) as revised by the Magnetic
+    action-layout pass (2026-09-01): bulk actions live in a selection bar that
+    is hidden in static HTML; the three CSV controls live inside the CSV menu;
+    the telemetry checkboxes live inside the onboard MODAL (Magnetic Dropdown
+    forbids a menu whose items need "another button to submit or apply", and
+    names modals as the bulk bar's own escape hatch); Delete is a destructive
+    item in the overflow dropdown (Dropdown > Types); the per-row action-links
+    column is gone."""
     with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
         html = f.read()
     assert '<div class="selbar" id="sel-bar" hidden>' in html
     csv_menu = html.split('id="csv-menu"')[1].split('</div>')[0]
     for cid in ('id="import-csv"', 'id="export-csv"', 'id="example-csv"'):
         assert cid in csv_menu, cid + " must live inside the CSV menu"
-    pop = html.split('id="onboard-pop"')[1].split('</div>')[0]
+    modal = html.split('id="onboard-modal"')[1].split('id="undeploy-modal"')[0]
     for cid in ('id="onboard-telemetry"', 'id="onboard-telemetry-stream"',
-                'id="onboard-selected"'):
-        assert cid in pop, cid + " must live inside the onboard popover"
-    assert 'class="btn danger push" id="delete-selected"' in html
+                'id="onboard-confirm"'):
+        assert cid in modal, cid + " must live inside the onboard modal"
+    # the onboard/undeploy options are not reachable from a dropdown any more
+    assert 'id="onboard-pop"' not in html and 'id="undeploy-pop"' not in html
+    assert 'class="menu-item danger menu-close" type="button" id="delete-selected"' in html
     devices_thead = html.split('id="devices"')[1].split('</thead>')[0]
     # '<th' alone also matches the '<thead>' tag itself; use '<th>' to count
     # only real header cells.
@@ -186,9 +192,20 @@ def test_all_selected_actions_share_one_busy_lock():
     assert "var BULK_BTNS = [" in js
     block = js.split("var BULK_BTNS = [")[1].split("]")[0]
     actions = re.findall(r"'([a-z-]+)'", block)
-    for el in ("onboard-selected", "undeploy-selected", "adopt-selected",
-               "delete-selected", "apply-cred-selected", "apply-image-selected"):
+    # Onboard and undeploy now FIRE from inside their modal (Magnetic Dropdown
+    # sends bulk-bar options to a modal rather than a menu), so the ids that
+    # claim the lock are the modal primaries.
+    for el in ("onboard-confirm", "undeploy-confirm", "adopt-selected",
+               "delete-selected", "apply-cred-selected", "assign-images-selected"):
         assert el in actions, "%s is not covered by the bulk busy lock" % el
+    # The bar's own Onboard…/Undeploy…/Set credential… only OPEN those modals,
+    # so they claim nothing -- but a batch already starting must not be able to
+    # hand out a second one, so setBulkBusy has to disable them too.
+    openers = re.findall(r"'([a-z-]+)'",
+                         js.split("var BULK_OPENERS = [")[1].split("]")[0])
+    for el in ("onboard-selected", "undeploy-selected", "set-cred-selected"):
+        assert el in openers, "%s is not disabled while a bulk action runs" % el
+    assert "BULK_BTNS.concat(BULK_OPENERS).forEach" in js
     # Every action claims the lock rather than reading another button's state.
     # Counted against BULK_BTNS itself rather than a fixed number, so a new bulk
     # action cannot be added without also claiming the lock -- quarantine and
@@ -249,6 +266,40 @@ def test_undeploy_and_status_ui_wired():
     assert "waiting for heartbeat" in js
     assert "onboarding…" in js and "undeploying…" in js
     assert "Waiting for heartbeat" in js         # overview card
+
+
+def test_status_display_map_covers_every_status():
+    """Task 4: statusDisplay()/statusPillHTML() are the ONE derivation of the
+    Magnetic 12-level status grammar, built next to deviceStatus() itself
+    (same "one derivation feeds both" reasoning as
+    test_every_status_the_cell_can_show_is_filterable below) so the rendered
+    pill and the filter dropdown can never disagree about a status. Every
+    key deviceStatus() can produce (DEVICE_STATUS_OPTIONS, app.js:62-76),
+    plus the 'offline' freshness modifier deviceIsOffline() applies on top,
+    must be covered. 'deployed' keeps its WIRE key unchanged -- only the
+    pill/dropdown DISPLAY text becomes "Staged" (spec: derivation in app.js
+    unchanged)."""
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    assert "function statusDisplay(" in js
+    assert "function statusPillHTML(" in js
+    for key in ("onboarding", "undeploying", "waiting-heartbeat",
+                "onboard-failed", "undeploy-failed", "deployed",
+                "placement-failed", "image-failed", "copying", "staging",
+                "enrolled", "not-enrolled", "offline"):
+        assert "'%s'" % key in js, key
+    # the wire key is untouched; only the DISPLAY label changes
+    assert "['deployed', 'Staged']" in js
+    # the 8 pill levels the CSS/sprite must supply (Warning/Severe split by
+    # N-of-M severity for image-failed; Disabled has no producible key yet,
+    # so it only ever appears as a bare map key, not a quoted value)
+    for level in ("positive", "progress", "negative", "warning", "severe",
+                  "info", "inactive", "disabled"):
+        assert level in js, level
+    for icon in ("i-check-circle", "i-dash-circle", "i-octagon-x",
+                 "i-triangle-warn", "i-diamond-severe", "i-square-info",
+                 "i-minus-circle", "i-slash-circle"):
+        assert icon in js, icon
 
 
 def test_monitoring_timeline_wired():
@@ -470,7 +521,7 @@ def test_settings_uses_sidebar_feature_submenus():
     revealed only while a settings sub-page is active."""
     with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
         html = f.read()
-    side = html.split('<nav class="side">')[1].split("</nav>")[0]
+    side = html.split('<nav class="nav-rail">')[1].split("</nav>")[0]
     # the sub-menu container starts hidden (revealed by the router) and holds
     # one deep-linkable entry per feature sub-page
     assert 'id="settings-submenu" hidden' in side
@@ -1212,7 +1263,8 @@ def test_device_delete_purges_catalog_state(tmp_path):
         cat.record_telemetry("d1", {"event": "staging-complete"})
         st, _, b = _req(host, port, "DELETE", "/api/devices/d1", headers=hh)
         assert st == 200 and json.loads(b)["deleted"] is True
-        assert cat.get_policy("d1") == {"approved_image_id": None}
+        assert cat.get_policy("d1") == {"approved_image_id": None,
+                                        "approved_image_ids": []}
         assert cat.get_device("d1") is None
         assert cat.get_telemetry("d1") == []
         st, _, _ = _req(host, port, "POST", "/api/devices", dev, headers=hh)
@@ -1321,12 +1373,479 @@ def test_assign_image_sets_policy(tmp_path):
         # Approval IS the whole policy. This used to assert install_allowed was
         # False; the flag gated nothing, was never read, and reading as False
         # beside an approved image implied a second gate an operator had to open.
-        assert pol == {"approved_image_id": "img1"}
+        assert pol == {"approved_image_id": "img1",
+                       "approved_image_ids": ["img1"]}
         # unknown image -> 400
         st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
                         {"image_id": "nope"}, headers=hh)
         assert st == 400
     finally:
+        stop()
+
+
+def test_assign_accepts_image_id_list_and_caps_at_ten(tmp_path):
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, cat = deps
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        for i in range(2, 12):    # img2..img11, alongside _serve_full's img1
+            cat.save_image({"id": "img%d" % i, "filename": "img%d.bin" % i,
+                            "sha256": "s%d" % i, "published_at": i})
+        _req(host, port, "POST", "/api/devices",
+             {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_ids": ["img1", "img2"]}, headers=hh)
+        assert st == 200
+        pol = cat.get_policy("d1")
+        assert pol["approved_image_ids"] == ["img1", "img2"]
+        assert pol["approved_image_id"] == "img1"
+        st, _, b = _req(host, port, "GET", "/api/devices", headers={"Cookie": ck})
+        row = [d for d in json.loads(b)["devices"] if d["device_id"] == "d1"][0]
+        assert row["assigned_image_ids"] == ["img1", "img2"]
+        assert row["assigned_image_id"] == "img1"
+        eleven = ["img%d" % i for i in range(1, 12)]
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_ids": eleven}, headers=hh)
+        assert st == 400
+        assert "at most 10" in json.loads(b)["error"]
+        # a rejected assignment must not have mutated the existing policy
+        assert cat.get_policy("d1")["approved_image_ids"] == ["img1", "img2"]
+    finally:
+        stop()
+
+
+def test_assign_rejects_malformed_image_ids(tmp_path):
+    """image_ids must be validated as a shape -- a JSON array of non-empty
+    strings -- BEFORE anything iterates it. A non-list value used to raise a
+    TypeError that killed the connection instead of answering 400 (a bare
+    int wasn't iterable at all; a bare string iterated into characters); a
+    list with a falsy/non-string element used to be silently filtered
+    instead of rejected. All four shapes must now answer 400 with a JSON
+    body, and the connection must still be alive to read it."""
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, cat = deps
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        _req(host, port, "POST", "/api/devices",
+             {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
+        # a bare int: previously raised TypeError and dropped the connection
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_ids": 5}, headers=hh)
+        assert st == 400
+        assert json.loads(b) == {"error": "image_ids must be a list of image ids"}
+        # a bare string: previously iterated into one-character "ids"
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_ids": "img-a"}, headers=hh)
+        assert st == 400
+        assert json.loads(b) == {"error": "image_ids must be a list of image ids"}
+        # a falsy element: previously silently dropped instead of rejected
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_ids": ["img-a", ""]}, headers=hh)
+        assert st == 400
+        assert json.loads(b) == {"error": "image_ids must be a list of image ids"}
+        # a non-string element
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_ids": ["img-a", 123]}, headers=hh)
+        assert st == 400
+        assert json.loads(b) == {"error": "image_ids must be a list of image ids"}
+        # none of the rejected bodies touched the device's policy
+        assert cat.get_policy("d1") == {"approved_image_id": None,
+                                        "approved_image_ids": []}
+    finally:
+        stop()
+
+
+def test_assign_singular_body_still_works(tmp_path):
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, cat = deps
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        _req(host, port, "POST", "/api/devices",
+             {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_id": "img1"}, headers=hh)
+        assert st == 200
+        assert cat.get_policy("d1")["approved_image_ids"] == ["img1"]
+    finally:
+        stop()
+
+
+def test_unassign_clears_the_whole_set(tmp_path):
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    _app, fleet, _creds, cat = _ctx
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        cat.save_image({"id": "img3", "filename": "img3.bin", "sha256": "ef",
+                        "size": 5, "published_at": 3})
+        _req(host, port, "POST", "/api/devices",
+             {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
+        cat.set_policy("d1", approved_image_ids=["img1", "img2", "img3"])
+        assert len(cat.get_policy("d1")["approved_image_ids"]) == 3
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_id": None}, headers=hh)
+        assert st == 200 and json.loads(b)["ok"] is True
+        assert cat.get_policy("d1") == {"approved_image_id": None,
+                                        "approved_image_ids": []}
+        events = [e for e in _read_audit_lines(audit_path)
+                 if e.get("action") == "unassign"]
+        # every image the unassign actually removed, not just the set's first:
+        # the audit trail is the record of what was done to this device, and
+        # "(was img1.bin)" hid two of the three images that were dropped.
+        assert events and events[-1]["detail"] == \
+            "unassigned (was img1.bin, img2.bin, img3.bin)"
+    finally:
+        stop()
+
+
+def test_assign_honours_an_expected_set_and_409s_on_a_stale_one(tmp_path):
+    """Review finding: nothing guarded two operators editing the same
+    device's images. Both open the picker on {A}, one applies {A,B}, the
+    other applies {A,C} a moment later, and the first edit is gone with no
+    sign it ever happened -- while the peer-policy PUT next door has carried
+    an if_revision compare-and-set all along.
+
+    The picker now sends the set it was opened on. A stored set that has
+    moved on is refused with 409 and the CURRENT set, nothing is written, and
+    nothing is audited. A body without the field keeps the unconditional
+    write, so older clients and API callers are unaffected."""
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    _app, fleet, _creds, cat = _ctx
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        _req(host, port, "POST", "/api/devices",
+             {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
+        # the expectation holds (nothing assigned yet) -> the write goes in
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_ids": ["img1"], "expect_image_ids": []},
+                        headers=hh)
+        assert st == 200
+        # the second operator still believes it is unassigned -> refused
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_ids": ["img2"], "expect_image_ids": []},
+                        headers=hh)
+        assert st == 409
+        body = json.loads(b)
+        assert body["error"] == "assignment_conflict"
+        assert body["assigned_image_ids"] == ["img1"]      # what it really is
+        assert cat.get_policy("d1")["approved_image_ids"] == ["img1"]
+        # a refused write is not an assignment, so it is not audited as one
+        assigns = [e for e in _read_audit_lines(audit_path)
+                  if e.get("action") == "assign"]
+        assert len(assigns) == 1
+
+        # unassign is guarded the same way
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_ids": [], "expect_image_ids": ["img2"]},
+                        headers=hh)
+        assert st == 409
+        assert cat.get_policy("d1")["approved_image_ids"] == ["img1"]
+
+        # a malformed expectation is a 400, never a silently ignored guard
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_ids": ["img2"], "expect_image_ids": "img1"},
+                        headers=hh)
+        assert st == 400
+        assert cat.get_policy("d1")["approved_image_ids"] == ["img1"]
+
+        # omitting it entirely keeps the old unconditional write
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_ids": ["img2"]}, headers=hh)
+        assert st == 200
+        assert cat.get_policy("d1")["approved_image_ids"] == ["img2"]
+    finally:
+        stop()
+
+
+def test_assign_audit_names_the_images_it_removed(tmp_path):
+    """Review finding: narrowing a device from {A,B,C} to {A} logged only
+    "assigned 1 image(s): A". The audit trail is the record of what an
+    operator did to a device, and the two images the operator dropped -- the
+    consequential half of that edit -- appeared nowhere in it.
+
+    A plural assign now names what it removed as well as what it set, and
+    only when it actually removed something. Ids whose catalog entry is gone
+    still get named (by id), since a policy row can outlive the image."""
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    _app, fleet, _creds, cat = _ctx
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        cat.save_image({"id": "img3", "filename": "img3.bin", "sha256": "ef",
+                        "size": 5, "published_at": 3})
+        _req(host, port, "POST", "/api/devices",
+             {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
+        cat.set_policy("d1", approved_image_ids=["img1", "img2", "img3"])
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_ids": ["img1"]}, headers=hh)
+        assert st == 200
+        events = [e for e in _read_audit_lines(audit_path)
+                 if e.get("action") == "assign"]
+        assert events[-1]["detail"] == \
+            "assigned 1 image(s): img1.bin; removed: img2.bin, img3.bin"
+
+        # widening removes nothing, so nothing is claimed to have been removed
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_ids": ["img1", "img2"]}, headers=hh)
+        assert st == 200
+        events = [e for e in _read_audit_lines(audit_path)
+                 if e.get("action") == "assign"]
+        assert events[-1]["detail"] == "assigned 2 image(s): img1.bin, img2.bin"
+    finally:
+        stop()
+
+
+def test_assign_audit_detail_pins_plural_wording(tmp_path):
+    """The plural (image_ids) assign path's audit detail is distinct wording
+    from the singular compat path's -- pin the exact "assigned N image(s):"
+    phrasing plus both filenames so a rewording doesn't slip by unnoticed."""
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    _app, fleet, _creds, cat = _ctx
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        _req(host, port, "POST", "/api/devices",
+             {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_ids": ["img1", "img2"]}, headers=hh)
+        assert st == 200
+        events = [e for e in _read_audit_lines(audit_path)
+                 if e.get("action") == "assign"]
+        assert events
+        detail = events[-1]["detail"]
+        assert "assigned 2 image(s):" in detail
+        assert "img1.bin" in detail and "img2.bin" in detail
+    finally:
+        stop()
+
+
+def test_assign_refuses_a_quarantined_image_with_the_verdict_in_the_400(tmp_path):
+    """KGV reconciler: an image the Cisco Bulk Hash reconciler has
+    quarantined (a NEW sha512 mismatch) must be refused at the /assign
+    route, with the verdict that caused it surfaced in the 400 body so the
+    operator sees why -- not just a bare error string."""
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, cat = deps
+    try:
+        cat.apply_hash_verification(
+            {"img1": {"state": "mismatch", "feed_sha512": "b" * 128,
+                      "publish_date": "2026-08-01", "deferral": False}},
+            source="scheduled", now=1000)
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        _req(host, port, "POST", "/api/devices",
+             {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_id": "img1"}, headers=hh)
+        assert st == 400
+        body = json.loads(b)
+        assert body["error"] == "image_quarantined"
+        assert body["image_id"] == "img1"
+        assert body["verdict"] == {
+            "state": "mismatch", "checked_at": 1000,
+            "feed_published_at": "2026-08-01", "source": "scheduled",
+            "deferral": False}
+        assert cat.get_policy("d1")["approved_image_ids"] == []
+        # the plural (image_ids) shape is refused the same way
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_ids": ["img1"]}, headers=hh)
+        assert st == 400
+        assert json.loads(b)["error"] == "image_quarantined"
+    finally:
+        stop()
+
+
+def test_device_rows_carry_the_list(tmp_path):
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, cat = deps
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        cat.save_image({"id": "img2", "filename": "img2.bin", "sha256": "cd",
+                        "published_at": 2})
+        _req(host, port, "POST", "/api/devices",
+             {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
+        cat.set_policy("d1", approved_image_ids=["img1", "img2"])
+        st, _, b = _req(host, port, "GET", "/api/devices", headers={"Cookie": ck})
+        assert st == 200
+        row = [d for d in json.loads(b)["devices"] if d["device_id"] == "d1"][0]
+        assert row["assigned_image_ids"] == ["img1", "img2"]
+        assert row["assigned_image_id"] == "img1"
+    finally:
+        stop()
+
+
+def test_rollout_counts_a_device_under_every_assigned_image(tmp_path):
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, cat = deps
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        cat.save_image({"id": "img2", "filename": "img2.bin", "sha256": "cd",
+                        "published_at": 2})
+        _req(host, port, "POST", "/api/devices",
+             {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
+        cat.set_policy("d1", approved_image_ids=["img1", "img2"])
+        st, _, b = _req(host, port, "GET", "/api/overview", headers={"Cookie": ck})
+        assert st == 200
+        rollout = {r["image_id"]: r for r in json.loads(b)["rollout"]}
+        assert rollout["img1"]["assigned"] == 1
+        assert rollout["img2"]["assigned"] == 1
+    finally:
+        stop()
+
+
+def test_rollout_staged_uses_heartbeat_staged_image_ids(tmp_path):
+    # Task 3 lands staged_image_ids on the heartbeat; rollout must read it
+    # directly rather than the single current_image_id/stage_state pair, so a
+    # device staging TWO images at once counts as staged under both.
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, cat = deps
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        cat.save_image({"id": "img2", "filename": "img2.bin", "sha256": "cd",
+                        "published_at": 2})
+        _req(host, port, "POST", "/api/devices",
+             {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
+        cat.set_policy("d1", approved_image_ids=["img1", "img2"])
+        # a synthetic heartbeat carrying the new field, as a Task-3 agent
+        # would send it -- current_image_id/stage_state deliberately say
+        # something that would NOT count under the legacy fallback logic
+        cat.record_heartbeat("d1", {"staged_image_ids": ["img1", "img2"],
+                                    "current_image_id": None,
+                                    "stage_state": "staging"}, now=10)
+        st, _, b = _req(host, port, "GET", "/api/overview", headers={"Cookie": ck})
+        assert st == 200
+        rollout = {r["image_id"]: r for r in json.loads(b)["rollout"]}
+        assert rollout["img1"]["staged"] == 1
+        assert rollout["img2"]["staged"] == 1
+    finally:
+        stop()
+
+
+def test_overview_totals_count_devices_not_image_pairs(tmp_path):
+    """Overview's aggregate cards ('Devices staged', rendered in app.js as a
+    device count) must count each DEVICE once, not once per assigned image.
+    A device with two images assigned and BOTH staged adds exactly 1 to
+    staged_total, not 2 -- and it adds 1 to assigned_total, not 2."""
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, cat = deps
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        cat.save_image({"id": "img2", "filename": "img2.bin", "sha256": "cd",
+                        "published_at": 2})
+        _req(host, port, "POST", "/api/devices",
+             {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
+        cat.set_policy("d1", approved_image_ids=["img1", "img2"])
+        cat.record_heartbeat("d1", {"staged_image_ids": ["img1", "img2"],
+                                    "current_image_id": None,
+                                    "stage_state": "staging"}, now=10)
+        st, _, b = _req(host, port, "GET", "/api/overview", headers={"Cookie": ck})
+        assert st == 200
+        ov = json.loads(b)
+        assert ov["assigned"] == 1   # one device, not one per assigned image
+        assert ov["staged"] == 1     # fully staged device counts once
+    finally:
+        stop()
+
+
+def test_overview_staged_total_excludes_partially_staged_device(tmp_path):
+    """A device with only SOME of its assigned images staged must not count
+    toward staged_total at all -- staged_total is whole-set-or-nothing per
+    device. The per-image rollout row for the image that IS staged still
+    shows it; only the aggregate is device-deduped."""
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, cat = deps
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        cat.save_image({"id": "img2", "filename": "img2.bin", "sha256": "cd",
+                        "published_at": 2})
+        _req(host, port, "POST", "/api/devices",
+             {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
+        cat.set_policy("d1", approved_image_ids=["img1", "img2"])
+        cat.record_heartbeat("d1", {"staged_image_ids": ["img1"],
+                                    "current_image_id": None,
+                                    "stage_state": "staging"}, now=10)
+        st, _, b = _req(host, port, "GET", "/api/overview", headers={"Cookie": ck})
+        assert st == 200
+        ov = json.loads(b)
+        assert ov["assigned"] == 1
+        assert ov["staged"] == 0     # not fully staged -> device doesn't count
+        rollout = {r["image_id"]: r for r in ov["rollout"]}
+        assert rollout["img1"]["staged"] == 1   # per-image row still shows it
+        assert rollout["img2"]["staged"] == 0
+    finally:
+        stop()
+
+
+def test_real_heartbeat_ingest_feeds_overview_staged_logic(tmp_path):
+    """End-to-end guard: a heartbeat posted through the REAL catalog HTTP
+    ingest route (catalog.route_post's field whitelist), not via a direct
+    record_heartbeat() call, must still be visible to the console's
+    deployed/staged derivation (rollout + staged_total in /api/overview).
+
+    Every other rollout/staged test in this file (e.g.
+    test_rollout_staged_uses_heartbeat_staged_image_ids above) calls
+    cat.record_heartbeat() directly, which bypasses catalog.py's HTTP
+    ingest handler entirely -- so those tests would keep passing even if the
+    ingest handler's whitelist silently dropped staged_image_ids /
+    errored_image_ids in production. This test posts over the real wire, the
+    same as a device agent would, to close that gap."""
+    import secrets_store
+
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, cat = deps
+    secrets_path = str(tmp_path / "secrets.json")
+    dev_srv = catalog_mod.make_server("127.0.0.1", 0, cat, secrets_path)
+    dev_port = dev_srv.server_address[1]
+    threading.Thread(target=dev_srv.serve_forever, daemon=True).start()
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        cat.save_image({"id": "img2", "filename": "img2.bin", "sha256": "cd",
+                        "published_at": 2})
+        _req(host, port, "POST", "/api/devices",
+             {"device_id": "d1", "device_ip": "10.0.0.1"}, headers=hh)
+        cat.set_policy("d1", approved_image_ids=["img1", "img2"])
+
+        # Mint the device's real catalog_token and POST the heartbeat over
+        # the real ingest HTTP path -- the exact code the review finding
+        # flagged as dropping staged_image_ids/errored_image_ids.
+        store = secrets_store.load(secrets_path)
+        tok = secrets_store.mint(store, "d1", "catalog_token", time.time())
+        secrets_store.save(store, secrets_path)
+        conn = http.client.HTTPConnection("127.0.0.1", dev_port, timeout=5)
+        conn.request(
+            "POST", "/v1/devices/d1/heartbeat",
+            body=json.dumps({"current_image_id": None,
+                             "stage_state": "staging",
+                             "staged_image_ids": ["img1", "img2"]}),
+            headers={"Authorization": "Bearer " + tok,
+                     "Content-Type": "application/json"})
+        hb_resp = conn.getresponse()
+        assert hb_resp.status == 200
+        hb_resp.read()
+        conn.close()
+
+        st, _, b = _req(host, port, "GET", "/api/overview",
+                        headers={"Cookie": ck})
+        assert st == 200
+        ov = json.loads(b)
+        # Only a stored (not dropped) staged_image_ids covering the whole
+        # assigned set makes this device count as fully staged.
+        assert ov["staged"] == 1
+        rollout = {r["image_id"]: r for r in ov["rollout"]}
+        assert rollout["img1"]["staged"] == 1
+        assert rollout["img2"]["staged"] == 1
+    finally:
+        dev_srv.shutdown()
         stop()
 
 
@@ -1751,8 +2270,241 @@ def test_sse_stream_survives_queue_wait(tmp_path, monkeypatch):
         stop()
 
 
+def test_plan_refuses_device_with_cached_xr_family(tmp_path):
+    """A fleet-stored device whose record already carries os_family='xr' must
+    not plan onto an IOS-XE platform. The /plan route calls
+    gui_onboard.resolve_platform(device) with no os_family= argument (see
+    gui_server._plan), so the refusal must come from the device record
+    itself, not a caller-supplied argument."""
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
+    state = str(tmp_path / "state")
+    fleet = gui_fleet.FleetStore(state)
+    fleet.upsert({"device_id": "xr1", "device_ip": "10.0.0.9", "model": "ASR-9906",
+                  "os_family": "xr", "credential_profile_id": "lab"})
+    creds = gui_creds.CredentialStore(secrets_path)
+    creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
+    onboard = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
+                                         mint_fn=lambda d: "TOK",
+                                         run_fn=lambda p, e, on: 0)
+    srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, creds, None,
+                                 onboard, certfile=None)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    host = "127.0.0.1"
+    try:
+        ck, csrf = _auth(host, port)
+        st, _, b = _req(host, port, "GET", "/api/devices/xr1/plan",
+                        headers={"Cookie": ck})
+        # Not 200 with an IOS-XE platform (guestshell/iox/router) -- refused.
+        assert st == 409, b
+        assert "IOS-XR" in json.loads(b)["error"]
+    finally:
+        srv.shutdown()
+
+
+def test_xr_host_plan_carries_no_addressing_fields(tmp_path):
+    """A fully-validated xr-host record (Task 1: xr-host <-> xr-appmgr is
+    mutually required) must plan cleanly -- the enum gate at gui_server._plan
+    accepts xr-host, and the resolved network dict carries ONLY device_ip/
+    model/platform plus the handful of non-addressing keys every plan
+    carries (management_type, swarm_port, renderer). Every XE addressing key
+    (iris_vlan/svi_*/app_*/inband_vlan/vpg_number/nat_interface/ios_ssh_host)
+    must be ABSENT -- not even present with an empty string -- because
+    xr-host's appmgr container uses the router's own network stack.
+
+    This also proves the router-coupling checks (gui_server.py:746-758) do
+    not fire for xr-host: model 8201 is not a Catalyst 8000 shape and the
+    resolved platform is 'xr-appmgr', not 'router', so none of the three
+    router-only gates raise, and the route returns 200 rather than 409."""
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, _cat = deps
+    try:
+        fleet.upsert({"device_id": "xr1", "device_ip": "10.0.0.9",
+                      "model": "8201", "os_family": "xr",
+                      "platform": "xr-appmgr", "management_type": "xr-host",
+                      "credential_profile_id": "lab"})
+        ck, csrf = _auth(host, port)
+        status, _, body = _req(host, port, "GET", "/api/devices/xr1/plan",
+                               headers={"Cookie": ck})
+        assert status == 200, body
+        plan = json.loads(body)["plan"]
+        assert plan["resolved"] == {
+            "management_type": "xr-host", "device_ip": "10.0.0.9",
+            "swarm_port": "6881", "model": "8201", "platform": "xr-appmgr",
+            "renderer": "v1"}
+        for key in ("iris_vlan", "svi_ip", "svi_mask", "app_ip", "app_mask",
+                    "app_gateway", "inband_vlan", "vpg_number",
+                    "nat_interface", "ios_ssh_host"):
+            assert key not in plan["resolved"], key
+        assert plan["ownership"] == (
+            "XR host networking — the agent shares the router's own "
+            "network stack; no app-network fields")
+        assert isinstance(plan["plan_hash"], str) and len(plan["plan_hash"]) == 64
+    finally:
+        stop()
+
+
+def test_plan_refuses_xr_appmgr_platform_without_xr_host_management_type(tmp_path):
+    """The mutual xr-host <-> xr-appmgr requirement (Task 1's
+    validate_record) is enforced only on a fully-classified record --
+    fleet.upsert on a bare {"platform": ...} payload (the /platform route;
+    also reachable via legacy CSV import) leaves management_type at
+    legacy_routed, which _plan converts straight to 'routed' before this
+    fix ever consulted platform again. That let an IOS-XR box plan as a
+    plain IOS-XE routed device: 10 XE addressing keys, a VLAN/SVI ownership
+    narrative, and owned resources [vlan, svi, guestshell] -- on hardware
+    that has none of those. _plan must gate on the RESOLVED platform vs.
+    management_type directly, the same way it already gates 'router'."""
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, _cat = deps
+    try:
+        fleet.upsert({"device_id": "xr1", "device_ip": "10.0.0.9",
+                      "model": "8201", "credential_profile_id": "lab"})
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, _ = _req(host, port, "POST", "/api/devices/xr1/platform",
+                        {"platform": "xr-appmgr"}, headers=hh)
+        assert st == 200
+        status, _, body = _req(host, port, "GET", "/api/devices/xr1/plan",
+                               headers={"Cookie": ck})
+        assert status == 409, body
+        assert json.loads(body)["error"] == (
+            "platform xr-appmgr requires management_type xr-host "
+            "(the two are mutually required)")
+    finally:
+        stop()
+
+
+def test_plan_ignores_the_network_attachment_alias_and_falls_to_legacy_routed(tmp_path):
+    """gui_server._plan reads management_type off the RAW fleet device
+    (gui_server.py:739), a site the Task 2 eleven-site atomic rename did not
+    cover -- that list was the 'resolved' dict's own writers/readers, not
+    this earlier raw-record read. A fleet.json row still carrying only the
+    retired network_attachment alias (never re-saved since before the
+    rename) is no longer interpreted at all here: it plans exactly like a
+    truly unclassified row -- legacy_routed coerced to 'routed' -- even when
+    the alias claims 'inband' and a stale inband_vlan sits on the row. The
+    stale inband_vlan is echoed back verbatim in the resolved dict (every
+    raw XE field is, regardless of management_type -- pre-existing,
+    unrelated behavior), but the row does NOT plan AS inband: management_type
+    reads 'routed', and the fields that a real inband/routed classification
+    would have populated (iris_vlan/svi_ip) stay empty because nothing in
+    the raw row ever set them."""
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, _cat = deps
+    try:
+        with open(fleet.path, "w") as stream:
+            json.dump({"revision": 1, "devices": {"d1": {
+                "device_id": "d1", "device_ip": "10.0.0.1", "platform": "guestshell",
+                "network_attachment": "inband", "inband_vlan": "120",
+                "registered_at": 1000,
+            }}}, stream)
+        ck, _csrf = _auth(host, port)
+        status, _, body = _req(host, port, "GET", "/api/devices/d1/plan",
+                               headers={"Cookie": ck})
+        assert status == 200, body
+        resolved = json.loads(body)["plan"]["resolved"]
+        assert resolved["management_type"] == "routed"     # not 'inband'
+        assert resolved["iris_vlan"] == "" and resolved["svi_ip"] == ""
+    finally:
+        stop()
+
+
+def test_plan_refuses_xr_appmgr_platform_on_a_network_attachment_alias_only_row(tmp_path):
+    """Same alias-retirement boundary, the xr-appmgr side: a row whose only
+    hint of xr-host is the retired network_attachment alias, with platform
+    explicitly xr-appmgr, still resolves management_type via the alias-free
+    path (legacy_routed -> 'routed'), so the xr-host<->xr-appmgr mutual gate
+    (gui_server.py:769) fires exactly as it would for any other alias-blind
+    xr-appmgr row: a clean 409, not a silent xr-host plan and not a 500."""
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, _cat = deps
+    try:
+        with open(fleet.path, "w") as stream:
+            json.dump({"revision": 1, "devices": {"xr1": {
+                "device_id": "xr1", "device_ip": "10.0.0.9",
+                "network_attachment": "xr-host", "platform": "xr-appmgr",
+                "model": "8201", "registered_at": 1000,
+            }}}, stream)
+        ck, _csrf = _auth(host, port)
+        status, _, body = _req(host, port, "GET", "/api/devices/xr1/plan",
+                               headers={"Cookie": ck})
+        assert status == 409, body
+        assert json.loads(body)["error"] == (
+            "platform xr-appmgr requires management_type xr-host "
+            "(the two are mutually required)")
+    finally:
+        stop()
+
+
+def test_owned_resources_for_xr_host_matches_the_uninstall_recipe(tmp_path):
+    """_owned_resources must claim exactly what device/xr-uninstall.sh
+    actually removes: the appmgr application, its registered package
+    source, the RPM staged at harddisk: root, and the agent's iris-work/
+    control-file directory -- and it must NOT claim a guestshell resource,
+    which XR hardware has no such thing as (the bug the unconditional
+    guestshell entry at gui_server.py:813 introduced for every management
+    type before this branch existed)."""
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path)
+    srv = gui_server.make_server("127.0.0.1", 0, app, certfile=None)
+    try:
+        resources = srv.RequestHandlerClass._owned_resources(
+            {"management_type": "xr-host"})
+        kinds = [r["kind"] for r in resources]
+        assert kinds == ["appmgr-application", "appmgr-source",
+                          "agent-rpm", "agent-work-dir"]
+        assert "guestshell" not in kinds
+        assert all(r["ownership"] == "iris-created" for r in resources)
+        # Names are gui_onboard's own constants, not re-hardcoded here, so a
+        # rename of APPID/SOURCE_NAME cannot silently drift the record.
+        by_kind = {r["kind"]: r for r in resources}
+        assert by_kind["appmgr-application"]["name"] == gui_onboard._XR_APPID
+        assert by_kind["appmgr-source"]["name"] == gui_onboard._XR_SOURCE_NAME
+    finally:
+        srv.server_close()
+
+
+def test_owned_resources_raises_without_management_type(tmp_path):
+    """Task 2 (spec decision 6): resolved["management_type"] is read as a
+    direct subscript, never a defaulted .get() -- a resolved dict missing
+    the key must fail loud instead of silently resolving to some guessed
+    scope. A PARTIAL rename that kept the old .get(..., None) default would
+    make this pass through as attachment=None -> the plain-VLAN/SVI teardown
+    branch, which can delete an operator-owned resource it never proved it
+    owns."""
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path)
+    srv = gui_server.make_server("127.0.0.1", 0, app, certfile=None)
+    try:
+        with pytest.raises(KeyError, match="management_type"):
+            srv.RequestHandlerClass._owned_resources({})
+    finally:
+        srv.server_close()
+
+
+def test_router_teardown_resolved_raises_without_management_type(tmp_path):
+    """Task 2 fix-wave (Minor 5): unlike the other eight reader sites, the
+    three management_type reads inside _router_teardown_resolved sit behind
+    an except ValueError in the undeploy route (gui_server.py:3084-3098),
+    which marks the record needs-reconcile and answers a clean 409. A bare
+    KeyError there would escape as an unhandled 500 instead -- so this one
+    function raises ValueError, not KeyError, on a resolved dict missing the
+    key."""
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path)
+    srv = gui_server.make_server("127.0.0.1", 0, app, certfile=None)
+    try:
+        with pytest.raises(ValueError, match="management_type"):
+            srv.RequestHandlerClass._router_teardown_resolved(
+                {"resolved": {"platform": "router"}})
+    finally:
+        srv.server_close()
+
+
 def _serve_inband(tmp_path, run_fn, device=None):
-    import deployment_receipts
+    import deployment_records
     secrets_path = str(tmp_path / "secrets.json")
     app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
     state = str(tmp_path / "state")
@@ -1764,13 +2516,13 @@ def _serve_inband(tmp_path, run_fn, device=None):
                   "platform": "guestshell", "credential_profile_id": "lab"})
     creds = gui_creds.CredentialStore(secrets_path)
     creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
-    receipts = deployment_receipts.ReceiptStore(state)
+    record_store = deployment_records.DeploymentRecordStore(state)
     art = str(tmp_path / "artifacts"); os.makedirs(art, exist_ok=True)
     for pkg in ("iris-arm64.tar", "iris-amd64.tar"):
         open(os.path.join(art, pkg), "w").close()   # IOx package-presence gate
     onboard = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
                                          mint_fn=lambda d: "TOK", run_fn=run_fn,
-                                         receipts=receipts, artifacts_dir=art,
+                                         record_store=record_store, artifacts_dir=art,
                                          # this device is platform=guestshell, so
                                          # the job-start reachability gate (see
                                          # gui_onboard.py) probes it before run_fn
@@ -1781,7 +2533,7 @@ def _serve_inband(tmp_path, run_fn, device=None):
                                              "device_identity": "FCW0000TEST",
                                              "detected_model": "IE-3400"})
     srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, creds, None,
-                                 onboard, certfile=None, receipts=receipts)
+                                 onboard, certfile=None, record_store=record_store)
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return "127.0.0.1", port, srv.shutdown
@@ -1805,7 +2557,7 @@ def test_inband_iox_onboard_defaults_ssh_host_to_mgmt_ip(tmp_path):
                         headers={"Cookie": ck})
         assert st == 200
         resolved = json.loads(b)["plan"]["resolved"]
-        assert resolved["attachment"] == "inband" and resolved["platform"] == "iox"
+        assert resolved["management_type"] == "inband" and resolved["platform"] == "iox"
         assert resolved["ios_ssh_host"] == "192.0.2.30"    # defaults to device_ip
         st, _, b = _req(host, port, "POST", "/api/devices/ie/onboard", {}, headers=hh)
         assert st == 200
@@ -1815,7 +2567,7 @@ def test_inband_iox_onboard_defaults_ssh_host_to_mgmt_ip(tmp_path):
             if ran:
                 break
             _t.sleep(0.02)
-        assert ran and ran[-1]["NETWORK_ATTACHMENT"] == "inband"
+        assert ran and ran[-1]["MANAGEMENT_TYPE"] == "inband"
         assert ran[-1]["IOS_SSH_HOST"] == "192.0.2.30"
     finally:
         stop()
@@ -1823,9 +2575,9 @@ def test_inband_iox_onboard_defaults_ssh_host_to_mgmt_ip(tmp_path):
 
 def test_reonboard_then_undeploy_starts(tmp_path):
     """Re-onboarding a device (idempotent redeploy) and then undeploying it
-    must work: the second onboard's receipt supersedes the first, so the
-    undeploy start finds exactly one active receipt. This is the lab-observed
-    failure: two active receipts made active_for_device() raise and the
+    must work: the second onboard's record supersedes the first, so the
+    undeploy start finds exactly one active record. This is the lab-observed
+    failure: two active records made active_for_device() raise and the
     Console reported 'failed to start' with no reason."""
     host, port, stop = _serve_inband(tmp_path, lambda p, e, on: 0)
     try:
@@ -1843,7 +2595,7 @@ def test_reonboard_then_undeploy_starts(tmp_path):
                 _t.sleep(0.02)
             return "timeout"
 
-        for _ in range(2):    # onboard TWICE — the re-onboard mints receipt #2
+        for _ in range(2):    # onboard TWICE — the re-onboard mints record #2
             st, _, b = _req(host, port, "POST", "/api/devices/edge/onboard", {},
                             headers=hh)
             assert st == 200
@@ -1856,18 +2608,18 @@ def test_reonboard_then_undeploy_starts(tmp_path):
 
 
 def test_inband_onboard_is_one_click_and_drives_inband_renderer(tmp_path):
-    """Inband onboards exactly like routed: a plain POST starts a job, records a
-    receipt, and runs the installer with NETWORK_ATTACHMENT=inband."""
+    """Inband onboards exactly like routed: a plain POST starts a job, persists a
+    record, and runs the installer with MANAGEMENT_TYPE=inband."""
     ran = []
     host, port, stop = _serve_inband(
         tmp_path, lambda p, e, on: (ran.append(dict(e)), 0)[1])
     try:
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
-        # plan preview reports the inband attachment
+        # plan preview reports the inband management type
         st, _, b = _req(host, port, "GET", "/api/devices/edge/plan",
                         headers={"Cookie": ck})
-        assert st == 200 and json.loads(b)["plan"]["resolved"]["attachment"] == "inband"
+        assert st == 200 and json.loads(b)["plan"]["resolved"]["management_type"] == "inband"
         # a plain onboard POST starts the job (no gate, no acknowledgement dance)
         st, _, b = _req(host, port, "POST", "/api/devices/edge/onboard", {},
                         headers=hh)
@@ -1881,15 +2633,44 @@ def test_inband_onboard_is_one_click_and_drives_inband_renderer(tmp_path):
             if json.loads(jb)["state"] in ("done", "error"):
                 break
             _t.sleep(0.02)
-        assert ran and ran[-1]["NETWORK_ATTACHMENT"] == "inband"
+        assert ran and ran[-1]["MANAGEMENT_TYPE"] == "inband"
+    finally:
+        stop()
+
+
+def test_onboard_job_status_wire_uses_record_id_not_receipt_id(tmp_path):
+    """get_job()/list_jobs() serialize the job dict WHOLESALE, so whatever key
+    binds the job to its deployment record is live public wire on
+    GET /api/onboard/jobs and /api/onboard/jobs/<id> -- not an
+    internal-only detail. It must speak record_id only; a lingering
+    receipt_id key would leak the retired vocabulary onto the console's
+    polling response."""
+    host, port, stop = _serve_inband(tmp_path, lambda p, e, on: 0)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, b = _req(host, port, "POST", "/api/devices/edge/onboard", {},
+                        headers=hh)
+        assert st == 200
+        jid = json.loads(b)["job_id"]
+        job = _wait_onboard_job(host, port, ck, jid)
+        assert job["state"] == "done"
+        assert "record_id" in job and job["record_id"]
+        assert "receipt_id" not in job
+        # the list endpoint serializes the same job dicts (minus 'lines')
+        _, _, lb = _req(host, port, "GET", "/api/onboard/jobs",
+                        headers={"Cookie": ck})
+        listed = json.loads(lb)["jobs"]
+        assert listed and "record_id" in listed[0] and listed[0]["record_id"]
+        assert "receipt_id" not in listed[0]
     finally:
         stop()
 
 
 def _serve_router(tmp_path, run_fn, preflight_fn=None, mint_fn=None, device=None,
                   audit_path=None):
-    """Receipt-backed server with one C8000V router inventory row."""
-    import deployment_receipts
+    """Record-backed server with one C8000V router inventory row."""
+    import deployment_records
     os.makedirs(tmp_path, exist_ok=True)
     secrets_path = str(tmp_path / "secrets.json")
     app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
@@ -1903,16 +2684,16 @@ def _serve_router(tmp_path, run_fn, preflight_fn=None, mint_fn=None, device=None
         "credential_profile_id": "lab"})
     creds = gui_creds.CredentialStore(secrets_path)
     creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
-    receipts = deployment_receipts.ReceiptStore(state)
+    record_store = deployment_records.DeploymentRecordStore(state)
     onboard = gui_onboard.OnboardService(
         fleet, creds, host_ip="10.9.9.9", mint_fn=mint_fn or (lambda d: "TOK"),
-        run_fn=run_fn, receipts=receipts, preflight_fn=preflight_fn)
+        run_fn=run_fn, record_store=record_store, preflight_fn=preflight_fn)
     srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, creds, None,
-                                 onboard, certfile=None, receipts=receipts,
+                                 onboard, certfile=None, record_store=record_store,
                                  audit_path=audit_path)
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    return "127.0.0.1", port, fleet, receipts, srv.shutdown
+    return "127.0.0.1", port, fleet, record_store, srv.shutdown
 
 
 def _wait_onboard_job(host, port, cookie, job_id):
@@ -1928,7 +2709,7 @@ def _wait_onboard_job(host, port, cookie, job_id):
 
 
 def test_c8000v_router_plan_auto_resolves_blank_platform_and_fields(tmp_path):
-    host, port, _fleet, receipts, stop = _serve_router(
+    host, port, _fleet, record_store, stop = _serve_router(
         tmp_path, lambda p, e, on: 0,
         preflight_fn=lambda dev, env, resolved: {
             "status": "passed", "device_identity": "9ABC123",
@@ -1945,7 +2726,7 @@ def test_c8000v_router_plan_auto_resolves_blank_platform_and_fields(tmp_path):
         plan = json.loads(body)["plan"]
         assert plan["ownership"] == "creates only a clean IRIS-owned VirtualPortGroup"
         assert plan["resolved"] == {
-            "attachment": "router-routed", "device_ip": "192.0.2.10",
+            "management_type": "router-routed", "device_ip": "192.0.2.10",
             "iris_vlan": "", "svi_ip": "",
             "svi_mask": "", "app_ip": "10.7.0.2", "app_mask": "255.255.255.252",
             "app_gateway": "10.7.0.1", "inband_vlan": "", "vpg_number": "7",
@@ -1955,7 +2736,7 @@ def test_c8000v_router_plan_auto_resolves_blank_platform_and_fields(tmp_path):
                                headers={"Cookie": cookie, "X-CSRF-Token": csrf})
         assert status == 200
         assert _wait_onboard_job(host, port, cookie, json.loads(body)["job_id"])["state"] == "done"
-        assert [resource["kind"] for resource in receipts.active_for_device("r1")["resources"]] == [
+        assert [resource["kind"] for resource in record_store.active_for_device("r1")["resources"]] == [
             "virtualportgroup", "eem-applets", "agent-files",
             "logging-discriminator", "pki-trustpoint", "http-client-trustpoint",
             "iox-global", "file-prompt-quiet",
@@ -1966,7 +2747,7 @@ def test_c8000v_router_plan_auto_resolves_blank_platform_and_fields(tmp_path):
 
 def test_router_onboard_uses_router_recipe_env_and_router_resource_kinds(tmp_path):
     events, ran = [], []
-    host, port, _fleet, receipts, stop = _serve_router(
+    host, port, _fleet, record_store, stop = _serve_router(
         tmp_path, lambda path, env, on: (ran.append((path, dict(env))), 0)[1],
         preflight_fn=lambda dev, env, resolved: (events.append("preflight") or {
             "status": "passed", "device_identity": "9ABC123",
@@ -1983,18 +2764,18 @@ def test_router_onboard_uses_router_recipe_env_and_router_resource_kinds(tmp_pat
         assert events == ["preflight", "mint"]
         path, env = ran[-1]
         assert path.endswith("device/router-install.sh")
-        assert {key: env[key] for key in ("NETWORK_ATTACHMENT", "VPG_NUMBER",
+        assert {key: env[key] for key in ("MANAGEMENT_TYPE", "VPG_NUMBER",
                                            "NAT_INTERFACE", "BT_LISTEN_PORT")} == {
-            "NETWORK_ATTACHMENT": "router-nat", "VPG_NUMBER": "10",
+            "MANAGEMENT_TYPE": "router-nat", "VPG_NUMBER": "10",
             "NAT_INTERFACE": "GigabitEthernet1", "BT_LISTEN_PORT": "6881"}
-        receipt = receipts.active_for_device("r1")
-        assert [resource["kind"] for resource in receipt["resources"]] == [
+        record = record_store.active_for_device("r1")
+        assert [resource["kind"] for resource in record["resources"]] == [
             "virtualportgroup", "eem-applets", "agent-files",
             "logging-discriminator", "pki-trustpoint", "http-client-trustpoint",
             "iox-global", "file-prompt-quiet",
             "guestshell",
             "nat-acl", "nat-overload", "nat-static", "nat-outside-marking"]
-        assert receipt["resources"][-1]["ownership"] == "iris-created"
+        assert record["resources"][-1]["ownership"] == "iris-created"
     finally:
         stop()
 
@@ -2005,7 +2786,7 @@ def test_router_preflight_failure_is_reported_by_the_queued_job(tmp_path):
     def reject(*_args):
         raise ValueError("VirtualPortGroup10 already exists")
 
-    host, port, _fleet, receipts, stop = _serve_router(
+    host, port, _fleet, record_store, stop = _serve_router(
         tmp_path, lambda p, e, on: ran.append(1) or 0, preflight_fn=reject,
         mint_fn=lambda did: minted.append(did) or "TOK")
     try:
@@ -2017,15 +2798,15 @@ def test_router_preflight_failure_is_reported_by_the_queued_job(tmp_path):
         assert job["state"] == "error"
         assert any("preflight failed" in line for line in job["lines"])
         assert minted == [] and ran == []
-        assert receipts.list("r1")[0]["state"] == "removed"
+        assert record_store.list("r1")[0]["state"] == "removed"
     finally:
         stop()
 
 
-def test_router_nat_preflight_ownership_persists_and_undeploy_uses_receipt(tmp_path):
+def test_router_nat_preflight_ownership_persists_and_undeploy_uses_record(tmp_path):
     for preexisting, expected in ((True, "0"), (False, "1")):
         ran = []
-        host, port, _fleet, receipts, stop = _serve_router(
+        host, port, _fleet, record_store, stop = _serve_router(
             tmp_path / ("existing" if preexisting else "created"),
             lambda path, env, on: (ran.append((path, dict(env))), 0)[1],
             preflight_fn=lambda dev, env, resolved, preexisting=preexisting: {
@@ -2039,9 +2820,9 @@ def test_router_nat_preflight_ownership_persists_and_undeploy_uses_receipt(tmp_p
                               headers=headers)
             onboard_job = _wait_onboard_job(host, port, cookie, json.loads(body)["job_id"])
             assert onboard_job["state"] == "done"
-            receipt = receipts.active_for_device("r1")
-            assert receipt["resolved"]["nat_outside_owned"] == expected
-            marking = [r for r in receipt["resources"] if r["kind"] == "nat-outside-marking"]
+            record = record_store.active_for_device("r1")
+            assert record["resolved"]["nat_outside_owned"] == expected
+            marking = [r for r in record["resources"] if r["kind"] == "nat-outside-marking"]
             assert marking == [{"kind": "nat-outside-marking", "interface": "GigabitEthernet1",
                                 "ownership": "pre-existing" if preexisting else "iris-created"}]
             _, _, body = _req(host, port, "POST", "/api/devices/r1/undeploy", {},
@@ -2055,7 +2836,7 @@ def test_router_nat_preflight_ownership_persists_and_undeploy_uses_receipt(tmp_p
 
 
 def test_platform_endpoint_allows_router_only_for_router_management_types(tmp_path):
-    host, port, fleet, _receipts, stop = _serve_router(tmp_path, lambda p, e, on: 0)
+    host, port, fleet, _record_store, stop = _serve_router(tmp_path, lambda p, e, on: 0)
     try:
         fleet.upsert({"device_id": "switch", "device_ip": "192.0.2.20",
                       "management_type": "routed", "iris_vlan": "120",
@@ -2075,7 +2856,7 @@ def test_platform_endpoint_allows_router_only_for_router_management_types(tmp_pa
 
 
 def test_router_adopt_is_refused_without_live_ownership_evidence(tmp_path):
-    host, port, _fleet, receipts, stop = _serve_router(tmp_path, lambda p, e, on: 0)
+    host, port, _fleet, record_store, stop = _serve_router(tmp_path, lambda p, e, on: 0)
     try:
         cookie, csrf = _auth(host, port)
         status, _, body = _req(
@@ -2083,17 +2864,17 @@ def test_router_adopt_is_refused_without_live_ownership_evidence(tmp_path):
             {"acknowledge_adopt": True},
             headers={"Cookie": cookie, "X-CSRF-Token": csrf})
         assert status == 409 and "cannot be adopted" in json.loads(body)["error"]
-        assert receipts.list("r1") == []
+        assert record_store.list("r1") == []
     finally:
         stop()
 
 
-def test_router_undeploy_uses_receipt_ip_after_inventory_edit(tmp_path):
+def test_router_undeploy_uses_record_ip_after_inventory_edit(tmp_path):
     ran = []
     evidence = {"status": "passed", "device_identity": "9ABC123",
                 "detected_model": "C8000V", "nat_interface": "GigabitEthernet1",
                 "nat_outside_preexisting": False}
-    host, port, fleet, _receipts, stop = _serve_router(
+    host, port, fleet, _record_store, stop = _serve_router(
         tmp_path, lambda path, env, on: (ran.append(dict(env)), 0)[1],
         preflight_fn=lambda *args: dict(evidence))
     try:
@@ -2115,30 +2896,30 @@ def test_router_undeploy_uses_receipt_ip_after_inventory_edit(tmp_path):
         stop()
 
 
-def test_router_undeploy_refuses_incomplete_or_mismatched_receipt(tmp_path):
-    host, port, _fleet, receipts, stop = _serve_router(tmp_path, lambda p, e, on: 0)
+def test_router_undeploy_refuses_incomplete_or_mismatched_record(tmp_path):
+    host, port, _fleet, record_store, stop = _serve_router(tmp_path, lambda p, e, on: 0)
     try:
         cookie, csrf = _auth(host, port)
         headers = {"Cookie": cookie, "X-CSRF-Token": csrf}
-        plan = {"platform": "router", "attachment": "router-routed",
+        plan = {"platform": "router", "management_type": "router-routed",
                 "device_ip": "192.0.2.10", "device_identity": "9ABC123",
                 "vpg_number": "10", "model": "C8000V"}
-        receipt = receipts.create({"controller_id": "iris", "device_id": "r1",
+        record = record_store.create({"controller_id": "iris", "device_id": "r1",
             "inventory_revision": 1, "plan_hash": "a" * 64,
             "resolved": plan, "preflight": {"status": "passed"},
             "resources": [{"kind": "virtualportgroup", "ownership": "iris-created",
                            "id": "99"}]})
-        receipts.transition(receipt["receipt_id"], "applying")
-        receipts.transition(receipt["receipt_id"], "active")
+        record_store.transition(record["record_id"], "applying")
+        record_store.transition(record["record_id"], "active")
         status, _, body = _req(host, port, "POST", "/api/devices/r1/undeploy", {},
                                headers=headers)
         assert status == 409 and "does not prove ownership" in json.loads(body)["error"]
-        assert receipts.get(receipt["receipt_id"])["state"] == "needs-reconcile"
+        assert record_store.get(record["record_id"])["state"] == "needs-reconcile"
     finally:
         stop()
 
 
-def test_router_routes_fail_closed_without_receipt_store(tmp_path):
+def test_router_routes_fail_closed_without_record_store(tmp_path):
     secrets_path = str(tmp_path / "secrets.json")
     app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
     fleet = gui_fleet.FleetStore(str(tmp_path / "state"))
@@ -2153,7 +2934,7 @@ def test_router_routes_fail_closed_without_receipt_store(tmp_path):
         fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
         run_fn=lambda p, e, on: 0)
     srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, creds, None,
-                                 onboard, certfile=None, receipts=None)
+                                 onboard, certfile=None, record_store=None)
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
@@ -2163,7 +2944,7 @@ def test_router_routes_fail_closed_without_receipt_store(tmp_path):
             status, _, body = _req(
                 "127.0.0.1", port, "POST", "/api/devices/r1/" + action, {},
                 headers=headers)
-            assert status == 503 and "receipt" in json.loads(body)["error"]
+            assert status == 503 and "record" in json.loads(body)["error"]
     finally:
         srv.shutdown()
 
@@ -2349,6 +3130,195 @@ def test_overview_staging_excludes_stale_and_error_devices(tmp_path):
                              headers={"Cookie": ck})[2])
         # fresh + flash only: the stale stager is offline, error is terminal
         assert ov["staging_now"] == 2
+    finally:
+        srv.shutdown()
+
+
+def test_overview_staging_counts_one_errored_image_with_others_in_flight(tmp_path):
+    """Regression (Task 3 review finding): Task 3's set heartbeat
+    (_send_set_heartbeat) reports the single MOST ACTIONABLE stage_state
+    across every image in the tick, so one failed image pins the whole
+    heartbeat to "error" even while another assigned image is still
+    downloading. The old staging_now check treated any stage_state=="error"
+    as terminal and dropped a device like that out of the staging count
+    entirely, mid-transfer. A device holding a multi-image set is wholly
+    failed only once nothing else in the set is still outstanding -- here,
+    "a" errored but "b" is still going, so the device must still count."""
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
+    state = str(tmp_path / "state")
+    fleet = gui_fleet.FleetStore(state)
+    cat = catalog_mod.CatalogStore(state)
+    cat.save_image({"id": "a", "filename": "a.bin", "sha256": "aa",
+                    "published_at": 1})
+    cat.save_image({"id": "b", "filename": "b.bin", "sha256": "bb",
+                    "published_at": 2})
+    fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+    cat.set_policy("d1", approved_image_ids=["a", "b"])
+    # "a" errored, "b" is still downloading: the aggregate stage_state the
+    # agent sends is "error" (Task 3's priority order over "staging"),
+    # staged_image_ids is empty (neither image is done yet), and only one
+    # message rides stage_error.
+    cat.record_heartbeat("d1", {"stage_state": "error",
+                                "stage_error": "a: no space",
+                                "staged_image_ids": [],
+                                "current_image_id": "b"}, now=10)
+    srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, None, cat,
+                                 None, None, certfile=None,
+                                 now_fn=lambda: 100)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        ck, _csrf = _auth("127.0.0.1", port)
+        ov = json.loads(_req("127.0.0.1", port, "GET", "/api/overview",
+                             headers={"Cookie": ck})[2])
+        assert ov["staging_now"] == 1     # b is still in flight
+        assert ov["staged"] == 0          # not fully staged either
+    finally:
+        srv.shutdown()
+
+
+def test_overview_staging_excludes_error_when_nothing_else_is_outstanding(tmp_path):
+    """Companion to the above: once every OTHER assigned image is already
+    staged, the single remaining unstaged one IS the one that errored --
+    nothing else could still be in flight, so the device is wholly failed
+    and must not count as staging."""
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
+    state = str(tmp_path / "state")
+    fleet = gui_fleet.FleetStore(state)
+    cat = catalog_mod.CatalogStore(state)
+    cat.save_image({"id": "a", "filename": "a.bin", "sha256": "aa",
+                    "published_at": 1})
+    cat.save_image({"id": "b", "filename": "b.bin", "sha256": "bb",
+                    "published_at": 2})
+    fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+    cat.set_policy("d1", approved_image_ids=["a", "b"])
+    # "b" is already staged; "a" is the one and only outstanding image, and
+    # it errored -- nothing else this device could still be doing.
+    cat.record_heartbeat("d1", {"stage_state": "error",
+                                "stage_error": "a: no space",
+                                "staged_image_ids": ["b"],
+                                "current_image_id": "a"}, now=10)
+    srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, None, cat,
+                                 None, None, certfile=None,
+                                 now_fn=lambda: 100)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        ck, _csrf = _auth("127.0.0.1", port)
+        ov = json.loads(_req("127.0.0.1", port, "GET", "/api/overview",
+                             headers={"Cookie": ck})[2])
+        assert ov["staging_now"] == 0
+    finally:
+        srv.shutdown()
+
+
+def test_overview_staging_all_errored_is_not_staging(tmp_path):
+    """Review finding on the two tests above: _send_set_heartbeat collapses a
+    multi-image tick's per-image statuses into ONE stage_state, so
+    "1 errored, 2 in flight" and "all 3 errored" used to look identical to
+    the server -- a device stuck on every assigned image counted as staging
+    forever. errored_image_ids (this fix) names the images that actually
+    failed THIS tick, so a device where every assigned image is accounted
+    for by staged_image_ids or errored_image_ids has nothing left in flight
+    and must not count."""
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
+    state = str(tmp_path / "state")
+    fleet = gui_fleet.FleetStore(state)
+    cat = catalog_mod.CatalogStore(state)
+    for iid in ("a", "b", "c"):
+        cat.save_image({"id": iid, "filename": iid + ".bin", "sha256": iid,
+                        "published_at": 1})
+    fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+    cat.set_policy("d1", approved_image_ids=["a", "b", "c"])
+    # every assigned image is either staged (none are) or errored (all are)
+    cat.record_heartbeat("d1", {"stage_state": "error",
+                                "stage_error": "everything failed",
+                                "staged_image_ids": [],
+                                "errored_image_ids": ["a", "b", "c"],
+                                "current_image_id": "a"}, now=10)
+    srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, None, cat,
+                                 None, None, certfile=None,
+                                 now_fn=lambda: 100)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        ck, _csrf = _auth("127.0.0.1", port)
+        ov = json.loads(_req("127.0.0.1", port, "GET", "/api/overview",
+                             headers={"Cookie": ck})[2])
+        assert ov["staging_now"] == 0
+    finally:
+        srv.shutdown()
+
+
+def test_overview_staging_counts_a_flash_full_set_as_still_staging(tmp_path):
+    """Review minor: Tier 3 treats every id in errored_image_ids as accounted
+    for -- but the agent files flash_full there too, and flash_full is the one
+    failure this count has always deliberately kept ("the agent is alive and
+    retrying"). Tiers 1 and 2 both count it; Tier 3 dropped the same device
+    out of staging_now entirely the moment its agent grew the field, so
+    freeing space on the box looked like nothing was happening."""
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
+    state = str(tmp_path / "state")
+    fleet = gui_fleet.FleetStore(state)
+    cat = catalog_mod.CatalogStore(state)
+    for iid in ("a", "b"):
+        cat.save_image({"id": iid, "filename": iid + ".bin", "sha256": iid,
+                        "published_at": 1})
+    fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+    cat.set_policy("d1", approved_image_ids=["a", "b"])
+    # both images are waiting on room: accounted for, but not finished with
+    cat.record_heartbeat("d1", {"stage_state": "flash_full",
+                                "stage_error": "no room for b.bin",
+                                "staged_image_ids": [],
+                                "errored_image_ids": ["a", "b"],
+                                "current_image_id": "a"}, now=10)
+    srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, None, cat,
+                                 None, None, certfile=None,
+                                 now_fn=lambda: 100)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        ck, _csrf = _auth("127.0.0.1", port)
+        ov = json.loads(_req("127.0.0.1", port, "GET", "/api/overview",
+                             headers={"Cookie": ck})[2])
+        assert ov["staging_now"] == 1
+    finally:
+        srv.shutdown()
+
+
+def test_overview_staging_one_errored_two_outstanding_counts(tmp_path):
+    """Companion to the above: with errored_image_ids naming only the ONE
+    image that actually failed, the other two -- neither staged nor errored
+    -- are genuinely still in flight, so the device counts as staging."""
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
+    state = str(tmp_path / "state")
+    fleet = gui_fleet.FleetStore(state)
+    cat = catalog_mod.CatalogStore(state)
+    for iid in ("a", "b", "c"):
+        cat.save_image({"id": iid, "filename": iid + ".bin", "sha256": iid,
+                        "published_at": 1})
+    fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+    cat.set_policy("d1", approved_image_ids=["a", "b", "c"])
+    cat.record_heartbeat("d1", {"stage_state": "error",
+                                "stage_error": "a: no space",
+                                "staged_image_ids": [],
+                                "errored_image_ids": ["a"],
+                                "current_image_id": "b"}, now=10)
+    srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, None, cat,
+                                 None, None, certfile=None,
+                                 now_fn=lambda: 100)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        ck, _csrf = _auth("127.0.0.1", port)
+        ov = json.loads(_req("127.0.0.1", port, "GET", "/api/overview",
+                             headers={"Cookie": ck})[2])
+        assert ov["staging_now"] == 1
     finally:
         srv.shutdown()
 
@@ -2776,9 +3746,52 @@ def test_setup_status_route_returns_documented_shape(tmp_path, monkeypatch):
         assert st["admin"]["username"] == "admin"
         pkgs = st["packages"]
         assert set(("state", "items", "remedy")) <= set(pkgs)
-        assert len(pkgs["items"]) == len(setup_status.IOX_PACKAGES)
+        # +1: the IOx tars plus the IOS-XR agent RPM (iris-xr.rpm), Wave C.
+        assert len(pkgs["items"]) == len(setup_status.IOX_PACKAGES) + 1
         for item in pkgs["items"]:
             assert "name" in item and "state" in item
+    finally:
+        stop()
+
+
+import bulkhash_refresh
+
+
+def test_setup_status_route_carries_the_image_verification_card(tmp_path, monkeypatch):
+    """The route's image_verification card (KGV / Cisco Bulk Hash reconciler,
+    console Task 5) must actually be wired to the real bulkhash settings
+    file on IRIS_STATE, not just present in setup_status.build_status's pure
+    unit tests -- unset with no recorded run, ok once one succeeded, and
+    still unset after one that failed (never an equality check against the
+    literal "fail", since the detail suffix always differs)."""
+    monkeypatch.setenv("IRIS_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
+    state_dir = str(tmp_path / "state")
+    monkeypatch.setenv("IRIS_STATE", state_dir)
+    host, port, _ctx, stop = _serve_full(tmp_path)
+    try:
+        ck, _csrf = _auth(host, port)
+        status, _, body = _req(host, port, "GET", "/api/settings/setup-status",
+                               headers={"Cookie": ck})
+        assert status == 200
+        assert json.loads(body)["image_verification"]["state"] == "unset"
+
+        spath = bulkhash_refresh.settings_path(state_dir)
+        bulkhash_refresh.write_settings(
+            spath, "off", 0, {"at": 1735689600, "source": "scheduled",
+                              "outcome": "fail: signature verification failed",
+                              "matched": None, "mismatched": None,
+                              "not_in_feed": None})
+        status, _, body = _req(host, port, "GET", "/api/settings/setup-status",
+                               headers={"Cookie": ck})
+        assert json.loads(body)["image_verification"]["state"] == "unset"
+
+        bulkhash_refresh.write_settings(
+            spath, "off", 0, {"at": 1735689600, "source": "manual",
+                              "outcome": "ok", "matched": 3, "mismatched": 0,
+                              "not_in_feed": 0})
+        status, _, body = _req(host, port, "GET", "/api/settings/setup-status",
+                               headers={"Cookie": ck})
+        assert json.loads(body)["image_verification"]["state"] == "ok"
     finally:
         stop()
 
@@ -3251,6 +4264,38 @@ def test_device_platform_invalid_value_400(tmp_path):
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
         st, _, _ = _req(host, port, "POST", "/api/devices/d1/platform",
                         {"platform": "bogus"}, headers=hh)
+        assert st == 400
+    finally:
+        stop()
+
+
+def test_device_platform_accepts_the_xr_agent_on_xr_hardware(tmp_path):
+    """The devices table lets an operator change a row's agent install. It
+    must be able to SET xr-appmgr on an IOS-XR box before its management type
+    is classified (the legacy short-circuit; platform xr-appmgr is now
+    mutually bound to management_type xr-host on any fully-validated row,
+    so xr1 stays unclassified here) -- and the fleet guard still refuses
+    xr-appmgr on hardware that is not IOS-XR."""
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, _cat = deps
+    try:
+        routed = {"management_type": "routed", "iris_vlan": "120",
+                  "svi_ip": "10.20.0.1", "svi_mask": "255.255.255.252",
+                  "app_ip": "10.20.0.2", "app_mask": "255.255.255.252",
+                  "app_gateway": "10.20.0.1"}
+        fleet.upsert({"device_id": "xr1", "device_ip": "10.0.0.9", "model": "8201"})
+        fleet.upsert(dict(routed, device_id="sw1", device_ip="10.0.0.8",
+                          model="C9300-48UXM"))
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, _ = _req(host, port, "POST", "/api/devices/xr1/platform",
+                        {"platform": "xr-appmgr"}, headers=hh)
+        assert st == 200
+        st, _, b = _req(host, port, "GET", "/api/devices", headers={"Cookie": ck})
+        rows = {d["device_id"]: d for d in json.loads(b)["devices"]}
+        assert rows["xr1"]["platform"] == "xr-appmgr"
+        st, _, _ = _req(host, port, "POST", "/api/devices/sw1/platform",
+                        {"platform": "xr-appmgr"}, headers=hh)
         assert st == 400
     finally:
         stop()
@@ -3872,6 +4917,40 @@ def test_device_upsert_create_and_update_details(tmp_path):
         stop()
 
 
+def test_device_form_xr_host_body_creates_a_clean_record_with_honest_audit(tmp_path):
+    """Wire-path coverage for the console's xr-host submit branch: POST the
+    EXACT body app.js's devForm submit handler builds for xr-host --
+    device_id, device_ip, management_type, model, platform,
+    credential_profile_id, nothing else, no addressing keys at all --
+    straight to the same /api/devices endpoint the form posts to. The
+    device must come back as a clean xr-host/xr-appmgr record with none of
+    the ten addressing fields, and the create audit line -- whose detail
+    reports vlan by falling back through iris_vlan/inband_vlan/vlan --
+    must show '-' honestly rather than fabricating one."""
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        body = {"device_id": "xr1", "device_ip": "10.0.0.9",
+                "management_type": "xr-host", "model": "8201",
+                "platform": "xr-appmgr", "credential_profile_id": ""}
+        st, _, b = _req(host, port, "POST", "/api/devices", body, headers=hh)
+        assert st == 200, b
+        saved = json.loads(b)["device"]
+        assert saved["management_type"] == "xr-host"
+        assert saved["platform"] == "xr-appmgr"
+        for key in ("iris_vlan", "svi_ip", "svi_mask", "app_ip", "app_mask",
+                    "app_gateway", "vpg_number", "nat_interface", "inband_vlan"):
+            assert not saved.get(key), "%s should be absent/empty, got %r" % (
+                key, saved.get(key))
+        ups = [e for e in _read_audit_lines(audit_path)
+               if e.get("event") == "device_upsert"]
+        assert ups and ups[-1]["action"] == "create"
+        assert ups[-1]["detail"] == "ip 10.0.0.9, vlan -, model 8201"
+    finally:
+        stop()
+
+
 def test_csv_import_route_stats_and_detail(tmp_path):
     host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
     try:
@@ -3909,11 +4988,11 @@ def test_device_delete_details_ok_and_fail(tmp_path):
         dels = [e for e in _read_audit_lines(audit_path)
                 if e.get("event") == "device_delete"]
         assert dels[0]["result"] == "ok"
-        # the receipt outcome is named too: it used to be the one thing delete
+        # the record outcome is named too: it used to be the one thing delete
         # changed (or in this case did not change) without saying so
         assert dels[0]["detail"] == (
             "removed (ip 10.0.0.1, model -), endpoints retained, "
-            "no deployment receipt")
+            "no deployment record")
         # deleting a device that never existed is a FAIL, not a phantom ok
         assert dels[1]["result"] == "fail"
         assert dels[1]["detail"] == "no such device"
@@ -5323,108 +6402,108 @@ def test_settings_ca_trust_malformed_ipv6_rejected(tmp_path, monkeypatch):
 
 # ---- GET /api/devices/<id>/deployment (deployment config visibility) ------
 
-def _serve_receipts(tmp_path, now_fn=None):
-    """A server with ONLY a receipt store wired (the deployment route needs
+def _serve_records(tmp_path, now_fn=None):
+    """A server with ONLY a record store wired (the deployment route needs
     nothing else). Returns the store so tests can seed records directly."""
-    import deployment_receipts
+    import deployment_records
     app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
     app.set_admin("admin", "pw")
     state = str(tmp_path / "state")
-    receipts = (deployment_receipts.ReceiptStore(state, now_fn=now_fn)
-                if now_fn else deployment_receipts.ReceiptStore(state))
+    record_store = (deployment_records.DeploymentRecordStore(state, now_fn=now_fn)
+                if now_fn else deployment_records.DeploymentRecordStore(state))
     srv = gui_server.make_server("127.0.0.1", 0, app, certfile=None,
-                                 receipts=receipts)
+                                 record_store=record_store)
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    return "127.0.0.1", port, receipts, srv.shutdown
+    return "127.0.0.1", port, record_store, srv.shutdown
 
 
-def _receipt_stub(device_id):
+def _record_stub(device_id):
     return {"controller_id": "iris", "device_id": device_id,
             "inventory_revision": 1, "plan_hash": "h",
-            "resolved": {"attachment": "routed", "platform": "guestshell"},
+            "resolved": {"management_type": "routed", "platform": "guestshell"},
             "preflight": {"status": "not-required"},
             "resources": [{"kind": "guestshell", "ownership": "iris-created"}]}
 
 
-def test_deployment_route_auth_and_receipts_unavailable(tmp_path):
-    # no receipt store wired at all -> 404 "receipts unavailable"
+def test_deployment_route_auth_and_records_unavailable(tmp_path):
+    # no record store wired at all -> 404 "records unavailable"
     host, port, _app, stop = _serve(tmp_path)
     try:
         assert _req(host, port, "GET", "/api/devices/d1/deployment")[0] == 401
         ck, _csrf = _auth(host, port)
         st, _, b = _req(host, port, "GET", "/api/devices/d1/deployment",
                         headers={"Cookie": ck})
-        assert st == 404 and json.loads(b)["error"] == "receipts unavailable"
+        assert st == 404 and json.loads(b)["error"] == "records unavailable"
     finally:
         stop()
 
 
 def test_deployment_route_null_then_newest_then_active(tmp_path):
     clock = {"t": 100}
-    host, port, receipts, stop = _serve_receipts(tmp_path,
+    host, port, record_store, stop = _serve_records(tmp_path,
                                                  now_fn=lambda: clock["t"])
     try:
         ck, _csrf = _auth(host, port)
-        # no receipts for the device: record is null, total 0
+        # no records for the device: record is null, total 0
         st, _, b = _req(host, port, "GET", "/api/devices/d1/deployment",
                         headers={"Cookie": ck})
         assert st == 200
-        assert json.loads(b) == {"receipt": None, "total": 0}
-        # two non-active, non-recoverable receipts -> the newest by
+        assert json.loads(b) == {"record": None, "total": 0}
+        # two non-active, non-recoverable records -> the newest by
         # timestamps.planned_at wins
-        r1 = receipts.create(_receipt_stub("d1"))
-        receipts.transition(r1["receipt_id"], "removed")
+        r1 = record_store.create(_record_stub("d1"))
+        record_store.transition(r1["record_id"], "removed")
         clock["t"] = 200
-        r2 = receipts.create(_receipt_stub("d1"))
+        r2 = record_store.create(_record_stub("d1"))
         _, _, b = _req(host, port, "GET", "/api/devices/d1/deployment",
                        headers={"Cookie": ck})
         got = json.loads(b)
         assert got["total"] == 2
-        assert got["receipt"]["receipt_id"] == r2["receipt_id"]
-        assert got["receipt"]["state"] == "planned"
-        # the record is the stored receipt as-is (resolved/preflight/
+        assert got["record"]["record_id"] == r2["record_id"]
+        assert got["record"]["state"] == "planned"
+        # the response is the stored record as-is (resolved/preflight/
         # resources ride along)
-        assert got["receipt"]["resolved"]["platform"] == "guestshell"
-        assert got["receipt"]["preflight"] == {"status": "not-required"}
-        assert got["receipt"]["resources"][0]["kind"] == "guestshell"
-        assert got["receipt"]["timestamps"]["planned_at"] == 200
-        # once a receipt goes active it wins regardless of age
-        receipts.transition(r2["receipt_id"], "applying")
-        receipts.transition(r2["receipt_id"], "active")
+        assert got["record"]["resolved"]["platform"] == "guestshell"
+        assert got["record"]["preflight"] == {"status": "not-required"}
+        assert got["record"]["resources"][0]["kind"] == "guestshell"
+        assert got["record"]["timestamps"]["planned_at"] == 200
+        # once a record goes active it wins regardless of age
+        record_store.transition(r2["record_id"], "applying")
+        record_store.transition(r2["record_id"], "active")
         clock["t"] = 300
-        r3 = receipts.create(_receipt_stub("d1"))     # newer, but only planned
+        r3 = record_store.create(_record_stub("d1"))     # newer, but only planned
         _, _, b = _req(host, port, "GET", "/api/devices/d1/deployment",
                        headers={"Cookie": ck})
         got = json.loads(b)
         assert got["total"] == 3
-        assert got["receipt"]["receipt_id"] == r2["receipt_id"]
-        assert got["receipt"]["state"] == "active"
-        assert r3["receipt_id"] != r2["receipt_id"]
-        # receipts are per-device: another device still sees null
+        assert got["record"]["record_id"] == r2["record_id"]
+        assert got["record"]["state"] == "active"
+        assert r3["record_id"] != r2["record_id"]
+        # records are per-device: another device still sees null
         _, _, b = _req(host, port, "GET", "/api/devices/other/deployment",
                        headers={"Cookie": ck})
-        assert json.loads(b) == {"receipt": None, "total": 0}
+        assert json.loads(b) == {"record": None, "total": 0}
     finally:
         stop()
 
 
 def test_deployment_route_recoverable_beats_newer_planned(tmp_path):
     clock = {"t": 100}
-    host, port, receipts, stop = _serve_receipts(tmp_path,
+    host, port, record_store, stop = _serve_records(tmp_path,
                                                  now_fn=lambda: clock["t"])
     try:
         ck, _csrf = _auth(host, port)
-        r1 = receipts.create(_receipt_stub("d1"))
-        receipts.transition(r1["receipt_id"], "needs-reconcile")
+        r1 = record_store.create(_record_stub("d1"))
+        record_store.transition(r1["record_id"], "needs-reconcile")
         clock["t"] = 200
-        receipts.create(_receipt_stub("d1"))          # newer, merely planned
+        record_store.create(_record_stub("d1"))          # newer, merely planned
         _, _, b = _req(host, port, "GET", "/api/devices/d1/deployment",
                        headers={"Cookie": ck})
         got = json.loads(b)
-        # the recoverable receipt still describes what is ON the box
-        assert got["receipt"]["receipt_id"] == r1["receipt_id"]
-        assert got["receipt"]["state"] == "needs-reconcile"
+        # the recoverable record still describes what is ON the box
+        assert got["record"]["record_id"] == r1["record_id"]
+        assert got["record"]["state"] == "needs-reconcile"
         assert got["total"] == 2
     finally:
         stop()
@@ -5674,9 +6753,9 @@ def test_force_undeploy_delivers_the_force_flag_to_the_recipe(tmp_path):
 
     env_extra is the ONLY channel into the recipe, and the undeploy branch is
     the only place the flag is ever set. Dropping env_extra for that action
-    silently downgrades a forced teardown to the full receipted one: on Guest
+    silently downgrades a forced teardown to the full recorded one: on Guest
     Shell and IOx that removes Vlan$VLAN, the IRISQ discriminators and the PKI
-    trustpoint using inventory values no receipt has proven -- precisely the
+    trustpoint using inventory values no record has proven -- precisely the
     harm the flag exists to prevent -- while the audit trail records that the
     operator's network was left untouched."""
     seen = {}
@@ -5697,6 +6776,85 @@ def test_force_undeploy_delivers_the_force_flag_to_the_recipe(tmp_path):
             "forced undeploy reached the recipe without the force flag")
     finally:
         stop()
+
+
+def test_force_undeploy_delivers_the_force_flag_to_xr_uninstall(tmp_path):
+    """The same force-flag delivery test above, but for an xr-host/xr-appmgr
+    device: force must resolve to device/xr-uninstall.sh (not one of the
+    IOS-XE teardown scripts) and IRIS_FORCE_AGENT_ONLY=1 must reach it the
+    same way it reaches the Guest Shell/IOx recipes. XR force never touches
+    a record -- os_family xr + platform xr-appmgr resolve straight to the
+    XR recipe with no probe or preflight involved, so a bare device record
+    is enough here, unlike an onboard test."""
+    seen = {}
+    ran_script = {}
+
+    def run_fn(p, e, on):
+        seen.update(e)
+        ran_script["path"] = p
+        return 0
+
+    host, port, stop = _serve_inband(
+        tmp_path, run_fn,
+        device={"device_id": "xr1", "device_ip": "10.0.0.9", "model": "8201",
+                "os_family": "xr", "platform": "xr-appmgr",
+                "management_type": "xr-host", "credential_profile_id": "lab"})
+    try:
+        ck, csrf = _auth(host, port)
+        st, _, b = _req(host, port, "POST", "/api/devices/xr1/undeploy",
+                        {"force": True},
+                        headers={"Cookie": ck, "X-CSRF-Token": csrf})
+        assert st == 200, b
+        _wait_onboard_job(host, port, ck, json.loads(b)["job_id"])
+        assert seen.get("IRIS_FORCE_AGENT_ONLY") == "1", (
+            "forced XR undeploy reached the recipe without the force flag")
+        assert ran_script.get("path", "").endswith("device/xr-uninstall.sh"), (
+            "forced XR undeploy did not run device/xr-uninstall.sh: %r"
+            % ran_script.get("path"))
+    finally:
+        stop()
+
+
+def test_undeploy_force_help_and_confirm_text_cover_xr_alongside_router():
+    """Source guard for the force-undeploy operator-facing text (Directive 2
+    Task 4): both the undeploy modal's help copy (index.html) and the confirm()
+    dialog text (app.js) must say, in the same breath as the pre-existing
+    router/IOx wording, what force actually does on an IOS-XR device --
+    strips only the IRIS-named appmgr footprint (app `iris`, source
+    `iris-xr`, the RPM, iris-work/, sidecar files) and never a staged image
+    file -- with the carve-out honestly stated too: the agent (not IRIS
+    teardown) deletes an adopted file when the catalog republishes new
+    content under that same image id, per
+    test_content_republish_on_an_adopted_file_warns_before_replacing_it in
+    device/agent/tests/test_iris_agent.py -- a claim that "a file the agent
+    did not itself download is never removed" would overclaim against that
+    tested behavior. Pinned as one whitespace-collapsed sentence so
+    re-wrapped HTML indentation can't dodge the assertion, and the
+    pre-existing router/IOx sentences are pinned alongside it so neither
+    text loses its wording when the other changes."""
+    xr_sentence = (
+        "On an IOS-XR device, force removes the same IRIS-named footprint "
+        "a normal undeploy would — the appmgr application iris, its "
+        "iris-xr package source, the RPM, iris-work/, and the IRIS sidecar "
+        "files at harddisk: root — but a staged image file there is never "
+        "removed by IRIS teardown, and the agent deletes an adopted file "
+        "only when the catalog republishes new content under that same "
+        "image id — never otherwise.")
+
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    help_row = html.split('id="undeploy-modal"', 1)[1].split(
+        'class="modal-foot"', 1)[0]
+    collapsed = " ".join(help_row.split())
+    assert xr_sentence in collapsed
+    assert ("VirtualPortGroup and NAT are left untouched, because nothing "
+            "here proves IRIS created them.") in collapsed
+
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    assert xr_sentence in js
+    assert ("The VirtualPortGroup and NAT are NOT removed, because without "
+            "a record there is no proof IRIS created them") in js
 
 
 def test_telemetry_health_badge_lives_on_overview_not_monitoring():
@@ -5755,7 +6913,7 @@ def test_devices_filter_every_column_and_act_on_the_filtered_set():
         js = f.read()
     devices = html.split('id="view-devices"', 1)[1].split("</section>", 1)[0]
     # one control per meaningful column, plus free text across the row
-    for control in ("dev-filter-q", "dev-filter-attachment", "dev-filter-platform",
+    for control in ("dev-filter-q", "dev-filter-management-type", "dev-filter-platform",
                     "dev-filter-cred", "dev-filter-telemetry", "dev-filter-peer",
                     "dev-filter-status", "dev-filter-clear"):
         assert 'id="%s"' % control in devices, "missing filter control: %s" % control
@@ -5766,6 +6924,284 @@ def test_devices_filter_every_column_and_act_on_the_filtered_set():
     assert "deviceMatchesFilters" in js
     # filters re-render, and the periodic poll must not wipe them
     assert "applyDeviceFilters" in js
+
+
+def test_agent_install_rename_and_inventory_only_label():
+    """Vocabulary fix: the 'platform' field (guestshell/iox/router) read as
+    networking hardware to operators, so its DISPLAY text becomes "Agent
+    install" everywhere it appears -- the add-form placeholder, the devices-
+    table header, and the filter label. Separately, the 'legacy'/
+    'legacy_routed' management_type value displayed as the word "legacy",
+    which reads like a real inventory state rather than "management type
+    not chosen yet" -- it becomes "Inventory only — management type not
+    chosen". Both are display-only: the wire field name 'platform', its
+    values (guestshell/iox/router), and the management_type values (legacy/
+    legacy_routed) are unchanged."""
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+
+    # index.html: filter option, filter label, table header, add-form select
+    assert '<option value="legacy">Inventory only — management type not chosen</option>' in html
+    assert 'aria-label="Filter by agent install"' in html
+    assert '<option value="">Agent install: any</option>' in html
+    assert '<th>Agent install</th>' in html
+    assert '<option value="" disabled selected>Choose an agent install</option>' in html
+    assert 'Agent install - auto by model' not in html
+    # the old wording is gone everywhere it used to appear as a label
+    assert '>Platform<' not in html
+    assert 'Platform: any' not in html
+    assert 'Filter by platform"' not in html
+    assert '>legacy</option>' not in html
+
+    # the field id, its values, and the management_type values are untouched
+    assert 'id="df-platform"' in html and 'id="dev-filter-platform"' in html
+    assert 'value="guestshell"' in html and 'value="iox"' in html
+    assert 'value="router"' in html and 'value="xr-appmgr"' in html
+    assert '<option value="legacy"' in html
+
+    # app.js: the row-management-type display and the status/detail lines
+    assert "'Inventory only — management type not chosen'" in js
+    assert "managementType === 'legacy_routed' || managementType === 'legacy'" in js
+    assert "'Agent install updated for '" in js
+    assert "'Agent install update failed: '" in js
+    assert "['Agent install', esc(res.platform" in js
+
+
+def test_add_device_form_model_field_precedes_agent_install_select():
+    """Agent-install options depend on the model (gui_onboard.
+    install_options_for), so the model input must render BEFORE the agent-
+    install select in the add-device form's DOM order -- app.js's
+    refreshInstallOptions reads df-model's live value to filter df-platform's
+    options as the operator types, before the field it is about to filter
+    even exists otherwise."""
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    assert html.index('id="df-model"') < html.index('id="df-platform"')
+
+
+def test_add_device_form_filters_install_options_live_by_model():
+    """Source guard for the /api/install-options wiring: as the operator
+    types a model, the agent-install select is refetched and repainted --
+    to the one option an IOS-XR model can run, and back to the full set when
+    the model is blank or unrecognized. The select used to be DISABLED for
+    IOS-XR with "no agent install available yet"; the XR appmgr container
+    agent exists now, so that text is gone and the option is real."""
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    assert "getElementById('df-model').addEventListener('input'" in js
+    assert "/api/install-options?model=" in js
+    assert "no agent install available yet" not in js
+    assert "'xr-appmgr'" in js and "XR appmgr container" in js
+    assert "refreshInstallOptions" in js
+
+
+def test_xr_host_management_type_option_added_to_both_selects():
+    """The xr-host management type needs to be choosable from the console:
+    the add-device form's df-management-type select and the devices-table
+    dev-filter-management-type select both gain the wire value xr-host. The
+    filter (whose siblings are bare wire-value labels like "routed") gets
+    the short honest label 'XR host'; the add-device form (whose siblings
+    are each "Label - one-line description", e.g. "Routed - IRIS-managed
+    app network") gets the matching descriptive form so xr-host doesn't
+    stand out as the one option with no explanation."""
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    dev_filter = html.split('id="dev-filter-management-type"', 1)[1].split("</select>", 1)[0]
+    assert '<option value="xr-host">XR host</option>' in dev_filter
+    df_mgmt_type = html.split('id="df-management-type"', 1)[1].split("</select>", 1)[0]
+    assert ('<option value="xr-host">XR host - router\'s own network '
+            'stack</option>') in df_mgmt_type
+
+
+def test_update_device_fields_hides_every_addressing_field_for_xr_host():
+    """xr-host runs the appmgr container on the router's own network stack:
+    no VLAN, SVI, VPG, NAT interface, or app IP/mask/gateway. Before this,
+    df-guest/df-mask/df-gateway were ALWAYS visible regardless of
+    management type -- the core UX bug this task fixes, since an operator adding
+    an XR router saw three fields that mean nothing for it. updateDeviceFields
+    must hide all seven addressing fields for xr-host and set the agent
+    install to xr-appmgr, mirroring the pre-existing router auto-set/clear
+    pattern in both directions."""
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    fn = js.split("function updateDeviceFields() {", 1)[1].split("\n  }", 1)[0]
+    assert "var xrHost = managementType === 'xr-host';" in fn
+    assert "df-vlan').hidden = router || xrHost;" in fn
+    assert "df-guest').hidden = xrHost;" in fn
+    assert "df-mask').hidden = xrHost;" in fn
+    assert "df-gateway').hidden = xrHost;" in fn
+    assert "if (xrHost && !platform.value) platform.value = 'xr-appmgr';" in fn
+    assert "if (!xrHost && platform.value === 'xr-appmgr') platform.value = '';" in fn
+
+
+def test_xr_host_auto_selected_from_model_and_from_platform_pick():
+    """Two paths into xr-host without ever asking the operator to notice an
+    addressing field: (1) the model looks IOS-XR shaped, which the client
+    learns not by reimplementing the server's model regex but by reading
+    the /api/install-options answer -- an XR model gets back exactly
+    ["xr-appmgr"], nothing else ever does -- and (2) the operator picks
+    Agent install = XR appmgr container directly. Either path auto-selects
+    df-management-type to xr-host and repaints the form, without fighting an
+    operator who is already there.
+
+    Symmetric exit: correcting the model away from an XR shape (e.g. 8201
+    -> C9300-48UXM) must reset an auto-entered xr-host management type back
+    to the unset/default option and repaint. Without this, df-guest/df-mask/
+    df-gateway stay hidden for a non-XR device with no visible cause and
+    the form cannot be completed. Scoped to the same model-driven repaint
+    -- it must not reach for any of the operator's own explicit management
+    type changes elsewhere in the form.
+
+    Regression closed here: a first pass only wired the exit into the
+    fetched-non-XR-answer branch. Every OTHER path that repaints the
+    platform select away from offering xr-appmgr -- the blank-model early
+    return, the !r.ok error path, a null options answer, the zero-options
+    dead end, and the catch block -- painted FULL_INSTALL_OPTIONS_HTML
+    (which does not even list xr-appmgr) while leaving df-management-type
+    stuck on xr-host, so the addressing fields stayed hidden with the
+    agent-install select silently offering no way back to xr-appmgr
+    either. The exit must be a single helper invoked from every one of
+    those paths, not re-implemented ad hoc per branch."""
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    refresh_fn = js.split("async function refreshInstallOptions() {", 1)[1].split(
+        "  document.getElementById('df-model').addEventListener('input', refreshInstallOptions);", 1)[0]
+    assert "options.length === 1 && options[0] === 'xr-appmgr'" in refresh_fn
+    assert "mgmtTypeSel.value !== 'xr-host'" in refresh_fn
+    assert "mgmtTypeSel.value = 'xr-host';" in refresh_fn
+    assert "updateDeviceFields();" in refresh_fn
+    assert "function exitXrHostIfStale() {" in refresh_fn
+    helper = refresh_fn.split("function exitXrHostIfStale() {", 1)[1].split("}", 1)[0]
+    assert "mgmtTypeSel.value === 'xr-host'" in helper
+    assert "mgmtTypeSel.value = '';" in helper
+    assert "updateDeviceFields();" in helper
+    # every non-XR repaint path calls the helper -- six calls: blank model,
+    # !r.ok, options === null, options.length === 0, the fetched-non-XR
+    # answer, and the catch block
+    assert refresh_fn.count("exitXrHostIfStale();") == 6
+    blank_model_block = refresh_fn.split("if (!model) {", 1)[1].split("}", 1)[0]
+    assert "exitXrHostIfStale();" in blank_model_block, \
+        "blank-model early return must exit a stale xr-host management type too"
+    catch_block = refresh_fn.split("} catch (e) {", 1)[1]
+    assert "exitXrHostIfStale();" in catch_block
+    assert "getElementById('df-platform').addEventListener('change'" in js
+    plat_fn = js.split(
+        "getElementById('df-platform').addEventListener('change', function () {", 1)[1].split(
+        "});", 1)[0]
+    assert "this.value !== 'xr-appmgr'" in plat_fn
+    assert "mgmtTypeSel.value === 'xr-host'" in plat_fn
+    assert "mgmtTypeSel.value = 'xr-host';" in plat_fn
+
+
+def test_device_form_submit_sends_no_addressing_fields_for_xr_host():
+    """The submit handler used to fall through to an 'else' branch that
+    sent iris_vlan/svi_ip/svi_mask for anything not inband or router-* --
+    an unhandled xr-host would have wrongly carried routed-mode addressing.
+    An explicit xr-host branch must send NONE of the addressing keys at
+    all: not the routed ones, not app_ip/app_mask/app_gateway either."""
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    assert "if (managementType === 'xr-host') {" in js
+    xr_branch = js.split("if (managementType === 'xr-host') {", 1)[1].split(
+        "} else if (managementType === 'inband') {", 1)[0]
+    for key in ("iris_vlan", "svi_ip", "svi_mask", "app_ip", "app_mask",
+                "app_gateway", "vpg_number", "nat_interface", "inband_vlan"):
+        assert key not in xr_branch, "xr-host submit branch sends %s" % key
+
+
+def test_devices_table_renders_honest_xr_host_label():
+    """managementTypeLabel must render xr-host as 'XR host' -- no VLAN/VPG
+    detail suffix appended, since xr-host carries neither -- while the
+    existing legacy/inventory-only branch stays untouched. Scoped to the
+    managementTypeLabel assignment itself (a bare substring search would
+    pass on ANY occurrence of these tokens anywhere in app.js and would
+    never notice a xr-host arm that accidentally referenced
+    managementTypeDetail), so this also pins that the xr-host arm precedes
+    the generic 'managementType + managementTypeDetail' fallback and never
+    reads managementTypeDetail."""
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    label = js.split("var managementTypeLabel = ", 1)[1].split(";\n", 1)[0]
+    assert "managementType === 'legacy_routed' || managementType === 'legacy'" in label
+    assert "'Inventory only — management type not chosen'" in label
+    assert "managementType === 'xr-host'" in label
+    assert "'XR host'" in label
+    fallback_marker = "(managementType + managementTypeDetail)"
+    assert fallback_marker in label
+    xr_idx = label.index("managementType === 'xr-host'")
+    fallback_idx = label.index(fallback_marker)
+    assert xr_idx < fallback_idx, "xr-host arm must precede the generic fallback"
+    xr_arm = label[xr_idx:fallback_idx]
+    assert "managementTypeDetail" not in xr_arm
+
+
+def test_deploy_info_panel_hides_meaningless_rows_and_labels_xr_host():
+    """The per-row (i) deployment-details panel rendered raw 'xr-host' as
+    the Attachment value and four rows of dashes -- Management VLAN / VPG,
+    SVI, App IP, NAT interface -- that mean nothing for an xr-host record,
+    since the appmgr container carries none of them. xr-host now renders
+    the honest 'XR host' label, and the four addressing rows are dropped
+    from the table entirely for it rather than shown as em-dashes (which
+    read as "unknown", not "not applicable")."""
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    fn = js.split("function deployRecordRows(rec, total) {", 1)[1].split(
+        "\n  }", 1)[0]
+    # Pins the DATA KEY, not just the rendered label: a reader still keyed
+    # off the retired res.attachment would read undefined for every device
+    # (deployment_records never wrote res.attachment) and this whole test
+    # would stay green testing a dead code path -- Task 2's fix-wave gap.
+    assert "res.management_type" in fn
+    assert "res.attachment" not in fn
+    assert "var xrHost = managementType === 'xr-host';" in fn
+    assert "'XR host'" in fn
+    assert "if (!xrHost) {" in fn
+    guarded = fn.split("if (!xrHost) {", 1)[1].split("}", 1)[0]
+    for row in ("Management VLAN / VPG", "SVI", "App IP", "NAT interface"):
+        assert row in guarded, "%r must be inside the !xrHost guard" % row
+    # State/Record/Planned/Finished/Preflight/Management type stay
+    # unconditional (every record has them); so do Swarm port/Model/Agent
+    # install/Device identity, which are outside the guard, after it closes
+    unguarded = fn.split("if (!xrHost) {", 1)[0]
+    for row in ("State", "Record", "Planned", "Finished", "Preflight",
+                "Management type"):
+        assert row in unguarded
+    after_guard = fn.split("if (!xrHost) {", 1)[1].split("}", 1)[1]
+    for row in ("Swarm port", "Model", "Agent install", "Device identity"):
+        assert row in after_guard
+
+
+def test_install_options_api_requires_auth_and_matches_model_matrix(tmp_path):
+    host, port, _, stop = _serve(tmp_path)
+    try:
+        assert _req(host, port, "GET",
+                    "/api/install-options?model=C9300-48UXM")[0] == 401
+        cookie, _ = _login(host, port)
+        headers = {"Cookie": cookie}
+
+        st, _, b = _req(host, port, "GET",
+                        "/api/install-options?model=C9300-48UXM", headers=headers)
+        assert st == 200
+        assert json.loads(b)["options"] == ["guestshell", "iox"]
+
+        # the 8201 incident: an IOS-XR model gets the ONE install it can run
+        # (never an IOS-XE one), not null
+        st, _, b = _req(host, port, "GET", "/api/install-options?model=8201",
+                        headers=headers)
+        assert st == 200
+        assert json.loads(b)["options"] == ["xr-appmgr"]
+
+        # blank/unrecognized model -> None ("auto only", no guardrail opinion)
+        st, _, b = _req(host, port, "GET", "/api/install-options?model=",
+                        headers=headers)
+        assert json.loads(b)["options"] is None
+        st, _, b = _req(host, port, "GET", "/api/install-options",
+                        headers=headers)
+        assert json.loads(b)["options"] is None
+    finally:
+        stop()
 
 
 def test_deploy_logs_paging_graph_search_and_side_drawer():
@@ -6021,46 +7457,46 @@ _OWNED = [{"kind": k, "ownership": "iris-created"} for k in (
     "nat-static", "nat-outside-marking")]
 
 
-def _stranded_receipt(receipts, resources=None):
-    """A receipt in the state a died-mid-teardown router is left in."""
-    rid = receipts.create({
+def _stranded_record(record_store, resources=None):
+    """A record in the state a died-mid-teardown router is left in."""
+    rid = record_store.create({
         "controller_id": "iris", "device_id": "r1", "inventory_revision": 1,
         "plan_hash": "b" * 64,
-        "resolved": {"platform": "router", "attachment": "router-nat",
+        "resolved": {"platform": "router", "management_type": "router-nat",
                      "device_ip": "192.0.2.10", "vpg_number": "10",
                      "nat_interface": "GigabitEthernet1", "app_ip": "10.8.0.2",
                      "app_mask": "255.255.255.252", "app_gateway": "10.8.0.1"},
         "preflight": {"status": "passed", "device_identity": "OLDBOARDID"},
-        "resources": _OWNED if resources is None else resources})["receipt_id"]
-    receipts.transition(rid, "applying")
-    receipts.transition(rid, "needs-reconcile")
+        "resources": _OWNED if resources is None else resources})["record_id"]
+    record_store.transition(rid, "applying")
+    record_store.transition(rid, "needs-reconcile")
     return rid
 
 
-def test_delete_abandons_receipts_so_a_readded_device_can_onboard(tmp_path, monkeypatch):
+def test_delete_abandons_records_so_a_readded_device_can_onboard(tmp_path, monkeypatch):
     """Delete must be terminal for a device id.
 
     Every other per-device store is purged on delete -- assignment, heartbeat,
-    telemetry, pull directive, report ledger -- but the receipt store was never
+    telemetry, pull directive, report ledger -- but the record store was never
     touched, and it is the one that gates onboard. A device deleted and added
     back under the same id therefore inherited its predecessor's deployment:
     onboard refused with "undeploy it first", and the undeploy it named refused
     the box, because a rebuilt VM keeps the id and the address but reports a new
     board ID. Neither door opened, and delete was no way out either."""
     monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
-    host, port, fleet, receipts, stop = _serve_router(tmp_path, lambda p, e, on: 0)
+    host, port, fleet, record_store, stop = _serve_router(tmp_path, lambda p, e, on: 0)
     try:
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
-        rid = _stranded_receipt(receipts)
+        rid = _stranded_record(record_store)
 
         st, _, b = _req(host, port, "POST", "/api/devices/r1/onboard", {}, headers=hh)
-        assert st == 409 and b"deployment receipt" in b
+        assert st == 409 and b"deployment record" in b
 
         st, _, b = _req(host, port, "DELETE", "/api/devices/r1", headers=hh)
         assert st == 200, b
-        assert receipts.get(rid)["state"] == "abandoned"
-        assert receipts.recoverable_for_device("r1") is None
+        assert record_store.get(rid)["state"] == "abandoned"
+        assert record_store.recoverable_for_device("r1") is None
 
         st, _, b = _req(host, port, "POST", "/api/devices", dict(_ROUTER_ROW),
                         headers=hh)
@@ -6072,32 +7508,32 @@ def test_delete_abandons_receipts_so_a_readded_device_can_onboard(tmp_path, monk
         stop()
 
 
-def test_delete_audit_names_the_receipt_outcome(tmp_path, monkeypatch):
+def test_delete_audit_names_the_record_outcome(tmp_path, monkeypatch):
     """The delete audit line already names what it revoked and what it retained.
-    Receipts were the one thing it changed silently."""
+    Records were the one thing it changed silently."""
     monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
     audit_path = str(tmp_path / "audit.jsonl")
-    host, port, fleet, receipts, stop = _serve_router(
+    host, port, fleet, record_store, stop = _serve_router(
         tmp_path, lambda p, e, on: 0, audit_path=audit_path)
     try:
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
-        _stranded_receipt(receipts)
+        _stranded_record(record_store)
         assert _req(host, port, "DELETE", "/api/devices/r1", headers=hh)[0] == 200
         with open(audit_path) as stream:
             events = [json.loads(line) for line in stream if line.strip()]
         deletes = [e for e in events if e.get("event") == "device_delete"]
         assert deletes, "no device_delete audit event"
-        assert "1 deployment receipt abandoned" in deletes[0]["detail"], \
+        assert "1 deployment record abandoned" in deletes[0]["detail"], \
             deletes[0]["detail"]
     finally:
         stop()
 
 
-def test_forced_undeploy_is_honoured_when_a_receipt_exists(tmp_path):
-    """Force is the rescue path for a box that no longer matches its receipt --
-    which is exactly a case where a receipt EXISTS. It used to be consulted only
-    on the no-receipt branch, so a replaced device ran the full receipted
+def test_forced_undeploy_is_honoured_when_a_record_exists(tmp_path):
+    """Force is the rescue path for a box that no longer matches its record --
+    which is exactly a case where a record EXISTS. It used to be consulted only
+    on the no-record branch, so a replaced device ran the full recorded
     teardown, hit the recipe's identity guard on the new board ID, and failed
     every single time with no way to ask for anything else."""
     seen = {}
@@ -6106,81 +7542,81 @@ def test_forced_undeploy_is_honoured_when_a_receipt_exists(tmp_path):
         seen.update(e)
         return 0
 
-    host, port, fleet, receipts, stop = _serve_router(tmp_path, run_fn)
+    host, port, fleet, record_store, stop = _serve_router(tmp_path, run_fn)
     try:
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
-        rid = _stranded_receipt(receipts)
+        rid = _stranded_record(record_store)
 
         st, _, b = _req(host, port, "POST", "/api/devices/r1/undeploy",
                         {"force": True}, headers=hh)
         assert st == 200, b
         _wait_onboard_job(host, port, ck, json.loads(b)["job_id"])
         assert seen.get("IRIS_FORCE_AGENT_ONLY") == "1", (
-            "a forced undeploy ran the receipted teardown instead")
-        # and the receipt it deliberately did not use as authority is retired,
+            "a forced undeploy ran the recorded teardown instead")
+        # and the record it deliberately did not use as authority is retired,
         # or the very next onboard is refused on it again.
-        assert receipts.get(rid)["state"] == "abandoned"
-        assert receipts.recoverable_for_device("r1") is None
+        assert record_store.get(rid)["state"] == "abandoned"
+        assert record_store.recoverable_for_device("r1") is None
     finally:
         stop()
 
 
-def test_forced_undeploy_retires_receipts_only_on_success(tmp_path):
-    """A failure to reach the device is not proof that the receipt is wrong.
-    Voiding a healthy deployment's receipt on a network blip would strand it the
+def test_forced_undeploy_retires_records_only_on_success(tmp_path):
+    """A failure to reach the device is not proof that the record is wrong.
+    Voiding a healthy deployment's record on a network blip would strand it the
     way this path exists to prevent, so retirement waits for a clean exit."""
-    host, port, fleet, receipts, stop = _serve_router(
+    host, port, fleet, record_store, stop = _serve_router(
         tmp_path, lambda p, e, on: 1)
     try:
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
-        rid = _stranded_receipt(receipts)
+        rid = _stranded_record(record_store)
         st, _, b = _req(host, port, "POST", "/api/devices/r1/undeploy",
                         {"force": True}, headers=hh)
         assert st == 200, b
         _wait_onboard_job(host, port, ck, json.loads(b)["job_id"])
-        assert receipts.get(rid)["state"] != "abandoned"
+        assert record_store.get(rid)["state"] != "abandoned"
     finally:
         stop()
 
 
-def test_forced_undeploy_escapes_multiple_recoverable_receipts(tmp_path):
-    """Two recoverable receipts refuse onboard, undeploy and adopt alike, and
+def test_forced_undeploy_escapes_multiple_recoverable_records(tmp_path):
+    """Two recoverable records refuse onboard, undeploy and adopt alike, and
     nothing in the product resolved them. The refusal now names force, and force
     reaches the teardown instead of being rejected ahead of it."""
-    host, port, fleet, receipts, stop = _serve_router(tmp_path, lambda p, e, on: 0)
+    host, port, fleet, record_store, stop = _serve_router(tmp_path, lambda p, e, on: 0)
     try:
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
-        first = _stranded_receipt(receipts)
-        second = _stranded_receipt(receipts)
+        first = _stranded_record(record_store)
+        second = _stranded_record(record_store)
 
         st, _, b = _req(host, port, "POST", "/api/devices/r1/undeploy", {},
                         headers=hh)
         assert st == 409
-        assert b"multiple recoverable receipts" in b and b"force" in b
+        assert b"multiple recoverable records" in b and b"force" in b
 
         st, _, b = _req(host, port, "POST", "/api/devices/r1/undeploy",
                         {"force": True}, headers=hh)
         assert st == 200, b
         _wait_onboard_job(host, port, ck, json.loads(b)["job_id"])
-        assert receipts.get(first)["state"] == "abandoned"
-        assert receipts.get(second)["state"] == "abandoned"
+        assert record_store.get(first)["state"] == "abandoned"
+        assert record_store.get(second)["state"] == "abandoned"
     finally:
         stop()
 
 
-def test_repeated_unusable_receipt_undeploy_stays_409(tmp_path):
-    """The 409 path marks the receipt needs-reconcile on its way out. Doing that
-    to a receipt already in needs-reconcile is not a legal transition, and the
+def test_repeated_unusable_record_undeploy_stays_409(tmp_path):
+    """The 409 path marks the record needs-reconcile on its way out. Doing that
+    to a record already in needs-reconcile is not a legal transition, and the
     raise escaped do_POST -- so the first retry answered with a traceback and no
     JSON body instead of the reason."""
-    host, port, fleet, receipts, stop = _serve_router(tmp_path, lambda p, e, on: 0)
+    host, port, fleet, record_store, stop = _serve_router(tmp_path, lambda p, e, on: 0)
     try:
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
-        _stranded_receipt(receipts, resources=[])   # proves ownership of nothing
+        _stranded_record(record_store, resources=[])   # proves ownership of nothing
         for attempt in range(3):
             st, _, b = _req(host, port, "POST", "/api/devices/r1/undeploy", {},
                             headers=hh)
@@ -6231,19 +7667,329 @@ def test_every_status_the_cell_can_show_is_filterable():
 def test_image_can_be_assigned_to_the_selection():
     """Assigning an image was per-row only, which does not scale past a handful
     of devices -- and the devices table gained filters precisely so an operator
-    could act on a subset. The bulk picker shares the selected-action lock with
-    every other bulk action, or a delete could fire mid-assignment."""
+    could act on a subset. Bulk assignment now opens the SAME image picker the
+    per-row button uses (Task 4: an ordered multi-image set, not a single
+    <select>), and shares the selected-action lock with every other bulk
+    action, or a delete could fire mid-assignment.
+
+    NOTE: this test used to pin the single-image <select id="image-selected">
+    + <button id="apply-image-selected"> pair with an "__unassign" sentinel
+    value. Task 4 replaces that control with the shared image-set picker
+    (openImagePicker) per its own spec, which is why this test's assertions
+    changed rather than only gaining new ones -- the control it pinned no
+    longer exists by design, not by drift."""
     html = _webroot("index.html")
     app_js = _webroot("app.js")
-    assert 'id="image-selected"' in html
-    assert 'id="apply-image-selected"' in html
-    assert "'apply-image-selected'" in app_js.split("BULK_BTNS", 1)[1][:400], \
+    assert '<select id="image-selected"' not in html, \
+        "old single-image bulk picker still wired -- was it really replaced?"
+    assert 'id="apply-image-selected"' not in html
+    assert 'id="assign-images-selected"' in html
+    assert "'assign-images-selected'" in app_js.split("BULK_BTNS", 1)[1][:400], \
         "bulk image assign is not under the shared selected-action lock"
-    handler = app_js.split("getElementById('apply-image-selected')", 1)[1][:900]
+    # two occurrences of the bare getElementById() exist (updateSelBar's
+    # live label text, and the click handler below) -- split on the
+    # listener registration specifically so this pins the handler, not the
+    # label update.
+    handler = app_js.split(
+        "getElementById('assign-images-selected').addEventListener", 1)[1][:3800]
+    assert "openImagePicker(" in handler
     assert "claimSelection()" in handler
-    assert "'/assign'" in handler
-    # unassigning is a deliberate choice, not what an untouched picker does
-    assert "__unassign" in handler and "__unassign" in app_js
+    # the intersection of the selection's current sets, not the union of them
+    # (union would silently ADD an image to a device that lacks it) and not
+    # one device's set either (that would silently DROP one from the rest)
+    assert "reduce(" in handler and "indexOf(" in handler
+    apply_fn = app_js.split("function assignImagesTo", 1)[1][:500]
+    assert "'/assign'" in apply_fn
+    assert "image_ids:" in apply_fn
+
+
+def test_empty_apply_confirms_before_unassigning(tmp_path):
+    """Review finding: two selected devices with DIFFERENT image sets
+    intersect to an EMPTY picker selection, which opens with nothing
+    pre-checked -- clicking Apply without touching a box then silently wipes
+    every selected device's assignment, no confirmation. Both the bulk path
+    and the single-device (per-row) path must confirm before POSTing an
+    empty image_ids body; a device that already has nothing assigned is a
+    harmless extra prompt, not a special case to detect."""
+    app_js = _webroot("app.js")
+    bulk_handler = app_js.split(
+        "getElementById('assign-images-selected').addEventListener", 1)[1][:3800]
+    assert "!imgIds.length" in bulk_handler
+    assert "confirm('Unassign all images from ' + claimed.length + ' device(s)?')" \
+        in bulk_handler
+    # cancelling the confirm must release the bulk selected-action lock, the
+    # same way the existing delete-selected cancel path does
+    assert "setBulkBusy(false)" in bulk_handler.split(
+        "Unassign all images from", 1)[1][:200]
+    row_handler = app_js.split("function openRowAssign(id, btn) {", 1)[1][:1400]
+    assert "!ids.length" in row_handler
+    assert "confirm('Unassign all images from ' + id + '?')" in row_handler
+
+
+def test_bulk_picker_notes_differing_assignments_on_empty_intersection():
+    """Additional to the confirm above: an empty intersection can ALSO mean
+    every selected device genuinely has nothing assigned -- not a trap, so no
+    note. It is a trap only when at least one selected device DOES have an
+    assignment (the empty pre-check came from sets that disagree, not from
+    everyone being unassigned); that case gets a one-line warning in the
+    picker before the operator checks anything."""
+    html = _webroot("index.html")
+    app_js = _webroot("app.js")
+    assert 'id="img-picker-note"' in html
+    bulk_handler = app_js.split(
+        "getElementById('assign-images-selected').addEventListener", 1)[1][:3800]
+    assert "Selected devices have differing assignments" in bulk_handler
+    assert "sets.some(" in bulk_handler
+    # the picker itself resets any stale note on every open, so a note left
+    # over from one bulk pick never bleeds into the next (bulk or per-row)
+    picker = app_js.split("function openImagePicker(currentIds, onApply) {", 1)[1]
+    picker = picker.split("\n  function closeImagePicker", 1)[0]
+    assert "img-picker-note" in picker
+
+
+def test_bulk_picker_warns_when_the_sets_merely_overlap():
+    """Review finding, untested until now: the note and the confirm keyed off
+    an EMPTY intersection, which catches only the extreme case. dev1=[A,B]
+    with dev2=[A] intersects to a perfectly non-empty [A], so that selection
+    got no note and no confirm -- the picker looked complete, Apply posted [A]
+    to both, and dev1 lost B with nothing said.
+
+    The rule belongs on the SETS, not their intersection: Apply writes one set
+    to every selected device, so any selection whose assignments are not all
+    identical can drop an image the operator never saw. Both the note and a
+    confirm on Apply now read one shared derivation of that, so they cannot
+    drift into two different rules. Identical sets -- every device unassigned
+    included -- stay a plain, unconfirmed apply."""
+    app_js = _webroot("app.js")
+    bulk_handler = app_js.split(
+        "getElementById('assign-images-selected').addEventListener", 1)[1][:3800]
+    assert "setsDiffer" in bulk_handler
+    # the gate is no longer the emptiness of the intersection
+    assert "!intersection.length &&" not in bulk_handler, \
+        "the note still fires only on an EMPTY intersection"
+    assert "if (setsDiffer) {" in bulk_handler
+    # Apply confirms before it replaces differing sets, and cancelling that
+    # confirm releases the shared selected-action lock like every other one.
+    guard = bulk_handler.split("} else if (setsDiffer &&", 1)
+    assert len(guard) == 2, "Apply does not confirm when the sets differ"
+    assert "confirm(" in guard[1][:200]
+    assert "setBulkBusy(false)" in guard[1][:900]
+
+
+def test_per_row_assign_never_releases_the_bulk_selected_action_lock():
+    """Review finding: the per-row assign button routes through forSelected(),
+    whose finally unconditionally did setBulkBusy(false). Assigning one row
+    while a bulk action was still running therefore re-enabled every bulk
+    button -- a delete could then fire while an onboard batch was still
+    starting, which is precisely what the shared selected-action lock exists
+    to prevent.
+
+    One row is not a selected-action: it must not touch that lock at all. The
+    row's own button carries the busy state for the duration of its POST."""
+    app_js = _webroot("app.js")
+    helper = app_js.split("async function forSelected(", 1)[1][:1400]
+    assert "ownsBulkLock" in helper, \
+        "forSelected still releases the bulk lock unconditionally"
+    assert "if (opts.ownsBulkLock !== false) setBulkBusy(false);" in helper
+    row_handler = app_js.split("function openRowAssign(id, btn) {", 1)[1][:1400]
+    assert "ownsBulkLock: false" in row_handler
+    # ...and the row disables its own control while the POST is in flight
+    assert "btn.disabled = true" in row_handler
+    assert "btn.isConnected" in row_handler
+    # and the row is the only caller that opts out -- openRowAssign is where
+    # that decision lives, so it cannot be copied into a bulk path by accident
+    assert app_js.count("ownsBulkLock: false") == 1
+    # the bulk callers keep the default: they claimed the lock, they release it
+    bulk_handler = app_js.split(
+        "getElementById('assign-images-selected').addEventListener", 1)[1][:3800]
+    assert "ownsBulkLock" not in bulk_handler
+
+
+def test_image_picker_and_drawer_show_filename_not_just_id():
+    """Review finding: the picker and the deployment drawer showed a bare
+    image id, forcing the operator to go find it in the Images tab to see
+    what it actually is. Both now render 'id — filename', escaped like every
+    other interpolation in this file, matching how the catalog list already
+    shows both facts about an image."""
+    app_js = _webroot("app.js")
+    assert "function imageLabel(id)" in app_js
+    label_fn = app_js.split("function imageLabel(id) {", 1)[1][:300]
+    assert "esc(id)" in label_fn and "esc(fn)" in label_fn
+    picker = app_js.split("function openImagePicker(currentIds, onApply) {", 1)[1]
+    picker = picker.split("\n  function closeImagePicker", 1)[0]
+    assert "imageLabel(id)" in picker
+    drawer = app_js.split("function deployImageRows(d) {", 1)[1][:1200]
+    assert "imageLabel(iid)" in drawer
+
+
+def test_picker_sends_the_set_it_was_opened_on_and_answers_409():
+    """Review finding: two operators editing the same device's images had
+    nothing between them -- the later Apply simply won, and the earlier edit
+    vanished without a trace, while the peer-policy PUT beside it has carried
+    an if_revision compare-and-set all along.
+
+    Both entry points now capture what each device was showing when the picker
+    opened and send it as expect_image_ids. A 409 means nothing was written:
+    the client re-reads, says so, and re-opens the picker for a single device
+    on the set that is really stored."""
+    app_js = _webroot("app.js")
+    body = app_js.split("function assignImagesTo(ids, imgIds, opts) {", 1)[1][:1600]
+    assert "expect_image_ids" in body
+    # the expectation is the caller's SNAPSHOT, never a fresh read here (that
+    # would absorb the very concurrent edit this is meant to catch)
+    assert "opts.expect" in body
+    assert "r.status === 409" in body
+    assert "openRowAssign(conflicts[0], null)" in body
+    # ...and both callers capture one
+    row = app_js.split("function openRowAssign(id, btn) {", 1)[1][:1400]
+    assert "expect[id] = current" in row
+    assert "expect: expect" in row
+    bulk = app_js.split(
+        "getElementById('assign-images-selected').addEventListener", 1)[1][:3600]
+    assert "expect[id] = sets[i]" in bulk
+    assert "assignImagesTo(claimed, imgIds, { expect: expect })" in bulk
+    # device ids are operator-chosen strings, so these maps have no prototype
+    assert app_js.count("Object.create(null)") >= 2
+
+
+def test_picker_does_not_open_on_a_failed_image_fetch():
+    """Hardening: a failed /api/images substitutes an empty list, which by the
+    time it reaches the picker is indistinguishable from an empty catalog --
+    and an empty picker can only be applied as "unassign everything". Neither
+    entry point opens on a fetch that did not succeed; the status line says so
+    instead.
+
+    Companion: an assigned id the catalog list does not carry was filtered out
+    of the picker entirely, so Apply -- which posts exactly what is checked --
+    dropped it. It keeps its place, checked and disabled."""
+    app_js = _webroot("app.js")
+    assert "imageListOk = ir.ok" in app_js, \
+        "the image list's load state is assumed rather than recorded"
+    assert app_js.count("if (!imageListOk) {") == 2, \
+        "both picker entry points must refuse a picker with no real catalog"
+    picker = app_js.split("function openImagePicker(currentIds, onApply) {", 1)[1]
+    picker = picker.split("\n  function closeImagePicker", 1)[0]
+    assert "var unknown = imageIds.indexOf(id) === -1" in picker
+    assert "unknown ? ' disabled' : ''" in picker
+    assert "not in the catalog" in picker
+
+
+def test_image_picker_is_one_function_shared_by_both_entry_points():
+    """The row select and the bulk dropdown used to be two separate ways to
+    assign the same thing, through two different code paths that could (and
+    did) drift apart. Task 4 replaces both with ONE picker function -- pin
+    that there is exactly one definition, that both the per-row button and
+    the bulk toolbar action call it, and that it enforces the 10-image cap
+    itself (the 11th checkbox disabled, not just the server's 400)."""
+    app_js = _webroot("app.js")
+    assert app_js.count("function openImagePicker(currentIds, onApply)") == 1
+    # definition + at least two call sites (per-row, bulk)
+    assert app_js.count("openImagePicker(") >= 3
+    picker = app_js.split("function openImagePicker(currentIds, onApply) {", 1)[1]
+    picker = picker.split("\n  function closeImagePicker", 1)[0]
+    assert ">= 10" in picker, "unchecked boxes are never disabled at the cap"
+    assert ".disabled = " in picker
+    # checked-first: the device's current set renders before the rest of the
+    # catalog, so it is never buried below the fold
+    assert "checked" in picker.lower()
+
+
+def test_row_assign_is_a_button_not_a_select():
+    """The per-row image control used to be a <select class="assign">: one
+    change event picked exactly one image. It cannot express an ORDERED SET,
+    so it is replaced by a button that opens the shared picker with the
+    row's current assigned set."""
+    html = _webroot("index.html")
+    app_js = _webroot("app.js")
+    assert '<select class="assign"' not in app_js
+    assert 'class="linkish assign-btn"' in app_js
+    assert "#dev-rows .assign-btn" in app_js
+    # the button opens the shared picker on the row's own assigned set
+    # (through openRowAssign, which the 409 retry re-enters)
+    assert "openRowAssign(btn.closest('tr').getAttribute('data-id'), btn)" in app_js
+    row = app_js.split("function openRowAssign(id, btn) {", 1)[1][:1400]
+    assert "rowAssignedIds(d)" in row and "openImagePicker(current," in row
+    assert 'id="mark-all"' in html   # the checkbox column stays untouched
+
+
+def test_deployed_badge_requires_every_assigned_image_staged():
+    """"Deployed" used to compare the single current_image_id/assigned_image_id
+    pair, so a device with two images assigned could read "deployed" the
+    moment just ONE of them finished. It must require every id in the
+    assigned set to be in the heartbeat's staged_image_ids; an agent that
+    predates the field (staged_image_ids absent) falls back to the old
+    single-image check, unchanged."""
+    app_js = _webroot("app.js")
+    body = app_js.split("function deviceStatus(d, devNow) {", 1)[1]
+    body = body.split("\n  function ", 1)[0]
+    assert "rowAssignedIds(d)" in body
+    assert "rowHasStaged" in body
+    # EVERY assigned image, not just one -- pin the .every( call itself so a
+    # regression to .some() (any image staged is "deployed") fails here
+    # instead of only showing up as a wrong badge in the console.
+    assert ".every(" in body
+    staged_fn = app_js.split("function rowHasStaged", 1)[1][:300]
+    assert "staged_image_ids" in staged_fn
+    # the legacy fallback (no staged_image_ids on the heartbeat) is preserved
+    assert "stage_state" in staged_fn and "current_image_id" in staged_fn
+
+
+def test_deployment_drawer_lists_one_row_per_assigned_image():
+    """The drawer said nothing about which images were staged where. One row
+    per assigned image: id + state -- ready via staged_image_ids, error via
+    errored_image_ids, everything else outstanding still in flight, with the
+    tick's own stage_error carried alongside. Parked is deliberately NOT a
+    console state: a parked image is simply absent from the assigned set, so
+    it never gets a row here at all."""
+    html = _webroot("index.html")
+    app_js = _webroot("app.js")
+    assert 'id="di-img-rows"' in html
+    assert "function deployImageRows(d)" in app_js
+    body = app_js.split("function deployImageRows(d) {", 1)[1][:1200]
+    assert "rowAssignedIds(d)" in body
+    assert "rowHasStaged(d, iid)" in body
+    assert "stage_error" in body
+    assert "parked" not in body.lower()
+    assert "document.getElementById('di-img-rows').innerHTML = deployImageRows(d)" in app_js
+
+
+def test_devices_side_reads_the_per_image_errors_the_agent_reports():
+    """Review finding: the agent has reported errored_image_ids since this
+    branch landed it, the swarm map's drawer reads it -- and the Devices side
+    never did. deviceStatus() returned "deployed" before it looked at any
+    error, and deployImageRows() called every non-current image "queued", so
+    the console could say "A ready, B queued" for the same tick the map showed
+    as "B — error", with the stage_error attached to no row at all.
+
+    Both now resolve membership in errored_image_ids, in the SAME precedence
+    the map uses (staged wins, then errored, then whichever image is in
+    flight), and an errored image blocks the all-green "deployed" badge and
+    gets its own filterable state instead."""
+    app_js = _webroot("app.js")
+    assert "function rowErroredIds(d)" in app_js
+    errored_fn = app_js.split("function rowErroredIds(d) {", 1)[1][:300]
+    assert "errored_image_ids" in errored_fn
+
+    drawer = app_js.split("function deployImageRows(d) {", 1)[1][:1200]
+    assert "rowErroredIds(d)" in drawer
+    assert "'error'" in drawer
+    # staged wins over errored -- the resolution order swarmmap.html uses
+    assert drawer.index("rowHasStaged(d, iid)") < drawer.index("errored.indexOf(iid)")
+    # ...and per-image state is never derived from the identity pointer.
+    # current_image_id is the first image of the set that produced heartbeat
+    # data this tick (typically one already STAGED), not the one in flight, so
+    # reading it as "currently transferring" mislabels whichever image it
+    # lands on and leaves the real failure reading "queued".
+    assert "current_image_id" not in drawer
+
+    body = app_js.split("function deviceStatus(d, devNow) {", 1)[1]
+    body = body.split("\n  function ", 1)[0]
+    assert "rowErroredIds(d)" in body
+    # "deployed" is gated on no assigned image having errored...
+    assert "!erroredIds.length" in body
+    # ...and the errored set reads as its own state rather than falling
+    # through to whatever the collapsed stage_state happens to be
+    assert "key: 'image-failed'" in body
 
 
 def test_deployment_details_open_in_a_right_hand_drawer():
@@ -6273,7 +8019,7 @@ def test_deployment_details_open_in_a_right_hand_drawer():
 def _serve_router_jobs(tmp_path, run_fn=None, now_fn=None):
     """_serve_router, but handing back the onboard service, its log dir and an
     audit file so a test can plant in-flight work and persisted logs."""
-    import deployment_receipts
+    import deployment_records
     os.makedirs(tmp_path, exist_ok=True)
     secrets_path = str(tmp_path / "secrets.json")
     app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
@@ -6285,13 +8031,13 @@ def _serve_router_jobs(tmp_path, run_fn=None, now_fn=None):
     fleet.upsert(dict(_ROUTER_ROW))
     creds = gui_creds.CredentialStore(secrets_path)
     creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
-    receipts = deployment_receipts.ReceiptStore(state)
+    record_store = deployment_records.DeploymentRecordStore(state)
     onboard = gui_onboard.OnboardService(
         fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
-        run_fn=run_fn or (lambda p, e, on: 0), receipts=receipts,
+        run_fn=run_fn or (lambda p, e, on: 0), record_store=record_store,
         log_dir=log_dir)
     srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, creds, None,
-                                 onboard, certfile=None, receipts=receipts,
+                                 onboard, certfile=None, record_store=record_store,
                                  audit_path=audit_path)
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -6328,7 +8074,7 @@ def test_delete_stops_the_device_s_in_flight_jobs(tmp_path, monkeypatch):
             "id": "ghost", "device_id": "r1", "action": "onboard",
             "state": "queued", "queued_at": 1, "started_at": None,
             "finished_at": None, "lines": [], "returncode": None,
-            "_line_bytes": 0, "_log_truncated": False, "receipt_id": None,
+            "_line_bytes": 0, "_log_truncated": False, "record_id": None,
             "resolved": None, "env_extra": None}
 
         assert _req(host, port, "DELETE", "/api/devices/r1", headers=hh)[0] == 200
@@ -6400,3 +8146,1092 @@ def test_previous_registration_logs_are_labelled_in_the_console():
     assert "previous_registration" in app_js
     block = app_js.split("previous_registration", 1)[1][:400]
     assert "previous device" in block
+
+
+def test_console_fonts_are_served_with_woff2_type(tmp_path):
+    host, port, _, stop = _serve(tmp_path)
+    try:
+        names = [
+            "Inter-Regular.woff2", "Inter-Medium.woff2",
+            "Inter-SemiBold.woff2", "RobotoMono-Regular.woff2", "RobotoMono-Medium.woff2",
+        ]
+        # Sharp Sans is Cisco-licensed and deliberately untracked (staged at
+        # deploy time); assert it only where the file is actually present so a
+        # fresh public clone stays green while deployed trees keep the pin.
+        if os.path.exists(os.path.join(gui_server.WEBROOT, "fonts", "SharpSans-Bold.woff2")):
+            names.append("SharpSans-Bold.woff2")
+        for name in names:
+            status, headers, body = _req(host, port, "GET", f"/fonts/{name}")
+            assert status == 200, name
+            assert headers.get("Content-Type") == "font/woff2", name
+            assert body[:4] == b"wOF2", name
+    finally:
+        stop()
+
+
+def test_stylesheet_registers_selfhosted_faces_only():
+    css = _webroot("styles.css")
+    for fam in ('font-family: "Inter"', 'font-family: "Roboto Mono"', 'font-family: "Sharp Sans"'):
+        assert fam in css
+    assert "https://" not in css  # CSP: no remote assets in the stylesheet
+    assert "DM Sans" not in css
+
+
+# ---------------------------------------------------------------------------
+# Magnetic token layer, base typography, monospace restriction (facelift Task 3)
+# ---------------------------------------------------------------------------
+
+def test_stylesheet_defines_the_magnetic_token_layer():
+    css = _webroot("styles.css")
+    for tok in (
+        "--canvas: #F0F1F2", "--surface: #FFFFFF", "--text-heading: #23282E",
+        "--text-body: #373C42", "--text-secondary: #6F7680", "--rule: #E1E4E8",
+        "--action: #2774D9", "--action-hover: #1D69CC", "--action-active: #0051AF",
+        "--danger: #D93843", "--success: #398519", "--progress: #8D4EED",
+        # yellow-95 / lavender-50 / lavender-95 extracted from magnetic.css --
+        # this token file has no "indigo" family; "lavender" is its
+        # blue-purple scale and is what the spec's indigo-50/indigo-95
+        # placeholder values were sampled from (near-exact match).
+        "--warning-tint: #FAEFB9", "--info: #5A68E5", "--info-tint: #EBEDFF",
+        "--font-sans:", "--font-mono:", "--font-display:",
+    ):
+        assert tok in css, tok
+
+
+def test_rainbow_stripe_is_retired():
+    css = _webroot("styles.css")
+    assert "linear-gradient(90deg,#00bceb" not in css
+    # Every page in webroot shares this stylesheet, so an orphaned
+    # class="stripe" hook can survive in any of them, not just index.html --
+    # check them all, not just the page most people think to look at.
+    html_names = sorted(
+        n for n in os.listdir(gui_server.WEBROOT) if n.endswith(".html"))
+    assert html_names, "no .html files found under WEBROOT"
+    for name in html_names:
+        assert 'class="stripe"' not in _webroot(name), name
+
+
+def test_machine_class_replaces_blanket_table_monospace():
+    css = _webroot("styles.css")
+    # Wave A Magnetic fixes gave .machine its own type-role size/line-height
+    # (P3: 14/20, uniform mono everywhere it's used) rather than leaving it
+    # a bare font-family switch.
+    assert ".machine { font-family: var(--font-mono); font-size:14px; line-height:20px; }" in css
+    # the blanket rule that used to force every table cell into monospace,
+    # regardless of whether the cell held prose or machine data, is gone
+    tbl_td = css.split(".tbl td {", 1)[1].split("}", 1)[0]
+    assert "font-family" not in tbl_td
+
+
+# ---------------------------------------------------------------------------
+# Responsive + accessibility foundations (facelift Task 6)
+# ---------------------------------------------------------------------------
+
+def test_console_declares_responsive_and_a11y_foundations():
+    """Step-1 pin from the task brief: the four foundations must exist
+    somewhere in the console webroot before any of the more targeted tests
+    below can mean anything."""
+    html = _webroot("index.html")
+    css = _webroot("styles.css")
+    assert 'id="nav-toggle"' in html
+    assert "@media" in css and "prefers-reduced-motion" in css
+    assert 'class="table-scroll"' in html or "table-scroll" in _webroot("app.js")
+    assert 'aria-live' in html
+
+
+def test_off_canvas_nav_toggle_wired():
+    """#nav-toggle lives in the product bar (not the nav rail itself, which
+    carries no id -- Task 5 shipped it as a bare `.nav-rail` and several
+    existing tests slice on the literal '<nav class="nav-rail">' string, so
+    this task targets it by selector rather than adding an id and risking
+    those pins). Below 768px it slides in via `.open`/`translateX`; the
+    button must report its own state through aria-expanded, not just move
+    a class around."""
+    html = _webroot("index.html")
+    css = _webroot("styles.css")
+    js = _webroot("app.js")
+    toggle = html.split('id="nav-toggle"', 1)[1].split(">", 1)[0]
+    assert 'aria-expanded="false"' in toggle
+    assert 'aria-label="' in toggle
+    # the off-canvas rail lives inside the same max-width:768px breakpoint
+    # the Step-1 pin already requires to exist for prefers-reduced-motion
+    mobile = css.split("@media (max-width: 768px)", 1)[1].split("\n}\n", 1)[0]
+    assert ".nav-rail" in mobile and "translateX(-100%)" in mobile
+    assert ".nav-rail.open" in css and "translateX(0)" in css
+    assert "#nav-toggle" in mobile or "#nav-toggle { display: inline-flex; }" in css
+    # full-width drawers/modal and --sp-lg page padding at the breakpoint
+    assert ".main { padding: var(--sp-lg); }" in mobile
+    assert "width: 100vw;" in mobile
+    # app.js: click toggles an open state and keeps aria-expanded honest,
+    # and every navigation closes it again (show() is the router's one
+    # entry point, so hooking it there covers every nav-rail link)
+    assert "var navToggle = document.getElementById('nav-toggle');" in js
+    assert "function setNavOpen(open) {" in js
+    assert "navRail.classList.toggle('open'" in js
+    assert "navToggle.setAttribute('aria-expanded'" in js
+    show_fn = js.split("function show(view) {", 1)[1][:200]
+    assert "setNavOpen(false);" in show_fn
+
+
+def test_every_operational_table_gets_a_scroll_wrapper():
+    """Every <table> in the console -- Overview rollout, Images, the
+    credential list, Devices, the deployment-details drawer's three
+    tables, the onboarding batch panel, both setup/settings package
+    tables, Server & build, Trusted CAs, Audit trail and Deployment logs --
+    scrolls in its own box below its own natural width, rather than
+    forcing the whole page to scroll sideways. Density and ids are
+    untouched: this only wraps, it never rewrites a table's own markup."""
+    html = _webroot("index.html")
+    table_ids = ("ov-rollout", "importable", "images", "devices",
+                 "di-img-tbl", "di-tbl", "di-log-tbl", "wz-pkg-table",
+                 "setup-pkg-table", "settings-info", "trust-tbl",
+                 "audit-tbl", "dl-tbl")
+    for tid in table_ids:
+        marker = 'id="%s"' % tid
+        assert marker in html, tid
+        before = html.split(marker, 1)[0]
+        # nearest preceding table-scroll open tag must be closer than the
+        # nearest preceding table-scroll CLOSE (i.e. this table is still
+        # inside an open wrapper, not after one that already closed)
+        last_open = before.rfind('<div class="table-scroll">')
+        assert last_open != -1, "%s has no preceding table-scroll wrapper" % tid
+        between = before[last_open:]
+        assert between.count("</div>") == 0, \
+            "%s's table-scroll wrapper closed before the table opened" % tid
+    # the two unnamed tables (credential list, onboarding batch) get one too
+    assert html.count('<div class="table-scroll">') == html.count("<table")
+    css = _webroot("styles.css")
+    assert ".table-scroll {" in css and "overflow-x: auto;" in css
+
+
+def test_dialogs_get_dialog_role_honestly():
+    """Fix wave (reviewer Critical, controller-adjudicated): the image-detail
+    drawer, the deployment-details drawer and the deployment-log drawer are
+    NON-modal -- no backdrop, the page behind stays fully interactive while
+    one is open (openImageInfo/openDeployInfo can each be called again for
+    another row while their drawer is still showing the last one), so they
+    get role=dialog WITHOUT aria-modal and WITHOUT a Tab-trap: either would
+    be dishonest ARIA and would wrongly lock keyboard/screen-reader users
+    out of the still-interactive page behind the drawer. The image-picker
+    IS a real modal (a translucent backdrop, a choice to make and confirm)
+    and keeps aria-modal + the Tab-trap unchanged.
+
+    All four still move focus in on open and restore it to the opener on
+    close -- that part of a dialog's contract holds regardless of modality."""
+    html = _webroot("index.html")
+    js = _webroot("app.js")
+    non_modal_drawers = ("img-info-panel", "deploy-info-panel", "dl-drawer")
+    for panel_id in non_modal_drawers + ("img-picker",):
+        tag = html.split('id="%s"' % panel_id, 1)[1].split(">", 1)[0]
+        assert 'role="dialog"' in tag, panel_id
+    for panel_id in non_modal_drawers:
+        tag = html.split('id="%s"' % panel_id, 1)[1].split(">", 1)[0]
+        assert 'aria-modal' not in tag, panel_id
+    img_picker_tag = html.split('id="img-picker"', 1)[1].split(">", 1)[0]
+    assert 'aria-modal="true"' in img_picker_tag
+    assert "function trapDialogFocus(container) {" in js
+    assert "trapDialogFocus(document.getElementById('img-picker'))" in js
+    for panel_id in non_modal_drawers:
+        assert "trapDialogFocus(document.getElementById('%s'))" % panel_id not in js, panel_id
+    # focus moves in on open and is restored to the opener on close, for
+    # all four -- modal or not
+    for opener_var in ("imgInfoOpener", "deployInfoOpener", "imgPickerOpener", "dlDrawerOpener"):
+        assert ("var %s = null;" % opener_var) in js, opener_var
+        assert (opener_var + " = document.activeElement;") in js, opener_var
+        assert (opener_var + ".focus();") in js, opener_var
+
+
+def test_forms_get_persistent_field_labels():
+    """Every operational input inside the console's ten <form> elements gets
+    a real, persistent <label> -- not just a placeholder, which disappears
+    the moment the operator starts typing and is not a reliable accessible
+    name. Filter-toolbar controls (dev-filter-*, dl-action, iv-hour, ...)
+    already carry aria-label from earlier work and are intentionally left
+    as-is here; this only targets the ten <form>s the task brief scopes."""
+    html = _webroot("index.html")
+    css = _webroot("styles.css")
+    assert ".field {" in css and ".field-label {" in css
+    assert "font-size: 12px" in css.split(".field-label {", 1)[1].split("}", 1)[0]
+    # a representative sample across different forms, not every field
+    samples = {
+        "dev-form": ("df-id", "df-management-type", "df-cred"),
+        "cred-form": ("cf-id", "cf-pass"),
+        "pw-form": ("pw-cur", "pw-new", "pw-confirm"),
+        "cert-form": ("cert-pem", "cert-key"),
+        "trust-form": ("trust-pem",),
+        "ca-form": ("ca-source", "ca-url"),
+        "ae-form": ("ae-host", "ae-port", "ae-recipient"),
+        "iv-schedule-form": ("iv-mode",),
+    }
+    for form_id, field_ids in samples.items():
+        form = html.split('id="%s"' % form_id, 1)[1].split("</form>", 1)[0]
+        for fid in field_ids:
+            assert 'for="%s"' % fid in form, "%s: no label for=%r" % (form_id, fid)
+    # the two shared templates (mounted into both Setup and Settings)
+    for tpl_id, field_ids in (("tpl-sh-form", ("sh-user", "sh-pass", "sh-pass2")),
+                               ("tpl-td-form", ("td-endpoint",))):
+        tpl = html.split('id="%s"' % tpl_id, 1)[1].split("</template>", 1)[0]
+        for fid in field_ids:
+            assert 'for="%s"' % fid in tpl, "%s: no label for=%r" % (tpl_id, fid)
+
+
+def test_error_and_status_regions_carry_live_roles():
+    """Async status text gets role=status/aria-live=polite; the inline
+    per-form error/outcome spans (reused for both a failure message and an
+    .err.ok success message -- see the .err.ok source-order comment in
+    styles.css) get role=alert, so either outcome is announced without the
+    operator having to go find the message by sight."""
+    html = _webroot("index.html")
+    alert_ids = ("df-err", "cf-err", "pw-msg", "sh-msg", "cert-msg",
+                 "trust-msg", "ca-msg", "td-msg", "ae-msg",
+                 "iv-schedule-msg", "iv-refresh-msg", "iv-offline-msg",
+                 "ii-override-note", "ii-release-msg")
+    for eid in alert_ids:
+        tag = html.split('id="%s"' % eid, 1)[1].split(">", 1)[0]
+        assert 'role="alert"' in tag, eid
+    status_ids = ("status", "dev-status", "di-note", "wz-progress", "wz-msg",
+                  "sh-status", "cert-status", "td-status", "ae-status",
+                  "sessions-info", "swarm-summary")
+    for sid in status_ids:
+        tag = html.split('id="%s"' % sid, 1)[1].split(">", 1)[0]
+        assert 'role="status"' in tag and 'aria-live="polite"' in tag, sid
+    # progress bars are exposed as progressbar, not silent divs. #prog
+    # (the legacy publish progress bar this pin used to also cover) was
+    # removed in the Wave A Magnetic fixes -- dead markup, never unhidden,
+    # superseded by the per-file upload rows' own rowProg element (see the
+    # rowProg assertions right below) -- so only the offline-upload bar
+    # remains here.
+    for pid in ("iv-offline-progress",):
+        tag = html.split('id="%s"' % pid, 1)[1].split(">", 1)[0]
+        assert 'role="progressbar"' in tag, pid
+        assert 'aria-valuemin="0"' in tag and 'aria-valuemax="100"' in tag, pid
+    app_js = _webroot("app.js")
+    assert "rowProg.setAttribute('role', 'progressbar');" in app_js
+    assert "aria-valuenow" in app_js
+
+
+def test_reduced_motion_covers_more_than_the_two_drawers_and_shadows_are_tokenized():
+    """Task 3/5 already pinned '.drawer { transition:none; }' verbatim
+    (test_deployment_details_open_in_a_right_hand_drawer) -- this asserts
+    the SAME line survives byte-for-byte while a second reduced-motion
+    block widens the exemption to the nav rail and the other micro-
+    interaction transitions this task's off-canvas nav and forms
+    introduce. Also: the drawer/modal shadows migrate off the old
+    Cisco-navy rgba() literals onto --shadow-lg (Task 6 owned-minors item);
+    the modal backdrop keeps an rgba() scrim but de-branded to neutral
+    black."""
+    css = _webroot("styles.css")
+    assert ".drawer { transition:none; }" in css
+    assert "rgba(11,37,69" not in css
+    assert "box-shadow:var(--shadow-lg);" in css
+    assert "background:rgba(0,0,0,.35);" in css
+    reduced_motion_blocks = css.count("@media (prefers-reduced-motion: reduce)")
+    assert reduced_motion_blocks >= 3
+    last_block = css.rsplit("@media (prefers-reduced-motion: reduce)", 1)[1]
+    for selector in (".nav-rail", ".btn", ".chip", ".dropzone", ".progress .bar"):
+        assert selector in last_block.split("}\n", 1)[0], selector
+
+
+# ---------------------------------------------------------------------------
+# Overview + Images hierarchy, Staging Boundary (facelift Task 7)
+# ---------------------------------------------------------------------------
+
+def test_staging_boundary_component_exists_and_ends_at_operator_control():
+    """Brief Step 1: the Staging Boundary is one shared component
+    (stagingBoundaryHTML(steps)), reused verbatim by device/image detail
+    contexts (Task 8; Overview's own fleet-wide instance was removed per
+    operator decision, Wave C). This is a pure source guard --
+    every named step of the lifecycle and the hatched terminus label must
+    exist as literal strings in app.js, regardless of how any one view
+    derives the states it feeds the component."""
+    js = _webroot("app.js")
+    assert "function stagingBoundaryHTML(" in js
+    for label in ('"Catalogued"', '"Source checked"', '"Assigned"',
+                  '"Transferring"', '"Verified"', '"Staged"', "Operator control"):
+        assert label in js, label
+
+
+def test_staging_boundary_step_states_are_css_backed():
+    """Brief Step 3: circles = done/current/upcoming/na CSS states, plus the
+    status-pill substitution for a failed step. Every state stagingBoundaryHTML
+    can render must have a real selector -- a typo'd class here would render
+    invisibly rather than fail loudly."""
+    js = _webroot("app.js")
+    fn = js.split("function boundaryMarkerHTML(state, pillHtml) {", 1)[1].split(
+        "\n  }", 1)[0]
+    for cls in ("boundary-circle is-done", "boundary-circle is-current",
+                "boundary-dot", "boundary-circle is-na", "boundary-circle is-upcoming",
+                "boundary-marker"):
+        assert cls in fn, cls
+    css = _webroot("styles.css")
+    for selector in (".boundary-circle.is-done", ".boundary-circle.is-current",
+                     ".boundary-dot", ".boundary-circle.is-na",
+                     ".boundary-circle.is-upcoming", ".boundary-marker",
+                     ".boundary-terminus", ".boundary-connector"):
+        assert selector in css, selector
+    # hatched terminus: repeating-linear-gradient on --surface-subtle, never
+    # a literal inline style= (CSP) -- the marker/step/terminus builders
+    # themselves emit no style= attribute anywhere.
+    assert "repeating-linear-gradient" in css
+    assert "style=" not in fn
+    assert "style=" not in js.split("function stagingBoundaryHTML(steps) {", 1)[1].split(
+        "\n  }", 1)[0]
+
+
+def test_device_boundary_scoped_to_staging_lifecycle_not_agent_deployment():
+    """HANDOFF §2: IRIS agent deployment (onboard/undeploy) and target-
+    software staging are two different lifecycles. The Staging Boundary is
+    about the second one only -- its failed-step derivation must key off
+    placement-failed/image-failed, never onboard-failed/undeploy-failed.
+
+    This used to pin Overview's own fleet-wide instance
+    (overviewBoundarySteps); that band (#ov-boundary, "Active staging") was
+    removed per operator decision (Wave C post-walk fix) along with the
+    function that derived its steps. The device drawer's per-device
+    instance (deviceBoundarySteps) is the sole survivor of the Staging
+    Boundary's per-view step derivation and carries the exact same
+    invariant, so the pin moves here rather than disappearing."""
+    js = _webroot("app.js")
+    fn = js.split("function deviceBoundarySteps(d, devNow) {", 1)[1].split(
+        "\n  }", 1)[0]
+    assert "'placement-failed'" in fn
+    assert "'image-failed'" in fn
+    assert "'onboard-failed'" not in fn
+    assert "'undeploy-failed'" not in fn
+    # no assigned images collapses every step but 'assigned' to 'na', never
+    # a guessed 'done'
+    assert "if (!ids.length) return ['na', 'na', 'upcoming', 'na', 'na', 'na'];" in fn
+    # no distinct on-device post-transfer verification signal exists in this
+    # build -- admitted honestly as 'na', not inferred from a proxy
+    assert "var verified = 'na';" in fn
+
+
+def test_overview_needs_attention_is_worst_of_group_and_excludes_offline():
+    """Spec: "Overview rollups = combined worst-of-group". Offline is a
+    freshness modifier (Inactive), not a negative/severe/warning problem, so
+    it must never be tallied into this band."""
+    js = _webroot("app.js")
+    fn = js.split("function overviewDeviceAttention(devs, devNow) {", 1)[1].split(
+        "\n  }", 1)[0]
+    assert "ATTENTION_LEVEL_RANK" in fn
+    assert "deviceIsOffline" not in fn
+    rank = js.split("var ATTENTION_LEVEL_RANK = {", 1)[1].split("}", 1)[0]
+    assert "negative" in rank and "severe" in rank and "warning" in rank
+    assert "'positive'" not in rank and "'inactive'" not in rank and "'info'" not in rank
+    # the quarantine count feeds the images half of the same band
+    img_fn = js.split("function overviewImageAttention(imgs) {", 1)[1].split(
+        "\n  }", 1)[0]
+    assert "i.quarantined" in img_fn
+
+
+def test_devices_attention_filter_is_appended_not_added_to_the_status_options():
+    """'__attention' is a rollup over several deviceStatus() keys, not a
+    producible status of its own -- it must be appended to the rendered
+    <select>, never merged into DEVICE_STATUS_OPTIONS itself (that array is
+    exactly "every key deviceStatus() can produce",
+    test_every_status_the_cell_can_show_is_filterable enforces it)."""
+    js = _webroot("app.js")
+    options_literal = js.split("var DEVICE_STATUS_OPTIONS = [", 1)[1].split("];", 1)[0]
+    assert "__attention" not in options_literal
+    assert "'<option value=\"__attention\">Needs attention (any)</option>'" in js
+    filter_fn = js.split("function deviceMatchesFilters(d, f, devNow) {", 1)[1].split(
+        "\n  }", 1)[0]
+    assert "f.status === '__attention'" in filter_fn
+    assert "'negative'" in filter_fn and "'severe'" in filter_fn and "'warning'" in filter_fn
+
+
+def test_images_catalog_leads_with_filename_and_verdict_pill():
+    """Brief Step 5: catalog rows lead with the exact filename (.machine) +
+    Cisco source-verification verdict pill; image id stays adjacent
+    (.machine)."""
+    html = _webroot("index.html")
+    thead = html.split('id="images">', 1)[1].split("</thead>", 1)[0]
+    headers = [h.split("</th>")[0] for h in thead.split("<th>")[1:]]
+    assert headers[:3] == ["File", "Verification", "Image ID"], headers
+    js = _webroot("app.js")
+    fn = js.split("function renderImageRows() {", 1)[1].split(
+        "\n  document.getElementById('images-filter-attention')", 1)[0]
+    row = fn.split("return '<tr data-id=", 1)[1].split("}).join('')", 1)[0]
+    pill_idx = row.index("bulkhashVerdictPillHTML(")
+    # filename leads (the FIRST esc(i.id) is the data-id attribute, not a
+    # displayed column -- the id column's own esc(i.id) comes after the pill).
+    # filename itself renders via dash() (Wave A item 8, em-dash fallback for
+    # an empty value) rather than a bare esc().
+    assert row.index("dash(i.filename") < pill_idx
+    assert "esc(i.id)" in row[pill_idx:]
+
+
+def test_images_needs_attention_toggle_filters_client_side_no_refetch():
+    """The "Needs attention only" toggle re-renders from LAST_IMAGES (the
+    already-fetched catalog), the same applyDeviceFilters()/renderDevices()
+    split Devices uses -- toggling it must never trigger a new /api/images
+    fetch."""
+    js = _webroot("app.js")
+    fn = js.split("function renderImageRows() {", 1)[1].split(
+        "\n  document.getElementById('images-filter-attention')", 1)[0]
+    # the filter + row-build itself, BEFORE the per-row click-handler wiring
+    # (the delete button's own handler legitimately calls fetch() for the
+    # DELETE request -- that is a click-time action, not part of re-render)
+    build = fn.split("document.querySelectorAll('#rows .del-img')", 1)[0]
+    assert "fetch(" not in build
+    assert "LAST_IMAGES.filter(" in build
+    assert "images-filter-attention" in fn
+    assert "'change', renderImageRows" in js
+
+
+def test_overview_fetches_devices_and_images_alongside_overview():
+    """The attention band needs per-device and per-image rows Overview did
+    not fetch before Task 7 -- all three requests must be issued together
+    (Promise.all), not serially, so the dashboard is not three round trips
+    slower than it used to be. (The aggregate Staging Boundary this test
+    used to also cite was the other original consumer of /api/devices and
+    /api/images here; it was removed per operator decision -- Wave C -- but
+    the attention band alone still needs both, so the three-way Promise.all
+    stays exactly as load-bearing as before.)"""
+    js = _webroot("app.js")
+    fn = js.split("async function refreshOverview() {", 1)[1].split("\n  }", 1)[0]
+    assert "Promise.all(" in fn
+    # Task 10 added an AbortController signal to each fetch call (generation/
+    # abort protection); these check the endpoint is still fetched, not the
+    # exact argument list.
+    assert "fetch('/api/overview'" in fn
+    assert "fetch('/api/devices'" in fn
+    assert "fetch('/api/images'" in fn
+    assert "renderOverviewAttention(" in fn
+    assert "renderOverviewBoundary(" not in fn
+
+
+def test_overview_fleet_totals_carry_precise_denominators():
+    """Brief Step 4, band 3: fleet totals with precise denominators. Every
+    ratio card names what it is a fraction OF, not a bare count."""
+    js = _webroot("app.js")
+    fn = js.split("async function refreshOverview() {", 1)[1].split("\n  }", 1)[0]
+    assert "'Waiting for heartbeat'" in fn  # pinned card label, unchanged
+    for sub in ("'of ' + ov.devices", "'of ' + ov.assigned"):
+        assert sub in fn, sub
+
+
+def test_card_component_matches_spec_padding_radius_and_elevation():
+    """spec §4 card rules: 24px padding, --radius-card, --shadow-xs."""
+    css = _webroot("styles.css")
+    card_rule = css.split(".card {", 1)[1].split("}", 1)[0]
+    assert "padding:var(--sp-xl)" in card_rule
+    assert "border-radius:var(--radius-card)" in card_rule
+    assert "box-shadow:var(--shadow-xs)" in card_rule
+
+
+def test_overview_attention_band_distinguishes_no_data_from_all_clear():
+    """Fix wave 2 (reviewer-confirmed truthfulness defect): a failed
+    /api/devices or /api/images fetch used to render the byte-identical
+    green "All clear" card genuine health renders -- "no data to report a
+    problem from" and "confirmed no problem" must be distinguishable.
+    renderOverviewAttention() now takes a fourth `fleetDataUnavailable`
+    argument and gates the all-clear branch behind its absence."""
+    js = _webroot("app.js")
+    fn = js.split(
+        "function renderOverviewAttention(devs, devNow, imgs, fleetDataUnavailable) {",
+        1)[1].split("\n  }", 1)[0]
+    assert "Fleet status unavailable" in fn
+    assert "attention-card is-inactive" in fn
+    assert "i-minus-circle" in fn
+    # the failure branch is neutral, not a repaint of the positive one --
+    # no check-circle/positive class anywhere in its own pushed markup
+    unavailable_card = fn.split("if (fleetDataUnavailable) {", 1)[1].split(
+        "} else if (!cards.length) {", 1)[0]
+    assert "i-check-circle" not in unavailable_card
+    assert "is-positive" not in unavailable_card
+    assert "All clear" not in unavailable_card
+    # the all-clear branch is the OTHER arm of the same if/else -- reachable
+    # only when fleet data was NOT reported unavailable
+    assert "} else if (!cards.length) {" in fn
+    all_clear_card = fn.split("} else if (!cards.length) {", 1)[1]
+    assert "All clear" in all_clear_card
+
+    # refreshOverview() marks BOTH degraded shapes (a rejected fetch and a
+    # resolved-but-non-2xx response) with failed:true, ORs them together,
+    # and threads the result into the renderer as its 4th argument.
+    overview_fn = js.split("async function refreshOverview() {", 1)[1].split(
+        "\n  }", 1)[0]
+    assert "failed: true" in overview_fn
+    assert "dbody.failed || imgsBody.failed" in overview_fn
+    assert "renderOverviewAttention(devs, devNow, imgs, fleetDataUnavailable)" in overview_fn
+
+
+# ---------------------------------------------------------------------------
+# Task 8: Devices density + the three carried status fixes (facelift Phase
+# 4b/5) -- Step 1 pins, written against real recon (facelift-contracts.md §7
+# for M2, §8 for job wiring), watched RED before the fix landed.
+# ---------------------------------------------------------------------------
+
+def test_devices_filter_offers_only_producible_options():
+    """M2 is ADJUDICATED as repair, not removal: the value="legacy" option
+    describes a real fleet state (an unclassified device, which the server
+    always stores as the truthy 'legacy_routed' -- gui_fleet.py's
+    _legacy_record/_legacy_like) and stays exactly where it is. What was
+    broken is the FILTER COMPARISON at deviceMatchesFilters(): it fell back
+    to the string 'legacy' only when d.management_type was falsy, which
+    never happens, so selecting the option always returned zero rows. Pin
+    both halves: the option survives verbatim, and the comparison now
+    folds 'legacy_routed' into 'legacy' the same way the row label already
+    does (managementTypeLabel, app.js) -- without touching that label
+    line, which test_devices_table_renders_honest_xr_host_label pins
+    character-for-character already."""
+    html = _webroot("index.html")
+    js = _webroot("app.js")
+    assert ('<option value="legacy">Inventory only — management type not '
+            'chosen</option>') in html
+    filter_fn = js.split("function deviceMatchesFilters(d, f, devNow) {", 1)[1].split(
+        "\n  }", 1)[0]
+    # the repaired comparison: legacy_routed and legacy compare equal, the
+    # same equivalence class managementTypeLabel already grants the row label
+    assert ("d.management_type === 'legacy_routed' ? 'legacy' : "
+            "(d.management_type || 'legacy')") in filter_fn
+
+
+def test_device_status_cell_carries_job_step_and_elapsed():
+    """jobPhaseSuffix(job) formats the "[n/m] · Xm" suffix an in-progress
+    onboard/undeploy pill carries, e.g. "Undeploying [3/5] · 12 min"; at or
+    above 60 minutes it switches to "1 h 12 min". Elapsed derives from the
+    job's own SERVER started_at timestamp (never a client-clock delta that
+    would reset on refresh) -- LAST_DEV_NOW is the same server clock
+    refreshDevices() already reads for offline-freshness math."""
+    js = _webroot("app.js")
+    assert "function jobPhaseSuffix(job) {" in js
+    fn = js.split("function jobPhaseSuffix(job) {", 1)[1].split("\n  }", 1)[0]
+    assert "job.started_at" in fn
+    assert "LAST_DEV_NOW" in fn
+    assert "' min'" in fn
+    assert "' h '" in fn
+    assert "60" in fn
+    assert "[" in fn and "]" in fn
+    # A queued job never carries started_at server-side (gui_onboard.py only
+    # stamps it once the job actually starts running) -- this early-return
+    # guard is what keeps a queued job from ever rendering an elapsed
+    # duration it hasn't accrued yet.
+    assert fn.strip().startswith("if (!job || !job.started_at) return '';")
+    # wired into the status cell for an active job only, matched by action
+    assert "jobPhaseSuffix(activeJob)" in js
+    assert "LAST_JOBS_BY_DEVICE" in js
+
+
+def test_offline_is_expected_during_active_undeploy():
+    """A device mid-undeploy that has already gone stale/offline (its agent
+    is deactivated at undeploy step [1/5], well before the rest of teardown
+    runs) must not read as a bare, alarming "Offline (no recent
+    heartbeat)" -- that is the expected shape of a healthy undeploy, not a
+    fault. The pill stays visible (never hidden) with an honest label and a
+    title explaining why.
+
+    Review finding (fix wave 1): deviceStatus() sets st.key 'undeploying'
+    for BOTH a queued and a running job -- it only reads d.onboard_state,
+    never the job record itself -- so gating on st.key alone mislabeled a
+    device stuck behind the onboard concurrency cap (job still queued, never
+    touched the device) as "expected offline" before teardown had even
+    started. The gate must additionally require the CROSS-REFERENCED job's
+    own state === 'running': a queued undeploy job's offline device keeps
+    the normal, honest "no recent heartbeat" pill."""
+    js = _webroot("app.js")
+    fn = js.split("function deviceStatusHtml(d, devNow) {", 1)[1].split(
+        "\n  }", 1)[0]
+    assert "Offline (expected during undeploy)" in fn
+    assert "[1/5]" in fn
+    # the actual gate: job state 'running' AND the status key, not either alone
+    assert "if (activeJob && activeJob.state === 'running' && st.key === 'undeploying') {" in fn
+    # regression guard: the old, insufficient gate (bare st.key, no job-state
+    # check) must not be what decides the label any more
+    assert "if (st.key === 'undeploying') {" not in fn
+
+
+# ---------------------------------------------------------------------------
+# Task 9: Setup/Settings/Monitoring get the Magnetic card hierarchy. Same
+# source-guard idiom throughout this file (no JS runtime harness exists in
+# this repo).
+# ---------------------------------------------------------------------------
+
+def test_settings_forms_are_wrapped_in_bounded_card_sections():
+    """Each Settings form's section heading now sits inside a .card -- the
+    24px-padding/--radius-card/--shadow-xs container test_card_component_
+    matches_spec_padding_radius_and_elevation already pins -- rather than a
+    bare h3 floating directly in the pane. Button counts/ids inside each
+    <form> are untouched; only the surrounding wrapper changed."""
+    html = _webroot("index.html")
+    settings = html.split('id="view-settings"')[1].split("</section>")[0]
+    for heading in ("<h3>Certificate</h3>", "<h3>Trusted CAs</h3>",
+                    "<h3>Telemetry destination</h3>", "<h3>Audit export</h3>",
+                    "<h3>Server &amp; build</h3>", "<h3>Schedule</h3>"):
+        assert heading in settings, heading
+        before = settings.split(heading, 1)[0]
+        last_open = before.rfind('<div class="card">')
+        assert last_open != -1, "%s has no preceding card wrapper" % heading
+        between = before[last_open:]
+        assert between.count("</div>") == 0, \
+            "%s's card wrapper closed before the heading" % heading
+    # button counts inside the pinned forms are exactly as before -- card
+    # wrapping never merges or drops a Save
+    cert_form = settings.split('id="cert-form"')[1].split('</form>')[0]
+    assert cert_form.count('class="btn"') == 1
+    td_form = settings.split('id="td-form"')[1].split('</form>')[0]
+    assert td_form.count('class="btn"') == 1
+
+
+def test_settings_card_never_wraps_a_template_root():
+    """The card goes AROUND the mount point (#sh-mount / #td-mount), never
+    around the <template> whose content is cloned into it -- a wrapped
+    template root would be inert markup styled as a card that never
+    actually renders."""
+    html = _webroot("index.html")
+    for tpl_id, mount_id in (("tpl-sh-form", "sh-mount"), ("tpl-td-form", "td-mount")):
+        before_tpl = html.split('id="%s"' % tpl_id, 1)[0]
+        last_card_open = before_tpl.rfind('<div class="card">')
+        last_card_close = before_tpl.rfind("</div>")
+        assert last_card_close > last_card_open, \
+            "%s: the preceding card must already be closed" % tpl_id
+        mount_pos = html.index('id="%s"' % mount_id)
+        assert mount_pos < html.index('id="%s"' % tpl_id), \
+            "%s: mount point must precede its template" % mount_id
+
+
+def test_monitoring_panes_carry_a_scope_tag_and_stay_distinct():
+    html = _webroot("index.html")
+    js = _webroot("app.js")
+    css = _webroot("styles.css")
+    audit_pane = html.split('id="monitoring-pane-audit"', 1)[1]
+    assert 'id="audit-scope-tag"' in audit_pane.split("<h3>", 1)[1].split(
+        "</h3>", 1)[0]
+    dl_pane = html.split('id="monitoring-pane-deploylogs"', 1)[1]
+    assert 'id="dl-scope-tag"' in dl_pane.split("<h3>", 1)[1].split("</h3>", 1)[0]
+    # each pane keeps its own description, distinct from the other's
+    assert "Every settings change" in audit_pane.split("<h3>", 1)[1][:600]
+    assert "Per-job onboard and undeploy logs" in dl_pane.split("<h3>", 1)[1][:600]
+    assert ".scope-tag {" in css
+    fn = js.split("function updateMonitoringScopeTags() {", 1)[1].split(
+        "\n  }", 1)[0]
+    assert "auditRange" in fn and "dlRange" in fn
+    show_fn = js.split("function showMonitoringSub(sub) {", 1)[1].split(
+        "\n  }", 1)[0]
+    assert "updateMonitoringScopeTags();" in show_fn
+
+
+def test_table_scroll_fade_color_is_parameterized_for_cards():
+    """Carried seam: .table-scroll's fade used to hardcode --canvas, which
+    reads as a visible seam now that several sit inside a --surface .card
+    (Task 9). A --scroll-fade custom property defaults to --canvas and is
+    overridden inside .card, so every table-scroll NOT inside a card is
+    visually unchanged."""
+    css = _webroot("styles.css")
+    rule = css.split(".table-scroll {", 1)[1].split("\n}", 1)[0]
+    assert "--scroll-fade: var(--canvas);" in rule
+    assert "var(--scroll-fade)" in rule
+    assert ".card .table-scroll { --scroll-fade: var(--surface); }" in css
+
+
+def test_bulk_bar_names_selection_scope():
+    """Final review fix wave, spec §5: the bulk bar names whether the checked
+    set IS the whole filtered table or only part of it, and -- when it's
+    only part -- gives a one-click path to the rest, WITHOUT growing a
+    second copy of the header checkbox's select-all logic. The click just
+    flips #mark-all and replays that checkbox's own 'change' listener."""
+    html = _webroot("index.html")
+    selbar = html.split('id="sel-bar"', 1)[1].split('class="selbar-actions"', 1)[0]
+    assert '<span class="muted" id="sel-scope-text" hidden></span>' in selbar
+    # A tertiary BUTTON, not the .linkish text link it used to be: Magnetic
+    # Button > Usage keeps text links for navigation inside a paragraph and
+    # gives standalone actions a button. Cancel is its neighbour because
+    # Magnetic Table > Bulk action bar dismisses the bar either by deselecting
+    # every row or by "the 'Cancel' button".
+    assert '<button class="btn tertiary" type="button" id="sel-scope-all" hidden></button>' in selbar
+    assert '<button class="btn tertiary" type="button" id="sel-clear">Cancel</button>' in selbar
+    assert 'onclick=' not in selbar
+
+    js = _webroot("app.js")
+    fn = js.split("function updateSelBar() {", 1)[1].split("\n  }", 1)[0]
+    assert "var m = document.querySelectorAll('#dev-rows .mark').length;" in fn
+    assert "var allSelected = n > 0 && n === m;" in fn
+    assert "'· All ' + m + ' filtered devices selected'" in fn
+    assert "'· Select all ' + m + ' filtered devices'" in fn
+
+    # the click is a shortcut INTO #mark-all's own change handler, not a
+    # second selection code path -- no independent '.mark' forEach nearby
+    click_fn = js.split(
+        "document.getElementById('sel-scope-all').addEventListener('click', function () {",
+        1)[1].split("\n  });", 1)[0]
+    assert "markAll.checked = true;" in click_fn
+    assert "markAll.dispatchEvent(new Event('change'));" in click_fn
+    assert "querySelectorAll" not in click_fn
+
+
+def test_table_type_roles_are_magnetic_p3_p4():
+    """Wave A Magnetic table-fidelity fixes (post-walk audit, root cause of
+    the "fonts are off" complaint): .tbl body copy is P3 (14/20), dense
+    machine-data cells inside a table step down to P4 (12/18) via a scoped
+    .tbl .machine override, and headers use sentence case (the markup is
+    already written sentence-case) rather than an uppercase/letter-spaced
+    treatment."""
+    css = _webroot("styles.css")
+    assert ".tbl { width:100%; border-collapse:collapse; font-size:14px; line-height:20px; }" in css
+    assert ".tbl .machine { font-size:12px; line-height:18px; }" in css
+    tbl_th = css.split(".tbl th {", 1)[1].split("}", 1)[0]
+    assert "text-transform:uppercase" not in tbl_th
+
+
+# ---------------------------------------------------------------------------
+# Left nav: Magnetic anatomy fixes (post-walk audit, Wave B)
+# ---------------------------------------------------------------------------
+
+def test_nav_icon_symbols_vendored_in_sprite():
+    """Wave B fix 1: the 8 Phosphor BOLD glyphs the left nav needs (the six
+    primary destinations, the Setup sub-item, and the off-canvas hamburger)
+    are vendored as <symbol> entries in the existing icon-sprite <svg> --
+    same convention as the status-pill icons (Task 4): fill="currentColor",
+    viewBox 0 0 256 256, referenced by id from the nav's own anchors."""
+    html = _webroot("index.html")
+    sprite = html.split('<svg class="icon-sprite"', 1)[1].split("</svg>", 1)[0]
+    for icon in ("i-nav-gauge", "i-nav-stack", "i-nav-hard-drives",
+                 "i-nav-share-network", "i-nav-gear", "i-nav-pulse",
+                 "i-nav-list-checks", "i-nav-list"):
+        assert ('<symbol id="%s" viewBox="0 0 256 256" fill="currentColor">' % icon) \
+            in sprite, icon
+
+
+def test_nav_items_carry_leading_icons():
+    """Post-walk Magnetic nav audit, Wave B fix 1 (root cause of the
+    operator's "is the sidebar even Magnetic?" complaint): every top-level
+    destination plus the Setup sub-item leads with a 20px currentColor icon
+    -- icons are structural in Magnetic nav. Every OTHER sub-item inside a
+    flyout stays icon-less; only Setup was named in the audit's glyph
+    list. Each icon-bearing item's label also moves into its own
+    .nav-label span, ahead of a future collapsed (icon-only) rail state."""
+    html = _webroot("index.html")
+    side = html.split('<nav class="nav-rail">')[1].split("</nav>")[0]
+    icon_items = {
+        "nav-overview": "i-nav-gauge", "nav-images": "i-nav-stack",
+        "nav-devices": "i-nav-hard-drives", "nav-swarm": "i-nav-share-network",
+        "nav-settings": "i-nav-gear", "nav-monitoring": "i-nav-pulse",
+        "nav-settings-setup": "i-nav-list-checks",
+    }
+    for nav_id, icon in icon_items.items():
+        item = side.split('id="%s"' % nav_id, 1)[1].split("</a>", 1)[0]
+        assert ('<svg class="nav-icon" aria-hidden="true"><use href="#%s"/></svg>'
+                % icon) in item, nav_id
+        assert '<span class="nav-label">' in item, nav_id
+    for sub_id in ("nav-settings-general", "nav-settings-tls",
+                   "nav-settings-telemetry", "nav-settings-audit",
+                   "nav-settings-bulkhash", "nav-monitoring-audit",
+                   "nav-monitoring-deploylogs"):
+        item = side.split('id="%s"' % sub_id, 1)[1].split("</a>", 1)[0]
+        assert "nav-icon" not in item, sub_id
+
+
+def test_hamburger_uses_sprite_glyph_and_product_name_drops_diamond():
+    """Wave B fixes 2 + 7: the literal ☰ character in #nav-toggle is
+    replaced with the vendored i-nav-list sprite glyph (list-bold,
+    deliberately not hamburger-bold -- that glyph is a food icon in
+    Phosphor's set, not a menu control); the invented ◈ logomark is dropped
+    from the product name (OSPO branding rule: no invented logomark)."""
+    html = _webroot("index.html")
+    assert "☰" not in html  # ☰
+    assert "◈" not in html  # ◈
+    toggle = html.split('id="nav-toggle"', 1)[1].split("</button>", 1)[0]
+    assert '<use href="#i-nav-list"/>' in toggle
+    assert '<span class="product-name">Intelligent Release &amp; Image Staging' in html
+
+
+def test_settings_and_monitoring_flyouts_are_positioned_beside_the_rail():
+    """Wave B fix 5, the biggest anatomy break: Settings/Monitoring stop
+    being inline in-rail accordions and become floating flyout panels
+    beside the rail, reusing .menu's floating-panel chrome (surface/
+    border/radius8/--shadow-md) via a shared class rather than a
+    reimplementation, anchored to .nav-rail (position:relative) rather than
+    to their own trigger. A small header label styled like .nav-group sits
+    inside each. Off-canvas (<=768px) reverts them to the in-rail
+    presentation so a flyout can't detach from a hidden, translateX'd
+    rail. Item markup/ids/hrefs inside are unchanged -- guarded already by
+    test_settings_uses_sidebar_feature_submenus and
+    test_settings_submenu_has_image_verification_entry (bulkhash suite);
+    this pins only the container's own placement/presentation."""
+    html = _webroot("index.html")
+    css = _webroot("styles.css")
+    assert '<div class="nav-flyout menu" id="settings-submenu" hidden>' in html
+    assert '<div class="nav-flyout menu" id="monitoring-submenu" hidden>' in html
+    after_settings = html.split('id="settings-submenu" hidden>', 1)[1]
+    assert after_settings.lstrip().startswith('<div class="nav-group">Settings</div>')
+    after_monitoring = html.split('id="monitoring-submenu" hidden>', 1)[1]
+    assert after_monitoring.lstrip().startswith('<div class="nav-group">Monitoring</div>')
+    assert ".nav-rail { width:200px; background:var(--surface); " \
+        "border-right:1px solid var(--rule); padding:8px 0; position:relative; }" in css
+    assert ".nav-flyout { left:200px;" in css
+    assert "#settings-submenu { top:" in css
+    assert "#monitoring-submenu { top:" in css
+    mobile = css.split("@media (max-width: 768px)", 1)[1].split("\n}\n", 1)[0]
+    assert "#settings-submenu, #monitoring-submenu {" in mobile
+    assert "position: static;" in mobile
+
+
+def test_bulk_bar_action_buttons_capped_via_more_menu():
+    """Magnetic Table > Bulk action bar: "When row checkboxes are selected,
+    the bulk action bar appears, allowing up to 4 specific actions for the
+    selected rows... The bulk action bar stays visible until all rows are
+    deselected or the 'Cancel' button is clicked."
+
+    So .selbar-actions holds exactly four controls, the fourth being the
+    overflow (Magnetic Dropdown lists "List actions from a horizontal 3-dot
+    icon" as a dropdown use case, and Table > Action column reaches for an
+    overflow icon button once there are more than two). The single primary
+    sits on the group's outside edge per Button > Button group > Alignment.
+    Selection state -- the count, the select-all-beyond-this-page shortcut and
+    Cancel -- sits outside that group and is not one of the four.
+
+    Adopt/Quarantine/Release/Set-credential/Delete live inside the overflow;
+    every id, click handler and the shared bulk busy-lock stay put
+    (test_bulk_row_actions_wired / test_all_selected_actions_share_one_busy_
+    lock guard those already)."""
+    def _top_level_button_ids(container):
+        # IDs of buttons NOT nested inside a `.menu` floating popover -- a
+        # menu-wrap TRIGGER button stays visible in the bar at all times
+        # (only its popover's own contents are hidden until opened), so
+        # `.menu-wrap` itself is transparent to this count; depth only
+        # starts at a `.menu` popover's own opening tag (exact class
+        # match, so it does not fire on `.menu-wrap`/`.menu-note` too), and
+        # any <div> nested inside one still balances the count correctly
+        # via the generic branch below.
+        depth = 0
+        ids = []
+        i = 0
+        while i < len(container):
+            if depth == 0 and container.startswith('<div class="menu"', i):
+                depth = 1
+                i += 4
+            elif depth > 0 and container.startswith("<div", i):
+                depth += 1
+                i += 4
+            elif depth > 0 and container.startswith("</div>", i):
+                depth -= 1
+                i += 6
+            elif depth == 0 and container.startswith('<button class="btn', i):
+                m = re.search(r'id="([^"]+)"', container[i:i + 260])
+                ids.append(m.group(1) if m else None)
+                i += 1
+            else:
+                i += 1
+        return ids
+
+    html = _webroot("index.html")
+    selbar = html.split('id="sel-bar"', 1)[1].split('id="dev-form"', 1)[0]
+    state, actions = selbar.split('class="selbar-actions"', 1)
+
+    # selection state, not actions on the selection
+    assert _top_level_button_ids(state) == ['sel-scope-all', 'sel-clear']
+
+    # exactly four, primary last (right-aligned group, outside edge)
+    ids = _top_level_button_ids(actions)
+    assert ids == ['assign-images-selected', 'undeploy-selected',
+                   'onboard-selected', 'more-menu-btn'], ids
+    assert len(ids) <= 4
+    assert actions.count('<button class="btn"') == 1, "one primary per group"
+
+    # the fourth is an icon-only overflow trigger with an accessible name
+    trigger = actions.split('id="more-menu-btn"', 1)[0]
+    assert 'class="btn ghost icon-only"' in trigger[trigger.rfind("<button"):]
+    assert 'aria-label="More actions"' in actions.split(
+        'id="more-menu-btn"', 1)[1].split(">", 1)[0]
+
+    more_pop = actions.split('id="more-pop" hidden>', 1)[1].split("</div>", 1)[0]
+    for folded_id in ("adopt-selected", "quarantine-selected",
+                      "release-selected", "set-cred-selected",
+                      "delete-selected"):
+        assert ('id="%s"' % folded_id) in more_pop, folded_id
+        # menu-close so the popover closes the instant the action fires --
+        # without it .menu's own click handler stopPropagation()s and the
+        # outside-click closer (document listener) never sees the click
+        before = more_pop.split('id="%s"' % folded_id, 1)[0]
+        tag_start = before.rfind("<button")
+        assert "menu-close" in before[tag_start:], folded_id
+    # Dropdown > Types: destructive menu items are a supported type, and the
+    # divider groups Delete away from the reversible actions above it
+    assert '<hr class="menu-divider">' in more_pop
+    assert 'class="menu-item danger menu-close" type="button" id="delete-selected"' in more_pop
+    # the credential picker moved out of the menu and into its own modal --
+    # Dropdown items act immediately, they never carry a select + Apply pair
+    assert 'id="cred-selected"' not in more_pop
+    cred_modal = html.split('id="cred-modal"', 1)[1].split('id="img-picker"', 1)[0]
+    assert 'id="cred-selected"' in cred_modal
+    assert 'id="apply-cred-selected"' in cred_modal
+
+
+def test_bulk_modals_close_cleanly_and_the_total_agrees_with_the_total():
+    """Three defects found reviewing the Magnetic action-layout pass, all in
+    the new modal/filter-bar code and none of them reachable by the static
+    guards around them.
+
+    1. The merged filter-bar Total agreed its noun with the MATCHED count, so
+       filtering twelve devices down to one read "1 of 12 result". In the
+       "X of N" form the noun belongs to N, and #dev-count is the page's only
+       count now, so the wrong form sat on screen for the most common thing
+       the search box is used for.
+    2. openModal captured document.activeElement as the element to restore
+       focus to -- but "Set credential…" lives inside the #more-pop dropdown
+       and carries .menu-close, so wireMenu hides it immediately afterwards.
+       focus() on a display:none element is a no-op, so keyboard focus was
+       dropped to the document every single time that modal closed. The opener
+       is resolved to the popover's own trigger, which stays visible.
+    3. A backdrop `e.target === overlay` click-closer misfires on the second
+       click of a double-click (the backdrop the first click raised is now
+       under the pointer) and on a drag-selection released past the dialog
+       edge (a click is dispatched at the mousedown/mouseup common ancestor) --
+       the latter closing the undeploy modal while its force help text is
+       being read. There is no backdrop closer; ✕ / Cancel / Escape are the
+       ways out, matching the pre-existing image picker on this same page."""
+    js = _webroot("app.js")
+
+    # 1 -- both branches pluralise on `total`
+    assert "(devs.length === total ? String(total) : devs.length + ' of ' + total) +" in js
+    assert "' result' + (total === 1 ? '' : 's');" in js
+    # the old form agreed with the matched count
+    assert "((devs.length === total ? total : devs.length) === 1 ? '' : 's')" not in js
+
+    # 2 -- a menu-hosted opener resolves to the popover's trigger
+    fn = js.split("function openModal(id) {", 1)[1].split("\n  }", 1)[0]
+    assert "var opener = document.activeElement;" in fn
+    assert "opener.closest('.menu')" in fn
+    assert "menu.closest('.menu-wrap')" in fn
+    assert "wrap.querySelector('[aria-expanded]')" in fn
+    assert "modalOpener = opener;" in fn
+    assert "modalOpener = document.activeElement;" not in js
+
+    # 3 -- no backdrop click-to-close anywhere (the phrase appears in the
+    # comment explaining why, so pin the code form, not the words)
+    assert "if (e.target === overlay) closeModal" not in js
+    assert "overlay.addEventListener('click'" not in js
+    wire = js.split("function wireModal(id, closerIds) {", 1)[1].split("\n  }", 1)[0]
+    assert "addEventListener('click'" in wire, "the ✕/Cancel closers must stay"
+    assert "e.key === 'Escape'" in wire
+    assert "trapDialogFocus(overlay);" in wire
+    # every modal still offers an explicit close control, per Magnetic Modal
+    html = _webroot("index.html")
+    for mid, closers in (("onboard-modal", ("onboard-cancel", "onboard-modal-x")),
+                         ("undeploy-modal", ("undeploy-cancel", "undeploy-modal-x")),
+                         ("cred-modal", ("cred-modal-cancel", "cred-modal-x"))):
+        block = html.split('id="%s"' % mid, 1)[1].split("<!--", 1)[0]
+        for cid in closers:
+            assert 'id="%s"' % cid in block, "%s must offer %s" % (mid, cid)
+        assert "wireModal('%s', ['%s', '%s']);" % (mid, closers[0], closers[1]) in js
+
+
+def test_nav_divider_grid_spacing_and_compact_anatomy_comment():
+    """Wave B fixes 3/4/8: a hairline divider separates the four primary
+    destinations from the Settings/Monitoring group; the rail's indent
+    steps to a consistent 16px per level (--sp-lg, was an uneven
+    18/30/44px); and the console's already-accepted compact 48px/200px
+    product-bar/nav-rail anatomy (vs. the boilerplate's 56px/280px) is
+    recorded in a comment, so it reads as a deliberate, user-directed
+    decision rather than something later fidelity work should "fix"."""
+    html = _webroot("index.html")
+    css = _webroot("styles.css")
+    assert '<hr class="nav-divider">' in html
+    assert ".nav-divider { border:0; height:1px; background:var(--rule); margin:8px 16px 0; }" \
+        in css
+    assert ".product-bar { background:var(--surface); color:var(--text-heading); " \
+        "border-bottom:1px solid var(--rule); height:48px; display:flex; " \
+        "align-items:center; padding:0 16px; gap:8px; }" in css
+    assert ".nav { display:flex; align-items:center; gap:8px; height:32px; padding:0 16px;" \
+        in css
+    assert ".nav-group { padding:12px 16px 2px;" in css
+    assert ".nav.sub { padding-left:32px; font-size:13px; }" in css
+    assert ".nav.subsub { padding-left:48px; font-size:13px; color:var(--text-secondary); }" \
+        in css
+    assert "56px" in css and "280px" in css and "48px" in css and "200px" in css
+
+
+# ---------------------------------------------------------------------------
+# Wave D: post-walk fixes (dense Devices type, flyout outside-click close,
+# Images import blurb)
+# ---------------------------------------------------------------------------
+
+def test_devices_table_gets_the_dense_type_modifier():
+    """Wave D fix 1 (operator, AFTER the Wave A type-role fix had already
+    landed: "still different fonts"). Devices is an 11-column table where a
+    single row mixed 14px sans (.dev-id, plain-text cells like Management
+    type), 12px mono (.machine), and 14px inherited control text (row
+    selects/buttons) -- individually "correct" per type role, but
+    heterogeneous enough to read as inconsistent. .tbl.dense steps every
+    cell's TEXT SIZE to one P4 scale (12/18); family still varies by data
+    kind (sans vs --font-mono), weight 500 stays on .dev-id. Scoped to
+    #devices only -- Images (5 columns) stays on the base 14px .tbl scale,
+    unmodified."""
+    html = _webroot("index.html")
+    css = _webroot("styles.css")
+    assert '<table class="tbl dense" id="devices">' in html
+    # Images keeps the base (non-dense) table scale this wave
+    assert '<table class="tbl" id="images">' in html
+    assert ".tbl.dense td { font-size:12px; line-height:18px; }" in css
+    # row controls (selects/buttons) match the row's own 12px text
+    assert "#dev-rows select, #dev-rows button { font-size:12px; }" in css
+    # .dev-id steps down from 14px to 12/18, weight 500 preserved
+    assert "#dev-rows .dev-id { font-family: var(--font-sans); font-size: 12px; " \
+        "line-height: 18px; font-weight: 500; color: var(--text-heading); }" in css
+
+
+def test_settings_monitoring_flyouts_close_on_outside_click_not_just_route():
+    """Wave D fix 2 (operator: "does not disappear when I click the site").
+    Wave B's flyouts were visually floating panels, but their hidden state
+    was still tied to the active route (`hidden = view !== 'settings'`), so
+    a flyout stayed open for as long as the operator was anywhere on
+    Settings/Monitoring -- never closing on an outside click the way every
+    other .menu popover does. The rail trigger is now ALSO wired through
+    wireMenu -- the same open-on-click / close-on-outside-click-or-Escape
+    machinery as csv-menu / onboard-pop / more-pop -- and the unconditional
+    route-tied hidden assignment is gone from the router."""
+    js = _webroot("app.js")
+    assert "wireMenu('nav-settings', 'settings-submenu');" in js
+    assert "wireMenu('nav-monitoring', 'monitoring-submenu');" in js
+    # the old unconditional route-tied visibility toggle is gone
+    assert "document.getElementById('settings-submenu').hidden = view !== 'settings';" \
+        not in js
+    assert "document.getElementById('monitoring-submenu').hidden = view !== 'monitoring';" \
+        not in js
+    # navigating to an unrelated view still closes a flyout left open (the
+    # back-button / programmatic-hashchange path an outside click never
+    # covers, since no click event fires on the page at all)
+    show_fn = js.split("function show(view) {", 1)[1].split(
+        "function current() {", 1)[0]
+    assert "if (view !== 'settings' && view !== 'monitoring') closeMenus();" in show_fn
+    # closeMenus() also clears aria-expanded on both triggers -- they live
+    # directly in the rail, not inside a .menu-wrap, so the generic
+    # .menu-wrap [aria-expanded] reset in closeMenus() would otherwise miss
+    # them and leave a stale aria-expanded="true" on a collapsed trigger
+    close_menus_fn = js.split("function closeMenus() {", 1)[1].split(
+        "\n  }", 1)[0]
+    assert "nav-settings" in close_menus_fn and "nav-monitoring" in close_menus_fn
+    assert "setAttribute('aria-expanded', 'false')" in close_menus_fn
+
+    html = _webroot("index.html")
+    assert 'id="nav-settings" aria-expanded="false"' in html
+    assert 'id="nav-monitoring" aria-expanded="false"' in html
+    # every sub-item closes the flyout the instant it is chosen (wireMenu's
+    # own panel click handler acts on .menu-close)
+    for sub_id in ("nav-settings-setup", "nav-settings-general", "nav-settings-tls",
+                   "nav-settings-telemetry", "nav-settings-audit", "nav-settings-bulkhash",
+                   "nav-monitoring-audit", "nav-monitoring-deploylogs"):
+        before = html.split('id="%s"' % sub_id, 1)[0]
+        tag_start = before.rfind("<a ")
+        assert "menu-close" in before[tag_start:], sub_id
+
+
+def test_images_import_blurb_drops_the_subdirectory_examples():
+    """Wave D fix 3 (operator: wanted the worked examples gone from the
+    Images import blurb -- the mechanism (a real subdirectory, the scanned
+    extensions, IMAGES_ROOT) stays, only the illustrative "such as
+    /opt/images/iosxe/c9300/ or /opt/images/iosxr/" clause goes."""
+    html = _webroot("index.html")
+    # the worked examples are gone outright -- these substrings do not
+    # appear anywhere else in the page
+    assert "such as" not in html
+    assert "iosxe/c9300" not in html
+    assert "/opt/images/iosxr/" not in html
+    assert ("Images copied onto the server under\n"
+            '              <span class="machine">/opt/images</span> — including any subdirectory —\n'
+            "              are offered for import below without uploading. Files ending in\n"
+            '              <span class="machine">.bin</span>, <span class="machine">.iso</span>,\n'
+            '              <span class="machine">.tar</span> or <span class="machine">.rpm</span> are\n'
+            "              scanned. Set <span class=\"machine\">IMAGES_ROOT</span> to scan a\n"
+            "              different directory.</p>") in html

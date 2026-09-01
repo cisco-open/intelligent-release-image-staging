@@ -203,6 +203,25 @@ def test_delete_image_blocked_when_assigned(tmp_path):
     assert store.get_image("img1") is not None         # nothing removed
 
 
+def test_delete_image_blocked_when_assigned_as_second_member(tmp_path):
+    # Every delete-guard test above assigns via the singular approved_image_id
+    # kwarg, so a regression to "check only approved_image_ids[0]" would pass
+    # the whole suite. Assign a multi-image set and prove BOTH members guard
+    # deletion, not just the first.
+    svc = gui_images.ImageService(str(tmp_path / "state"), str(tmp_path / "imgs"),
+                                  seeder_remove_fn=lambda ih: None)
+    store = svc._store()
+    store.save_image({"id": "img-a", "filename": "img-a.bin", "info_hash_hex": "a",
+                      "published_at": 1})
+    store.save_image({"id": "img-b", "filename": "img-b.bin", "info_hash_hex": "b",
+                      "published_at": 1})
+    store.set_policy("d1", approved_image_ids=["img-a", "img-b"])
+    assert svc.delete_image("img-a") == ["d1"]        # first member blocks
+    assert store.get_image("img-a") is not None
+    assert svc.delete_image("img-b") == ["d1"]        # second member blocks too
+    assert store.get_image("img-b") is not None
+
+
 def test_delete_image_ignores_stale_policy_with_live_fleet(tmp_path):
     svc = gui_images.ImageService(str(tmp_path / "state"), str(tmp_path / "imgs"),
                                   seeder_remove_fn=lambda ih: None)
@@ -562,3 +581,37 @@ def test_importable_path_identifies_candidates_only(tmp_path):
     # a prefix of a real root, but not a discovered candidate
     assert svc.is_importable_path(
         str(tmp_path / "imgs" / ".." / "outside" / "secret.bin")) is False
+
+
+def test_scan_offers_ios_xr_and_other_cisco_image_types(tmp_path):
+    """IOS-XR ships .iso images (base and GISO) and .tar/.rpm package bundles.
+    The scan used to accept only .bin, so an operator who dropped an XR image
+    into the import root saw nothing offered and no reason why."""
+    root = tmp_path / "images"
+    (root / "iosxr").mkdir(parents=True)
+    (root / "iosxe").mkdir(parents=True)
+    (root / "iosxr" / "8000-x64-26.2.1.iso").write_bytes(b"xr-iso")
+    (root / "iosxr" / "8000-optional-rpms.26.2.1.tar").write_bytes(b"xr-rpms")
+    (root / "iosxr" / "xr-9000v-x64-7.11.1.rpm").write_bytes(b"xr-rpm")
+    (root / "iosxe" / "cat9k_iosxe.26.01.01.SPA.bin").write_bytes(b"xe-bin")
+    svc = gui_images.ImageService(str(tmp_path / "state"),
+                                  str(tmp_path / "vol"), import_root=str(root))
+    offered = sorted(c["filename"] for c in svc.list_importable())
+    assert offered == ["8000-optional-rpms.26.2.1.tar",
+                       "8000-x64-26.2.1.iso",
+                       "cat9k_iosxe.26.01.01.SPA.bin",
+                       "xr-9000v-x64-7.11.1.rpm"]
+
+
+def test_scan_still_ignores_files_that_are_not_images(tmp_path):
+    """Widening the extension set must not turn the import root into a file
+    browser: notes, checksums and archives of other kinds stay invisible."""
+    root = tmp_path / "images"
+    root.mkdir()
+    (root / "real.26.01.01.SPA.bin").write_bytes(b"image")
+    for noise in ("README.md", "image.bin.sha256", "notes.txt",
+                  "bundle.tar.gz", "archive.zip", ".hidden.iso"):
+        (root / noise).write_bytes(b"noise")
+    svc = gui_images.ImageService(str(tmp_path / "state"),
+                                  str(tmp_path / "vol"), import_root=str(root))
+    assert [c["filename"] for c in svc.list_importable()] == ["real.26.01.01.SPA.bin"]

@@ -3,111 +3,316 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-:root { --navy:#0b2545; --navy2:#12395f; --blue:#0b5cd6; --bg:#f5f7fa; --line:#e5e9f0; }
+@font-face { font-family: "Inter"; src: url("fonts/Inter-Regular.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: "Inter"; src: url("fonts/Inter-Medium.woff2") format("woff2"); font-weight: 500; font-style: normal; font-display: swap; }
+@font-face { font-family: "Inter"; src: url("fonts/Inter-SemiBold.woff2") format("woff2"); font-weight: 600 700; font-style: normal; font-display: swap; }
+@font-face { font-family: "Roboto Mono"; src: url("fonts/RobotoMono-Regular.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: "Roboto Mono"; src: url("fonts/RobotoMono-Medium.woff2") format("woff2"); font-weight: 500 700; font-style: normal; font-display: swap; }
+@font-face { font-family: "Sharp Sans"; src: url("fonts/SharpSans-Bold.woff2") format("woff2"); font-weight: 700; font-style: normal; font-display: swap; }
+
+:root {
+  --canvas: #F0F1F2; --surface: #FFFFFF; --surface-subtle: #F7F7F7;
+  --text-heading: #23282E; --text-body: #373C42; --text-secondary: #6F7680;
+  --rule: #E1E4E8; --border: #889099;
+  --action: #2774D9; --action-hover: #1D69CC; --action-active: #0051AF;
+  --action-tint: #E3EEFF; --selected-tint: #CCE1FF;
+  --danger: #D93843; --danger-tint: #FFE8E9;
+  --warning: #B05F04; --warning-tint: #FAEFB9;
+  --severe: #C44F14; --severe-tint: #FFEADB;
+  --success: #398519; --success-tint: #E0F5D5;
+  --progress: #8D4EED; --progress-tint: #F3EBFF;
+  --info: #5A68E5; --info-tint: #EBEDFF;
+  --inactive: #6F7680; --inactive-tint: #F0F1F2;
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "Roboto Mono", ui-monospace, Menlo, monospace;
+  --font-display: "Sharp Sans", var(--font-sans);
+  --shadow-xs: 0 2px 5px rgba(0,0,0,.05); --shadow-sm: 0 3px 8px rgba(0,0,0,.08);
+  --shadow-md: 0 4px 12px rgba(0,0,0,.12); --shadow-lg: 0 4px 12px rgba(0,0,0,.18);
+  --focus-ring: 0 0 0 2px #E3EEFF, 0 0 0 3px #2774D9;
+  --radius-control: 4px; --radius-card: 8px;
+  --sp-xs: 4px; --sp-sm: 8px; --sp-md: 12px; --sp-lg: 16px;
+  --sp-xl: 24px; --sp-2xl: 32px; --sp-3xl: 40px;
+}
 * { box-sizing:border-box; }
-body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; color:#1a2b45; background:var(--bg); }
-.top { background:linear-gradient(90deg,var(--navy),var(--navy2)); color:#fff; height:48px; display:flex; align-items:center; padding:0 18px; gap:10px; font-weight:600; }
-.top .spacer { flex:1; }
-.top .who { font-size:13px; font-weight:400; opacity:.9; }
-.top .tag { font-size:11px; font-weight:400; opacity:.7; border:1px solid rgba(255,255,255,.4); border-radius:4px; padding:1px 6px; margin-left:6px; vertical-align:1px; }
-.stripe { height:3px; background:linear-gradient(90deg,#00bceb,#0d6efd,#7b61ff,#e5308a,#f7961d); }
-.shell { display:flex; min-height:calc(100vh - 51px); }
-.side { width:180px; background:#fff; border-right:1px solid var(--line); padding:10px 0; }
-.side a { display:block; padding:9px 18px; color:#334; text-decoration:none; font-size:14px; }
-.side a.active { background:#e7f1ff; color:var(--blue); font-weight:600; border-left:3px solid var(--blue); padding-left:15px; }
+body { margin:0; font-family:var(--font-sans); font-size:14px; line-height:20px; color:var(--text-body); background:var(--canvas); }
+h1, h2, h3, h4 { font-family:var(--font-display); font-weight:700; color:var(--text-heading); }
+h1 { font-size:24px; line-height:34px; }
+h2 { font-size:18px; line-height:24px; }
+h3 { font-size:16px; line-height:22px; }
+h4 { font-size:14px; line-height:20px; }
+/* Form controls don't inherit the type system from the UA stylesheet by
+   default (buttons/inputs/selects/options render a platform font of their
+   own) -- every control on every view must land on the same Inter body
+   type as everything around it. */
+button, input, select, textarea, option { font: inherit; }
+/* Shared control chrome for any bare, unclassed text input/select (the
+   Devices filter row and a couple of drawer fields had none at all --
+   raw browser widgets sitting next to fully-styled buttons). More specific
+   rules declared later (.inline-form, .joined, .login-card) override the
+   sizing details below on the fields they own; this just gives every
+   other control the same box, radius and focus ring. */
+input:not([type="checkbox"]):not([type="radio"]):not([type="file"]), select {
+  height: 32px; padding: 0 9px; font-size: 14px; color: var(--text-body);
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+}
+input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):focus-visible,
+select:focus-visible, textarea:focus-visible, button:focus-visible {
+  outline: none; box-shadow: var(--focus-ring);
+}
+/* Compact anatomy (user-directed, deliberate divergence): this console runs
+   .product-bar at 48px / .nav-rail at 200px rather than the boilerplate
+   Magnetic shell's 56px / 280px -- a denser bar and rail suit an
+   operator console read at arm's length across many rows of device/image
+   data, not a marketing-app shell. Every other nav anatomy fix in this
+   wave (icons, divider, flyouts, grid spacing) is layered on top of this
+   already-accepted compact frame, not a step toward the wider default. */
+.product-bar { background:var(--surface); color:var(--text-heading); border-bottom:1px solid var(--rule); height:48px; display:flex; align-items:center; padding:0 16px; gap:8px; }
+.product-bar .product-name { font-family:var(--font-display); font-size:16px; font-weight:700; color:var(--text-heading); }
+.product-bar .product-suite { font-size:13px; font-weight:500; color:var(--text-secondary); }
+.product-bar .spacer { flex:1; }
+.product-bar .who { font-size:13px; font-weight:400; color:var(--text-secondary); }
+.product-bar .tag { font-family:var(--font-sans); font-size:11px; font-weight:500; color:var(--text-secondary); border:1px solid var(--border); border-radius:4px; padding:1px 6px; margin-left:6px; vertical-align:1px; }
+.shell { display:flex; min-height:calc(100vh - 49px); }
+.nav-rail { width:200px; background:var(--surface); border-right:1px solid var(--rule); padding:8px 0; position:relative; }
 .main { flex:1; padding:24px; }
-.btn { background:var(--blue); color:#fff; border:0; border-radius:6px; padding:9px 16px; font-size:14px; cursor:pointer;
-  box-shadow:0 1px 2px rgba(11,37,69,.18); transition:background .12s ease, box-shadow .12s ease, transform .06s ease; }
-.btn:hover { background:#0a52c2; }
+.btn { background:var(--action); color:#fff; border:0; border-radius:var(--radius-control); height:32px; padding:0 16px; font-size:14px; cursor:pointer;
+  display:inline-flex; align-items:center; justify-content:center;
+  box-shadow:var(--shadow-xs); transition:background .12s ease, box-shadow .12s ease, transform .06s ease; }
+.btn:hover { background:var(--action-hover); }
 .btn:active { transform:translateY(1px); box-shadow:inset 0 1px 3px rgba(0,0,0,.25); }
-.btn:focus-visible { outline:none; box-shadow:0 0 0 3px rgba(11,92,214,.35); }
-.btn.ghost { background:#fff; color:var(--blue); border:1px solid #c7d0e0; box-shadow:0 1px 2px rgba(11,37,69,.06); }
-.btn.ghost:hover { background:#f2f7ff; border-color:var(--blue); }
-.btn.ghost:active { transform:translateY(1px); box-shadow:inset 0 1px 2px rgba(11,37,69,.12); }
-.btn.ghost:focus-visible { outline:none; box-shadow:0 0 0 3px rgba(11,92,214,.35); }
+.btn:focus-visible { outline:none; box-shadow:var(--focus-ring); }
+/* .btn's own display:inline-flex outranks the [hidden] attribute's UA
+   display:none, so any button toggled with .hidden -- the filter bar's Reset,
+   the bulk bar's "Select all N filtered devices" -- would stay on screen
+   forever without this. */
+.btn[hidden] { display:none; }
+.btn.ghost { background:var(--surface); color:var(--action); border:1px solid var(--border); box-shadow:var(--shadow-xs); }
+.btn.ghost:hover { background:var(--action-tint); border-color:var(--action); }
+.btn.ghost:active { transform:translateY(1px); box-shadow:inset 0 1px 2px rgba(0,0,0,.12); }
+.btn.ghost:focus-visible { outline:none; box-shadow:var(--focus-ring); }
 /* Single-glyph button (the ? help trigger): the default .btn padding turns one
    character into a wide pill, so give it an equal-sided round shape instead. */
-.btn.icon { width:30px; height:30px; padding:0; border-radius:999px;
+.btn.icon { width:32px; height:32px; padding:0; border-radius:999px;
   display:inline-flex; align-items:center; justify-content:center;
   font-size:15px; line-height:1; font-weight:700; }
-.chip { background:#fff; color:#334; border:1px solid #c7d0e0; border-radius:999px; padding:6px 14px; font-size:13px;
+.chip { background:var(--surface); color:var(--text-body); border:1px solid var(--border); border-radius:999px; padding:6px 14px; font-size:13px;
   cursor:pointer; transition:background .12s ease, box-shadow .12s ease, transform .06s ease, border-color .12s ease; }
-.chip:hover { background:#f2f7ff; border-color:var(--blue); }
+.chip:hover { background:var(--action-tint); border-color:var(--action); }
 .chip:active { transform:translateY(1px); }
-.chip:focus-visible { outline:none; box-shadow:0 0 0 3px rgba(11,92,214,.35); }
-.chip.active { background:var(--blue); color:#fff; border-color:var(--blue); }
+.chip:focus-visible { outline:none; box-shadow:var(--focus-ring); }
+.chip.active { background:var(--action); color:#fff; border-color:var(--action); }
 .login-wrap { min-height:100vh; display:flex; align-items:center; justify-content:center; }
-.login-card { background:#fff; border:1px solid var(--line); border-radius:10px; padding:28px; width:320px; box-shadow:0 4px 20px rgba(0,0,0,.08); }
+.login-card { background:var(--surface); border:1px solid var(--rule); border-radius:var(--radius-card); padding:28px; width:420px; box-shadow:var(--shadow-xs); }
 .login-card h1 { font-size:20px; margin:0 0 4px; }
-.login-card .sub { color:#67728a; font-size:13px; margin:0 0 18px; }
-.login-card label { display:block; font-size:12px; color:#67728a; margin:12px 0 4px; }
-.login-card input { width:100%; padding:9px; border:1px solid #c7d0e0; border-radius:6px; font-size:14px; }
+.login-card .sub { color:var(--text-secondary); font-size:13px; margin:0 0 18px; }
+.login-card label { display:block; font-size:12px; color:var(--text-secondary); margin:12px 0 4px; }
+.login-card input { width:100%; }
 .login-card .btn { width:100%; margin-top:18px; }
-.err { color:#c0362c; font-size:13px; margin-top:12px; min-height:18px; }
+.err { color:var(--danger); font-size:13px; margin-top:12px; min-height:18px; }
 #logout { margin-left:14px; }
-.upload { border:2px dashed #c7d0e0; border-radius:10px; padding:22px; text-align:center; margin:8px 0 20px; color:#334; }
-.upload.drag { border-color:var(--blue); background:#f2f7ff; }
-.muted { color:#67728a; font-size:13px; }
-.progress { height:8px; background:#e5e9f0; border-radius:5px; overflow:hidden; margin:12px auto; max-width:420px; }
-.progress .bar { height:100%; width:0; background:var(--blue); transition:width .15s; }
-.tbl { width:100%; border-collapse:collapse; font-size:13px; }
-.tbl th { text-align:left; color:#67728a; font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:.3px; border-bottom:1px solid var(--line); padding:8px 10px; }
-.tbl td { border-bottom:1px solid #f0f2f6; padding:8px 10px; color:#334; font-family:ui-monospace,Menlo,Consolas,monospace; }
+.upload { border:2px dashed var(--border); border-radius:10px; padding:22px; text-align:center; margin:8px 0 20px; color:var(--text-body); }
+.upload.drag { border-color:var(--action); background:var(--action-tint); }
+.muted { color:var(--text-secondary); font-size:12px; line-height:18px; }
+.progress { height:8px; background:var(--rule); border-radius:5px; overflow:hidden; margin:12px auto; max-width:420px; }
+.progress .bar { height:100%; width:0; background:var(--action); transition:width .15s; }
+.tbl { width:100%; border-collapse:collapse; font-size:14px; line-height:20px; }
+.tbl th { text-align:left; color:var(--text-secondary); font-weight:600; font-size:12px; text-transform:none; letter-spacing:normal; border-bottom:1px solid var(--border); padding:8px 12px; }
+.tbl td { border-bottom:1px solid var(--rule); padding:8px 12px; color:var(--text-body); }
+.tbl td:last-child, .tbl th:last-child { text-align:right; }
+#images td:nth-child(4), #images th:nth-child(4) { text-align:right; }
 .toolbar { display:flex; gap:8px; align-items:center; margin:8px 0 16px; flex-wrap:wrap; }
-.nav { display:block; padding:9px 18px; color:#334; text-decoration:none; font-size:14px; cursor:pointer; }
-.nav.active { background:#e7f1ff; color:var(--blue); font-weight:600; border-left:3px solid var(--blue); padding-left:15px; }
-.nav-group { padding:14px 18px 2px; font-size:11px; text-transform:uppercase; letter-spacing:.4px; color:#889; }
-.nav.sub { padding-left:30px; font-size:13px; }
-.nav.sub.active { padding-left:27px; }
-.nav.subsub { padding-left:44px; font-size:13px; color:#556; }
-.nav.subsub.active { padding-left:41px; }
-.nav.subsub:focus-visible { outline:none; box-shadow:inset 0 0 0 3px rgba(11,92,214,.35); }
+/* Nav anatomy (post-walk Magnetic fidelity fixes, Wave B): every item leads
+   with a fixed 20px icon (currentColor, so it tracks default/hover/.active
+   state for free) -- icons are structural in Magnetic nav, not decoration.
+   The label lives in its own .nav-label span so a future collapsed
+   (icon-only) rail state has something to hide without touching the icon
+   or the anchor's own hit target. */
+.nav { display:flex; align-items:center; gap:8px; height:32px; padding:0 16px; color:var(--text-body); text-decoration:none; font-size:14px; font-weight:500; cursor:pointer; }
+.nav:hover { background:var(--surface-subtle); }
+.nav.active { background:var(--action-tint); color:var(--action-active); font-weight:600; border-left:3px solid var(--action); padding-left:13px; }
+.nav:focus-visible { outline:none; box-shadow:var(--focus-ring); }
+.nav-icon { width:20px; height:20px; flex:none; }
+/* Section divider (Wave B): a hairline above the "System" group label,
+   separating the four primary destinations from the Settings/Monitoring
+   pair below -- absent before, despite being structural in Magnetic nav. */
+.nav-divider { border:0; height:1px; background:var(--rule); margin:8px 16px 0; }
+.nav-group { padding:12px 16px 2px; font-size:12px; font-weight:600; letter-spacing:.2px; color:var(--text-secondary); }
+/* On-grid indent: .nav's own 16px left inset, +16px per nesting level
+   (--sp-lg, the console's base spacing unit) -- .nav.sub at one level,
+   .nav.subsub at two, rather than the old uneven 18/30/44px steps. */
+.nav.sub { padding-left:32px; font-size:13px; }
+.nav.sub.active { padding-left:29px; }
+.nav.subsub { padding-left:48px; font-size:13px; color:var(--text-secondary); }
+.nav.subsub.active { padding-left:45px; }
+.page-header { display:flex; align-items:center; justify-content:space-between; gap:16px; margin:0 0 16px; }
+.page-title { font-family:var(--font-display); font-size:24px; line-height:34px; font-weight:700; color:var(--text-heading); margin:0; }
+.page-actions { display:flex; align-items:center; gap:8px; }
 .tbl .act { font-family:inherit; }
-.linkish { color:var(--blue); background:none; border:0; cursor:pointer; font:inherit; padding:0; }
-.log { background:#0b1626; color:#cfe3ff; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px; padding:12px; border-radius:8px; max-height:340px; overflow:auto; white-space:pre-wrap; }
+.linkish { color:var(--action); background:none; border:0; cursor:pointer; font:inherit; padding:0; }
+.machine { font-family: var(--font-mono); font-size:14px; line-height:20px; }
+.tbl .machine { font-size:12px; line-height:18px; }
+.log { background:#0b1626; color:#cfe3ff; font-family:var(--font-mono); font-size:12px; padding:12px; border-radius:8px; max-height:340px; overflow:auto; white-space:pre-wrap; }
 .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin:8px 0 20px; }
-.card { border:1px solid var(--line); border-radius:8px; padding:14px; }
-.card .lbl { font-size:11px; text-transform:uppercase; letter-spacing:.4px; color:#67728a; }
-.card .num { font-size:30px; font-weight:300; color:var(--blue); line-height:1.2; }
-.pbar { height:8px; background:#e5e9f0; border-radius:5px; overflow:hidden; min-width:80px; }
-.pbar > span { display:block; height:100%; background:#1a7f43; }
-.inline-form:not([hidden]) { display:flex; flex-wrap:wrap; gap:8px; align-items:center; background:#f7f9fc; border:1px solid var(--line); border-radius:8px; padding:12px; margin:0 0 16px; }
-.inline-form input, .inline-form select { padding:7px 9px; border:1px solid #c7d0e0; border-radius:6px; font-size:13px; }
-.inline-form .err { color:#c0362c; font-size:13px; }
+/* Container card (spec §4: 24px padding, --radius-card, --shadow-xs -- the
+   "card=xs (Subtle)" elevation mapping). Reserved for summary/bounded
+   status, not the default wrapper around every section. */
+.card { background:var(--surface); border:1px solid var(--rule);
+  border-radius:var(--radius-card); padding:var(--sp-xl); box-shadow:var(--shadow-xs); }
+.card .lbl { font-size:11px; text-transform:uppercase; letter-spacing:.4px; color:var(--text-secondary); }
+.card .num { font-size:30px; font-weight:300; color:var(--action); line-height:1.2; }
+.card .sub { font-size:11px; color:var(--text-secondary); margin-top:2px; }
+.pbar { height:8px; background:var(--rule); border-radius:5px; overflow:hidden; min-width:80px; }
+.pbar > span { display:block; height:100%; background:var(--success); }
+.inline-form:not([hidden]) { display:flex; flex-wrap:wrap; gap:8px; align-items:center; background:var(--surface-subtle); border:1px solid var(--rule); border-radius:8px; padding:12px; margin:0 0 16px; }
+.inline-form input, .inline-form select { padding:7px 9px; border:1px solid var(--border); border-radius:var(--radius-control); font-size:13px; }
+.inline-form .err { color:var(--danger); font-size:13px; }
+/* A success message reuses the .err slot (same element, same layout)
+   rather than a second status element. Must come AFTER .inline-form .err
+   above: both are two-class selectors (equal specificity), so source order
+   decides the tie -- this rule needs to win inside a form (an in-form
+   success message) as well as outside one (the Image verification pane's
+   Refresh now / offline-upload status lines are not form fields, so they
+   were never wrapped in one; there .err.ok's higher specificity than the
+   bare .err rule wins regardless of order). Putting it earlier, as a
+   previous pass did, let the .inline-form .err red rule win the tie inside
+   every form and repainted eight previously-working success messages red. */
+.err.ok { color:var(--success); }
 #cred-panel:not([hidden]) { display:block; }
 #cred-rows td { padding:6px 10px; }
-.inline-form .err.ok { color:#1a7f43; }
+/* Swarm map keeps its dark presentation (re-tokened from magnetic.dark.css
+   in Task 11) -- not part of this task's light-theme migration. */
 .swarm-frame { width:100%; height:clamp(680px,78vh,980px); border:1px solid #243049; border-radius:10px; background:#0b0f17; }
 #settings-info td:first-child { width:160px; }
 #audit-timeline { margin:4px 0 16px; }
 #audit-histogram, #dl-histogram { width:100%; height:64px; display:block; margin:6px 0; }
-#audit-histogram .axis, #dl-histogram .axis { stroke:var(--line); stroke-width:1; }
+#audit-histogram .axis, #dl-histogram .axis { stroke:var(--rule); stroke-width:1; }
+/* chart fill has no single-token equivalent (decorative, not a status
+   color); Monitoring's chart treatment is Task 9 territory. */
 #audit-histogram .bar, #dl-histogram .bar { fill:#9fc0f0; cursor:pointer; transition:fill .12s ease; }
-#audit-histogram .bar:hover { fill:var(--blue); }
+#audit-histogram .bar:hover { fill:var(--action); }
 /* time brush: selection overlay lives in its own pointer-events-free layer;
    all hit-testing is numeric on the svg itself */
 #audit-histogram { cursor:crosshair; touch-action:none; user-select:none; -webkit-user-select:none; }
 #audit-brush { pointer-events:none; }
-#audit-brush .brush-sel { fill:rgba(11,92,214,.14); stroke:var(--blue); stroke-width:1; }
-#audit-brush .brush-handle { fill:var(--blue); }
+#audit-brush .brush-sel { fill:rgba(39,116,217,.14); stroke:var(--action); stroke-width:1; }
+#audit-brush .brush-handle { fill:var(--action); }
 #audit-clear-selection { margin-left:6px; }
 /* audit table: composed messages, category tags, result badges */
-#audit-tbl td.msg { font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; }
 #audit-tbl td.nowrap { white-space:nowrap; }
-#audit-tbl .detail { color:#67728a; }
+#audit-tbl .detail { color:var(--text-secondary); }
+/* Status pill grammar (12-level Magnetic mapping, Task 4). Icon + tinted
+   background, never color alone. Positive is BLUE-family per Magnetic --
+   green stays reserved for Allow/policy grammar elsewhere in the console. */
+.status-pill { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px;
+  border-radius: 999px; font-size: 12px; line-height: 18px; font-weight: 500; }
+.status-pill svg { width: 12px; height: 12px; flex: none; }
+.status-pill.is-positive { background: var(--action-tint); color: var(--action-active); }
+.status-pill.is-progress { background: var(--progress-tint); color: var(--progress); }
+.status-pill.is-negative { background: var(--danger-tint); color: var(--danger); }
+.status-pill.is-warning  { background: var(--warning-tint); color: var(--warning); }
+.status-pill.is-severe   { background: var(--severe-tint); color: var(--severe); }
+.status-pill.is-info     { background: var(--info-tint); color: var(--info); }
+.status-pill.is-inactive { background: var(--inactive-tint); color: var(--inactive); }
+.status-pill.is-disabled { background: var(--inactive-tint); color: var(--inactive); }
+
+/* Overview bands (Task 7): attention first, active staging second, fleet
+   totals third -- each its own vertical section, 24px between sections
+   (spec §4 spacing scale). */
+.ov-band { margin:0 0 var(--sp-xl); }
+.ov-band h3:first-child { margin-top:0; }
+/* "Needs attention": clickable worst-of-group rollup cards. A real <button>
+   when it routes somewhere (Devices/Images, filtered); a plain <div> for
+   the all-clear state, which has nowhere useful to send a click. */
+.attention-cards { display:flex; flex-wrap:wrap; gap:12px; margin:8px 0 0; }
+.attention-card { display:flex; align-items:center; gap:12px; text-align:left;
+  background:var(--surface); border:1px solid var(--rule); border-radius:var(--radius-card);
+  padding:12px 16px; box-shadow:var(--shadow-xs); font:inherit; color:inherit;
+  min-width:220px; }
+button.attention-card { cursor:pointer; transition:box-shadow .12s ease, transform .06s ease; }
+button.attention-card:hover { box-shadow:var(--shadow-sm); }
+button.attention-card:active { transform:translateY(1px); }
+button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring); }
+.attention-card svg { width:22px; height:22px; flex:none; }
+.attention-text { display:flex; flex-direction:column; }
+.attention-card.is-negative svg { color:var(--danger); }
+.attention-card.is-severe svg { color:var(--severe); }
+.attention-card.is-warning svg { color:var(--warning); }
+.attention-card.is-positive svg { color:var(--action-active); }
+.attention-count { display:block; font-family:var(--font-display); font-size:20px;
+  font-weight:700; line-height:1.2; color:var(--text-heading); }
+.attention-label { display:block; font-size:13px; color:var(--text-body); }
+.attention-hint { display:block; font-size:11px; color:var(--text-secondary); margin-top:2px; }
+
+/* Staging Boundary (spec §4 "Signature: Staging Boundary" -- the one
+   intentional IRIS signature). Horizontal stepper: 16px circles + neutral
+   connectors, a failed step shows the status pill in place of its circle,
+   never a falsely-linear "done". Ends at a hatched, explicitly non-IRIS
+   "Operator control" terminus -- installation/activation/reload stay with
+   the operator. No glow, no particles. */
+.staging-boundary { display:flex; align-items:flex-start; flex-wrap:wrap; }
+.boundary-step { display:flex; flex-direction:column; align-items:center; gap:6px;
+  width:92px; text-align:center; }
+.boundary-connector { flex:1 1 16px; min-width:12px; height:1px; background:var(--rule);
+  margin-top:7px; }
+.boundary-circle { width:16px; height:16px; border-radius:999px; box-sizing:border-box;
+  display:inline-flex; align-items:center; justify-content:center; }
+.boundary-circle.is-done { border:2px solid var(--action); color:var(--action); }
+.boundary-circle.is-done svg { width:12px; height:12px; }
+.boundary-circle.is-current { background:var(--action); }
+.boundary-dot { width:6px; height:6px; border-radius:999px; background:#fff; }
+.boundary-circle.is-upcoming { border:2px solid var(--border); }
+.boundary-circle.is-na { border:2px dashed var(--border); }
+.boundary-marker svg { width:16px; height:16px; }
+.boundary-label { font-size:12px; line-height:18px; color:var(--text-secondary); }
+.boundary-terminus { display:flex; align-items:center; justify-content:center;
+  padding:0 14px; min-height:16px; border-radius:var(--radius-control);
+  background-image: repeating-linear-gradient(45deg, var(--rule), var(--rule) 4px,
+    var(--surface-subtle) 4px, var(--surface-subtle) 8px); }
+.boundary-terminus-label { font-size:12px; line-height:18px; font-weight:600;
+  color:var(--text-secondary); white-space:nowrap; }
+
+/* Images: intake/publish work area, visually separated (bounded cards) from
+   the catalog table below it (Task 7 Step 5). */
+.images-intake { display:flex; flex-direction:column; gap:16px; margin:0 0 24px; }
+.images-intake h3:first-child { margin-top:0; }
+/* Same stacked-card pattern as .images-intake above, reused wherever Task 9
+   turns a run of Settings/Setup h3 sections into bounded .card sections. */
+.setup-cards { display:flex; flex-direction:column; gap:16px; margin:12px 0 0; }
+.setup-cards .card h3:first-child { margin-top:0; }
+/* Icon sprite (Phosphor bold symbols, index.html): defines but never paints
+   -- CSP forbids a literal style= attribute, so it's hidden by class
+   instead of the usual inline 0x0/absolute trick. */
+.icon-sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+/* Batch-onboard row marker for an undeploy job (was a literal style=
+   attribute -- CSP forbids inline style in dynamic HTML). Purple to match
+   the In-progress pill level it names the same lifecycle action as. */
+.job-action-undeploy { color: var(--progress); font-size: 10px; font-weight: 600; }
+
 .badge { display:inline-block; font-size:11px; font-weight:600; border-radius:4px; padding:1px 7px; line-height:1.5; }
+/* Monitoring: the active time-scope tag next to a pane's own title (Task 9) --
+   read from the same range the histogram/table below already use. */
+.scope-tag { display:inline-block; font-size:11px; font-weight:600; padding:1px 8px;
+  border-radius:999px; background:var(--action-tint); color:var(--action);
+  margin-left:6px; vertical-align:middle; }
 /* same trap: #telemetry-health starts hidden and would otherwise render as an
    empty pill until its first refresh. */
 .badge[hidden] { display:none; }
-.badge-ok { background:#e3f4e8; color:#1a7f43; }
-.badge-fail { background:#fbe9e7; color:#c0362c; }
+.badge-ok { background:var(--success-tint); color:var(--success); }
+.badge-fail { background:var(--danger-tint); color:var(--danger); }
 /* batch-onboard job states (done/error reuse badge-ok/badge-fail) */
-.badge-queued { background:#eef1f6; color:#67728a; }
-.badge-running { background:#e3edfb; color:#0b5cd6; }
-.badge-cancelled { background:#f7efdc; color:#8a6d1a; }
-.legacy-warning { background:#fdf3e2; border:1px solid #ecc987; border-left:4px solid #d97706;
-  border-radius:6px; color:#6c4a07; font-size:13px; margin:0 0 16px; padding:8px 10px; }
-#batch-panel td.out { color:#67728a; max-width:420px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.badge-queued { background:var(--inactive-tint); color:var(--inactive); }
+.badge-running { background:var(--action-tint); color:var(--action); }
+.badge-cancelled { background:var(--warning-tint); color:var(--warning); }
+.legacy-warning { background:var(--warning-tint); border:1px solid var(--warning); border-left:4px solid var(--warning);
+  border-radius:6px; color:var(--warning); font-size:13px; margin:0 0 16px; padding:8px 10px; }
+#batch-panel td.out { color:var(--text-secondary); max-width:420px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* Category tags are a 7-way qualitative palette for visual distinction
+   between audit categories, not a semantic status system -- the Magnetic
+   token set has no matching categorical palette, and collapsing these onto
+   the status tokens would make two or more categories render identically,
+   defeating the point of the tags. Left as literal hex; candidate for a
+   dedicated categorical-palette decision in Task 9's monitoring pass. */
 .cat-tag { display:inline-block; font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.3px;
   border-radius:4px; padding:1px 6px; margin-right:4px; background:#eef1f6; color:#556; }
 .cat-auth { background:#f0e9fb; color:#6b3fa0; }
@@ -120,53 +325,89 @@ body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-
 
 /* Devices toolbar rework (2026-08-12): selection bar, menus, destructive btn */
 .toolbar .push, .selbar .push { margin-left:auto; }
-.toolbar .sep, .selbar .sep { width:1px; height:22px; background:#dfe4ec; }
+.toolbar .sep, .selbar .sep { width:1px; height:22px; background:var(--rule); }
 .menu-wrap { position:relative; display:inline-block; }
-.menu { position:absolute; top:calc(100% + 4px); left:0; z-index:30; background:#fff;
-  border:1px solid #c7d0e0; border-radius:8px; box-shadow:0 6px 18px rgba(11,37,69,.18);
+.menu { position:absolute; top:calc(100% + 4px); left:0; z-index:30; background:var(--surface);
+  border:1px solid var(--border); border-radius:8px; box-shadow:var(--shadow-md);
   padding:6px; min-width:190px; }
 .menu label { display:block; padding:4px 8px; white-space:nowrap; }
 .menu .btn { margin:6px 8px 4px; }
 .menu-item { display:block; width:100%; text-align:left; background:none; border:0;
-  border-radius:6px; padding:8px 10px; font-size:13px; color:#1a2b45; cursor:pointer; }
-.menu-item:hover { background:#f2f7ff; color:var(--blue); }
+  border-radius:6px; padding:8px 10px; font-size:13px; color:var(--text-body); cursor:pointer; }
+.menu-item:hover { background:var(--action-tint); color:var(--action); }
+/* Settings/Monitoring flyout submenus (Wave B): were inline in-rail
+   accordions -- the audit's biggest nav-fidelity break, since Magnetic sub-
+   navigation floats beside the rail rather than pushing the rest of the
+   rail's own items down. .nav-flyout reuses .menu's floating-panel chrome
+   verbatim (surface/border/radius8/--shadow-md, both classes on the same
+   element) and only overrides position -- anchored to .nav-rail (now
+   position:relative) rather than to its own trigger, at a static top per
+   trigger's row position (no JS position math, per the brief). The header
+   label inside is a plain .nav-group, reused rather than re-styled. Sub-
+   item markup/ids/hrefs inside are untouched; only this container's
+   placement changed -- see the byte-exact-marker note on the pin this
+   moved in test_gui_console_bulkhash.py. */
+.nav-flyout { left:200px; padding:6px 0; min-width:220px; }
+#settings-submenu { top:179px; }
+#monitoring-submenu { top:211px; }
+/* Flyout indent fix (review, Wave E): .nav.subsub's 48px left padding is a
+   carry-over from the in-rail staircase this flyout replaced (two nesting
+   levels' worth of on-grid indent, see the .nav.sub/.nav.subsub comment
+   above) -- inside a flyout there is only one level below the panel's own
+   .nav-group header, so 48px reads as a large, unexplained gap under a
+   header sitting at .nav-group's 16px. Magnetic's own drawer reference
+   (agentinfo/magnetic_export, navigation/drawer sub-items) shows sub-item
+   text flush with its group header, not stepped in further -- so this
+   flattens .nav-flyout's sub items to that same 16px rather than
+   re-deriving a new nesting depth for a one-level panel. Scoped to
+   .nav-flyout only: the <=768px inline fallback below reverts these panels
+   to the in-rail presentation, where the staircase is still correct and
+   must stay untouched. */
+.nav-flyout .nav.subsub { padding-left:16px; }
+.nav-flyout .nav.subsub.active { padding-left:13px; }
 /* display lives on :not([hidden]) so the hidden attribute keeps working
    (same pattern as .inline-form above) */
-.selbar { gap:8px; align-items:center; flex-wrap:wrap; background:#e7f1ff;
-  border:1px solid #b9d4fb; border-radius:8px; padding:8px 12px; margin:0 0 16px; }
+.selbar { gap:8px; align-items:center; flex-wrap:wrap; background:var(--action-tint);
+  border:1px solid var(--selected-tint); border-radius:8px; padding:8px 12px; margin:0 0 16px; }
 .selbar:not([hidden]) { display:flex; }
-.selbar .sel-count { font-weight:600; font-size:13px; color:var(--blue); }
-.btn.danger { background:#fff; color:#c0362c; border:1px solid #e5b8b3;
-  box-shadow:0 1px 2px rgba(11,37,69,.06); }
-.btn.danger:hover { background:#c0362c; border-color:#c0362c; color:#fff; }
-.btn.danger:focus-visible { outline:none; box-shadow:0 0 0 3px rgba(192,54,44,.35); }
-.linkish.danger-link { color:#c0362c; }
+.selbar .sel-count { font-weight:600; font-size:12px; line-height:18px; color:var(--action); }
+.btn.danger { background:var(--surface); color:var(--danger); border:1px solid var(--danger-tint);
+  box-shadow:var(--shadow-xs); }
+.btn.danger:hover { background:var(--danger); border-color:var(--danger); color:#fff; }
+.btn.danger:focus-visible { outline:none; box-shadow:var(--focus-ring); }
+.linkish.danger-link { color:var(--danger); }
 .joined { display:inline-flex; }
-.joined select { border:1px solid #c7d0e0; border-radius:6px 0 0 6px; border-right:0;
-  padding:6px 8px; font-size:13px; background:#fff; }
-.joined .btn { border-radius:0 6px 6px 0; }
-#dev-rows tr.sel td { background:#f2f7ff; }
+.joined select { border:1px solid var(--border); border-radius:var(--radius-control) 0 0 var(--radius-control); border-right:0;
+  padding:6px 8px; font-size:13px; background:var(--surface); }
+.joined .btn { border-radius:0 var(--radius-control) var(--radius-control) 0; }
+/* Row hover/selected (density pass, Task 8): equal specificity
+   (#dev-rows tr:hover td vs #dev-rows tr.sel td), so a selected row that is
+   ALSO hovered is spelled out explicitly rather than relying on source
+   order to break the tie; selected uses the dedicated --selected-tint
+   token rather than the --action-tint hover-adjacent one it used before. */
+/* row tint is a scan aid; rows are not click targets (deliberate divergence from tbl-dont-row-hover-interactive) */
+#dev-rows tr:hover td { background:var(--surface-subtle); }
+#dev-rows tr.sel td, #dev-rows tr.sel:hover td { background:var(--selected-tint); }
 
 /* Settings: certificate / trust store / telemetry destination (2026-08-19) */
 .inline-form textarea { flex:1 1 100%; max-width:640px; min-height:88px; resize:vertical;
-  padding:7px 9px; border:1px solid #c7d0e0; border-radius:6px; font-size:12px;
-  font-family:ui-monospace,Menlo,Consolas,monospace; }
+  padding:7px 9px; border:1px solid var(--border); border-radius:var(--radius-control); font-size:12px;
+  font-family:var(--font-mono); }
 #trust-tbl { margin:0 0 12px; }
-.dropzone { border:2px dashed #c7d0e0; border-radius:10px; padding:20px 16px; text-align:center;
-  color:#334; font-size:14px; cursor:pointer; margin:0 0 12px; background:#fafbfd;
+.dropzone { border:2px dashed var(--border); border-radius:10px; padding:20px 16px; text-align:center;
+  color:var(--text-body); font-size:14px; cursor:pointer; margin:0 0 12px; background:var(--surface-subtle);
   transition:border-color .12s ease, background .12s ease; }
-.dropzone::before { content:"⤓"; display:block; font-size:20px; color:#67728a; margin-bottom:4px; }
-.dropzone:hover { border-color:var(--blue); background:#f2f7ff; }
-.dropzone:focus-visible { outline:none; box-shadow:0 0 0 3px rgba(11,92,214,.35); }
-.dropzone.drag { border-color:var(--blue); background:#e7f1ff; }
-.dropzone.drag::before, .dropzone:hover::before { color:var(--blue); }
+.dropzone::before { content:"⤓"; display:block; font-size:20px; color:var(--text-secondary); margin-bottom:4px; }
+.dropzone:hover { border-color:var(--action); background:var(--action-tint); }
+.dropzone:focus-visible { outline:none; box-shadow:var(--focus-ring); }
+.dropzone.drag { border-color:var(--action); background:var(--action-tint); }
+.dropzone.drag::before, .dropzone:hover::before { color:var(--action); }
 .dropzone p { margin:0; }
-.dropzone .hint { display:block; margin-top:3px; color:#67728a; font-size:12px; }
+.dropzone .hint { display:block; margin-top:3px; color:var(--text-secondary); font-size:12px; }
 
 /* Console wave (2026-08-20): help popover, per-file uploads, per-job onboard
    logs, deployment details, monitoring/deploy-log panes */
-.mono { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px; }
-.badge-off { background:#e8e8ec; color:#445; }
+.badge-off { background:var(--inactive-tint); color:var(--inactive); }
 .menu.right { left:auto; right:0; }
 .menu a.menu-item { text-decoration:none; }
 .help-row { padding:4px 8px; white-space:nowrap; }
@@ -181,7 +422,7 @@ body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-
 .upload-row .up-name { flex:0 1 220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }
 .upload-row .progress { flex:1 1 auto; margin:0; }
 .upload-row .up-state { white-space:nowrap; font-size:12px; min-width:64px; }
-.upload-row .up-state.err { color:#c0362c; }
+.upload-row .up-state.err { color:var(--danger); }
 .upload-row .up-dismiss { font-size:14px; }
 /* per-job onboard log panels (one panel per job in #onboard-logs) */
 #onboard-logs .job-log-panel { margin-top:18px; }
@@ -193,27 +434,27 @@ body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-
 #di-tbl td:first-child { width:190px; }
 #deploy-info-panel .log, #monitoring-pane-deploylogs .log { margin-top:10px; }
 /* joined input+button (deploy-log device filter) */
-.joined input { border:1px solid #c7d0e0; border-radius:6px 0 0 6px; border-right:0;
-  padding:6px 8px; font-size:13px; background:#fff; }
+.joined input { border:1px solid var(--border); border-radius:var(--radius-control) 0 0 var(--radius-control); border-right:0;
+  padding:6px 8px; font-size:13px; background:var(--surface); }
 
 /* standalone help/guide pages (help-device.html, help-server.html): no
    sidebar shell, one readable column reusing the shared tokens. CSP blocks
    inline <style>, so these live here with the rest of the sheet. */
-.top a.toplink { color:#fff; text-decoration:none; font-size:13px; font-weight:400;
-  opacity:.85; margin-left:14px; }
-.top a.toplink:hover { opacity:1; text-decoration:underline; }
+.product-bar a.toplink { color:var(--text-secondary); text-decoration:none; font-size:13px; font-weight:500;
+  margin-left:14px; }
+.product-bar a.toplink:hover { color:var(--action); text-decoration:underline; }
 .doc { max-width:820px; margin:0 auto; padding:24px 24px 48px; }
 .doc h1 { font-size:22px; margin:12px 0 4px; }
 .doc h2 { font-size:16px; margin:26px 0 6px; }
-.doc p, .doc li { font-size:14px; line-height:1.55; color:#334; }
+.doc p, .doc li { font-size:14px; line-height:1.55; color:var(--text-body); }
 .doc ol > li { margin:0 0 14px; }
 .doc ul > li { margin:0 0 4px; }
-.doc code { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12.5px;
-  background:#eef1f6; border-radius:4px; padding:1px 5px; }
+.doc code { font-family:var(--font-mono); font-size:12.5px;
+  background:var(--inactive-tint); border-radius:4px; padding:1px 5px; }
 .doc .log { max-height:none; }
-.doc .warn { background:#fdf3e2; border:1px solid #ecc987; border-left:4px solid #d97706;
+.doc .warn { background:var(--warning-tint); border:1px solid var(--warning); border-left:4px solid var(--warning);
   border-radius:8px; padding:12px 14px; margin:18px 0; }
-.doc .warn strong { color:#8a4b06; }
+.doc .warn strong { color:var(--warning); }
 
 
 /* Right-hand drawers. Both the deployment-log viewer and the per-device
@@ -221,14 +462,14 @@ body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-
    below it: a panel appended under a long table puts its content off-screen,
    and the operator has to scroll away from the row they clicked to read it. */
 .drawer { position:fixed; top:0; right:0; bottom:0; width:min(720px, 92vw);
-  z-index:60; display:flex; flex-direction:column; background:var(--panel, #fff);
-  border-left:1px solid var(--line, #d7dee8); box-shadow:-8px 0 24px rgba(11,37,69,.18);
+  z-index:60; display:flex; flex-direction:column; background:var(--surface);
+  border-left:1px solid var(--rule); box-shadow:var(--shadow-lg);
   transform:translateX(100%); transition:transform .18s ease; }
 .drawer:not([hidden]) { transform:translateX(0); }
 /* A class selector outranks the UA stylesheet's [hidden]{display:none}. */
 .drawer[hidden] { display:none; }
 .drawer-head { display:flex; align-items:center; justify-content:space-between;
-  gap:10px; padding:10px 12px; border-bottom:1px solid var(--line, #d7dee8);
+  gap:10px; padding:10px 12px; border-bottom:1px solid var(--rule);
   font-weight:600; }
 .drawer-body { flex:1; overflow:auto; padding:12px 14px; }
 .drawer-body h3:first-child { margin-top:0; }
@@ -238,44 +479,359 @@ body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-
   .drawer { transition:none; }
 }
 
+/* Image picker: a centred modal over a translucent backdrop, shared by the
+   per-row assign button and the bulk "Assign images to N devices…" action
+   (openImagePicker in app.js) -- a choice to make and confirm, not a panel
+   to read alongside the table, so it is a modal rather than a third drawer. */
+.modal-backdrop { position:fixed; inset:0; z-index:70; background:rgba(0,0,0,.35);
+  display:flex; align-items:center; justify-content:center; padding:24px; }
+.modal-backdrop[hidden] { display:none; }
+.modal { background:var(--surface); border-radius:10px;
+  box-shadow:var(--shadow-lg); width:min(480px, 100%);
+  max-height:min(640px, 90vh); display:flex; flex-direction:column; }
+.modal-head { display:flex; align-items:center; justify-content:space-between;
+  gap:10px; padding:12px 16px; border-bottom:1px solid var(--rule);
+  font-weight:600; }
+.modal-body { flex:1; overflow:auto; padding:8px 16px; }
+.modal-foot { display:flex; justify-content:flex-end; gap:8px; padding:12px 16px;
+  border-top:1px solid var(--rule); }
+.img-pick-row { display:flex; align-items:center; gap:8px; padding:7px 4px;
+  font-family:var(--font-mono); font-size:13px; cursor:pointer; }
+.img-pick-row input:disabled { cursor:not-allowed; }
+
 /* Deployment-log drawer: slides in from the RIGHT so the list it was opened
    from stays where the operator left it, instead of being pushed off screen
    by a panel appended below the table. */
 #dl-drawer { position:fixed; top:0; right:0; bottom:0; width:min(720px, 92vw);
-  z-index:60; display:flex; flex-direction:column; background:var(--panel, #fff);
-  border-left:1px solid var(--line, #d7dee8); box-shadow:-8px 0 24px rgba(11,37,69,.18);
+  z-index:60; display:flex; flex-direction:column; background:var(--surface);
+  border-left:1px solid var(--rule); box-shadow:var(--shadow-lg);
   transform:translateX(100%); transition:transform .18s ease; }
 #dl-drawer:not([hidden]) { transform:translateX(0); }
 #dl-drawer[hidden] { display:none; }
 .dl-drawer-head { display:flex; align-items:center; justify-content:space-between;
-  gap:10px; padding:10px 12px; border-bottom:1px solid var(--line, #d7dee8); }
+  gap:10px; padding:10px 12px; border-bottom:1px solid var(--rule); }
 #dl-drawer .log { flex:1; margin:0; overflow:auto; border:0; border-radius:0; }
 
 @media (prefers-reduced-motion: reduce) {
   #dl-drawer { transition:none; }
 }
 
-/* First-run setup wizard + the nudge that brings an operator back to it. */
+/* First-run setup wizard + the nudge that brings an operator back to it.
+   Magnetic Stepper anatomy (agentinfo/facelift-2026-08-30-visual-
+   direction.md lines 63-70): left step panel ~320px (range 200-400px),
+   content area right, Next/Back right-aligned at the content column's own
+   bottom. .wz-layout/.wz-panel/.wz-content are new -- every wz-step-*/
+   wz-nav/wz-steplist id below stays on the same functionally equivalent
+   element, per the brief. */
 .nudge { display:flex; align-items:center; gap:10px; margin:0 0 12px;
-  padding:8px 12px; border:1px solid #e2c98a; background:#fdf6e3;
+  padding:8px 12px; border:1px solid var(--warning); background:var(--warning-tint);
   border-radius:4px; }
 /* A class selector outranks the UA stylesheet's [hidden]{display:none}, so
    without this `el.hidden = true` sets the attribute and changes nothing. */
 .nudge[hidden] { display:none; }
 .nudge .btn { margin-left:auto; }
+.wz-layout { display:flex; align-items:flex-start; gap:24px; margin-top:12px; }
+.wz-panel { flex:0 0 320px; max-width:320px; }
+.wz-content { flex:1 1 auto; min-width:0; }
+@media (max-width:900px) {
+  .wz-layout { flex-direction:column; }
+  .wz-panel { flex:0 0 auto; max-width:none; width:100%; }
+}
 #view-setup .wz-step, #view-setup .wz-done { padding:12px 14px; margin:12px 0;
-  border:1px solid var(--line, #d7dee8); border-radius:4px; }
+  border:1px solid var(--rule); border-radius:4px; }
+#view-setup .wz-step:first-child, #view-setup .wz-done:first-child { margin-top:0; }
 #view-setup .wz-done { opacity:.75; }
 #view-setup .form-mount { margin-top:10px; }
 #wz-nav { margin-top:16px; }
 
-/* Wizard step list: every step visible with its state, any of them openable. */
-#wz-steplist { display:flex; flex-wrap:wrap; gap:8px; margin:10px 0 4px; }
+/* Wizard step list: every step visible with its state, any of them openable,
+   laid out as the panel's vertical list (not the horizontal chip row this
+   replaces). */
+#wz-steplist { display:flex; flex-direction:column; gap:6px; }
 .wz-steplist-item { display:flex; align-items:center; gap:8px; cursor:pointer;
-  padding:6px 10px; font:inherit; color:inherit; background:#fff;
-  border:1px solid var(--line, #d7dee8); border-radius:999px; }
-.wz-steplist-item.current { border-color:var(--blue, #2f6fdb); background:#eef4ff; }
+  padding:8px 10px; font:inherit; color:inherit; text-align:left; background:var(--surface);
+  border:1px solid var(--rule); border-radius:var(--radius-control); }
+.wz-steplist-item.current { border-color:var(--action); background:var(--action-tint); }
 .wz-steplist-n { display:inline-flex; align-items:center; justify-content:center;
-  width:18px; height:18px; border-radius:50%; background:#eef1f6;
+  flex:none; width:18px; height:18px; border-radius:50%; box-sizing:border-box;
+  border:2px solid var(--border); background:var(--surface); color:var(--text-secondary);
   font-size:11px; font-weight:600; }
-.wz-steplist-item.current .wz-steplist-n { background:var(--blue, #2f6fdb); color:#fff; }
+/* current = blue filled with the step number (still shown even on an
+   already-'ok' step -- the operator is standing on it right now) */
+.wz-steplist-n.is-current { background:var(--action); border-color:var(--action); color:#fff; }
+/* completed = blue-outline circle with a check, never filled */
+.wz-steplist-n.is-done { border-color:var(--action); background:var(--surface); color:var(--action); }
+.wz-steplist-n.is-done svg { width:11px; height:11px; }
+/* upcoming = plain gray-outline number, the base rule above */
+.wz-steplist-label { flex:1 1 auto; }
+
+/* ---------------------------------------------------------------------
+   Responsive + accessibility foundations (Task 6)
+   --------------------------------------------------------------------- */
+
+/* Horizontal scroll wrapper for every operational table: the console's
+   density is deliberate (Devices carries 11 columns), so at narrow
+   viewports the table scrolls within its own box instead of forcing the
+   whole page to scroll sideways. The edge gradients are a pure-CSS "is
+   there more to scroll" cue (Lea Verou's scroll-shadow trick, adapted to
+   the horizontal axis): a canvas-colored layer that scrolls WITH the
+   content masks a shadow layer that stays pinned to the viewport, so the
+   shadow only shows on the side that still has columns hidden off-screen.
+
+   --scroll-fade (Task 9, carried seam): the fade color used to be hardcoded
+   to --canvas, which was fine while every .table-scroll sat directly on the
+   page background -- but Task 9 puts several inside a --surface (white)
+   .card, where a canvas-tinted fade reads as a visible seam against the
+   white card. Defaulting the custom property here and overriding it inside
+   .card below keeps every other .table-scroll (still on canvas) unchanged. */
+.table-scroll {
+  --scroll-fade: var(--canvas);
+  overflow-x: auto;
+  background:
+    linear-gradient(to right, var(--scroll-fade) 30%, rgba(240,241,242,0)) 0 0,
+    linear-gradient(to left, var(--scroll-fade) 30%, rgba(240,241,242,0)) 100% 0,
+    linear-gradient(to right, rgba(0,0,0,.10), rgba(0,0,0,0)) 0 0,
+    linear-gradient(to left, rgba(0,0,0,.10), rgba(0,0,0,0)) 100% 0;
+  background-repeat: no-repeat;
+  background-color: var(--scroll-fade);
+  background-size: 32px 100%, 32px 100%, 12px 100%, 12px 100%;
+  background-attachment: local, local, scroll, scroll;
+}
+.card .table-scroll { --scroll-fade: var(--surface); }
+
+/* Persistent field labels (foundation for Task 9's field-row layout):
+   every operational form input gets a real <label>, wrapping the control
+   so the association holds even once a form is restyled around it. */
+.field { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.field-label { font-size: 12px; font-weight: 500; color: var(--text-secondary); }
+/* A textarea field spans the row instead of sitting at compact width, and
+   its control stretches to fill it (matches the pre-Task-6 sizing). */
+.field-wide { flex: 1 1 100%; max-width: 640px; align-items: stretch; }
+/* A field's own control can be hidden independently by app.js (conditional
+   form fields, e.g. df-vlan for xr-host) -- without this the wrapping
+   label stays on screen with nothing left to label. */
+.field:has(> [hidden]) { display: none; }
+
+/* Off-canvas nav rail (mobile, <=768px): #nav-toggle lives in the product
+   bar and is otherwise invisible -- there is nothing to toggle above the
+   breakpoint, where the rail is always shown in place. */
+#nav-toggle { display: none; }
+
+@media (max-width: 768px) {
+  #nav-toggle { display: inline-flex; }
+  .nav-rail {
+    position: fixed; top: 48px; left: 0; bottom: 0; z-index: 55;
+    box-shadow: var(--shadow-lg);
+    transform: translateX(-100%); transition: transform .18s ease;
+  }
+  .nav-rail.open { transform: translateX(0); }
+  /* Off-canvas mode: revert the flyouts to the inline in-rail presentation
+     they replace above 768px -- a position:absolute flyout anchored to
+     .nav-rail would detach from the rail while it sits translateX(-100%)
+     off-screen (closed), or float over the content at the wrong offset
+     while it slides in (open). */
+  #settings-submenu, #monitoring-submenu {
+    position: static; left: auto; top: auto; box-shadow: none; border: 0;
+    border-radius: 0; min-width: 0; padding: 0; background: transparent;
+  }
+  /* The flyout-indent fix above (16px, scoped to .nav-flyout) is a
+     floating-panel correction -- these submenus keep their .nav-flyout
+     class even off-canvas, so without this the 16px would leak into the
+     in-rail presentation too. Here the items are back to being a nested
+     level of the rail's own staircase, where the original 48px on-grid
+     step (matching .nav.sub/.nav.subsub above) is still correct; same
+     specificity as the desktop override, so source order (this comes
+     later) decides the tie. */
+  .nav-flyout .nav.subsub { padding-left:48px; }
+  .nav-flyout .nav.subsub.active { padding-left:45px; }
+  .main { padding: var(--sp-lg); }
+  .drawer, #dl-drawer { width: 100vw; }
+  .modal { width: calc(100% - 2 * var(--sp-lg)); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nav-rail, .btn, .chip, .dropzone, .progress .bar { transition: none; }
+}
+
+/* ---------------------------------------------------------------------
+   Devices: density pass (Task 8) -- selection gutter, scan hierarchy,
+   "More filters" disclosure, Status column legend popover. Row
+   hover/selected is defined earlier, alongside the rest of the pre-
+   existing #dev-rows/.selbar rules. Carried fixes M2 / step+elapsed /
+   expected-offline are pure app.js changes and need no CSS of their own
+   beyond the existing status-pill levels.
+   --------------------------------------------------------------------- */
+
+/* Selection gutter: always visible. It used to fade to transparent unless
+   the row was hovered/focused/checked or the operator had pressed a
+   "Select devices" toggle -- a control with no counterpart in Magnetic,
+   which treats the checkbox as one of the table's fixed, non-adjustable
+   columns (Table > Columns: "the checkbox, #, status, action, row
+   reordering, and expand columns are not adjustable") and shows it
+   whenever a table supports selection. Hiding it bought a few pixels of
+   density and cost the page a button nobody could explain. */
+#devices .mark, #devices #mark-all { vertical-align: middle; }
+
+/* Dense-table modifier (Wave D fix 1, operator: "different fonts" persisted
+   even after the Wave A type-role fix): a single Devices row was mixing
+   14px sans (.dev-id, plain-text cells like Management type) with 12px
+   mono (.machine, via the .tbl .machine override above) and 14px inherited
+   control text (row selects/buttons) -- heterogeneous enough to read as
+   inconsistent even though every piece was individually "correct" per its
+   own type role. .tbl.dense steps every cell's TEXT SIZE down to one P4
+   scale (12/18) regardless of content kind; family still varies by data
+   kind (sans for names/labels, --font-mono for machine data), weight 500
+   stays on .dev-id below. Scoped to #devices only via this "tbl dense"
+   class pairing on that one <table> (11 columns, the console's densest) --
+   Images (5 columns, 14px-base) is unaffected. */
+.tbl.dense td { font-size:12px; line-height:18px; }
+/* Row controls must match the row's own 12px text or they tower over
+   everything else in the row -- the root cause of the "different fonts"
+   read. select/button already inherit `font: inherit` from the UA-reset
+   rule near the top of this file, but a later, equally-specific rule
+   (input/select's own font-size:14px, above) wins that inheritance tie by
+   source order, so the size needs an explicit override here. */
+#dev-rows select, #dev-rows button { font-size:12px; }
+
+/* Scan hierarchy: device id leads each row (12/500 sans, Magnetic body
+   type, stepped down from 14 by the dense modifier above); IP/model are
+   secondary machine data (12px, --text-secondary) -- scoped to #dev-rows
+   so the shared .machine utility (pinned elsewhere at its own ".machine {
+   font-family: var(--font-mono); font-size:14px; line-height:20px; }"
+   definition) keeps its default size/color everywhere else it is used
+   (deploy-info drawer, batch panel, help popover, …). */
+#dev-rows .dev-id { font-family: var(--font-sans); font-size: 12px; line-height: 18px; font-weight: 500; color: var(--text-heading); }
+#dev-rows .machine { color: var(--text-secondary); }
+
+/* "More filters" disclosure: a native <details>, no JS needed to toggle it
+   open/closed (CSP-clean by construction) -- the expanded body is an
+   absolutely-positioned dropdown (mirrors .menu below) so opening it never
+   reflows the rest of the toolbar. */
+#more-filters { position: relative; }
+#more-filters summary { cursor: pointer; list-style: none; display: inline-flex; align-items: center;
+  gap: 6px; height: 32px; padding: 0 12px; font-size: 14px; color: var(--action);
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-control);
+  box-shadow: var(--shadow-xs); white-space: nowrap; }
+#more-filters summary::-webkit-details-marker { display: none; }
+#more-filters summary .ico { width: 16px; height: 16px; flex: none; }
+#more-filters summary:hover { background: var(--action-tint); border-color: var(--action); }
+#more-filters summary:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+#more-filters[open] summary { background: var(--action-tint); border-color: var(--action); }
+#more-filters .more-filters-body { position: absolute; top: calc(100% + 4px); left: 0; z-index: 30;
+  display: flex; gap: 8px; flex-wrap: wrap; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; box-shadow: var(--shadow-md); padding: 10px; min-width: 280px; }
+
+/* Status column legend popover: reuses .menu's CSP-safe toggle machinery
+   (wireMenu() in app.js, [hidden] toggle) and chrome, but NOT .menu-wrap's
+   nesting -- the trigger button lives in the Status <th> (inside
+   .table-scroll) while the popover itself is a sibling of .table-scroll
+   (fix wave 1: a descendant would be clipped by that container's forced
+   overflow-y). .devices-table-wrap is its positioning parent instead;
+   top:0/right:0 anchors it to the wrapper's top-right corner, which lines
+   up with the Status column (the table's own rightmost) without needing to
+   track the button's live position. */
+.devices-table-wrap { position: relative; }
+#status-legend-pop { top: 0; left: auto; right: 0; min-width: 230px; }
+#status-legend-pop .legend-title { font-size: 11px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .3px; color: var(--text-secondary); padding: 4px 8px 6px; }
+#status-legend-pop .legend-row { padding: 4px 8px; }
+
+/* ---------------------------------------------------------------------
+   Devices: Magnetic action-layout pass (2026-09-01). The page had grown
+   three separate rows of controls -- a table-level toolbar, a filter
+   toolbar, and the selection bar -- carrying buttons in four different
+   visual weights, two unrelated controls both labelled "More", and a
+   "Select devices" toggle with no counterpart anywhere in Magnetic. The
+   rules applied here, all from the Magnetic archive under agentinfo/:
+
+     Table > Placement > Table-level actions -- with a filter bar present,
+       table-level actions belong on the RIGHT SIDE of that filter bar,
+       "to keep all table controls in a single, consistent location".
+     Filter bar > Anatomy -- Search, persistent filters, an overflow
+       button labelled "<icon> + Filters", a Total of the form "<number>
+       results", and a Reset shown only once a filter or search is active.
+     Filter bar > Spacing with other elements -- 36px minimum gap between
+       the bar and whatever sits to its right.
+     Table > Bulk action bar -- up to FOUR actions, a selected-row count,
+       a select-all-beyond-this-page option, sits above the table header,
+       dismissed by deselecting or by a "Cancel" button.
+     Button > Usage -- one action per button; no caret as a trailing icon
+       (that shape is a Dropdown); text links are for navigation inside a
+       paragraph, standalone actions get a button.
+     Button > Button group > Alignment -- the primary sits on the group's
+       outside edge; 8px between primary/secondary, 16px around tertiary.
+   --------------------------------------------------------------------- */
+
+/* The single control row: filter bar left, table-level actions right.
+   Both halves wrap internally before the row itself breaks, and the row
+   only stacks once the viewport can no longer hold the two side by side. */
+.table-controls { display:flex; align-items:flex-start; justify-content:space-between;
+  gap:36px; flex-wrap:wrap; margin:8px 0 12px; }
+.filter-bar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; flex:1 1 460px; min-width:0; }
+.filter-bar > input { min-width:200px; flex:0 1 260px; }
+/* Total, per Filter bar > Anatomy. Secondary text, not a control, so it
+   reads as a readout of the bar rather than another thing to click. */
+.filter-total { font-size:12px; line-height:18px; color:var(--text-secondary); white-space:nowrap; }
+/* Button group, right-aligned: 8px between the primary/secondary buttons
+   (Button > Button group > Sizes, medium). */
+.table-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; flex:0 0 auto; }
+/* Action/job feedback gets the row under the controls -- inside the bar it
+   competed with the filters for width and shoved them around as it grew. */
+.dev-status-line { font-size:12px; line-height:18px; margin:0 0 12px; min-height:18px; }
+.dev-status-line.err { color:var(--danger); }
+
+/* Tertiary button (Button > Variants: "Primary and primary destructive /
+   Secondary and secondary destructive / Tertiary and tertiary
+   destructive"). The console only had solid and outlined, so every quiet
+   standalone action -- Reset, Cancel, Select all -- had been reaching for
+   .linkish, a text link, which Button > Usage reserves for navigation
+   inside body copy. Same 32px box as the other two so a mixed group
+   still sits on one baseline. */
+.btn.tertiary { background:none; color:var(--action); border:1px solid transparent; box-shadow:none;
+  padding:0 8px; }
+.btn.tertiary:hover { background:var(--action-tint); }
+.btn.tertiary:active { transform:translateY(1px); box-shadow:none; }
+.btn.tertiary:focus-visible { outline:none; box-shadow:var(--focus-ring); }
+.btn.tertiary.danger-text { color:var(--danger); }
+.btn.tertiary.danger-text:hover { background:var(--danger-tint); }
+
+/* Dropdown trigger. Button > Usage forbids a caret as a button's trailing
+   icon and points at the Dropdown component instead; its trigger is a
+   button that carries a chevron and flips it while the menu is open. The
+   triggers here used to be plain .btn with a literal "▾" typed into the
+   label. */
+.btn.dropdown { gap:6px; padding-right:12px; }
+.btn.dropdown .caret { width:14px; height:14px; flex:none; transition:transform .12s ease; }
+.btn.dropdown[aria-expanded="true"] .caret { transform:rotate(180deg); }
+.btn.dropdown[aria-expanded="true"] { background:var(--action-tint); border-color:var(--action); }
+
+/* Dropdown menu: dividers and destructive items (Dropdown > Types: "A
+   dropdown menu can contain regular, disabled, and destructive menu item
+   types" and "With dividers, groups"). */
+.menu-divider { border:0; height:1px; background:var(--rule); margin:6px 4px; }
+.menu-item.danger { color:var(--danger); }
+.menu-item.danger:hover { background:var(--danger-tint); color:var(--danger); }
+
+/* Bulk action bar: selection state on the left, the four actions on the
+   right with the primary on that group's outside edge. */
+.selbar-actions { display:flex; align-items:center; gap:8px; margin-left:auto; flex-wrap:wrap; }
+
+/* Modal option rows (the onboard/undeploy checkboxes that used to hang
+   inside dropdown popovers). */
+.modal-body .check-row { display:flex; align-items:center; gap:8px; padding:6px 0; font-size:14px; }
+.modal-body .menu-note { max-width:none; margin-top:4px; }
+/* Icon-only button (Button > Variants: "Each type has a text version
+   (default) with optional icons and an icon-only version"). Square, on the
+   same 32px box and the same corner radius as every other button -- unlike
+   the pre-existing round .btn.icon, which is the header's "?" pill. */
+.btn.icon-only { width:32px; height:32px; padding:0; flex:none; }
+.btn.icon-only svg { width:16px; height:16px; }
+.modal-head .btn.icon-only { margin-left:12px; }
+
+@media (max-width: 768px) {
+  /* Stacked, the 36px inter-group gap is dead vertical space -- the row
+     break itself already separates the two halves. */
+  .table-controls { gap:12px; }
+  .table-actions { width:100%; }
+  .selbar-actions { margin-left:0; width:100%; }
+}

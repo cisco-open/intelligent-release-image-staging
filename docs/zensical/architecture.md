@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Architecture
 
-IRIS uses a private BitTorrent swarm to distribute large Cisco IOS-XE images to routers and switches. The goal is simple: get the image staged on every approved device faster and with better transfer resilience, while leaving install and reload decisions to the operator.
+IRIS uses a private BitTorrent swarm to distribute large Cisco images and patches to routers and switches. The goal is simple: get the image staged on every approved device faster and with better transfer resilience, while leaving install and reload decisions to the operator.
 
 ## The simple model
 
@@ -47,7 +47,7 @@ flowchart TB
 | Faster network distribution | The server does not need to send every byte of a multi-gigabyte image to every device. Devices that already have pieces can help the rest of the network. |
 | Higher transfer tolerance | Downloads are piece-based and resumable. If a transfer is interrupted or one path is slow, a device can continue by fetching missing pieces from available peers and the seeder. |
 | Controlled rollout intent | The catalog tells each device which image is approved for staging. Devices that are not assigned do not stage that image. |
-| Device-side safety | Each device verifies the downloaded file and the final staged copy. IRIS stops after staging; install, activation, boot changes, and reloads remain outside IRIS. |
+| Device-side safety | Each device verifies the downloaded file's hash and confirms the final staged copy by exact byte size. IRIS stops after staging; install, activation, boot changes, and reloads remain outside IRIS. |
 
 !!! note "Central services still matter"
     IRIS improves image distribution, not every possible failure mode. The catalog and tracker still coordinate policy and swarm participation. The fault-tolerance benefit is in the transfer path: devices can resume piece downloads and use more than one source once the swarm has content.
@@ -63,7 +63,7 @@ sequenceDiagram
     participant DeviceB as Device B
     participant IOS
 
-    Operator->>Server: Publish IOS-XE image
+    Operator->>Server: Publish image
     Server->>Server: Hash image and create private torrent
     Operator->>Server: Assign image to approved devices
     DeviceA->>Server: Poll catalog for assignment
@@ -72,7 +72,7 @@ sequenceDiagram
     DeviceB->>Server: Download initial pieces
     DeviceA<<->>DeviceB: Exchange missing pieces
     DeviceA->>DeviceA: Verify downloaded image hash
-    DeviceA->>IOS: Copy and verify staged image
+    DeviceA->>IOS: Place at platform storage root (copy on IOS-XE; direct bind mount on IOS-XR)
     DeviceA->>Server: Report staged status
 ```
 
@@ -103,7 +103,7 @@ starts. See [Runtime identity](server.md#runtime-identity).
 
 The server keeps durable state under `/var/lib/iris`. Catalog records are small JSON documents written atomically with advisory locks so concurrent GUI and CLI operations do not corrupt state. Secret material is encrypted at rest under `/etc/iris` with age recipients and decrypted to `/run/iris` tmpfs only while the container is running.
 
-Generated artifacts live under `artifacts/` on the host and are served by the artifact server. IOS-XE image files stay outside the repository, commonly under `/opt/images`, and are mounted read-only into the container.
+Generated artifacts live under `artifacts/` on the host and are served by the artifact server. Image files stay outside the repository, commonly under `/opt/images`, and are mounted read-only into the container.
 
 Publishing does not move the image. The seeder seeds it from the directory it
 already occupies, the generated `.torrent` goes to the state directory, and the
@@ -115,8 +115,16 @@ from the read-only image root survives. See
 [Catalog entry fields](reference.md#catalog-entry-fields).
 
 On an IOx device, `/data/iris` is persistent application scratch rather than an
-IOS-visible image destination. After swarm verification, the app hands the file
-to IOS — a disk-speed write through the bind-mounted share where available, an
-scp push on IE-3400 or as the fallback — and IOS performs the final
-`copy /verify`. This keeps signature enforcement and the final filesystem
-write inside IOS.
+IOS-visible image destination. The agent checks the staged file's sha256
+against the catalog's known-good value before hand-off — the catalog's
+images can separately be checked for authenticity against Cisco's signed
+Bulk Hash feed, and a mismatch quarantines the image. The app then hands the
+file to IOS — a disk-speed write through the bind-mounted share where
+available, an scp push on IE-3400 or as the fallback — and IOS performs the
+final placement as a plain copy, which the agent attests by polling for the
+file and confirming it matches the catalog's declared byte size exactly.
+
+On IOS-XR, the appmgr container shares the router's own network stack and bind-
+mounts `/misc/disk1` as `/hostmount`; that mount is `harddisk:`. The agent
+downloads, verifies, and seeds the file at its final location, so there is no
+IOS placement copy and no app-network VLAN, SVI, VPG, or NAT configuration.

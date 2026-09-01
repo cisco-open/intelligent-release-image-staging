@@ -5,6 +5,7 @@
 import http.client
 import json
 import os
+import socket
 import threading
 
 import metrics
@@ -45,6 +46,33 @@ def test_poll_seeder_maps_global_stat_and_sums_connections():
     assert names["def"] == "img2.bin"
     assert totals["abc"] == 2048
     assert totals["def"] == 4096
+
+
+def test_poll_seeder_reports_queued_torrents():
+    # aria2 caps concurrent downloads, and a SEEDING torrent never completes,
+    # so anything past that cap sits in the waiting queue forever -- never
+    # served, never an error. That starvation wedged an IE-3400 in staging for
+    # half an hour on 2026-08-31 with nothing logged anywhere. getGlobalStat
+    # already carries numWaiting on every poll; surfacing it is what makes the
+    # condition observable instead of silent.
+    rpc = _fake_rpc(
+        {"uploadSpeed": "0", "downloadSpeed": "0", "numActive": "5",
+         "numWaiting": "1"},
+        [{"connections": "0", "infoHash": "abc", "totalLength": "1",
+          "files": [{"path": "/img/cat9k.bin"}]}])
+    stats, _names, _totals = telemetry.poll_seeder(rpc)
+    assert stats["queued_torrents"] == 1
+
+
+def test_poll_seeder_queued_torrents_defaults_to_zero():
+    # An aria2 build that omits numWaiting must read as "nothing starved",
+    # never raise and never render a missing gauge.
+    rpc = _fake_rpc(
+        {"uploadSpeed": "0", "downloadSpeed": "0", "numActive": "1"},
+        [{"connections": "0", "infoHash": "abc", "totalLength": "1",
+          "files": [{"path": "/img/cat9k.bin"}]}])
+    stats, _names, _totals = telemetry.poll_seeder(rpc)
+    assert stats["queued_torrents"] == 0
 
 
 def test_poll_seeder_rpc_error_reports_down():
@@ -574,6 +602,153 @@ def test_metrics_server_healthz_without_health_provider():
         assert json.loads(body)["ok"] is True
     finally:
         srv.shutdown()
+
+
+# --- /readyz + listener probing ---
+
+def _listening():
+    """A real bound+listening loopback socket. Returns (sock, port).
+
+    Backlog is generous because nothing here ever accept()s: each probe leaves
+    its connection sitting in the queue, so a backlog of 1 would refuse the
+    second probe and read as "down". A real service accepts and drains.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    s.listen(16)
+    return s, s.getsockname()[1]
+
+
+def _dead_port():
+    """A port with nothing on it: bind to get one free, then release it."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def test_parse_health_listeners_blank_falls_back_to_default():
+    default = {"tracker": 6969}
+    assert telemetry.parse_health_listeners(None, default) == default
+    assert telemetry.parse_health_listeners("", default) == default
+    assert telemetry.parse_health_listeners("   ", default) == default
+    # a copy, not the caller's dict -- a later edit must not mutate the default
+    got = telemetry.parse_health_listeners(None, default)
+    got["catalog"] = 8443
+    assert default == {"tracker": 6969}
+
+
+def test_parse_health_listeners_off_probes_nothing():
+    # explicit opt-out for a deployment running a subset of the services:
+    # {} is "check nothing", which is NOT the same as None -> default
+    assert telemetry.parse_health_listeners("off", {"tracker": 6969}) == {}
+    assert telemetry.parse_health_listeners("OFF", {"tracker": 6969}) == {}
+
+
+def test_parse_health_listeners_parses_pairs_and_skips_malformed():
+    # a malformed entry is ignored, not fatal: a typo in one env pair must not
+    # take down probing for the listeners that DID parse
+    got = telemetry.parse_health_listeners(
+        "tracker:6969, catalog:8443 ,nope,bad:port,,artifacts:8000")
+    assert got == {"tracker": 6969, "catalog": 8443, "artifacts": 8000}
+
+
+def test_readyz_200_when_every_listener_is_up():
+    sock, port = _listening()
+    srv = telemetry.make_metrics_server("127.0.0.1", 0, lambda: "",
+                                        listeners={"tracker": port})
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        status, body = _get(srv.server_address[1], "/readyz")
+        assert status == 200
+        data = json.loads(body)
+        assert data["ok"] is True
+        assert data["listeners"] == {"tracker": "up"}
+        assert "down" not in data
+    finally:
+        srv.shutdown()
+        sock.close()
+
+
+def test_readyz_503_names_the_listener_that_is_down():
+    # the whole point of the endpoint: a dead sub-service must fail the probe
+    # by STATUS CODE (/healthz stays 200 by contract), and say which one.
+    sock, up_port = _listening()
+    srv = telemetry.make_metrics_server(
+        "127.0.0.1", 0, lambda: "",
+        listeners={"tracker": up_port, "artifacts": _dead_port()})
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        status, body = _get(srv.server_address[1], "/readyz")
+        assert status == 503
+        data = json.loads(body)
+        assert data["ok"] is False
+        assert data["down"] == ["artifacts"]
+        assert data["listeners"] == {"artifacts": "down", "tracker": "up"}
+    finally:
+        srv.shutdown()
+        sock.close()
+
+
+def test_readyz_is_inert_until_a_deployment_declares_listeners():
+    # listeners=None -> nothing probed, 200. Keeps the endpoint harmless for
+    # a deployment that has not opted in.
+    srv = telemetry.make_metrics_server("127.0.0.1", 0, lambda: "")
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        status, body = _get(srv.server_address[1], "/readyz")
+        assert status == 200
+        data = json.loads(body)
+        assert data["ok"] is True
+        assert "listeners" not in data
+    finally:
+        srv.shutdown()
+
+
+def test_readyz_listeners_can_be_a_callable_read_per_request():
+    # read per request, so a port learned after startup is still probed
+    sock, port = _listening()
+    calls = []
+
+    def listeners():
+        calls.append(1)
+        return {"tracker": port}
+
+    srv = telemetry.make_metrics_server("127.0.0.1", 0, lambda: "",
+                                        listeners=listeners)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        for _ in range(2):
+            assert _get(srv.server_address[1], "/readyz")[0] == 200
+        assert len(calls) == 2
+    finally:
+        srv.shutdown()
+        sock.close()
+
+
+def test_healthz_reports_listeners_but_keeps_its_200_contract():
+    # a down listener must NOT flip /healthz's status: container HEALTHCHECK
+    # and existing orchestrator probes read that code (spec 7.7).
+    srv = telemetry.make_metrics_server(
+        "127.0.0.1", 0, lambda: "",
+        listeners={"artifacts": _dead_port()})
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        status, body = _get(srv.server_address[1], "/healthz")
+        assert status == 200
+        assert json.loads(body)["listeners"] == {"artifacts": "down"}
+    finally:
+        srv.shutdown()
+
+
+def test_probe_listeners_never_raises_on_a_nonsense_port():
+    # called from a request handler: a failure to MEASURE must not become a
+    # 500 that looks like a failure of the thing being measured
+    assert telemetry._probe_listeners({"bogus": 0}) == {"bogus": "down"}
+    assert telemetry._probe_listeners({"bogus": 999999}) == {"bogus": "down"}
+    assert telemetry._probe_listeners({}) == {}
+    assert telemetry._probe_listeners(None) == {}
 
 
 def test_metrics_server_unknown_path_404():
@@ -2456,7 +2631,7 @@ def test_unknown_aria2_session_does_not_rebank_totals(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# peer_receipts attribution: WHO sent the measured bytes
+# peer_transfer_records attribution: WHO sent the measured bytes
 #
 # The device measures exact bytes per BitTorrent peer and makes no claim about
 # which peer was the origin -- it cannot: the origin seeder is an ordinary peer
@@ -2469,14 +2644,14 @@ def test_unknown_aria2_session_does_not_rebank_totals(tmp_path):
 _ORIGIN_IP = "100.90.168.20"
 
 
-def _receipt_row(ip, got, **extra):
+def _transfer_record_row(ip, got, **extra):
     row = {"ip": ip, "session_bytes_from_peer": got,
            "session_bytes_to_peer": 0}
     row.update(extra)
     return row
 
 
-def _receipt_block(rows, rows_omitted=0, bytes_omitted=0, complete=True):
+def _transfer_record_block(rows, rows_omitted=0, bytes_omitted=0, complete=True):
     return {"source": "aria2_session_counters", "captured_at": 100.0,
             "complete": complete, "rows": list(rows),
             "rows_total": len(rows) + rows_omitted,
@@ -2488,11 +2663,11 @@ def _receipt_block(rows, rows_omitted=0, bytes_omitted=0, complete=True):
 
 def test_origin_bytes_are_not_counted_as_peer_bytes():
     """The blocker this split exists for: the origin's row is in the device's
-    own receipts, so the device-side total includes it. Reporting that total as
+    own transfer records, so the device-side total includes it. Reporting that total as
     'from peers' turned a 28.9% peer-delivered wave into ~100%."""
-    block = _receipt_block([_receipt_row(_ORIGIN_IP, 7110),
-                            _receipt_row("10.0.0.7", 2890)])
-    split = telemetry.classify_peer_receipts(
+    block = _transfer_record_block([_transfer_record_row(_ORIGIN_IP, 7110),
+                            _transfer_record_row("10.0.0.7", 2890)])
+    split = telemetry.classify_peer_transfer_records(
         block, {_ORIGIN_IP}, {"10.0.0.7": "rtr-07"})
     assert split["origin_rows"] == 1 and split["origin_bytes"] == 7110
     assert split["device_rows"] == 1 and split["device_bytes"] == 2890
@@ -2507,14 +2682,14 @@ def test_a_device_that_became_a_seeder_is_still_a_device():
     """aria2's has_complete_file is true for ANY peer holding the whole file,
     so in a wave every device that finishes early raises it. Identity decides
     the class, never the flag."""
-    block = _receipt_block([
-        _receipt_row("10.0.0.7", 500, has_complete_file=True),
-        _receipt_row(_ORIGIN_IP, 100, has_complete_file=True)])
-    split = telemetry.classify_peer_receipts(
+    block = _transfer_record_block([
+        _transfer_record_row("10.0.0.7", 500, has_complete_file=True),
+        _transfer_record_row(_ORIGIN_IP, 100, has_complete_file=True)])
+    split = telemetry.classify_peer_transfer_records(
         block, {_ORIGIN_IP}, {"10.0.0.7": "rtr-07"})
     assert split["device_bytes"] == 500 and split["device_rows"] == 1
     assert split["origin_bytes"] == 100
-    assert telemetry.receipt_source_class(
+    assert telemetry.transfer_record_source_class(
         "10.0.0.7", {_ORIGIN_IP}, {"10.0.0.7": "rtr-07"}) == "device"
 
 
@@ -2522,8 +2697,8 @@ def test_an_unresolvable_address_is_unknown_not_a_peer():
     """A third bucket, always. An address that is neither the origin nor a
     known device is UNKNOWN; folding it into either side would invent the
     attribution."""
-    block = _receipt_block([_receipt_row("198.51.100.9", 4096)])
-    split = telemetry.classify_peer_receipts(block, {_ORIGIN_IP}, {})
+    block = _transfer_record_block([_transfer_record_row("198.51.100.9", 4096)])
+    split = telemetry.classify_peer_transfer_records(block, {_ORIGIN_IP}, {})
     assert split["unknown_rows"] == 1 and split["unknown_bytes"] == 4096
     assert split["device_bytes"] == 0 and split["origin_bytes"] == 0
 
@@ -2532,15 +2707,15 @@ def test_no_known_origin_leaves_rows_unknown_rather_than_peer_delivered():
     """An unreadable/empty registry must not promote the origin's bytes to
     peer-delivered: with no origin address known, an unjoinable row is
     unknown."""
-    split = telemetry.classify_peer_receipts(
-        _receipt_block([_receipt_row(_ORIGIN_IP, 9000)]), set(), {})
+    split = telemetry.classify_peer_transfer_records(
+        _transfer_record_block([_transfer_record_row(_ORIGIN_IP, 9000)]), set(), {})
     assert split["unknown_bytes"] == 9000 and split["device_bytes"] == 0
 
 
 def test_an_address_claimed_by_both_origin_and_device_is_unknown():
     """Two identity claims on one address cannot both be the sender, so we
     assert neither."""
-    assert telemetry.receipt_source_class(
+    assert telemetry.transfer_record_source_class(
         _ORIGIN_IP, {_ORIGIN_IP}, {_ORIGIN_IP: "rtr-07"}) == "unknown"
 
 
@@ -2549,9 +2724,9 @@ def test_omitted_mass_is_reported_apart_and_never_redistributed():
     survives to classify them. They get their own figure -- spreading them
     across the named buckets pro rata is the even-split fabrication that was
     removed in 2026.08.20."""
-    block = _receipt_block([_receipt_row("10.0.0.7", 1000)],
+    block = _transfer_record_block([_transfer_record_row("10.0.0.7", 1000)],
                            rows_omitted=3, bytes_omitted=750)
-    split = telemetry.classify_peer_receipts(
+    split = telemetry.classify_peer_transfer_records(
         block, {_ORIGIN_IP}, {"10.0.0.7": "rtr-07"})
     assert split["unattributed_omitted_rows"] == 3
     assert split["unattributed_omitted_bytes"] == 750
@@ -2562,16 +2737,16 @@ def test_omitted_mass_is_reported_apart_and_never_redistributed():
 
 
 def test_a_partial_capture_is_flagged_so_no_share_is_computed_blind():
-    block = _receipt_block([_receipt_row("10.0.0.7", 10)], complete=False)
-    split = telemetry.classify_peer_receipts(block, set(), {})
+    block = _transfer_record_block([_transfer_record_row("10.0.0.7", 10)], complete=False)
+    split = telemetry.classify_peer_transfer_records(block, set(), {})
     assert split["capture_complete"] is False
 
 
-def test_no_receipts_block_classifies_to_nothing_not_to_zero():
+def test_no_transfer_records_block_classifies_to_nothing_not_to_zero():
     """Absent means NOT MEASURED. An all-zero split would read as 'no peer
     bytes', which is a different, false claim."""
-    assert telemetry.classify_peer_receipts(None, {_ORIGIN_IP}, {}) is None
-    assert telemetry.classify_peer_receipts(7, {_ORIGIN_IP}, {}) is None
+    assert telemetry.classify_peer_transfer_records(None, {_ORIGIN_IP}, {}) is None
+    assert telemetry.classify_peer_transfer_records(7, {_ORIGIN_IP}, {}) is None
 
 
 def test_origin_addresses_come_from_the_service_seeder_principal():
@@ -2599,20 +2774,20 @@ def test_an_unreadable_registry_yields_no_origin_rather_than_a_guess():
 
 def test_export_attaches_attribution_to_the_report_that_carries_it(monkeypatch):
     """The split rides with the report it describes: a later report with no
-    receipts must not inherit the previous report's attribution."""
+    transfer records must not inherit the previous report's attribution."""
     import auth
     reg = PeerRegistry()
     reg.announce("abc", "seeder", _ORIGIN_IP, 6881, left=0,
                  principal=auth.Principal("service", "seeder"))
-    with_receipts = {"schema": "v2", "report_id": "r1", "received_at": 1,
-                     "peer_receipts": _receipt_block(
-                         [_receipt_row(_ORIGIN_IP, 700),
-                          _receipt_row("10.0.0.7", 300)])}
+    with_transfer_records = {"schema": "v2", "report_id": "r1", "received_at": 1,
+                     "peer_transfer_records": _transfer_record_block(
+                         [_transfer_record_row(_ORIGIN_IP, 700),
+                          _transfer_record_row("10.0.0.7", 300)])}
     without = {"schema": "v2", "report_id": "r2", "received_at": 2}
     hub = telemetry.Telemetry(
         reg,
         device_info=lambda: {"rtr-07": {"swarm_ip": "10.0.0.7"}},
-        reports_info=lambda: {"rtr-07": [with_receipts, without]})
+        reports_info=lambda: {"rtr-07": [with_transfer_records, without]})
     seen = []
     real = otlp.build_report_record
 
@@ -2628,22 +2803,22 @@ def test_export_attaches_attribution_to_the_report_that_carries_it(monkeypatch):
     # are bound into the classify callback at the emit site instead; what the
     # report record carries is the SPLIT, asserted below.
     assert "peer_origin_ips" not in by_id["r1"]
-    assert by_id["r1"]["peer_receipt_attribution"]["origin_bytes"] == 700
-    assert by_id["r1"]["peer_receipt_attribution"]["device_bytes"] == 300
-    assert "peer_receipt_attribution" not in by_id["r2"]
+    assert by_id["r1"]["peer_transfer_record_attribution"]["origin_bytes"] == 700
+    assert by_id["r1"]["peer_transfer_record_attribution"]["device_bytes"] == 300
+    assert "peer_transfer_record_attribution" not in by_id["r2"]
 
 
-def test_peer_receipts_reach_the_log_queue_not_just_the_catalog():
+def test_peer_transfer_records_reach_the_log_queue_not_just_the_catalog():
     """The exact device-side measurement must LEAVE the server.
 
-    build_peer_receipt_records existed in otlp.py and nothing called it: the
-    export pipeline emitted only the report record, so iris.device.peer_receipt
+    build_peer_transfer_records existed in otlp.py and nothing called it: the
+    export pipeline emitted only the report record, so iris.device.peer_transfer_record
     did not exist at runtime and the per-peer rows stopped in the catalog --
     while the LOSSY sampled estimate (iris.swarm.peer_bytes) was exported
     happily. The better number was the hidden one. Test the pipeline, not the
     builder: an otlp.py unit test passes either way."""
     report = _stored_report()
-    report["peer_receipts"] = {
+    report["peer_transfer_records"] = {
         "source": "aria2_session_counters", "captured_at": 150.0,
         "complete": True, "rows_total": 2, "rows_omitted": 0,
         "bytes_from_all_senders_total": 300,
@@ -2672,14 +2847,14 @@ def test_peer_receipts_reach_the_log_queue_not_just_the_catalog():
         return None
 
     names = [log_name(r) for r in hub.log_queue.snapshot()]
-    assert "iris.device.peer_receipt" in names, \
+    assert "iris.device.peer_transfer_record" in names, \
         "the exact per-peer measurement never left the server"
-    assert names.count("iris.device.peer_receipt") == 2, names
+    assert names.count("iris.device.peer_transfer_record") == 2, names
 
     # and each row carries its sender class, with the origin called the origin
     classes = {}
     for record in hub.log_queue.snapshot():
-        if log_name(record) != "iris.device.peer_receipt":
+        if log_name(record) != "iris.device.peer_transfer_record":
             continue
         attrs = {a["key"]: a["value"] for a in record["attributes"]}
         ip = attrs["network.peer.address"]["stringValue"]

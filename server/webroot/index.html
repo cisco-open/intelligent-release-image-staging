@@ -10,8 +10,86 @@
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <div class="top">
-    <span>◈ Intelligent Release &amp; Image Staging <span class="tag">IRIS</span></span>
+  <!-- Status pill icon sprite (12-level Magnetic mapping, Task 4). Vendored
+       Phosphor (MIT-licensed) bold-weight glyphs, referenced by
+       <use href="#i-..."> in app.js's statusPillHTML(); the pill's own text
+       label carries the accessible name, so this whole sprite is inert to
+       assistive tech. Icon-to-symbol mapping and any substitutions are
+       documented in .superpowers/sdd/task-4-report.md. -->
+  <svg class="icon-sprite" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+    <symbol id="i-check-circle" viewBox="0 0 256 256" fill="currentColor">
+      <path d="M176.49,95.51a12,12,0,0,1,0,17l-56,56a12,12,0,0,1-17,0l-24-24a12,12,0,1,1,17-17L112,143l47.51-47.52A12,12,0,0,1,176.49,95.51ZM236,128A108,108,0,1,1,128,20,108.12,108.12,0,0,1,236,128Zm-24,0a84,84,0,1,0-84,84A84.09,84.09,0,0,0,212,128Z"/>
+    </symbol>
+    <symbol id="i-dash-circle" viewBox="0 0 256 256" fill="currentColor">
+      <path d="M92.38,38.05A12,12,0,0,1,101,23.42a108,108,0,0,1,54,0,12,12,0,1,1-6,23.23,84.11,84.11,0,0,0-42,0A12,12,0,0,1,92.38,38.05ZM50.94,52.34a108.1,108.1,0,0,0-27,46.76,12,12,0,0,0,8.37,14.77,12.2,12.2,0,0,0,3.2.43,12,12,0,0,0,11.56-8.8,84,84,0,0,1,21-36.35A12,12,0,1,0,50.94,52.34Zm-3.88,98.14a12,12,0,0,0-23.12,6.42,108,108,0,0,0,27,46.78A12,12,0,0,0,68,186.85,84,84,0,0,1,47.06,150.48ZM149,209.35a84,84,0,0,1-42,0,12,12,0,1,0-6,23.23,108,108,0,0,0,54,0,12,12,0,1,0-6-23.23Zm74.72-67.22A12,12,0,0,0,209,150.5a84,84,0,0,1-21,36.35,12,12,0,0,0,17.12,16.82,108.19,108.19,0,0,0,27-46.77A12,12,0,0,0,223.71,142.13Zm-14.77-36.61a12,12,0,0,0,23.12-6.42,108,108,0,0,0-27-46.78A12,12,0,1,0,188,69.15,84,84,0,0,1,208.94,105.52Z"/>
+    </symbol>
+    <symbol id="i-octagon-x" viewBox="0 0 256 256" fill="currentColor">
+      <path d="M230.14,77.41,178.59,25.86A19.85,19.85,0,0,0,164.45,20H91.55a19.85,19.85,0,0,0-14.14,5.86L25.86,77.41A19.85,19.85,0,0,0,20,91.55v72.9a19.85,19.85,0,0,0,5.86,14.14l51.55,51.55A19.85,19.85,0,0,0,91.55,236h72.9a19.85,19.85,0,0,0,14.14-5.86l51.55-51.55A19.85,19.85,0,0,0,236,164.45V91.55A19.85,19.85,0,0,0,230.14,77.41ZM212,162.79,162.79,212H93.21L44,162.79V93.21L93.21,44h69.58L212,93.21Z"/>
+    </symbol>
+    <symbol id="i-triangle-warn" viewBox="0 0 256 256" fill="currentColor">
+      <path d="M240.26,186.1,152.81,34.23h0a28.74,28.74,0,0,0-49.62,0L15.74,186.1a27.45,27.45,0,0,0,0,27.71A28.31,28.31,0,0,0,40.55,228h174.9a28.31,28.31,0,0,0,24.79-14.19A27.45,27.45,0,0,0,240.26,186.1Zm-20.8,15.7a4.46,4.46,0,0,1-4,2.2H40.55a4.46,4.46,0,0,1-4-2.2,3.56,3.56,0,0,1,0-3.73L124,46.2a4.77,4.77,0,0,1,8,0l87.44,151.87A3.56,3.56,0,0,1,219.46,201.8ZM116,136V104a12,12,0,0,1,24,0v32a12,12,0,0,1-24,0Zm28,40a16,16,0,1,1-16-16A16,16,0,0,1,144,176Z"/>
+    </symbol>
+    <symbol id="i-diamond-severe" viewBox="0 0 256 256" fill="currentColor">
+      <path d="M128,68a12,12,0,0,1,12,12v52a12,12,0,0,1-24,0V80A12,12,0,0,1,128,68Zm0,88a16,16,0,1,0,16,16A16,16,0,0,0,128,156Zm116-28a19.86,19.86,0,0,1-5.84,14.11l-96,96.06a20,20,0,0,1-28.21,0h0l-96-96.06a20,20,0,0,1,0-28.22l96.05-96.06a20,20,0,0,1,28.21,0l96.06,96.06A19.86,19.86,0,0,1,244,128Zm-25.68,0L128,37.67,37.68,128,128,218.33Z"/>
+    </symbol>
+    <symbol id="i-square-info" viewBox="0 0 256 256" fill="currentColor">
+      <path d="M108,84a16,16,0,1,1,16,16A16,16,0,0,1,108,84Zm128,44A108,108,0,1,1,128,20,108.12,108.12,0,0,1,236,128Zm-24,0a84,84,0,1,0-84,84A84.09,84.09,0,0,0,212,128Zm-72,36.68V132a20,20,0,0,0-20-20,12,12,0,0,0-4,23.32V168a20,20,0,0,0,20,20,12,12,0,0,0,4-23.32Z"/>
+    </symbol>
+    <symbol id="i-minus-circle" viewBox="0 0 256 256" fill="currentColor">
+      <path d="M180,128a12,12,0,0,1-12,12H88a12,12,0,0,1,0-24h80A12,12,0,0,1,180,128Zm56,0A108,108,0,1,1,128,20,108.12,108.12,0,0,1,236,128Zm-24,0a84,84,0,1,0-84,84A84.09,84.09,0,0,0,212,128Z"/>
+    </symbol>
+    <symbol id="i-slash-circle" viewBox="0 0 256 256" fill="currentColor">
+      <path d="M128,20A108,108,0,1,0,236,128,108.12,108.12,0,0,0,128,20Zm84,108a83.6,83.6,0,0,1-16.75,50.28L77.72,60.75A84,84,0,0,1,212,128ZM44,128A83.6,83.6,0,0,1,60.75,77.72L178.28,195.25A84,84,0,0,1,44,128Z"/>
+    </symbol>
+    <!-- Bare checkmark (no circle) -- the completed-step marker inside the
+         Staging Boundary's own 16px CSS-bordered circle (Task 7). This is
+         exactly the checkmark sub-path already vendored above inside
+         i-check-circle, split out on its own: same MIT-licensed Phosphor
+         bold glyph, no new asset. -->
+    <symbol id="i-check" viewBox="0 0 256 256" fill="currentColor">
+      <path d="M176.49,95.51a12,12,0,0,1,0,17l-56,56a12,12,0,0,1-17,0l-24-24a12,12,0,1,1,17-17L112,143l47.51-47.52A12,12,0,0,1,176.49,95.51Z"/>
+    </symbol>
+    <!-- Left-nav icons (post-walk Magnetic fidelity fixes, Wave B): vendored
+         Phosphor (MIT-licensed) BOLD glyphs for the six primary nav
+         destinations, the Setup sub-item, and the off-canvas hamburger --
+         list-bold, deliberately NOT hamburger-bold (that glyph is a food
+         icon in Phosphor's set, not a menu control). Fetched verbatim from
+         https://raw.githubusercontent.com/phosphor-icons/core/main/assets/
+         bold/<name>-bold.svg; fill="currentColor" so each inherits the
+         anchor's own state color (default/hover/.active), same vendoring
+         convention as the status-pill symbols above. Referenced via
+         <use href="#i-nav-..."> from each .nav anchor's leading <svg
+         class="nav-icon"> and from #nav-toggle. Evidence and per-icon
+         sourcing in .superpowers/sdd/wave-b-report.md. -->
+    <symbol id="i-nav-gauge" viewBox="0 0 256 256" fill="currentColor">
+      <path d="M209.88,69.83A115.19,115.19,0,0,0,128,36h-.41C63.85,36.22,12,88.76,12,153.13V176a20,20,0,0,0,20,20H224a20,20,0,0,0,20-20V152A115.25,115.25,0,0,0,209.88,69.83ZM220,172H127.32l46.44-65A12,12,0,1,0,154.24,93L97.82,172H36V153.13c0-1.72,0-3.43.14-5.13H56a12,12,0,0,0,0-24H40.62c10.91-33.39,40-58.52,75.38-63.21V80a12,12,0,0,0,24,0V60.8A92,92,0,0,1,215.66,124H200a12,12,0,0,0,0,24h19.9c.06,1.33.1,2.66.1,4Z"/>
+    </symbol>
+    <symbol id="i-nav-stack" viewBox="0 0 256 256" fill="currentColor">
+      <path d="M234.36,170A12,12,0,0,1,230,186.37l-96,56a12,12,0,0,1-12.1,0l-96-56a12,12,0,0,1,12.09-20.74l90,52.48L218,165.63A12,12,0,0,1,234.36,170ZM218,117.63,128,170.11,38.05,117.63A12,12,0,0,0,26,138.37l96,56a12,12,0,0,0,12.1,0l96-56A12,12,0,0,0,218,117.63ZM20,80a12,12,0,0,1,6-10.37l96-56a12.06,12.06,0,0,1,12.1,0l96,56a12,12,0,0,1,0,20.74l-96,56a12,12,0,0,1-12.1,0l-96-56A12,12,0,0,1,20,80Zm35.82,0L128,122.11,200.18,80,128,37.89Z"/>
+    </symbol>
+    <symbol id="i-nav-hard-drives" viewBox="0 0 256 256" fill="currentColor">
+      <path d="M208,36H48A20,20,0,0,0,28,56V200a20,20,0,0,0,20,20H208a20,20,0,0,0,20-20V56A20,20,0,0,0,208,36Zm-4,24v56H52V60ZM52,196V140H204v56ZM160,88a16,16,0,1,1,16,16A16,16,0,0,1,160,88Zm32,80a16,16,0,1,1-16-16A16,16,0,0,1,192,168Z"/>
+    </symbol>
+    <symbol id="i-nav-share-network" viewBox="0 0 256 256" fill="currentColor">
+      <path d="M176,156a43.78,43.78,0,0,0-29.09,11L106.1,140.8a44.07,44.07,0,0,0,0-25.6L146.91,89a43.83,43.83,0,1,0-13-20.17L93.09,95a44,44,0,1,0,0,65.94L133.9,187.2A44,44,0,1,0,176,156Zm0-120a20,20,0,1,1-20,20A20,20,0,0,1,176,36ZM64,148a20,20,0,1,1,20-20A20,20,0,0,1,64,148Zm112,72a20,20,0,1,1,20-20A20,20,0,0,1,176,220Z"/>
+    </symbol>
+    <symbol id="i-nav-gear" viewBox="0 0 256 256" fill="currentColor">
+      <path d="M128,76a52,52,0,1,0,52,52A52.06,52.06,0,0,0,128,76Zm0,80a28,28,0,1,1,28-28A28,28,0,0,1,128,156Zm92-27.21v-1.58l14-17.51a12,12,0,0,0,2.23-10.59A111.75,111.75,0,0,0,225,71.89,12,12,0,0,0,215.89,66L193.61,63.5l-1.11-1.11L190,40.1A12,12,0,0,0,184.11,31a111.67,111.67,0,0,0-27.23-11.27A12,12,0,0,0,146.3,22L128.79,36h-1.58L109.7,22a12,12,0,0,0-10.59-2.23A111.75,111.75,0,0,0,71.89,31.05,12,12,0,0,0,66,40.11L63.5,62.39,62.39,63.5,40.1,66A12,12,0,0,0,31,71.89,111.67,111.67,0,0,0,19.77,99.12,12,12,0,0,0,22,109.7l14,17.51v1.58L22,146.3a12,12,0,0,0-2.23,10.59,111.75,111.75,0,0,0,11.29,27.22A12,12,0,0,0,40.11,190l22.28,2.48,1.11,1.11L66,215.9A12,12,0,0,0,71.89,225a111.67,111.67,0,0,0,27.23,11.27A12,12,0,0,0,109.7,234l17.51-14h1.58l17.51,14a12,12,0,0,0,10.59,2.23A111.75,111.75,0,0,0,184.11,225a12,12,0,0,0,5.91-9.06l2.48-22.28,1.11-1.11L215.9,190a12,12,0,0,0,9.06-5.91,111.67,111.67,0,0,0,11.27-27.23A12,12,0,0,0,234,146.3Zm-24.12-4.89a70.1,70.1,0,0,1,0,8.2,12,12,0,0,0,2.61,8.22l12.84,16.05A86.47,86.47,0,0,1,207,166.86l-20.43,2.27a12,12,0,0,0-7.65,4,69,69,0,0,1-5.8,5.8,12,12,0,0,0-4,7.65L166.86,207a86.47,86.47,0,0,1-10.49,4.35l-16.05-12.85a12,12,0,0,0-7.5-2.62c-.24,0-.48,0-.72,0a70.1,70.1,0,0,1-8.2,0,12.06,12.06,0,0,0-8.22,2.6L99.63,211.33A86.47,86.47,0,0,1,89.14,207l-2.27-20.43a12,12,0,0,0-4-7.65,69,69,0,0,1-5.8-5.8,12,12,0,0,0-7.65-4L49,166.86a86.47,86.47,0,0,1-4.35-10.49l12.84-16.05a12,12,0,0,0,2.61-8.22,70.1,70.1,0,0,1,0-8.2,12,12,0,0,0-2.61-8.22L44.67,99.63A86.47,86.47,0,0,1,49,89.14l20.43-2.27a12,12,0,0,0,7.65-4,69,69,0,0,1,5.8-5.8,12,12,0,0,0,4-7.65L89.14,49a86.47,86.47,0,0,1,10.49-4.35l16.05,12.85a12.06,12.06,0,0,0,8.22,2.6,70.1,70.1,0,0,1,8.2,0,12,12,0,0,0,8.22-2.6l16.05-12.85A86.47,86.47,0,0,1,166.86,49l2.27,20.43a12,12,0,0,0,4,7.65,69,69,0,0,1,5.8,5.8,12,12,0,0,0,7.65,4L207,89.14a86.47,86.47,0,0,1,4.35,10.49l-12.84,16.05A12,12,0,0,0,195.88,123.9Z"/>
+    </symbol>
+    <symbol id="i-nav-pulse" viewBox="0 0 256 256" fill="currentColor">
+      <path d="M244,128a12,12,0,0,1-12,12H207.42l-36.69,73.37A12,12,0,0,1,160,220h-.6a12,12,0,0,1-10.61-7.72L95,71.15,66.92,133A12,12,0,0,1,56,140H24a12,12,0,0,1,0-24H48.27L85.08,35a12,12,0,0,1,22.13.7l54.28,142.46,27.78-55.56A12,12,0,0,1,200,116h32A12,12,0,0,1,244,128Z"/>
+    </symbol>
+    <symbol id="i-nav-list-checks" viewBox="0 0 256 256" fill="currentColor">
+      <path d="M228,128a12,12,0,0,1-12,12H128a12,12,0,0,1,0-24h88A12,12,0,0,1,228,128ZM128,76h88a12,12,0,0,0,0-24H128a12,12,0,0,0,0,24Zm88,104H128a12,12,0,0,0,0,24h88a12,12,0,0,0,0-24ZM79.51,39.51,56,63l-7.51-7.52a12,12,0,0,0-17,17l16,16a12,12,0,0,0,17,0l32-32a12,12,0,0,0-17-17Zm0,64L56,127l-7.51-7.52a12,12,0,1,0-17,17l16,16a12,12,0,0,0,17,0l32-32a12,12,0,0,0-17-17Zm0,64L56,191l-7.51-7.52a12,12,0,1,0-17,17l16,16a12,12,0,0,0,17,0l32-32a12,12,0,0,0-17-17Z"/>
+    </symbol>
+    <symbol id="i-nav-list" viewBox="0 0 256 256" fill="currentColor">
+      <path d="M228,128a12,12,0,0,1-12,12H40a12,12,0,0,1,0-24H216A12,12,0,0,1,228,128ZM40,76H216a12,12,0,0,0,0-24H40a12,12,0,0,0,0,24ZM216,180H40a12,12,0,0,0,0,24H216a12,12,0,0,0,0-24Z"/>
+    </symbol>
+  </svg>
+  <div class="product-bar">
+    <button class="btn ghost icon" id="nav-toggle" aria-expanded="false" aria-label="Toggle navigation" title="Menu"><svg class="nav-icon" aria-hidden="true"><use href="#i-nav-list"/></svg></button>
+    <span class="product-name">Intelligent Release &amp; Image Staging <span class="tag">IRIS</span></span>
+    <span class="product-suite">Console</span>
     <span class="spacer"></span>
     <span class="who" id="who"></span>
     <div class="menu-wrap">
@@ -19,7 +97,7 @@
       <div class="menu right" id="help-pop" hidden>
         <div class="help-row muted" id="help-version"></div>
         <div class="help-row muted">Deployment id
-          <span class="mono" id="help-deployment-id"></span>
+          <span class="machine" id="help-deployment-id"></span>
           <button class="linkish" type="button" id="help-copy-id">copy</button>
         </div>
         <a class="menu-item menu-close" id="help-docs-link" href="https://cisco-open.github.io/intelligent-release-image-staging/" target="_blank" rel="noopener">Official documentation ↗</a>
@@ -29,26 +107,29 @@
     </div>
     <button class="btn ghost" id="logout">Sign out</button>
   </div>
-  <div class="stripe"></div>
   <div class="shell">
-    <nav class="side">
-      <a href="#overview" class="nav" id="nav-overview">Overview</a>
-      <a href="#images" class="nav" id="nav-images">Images</a>
-      <a href="#devices" class="nav" id="nav-devices">Devices</a>
-      <a href="#swarm" class="nav" id="nav-swarm">Swarm</a>
+    <nav class="nav-rail">
+      <a href="#overview" class="nav" id="nav-overview"><svg class="nav-icon" aria-hidden="true"><use href="#i-nav-gauge"/></svg><span class="nav-label">Overview</span></a>
+      <a href="#images" class="nav" id="nav-images"><svg class="nav-icon" aria-hidden="true"><use href="#i-nav-stack"/></svg><span class="nav-label">Images</span></a>
+      <a href="#devices" class="nav" id="nav-devices"><svg class="nav-icon" aria-hidden="true"><use href="#i-nav-hard-drives"/></svg><span class="nav-label">Devices</span></a>
+      <a href="#swarm" class="nav" id="nav-swarm"><svg class="nav-icon" aria-hidden="true"><use href="#i-nav-share-network"/></svg><span class="nav-label">Swarm</span></a>
+      <hr class="nav-divider">
       <div class="nav-group">System</div>
-      <a href="#settings" class="nav sub" id="nav-settings">Settings</a>
-      <div id="settings-submenu" hidden>
-        <a href="#settings/setup" class="nav subsub" id="nav-settings-setup">Setup</a>
-        <a href="#settings/general" class="nav subsub" id="nav-settings-general">General</a>
-        <a href="#settings/tls" class="nav subsub" id="nav-settings-tls">TLS &amp; trust</a>
-        <a href="#settings/telemetry" class="nav subsub" id="nav-settings-telemetry">Telemetry</a>
-        <a href="#settings/audit" class="nav subsub" id="nav-settings-audit">Audit export</a>
+      <a href="#settings" class="nav sub" id="nav-settings" aria-expanded="false"><svg class="nav-icon" aria-hidden="true"><use href="#i-nav-gear"/></svg><span class="nav-label">Settings</span></a>
+      <div class="nav-flyout menu" id="settings-submenu" hidden>
+        <div class="nav-group">Settings</div>
+        <a href="#settings/setup" class="nav subsub menu-close" id="nav-settings-setup"><svg class="nav-icon" aria-hidden="true"><use href="#i-nav-list-checks"/></svg><span class="nav-label">Setup</span></a>
+        <a href="#settings/general" class="nav subsub menu-close" id="nav-settings-general">General</a>
+        <a href="#settings/tls" class="nav subsub menu-close" id="nav-settings-tls">TLS &amp; trust</a>
+        <a href="#settings/telemetry" class="nav subsub menu-close" id="nav-settings-telemetry">Telemetry</a>
+        <a href="#settings/audit" class="nav subsub menu-close" id="nav-settings-audit">Audit export</a>
+        <a href="#settings/bulkhash" class="nav subsub menu-close" id="nav-settings-bulkhash">Image verification</a>
       </div>
-      <a href="#monitoring" class="nav sub" id="nav-monitoring">Monitoring</a>
-      <div id="monitoring-submenu" hidden>
-        <a href="#monitoring/audit" class="nav subsub" id="nav-monitoring-audit">Audit trail</a>
-        <a href="#monitoring/deploylogs" class="nav subsub" id="nav-monitoring-deploylogs">Deployment logs</a>
+      <a href="#monitoring" class="nav sub" id="nav-monitoring" aria-expanded="false"><svg class="nav-icon" aria-hidden="true"><use href="#i-nav-pulse"/></svg><span class="nav-label">Monitoring</span></a>
+      <div class="nav-flyout menu" id="monitoring-submenu" hidden>
+        <div class="nav-group">Monitoring</div>
+        <a href="#monitoring/audit" class="nav subsub menu-close" id="nav-monitoring-audit">Audit trail</a>
+        <a href="#monitoring/deploylogs" class="nav subsub menu-close" id="nav-monitoring-deploylogs">Deployment logs</a>
       </div>
     </nav>
     <main class="main">
@@ -58,296 +139,614 @@
         <button class="linkish" id="setup-nudge-dismiss">dismiss</button>
       </div>
       <section id="view-overview" hidden>
-        <h2>Network Overview <span id="telemetry-health" class="badge badge-queued" hidden></span></h2>
-        <div class="cards" id="ov-cards"></div>
-        <h3>Rollout</h3>
-        <table class="tbl" id="ov-rollout">
-          <thead><tr><th>Image</th><th>Assigned</th><th>Staged</th><th>Progress</th></tr></thead>
-          <tbody id="ov-rows"></tbody>
-        </table>
+        <div class="page-header">
+          <h2 class="page-title">Network Overview <span id="telemetry-health" class="badge badge-queued" hidden></span></h2>
+        </div>
+        <!-- Band 1: worst-of-group rollups, clickable into a filtered
+             Devices/Images view (spec: "Overview rollups = combined
+             worst-of-group"). -->
+        <div class="ov-band">
+          <h3>Needs attention</h3>
+          <div class="attention-cards" id="ov-attention"></div>
+        </div>
+        <!-- Band 2: fleet totals, precise denominators, plus the concrete
+             in-progress-transfer evidence (the Rollout table) -- the
+             fleet-wide Staging Boundary that used to sit above this
+             (Active staging) was removed per operator decision; the
+             per-device instance still lives in the device detail drawer. -->
+        <div class="ov-band">
+          <h3>Fleet totals</h3>
+          <div class="cards" id="ov-cards"></div>
+          <h3>Rollout</h3>
+          <div class="table-scroll">
+          <table class="tbl" id="ov-rollout">
+            <thead><tr><th>Image</th><th>Assigned</th><th>Staged</th><th>Progress</th></tr></thead>
+            <tbody id="ov-rows"></tbody>
+          </table>
+          </div>
+        </div>
       </section>
       <section id="view-images" hidden>
-        <h2>Images</h2>
-        <div class="upload" id="drop">
-          <input type="file" id="file" accept=".bin,.SPA.bin" multiple hidden>
-          <p><button class="btn" id="pick">Choose files</button> or drag images here</p>
-          <div id="uploads"></div>
-          <div class="progress" id="prog" hidden><div class="bar" id="bar"></div></div>
-          <p class="muted" id="status"></p>
+        <div class="page-header">
+          <h2 class="page-title">Images</h2>
         </div>
-        <p class="muted">Images copied onto the server under
-          <span class="mono">/opt/images</span> — for example
-          <span class="mono">/opt/images/iosxe/c9300/</span> — are offered for
-          import below without uploading. Set <span class="mono">IMAGES_ROOT</span>
-          to scan a different directory.</p>
-        <div id="import-panel" hidden>
-          <h3>Import from disk</h3>
-          <p class="muted">Images already present on this server that are not in the
-            catalog. They are published where they are — nothing is copied.</p>
-          <table class="tbl" id="importable">
-            <thead><tr><th>File</th><th>Size</th><th>Path</th><th></th></tr></thead>
-            <tbody id="import-rows"></tbody>
+        <!-- Intake/publish work area: bounded cards, visually separated from
+             the catalog below (brief Step 5). -->
+        <div class="images-intake">
+          <div class="card">
+            <h3>Publish</h3>
+            <div class="upload" id="drop">
+              <input type="file" id="file" accept=".bin,.SPA.bin" multiple hidden>
+              <p><button class="btn" id="pick">Choose files</button> or drag images here</p>
+              <div id="uploads"></div>
+              <p class="muted" id="status" role="status" aria-live="polite"></p>
+            </div>
+            <p class="muted">Images copied onto the server under
+              <span class="machine">/opt/images</span> — including any subdirectory —
+              are offered for import below without uploading. Files ending in
+              <span class="machine">.bin</span>, <span class="machine">.iso</span>,
+              <span class="machine">.tar</span> or <span class="machine">.rpm</span> are
+              scanned. Set <span class="machine">IMAGES_ROOT</span> to scan a
+              different directory.</p>
+          </div>
+          <div class="card" id="import-panel" hidden>
+            <h3>Import from disk</h3>
+            <p class="muted">Images already present on this server that are not in the
+              catalog. They are published where they are — nothing is copied.</p>
+            <div class="table-scroll">
+            <table class="tbl" id="importable">
+              <thead><tr><th>File</th><th>Size</th><th>Path</th><th></th></tr></thead>
+              <tbody id="import-rows"></tbody>
+            </table>
+            </div>
+          </div>
+        </div>
+        <!-- Catalog: filename + Cisco source-verification verdict lead each
+             row, image id stays adjacent (brief Step 5). -->
+        <div class="images-catalog">
+          <h3>Catalog</h3>
+          <div class="toolbar">
+            <span class="muted push" id="images-count"></span>
+            <label class="muted"><input type="checkbox" id="images-filter-attention"> Needs attention only</label>
+          </div>
+          <div class="table-scroll">
+          <table class="tbl" id="images">
+            <thead><tr><th>File</th><th>Verification</th><th>Image ID</th><th>Size</th><th>SHA-256</th><th>Published</th><th></th></tr></thead>
+            <tbody id="rows"></tbody>
           </table>
+          </div>
         </div>
-        <table class="tbl" id="images">
-          <thead><tr><th>Image ID</th><th>File</th><th>Size</th><th>SHA-256</th><th>Published</th><th></th></tr></thead>
-          <tbody id="rows"></tbody>
-        </table>
+        <!-- Slides in from the RIGHT, like the deployment-details drawer --
+             a panel to read alongside the table it was opened from, not a
+             choice to confirm, so a drawer rather than a modal. role=dialog
+             (Task 6, fix wave): a NON-modal dialog -- no backdrop, the page
+             behind stays fully interactive (openImageInfo can be called
+             again while this is open), so aria-modal and a Tab-trap would
+             be dishonest and would wrongly lock out the rest of the page. -->
+        <div id="img-info-panel" class="drawer" hidden role="dialog" aria-label="Image details">
+          <div class="drawer-head">
+            <span>Image details <span id="ii-id" class="machine"></span></span>
+            <button class="btn ghost" id="ii-close" aria-label="Close image details">✕</button>
+          </div>
+          <div class="drawer-body">
+            <p class="muted" id="ii-file"></p>
+            <h3>Cisco Bulk Hash verification</h3>
+            <p id="ii-verdict"></p>
+            <p class="muted" id="ii-verdict-detail"></p>
+            <div id="ii-release-block" hidden>
+              <h3>Release from quarantine</h3>
+              <p class="muted">This image's hash did not match Cisco's feed.
+                Releasing it allows it to be assigned to devices again.</p>
+              <button class="btn" type="button" id="ii-release">Release</button>
+              <div id="ii-override-block" hidden>
+                <p class="err" id="ii-override-note" role="alert"></p>
+                <p class="muted">Type the exact filename below to confirm the
+                  override and release it anyway.</p>
+                <input id="ii-confirm-text" placeholder="Exact filename" spellcheck="false">
+                <button class="btn danger" type="button" id="ii-release-override">Release anyway (override)</button>
+              </div>
+              <p class="err" id="ii-release-msg" role="alert"></p>
+            </div>
+          </div>
+        </div>
       </section>
       <section id="view-devices" hidden>
-        <h2>Devices</h2>
-        <div class="toolbar">
-          <button class="btn" id="add-dev">+ Add device</button>
-          <span class="sep"></span>
-          <div class="menu-wrap">
-            <button class="btn ghost" id="csv-menu-btn" aria-expanded="false">CSV ▾</button>
-            <div class="menu" id="csv-menu" hidden>
-              <button class="menu-item menu-close" id="import-csv">Import CSV…</button>
-              <button class="menu-item menu-close" id="export-csv">Export CSV</button>
-              <button class="menu-item menu-close" id="example-csv">Download example</button>
-            </div>
+        <div class="page-header">
+          <h2 class="page-title">Devices</h2>
+        </div>
+        <!-- One control row for the whole table. Magnetic Table > Placement >
+             Table-level actions: "When a table includes a filter bar, place
+             table-level actions on the right side of the filter bar to keep
+             all table controls in a single, consistent location." This page
+             used to stack two .toolbar rows -- table-level actions (Add
+             device / CSV / Credentials) above, filters below -- so the
+             controls for one table sat in two places and the page opened
+             with two competing button rows. .filter-bar and .table-actions
+             are those two halves on one line now, separated by the 36px
+             minimum gap Magnetic Filter bar > Spacing with other elements
+             asks for (styles.css). -->
+        <div class="table-controls">
+          <div class="filter-bar" id="dev-filters">
+            <input id="dev-filter-q" placeholder="Filter devices, IP, model…" aria-label="Filter by device, IP or model">
+            <select id="dev-filter-platform" aria-label="Filter by agent install">
+              <option value="">Agent install: any</option>
+              <option value="guestshell">Guest Shell</option>
+              <option value="iox">IOx</option>
+              <option value="router">Router</option>
+              <option value="xr-appmgr">XR appmgr container</option>
+              <option value="__none">— unset —</option>
+            </select>
+            <!-- Options are generated in app.js from DEVICE_STATUS_OPTIONS, the
+                 same list the Status cell derives from. -->
+            <select id="dev-filter-status" aria-label="Filter by status">
+              <option value="">Status: any</option>
+            </select>
+            <!-- Overflow filters (Magnetic Filter bar > Anatomy): the
+                 less-frequently-used filters live behind one overflow control
+                 whose label format the spec fixes as "<icon> + Filters". It
+                 read "More filters" before, which collided with the bulk
+                 bar's own "More ▾" -- two unrelated controls wearing the same
+                 word on the same screen. Summary text (the applied-filter
+                 count) is still updated live by updateMoreFiltersSummary()
+                 (app.js); every field id/value below is unchanged. -->
+            <details id="more-filters">
+              <summary id="more-filters-summary">
+                <svg class="ico" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M2.5 4h11M4.5 8h7M6.5 12h3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                <span id="more-filters-label">Filters</span>
+              </summary>
+              <div class="more-filters-body">
+                <select id="dev-filter-management-type" aria-label="Filter by management type">
+                  <option value="">Management type: any</option>
+                  <option value="routed">routed</option>
+                  <option value="inband">inband</option>
+                  <option value="router-routed">router-routed</option>
+                  <option value="router-nat">router-nat</option>
+                  <option value="xr-host">XR host</option>
+                  <option value="legacy">Inventory only — management type not chosen</option>
+                </select>
+                <select id="dev-filter-cred" aria-label="Filter by credential profile">
+                  <option value="">Credential: any</option>
+                  <option value="__none">— none —</option>
+                </select>
+                <select id="dev-filter-telemetry" aria-label="Filter by telemetry state">
+                  <option value="">Telemetry: any</option>
+                  <option value="on">on</option>
+                  <option value="off">off</option>
+                </select>
+                <select id="dev-filter-peer" aria-label="Filter by peer policy">
+                  <option value="">Peer policy: any</option>
+                  <option value="quarantined">quarantined</option>
+                  <option value="not-quarantined">not quarantined</option>
+                </select>
+              </div>
+            </details>
+            <!-- Reset (Magnetic Filter bar > Anatomy: "Displayed when at least
+                 one filter has been selected or a search term has been
+                 entered"), so it stops sitting there permanently offering to
+                 clear nothing; updateFilterBarState() (app.js) shows it. A
+                 tertiary BUTTON, not the bare text link it used to be:
+                 Magnetic Button reserves text links for navigation inside a
+                 paragraph and gives standalone actions a button. -->
+            <button class="btn tertiary" type="button" id="dev-filter-clear" hidden>Reset</button>
+            <!-- Total (Magnetic Filter bar > Anatomy, format "<number> +
+                 results"). One count for the table now: the old layout carried
+                 two, "12 devices" in the top toolbar and "showing 6 of 12"
+                 down in the filter row, which disagreed on wording and made
+                 the reader check both. -->
+            <span class="filter-total" id="dev-count"></span>
           </div>
-          <input type="file" id="csv-file" accept=".csv" hidden>
-          <button class="btn ghost" id="manage-creds">Credentials</button>
-          <span class="muted push" id="dev-count"></span>
-          <span class="muted" id="dev-status"></span>
+          <!-- Table-level actions. Magnetic Button > Button group > Alignment:
+               "Alignment affects button order, with the primary button on the
+               outside edge" -- right-aligned here, so the one primary (Add
+               device) is rightmost and CSV/Manage credentials are secondary.
+               Magnetic Content design > CTAs asks for verb + object and no
+               articles, which is why "Credentials" (a bare noun) is now
+               "Manage credentials". -->
+          <div class="table-actions">
+            <div class="menu-wrap">
+              <!-- A dropdown trigger, not a button wearing a text caret.
+                   Magnetic Button > Usage is explicit: "Don't use buttons for
+                   multiple actions. Don't use a caret as a trailing icon.
+                   (Use a dropdown to present a list of related options for a
+                   topic or object.)" .dropdown draws the chevron as an icon
+                   that rotates with aria-expanded (styles.css). -->
+              <button class="btn ghost dropdown" id="csv-menu-btn" type="button" aria-expanded="false" aria-haspopup="true">CSV<svg class="caret" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M4.5 6.5 8 10l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+              <div class="menu right" id="csv-menu" hidden>
+                <button class="menu-item menu-close" id="import-csv">Import CSV…</button>
+                <button class="menu-item menu-close" id="export-csv">Export CSV</button>
+                <button class="menu-item menu-close" id="example-csv">Download example</button>
+              </div>
+            </div>
+            <input type="file" id="csv-file" accept=".csv" hidden>
+            <button class="btn ghost" id="manage-creds">Manage credentials</button>
+            <button class="btn" id="add-dev">Add device</button>
+          </div>
         </div>
-        <div class="toolbar" id="dev-filters">
-          <input id="dev-filter-q" placeholder="Filter devices, IP, model…" aria-label="Filter by device, IP or model">
-          <select id="dev-filter-attachment" aria-label="Filter by management type">
-            <option value="">Management type: any</option>
-            <option value="routed">routed</option>
-            <option value="inband">inband</option>
-            <option value="router-routed">router-routed</option>
-            <option value="router-nat">router-nat</option>
-            <option value="legacy">legacy</option>
-          </select>
-          <select id="dev-filter-platform" aria-label="Filter by platform">
-            <option value="">Platform: any</option>
-            <option value="guestshell">Guest Shell</option>
-            <option value="iox">IOx</option>
-            <option value="router">Router</option>
-            <option value="__none">— unset —</option>
-          </select>
-          <select id="dev-filter-cred" aria-label="Filter by credential profile">
-            <option value="">Credential: any</option>
-            <option value="__none">— none —</option>
-          </select>
-          <select id="dev-filter-telemetry" aria-label="Filter by telemetry state">
-            <option value="">Telemetry: any</option>
-            <option value="on">on</option>
-            <option value="off">off</option>
-          </select>
-          <select id="dev-filter-peer" aria-label="Filter by peer policy">
-            <option value="">Peer policy: any</option>
-            <option value="quarantined">quarantined</option>
-            <option value="not-quarantined">not quarantined</option>
-          </select>
-          <!-- Options are generated in app.js from DEVICE_STATUS_OPTIONS, the
-               same list the Status cell derives from. -->
-          <select id="dev-filter-status" aria-label="Filter by status">
-            <option value="">Status: any</option>
-          </select>
-          <button class="linkish" id="dev-filter-clear">clear filters</button>
-          <span class="muted push" id="dev-filter-count"></span>
-        </div>
+        <!-- Job/action feedback gets its own line under the controls instead of
+             competing for width inside them (Magnetic Filter bar: elements
+             sharing the bar's row reduce the space its filters get). -->
+        <div class="dev-status-line muted" id="dev-status" role="status" aria-live="polite"></div>
+        <!-- Bulk action bar (Magnetic Table > Anatomy > Bulk action bar):
+             "When row checkboxes are selected, the bulk action bar appears,
+             allowing up to 4 specific actions for the selected rows. An
+             indicator displays the number of selected rows, and an option to
+             select all rows across all pages is available. The bulk action bar
+             is positioned above the table header. The bulk action bar stays
+             visible until all rows are deselected or the 'Cancel' button is
+             clicked."
+             Selection state (count, scope, Cancel) sits on the left; the four
+             actions sit on the right with the single primary (Onboard) on the
+             group's outside edge, per Button > Button group > Alignment.
+             The fourth is the overflow -- Magnetic Dropdown names "List
+             actions from a horizontal 3-dot icon" as a dropdown use case, and
+             Table > Action column uses an overflow icon button for the same
+             job. It replaces the labelled "More ▾" that used to clash by name
+             with the filter bar's "More filters". -->
         <div class="selbar" id="sel-bar" hidden>
           <span class="sel-count" id="sel-count"></span>
-          <button class="linkish" id="sel-clear">clear</button>
-          <span class="sep"></span>
-          <div class="menu-wrap">
-            <button class="btn" id="onboard-menu-btn" aria-expanded="false">Onboard ▾</button>
-            <div class="menu" id="onboard-pop" hidden>
-              <label class="muted"><input type="checkbox" id="onboard-telemetry" checked> Telemetry reports</label>
-              <label class="muted"><input type="checkbox" id="onboard-telemetry-stream"> Telemetry streaming (live samples)</label>
-              <button class="btn menu-close" id="onboard-selected">Start onboard</button>
-            </div>
-          </div>
-          <div class="menu-wrap">
-            <button class="btn ghost" id="undeploy-menu-btn" aria-expanded="false">Undeploy ▾</button>
-            <div class="menu" id="undeploy-pop" hidden>
-              <label class="muted"><input type="checkbox" id="undeploy-force"> Force (no usable deployment receipt)</label>
-              <div class="help-row muted menu-note">
-                Use when a device is stranded — an onboard that died before its
-                receipt was written, or a box that was rebuilt or replaced, so the
-                receipt names hardware that is no longer there and the teardown
-                refuses it on an identity mismatch. Force skips the receipt
-                entirely and removes the IRIS agent footprint only: the
-                VirtualPortGroup and NAT are left untouched, because nothing here
-                proves IRIS created them. Any receipt for the device is abandoned
-                once the teardown succeeds, so it can be onboarded again.
+          <span class="muted" id="sel-scope-text" hidden></span>
+          <button class="btn tertiary" type="button" id="sel-scope-all" hidden></button>
+          <button class="btn tertiary" type="button" id="sel-clear">Cancel</button>
+          <div class="selbar-actions">
+            <!-- Each of these opens a modal (Magnetic Modal > Usage: "Use
+                 modals for simple tasks that inform, confirm, or complete a
+                 simple action"). They used to be .btn + "▾" popovers holding
+                 checkboxes and their own nested Start button -- a shape
+                 Magnetic Button forbids on a button and Magnetic Dropdown
+                 forbids in a menu, whose items must fire immediately and
+                 "don't require another element, like a button, to trigger an
+                 action". -->
+            <button class="btn ghost" type="button" id="assign-images-selected">Assign images…</button>
+            <button class="btn ghost" type="button" id="undeploy-selected">Undeploy…</button>
+            <button class="btn" type="button" id="onboard-selected">Onboard…</button>
+            <div class="menu-wrap">
+              <button class="btn ghost icon-only" type="button" id="more-menu-btn" aria-expanded="false" aria-haspopup="true" aria-label="More actions" title="More actions"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="3.5" cy="8" r="1.35" fill="currentColor"/><circle cx="8" cy="8" r="1.35" fill="currentColor"/><circle cx="12.5" cy="8" r="1.35" fill="currentColor"/></svg></button>
+              <div class="menu right" id="more-pop" hidden>
+                <button class="menu-item menu-close" type="button" id="adopt-selected">Adopt</button>
+                <button class="menu-item menu-close" type="button" id="quarantine-selected">Quarantine</button>
+                <button class="menu-item menu-close" type="button" id="release-selected">Release</button>
+                <button class="menu-item menu-close" type="button" id="set-cred-selected">Set credential…</button>
+                <hr class="menu-divider">
+                <!-- Magnetic Dropdown > Types: "A dropdown menu can contain
+                     regular, disabled, and destructive menu item types." Delete
+                     keeps its confirmation step (Button > Best practices:
+                     "Allow a user to back out of important destructive
+                     actions"); the ellipsis says another step follows. -->
+                <button class="menu-item danger menu-close" type="button" id="delete-selected">Delete…</button>
               </div>
-              <button class="btn menu-close" id="undeploy-selected">Start undeploy</button>
             </div>
           </div>
-          <button class="btn ghost" id="adopt-selected">Adopt</button>
-          <button class="btn ghost" id="quarantine-selected">Quarantine</button>
-          <button class="btn ghost" id="release-selected">Release</button>
-          <span class="sep"></span>
-          <span class="joined">
-            <select id="cred-selected"><option value="">— credential for selected —</option></select>
-            <button class="btn ghost" id="apply-cred-selected">Apply</button>
-          </span>
-          <span class="joined">
-            <select id="image-selected"><option value="">— image for selected —</option></select>
-            <button class="btn ghost" id="apply-image-selected">Apply</button>
-          </span>
-          <button class="btn danger push" id="delete-selected">Delete…</button>
         </div>
         <form class="inline-form" id="dev-form" hidden>
-          <input id="df-id" placeholder="Device ID / IP">
-          <input id="df-ip" placeholder="Management IP">
-          <select id="df-attachment"><option value="">Management type…</option><option value="routed">Routed - IRIS-managed app network</option><option value="inband">Inband - existing management VLAN</option><option value="router-routed">Router routed - IRIS-managed VPG subnet</option><option value="router-nat">Router NAT - VPG behind NAT</option></select>
-          <input id="df-vlan" placeholder="VLAN">
-          <input id="df-svi" placeholder="SVI IP (routed only)">
-          <input id="df-vpg" placeholder="VirtualPortGroup number (0-31)" title="IOS interface VirtualPortGroup<N>" hidden>
-          <input id="df-nat-interface" placeholder="NAT outside interface" hidden>
-          <input id="df-guest" placeholder="App IP (Guest Shell)">
-          <input id="df-mask" placeholder="App mask">
-          <input id="df-gateway" placeholder="App gateway (VPG IP for routers)" title="For router modes, this is the IP configured on VirtualPortGroup<N>">
-          <input id="df-model" placeholder="model (e.g. C9300-48UXM / IE-3400 / C8000V) — optional">
-          <select id="df-platform"><option value="">Platform - auto by model</option><option value="guestshell">Guest Shell</option><option value="iox">IOx</option><option value="router">Router (Guest Shell via VirtualPortGroup)</option></select>
-          <select id="df-cred"><option value="">— no credential —</option></select>
+          <label class="field" for="df-id"><span class="field-label">Device ID / IP</span><input id="df-id" placeholder="e.g. 10.0.0.5"></label>
+          <label class="field" for="df-ip"><span class="field-label">Management IP</span><input id="df-ip" placeholder="e.g. 10.0.0.5"></label>
+          <label class="field" for="df-management-type"><span class="field-label">Management type</span><select id="df-management-type"><option value="">Choose…</option><option value="routed">Routed - IRIS-managed app network</option><option value="inband">Inband - existing management VLAN</option><option value="router-routed">Router routed - IRIS-managed VPG subnet</option><option value="router-nat">Router NAT - VPG behind NAT</option><option value="xr-host">XR host - router's own network stack</option></select></label>
+          <label class="field" for="df-vlan"><span class="field-label">VLAN</span><input id="df-vlan" placeholder="e.g. 100"></label>
+          <label class="field" for="df-svi"><span class="field-label">SVI IP (routed only)</span><input id="df-svi" placeholder="e.g. 10.0.1.1"></label>
+          <label class="field" for="df-vpg"><span class="field-label">VirtualPortGroup number (0-31)</span><input id="df-vpg" placeholder="e.g. 0" title="IOS interface VirtualPortGroup<N>" hidden></label>
+          <label class="field" for="df-nat-interface"><span class="field-label">NAT outside interface</span><input id="df-nat-interface" placeholder="e.g. GigabitEthernet0/0" hidden></label>
+          <label class="field" for="df-guest"><span class="field-label">App IP (Guest Shell)</span><input id="df-guest" placeholder="e.g. 10.0.2.5"></label>
+          <label class="field" for="df-mask"><span class="field-label">App mask</span><input id="df-mask" placeholder="e.g. 255.255.255.0"></label>
+          <label class="field" for="df-gateway"><span class="field-label">App gateway (VPG IP for routers)</span><input id="df-gateway" placeholder="e.g. 10.0.2.1" title="For router modes, this is the IP configured on VirtualPortGroup<N>"></label>
+          <label class="field" for="df-model"><span class="field-label">Model (optional)</span><input id="df-model" placeholder="e.g. C9300-48UXM / IE-3400 / C8000V"></label>
+          <label class="field" for="df-platform"><span class="field-label">Agent install</span><select id="df-platform"><option value="" disabled selected>Choose an agent install</option><option value="guestshell">Guest Shell</option><option value="iox">IOx</option><option value="router">Router (Guest Shell via VirtualPortGroup)</option><option value="xr-appmgr">XR appmgr container</option></select></label>
+          <label class="field" for="df-cred"><span class="field-label">Credential</span><select id="df-cred"><option value="">— no credential —</option></select></label>
           <button class="btn" type="submit">Save device</button>
           <button class="btn ghost" type="button" id="df-cancel">Cancel</button>
-          <span class="err" id="df-err"></span>
+          <span class="err" id="df-err" role="alert"></span>
         </form>
         <div class="inline-form" id="cred-panel" hidden>
+          <div class="table-scroll">
           <table class="tbl">
             <thead><tr><th>Profile id</th><th>Name</th><th>Device username</th><th></th></tr></thead>
             <tbody id="cred-rows"></tbody>
           </table>
+          </div>
           <form id="cred-form">
-            <input id="cf-id" placeholder="Profile id (e.g. lab-switches)">
-            <input id="cf-name" placeholder="Display name">
-            <input id="cf-user" placeholder="Device username" value="admin">
-            <input id="cf-pass" type="password" placeholder="Device password" autocomplete="new-password">
-            <input id="cf-pass2" type="password" placeholder="Confirm password" autocomplete="new-password">
-            <input id="cf-en" type="password" placeholder="Enable secret (blank = same)" autocomplete="new-password">
+            <label class="field" for="cf-id"><span class="field-label">Profile id</span><input id="cf-id" placeholder="e.g. lab-switches"></label>
+            <label class="field" for="cf-name"><span class="field-label">Display name</span><input id="cf-name" placeholder="e.g. Lab switches"></label>
+            <label class="field" for="cf-user"><span class="field-label">Device username</span><input id="cf-user" placeholder="admin" value="admin"></label>
+            <label class="field" for="cf-pass"><span class="field-label">Device password</span><input id="cf-pass" type="password" placeholder="Device password" autocomplete="new-password"></label>
+            <label class="field" for="cf-pass2"><span class="field-label">Confirm password</span><input id="cf-pass2" type="password" placeholder="Confirm password" autocomplete="new-password"></label>
+            <label class="field" for="cf-en"><span class="field-label">Enable secret</span><input id="cf-en" type="password" placeholder="Blank = same as password" autocomplete="new-password"></label>
             <button class="btn" type="submit">Save profile</button>
             <button class="btn ghost" type="button" id="cf-reset">New</button>
             <button class="btn ghost" type="button" id="cf-close">Close</button>
-            <span class="err" id="cf-err"></span>
+            <span class="err" id="cf-err" role="alert"></span>
           </form>
         </div>
-        <table class="tbl" id="devices">
-          <thead><tr><th><input type="checkbox" id="mark-all"></th><th>Device</th><th>IP</th><th>Model</th><th>Management type</th><th>Platform</th><th>Credential</th><th>Assigned image</th><th>Telemetry</th><th>Peer policy</th><th>Status</th></tr></thead>
+        <!-- devices-table-wrap (fix wave 1): the Status legend popover
+             (#status-legend-pop below) must NOT be a descendant of
+             .table-scroll -- that container's overflow-x:auto forces its
+             overflow-y to the CSS-spec-mandated "auto" too (one axis
+             visible + one non-visible resolves both to non-visible), which
+             clipped the ~300px popover on any short table and forced a
+             stray vertical scrollbar. Moving it to a sibling of
+             .table-scroll, inside this position:relative wrapper, keeps it
+             out of that scroll/clip context entirely while still anchoring
+             it near the table's top-right (the button that opens it stays
+             in the Status header cell, the table's own rightmost column). -->
+        <div class="devices-table-wrap">
+        <div class="table-scroll">
+        <table class="tbl dense" id="devices">
+          <thead><tr><th><input type="checkbox" id="mark-all"></th><th>Device</th><th>IP</th><th>Model</th><th>Management type</th><th>Agent install</th><th>Credential</th><th>Assigned images</th><th>Telemetry</th><th>Peer policy</th><th>Status <button class="linkish" type="button" id="status-legend-btn" aria-expanded="false" aria-label="Show status pill legend">ⓘ</button></th></tr></thead>
           <tbody id="dev-rows"></tbody>
         </table>
+        </div>
+        <div class="menu" id="status-legend-pop" hidden></div>
+        </div>
         <!-- Slides in from the RIGHT, like the deployment-log drawer. It used
              to be appended below the devices table, so opening it on a fleet of
              any size pushed the details off-screen and made the operator scroll
-             away from the row they had just clicked. -->
-        <div id="deploy-info-panel" class="drawer" hidden aria-label="Deployment details">
+             away from the row they had just clicked. role=dialog (Task 6, fix
+             wave): a NON-modal dialog -- no backdrop, the page behind stays
+             fully interactive (openDeployInfo's own deployInfoDev guard
+             expects a second row's drawer to open while the first is still
+             loading), so aria-modal and a Tab-trap would be dishonest and
+             would wrongly lock out the rest of the page. -->
+        <div id="deploy-info-panel" class="drawer" hidden role="dialog" aria-label="Deployment details">
           <div class="drawer-head">
-            <span>Deployment details <span id="di-dev" class="mono"></span></span>
+            <span>Deployment details <span id="di-dev" class="machine"></span></span>
             <button class="btn ghost" id="di-close" aria-label="Close deployment details">✕</button>
           </div>
           <div class="drawer-body">
-            <p class="muted" id="di-note"></p>
+            <p class="muted" id="di-note" role="status" aria-live="polite"></p>
+            <!-- Per-device instance of the Staging Boundary (Task 7's
+                 stagingBoundaryHTML, reused verbatim per its own contract):
+                 derived ONLY from data this drawer already has (the device
+                 row + the quarantined map refreshDevices() already fetched),
+                 never a new request. See deviceBoundarySteps() in app.js. -->
+            <div class="card"><div id="di-boundary"></div></div>
+            <h3>Images</h3>
+            <div class="table-scroll">
+            <table class="tbl" id="di-img-tbl">
+              <thead><tr><th>Image</th><th>State</th></tr></thead>
+              <tbody id="di-img-rows"></tbody>
+            </table>
+            </div>
+            <div class="table-scroll">
             <table class="tbl" id="di-tbl"><tbody id="di-rows"></tbody></table>
+            </div>
             <h3>Deployment logs</h3>
+            <div class="table-scroll">
             <table class="tbl" id="di-log-tbl">
               <thead><tr><th>Finished</th><th>Action</th><th>Result</th><th>Size</th><th></th></tr></thead>
               <tbody id="di-log-rows"></tbody>
             </table>
+            </div>
             <pre class="log" id="di-log-text" hidden></pre>
           </div>
         </div>
+        <!-- Image picker: one control shared by the per-row "assign" button
+             and the bulk "Assign images to N devices…" toolbar action
+             (openImagePicker in app.js). A centred modal, not a drawer -- it
+             is a choice to make and confirm, not a panel to read alongside
+             the table it was opened from. role=dialog + aria-modal (Task 6). -->
+        <!-- Bulk-action modals (Magnetic Modal > Usage: "Use modals for
+             simple tasks that inform, confirm, or complete a simple action").
+             Onboard/Undeploy/Set credential used to be .menu popovers hanging
+             off caret buttons in the bulk bar, each holding form controls and
+             its own nested submit -- which Magnetic Dropdown rules out
+             ("Selecting an item from the menu starts an action without
+             requiring the use of another button to submit or apply") and
+             names modals as the right home for: "provide features in bulk
+             action bar that open modals". Same chrome as the image picker
+             below; every control id is unchanged, so telemetryFlags(),
+             startBatch() and the credential handler read exactly what they
+             read before. -->
+        <div id="onboard-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="onboard-modal-title">
+          <div class="modal">
+            <div class="modal-head">
+              <span id="onboard-modal-title">Onboard devices <span id="onboard-modal-count" class="muted"></span></span>
+              <button class="btn ghost icon-only" type="button" id="onboard-modal-x" aria-label="Close">&#10005;</button>
+            </div>
+            <div class="modal-body">
+              <p class="muted">Installs the IRIS agent on each selected device and starts staging its assigned images.</p>
+              <label class="check-row"><input type="checkbox" id="onboard-telemetry" checked> Telemetry reports</label>
+              <label class="check-row"><input type="checkbox" id="onboard-telemetry-stream"> Telemetry streaming (live samples)</label>
+            </div>
+            <div class="modal-foot">
+              <button class="btn ghost" type="button" id="onboard-cancel">Cancel</button>
+              <button class="btn" type="button" id="onboard-confirm">Start onboard</button>
+            </div>
+          </div>
+        </div>
+        <div id="undeploy-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="undeploy-modal-title">
+          <div class="modal">
+            <div class="modal-head">
+              <span id="undeploy-modal-title">Undeploy devices <span id="undeploy-modal-count" class="muted"></span></span>
+              <button class="btn ghost icon-only" type="button" id="undeploy-modal-x" aria-label="Close">&#10005;</button>
+            </div>
+            <div class="modal-body">
+              <p class="muted">Removes the IRIS agent and record-owned resources from each selected device. Staged images at the filesystem root are left in place, and running jobs are never interrupted.</p>
+              <label class="check-row"><input type="checkbox" id="undeploy-force"> Force (no usable deployment record)</label>
+              <div class="help-row muted menu-note">
+                Use when a device is stranded — an onboard that died before its
+                record was written, or a box that was rebuilt or replaced, so the
+                record names hardware that is no longer there and the teardown
+                refuses it on an identity mismatch. Force skips the record
+                entirely and removes the IRIS agent footprint only: the
+                VirtualPortGroup and NAT are left untouched, because nothing here
+                proves IRIS created them. On an IOS-XR device, force removes the
+                same IRIS-named footprint a normal undeploy would — the appmgr
+                application iris, its iris-xr package source, the RPM,
+                iris-work/, and the IRIS sidecar files at harddisk: root — but a
+                staged image file there is never removed by IRIS teardown, and
+                the agent deletes an adopted file only when the catalog
+                republishes new content under that same image id — never
+                otherwise. Any record for the device is abandoned once the
+                teardown succeeds, so it can be onboarded again.
+              </div>
+            </div>
+            <div class="modal-foot">
+              <button class="btn ghost" type="button" id="undeploy-cancel">Cancel</button>
+              <button class="btn danger" type="button" id="undeploy-confirm">Start undeploy</button>
+            </div>
+          </div>
+        </div>
+        <div id="cred-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="cred-modal-title">
+          <div class="modal">
+            <div class="modal-head">
+              <span id="cred-modal-title">Set credential <span id="cred-modal-count" class="muted"></span></span>
+              <button class="btn ghost icon-only" type="button" id="cred-modal-x" aria-label="Close">&#10005;</button>
+            </div>
+            <div class="modal-body">
+              <label class="field" for="cred-selected"><span class="field-label">Credential profile</span>
+                <select id="cred-selected"><option value="">— credential for selected —</option></select>
+              </label>
+            </div>
+            <div class="modal-foot">
+              <button class="btn ghost" type="button" id="cred-modal-cancel">Cancel</button>
+              <button class="btn" type="button" id="apply-cred-selected">Apply</button>
+            </div>
+          </div>
+        </div>
+        <div id="img-picker" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-label="Choose images">
+          <div class="modal">
+            <div class="modal-head">
+              <span>Choose images <span id="img-picker-count" class="muted"></span></span>
+            </div>
+            <div class="modal-body">
+              <p id="img-picker-note" class="muted" hidden role="status" aria-live="polite"></p>
+              <div id="img-picker-rows"></div>
+            </div>
+            <div class="modal-foot">
+              <button class="btn ghost" id="img-picker-cancel">Cancel</button>
+              <button class="btn" id="img-picker-apply">Apply</button>
+            </div>
+          </div>
+        </div>
         <div id="batch-panel" hidden>
-          <h3>Onboarding batch <span id="batch-summary" class="muted"></span></h3>
+          <h3>Onboarding batch <span id="batch-summary" class="muted" role="status" aria-live="polite"></span></h3>
+          <div class="table-scroll">
           <table class="tbl">
             <thead><tr><th>Device</th><th>State</th><th>Duration</th><th>Last output</th><th></th></tr></thead>
             <tbody id="batch-rows"></tbody>
           </table>
+          </div>
           <button class="btn ghost" id="batch-cancel">Cancel queued</button>
           <button class="btn ghost" id="batch-close">Close</button>
         </div>
         <div id="onboard-logs"></div>
       </section>
       <section id="view-swarm" hidden>
-        <h2>Swarm</h2>
-        <p class="muted" id="swarm-summary"></p>
-        <p class="legacy-warning" id="legacy-peer-warning" hidden></p>
+        <div class="page-header">
+          <h2 class="page-title">Swarm</h2>
+        </div>
+        <p class="muted" id="swarm-summary" role="status" aria-live="polite"></p>
+        <p class="legacy-warning" id="legacy-peer-warning" hidden role="status" aria-live="polite"></p>
         <iframe id="swarm-frame" class="swarm-frame" title="Live swarm map"></iframe>
         <p><a class="btn ghost" id="swarm-open" target="_blank" rel="noopener">Open the swarm map full-screen ↗</a></p>
       </section>
       <section id="view-setup" hidden>
-        <h2>Finish setting up this server</h2>
-        <p class="muted" id="wz-progress"></p>
-        <div id="wz-steplist" role="list"></div>
-
-        <div class="wz-done" id="wz-admin">
-          <h3>Admin account <span id="wz-admin-chip"></span></h3>
-          <p class="muted">Created during first-run sign-in. Change the password
-            any time from Settings &rsaquo; General.</p>
+        <div class="page-header">
+          <h2 class="page-title">Finish setting up this server</h2>
         </div>
+        <p class="muted" id="wz-progress" role="status" aria-live="polite"></p>
+        <!-- Magnetic Stepper anatomy: left step panel (~320px), content area
+             right, Next/Back right-aligned at the content column's own
+             bottom -- captured in agentinfo/facelift-2026-08-30-visual-
+             direction.md lines 63-70. wz-* ids stay on the same functionally
+             equivalent elements; only the surrounding layout changed. -->
+        <div class="wz-layout">
+          <div class="wz-panel">
+            <div id="wz-steplist" role="list"></div>
+          </div>
+          <div class="wz-content">
+            <div class="wz-done" id="wz-admin">
+              <h3>Admin account <span id="wz-admin-chip"></span></h3>
+              <p class="muted">Created during first-run sign-in. Change the password
+                any time from Settings &rsaquo; General.</p>
+            </div>
 
-        <div class="wz-step" id="wz-step-telemetry" hidden>
-          <h3>1. Telemetry destination <span id="wz-td-chip"></span></h3>
-          <p class="muted">Where swarm progress, device reports and export health
-            are published. With no destination configured, none of it leaves this
-            server.</p>
-          <div class="form-mount" id="wz-td-mount"></div>
-        </div>
+            <div class="wz-step" id="wz-step-telemetry" hidden>
+              <h3>1. Telemetry destination <span id="wz-td-chip"></span></h3>
+              <p class="muted">Where swarm progress, device reports and export health
+                are published. With no destination configured, none of it leaves this
+                server.</p>
+              <div class="form-mount" id="wz-td-mount"></div>
+            </div>
 
-        <div class="wz-step" id="wz-step-stagehost" hidden>
-          <h3>2. Stage host <span id="wz-sh-chip"></span></h3>
-          <p class="muted">Credentials IRIS uses to reach the Docker host that
-            builds and serves device onboarding material. Without them, onboarding
-            a device over the Docker path cannot start.</p>
-          <div class="form-mount" id="wz-sh-mount"></div>
-        </div>
+            <div class="wz-step" id="wz-step-stagehost" hidden>
+              <h3>2. Stage host <span id="wz-sh-chip"></span></h3>
+              <p class="muted">Credentials IRIS uses to reach the Docker host that
+                builds and serves device onboarding material. Without them, onboarding
+                a device over the Docker path cannot start.</p>
+              <div class="form-mount" id="wz-sh-mount"></div>
+            </div>
 
-        <div class="wz-step" id="wz-step-packages" hidden>
-          <h3>3. Device packages <span id="wz-pkg-chip"></span></h3>
-          <p class="muted">Devices that run the agent as an IOx app (IE-3x00, and
-            C9300 with app-hosting) install a package that pins this server's
-            certificate at build time. If that certificate changes, existing
-            packages can no longer authenticate &mdash; the app installs and reports
-            RUNNING, but the device never checks in. Guest Shell platforms re-fetch
-            the certificate on every onboard and are not affected.</p>
-          <p class="muted"><strong>This step cannot be completed from the console.</strong>
-            The console container has no Docker socket, so it can detect a stale
-            package but never rebuild one. Run the command below on the Docker host,
-            then re-check.</p>
-          <table class="tbl" id="wz-pkg-table"><tbody></tbody></table>
-          <p class="mono" id="wz-pkg-remedy"></p>
-          <p><button class="btn ghost" id="wz-pkg-recheck">Re-check</button></p>
-        </div>
+            <div class="wz-step" id="wz-step-packages" hidden>
+              <h3>3. Device packages <span id="wz-pkg-chip"></span></h3>
+              <p class="muted">Devices that run the agent as an IOx app (IE-3x00, and
+                C9300 with app-hosting) install a package that pins this server's
+                certificate at build time. If that certificate changes, existing
+                packages can no longer authenticate &mdash; the app installs and reports
+                RUNNING, but the device never checks in. Guest Shell platforms re-fetch
+                the certificate on every onboard and are not affected.</p>
+              <p class="muted"><strong>This step cannot be completed from the console.</strong>
+                The console container has no Docker socket, so it can detect a stale
+                package but never rebuild one. Run the command below on the Docker host,
+                then re-check.</p>
+              <div class="table-scroll">
+              <table class="tbl" id="wz-pkg-table"><tbody></tbody></table>
+              </div>
+              <p class="machine" id="wz-pkg-remedy"></p>
+              <p><button class="btn ghost" id="wz-pkg-recheck">Re-check</button></p>
+            </div>
 
-        <div class="toolbar" id="wz-nav">
-          <button class="btn ghost" id="wz-back">&lsaquo; Back</button>
-          <button class="btn ghost" id="wz-skip">Skip for now</button>
-          <button class="btn" id="wz-next">Next &rsaquo;</button>
-          <span class="muted push" id="wz-msg"></span>
+            <div class="wz-step" id="wz-step-imageverification" hidden>
+              <h3>4. Image verification <span id="wz-iv-chip"></span></h3>
+              <p class="muted">Confirms every staged image's hash against Cisco's
+                Bulk Hash feed before it is trusted. Without at least one successful
+                check, IRIS cannot vouch that a staged image is the genuine,
+                untampered Cisco release.</p>
+              <div class="form-mount" id="wz-iv-mount"></div>
+            </div>
+
+            <div class="toolbar" id="wz-nav">
+              <button class="btn ghost" id="wz-back">&lsaquo; Back</button>
+              <button class="btn ghost" id="wz-skip">Skip for now</button>
+              <button class="btn" id="wz-next">Next &rsaquo;</button>
+              <span class="muted push" id="wz-msg" role="status" aria-live="polite"></span>
+            </div>
+          </div>
         </div>
       </section>
       <section id="view-settings" hidden>
-        <h2>Settings</h2>
+        <div class="page-header">
+          <h2 class="page-title">Settings</h2>
+        </div>
         <div id="settings-pane-setup" hidden>
-          <p class="muted">Four things to complete after installing a server.
+          <p class="muted">Five things to complete after installing a server.
             They can be done in any order, and this page keeps reporting their
             state so you can come back and check.</p>
 
+          <div class="setup-cards">
+          <div class="card">
           <h3>Admin account <span id="setup-admin-chip"></span></h3>
           <p class="muted">The single account that signs in to this console.
             It was created during first-run setup.</p>
           <p><a href="#settings/general" class="btn ghost">Change password</a></p>
+          </div>
 
+          <div class="card">
           <h3>Telemetry destination <span id="setup-td-chip"></span></h3>
           <p class="muted">Telemetry export is how swarm progress, device
             reports and export health reach the dashboards. Without a
             destination configured, none of it is published anywhere.</p>
           <p class="muted" id="setup-td-note"></p>
           <p><a href="#setup" class="btn ghost">Configure in setup</a></p>
+          </div>
 
+          <div class="card">
           <h3>Stage host (Docker onboarding) <span id="setup-sh-chip"></span></h3>
           <p class="muted">Credentials IRIS uses to reach the Docker host that
             builds and serves device onboarding material. Without them,
             onboarding a device over the Docker path cannot start.</p>
           <p><a href="#setup" class="btn ghost">Configure in setup</a></p>
+          </div>
 
+          <div class="card">
           <h3>Device packages <span id="setup-pkg-chip"></span></h3>
           <p class="muted">Devices that run the agent as an IOx app (IE-3x00, and
             C9300 with app-hosting) install a package that pins this server's
@@ -355,138 +754,243 @@
             packages can no longer authenticate — the app installs and reports
             RUNNING, but the device never checks in. Guest Shell platforms
             re-fetch the certificate on every onboard and are not affected.</p>
+          <div class="table-scroll">
           <table class="tbl" id="setup-pkg-table"><tbody></tbody></table>
+          </div>
           <p class="muted" id="setup-pkg-remedy"></p>
+          </div>
+
+          <div class="card">
+          <h3>Image verification <span id="setup-iv-chip"></span></h3>
+          <p class="muted">Confirms every staged image's hash against Cisco's
+            Bulk Hash feed before it is trusted. Without at least one
+            successful check, IRIS cannot vouch that a staged image is the
+            genuine, untampered Cisco release.</p>
+          <p><a href="#setup" class="btn ghost">Configure in setup</a></p>
+          </div>
+          </div>
         </div>
         <div id="settings-pane-general">
+          <div class="setup-cards">
+          <div class="card">
           <h3>Server &amp; build</h3>
+          <div class="table-scroll">
           <table class="tbl" id="settings-info"><tbody></tbody></table>
+          </div>
+          </div>
+          <div class="card">
           <h3>Change admin password</h3>
           <form class="inline-form" id="pw-form">
-            <input id="pw-cur" type="password" placeholder="Current password" autocomplete="current-password">
-            <input id="pw-new" type="password" placeholder="New password (min 8)" autocomplete="new-password">
-            <input id="pw-confirm" type="password" placeholder="Confirm new password" autocomplete="new-password">
+            <label class="field" for="pw-cur"><span class="field-label">Current password</span><input id="pw-cur" type="password" placeholder="Current password" autocomplete="current-password"></label>
+            <label class="field" for="pw-new"><span class="field-label">New password</span><input id="pw-new" type="password" placeholder="Min 8 characters" autocomplete="new-password"></label>
+            <label class="field" for="pw-confirm"><span class="field-label">Confirm new password</span><input id="pw-confirm" type="password" placeholder="Confirm new password" autocomplete="new-password"></label>
             <button class="btn" type="submit">Change password</button>
-            <span class="err" id="pw-msg"></span>
+            <span class="err" id="pw-msg" role="alert"></span>
           </form>
+          </div>
+          <!-- Card goes AROUND the mount point, never around the template
+               root below -- the template's own content is inert markup
+               until cloned into #sh-mount (mountSettingsForm, app.js), so it
+               stays outside the card entirely. -->
+          <div class="card">
           <h3>Stage host (Docker onboarding)</h3>
           <div class="form-mount" id="sh-mount"></div>
+          </div>
           <template id="tpl-sh-form">
-          <p class="muted" id="sh-status"></p>
+          <p class="muted" id="sh-status" role="status" aria-live="polite"></p>
           <form class="inline-form" id="sh-form">
-            <input id="sh-user" placeholder="Stage host username" autocomplete="username">
-            <input id="sh-pass" type="password" placeholder="Stage host password" autocomplete="new-password">
-            <input id="sh-pass2" type="password" placeholder="Confirm password" autocomplete="new-password">
+            <label class="field" for="sh-user"><span class="field-label">Stage host username</span><input id="sh-user" placeholder="e.g. admin" autocomplete="username"></label>
+            <label class="field" for="sh-pass"><span class="field-label">Stage host password</span><input id="sh-pass" type="password" placeholder="Stage host password" autocomplete="new-password"></label>
+            <label class="field" for="sh-pass2"><span class="field-label">Confirm password</span><input id="sh-pass2" type="password" placeholder="Confirm password" autocomplete="new-password"></label>
             <button class="btn" type="submit">Save</button>
             <button class="btn ghost" type="button" id="sh-clear">Clear</button>
-            <span class="err" id="sh-msg"></span>
+            <span class="err" id="sh-msg" role="alert"></span>
           </form>
           </template>
+          <div class="card">
           <h3>Sessions</h3>
-          <p class="muted" id="sessions-info"></p>
+          <p class="muted" id="sessions-info" role="status" aria-live="polite"></p>
           <p>
             <button class="btn ghost" id="revoke-others">Sign out other sessions</button>
-            <span class="muted" id="revoke-msg"></span>
+            <span class="muted" id="revoke-msg" role="status" aria-live="polite"></span>
           </p>
+          </div>
+          </div>
         </div>
         <div id="settings-pane-tls" hidden>
+          <div class="setup-cards">
+          <div class="card">
           <h3>Certificate</h3>
           <p class="muted">Serves the console only — the device-facing catalog and
             artifact certificates are untouched, so enrolled devices keep working.
             The private key is stored age-encrypted and never shown again.</p>
-          <p class="muted" id="cert-status"></p>
+          <p class="muted" id="cert-status" role="status" aria-live="polite"></p>
           <div class="dropzone" id="cert-dropzone" tabindex="0" role="button"
               aria-label="Drop a certificate and/or private key PEM file, or press Enter to browse for files">
             <input type="file" id="cert-dropzone-input" multiple hidden>
             <p>Drop the certificate and private key here<span class="hint">PEM files — or click / press Enter to browse</span></p>
           </div>
           <form class="inline-form" id="cert-form">
-            <textarea id="cert-pem" rows="4" spellcheck="false" placeholder="Certificate PEM — leaf or full chain (-----BEGIN CERTIFICATE-----)"></textarea>
-            <textarea id="cert-key" rows="4" spellcheck="false" placeholder="Private key PEM (-----BEGIN PRIVATE KEY-----)"></textarea>
+            <label class="field field-wide" for="cert-pem"><span class="field-label">Certificate PEM (leaf or full chain)</span><textarea id="cert-pem" rows="4" spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----"></textarea></label>
+            <label class="field field-wide" for="cert-key"><span class="field-label">Private key PEM</span><textarea id="cert-key" rows="4" spellcheck="false" placeholder="-----BEGIN PRIVATE KEY-----"></textarea></label>
             <label id="cert-passphrase-row" hidden>Key passphrase
               <input type="password" id="cert-passphrase" autocomplete="off"
                      placeholder="passphrase for the encrypted key">
             </label>
             <button class="btn" type="submit">Replace certificate</button>
             <button class="linkish danger-link" type="button" id="cert-revert" hidden>Use built-in certificate</button>
-            <span class="err" id="cert-msg"></span>
+            <span class="err" id="cert-msg" role="alert"></span>
           </form>
+          </div>
+          <div class="card">
           <h3>Trusted CAs</h3>
           <p class="muted">Root CAs trusted by outbound TLS (telemetry export, CA
             bundle download) in addition to the system store.</p>
+          <div class="table-scroll">
           <table class="tbl" id="trust-tbl">
             <thead><tr><th>Subject</th><th>Expires</th><th>SHA-256</th><th>Source</th><th>Certs</th><th></th></tr></thead>
             <tbody id="trust-rows"></tbody>
           </table>
+          </div>
           <div class="dropzone" id="trust-dropzone" tabindex="0" role="button"
               aria-label="Drop CA certificate PEM files, or press Enter to browse for files">
             <input type="file" id="trust-dropzone-input" multiple hidden>
             <p>Drop CA certificates here<span class="hint">one or many PEM files — or click / press Enter to browse</span></p>
           </div>
           <form class="inline-form" id="trust-form">
-            <textarea id="trust-pem" rows="4" spellcheck="false" placeholder="CA certificate PEM — one or more -----BEGIN CERTIFICATE----- blocks"></textarea>
+            <label class="field field-wide" for="trust-pem"><span class="field-label">CA certificate PEM</span><textarea id="trust-pem" rows="4" spellcheck="false" placeholder="One or more -----BEGIN CERTIFICATE----- blocks"></textarea></label>
             <button class="btn" type="submit">Add CA</button>
-            <span class="err" id="trust-msg"></span>
+            <span class="err" id="trust-msg" role="alert"></span>
           </form>
+          </div>
+          <div class="card">
+          <h3>Public CA bundle</h3>
           <p class="muted">Optional public CA bundle: Download now fetches the
             https:// URL below (Cisco's Trusted Root Store by default); enable the
             daily auto-refresh to keep it current. A failed download never replaces
             the previous bundle.</p>
           <form class="inline-form" id="ca-form">
-            <select id="ca-source">
+            <label class="field" for="ca-source"><span class="field-label">CA bundle source</span><select id="ca-source">
               <option value="cisco">Cisco Trusted Root Store</option>
               <option value="mozilla">Mozilla CA bundle (curl.se)</option>
               <option value="custom">Custom URL</option>
-            </select>
-            <input id="ca-url" placeholder="Public CA bundle URL (https://…)" hidden>
+            </select></label>
+            <label class="field" for="ca-url"><span class="field-label">Custom bundle URL</span><input id="ca-url" placeholder="https://…" hidden></label>
             <label class="muted"><input type="checkbox" id="ca-auto"> Refresh daily</label>
             <button class="btn ghost" type="submit">Save</button>
             <button class="btn ghost" type="button" id="ca-refresh">Download now</button>
-            <span class="err" id="ca-msg"></span>
+            <span class="err" id="ca-msg" role="alert"></span>
           </form>
+          </div>
+          </div>
         </div>
         <div id="settings-pane-telemetry" hidden>
+          <!-- Card goes around the mount point, never around the template
+               root below -- same convention as tpl-sh-form above. -->
+          <div class="card">
           <h3>Telemetry destination</h3>
           <div class="form-mount" id="td-mount"></div>
+          </div>
           <template id="tpl-td-form">
-          <p class="muted" id="td-status"></p>
+          <p class="muted" id="td-status" role="status" aria-live="polite"></p>
           <form class="inline-form" id="td-form">
-            <input id="td-endpoint" placeholder="OTLP endpoint (https://collector:4318)">
+            <label class="field field-wide" for="td-endpoint"><span class="field-label">OTLP endpoint</span><input id="td-endpoint" placeholder="https://collector:4318"></label>
             <label class="muted"><input type="checkbox" id="td-enabled"> Export enabled</label>
             <button class="btn" type="submit">Save</button>
             <button class="linkish danger-link" type="button" id="td-revert" hidden>Revert to deployment default</button>
-            <span class="err" id="td-msg"></span>
+            <span class="err" id="td-msg" role="alert"></span>
           </form>
           </template>
         </div>
         <div id="settings-pane-audit" hidden>
+          <div class="card">
           <h3>Audit export</h3>
           <p class="muted">Uploads the audit trail to a remote host over SCP,
             age-encrypted to the recipient below — encryption is mandatory.
             The SCP password is stored age-encrypted and never shown again.</p>
-          <p class="muted" id="ae-status"></p>
+          <p class="muted" id="ae-status" role="status" aria-live="polite"></p>
           <form class="inline-form" id="ae-form">
-            <input id="ae-host" placeholder="Host">
-            <input id="ae-port" placeholder="Port (22)">
-            <input id="ae-user" placeholder="Username" autocomplete="username">
-            <input id="ae-path" placeholder="Remote path (/var/backups or ~/audit)">
-            <input id="ae-recipient" placeholder="age recipient (age1…)" spellcheck="false">
-            <input id="ae-pass" type="password" placeholder="Password" autocomplete="new-password">
+            <label class="field" for="ae-host"><span class="field-label">Host</span><input id="ae-host" placeholder="e.g. backup.example.com"></label>
+            <label class="field" for="ae-port"><span class="field-label">Port</span><input id="ae-port" placeholder="22"></label>
+            <label class="field" for="ae-user"><span class="field-label">Username</span><input id="ae-user" placeholder="Username" autocomplete="username"></label>
+            <label class="field" for="ae-path"><span class="field-label">Remote path</span><input id="ae-path" placeholder="/var/backups or ~/audit"></label>
+            <label class="field" for="ae-recipient"><span class="field-label">age recipient</span><input id="ae-recipient" placeholder="age1…" spellcheck="false"></label>
+            <label class="field" for="ae-pass"><span class="field-label">Password</span><input id="ae-pass" type="password" placeholder="Password" autocomplete="new-password"></label>
             <label class="muted"><input type="checkbox" id="ae-auto"> Export daily</label>
             <button class="btn" type="submit">Save</button>
             <button class="btn ghost" type="button" id="ae-run">Export now</button>
             <button class="linkish danger-link" type="button" id="ae-clear">Clear</button>
-            <span class="err" id="ae-msg"></span>
+            <span class="err" id="ae-msg" role="alert"></span>
           </form>
+          </div>
+        </div>
+        <div id="settings-pane-bulkhash" hidden>
+          <!-- iv-content is MOVED (never cloned) between here and the setup
+               wizard's step 4 mount point at runtime (mountImageVerification,
+               app.js) -- see that function's comment for why a move rather
+               than the td/sh template-clone precedent. Its static home is
+               here, so every id-scoped source guard below keeps working
+               unchanged: the move only ever happens after the page loads. -->
+          <div id="iv-content">
+          <div class="card">
+          <h3>Schedule</h3>
+          <p class="muted">Cisco's Bulk Hash feed lists the sha512 of every
+            genuine Cisco release image. A scheduled or manual check compares
+            it against every image in this catalog and quarantines any that
+            mismatch, blocking new device assignments until the mismatch is
+            resolved or an operator explicitly overrides it.</p>
+          <form class="inline-form" id="iv-schedule-form">
+            <label class="field" for="iv-mode"><span class="field-label">Frequency</span><select id="iv-mode">
+              <option value="off">Off</option>
+              <option value="daily">Daily (UTC)</option>
+              <option value="weekly">Weekly (Mondays, UTC)</option>
+            </select></label>
+            <label class="field" for="iv-hour"><span class="field-label">Hour (UTC)</span><select id="iv-hour"></select></label>
+            <button class="btn" type="submit">Save</button>
+            <span class="err" id="iv-schedule-msg" role="alert"></span>
+          </form>
+          </div>
+          <div class="card">
+          <h3>Refresh now</h3>
+          <p class="muted">Runs the check immediately against Cisco's live
+            feed, outside the schedule above.</p>
+          <p>
+            <button class="btn ghost" type="button" id="iv-refresh">Refresh now</button>
+            <span class="err" id="iv-refresh-msg" role="alert"></span>
+          </p>
+          <p class="muted" id="iv-last-run" role="status" aria-live="polite">Never run.</p>
+          </div>
+          <div class="card">
+          <h3>Offline check</h3>
+          <p class="muted">No route to Cisco from this server? Download the
+            feed manually from
+            <a href="https://tools.cisco.com/cscrdr/security/center/files/trust/Cisco_BulkHash_CSV.tar"
+               target="_blank" rel="noopener" class="machine">Cisco's Bulk Hash feed</a>
+            on a machine that has a route, then upload the tar below &mdash;
+            it is verified and reconciled exactly like a live fetch.</p>
+          <div class="dropzone" id="iv-offline-dropzone" tabindex="0" role="button"
+              aria-label="Drop a Cisco Bulk Hash feed tar file, or press Enter to browse for files">
+            <input type="file" id="iv-offline-dropzone-input" accept=".tar" hidden>
+            <p>Drop the feed tar here<span class="hint">or click / press Enter to browse</span></p>
+          </div>
+          <div class="progress" id="iv-offline-progress" hidden role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Offline feed upload progress"><div class="bar" id="iv-offline-bar"></div></div>
+          <p class="err" id="iv-offline-msg" role="alert"></p>
+          </div>
+          </div>
         </div>
       </section>
       <section id="view-monitoring" hidden>
-        <h2>Monitoring</h2>
+        <div class="page-header">
+          <h2 class="page-title">Monitoring</h2>
+        </div>
         <div id="monitoring-pane-audit">
-        <h3>Audit trail (90-day circular)</h3>
+        <h3>Audit trail <span class="scope-tag" id="audit-scope-tag"></span></h3>
+        <p class="muted">Every settings change, sign-in, device and image
+          action recorded on this server, kept for 90 days on a rolling
+          basis.</p>
         <div class="toolbar">
           <span class="joined">
-            <select id="audit-category">
+            <select id="audit-category" aria-label="Filter by category">
               <option value="">All categories</option>
               <option value="auth">auth</option>
               <option value="device">device</option>
@@ -512,18 +1016,20 @@
             <g id="audit-brush"></g>
           </svg>
           <p class="muted">
-            <span id="audit-window-label"></span>
+            <span id="audit-window-label" role="status" aria-live="polite"></span>
             <button class="linkish" id="audit-clear-selection" hidden>× clear</button>
           </p>
         </div>
+        <div class="table-scroll">
         <table class="tbl" id="audit-tbl">
           <thead><tr><th>Time</th><th>Actor</th><th>Message</th><th>Result</th></tr></thead>
           <tbody id="audit-rows"></tbody>
         </table>
+        </div>
         <p><button class="btn ghost" id="audit-load-older">Load older</button></p>
         </div>
         <div id="monitoring-pane-deploylogs" hidden>
-          <h3>Deployment logs</h3>
+          <h3>Deployment logs <span class="scope-tag" id="dl-scope-tag"></span></h3>
           <p class="muted">Per-job onboard and undeploy logs kept on the server —
             they survive console reloads and session changes. Pick a window
             below, or drag across the graph to select a range; the table follows
@@ -541,13 +1047,13 @@
               <g id="dl-brush"></g>
             </svg>
             <p class="muted">
-              <span id="dl-window-label"></span>
+              <span id="dl-window-label" role="status" aria-live="polite"></span>
               <button class="linkish" id="dl-clear-selection" hidden>× clear</button>
             </p>
           </div>
           <div class="toolbar">
             <span class="joined">
-              <input id="dl-search" placeholder="Search device, action or result" spellcheck="false">
+              <input id="dl-search" placeholder="Search device, action or result" spellcheck="false" aria-label="Search device, action or result">
               <select id="dl-action" aria-label="Filter by action">
                 <option value="">Action: any</option>
                 <option value="onboard">deployment</option>
@@ -563,19 +1069,26 @@
             </span>
             <span class="muted push" id="dl-count"></span>
           </div>
+          <div class="table-scroll">
           <table class="tbl" id="dl-tbl">
             <thead><tr><th>Finished</th><th>Device</th><th>Action</th><th>Result</th><th>Size</th><th></th></tr></thead>
             <tbody id="dl-rows"></tbody>
           </table>
+          </div>
           <div class="toolbar" id="dl-pager">
             <button class="btn ghost" id="dl-prev">‹ Newer</button>
             <span class="muted" id="dl-page"></span>
             <button class="btn ghost" id="dl-next">Older ›</button>
           </div>
         </div>
-        <div id="dl-drawer" hidden aria-label="Deployment log">
+        <!-- role=dialog (Task 6, fix wave): a NON-modal dialog -- no
+             backdrop, the deployment-logs table behind stays fully
+             interactive while this is open, so aria-modal and a Tab-trap
+             would be dishonest and would wrongly lock out the rest of the
+             page. -->
+        <div id="dl-drawer" hidden role="dialog" aria-label="Deployment log">
           <div class="dl-drawer-head">
-            <span class="mono" id="dl-drawer-title"></span>
+            <span class="machine" id="dl-drawer-title"></span>
             <button class="btn ghost" id="dl-drawer-close" aria-label="Close log">✕</button>
           </div>
           <pre class="log" id="dl-text"></pre>

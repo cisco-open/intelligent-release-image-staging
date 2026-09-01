@@ -8,8 +8,14 @@ target_fs, rpc_port (default 6800), rpc_secret, max_peers, catalog_ca. `target_f
 selects a writable IOS filesystem prefix such as `sdflash:`; an empty value keeps
 platform auto-detection. `catalog_ca` is the
 on-device path to the pinned server cert (iris-catalog.pem) used to VERIFY the
-catalog TLS connection; when unset the agent keeps today's unverified behavior but
-warns (verify-if-present, spec §4.6). Stdlib only."""
+catalog TLS connection; the agent now FAILS CLOSED when it is unset or the file
+is missing (iris_agent.make_catalog_context refuses the connection rather than
+falling back to unverified TLS). Deliberately NOT in DEFAULTS below: a conf that
+omits catalog_ca must load with the key still absent, not backfilled to "" and
+then persisted by the next write_conf() round-trip (security fix -- an earlier
+version invented catalog_ca = "" here, which silently and permanently pinned a
+dropped-conf device to unverified TLS the moment anything else reconciled its
+conf). Stdlib only."""
 import os
 import re
 import tempfile
@@ -22,8 +28,8 @@ DEFAULTS = {
     "rpc_secret": "",
     "max_peers": "10",     # cap BT peer connections per torrent on a device
     "telemetry_stream": "off",  # live sample streaming opt-in (fail-closed; spec §5.5)
-    "catalog_ca": "",      # path to pinned server cert; "" => verify-if-present off (#12)
     "token_expires_at": "0",   # epoch secs of catalog_token expiry; 0 => refresh next tick
+    # catalog_ca is intentionally absent from DEFAULTS -- see module docstring.
 }
 
 

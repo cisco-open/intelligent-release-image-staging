@@ -7,12 +7,13 @@ running the test suites, see [TESTING.md](TESTING.md).
 
 ## Project scope
 
-The project only **distributes and STAGES** IOS-XE images to `flash:` across a
-Catalyst 9300 fleet. It **never installs, activates, or reloads** anything — that
-remains an explicit, human-driven operation outside the system. Contributions must
-respect this hard invariant: please do not add code, automation, or documentation
-that installs, activates, reloads, or otherwise mutates the running/booted
-software state of a device.
+The project **distributes, verifies, and STAGES** Cisco software on IOS-XE and
+IOS-XR devices: to `flash:` / `bootflash:` / `sdflash:` through Guest Shell or
+IOx, and directly to `harddisk:` from the IOS-XR appmgr container. It **never
+installs, activates, or reloads the staged software** and never changes boot
+variables. Contributions must respect this hard invariant: do not add code,
+automation, or documentation that crosses the staging boundary or otherwise
+mutates the running/booted software state of a device.
 
 ## Development setup
 
@@ -45,6 +46,30 @@ The seed-server Dockerfile uses the repository root as its build context so the
 image can carry the device installers and console onboarding helper. Build it
 directly with `docker build --platform linux/amd64 -f server/Dockerfile .`.
 
+## Embedded agent packages
+
+The shared sources under `device/agent/` are embedded into the Guest Shell
+bundle, both IOx tars, and the IOS-XR RPM. After **any** shared-agent change,
+rebuild every package used by the deployment before testing or redeploying
+devices:
+
+```bash
+# rebuilt automatically when the server image starts
+docker compose -f server/docker-compose.yml up -d --build
+
+# prebuilt packages; run explicitly
+tools/provision-iox-packages.sh
+CATALOG_PEM=<live-certificate-only-pem> \
+  tools/build-xr-package.sh --out artifacts/
+tools/check-package-freshness.sh
+```
+
+`tools/check-package-freshness.sh` detects certificate drift. It inspects the
+certificate inside the IOx tars and compares the XR RPM's build time with the
+certificate's `notBefore`; it does **not** prove that any package contains the
+current source. For an agent-code release, rebuild rather than relying on a
+green freshness report, then redeploy affected devices.
+
 ## Commit message format
 
 Keep commit messages light and consistent with the repo's existing style: a
@@ -52,14 +77,20 @@ clear, concise, **imperative** subject line (e.g., "Add flash reclaim guard"),
 with an optional body explaining the *why* when it isn't obvious. Conventional
 Commits are **not** required.
 
-For changes that ship (a release-worthy change):
+For an ordinary release-worthy change, add its operator-visible description
+under `CHANGELOG.md` → `Unreleased`; do not bump `VERSION` per commit.
 
-- Add a **`CHANGELOG.md`** entry describing the change.
+To cut a release:
+
+- Move the accumulated Unreleased entries under a dated release heading.
 - **Bump the `VERSION` file** using CalVer: `YYYY.0M.0D` with an optional
   `.MICRO` (`1`, `2`, …) for multiple releases on the same day
   (e.g., `2026.06.11`, then `2026.06.11.1`).
-- Releases are **tagged** `vYYYY.0M.0D`. Keep `VERSION`, `CHANGELOG.md`, and the
-  tag in sync.
+- Run both test suites, build the Zensical site, assemble the release with
+  `tools/make-release.sh`, and rebuild all prebuilt device packages when the
+  shared agent changed.
+- Tag `v<VERSION>` — for example `v2026.06.11.1`. Keep `VERSION`, the changelog
+  heading, and the tag exactly in sync, including any `.MICRO` suffix.
 
 ## License headers
 

@@ -29,7 +29,6 @@ def _state():
             "completed_content_bytes": 1288490188,
             "total_content_bytes": 1288490188,
             "content_sha256_state": "verified",
-            "ios_copy_verify_state": "ok",
             "peers_v2": {"10.0.0.9": {"first_observed": 1010.0,
                                       "last_observed": 1090.0,
                                       "observations": 71}}}}}
@@ -50,7 +49,7 @@ def test_build_report_v2_exact_schema():
     assert rep["content"] == {"completed_content_bytes": 1288490188,
                               "total_content_bytes": 1288490188}
     assert rep["content_sha256"] == {"state": "verified", "algo": "sha256"}
-    assert rep["ios_copy_verify"] == {"state": "ok"}
+    assert rep["ios_copy_verify"] == {"state": "not_run"}
     assert rep["sampling"]["sampling_class"] in ("good", "constrained")
     assert rep["sampling"]["catalog_rtt_ms_median"] == 24
     assert rep["sampling"]["catalog_rtt_samples"] == 3
@@ -119,3 +118,11 @@ def test_pull_request_id_parsing():
 
 def test_mint_id_shape():
     assert HEX32.match(telemetry_report.mint_id())
+
+
+def test_report_says_not_run_after_successful_placement():
+    state = _state()
+    # After successful copy_to_root, the v2 report should say copy verification was not run
+    rep = telemetry_report.build_report_v2(
+        _CFG, state, "img1", "staging-complete", 1200.5, "a" * 32, "b" * 32)
+    assert rep["ios_copy_verify"] == {"state": "not_run"}

@@ -3,7 +3,7 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
 # automatically by the Console/API onboarding flow (see the Management Type
 # and VLAN Ownership doc). Comment lines (#) and the header are ignored on import.
 #
-# management_type (required): 'routed', 'inband', 'router-routed', or 'router-nat'.
+# management_type (required): 'routed', 'inband', 'router-routed', 'router-nat', or 'xr-host'.
 #   routed  = IRIS creates a dedicated VLAN + SVI. Fill iris_vlan, svi_ip,
 #             svi_mask, app_ip, app_mask, app_gateway. Leave inband_vlan blank.
 #   inband  = attach to an EXISTING operator-owned VLAN. IRIS never creates,
@@ -12,13 +12,16 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
 #   router-routed = IRIS creates a VirtualPortGroup (VPG) app subnet. Fill
 #             app_ip, app_mask, app_gateway, and vpg_number; no NAT.
 #   router-nat = router-routed plus overload NAT behind nat_interface and static
-#             PAT for TCP 6881. NAT cleanup is receipt-owned; a pre-existing
-#             `ip nat outside` marking is preserved.
+#             PAT for TCP 6881. NAT cleanup is tracked in the deployment record;
+#             a pre-existing `ip nat outside` marking is preserved.
 #             The interface is canonicalized during preflight; named globals
-#             and guest-share must be collision-free and are receipt-owned.
+#             and guest-share must be collision-free and are tracked the same way.
+#   xr-host = IOS-XR appmgr container on the router's own network stack. Leave
+#             all VLAN/SVI/app-address/VPG/NAT fields blank; use platform=xr-appmgr.
 # 'model' is OPTIONAL (e.g. C9300-48UXM, IE-3400, C8000V); blank lets onboarding detect it.
-# 'platform' is OPTIONAL and LAST: blank = auto (by model), or force 'guestshell'
-#   , 'iox', or 'router'. Router modes require platform=router (auto for C8xxx).
+# 'platform' is LAST: choose 'guestshell', 'iox', 'router', or 'xr-appmgr'. A
+#   blank imported value is an inventory transition state; known IOS-XE models
+#   can resolve at onboard, while uncertainty and IOS-XR without xr-appmgr fail closed.
 #   Inband supports Guest Shell and IOx (IE-3x00, C9300); DHCP is NOT supported.
 # ios_ssh_host: OPTIONAL for inband IOx. The app SSHes to the switch's mgmt IP
 #   (device_ip) by default; set this only to override it. Blank for Guest Shell.
@@ -31,3 +34,5 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
 100.90.168.99,100.90.168.99,inband,,,,100.90.168.97,255.255.255.0,100.90.168.98,120,100.90.168.98,IE-3400,,,iox
 # C8000v router NAT example (VPG 10; use an operator-selected outside interface):
 # 100.92.9.40,100.92.9.40,router-nat,,,,10.8.0.2,255.255.255.252,10.8.0.1,,,C8000V,10,GigabitEthernet1,router
+# Cisco 8201 IOS-XR example (no app-network fields):
+# 192.0.2.50,192.0.2.50,xr-host,,,,,,,,,8201,,,xr-appmgr

@@ -14,7 +14,7 @@
 #
 # Usage:  tools/gen-device-installers.sh [csv]      (legacy routed inventory only)
 # CSV v2 deployment is intentionally Console/API-only: it requires a persisted
-# receipt, plan confirmation, and preflight before an enrollment token is minted.
+# record, plan confirmation, and preflight before an enrollment token is minted.
 # Output: fleet/dist/install-<device_id>.sh  (+ install-all.sh)
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -24,7 +24,7 @@ OUT="${OUT:-$REPO/fleet/dist}"
 if IFS= read -r first_line < "$CSV" && \
    { [[ "$first_line" == *"management_type"* ]] || \
      [[ "$first_line" == *"network_attachment"* ]]; }; then
-  echo "ERROR: CSV v2 requires Console/API onboarding so IRIS can persist a receipt,"
+  echo "ERROR: CSV v2 requires Console/API onboarding so IRIS can persist a record,"
   echo "plan, and preflight before minting an enrollment token." >&2
   exit 1
 fi

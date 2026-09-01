@@ -10,7 +10,7 @@
 # device/device-install.sh: push the IRIS PKI trustpoint over SSH FIRST, then
 # `copy https://STAGE_HOST:8000/<pkg>` from the always-on container artifact
 # server (no throwaway HTTP server). The agent then pulls its assigned image over
-# the swarm and copies it to an IOS-visible disk via `copy /verify`, such as
+# the swarm and copies it to an IOS-visible disk via a plain `copy`, such as
 # sdflash: on IE-3x00 or usbflash1: on C9300. Distribute/stage
 # ONLY; never install/activate/reload the IOS image.
 #
@@ -40,14 +40,18 @@ if [ "$DRY" -eq 0 ]; then
   [ -r "$IRIS_CRT_FILE" ] || { echo "ERROR: IRIS_CRT_FILE=$IRIS_CRT_FILE not readable" >&2; exit 1; }
 fi
 
-# Attachment model. routed: IRIS creates a dedicated VLAN/SVI and the app SSHes
+# Management type model. routed: IRIS creates a dedicated VLAN/SVI and the app SSHes
 # to that SVI. inband: the app attaches to an EXISTING operator-owned VLAN that
 # IRIS never creates/changes/removes, and SSHes to the existing IOS management
-# SVI (IOS_SSH_HOST) for its copy /verify. The AppGig trunk is the one inband
+# SVI (IOS_SSH_HOST) for its plain-copy placement. The AppGig trunk is the one inband
 # touch: IRIS ADDs the inband VLAN to its allowed list (additive only, never
 # replaced, never removed on uninstall).
-NETWORK_ATTACHMENT="${NETWORK_ATTACHMENT:-routed}"
-case "$NETWORK_ATTACHMENT" in
+if [ -n "${NETWORK_ATTACHMENT:-}" ] && [ -z "${MANAGEMENT_TYPE:-}" ]; then
+  echo "ERROR: NETWORK_ATTACHMENT was renamed to MANAGEMENT_TYPE; refusing to fall back to the routed default" >&2
+  exit 1
+fi
+MANAGEMENT_TYPE="${MANAGEMENT_TYPE:-routed}"
+case "$MANAGEMENT_TYPE" in
   routed)
     : "${VLAN:?set VLAN}"; : "${SVI_IP:?set SVI_IP}"; : "${SVI_MASK:?set SVI_MASK}"; : "${GUEST_IP:?set GUEST_IP}"
     GW_IP="${GW_IP:-$SVI_IP}"; IOS_SSH_HOST="${IOS_SSH_HOST:-$SVI_IP}" ;;
@@ -55,7 +59,7 @@ case "$NETWORK_ATTACHMENT" in
     : "${INBAND_VLAN:?set INBAND_VLAN}"; : "${APP_IP:?set APP_IP}"; : "${APP_MASK:?set APP_MASK}"; : "${APP_GATEWAY:?set APP_GATEWAY}"
     : "${IOS_SSH_HOST:?set IOS_SSH_HOST — the existing IOS management SVI the app SSHes to}"
     VLAN="$INBAND_VLAN"; GUEST_IP="$APP_IP"; SVI_MASK="$APP_MASK"; GW_IP="$APP_GATEWAY" ;;
-  *) echo "ERROR: NETWORK_ATTACHMENT must be routed or inband" >&2; exit 1 ;;
+  *) echo "ERROR: MANAGEMENT_TYPE must be routed or inband" >&2; exit 1 ;;
 esac
 
 CATALOG_URL="${CATALOG_URL:-https://$STAGE_HOST:8443}"
@@ -83,13 +87,14 @@ APPID=iris
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RUN() { "$HERE/../../lab/device-run.sh" "$DEVICE_IP"; }   # IOS cmds on stdin
 
-# A receipt binds this deployment to one physical device and platform.  Check
-# both before an idempotent reinstall tears down the app on the target address.
+# A deployment record binds this deployment to one physical device and
+# platform.  Check both before an idempotent reinstall tears down the app on
+# the target address.
 MODEL="${MODEL:-}"
 EXPECTED_DEVICE_IDENTITY="${EXPECTED_DEVICE_IDENTITY:-}"
 if [ "$DRY" -eq 0 ]; then
-  : "${EXPECTED_DEVICE_IDENTITY:?set EXPECTED_DEVICE_IDENTITY from the deployment receipt}"
-  : "${MODEL:?set MODEL from the deployment receipt}"
+  : "${EXPECTED_DEVICE_IDENTITY:?set EXPECTED_DEVICE_IDENTITY from the deployment record}"
+  : "${MODEL:?set MODEL from the deployment record}"
   VERSION_OUT="$(printf 'show version\n' | RUN 2>/dev/null)"
   LIVE_MODEL="$(printf '%s\n' "$VERSION_OUT" \
     | sed -nE 's/^cisco[[:space:]]+([^[:space:]]+)[[:space:]]+\(.*/\1/p' | head -1)"
@@ -121,7 +126,7 @@ trustpoint_block() {
 }
 
 ios_net() {           # networking + IOx enable (idempotent)
-if [ "$NETWORK_ATTACHMENT" = "inband" ]; then
+if [ "$MANAGEMENT_TYPE" = "inband" ]; then
 # Inband: attach to the EXISTING operator-owned VLAN. IRIS creates NO vlan, SVI,
 # route, or VRF. The ONE allowed touch is the AppGig trunk, and only ADDITIVELY —
 # `allowed vlan add` never replaces the allowed list (the bare form would), and
@@ -137,7 +142,7 @@ interface $APP_INTF
 file prompt quiet
 !
 ! SCP server: the scp fallback hand-off (primary on IE-3x00; C9k uses the
-! bind-mounted SSD share) pushes the scratch here, then copy /verify places it.
+! bind-mounted SSD share) pushes the scratch here, then the plain copy places it.
 ip scp server enable
 !
 end
@@ -162,7 +167,7 @@ file prompt quiet
 !
 ! SCP server: the scp hand-off (primary on IE-3x00, where IOx cannot
 ! bind-mount sdflash:; the C9k default is the SSD share) pushes the scratch to
-! guest-share, then copy /verify places it.
+! guest-share, then the plain copy places it.
 ip scp server enable
 !
 end
@@ -251,11 +256,11 @@ clear_partial_app_config() {
 }
 
 if [ "$DRY" -eq 1 ]; then
-  echo "===== IOS NETWORKING ($NETWORK_ATTACHMENT; apply via lab/device-run.sh $DEVICE_IP) ====="
+  echo "===== IOS NETWORKING ($MANAGEMENT_TYPE; apply via lab/device-run.sh $DEVICE_IP) ====="
   ios_net
   echo "===== PKI TRUSTPOINT (pasted over SSH FIRST, before any copy) ====="
   trustpoint_block
-  echo "===== APP-HOSTING appid $APPID (app SSHes to IOS at $IOS_SSH_HOST for copy /verify) ====="
+  echo "===== APP-HOSTING appid $APPID (app SSHes to IOS at $IOS_SSH_HOST for the image copy) ====="
   appid_block
   if [ -n "$SHARE_IOS_PATH" ]; then
     echo "===== SHARE (created on IOS before activation so the bind-mount target exists) ====="
@@ -264,7 +269,7 @@ if [ "$DRY" -eq 1 ]; then
   echo "===== INSTALL COPY (over verified https) ====="
   printf 'copy https://%s:8000/%s %s%s\n' "$STAGE_HOST" "$PKG" "$PKG_FS" "$PKG"
   echo "===== app-hosting install -> activate -> start appid $APPID, then persist ====="
-  if [ "$NETWORK_ATTACHMENT" = "inband" ]; then
+  if [ "$MANAGEMENT_TYPE" = "inband" ]; then
     echo "===== LEFT UNTOUCHED (inband): existing VLAN/SVI, routes, VRF (AppGig allowed list only ever ADDs) ====="
   fi
   exit 0
@@ -278,7 +283,7 @@ echo "[pre] prerequisite checks (ip routing, IOx storage, device clock)"
 # fail) here, in plain language, before any config is touched. These checks are
 # all read-only, so they run BEFORE the teardown below: a failing prerequisite
 # on a re-onboard must leave the existing working app untouched.
-if [ "$NETWORK_ATTACHMENT" = "routed" ]; then
+if [ "$MANAGEMENT_TYPE" = "routed" ]; then
   # `ip routing` can be the platform DEFAULT (seen on IE3x00): then neither
   # `ip routing` nor `no ip routing` appears in the config, and grepping for
   # the positive line false-fails a healthy switch. Decide from authoritative
@@ -319,7 +324,7 @@ printf 'app-hosting stop appid %s\napp-hosting deactivate appid %s\napp-hosting 
 sleep 6
 printf 'configure terminal\nno app-hosting appid %s\nend\n' "$APPID" | RUN >/dev/null 2>&1 || true
 
-echo "[2/9] apply IOx networking ($NETWORK_ATTACHMENT: IOx enable$([ "$NETWORK_ATTACHMENT" = inband ] && echo ", existing VLAN preserved" || echo ", VLAN $VLAN, $APP_INTF, Vlan$VLAN SVI"))"
+echo "[2/9] apply IOx networking ($MANAGEMENT_TYPE: IOx enable$([ "$MANAGEMENT_TYPE" = inband ] && echo ", existing VLAN preserved" || echo ", VLAN $VLAN, $APP_INTF, Vlan$VLAN SVI"))"
 { echo "configure terminal"; ios_net; } | RUN >/dev/null
 
 # The share dir must exist BEFORE activation binds it into the container.
@@ -419,6 +424,6 @@ case "$save_out" in
 esac
 
 echo "[9/9] $APPID RUNNING. The agent refreshes its token, downloads $DEVICE_ID's"
-echo "      assigned image over the swarm, and copies it to $TARGET_FS via copy /verify."
+echo "      assigned image over the swarm, and copies it to $TARGET_FS via a plain copy."
 echo "      Watch:  printf 'dir $TARGET_FS\\n' | lab/device-run.sh $DEVICE_IP"
 echo "      Swarm:  https://$STAGE_HOST:8080/  (Console -> Swarm tab)"

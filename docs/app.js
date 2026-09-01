@@ -22,8 +22,8 @@ const workflow = {
   },
   verify: {
     title: "Verify on the device",
-    body: "The agent checks the downloaded file and the device verifies the staged copy before IRIS reports success.",
-    command: "copy /verify <staged-file> <device-storage>:<image>.bin",
+    body: "The agent checks the downloaded file's sha256 against the catalog's known-good value, then copies it to device storage — a plain copy attested by exact byte size.",
+    command: "copy <staged-file> <device-storage>:<image>.bin",
   },
   report: {
     title: "Report staged and stop",
@@ -44,7 +44,7 @@ const paths = {
   },
   iox: {
     title: "Industrial Ethernet IOx",
-    copy: "Package the same staging model as an IOx Docker app and use SSH-to-self for IOS copy and verify commands.",
+    copy: "Package the same staging model as an IOx Docker app and use SSH-to-self for IOS copy commands.",
     items: [
       "Serves operator-built `iris-arm64.tar` from artifacts.",
       "Downloads image pieces through the private swarm.",
@@ -53,7 +53,7 @@ const paths = {
   },
   router: {
     title: "Catalyst 8000 Guest Shell",
-    copy: "Bring up Guest Shell through a VirtualPortGroup in routed or NAT attachment, with preflight repeated before token mint and receipts bound to device identity.",
+    copy: "Bring up Guest Shell through a VirtualPortGroup in routed or NAT management type, with preflight repeated before token mint and deployment records bound to device identity.",
     items: [
       "Repeats preflight before token mint.",
       "Downloads image pieces through the private swarm.",
@@ -67,6 +67,15 @@ const paths = {
       "Introduces image metadata and private torrents.",
       "Keeps aria2 RPC local-only.",
       "Exposes fleet progress in the console.",
+    ],
+  },
+  xr: {
+    title: "Cisco 8000 Series appmgr",
+    copy: "Run the agent as an appmgr Docker application with host networking, pushing iris-xr.rpm to harddisk: over scp and bind-mounting the router's own filesystem — no Guest Shell involved.",
+    items: [
+      "Pushes iris-xr.rpm to harddisk: as an appmgr Docker application.",
+      "Downloads image pieces through the private swarm directly onto harddisk:.",
+      "Stages the software but does not install, activate, or reload the device.",
     ],
   },
 };

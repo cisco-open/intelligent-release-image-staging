@@ -6,19 +6,21 @@ SPDX-License-Identifier: Apache-2.0
 
 # Device Agents
 
-Device agents are the only part of IRIS that runs on IOS-XE devices. Their job is intentionally narrow: discover the approved image, download it, verify it, copy it to the platform storage root, and report status.
+Device agents are the only part of IRIS that runs on the device. Their job is intentionally narrow: discover the approved image, download it, verify it, place it on the platform storage root, and report status. Most run on IOS-XE; the IOS-XR agent runs in an appmgr container, described under [IOS-XR: what the installer pushes](#ios-xr-what-the-installer-pushes).
 
-A device attaches through one of four management types: a dedicated IRIS-managed
+A device attaches through one of five management types: a dedicated IRIS-managed
 VLAN/SVI (**routed**), an existing operator-owned management VLAN (**inband**),
-or an IRIS-managed VirtualPortGroup (**router-routed** or **router-nat**).
+an IRIS-managed VirtualPortGroup (**router-routed** or **router-nat**), or the
+router's own network stack with no app-network fields (**xr-host**).
 The management-type choice governs what the installer and uninstaller may configure
 and remove; see
-[Management Type and VLAN Ownership](network-attachment.md).
+[Management Type and VLAN Ownership](management-type.md).
 
 After a successful Guest Shell or IOx onboarding or cleanup lifecycle, IRIS runs
 `copy running-config startup-config`. This persists the IRIS app-hosting,
 networking, trustpoint, and cleanup state across a reload. Failed or partial
-onboarding is not saved.
+onboarding is not saved. IOS-XR has no running/startup split to bridge — a
+`commit` is already the persisted state — so the XR recipes never issue one.
 
 ## Guest Shell path
 
@@ -35,7 +37,7 @@ flowchart TB
     Agent --> Poll["Poll catalog"]
     Poll --> Download["Download with aria2c"]
     Download --> Hash["Verify sha256"]
-    Hash --> Copy["IOS copy /verify to the storage root"]
+    Hash --> Copy["Plain copy to the storage root, byte-size attested"]
     Copy --> Report["Report status"]
 ```
 
@@ -52,15 +54,15 @@ the guest-share root, over a `copy https://` that the PKI trustpoint step
 | --- | --- | --- |
 | staged as `iris-agent-<DEVICE_ID>-<CAP>.conf` | `iris-agent.conf` | catalog URL, device id, and an empty `rpc_secret` — the agent fetches the real secret on its first token refresh |
 | staged as `rpc-secret-<CAP>` | `rpc-secret` | seeds aria2c's RPC secret; bootstrap.sh reconciles it against the conf on every tick |
-| `iris-agent.tgz` | `bundle.tgz` | the agent Python, `bootstrap.sh`, `guestshell-start.sh`, `rotate-logs.sh`, `agent/peer-receipt-hook.sh` (aria2's `--on-bt-download-complete` program), and an architecture-matched `aria2c`, packed by `tools/make-agent-bundle.sh` |
+| `iris-agent.tgz` | `bundle.tgz` | the agent Python, `bootstrap.sh`, `guestshell-start.sh`, `rotate-logs.sh`, `agent/peer-transfer-hook.sh` (aria2's `--on-bt-download-complete` program), and an architecture-matched `aria2c`, packed by `tools/make-agent-bundle.sh` |
 | the bare server cert | `iris-catalog.pem` | pinned TLS trust anchor for the agent's catalog calls |
 | — | `bootstrap.sh` | the EEM entry point itself |
 
 `CAP` is a fresh 128-bit random capability minted per install run (not one
 fixed filename reused by every device — that was the old shared
 `rpc-secret`). The staged copies live under the artifact server's `staging/`
-prefix and are only reachable for the ~600 seconds it retains them, ample
-headroom for the installer's own 3-attempt retry loop.
+prefix and are only reachable for the 3600 seconds it retains them, ample
+headroom for queued fleet work and the installer's own retry loop.
 
 The installer then installs one EEM applet:
 
@@ -86,7 +88,7 @@ the live agent, so undeploy first and then onboard again. `router-install.sh`
 additionally destroys any pre-existing Guest Shell before re-applying config,
 so a re-onboard never leaves the guest running on stale networking from a
 previous install — see
-[Router routed and router NAT](network-attachment.md#router-routed-and-router-nat-iris-managed-virtualportgroup).
+[Router routed and router NAT](management-type.md#router-routed-and-router-nat-iris-managed-virtualportgroup).
 
 ### IOx: what the installer pushes
 
@@ -102,6 +104,8 @@ config already exists on the persistent mount. There is no EEM timer on IOx:
 `entrypoint.sh` is its own supervisor loop, running the agent once every
 `IRIS_TICK_SECONDS` (default 60s).
 
+Re-provision a device when replacing its bootstrap configuration or enrollment material: the cutover replaces only the staging agent's credentials and never touches the device's software.
+
 **Upgrade on IOx is uninstall, then reinstall** — there is no in-place package
 update. `device/iox/install.sh` is idempotent by design: its first step always
 stops, deactivates, and uninstalls any existing `iris` app before copying the
@@ -112,6 +116,27 @@ that still has the `iris` app-hosting stanza or any other IRIS-named config.
 `device/iox/uninstall.sh`
 performs the same teardown standalone, for a clean removal with no reinstall.
 
+### IOS-XR: what the installer pushes
+
+`device/xr-install.sh` deploys the agent to a Cisco 8000-series router
+running IOS-XR as an **appmgr Docker application**. It pushes the pre-built
+`iris-xr.rpm` to `harddisk:` over scp, registers it (`appmgr package install
+rpm`), and activates it in config mode with host networking and one bind
+mount: `-v /misc/disk1:/hostmount`. `/misc/disk1` **is** `harddisk:`, so the
+container writes straight to the router's own filesystem. Secrets and the
+device id are passed as `--env` options on the activation line and are never
+baked into the image; `device/xr/entrypoint.sh` writes them into
+`iris-agent.conf` on first boot, and is its own supervisor loop the same way
+the IOx entrypoint is. `device/xr-uninstall.sh` is the record-driven
+inverse: deactivate, uninstall the source, remove the RPM and the agent's
+`iris-work/` directory, and sweep any `*.torrent`/`*.aria2`/`*.peers.json`
+sidecar the agent left at `harddisk:` root — this platform has no placement
+step, so those land next to any staged image, not inside `iris-work/`.
+
+Nothing is installed or activated on the device's *software*: as on every
+other platform, IRIS distributes, verifies, and stages an image, and stops
+there.
+
 ### Confirming it worked
 
 Assignment only gates staging, not presence: an unassigned device still
@@ -120,6 +145,14 @@ posture. The agent's first successful heartbeat is therefore the signal that
 installation succeeded — that is what makes a device appear in the Console
 device table and Swarm Map (see [Web Console](console.md)). Nothing before
 that point is visible outside device-side logs.
+
+Immediately after first boot, aria2c may still be running with the empty RPC
+secret deliberately shipped by the installer while the agent has just fetched
+the real one. aria2-next reports that brief mismatch as HTTP 400. IRIS treats it
+as a normal `staging` state, emits `ARIA2-AUTH`, and lets the next bootstrap tick
+copy the refreshed secret and restart aria2c; it does not show a false staging
+failure. A connection-refused or otherwise unreachable RPC endpoint remains a
+real error.
 
 ### Failure mode: aria2c alive but not serving
 
@@ -153,7 +186,9 @@ The agent loop is deliberately boring:
 4. Skip work when the approved image is already staged and verified.
 5. Download missing content through `aria2c`.
 6. Verify the downloaded file hash.
-7. Copy to the IOS storage root with IOS verification.
+7. Place the image at the storage root and attest it by exact byte size. On
+   IOS-XE that is a copy; on IOS-XR the download already landed there through
+   the bind mount, so the agent only attests it.
 8. Report health, progress, and errors.
 
 ## Verification gates
@@ -162,8 +197,8 @@ IRIS uses two checks because the server and device have different capabilities:
 
 | Check | Where | Why |
 | --- | --- | --- |
-| `sha256` | Agent Python code | Confirms the downloaded file matches catalog metadata before IOS copy. |
-| Cisco signature (`copy /verify`) | IOS copy path | IOS enforces the embedded Cisco image signature while copying to the storage root; a failed signature fails the copy and leaves no destination file. |
+| `sha256` | Agent Python code | Confirms the downloaded file matches the catalog's known-good value — the same value established at publish time on the server — before the IOS copy runs. |
+| Byte size at the storage root | Agent Python code, polling IOS `dir` (IOS-XE) or a `stat` on the mount (IOS-XR) | Placement carries no in-band signature check on any platform; the agent attests the file landed correctly by confirming its size matches the catalog exactly. On IOS-XR there is nothing to copy — the image was downloaded to its final location — so the same check runs against the file already there. |
 
 If verification fails, the agent reports the failure and leaves installation decisions untouched. It does not change boot variables and does not reload the device.
 
@@ -186,7 +221,7 @@ before they reach the applet, so a hand-edited state file cannot inject a comman
 ## Device SSH host-key pinning
 
 Guest Shell runs inside IOS and configures the device locally. The IOx app instead
-reaches IOS over SSH to run `copy /verify` and the cleanup applets, so it has a host
+reaches IOS over SSH to run the placement copy and the cleanup applets, so it has a host
 key to consider.
 
 Host-key pinning is optional and off by default. Set `device_ssh_known_hosts` in the
@@ -205,6 +240,11 @@ it exists for operators who want the connection pinned.
 | Catalyst 9300 IOx | `flash:` when console-onboarded (via the SSD share); the CLI installer defaults to `sdflash:` | IOx Docker app and SSH-to-self IOS commands. |
 | IE-3400 IOx | `sdflash:` | IOx Docker app and SSH-to-self IOS commands. |
 | Catalyst 8000 Guest Shell | `bootflash:` | Guest Shell through a VirtualPortGroup. |
+| Cisco 8000 series (IOS-XR) | `harddisk:` | appmgr Docker app; no CLI — the container bind-mounts `harddisk:` and stages directly onto it. |
 
 The router path targets the Catalyst 8000 family and is lab-tested on Catalyst 8000V; see
-[Router routed and router NAT](network-attachment.md#router-routed-and-router-nat-iris-managed-virtualportgroup).
+[Router routed and router NAT](management-type.md#router-routed-and-router-nat-iris-managed-virtualportgroup).
+
+For the lab-validation status behind this table — including which of these
+platforms have been exercised end to end on real hardware and which have not
+— see [Validation: Validated platforms](validation.md#validated-platforms).

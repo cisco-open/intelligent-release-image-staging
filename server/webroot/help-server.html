@@ -10,13 +10,12 @@
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <div class="top">
-    <span>◈ Intelligent Release &amp; Image Staging <span class="tag">IRIS</span></span>
+  <div class="product-bar">
+    <span class="product-name">◈ Intelligent Release &amp; Image Staging <span class="tag">IRIS</span></span>
     <span class="spacer"></span>
     <a class="toplink" href="/">← Console</a>
     <a class="toplink" href="https://cisco-open.github.io/intelligent-release-image-staging/" target="_blank" rel="noopener">Official documentation ↗</a>
   </div>
-  <div class="stripe"></div>
   <main class="doc">
     <h1>Server-side setup &amp; troubleshooting</h1>
 
@@ -65,7 +64,7 @@
       <li><code>/etc/iris</code> — encrypted secrets, generated TLS
       material, and the audit trail (<code>audit.jsonl</code>).</li>
       <li><code>/var/lib/iris</code> — catalog state, policies, torrent
-      metadata, deployment receipts, deploy logs.</li>
+      metadata, deployment records, deploy logs.</li>
       <li><code>/run/iris</code> — plaintext runtime secrets, tmpfs only:
       gone on restart by design, rebuilt from the encrypted store.</li>
       <li><code>/var/lib/iris-images</code> — console-uploaded images.

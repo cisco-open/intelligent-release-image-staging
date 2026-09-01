@@ -58,9 +58,9 @@ def _deps(cat, sizes, state_path, **over):
         catalog=cat, emit=lambda *a: None, ios=lambda c: "",
         aria_add=lambda t, d: None, file_size=lambda p: sizes.get(p),
         verify=lambda p, sha: True, free_bytes=lambda prefix="flash:": 9_000_000_000,
-        version=lambda: "17", copy_to_root=lambda f, tp="flash:": True,
+        version=lambda: "17", copy_to_root=lambda f, tp="flash:", expected_size=None: True,
         purge_others=lambda k, i: None, reclaim=lambda: None,
-        root_present=lambda f, prefix="flash:": True,
+        root_present=lambda f, prefix="flash:", expected_size=None: True,
         remove_stage=lambda p: sizes.pop(p, None), aria_remove=lambda f: None,
         detect_mode=lambda: "bundle", target_fs=lambda: ("flash:", 9_000_000_000),
         running_image=lambda: "running.bin",
@@ -69,7 +69,7 @@ def _deps(cat, sizes, state_path, **over):
         aria_stats=lambda p: {"gid": "g", "completedLength": "5",
                               "totalLength": "5", "downloadSpeed": "0",
                               "uploadSpeed": "0", "connections": "0"},
-        aria_peers=lambda p: [], io_transfer=False,
+        aria_peers=lambda p: [], io_transfer=False, copy_in_place=False,
         checkpoint=checkpoint, aria_session=lambda: None)
     base.update(over)
     return iris_agent.Deps(**base)

@@ -39,7 +39,7 @@
 #   guest-writable by construction and is NOT touched by the agent's stale
 #   artifact sweep (that only removes .bin/.torrent/.aria2). The next one-shot
 #   EEM tick folds it into the terminal report and deletes it -- see
-#   telemetry_report.parse_receipt_snapshot() for the reader.
+#   telemetry_report.parse_peer_transfer_snapshot() for the reader.
 #   The RPC response body is embedded VERBATIM: this script parses no JSON, so
 #   there is nothing here to get wrong about numbers. Validation is the agent's.
 #
@@ -85,7 +85,7 @@ REQ='[{"jsonrpc":"2.0","id":"peers","method":"aria2.getPeers","params":["token:'
 # SIZE bound on the answer, alongside the time bounds. It belongs here and not
 # only on the reader: the response is embedded VERBATIM below, so a reader-only
 # cap writes an oversized body to the flash-constrained stage dir first and
-# rejects it second (telemetry_report.RECEIPT_MAX_BYTES = 1 MiB) -- backwards
+# rejects it second (telemetry_report.PEER_TRANSFER_MAX_BYTES = 1 MiB) -- backwards
 # on a device whose flash is the scarce resource. MAX_BODY leaves room for the
 # envelope printf wraps around the body and still lands under that reader cap,
 # so a snapshot this hook writes is always one the agent can read.

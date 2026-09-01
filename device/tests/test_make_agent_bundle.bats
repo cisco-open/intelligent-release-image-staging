@@ -20,7 +20,7 @@ setup() {
   # every piece the presence check looks for
   for f in agent/iris_agent.py agent/catalog_client.py agent/flashcheck.py \
            agent/flash_target.py agent/agent_config.py verify_image.py \
-           agent/peer-receipt-hook.sh \
+           agent/peer-transfer-hook.sh \
            bootstrap.sh guestshell-start.sh rotate-logs.sh; do
     mkdir -p "$ROOT/device/$(dirname "$f")"
     echo "stub" > "$ROOT/device/$f"

@@ -27,9 +27,10 @@ docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin
 
 ### Finishing setup
 
-Creating the admin is the first of four things a new server needs. The sign-in
-straight after it lands on the **setup flow** (`#setup`), which walks the other
-three in order:
+Creating the admin is the first of five things a new server needs. The sign-in
+straight after it lands on the **setup flow** (`#setup`) — a real Magnetic
+Stepper, not a linking checklist: a step panel on the left, the active step's
+own controls on the right — which walks the other four in order:
 
 1. **Telemetry destination** — where swarm progress, device reports and export
    health are published. Already satisfied if the deployment environment sets
@@ -39,11 +40,20 @@ three in order:
    builds and serves device onboarding material. Without them, onboarding over
    the Docker path cannot start.
 3. **Device packages** — whether each served IOx package still pins the
-   certificate this server hands to devices.
+   certificate this server hands to devices, plus the IOS-XR agent RPM
+   (`iris-xr.rpm`), checked differently — see below.
+4. **Image verification** — the Cisco Bulk Hash source check against every
+   staged image. Configured inline: refresh now, enable the daily schedule, a
+   pointer to downloading Cisco's Bulk Hash feed for air-gapped servers, and
+   the offline feed-file import. These are the same controls Settings ›
+   Image verification exposes — the wizard step mounts them in place rather
+   than duplicating them.
 
 The forms are hosted in the flow itself, so finishing setup does not send you
-round the Settings pages. A step list across the top shows every step with its
-current state and lets you open any of them directly, in any order.
+round the Settings pages. A step panel on the left shows every step with its
+current state — completed steps carry a check, the current step is filled in,
+upcoming ones stay outline-only — and lets you open any of them directly, in
+any order.
 
 Every step can be skipped, and re-entering `#setup` resumes at the first one
 still outstanding. That is not merely a convenience: **the device-packages step
@@ -58,8 +68,10 @@ the session rather than permanently, because a package that goes stale later is
 a silent failure with no other symptom, and a banner dismissed for good would
 hide precisely the case this exists to catch.
 
-Settings › Setup keeps reporting the same four states afterwards, for checking a
-server long after it was installed.
+Settings › Setup keeps reporting the same five states afterwards, for checking
+a server long after it was installed — including a schedule for image
+verification that is configured but has not yet produced a successful run,
+worded distinctly from one never configured at all.
 
 ## Console areas
 
@@ -67,19 +79,20 @@ server long after it was installed.
 | --- | --- |
 | Overview | Rollout counters and per-image staging progress. Carries the *Telemetry export* badge (`ok` / `degraded` / `off`, or `unknown` when the health endpoint cannot be read), fed by the hub's OTLP export health. |
 | Images | Shows published image metadata and staged network status, uploads new images, and imports images already on disk. |
-| Devices | Lists known devices, their **management type**, platform details, current assignment, and recent reports. |
-| Assignments | Maps each device to the image it should stage. |
+| Devices | Lists known devices, their **management type**, **Agent install** choice, assigned images, and recent reports. |
 | Onboarding | Starts and tracks install or undeploy jobs when the device's assigned credential profile is configured. |
 | Swarm | Shows peer progress and seeder/device participation. |
 | Monitoring | Holds the audit trail and per-job deployment logs. |
 | Settings | Shows server configuration, version, and operational settings. |
 | Audit | Records administrative and workflow actions. |
 
-For IOx devices, the Devices status distinguishes `copying to <filesystem>` from
-the torrent download phase while the app transfers a completed image from its
-container storage into IOS-visible storage. A final-placement failure is shown
-as `placement failed` with a bounded diagnostic; inspect the device's
-`IRIS ROOTCOPY-FAIL` syslog entry for the full device-side detail.
+For IOx devices, the Devices status distinguishes `Copying to <filesystem>`
+(sentence-cased render of the underlying `copying` wire status) from the
+torrent download phase while the app transfers a completed image from its
+container storage into IOS-visible storage. A final-placement failure is
+shown as `Placement failed` (wire status `placement-failed`) with a bounded
+diagnostic beside the pill; inspect the device's `IRIS ROOTCOPY-FAIL` syslog
+entry for the full device-side detail.
 
 On the Images screen, every picked or dropped file gets its own upload row —
 filename, progress bar, then publish state — with its own publish poller, so
@@ -112,8 +125,9 @@ image. The import runs as an ordinary publish job with the same progress
 reporting as an upload, and is recorded in Audit as `image_import` (also with
 `result=fail` when a request is rejected).
 
-A file is offered only when it is a `.bin`, passes the filename charset gate, is
-not a dotfile or a `.torrent`/`.upload` temporary, resolves inside its own root
+A file is offered only when it has an explicit Cisco software suffix (`.bin`,
+`.iso`, `.tar`, or `.rpm`), passes the filename charset gate, is not a dotfile
+or a `.torrent`/`.upload` temporary, resolves inside its own root
 (so a symlink cannot reach outside it), is readable by the server, is not
 already published, and is not ambiguous. Files failing the silent gates (wrong
 extension, dotfiles, temporaries, symlinks escaping the root) are hidden
@@ -156,30 +170,50 @@ device table shows each device's management type rather than a bare VLAN/SVI val
 - **Router routed - IRIS-managed VPG subnet** — creates a VirtualPortGroup and
   routed app subnet; the operator provides routes to IRIS and peers.
 - **Router NAT - VPG behind NAT** — adds overload NAT and static TCP PAT for
-  port 6881. The receipt preserves a pre-existing `ip nat outside` marking.
+  port 6881. The deployment record preserves a pre-existing `ip nat outside` marking.
+- **XR host - router's own network stack** — the appmgr container runs on
+  the router's own network stack; there are no app-network fields to set.
+
+A device with no management type chosen yet — imported from an older positional CSV,
+or added without picking one of the five types above — reads **Inventory only —
+management type not chosen** in that column instead. See
+[Older positional CSVs](fleet-workflows.md#inventory).
 
 Router choices show the VPG number and app addressing; Router NAT also requires
 the outside interface. Both target the Catalyst 8000 family and are validated on
-Catalyst 8000V across onboarding, image staging, receipt-backed undeploy, Swarm Map, and
+Catalyst 8000V across onboarding, image staging, record-backed undeploy, Swarm Map, and
 OpenTelemetry (OTLP) export.
 
-Each onboard records a durable **receipt** of what it applied, and **Undeploy**
-runs only from that receipt, so editing inventory after onboarding cannot
-retarget cleanup. A device deployed before receipts existed shows no active
-receipt; check its row and use the toolbar's **Adopt** action (an explicit,
+Each onboard creates a durable **deployment record** of what it applied, and **Undeploy**
+runs only from that deployment record, so editing inventory after onboarding cannot
+retarget cleanup. A device deployed before deployment records existed shows no active
+deployment record; check its row and use the toolbar's **Adopt** action (an explicit,
 audited, no-change recording of current ownership) before undeploying it. Router deployments cannot
-be adopted — re-onboard instead. For preflight and receipt ownership see
-[Deployment plans and applied receipts](network-attachment.md#deployment-plans-and-applied-receipts).
+be adopted — re-onboard instead. For preflight and deployment-record ownership see
+[Deployment plans and applied records](management-type.md#deployment-plans-and-applied-records).
 
 Each device row's **ⓘ Deployment details** control opens a read-only drawer
 beside the table — it slides in from the right, closes on **Esc** or **✕**, and
-leaves the row you opened it from where it was — showing what the deployment
-holds: the receipt state (`active`, `removed`, `superseded`, `needs-reconcile`,
-`abandoned`) and receipt id, the
+leaves the row you opened it from where it was. It opens on an **Images** table
+listing every image currently assigned to the device with its own state:
+`ready` once that image is staged and verified, `error` for an image the
+agent's last tick gave up on, and `staging` for one still in flight. That is
+the same resolution the Swarm Map's drawer uses, so the two never disagree
+about an image, and a device with any failed image reads `N of M image(s)
+failed` in the Status column rather than `Staged` (the rendered label for
+the underlying `deployed` wire status). A device staging a single image shows
+that agent's own state string instead, sentence-cased for display (for
+example the raw `downloading` or `transferring_to_ios` state renders
+`Downloading` or `Transferring_to_ios`), since a one-image heartbeat
+reports exactly one image. The reported error is one per heartbeat, for the tick
+rather than for a particular image, so a multi-image set carries it on its
+own **Last reported error** row below the images. Below that, it shows the deployment itself: the deployment record state (`active`,
+`removed`, `superseded`, `needs-reconcile`,
+`abandoned`) and record id, the
 preflight result, and the resolved configuration the onboard applied — the
-attachment type, the owned management VLAN or VPG, SVI and app addressing,
-NAT interface, swarm port, and the recorded model, platform, and device
-identity. A device with no receipt says so, naming adopt or re-onboard as the
+management type, the owned management VLAN or VPG, SVI and app addressing,
+NAT interface, swarm port, and the recorded model, **Agent install** choice, and device
+identity. A device with no deployment record says so, naming adopt or re-onboard as the
 fix. The drawer ends with that device's persisted deployment logs
 ([Deployment logs](#deployment-logs)), each viewable in place. A run that
 finished before the current device was registered under this name is labelled
@@ -190,9 +224,19 @@ and shown, never presented as this device's own history. Devices registered
 before IRIS started stamping registration time carry no stamp, and nothing is
 labelled for them.
 
-An `abandoned` receipt is one that no longer describes a device IRIS manages:
+The Swarm Map's own device drawer lists images differently from the drawer
+above: its **Image staging** section is built from the device's last
+heartbeat (`staged_image_ids`, `errored_image_ids`, `current_image_id`), so it
+shows what the device last reported, not what is assigned. The Devices drawer
+above shows the full assigned set, including images still `queued` and not
+yet staged; it reads the same heartbeat fields for the states it shares, so
+an image is never `error` on one and something else on the other. A freshly assigned image therefore appears in the Devices drawer
+right away but does not show on the map until the device's next heartbeat
+reports it.
+
+An `abandoned` deployment record is one that no longer describes a device IRIS manages:
 the device was deleted from the inventory, or a forced teardown stripped the
-agent without using the receipt as authority. It is kept as the record of what
+agent without using the deployment record as authority. It is kept as the account of what
 IRIS built on that box, but it never authorises a teardown and never blocks an
 onboard again.
 
@@ -202,25 +246,48 @@ The Devices toolbar acts on every checked row, so a CSV import can be finished
 without touching each device.
 
 Above it, the filter bar narrows what is rendered — free text across device, IP
-and model, plus management type, platform, credential, telemetry, peer policy
+and model, plus management type, **Agent install**, credential, telemetry, peer policy
 and status. Only matching rows are drawn, so filtering and then **select all**
 is how you act on a subset instead of hand-picking rows out of the whole fleet.
 The **Status** choices are generated from the same derivation the Status column
-renders, so every state a row can show can be filtered for: `onboarding`,
-`undeploying`, `waiting for heartbeat`, `onboard failed`, `undeploy failed`,
-`deployed`, `placement failed`, `copying to IOS storage`, `staging (other)`,
-`enrolled`, `not enrolled`, and `offline` — the last being a modifier, since a
-device can read `deployed` and still have gone quiet.
+renders, so every state a row can show can be filtered for. Each dropdown
+choice shows the same sentence-case label the column renders: `Onboarding`,
+`Undeploying`, `Waiting for heartbeat`, `Onboard failed`, `Undeploy failed`,
+`Staged`, `Placement failed`, `Image(s) failed`, `Copying to IOS storage`,
+`Staging (other)`, `Enrolled`, `Not enrolled`, and `Offline (no recent
+heartbeat)` — but its `<option>` value, and the wire status the cell itself
+carries, is the lowercase/kebab form underneath: `onboarding`, `undeploying`,
+`waiting-heartbeat`, `onboard-failed`, `undeploy-failed`, `deployed`,
+`placement-failed`, `image-failed`, `copying`, `staging`, `enrolled`,
+`not-enrolled`, and `offline` — the last being a modifier, since a device
+filtered on `deployed` (rendered `Staged`) can still have gone quiet.
 
 | Control | What it does | Confirms first |
 | --- | --- | --- |
 | Onboard selected | Queues an onboard job per device and tracks them in the batch panel; the server runs a bounded number at a time and queues the rest. | No |
 | *Telemetry reports* / *Telemetry streaming* checkboxes | Set the deployed agent's telemetry posture for every onboard started from this toolbar (single-row onboards included). Reports default on; streaming defaults off ([Transfer streaming](observability.md#transfer-streaming)). A bulk redeploy with the boxes toggled is the site-scale enable/disable path. | No |
-| Undeploy selected | Runs receipt-driven cleanup on each device. | Yes — one dialog for the whole selection, naming what teardown removes and preserves |
-| Adopt selected | Records the ownership receipt for each device. | Yes — a dialog listing the selected devices |
+| Undeploy selected | Runs record-driven cleanup on each device. | Yes — one dialog for the whole selection, naming what teardown removes and preserves |
+| Adopt selected | Creates the ownership deployment record for each device. | Yes — a dialog listing the selected devices |
 | Delete selected | Removes the inventory rows only. | Yes — a dialog listing the devices and warning that deletion is not an undeploy |
 | *credential for selected* + **Apply** | Assigns one credential profile to every checked device. Leaving the picker on either blank entry clears the credential instead. | No |
-| *image for selected* + **Apply** | Assigns one catalog image to every checked device — the bulk form of the per-row **Assigned image** picker, and the reason the filter bar exists: filter to a platform or model, select all, assign. Choosing *— unassign —* clears the assignment instead; an untouched picker does nothing. | No |
+| Assign images to selected | Opens the shared image picker for the whole checked selection — the bulk form of each row's own control in the **Assigned images** column, and the reason the filter bar exists: filter to a platform or model, select all, assign. | Only when it would unassign every image |
+
+A device can have up to ten images assigned at once, staged and transferred in
+parallel; the per-row control in the **Assigned images** column (reading `N
+image(s)` when images are assigned, `— assign —` when none are) and the
+toolbar's **Assign images to *N* devices…** button open the same checkbox
+picker, reading `Choose images` with a live `n/10` count — an eleventh box
+disables itself rather than waiting for a server-side rejection. Applying to
+a multi-device selection pre-checks the *intersection* of what the selection
+already has assigned — never the union — so **Apply** can never silently add an
+image to a device that lacks it. Apply then writes the checked set to *every*
+selected device, so an image a device has that you leave unchecked is dropped
+from it: whenever the selection's assignments are not all identical, the picker
+says so and **Apply** asks you to confirm before it posts. Applying an empty pick is a
+deliberate unassign and confirms first, whether for one device or for the
+whole selection: unchecking an image stops its torrent and frees the staging
+copy, but leaves any already-staged file on the device's boot filesystem,
+still tracked by IRIS.
 
 The **Adopt** dialog names the whole selection. It warns that you should only
 adopt a device whose inventory row matches what is really on the box, points at
@@ -229,31 +296,31 @@ routers cannot be adopted, and sends the acknowledgement the server requires —
 an adopt that omits it is refused.
 
 The **Undeploy** dialog's **Force** checkbox covers a device stranded with no
-*usable* deployment receipt. That is either no receipt at all — typically an
-onboard that enabled the agent but died before its receipt was written — or a
-receipt that no longer describes the box in front of it. The second case is a
+*usable* deployment record. That is either no deployment record at all — typically an
+onboard that enabled the agent but died before its deployment record was written — or a
+deployment record that no longer describes the box in front of it. The second case is a
 device that was rebuilt or replaced: it keeps its device id and its address but
 reports a new board ID, so the teardown recipe refuses it with `device identity
 mismatch`, while onboard refuses too and names that same teardown as the fix.
-Force is read before the receipt is, so neither a mismatched receipt nor two
-conflicting recoverable receipts can keep you from it. Forcing removes every
+Force is read before the deployment record is, so neither a mismatched deployment record nor two
+conflicting recoverable deployment records can keep you from it. Forcing removes every
 artifact that
 carries IRIS's own name — the EEM applets, Guest Shell or the IOx app and its
 app-hosting stanza, the IRISQ logging discriminator and its
 buffered/console/monitor bindings, `crypto pki trustpoint IRIS` and `ip http
 client secure-trustpoint IRIS`, and the staged files — and preserves only the
 operator's network: the VLAN and SVI, the VirtualPortGroup, and the NAT rules,
-which without a receipt nothing proves IRIS created. Everything IRIS-named has
+which without a deployment record nothing proves IRIS created. Everything IRIS-named has
 to go, or the next onboard's preflight refuses the device the forced teardown
 just rescued. It behaves the same on every platform, including a router, which
-has no other way to clear a receipt-less agent — it cannot be adopted, and
+has no other way to clear an agent with no deployment record — it cannot be adopted, and
 its preflight refuses to re-onboard over an already-enabled Guest Shell.
 Recorded in Audit as `undeploy_forced`.
 
-Once a forced teardown succeeds, every receipt the device still held is marked
+Once a forced teardown succeeds, every deployment record the device still held is marked
 `abandoned` — only on success, because failing to reach a device is not proof
-that its receipt is wrong. Without that step the next onboard would be refused
-on the very receipt the force was run to get past.
+that its deployment record is wrong. Without that step the next onboard would be refused
+on the very deployment record the force was run to get past.
 
 Bulk operations report per-device refusals rather than failing the whole batch:
 the status line shows how many devices succeeded and names the ones that did
@@ -265,7 +332,7 @@ immediately, so a device imported before any profile existed becomes assignable
 at once instead of after the next ten-second poll.
 
 !!! warning "Deleting inventory is not an undeploy"
-    Delete removes the Console record — it does not touch the box. An onboarded
+    Delete removes the Console inventory entry — it does not touch the box. An onboarded
     device keeps its agent and its staged image, with no inventory entry left to
     manage it. Undeploy first if that is what you meant. The deletion cannot be
     undone.
@@ -273,7 +340,7 @@ at once instead of after the next ten-second poll.
     Delete *is* terminal for the device id, though. Alongside the inventory row
     it revokes the device's credentials, clears its image assignment, heartbeat,
     telemetry history, pending pull and seen-report ledger, marks its
-    deployment receipts `abandoned`, and cancels any onboard or undeploy still
+    deployment records `abandoned`, and cancels any onboard or undeploy still
     queued or running for it. Re-adding the same device id afterwards starts
     from scratch: nothing the previous device left behind can block or
     authorise anything for its replacement. Peer endpoint rows are the one
@@ -291,7 +358,7 @@ instead of hanging inside an opaque SSH timeout. Router and IOx onboards
 already run their own live preflight, so all three platforms now fail loud on
 an unreachable device. Every onboarding rejection — a failed preflight, a
 busy device, an unreachable device, a router already holding a deployment
-receipt — is rendered in the console and recorded in Audit, whether it is
+record — is rendered in the console and recorded in Audit, whether it is
 refused at submit time or fails once the job is running.
 
 ### Job log windows
@@ -324,6 +391,12 @@ ever shows the selected window. The same list, already filtered to one device,
 sits at the bottom of that device's deployment-details panel on the Devices
 screen.
 
+Each line in the persisted log is prefixed with its elapsed offset from the job
+start, for example `[+   42.3s] [4/7] waiting for Guest Shell`. The live SSE
+stream remains unchanged. These offsets identify whether a slow onboard spent
+its time in device reachability, Guest Shell readiness, artifact download, or a
+later verification step instead of exposing only one total duration.
+
 ## Settings
 
 Settings is a sidebar feature with its own sub-menu — **Setup**, **General**,
@@ -334,35 +407,56 @@ tab strip. Each sub-page is deep-linkable: `#settings/setup`,
 
 ### Setup
 
-The **Setup** sub-page (`#settings/setup`) is a post-install status panel: four
+The **Setup** sub-page (`#settings/setup`) is a post-install status panel: five
 cards — **admin account**, **telemetry destination**, **stage-host
-credentials**, and **device packages** — each carrying a live status chip and a
-short rationale, meant to be revisited any time after installing a server
-rather than completed in one sitting. The admin card links to Settings ›
-General; the telemetry and stage-host cards open the setup flow (`#setup`),
-which hosts those forms. The telemetry card also names the endpoint in effect
-and whether it is a console override or the deployment default. Every card's
-status is one of `ok`, `unset`, `stale`, `absent`, or
-`unknown`. `absent` and `unknown` both mean the server could not determine
-the state; a failed or malformed status fetch shows every chip as `unknown`
-rather than leaving a previous, possibly stale, render on screen. Neither is
-ever presented as success.
+credentials**, **device packages**, and **image verification** — each
+carrying a live status chip and a short rationale, meant to be revisited any
+time after installing a server rather than completed in one sitting. The
+admin card links to Settings › General; the telemetry, stage-host, and image
+verification cards all open the setup flow (`#setup`), which hosts those
+controls as steps 1, 2, and 4. The telemetry card also names the endpoint in
+effect and whether it is a console override or the deployment default. Every
+card's status is one of `ok`, `unset`, `stale`, `absent`, or `unknown`, plus a
+sixth reading unique to image verification — a schedule that is configured
+but has not yet produced a successful run, worded distinctly ("Configured —
+no successful run yet") from one never configured at all. `absent` and
+`unknown` both mean the server could not determine the state; a failed or
+malformed status fetch shows every chip as `unknown` rather than leaving a
+previous, possibly stale, render on screen. Neither is ever presented as
+success — and `absent` is rendered as a neutral, not-applicable chip rather
+than a warning, since (as the device packages paragraph below explains) it
+routinely just means an architecture this deployment does not use.
 
 The **device packages** card exists because the IOx device packages
-(`iris-arm64.tar`, `iris-amd64.tar`) bake the catalog's TLS certificate in at
-**build** time. If the server's certificate later changes — a rebuilt
-server, a fresh volume, a deliberate rotation — every package already built
-against the old certificate silently stops working: the device installs and
-its app reports RUNNING, but it can never authenticate to the catalog and so
-never checks in. See
-[TLS rotation and IOx packages](operations.md#tls-rotation-and-iox-packages)
+(`iris-arm64.tar`, `iris-amd64.tar`) — and the IOS-XR agent RPM
+(`iris-xr.rpm`) — bake the catalog's TLS certificate in at **build** time.
+If the server's certificate later changes — a rebuilt server, a fresh
+volume, a deliberate rotation — every package already built against the old
+certificate silently stops working: the device installs and its app reports
+RUNNING, but it can never authenticate to the catalog and so never checks
+in. See
+[TLS rotation and device packages](operations.md#tls-rotation-and-device-packages)
 for the full failure mode and the fix. The card lists each package's build
 time and state against the server's live certificate; `absent` for an
 architecture you do not deploy (for example `iris-amd64.tar` at a site with
-no Catalyst 9300 IOx devices) needs no action. A `stale` row links to the
-rebuild command; if instead the certificate the server currently serves
-disagrees with the copy already handed to devices, the card names that
-condition specifically, because rebuilding packages alone would not fix it.
+no Catalyst 9300 IOx devices, or `iris-xr.rpm` with no Cisco 8000 devices)
+needs no action. A `stale` row links to the rebuild command; if instead the
+certificate the server currently serves disagrees with the copy already
+handed to devices, the card names that condition specifically, because
+rebuilding packages alone would not fix it.
+
+The `iris-xr.rpm` row is checked differently from the two tars, and its
+detail text says so: this module has no RPM/cpio reader, so it cannot pin
+the certificate baked *inside* the RPM the way it does for the tars — it can
+only compare the RPM's build time against the server's live certificate.
+`ok` means the RPM was built after the current certificate (the best
+available evidence, not a contents check); `stale` means it predates the
+certificate and may still pin an old one. Either way the row says plainly
+that only build time was verified, never contents. Its rebuild command is
+`tools/build-xr-package.sh --out artifacts/`, not the IOx tars' — a
+different script for a different package format — and needs `CATALOG_PEM`
+pointed at the live certificate (certificate block only) the same way the
+tars' rebuild does.
 
 ### TLS & trust
 

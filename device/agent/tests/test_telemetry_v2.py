@@ -209,8 +209,12 @@ _IMG = {"id": "img1", "filename": "img1.bin", "size": 5, "sha256": "abc"}
 
 
 class _Cat:
-    def __init__(self, policy, image):
+    def __init__(self, policy, image, images=None):
         self._policy, self._image = policy, image
+        # Rows this catalog can answer for BY ID. A real catalog answers every
+        # id with its own row; the single-image default below is kept for the
+        # cases that only ever ask about one image.
+        self._images = {i["id"]: i for i in (images or ())}
         self.heartbeats, self.telemetry, self.order = [], [], []
         self.hb_response = None
 
@@ -218,7 +222,7 @@ class _Cat:
         return self._policy
 
     def get_image(self, iid):
-        return self._image
+        return self._images.get(iid, self._image)
 
     def download_torrent(self, iid, dest):
         pass
@@ -239,15 +243,16 @@ def _deps(cat, sizes, **over):
         catalog=cat, emit=lambda *a: None, ios=lambda c: "",
         aria_add=lambda t, d: None, file_size=lambda p: sizes.get(p),
         verify=lambda p, sha: True, free_bytes=lambda prefix="flash:": 9_000_000_000,
-        version=lambda: "17", copy_to_root=lambda f, tp="flash:": True,
+        version=lambda: "17", copy_to_root=lambda f, tp="flash:", expected_size=None: True,
         purge_others=lambda k, i: None, reclaim=lambda: None,
-        root_present=lambda f, prefix="flash:": True,
+        root_present=lambda f, prefix="flash:", expected_size=None: True,
         remove_stage=lambda p: sizes.pop(p, None), aria_remove=lambda f: None,
         detect_mode=lambda: "bundle", target_fs=lambda: ("flash:", 9_000_000_000),
         running_image=lambda: "running.bin",
         reclaimable=lambda pre, pro: [], reclaim_bundle=lambda pre, n: None,
         model=lambda: "C9300", refresh=lambda: None,
         aria_stats=lambda p: None, aria_peers=lambda p: [], io_transfer=False,
+        copy_in_place=False,
         checkpoint=lambda s: order.append("checkpoint"),
         aria_session=lambda: None)
     base.update(over)
@@ -328,9 +333,13 @@ def test_reassignment_a_b_a_mints_three_distinct_transfer_ids():
     state = {}
 
     def run(img_id):
-        img = {"id": img_id, "filename": img_id + ".bin", "size": 5,
-               "sha256": "abc"}
-        cat = _Cat({"approved_image_id": img_id}, img)
+        rows = [{"id": i, "filename": i + ".bin", "size": 5, "sha256": "abc"}
+                for i in ("imgA", "imgB")]
+        img = next(r for r in rows if r["id"] == img_id)
+        # The catalog answers each id with ITS OWN row, as the real one does:
+        # the park pass has to name the departing image's staged file before it
+        # can stop that torrent and delete the file.
+        cat = _Cat({"approved_image_id": img_id}, img, images=rows)
         deps = _deps(cat, {"/stage/%s.bin" % img_id: 2,
                            "/stage/%s.bin.aria2" % img_id: 1},
                      purge_others=lambda k, i: None)
@@ -341,11 +350,13 @@ def test_reassignment_a_b_a_mints_three_distinct_transfer_ids():
     run("imgA")
     a1 = state["imgA"]["tele"]["transfer_id"]
     run("imgB")
-    # PRODUCTION reassignment: run_once's own state.pop(prev) drops the old
-    # image entry (tele + transfer_id) when the assigned image changes — it does
-    # NOT call telemetry_report.clear_transfer(). Prove the old A cycle is truly
-    # gone from state, so the return to A below re-mints rather than reusing.
-    assert "imgA" not in state
+    # PRODUCTION reassignment: an image that leaves the assignment set is
+    # PARKED — its record survives (root copy kept), so the park pass is what
+    # ends the acquisition cycle, clearing the transfer identity. Prove the old
+    # A cycle is truly gone, so the return to A below re-mints rather than
+    # reusing.
+    assert state["imgA"]["parked"] is True
+    assert "transfer_id" not in state["imgA"].get("tele", {})
     run("imgA")
     a2 = state["imgA"]["tele"]["transfer_id"]
     assert len(set(tids)) == 3

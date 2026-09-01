@@ -17,7 +17,7 @@ address plus bidirectional device-to-device BitTorrent traffic.
 | 22 | TCP | Console/server host -> device IOS | SSH | Drive the installer, configure the trustpoint, and transfer configuration. |
 | 22 | TCP | Console/server host -> remote stage host | SSH | Only when the Console and artifact/stage host are different machines. |
 | 8000 | TCP | Console/server host -> artifact server | HTTPS | Installer preflight. |
-| 8000 | TCP | Device IOS -> artifact server | HTTPS | Download the Guest Shell bundle, bootstrap, certificate, per-device configuration, and IOx package. |
+| 8000 | TCP | Device IOS -> artifact server | HTTPS | Download the Guest Shell bundle, bootstrap, certificate, per-device configuration, IOx package, or XR RPM. |
 
 In the standard Compose deployment the Console and artifact server share the
 same container, so per-device configuration is staged locally and there is no
@@ -33,7 +33,8 @@ Console-to-stage-host SSH hop.
 | 6881-6999 | TCP | Device <-> device | BitTorrent | Peer-to-peer fetch and reseed traffic. Router NAT uses static TCP PAT for 6881. |
 | 8080 | TCP | Operator browser -> Console | HTTPS | Console UI and API. The host port can be changed with `IRIS_GUI_PUBLISH`. |
 | 9101 | TCP | Prometheus or operator tooling -> server telemetry | HTTP | `/healthz` and optional `/metrics` (swarm state, image sizes, and the peer-distribution counters). `/swarm` answers only loopback peers unless `IRIS_SWARM_PUBLIC=1`. |
-| 22 | TCP | IOx agent -> its own IOS SVI | SSH/SCP | IOx SSH-to-self control; SCP image transfer before IOS `copy /verify` on IE-3400, or on a Catalyst 9300 falling back from the SSD share. |
+| 22 | TCP | IOx agent -> its own IOS SVI | SSH/SCP | IOx SSH-to-self control; SCP image transfer before the final IOS placement copy on IE-3400, or on a Catalyst 9300 falling back from the SSD share. |
+| 22 | TCP | Console/server host -> IOS-XR router | SSH/SCP | Register and control the appmgr agent and copy its RPM to `harddisk:` during onboard/undeploy. |
 
 External telemetry is opt-in, and the 9101 listener runs either way: `/healthz`
 and the `/swarmmap` pointer are served regardless, the Prometheus `/metrics`
@@ -76,7 +77,7 @@ All ports below are **TCP**.
 !!! note "IRIS uses no UDP"
     Every listener above is TCP. The UDP parts of BitTorrent are switched off on
     every launch path — DHT, peer exchange, and local peer discovery are all
-    disabled on the server seeder and on both device agents — so there is no DHT
+    disabled on the server seeder and on every device-agent runtime — so there is no DHT
     UDP port to open and UDP can stay closed for IRIS traffic.
 
 When both `IRIS_OBSERVABILITY` and `IRIS_OTLP_ENDPOINT` are set, the server also
@@ -105,7 +106,7 @@ The collector is external to IRIS and is not published by the Compose stack.
   IRIS`, the app-hosting stanza), has Guest Shell already enabled, or has a
   non-empty `bootflash:guest-share`. The installer separately verifies from the
   server host that the artifact server (8000) is serving over trusted HTTPS.
-  See [Management Type and VLAN Ownership](network-attachment.md).
+  See [Management Type and VLAN Ownership](management-type.md).
 - For **router-routed** devices, the operator must route the VPG app subnet to
   the IRIS server and peers. **router-nat** uses the configured outside
   interface; permit inbound TCP 6881 to its outside address for peer reachability.

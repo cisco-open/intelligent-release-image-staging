@@ -57,12 +57,31 @@ _ROOT_COPY_BACKOFF_MAX = 60 * 60
 # never truthy/falsy-compared, so it can't be mistaken for True/False.
 ROOT_COPY_RUNNING_IMAGE_UNKNOWN = object()
 
+# Sentinel returned by every copy_to_root path that gives up BEFORE any IOS
+# command runs: both running-image refusals, an scp scratch push that raised, an
+# applet run that never fired, a delete-first that raised. It exists because the
+# terminal-state reclaim (_reclaim_failed_root_copy) is only safe when THIS
+# attempt's `delete /force` actually executed — that delete is what proves a file
+# sitting at the image name is our own partial. After a pre-IOS failure nothing
+# was deleted, so a file at that name is the OPERATOR'S, and on the
+# running-image-refusal path it is the running image itself: deleting it strands
+# a bundle-mode box in rommon at the next reload.
+#
+# Retry/backoff accounting treats this EXACTLY like plain False — the attempt
+# counts, the backoff advances, copy_terminal still eventually fires, because an
+# operator must still be shown the terminal state. The only difference is that it
+# never sets st["ios_copy_started"], the flag that arms the reclaim.
+#
+# Identity-checked (`is`), NEVER truthy/falsy-compared: it is a plain object() and
+# therefore TRUTHY, so any success branch must exclude it explicitly first.
+ROOT_COPY_NOT_ATTEMPTED = object()
+
 Deps = collections.namedtuple(
     "Deps", "catalog emit ios aria_add file_size verify free_bytes version "
             "copy_to_root purge_others reclaim root_present remove_stage "
              "aria_remove detect_mode target_fs running_image reclaimable "
              "reclaim_bundle model refresh aria_stats aria_peers io_transfer "
-             "checkpoint aria_session")
+             "checkpoint aria_session copy_in_place")
 
 
 def _atomic_write_state(state_path, state):
@@ -108,7 +127,8 @@ def _atomic_write_state(state_path, state):
 
 def _heartbeat(image, deps, stage_state="staging", target_fs=None,
                tele_on=True, stage_error=None, sample=None, stream_on=False,
-               observation=None):
+               observation=None, staged_image_ids=None,
+               errored_image_ids=None):
     hb = {"current_image_id": image["id"] if image else None,
           "free_flash_bytes": deps.free_bytes(target_fs or "flash:"),
           "version": deps.version(),
@@ -122,6 +142,19 @@ def _heartbeat(image, deps, stage_state="staging", target_fs=None,
         hb["sample"] = sample
     if observation is not None:
         hb["telemetry_observation"] = observation
+    if staged_image_ids is not None:
+        # Which images of an assigned SET are fully staged. Sent only for a
+        # real set: a one-image device (and every agent that predates the
+        # field) leaves it out, and the server falls back to the
+        # current_image_id/stage_state pair for those.
+        hb["staged_image_ids"] = staged_image_ids
+    if errored_image_ids is not None:
+        # Which images of an assigned SET hit a terminal per-image failure
+        # THIS tick. Same one-image-set/legacy-agent omission as
+        # staged_image_ids above: paired with it, it lets the server tell
+        # "everything is stuck" from "one erred, the rest are still going"
+        # instead of guessing from the set's single collapsed stage_state.
+        hb["errored_image_ids"] = errored_image_ids
     return hb
 
 
@@ -423,7 +456,7 @@ def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now,
             # measurement the sampler above structurally cannot make: a peer
             # that connected and dropped between two 60 s ticks is invisible
             # to it, whatever keys it asks for.
-            _ingest_peer_receipts(deps, tele, stage, now)
+            _ingest_peer_transfer_records(deps, tele, stage, now)
             tele["done_ts"] = now
             stats = deps.aria_stats(stage)
             if stats:
@@ -516,24 +549,113 @@ def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now,
 
 
 def _protect_set(image, state):
-    """Files reclaim must never delete: the running image, the image being
-    staged (+ its torrent/aria2 sidecars), and IRIS's own placed root copy."""
+    """Files reclaim must never delete: the running image (added by the caller,
+    which is the only place that knows it), the image being staged (+ its
+    torrent/aria2 sidecars), and every root copy IRIS placed for an image still
+    IN the assigned set. Freeing space for one image of a set must never eat
+    another image of the same set.
+
+    PARKED root copies are deliberately NOT protected. Park keeps them, but
+    keeps them the way a replaced image's copy is kept: available to the
+    reclaim gate the moment a newly checked image needs the room. Protecting
+    them here made the "kept until space is needed" half of the uncheck
+    contract unreachable — a device with a full boot filesystem had nothing
+    left it was allowed to free, so it reported flash_full forever no matter
+    how many images the operator unchecked. An image that comes back into the
+    set is un-parked before this runs (_reconcile_set), so it is protected
+    again by its membership, not by its flag."""
     keep = {image["filename"], image["filename"] + ".aria2",
             image["id"] + ".torrent"}
     rf = state.get("root_file")
     if rf:
         keep.add(rf)
+    for value in state.values():
+        if (isinstance(value, dict) and value.get("root_file")
+                and not value.get("parked")):
+            keep.add(value["root_file"])
     return keep
 
 
 def _reset_copy_failures(st):
-    for key in ("copy_attempts", "copy_next_ts", "copy_terminal", "stage_error"):
+    for key in ("copy_attempts", "copy_next_ts", "copy_terminal", "stage_error",
+                "ios_copy_started"):
         st.pop(key, None)
 
 
 def _copy_backoff(attempts):
     return min(_ROOT_COPY_BACKOFF_BASE * (2 ** max(attempts - 2, 0)),
                _ROOT_COPY_BACKOFF_MAX)
+
+
+def _reclaim_failed_root_copy(deps, target_prefix, image):
+    """Delete this attempt's failed root copy when the retry gate goes
+    terminal. Called ONCE, on the transition into copy_terminal.
+
+    Why it has to happen here: after copy_terminal is set, no further copy
+    fires, so the placement path's delete-first never runs again. Without this
+    the leftover sits at the boot-FS root under the REAL Cisco image name,
+    burning ~1.2 GB indefinitely — and an operator listing flash: would see
+    what looks like a perfectly good image. state['root_file'] is only set on
+    SUCCESS, so no other cleanup path owns this file.
+
+    WHY A DELETE HERE CAN BE SAFE: a placement attempt that reached IOS begins
+    with `delete /force <FS><filename>` — the IRIS-COPYROOT applet's action 020
+    on the Guest Shell path, the vty command on the direct path. So a file
+    present at that name after such an attempt fails can only be the partial
+    THAT attempt wrote.
+
+    THAT INVARIANT DOES NOT HOLD UNCONDITIONALLY, and this function must never
+    assume it. Attempts that fail BEFORE any IOS command — the running-image
+    refusals, an scp push that raised, an applet run that never fired — delete
+    nothing, so a file at that name is the operator's, and on the
+    running-image-refusal path it IS the running image. Two independent layers
+    keep that file safe:
+
+      Layer 1 (caller): run_once only calls this when at least one attempt in
+        this image's cycle came back a genuine post-delete-first False
+        (st["ios_copy_started"]); ROOT_COPY_NOT_ATTEMPTED never sets it.
+      Layer 2 (below, unconditional): re-read the running image and refuse if
+        the target matches its basename, or if the running image cannot be
+        confirmed at all. This holds even if Layer 1 regresses, and mirrors the
+        same running_image()/_ios_basename comparison copy_to_root makes before
+        any destructive command. An unknown running image is treated exactly as
+        _reclaim_for_mode treats it (#4): no protect-set can be built, so no
+        delete may run.
+
+    Stage-only: this reclaims exactly one name — IRIS's own failed copy — and
+    is reclamation, not install activity. Best-effort; a delete that raises is
+    logged and swallowed, since the terminal state is already reported."""
+    fname = image["filename"]
+    # ---- Layer 2: independent last-line check, before ANY delete is issued ----
+    try:
+        running = deps.running_image()
+    except Exception as e:
+        deps.emit("ROOTCOPY-RECLAIM-REFUSED",
+                  "%s left in place at %s: running image unknown "
+                  "(show version read raised: %s) — refusing a delete that "
+                  "cannot be proven safe" % (fname, target_prefix, e))
+        return
+    if not running:
+        deps.emit("ROOTCOPY-RECLAIM-REFUSED",
+                  "%s left in place at %s: running image unknown — refusing a "
+                  "delete that cannot be proven safe" % (fname, target_prefix))
+        return
+    if _ios_basename(running).casefold() == fname.casefold():
+        deps.emit("ROOTCOPY-RECLAIM-REFUSED",
+                  "%s left in place at %s: it IS the running image (%s) — "
+                  "refusing destructive delete"
+                  % (fname, target_prefix, running))
+        return
+    try:
+        deps.reclaim_bundle(target_prefix, [fname])
+    except Exception as e:
+        deps.emit("ROOTCOPY-RECLAIM-FAIL",
+                  "%s failed placement left at %s; delete raised: %s"
+                  % (fname, target_prefix, e))
+        return
+    deps.emit("ROOTCOPY-RECLAIM",
+              "%s placement gave up; deleted this attempt's partial copy from %s"
+              % (fname, target_prefix))
 
 
 def _ios_basename(path):
@@ -573,65 +695,435 @@ def _reclaim_for_mode(deps, mode, target_prefix, image, state):
     return False
 
 
-def run_once(cfg, deps, state):
-    # Self-refresh the catalog token BEFORE any catalog work, once it's past
-    # half-life (or its expiry is unknown). Best-effort: deps.refresh() does the
-    # POST + atomic conf rewrite and returns the updated cfg, or None on failure
-    # — on failure we log and proceed on the CURRENT token (a 7d TTL + half-life
-    # refresh leaves a ~3.5d retry buffer, so a few failed ticks never strand
-    # the device).
-    if needs_refresh(time.time(),
-                     int(float(cfg.get("token_expires_at", 0) or 0)),
-                     _TOKEN_TTL, _TOKEN_REFRESH_AT):
-        new_cfg = deps.refresh()
-        if new_cfg is None:
-            deps.emit("TOKEN-REFRESH-FAIL",
-                      "catalog token refresh failed; proceeding on current token")
+class _ImageTick:
+    """One image's deferred heartbeat + telemetry work for this tick.
+
+    The device is ONE row on the server, so an assigned set of images still
+    gets ONE heartbeat per tick — but its stage_state and staged_image_ids are
+    facts about the whole set, and cannot be settled until every image has been
+    checked. So _stage_image() decides what it would report, exactly where it
+    always did, and records the _heartbeat() arguments here; run_once()
+    composes the single payload, POSTs it, and replays the telemetry against
+    the response.
+
+    For a one-image set this is a pure deferral: the same payload, built from
+    the same arguments, POSTed at the same point in the tick (nothing runs
+    between the end of the loop and the POST), followed by the same telemetry
+    tick with the same response."""
+
+    __slots__ = ("hb", "tele", "stage_state", "stage_error")
+
+    # Index of _telemetry_tick()'s hb_resp parameter in the recorded call.
+    _HB_RESP_ARG = 6
+
+    def __init__(self):
+        self.hb = None
+        self.tele = None
+        self.stage_state = None
+        self.stage_error = None
+
+    def heartbeat(self, *args, **kwargs):
+        """Record this image's _heartbeat() call. Returns None because the
+        server's answer does not exist yet — replay() substitutes the real
+        response into the telemetry call that consumes it."""
+        self.hb = (args, kwargs)
+        # What this image would have reported on its own, kept out here so the
+        # set-level aggregate never has to re-run _heartbeat's device reads.
+        self.stage_state = (args[2] if len(args) > 2
+                            else kwargs.get("stage_state", "staging"))
+        self.stage_error = kwargs.get("stage_error")
+        return None
+
+    def telemetry(self, *args, **kwargs):
+        self.tele = (args, kwargs)
+
+    def build(self, staged_image_ids=None, errored_image_ids=None):
+        args, kwargs = self.hb
+        return _heartbeat(*args, staged_image_ids=staged_image_ids,
+                          errored_image_ids=errored_image_ids, **kwargs)
+
+    def replay(self, hb_resp):
+        if self.tele is None:
+            return
+        args, kwargs = self.tele
+        args = list(args)
+        args[self._HB_RESP_ARG] = hb_resp
+        _telemetry_tick(*args, **kwargs)
+
+
+# Top-level state keys that are NOT per-image records: scalars the agent keeps
+# about the device, plus telemetry's own bags. Everything else that looks like
+# an image record (below) is keyed by image id.
+_RESERVED_STATE_KEYS = frozenset((
+    "schema_version", "image_id", "root_file", "stage_fs",
+    "pending_root_deletes", "link", "frozen_pull", "stream_directives"))
+
+# Fields only a per-image record carries. Membership in the assigned set is
+# not enough to recognise one: the park pass has to find records for images
+# that are no longer assigned at all.
+#
+# 'origin' (Directive 2 / XR teardown hardening): how THIS placement's bytes
+# reached the target-FS root — "downloaded" (this agent's own transfer wrote
+# them) or "adopted" (attest-in-place confirmed bytes that were already
+# there; nothing of ours moved them). Written once, at the same site that
+# sets 'copied'/'root_file' on a successful copy_to_root. ADDITIVE: a state
+# file from before this field existed simply lacks it, and every deletion
+# path below treats a missing origin exactly like "adopted" — fail-safe, so
+# an unproven placement is never the thing IRIS deletes.
+# 'download_started' is origin's own bookkeeping, not a fact anyone outside
+# this module reads: it is set the moment THIS agent's aria2 session is
+# asked to fetch an image (see the aria_add call site) and is what lets the
+# copy-success site tell a genuine download apart from attest-in-place
+# finding bytes it never touched.
+_IMAGE_ENTRY_FIELDS = ("done", "copied", "sha", "tele", "root_file", "parked",
+                       "copy_attempts", "copy_terminal", "copy_reclaim_tried",
+                       "ios_copy_started", "reclaim_tried", "blocked_no_space",
+                       "stage_error", "origin", "download_started")
+
+
+def _is_image_entry(value):
+    return isinstance(value, dict) and any(k in value
+                                           for k in _IMAGE_ENTRY_FIELDS)
+
+
+def _image_filename(deps, entry, img_id):
+    """The staged/placed filename of an image the loop is not staging.
+
+    Prefer what the device already recorded (free, and still right for an
+    image the catalog has since dropped), then ask the catalog. Returns None
+    if neither answers, or if the answer fails the filename whitelist that
+    guards every interpolation into an IOS command."""
+    fname = (entry or {}).get("root_file")
+    if not fname:
+        try:
+            image = deps.catalog.get_image(img_id)
+        except Exception:
+            image = None
+        fname = (image or {}).get("filename")
+    return fname if fname and _FILENAME_RE.match(fname) else None
+
+
+def _root_file_origin(state, fname):
+    """The recorded provenance of the per-image record that placed `fname`
+    at the target-FS root, or None when no record claims it.
+
+    pending_root_deletes carries bare filenames (not image ids), so the
+    owning record has to be found by its root_file field rather than looked
+    up directly. None here means exactly what a found record's missing
+    'origin' means: unproven — every deletion site treats it as adopted."""
+    for value in state.values():
+        if _is_image_entry(value) and value.get("root_file") == fname:
+            return value.get("origin")
+    return None
+
+
+def _protect_adopted_root(deps, entry, fname):
+    """True when `entry` names `fname` as the root-FS placement it made,
+    on a platform where that must never be agent-deleted: a platform whose
+    copy_to_root is attest-in-place (deps.copy_in_place) succeeded WITHOUT
+    this agent writing anything — origin 'adopted', or missing/legacy
+    (fail-safe).
+
+    Keyed on `root_file == fname` — the durable fact that THIS record IS
+    the placement about to be deleted — rather than `copied`. `copied` is
+    RECOMPUTED every tick from a fresh root_present() call (the steady-state
+    self-heal) and goes False on nothing more than a transient size drift
+    or a single stat miss, while `root_file`/`origin` do not move with that
+    noise (reviewer PROBE1: keying on `copied` failed OPEN exactly when a
+    placement's provenance was most in doubt). An entry with no root_file
+    at all — never successfully placed, or already cleared — can never
+    match here, which is what preserves ordinary cleanup of an in-progress
+    or failed placement. A platform that physically writes its own root
+    copy (copy_in_place=False) has no adoption path — see xr_deps' module
+    docstring — so it is never protected here."""
+    return bool(deps.copy_in_place and entry.get("root_file") == fname
+               and entry.get("origin") != "downloaded")
+
+
+def _reconcile_set(deps, state, ids, stage_dir):
+    """Reconcile what is on the device against the assigned set, before staging.
+
+    PARK — an image the device has state for that is no longer in the set:
+    stop its torrent, delete its stage copy, mark the record parked. Its ROOT
+    copy is deliberately KEPT. An image dropped from a set is not necessarily
+    gone for good (sets are edited), and a surviving root copy turns re-adding
+    it into a presence-and-size check instead of another ~1.2 GB placement.
+    This replaces the old single-image reassignment cleanup, which queued the
+    old root copy for deletion — the opposite call. (pending_root_deletes
+    itself stays: state files written by that agent can still carry a queue,
+    and the drain + its whitelist re-check still run.)
+
+    On a platform whose stage dir IS the target-FS root (deps.copy_in_place,
+    e.g. XR), "delete its stage copy" above and "the root copy is kept" are
+    in direct conflict — there is only one file. _protect_adopted_root
+    resolves that: an origin-'adopted' (or provenance-unknown) placement is
+    left in place exactly like every other platform's root copy; only a
+    placement this agent proved it downloaded is freed on park. Either way,
+    origin/download_started are CLEARED on park (reviewer PROBE2): the
+    acquisition cycle those facts describe ends the moment the image leaves
+    the set, and an operator can restage a byte-identical file under the
+    SAME name while it is gone — the steady-state short-circuit that will
+    greet a reassignment never revisits copy_to_root, so a stale verdict
+    left behind here would silently re-arm on the NEXT park.
+
+    UN-PARK — a parked image back in the set: clear the flag and the placement
+    retry gate, then let the normal path re-confirm it.
+
+    The aria2/stage-dir sweep is re-scoped with it: purge_others() now keeps
+    the WHOLE set. Called with one survivor it would delete the other assigned
+    images' staged files."""
+    # The old agent kept ONE top-level root_file, for its ONE image. Migrate it
+    # into that image's own record — the park pass needs to know the filename
+    # an image placed, and per-image is where placement is recorded now.
+    legacy_root = state.get("root_file")
+    legacy_id = state.get("image_id")
+    if legacy_root and legacy_id and isinstance(state.get(legacy_id, {}), dict):
+        state.setdefault(legacy_id, {}).setdefault("root_file", legacy_root)
+
+    for img_id in ids:
+        entry = state.get(img_id)
+        if isinstance(entry, dict) and entry.pop("parked", None):
+            # Back in the set: a durable placement failure from before must not
+            # outlive the reassignment, exactly as a fresh assignment cleared it.
+            _reset_copy_failures(entry)
+            deps.emit("UNPARKED", "%s back in the assignment set; re-checking "
+                                  "its staged and root copies" % img_id)
+
+    stale = [k for k in state
+             if k not in ids and k not in _RESERVED_STATE_KEYS
+             and _is_image_entry(state[k]) and not state[k].get("parked")]
+    if not stale and (not legacy_id or legacy_id in ids):
+        return                            # set unchanged: nothing to park or sweep
+
+    # What the sweep must spare: for every assigned image, the name the catalog
+    # gives it NOW (the file being downloaded) and the name it already placed
+    # (they differ if the image was republished under a new filename). An image
+    # that resolves to neither leaves the sweep disarmed, below.
+    keep_files = []
+    resolved = 0
+    for img_id in ids:
+        names = []
+        try:
+            image = deps.catalog.get_image(img_id)
+        except Exception:
+            image = None
+        for fname in ((image or {}).get("filename"),
+                      (state.get(img_id) or {}).get("root_file")):
+            if fname and _FILENAME_RE.match(fname) and fname not in names:
+                names.append(fname)
+        if names:
+            resolved += 1
+            keep_files.extend(names)
+    keep = set(keep_files)
+
+    for key in stale:
+        entry = state[key]
+        fname = _image_filename(deps, entry, key)
+        # Never touch a file the assigned set claims. A catalog that answers
+        # for a dropped id with an assigned image's filename (or two ids
+        # sharing one filename) must not cost the set its staged bytes.
+        if not fname or fname in keep:
+            # NOTHING was attempted for this entry, so it is NOT parked. The
+            # flag is what takes a record out of `stale`, so setting it here
+            # retires an image whose torrent is still running and whose partial
+            # still occupies flash — permanently, with no way back short of
+            # hand-editing the state file. Leave the record alone and the next
+            # tick re-runs the park, once the catalog can name the file again.
+            deps.emit("PARK-DEFERRED",
+                      "%s left the assignment set but its staged file could "
+                      "not be named this tick; park retried next tick" % key)
+            continue
+        try:
+            deps.aria_remove(fname)
+        except OSError:
+            # aria2 RPC down: best-effort. The stage copy still goes, and
+            # the purge sweep below drops the download once the RPC is
+            # back — a parked torrent must never stall the tick.
+            pass
+        # On every IOS-XE platform the stage dir is IRIS's own directory and
+        # the root copy lives elsewhere entirely, so deleting the stage copy
+        # here is always safe — that separation is the whole reason park can
+        # promise to KEEP the root copy. A platform whose stage dir IS the
+        # root (deps.copy_in_place, e.g. XR: attest_in_place writes no new
+        # bytes because there is nowhere else to write them) has no such
+        # separation: THIS delete would be a root delete, so an adopted (or
+        # provenance-unknown) placement must be left exactly where it is —
+        # the 2026-08-29 incident was an unassign doing this to an
+        # operator-staged ISO. Only a copy this agent proved it downloaded is
+        # still fair game; an in-progress/failed placement was never proven
+        # to be anyone's root copy at all and is cleaned up as always.
+        protected = _protect_adopted_root(deps, entry, fname)
+        if protected:
+            deps.emit("ROOTCOPY-KEPT",
+                      "left in place: operator-adopted %s" % fname)
         else:
-            cfg = new_cfg
+            try:
+                deps.remove_stage(os.path.join(stage_dir, fname))
+            except OSError:
+                # Best-effort for the same reason: a stage copy that cannot be
+                # deleted this tick still leaves a record whose torrent IS stopped,
+                # and the purge sweep collects the file later.
+                pass
+        # BOTH park actions have now been attempted for this entry, which is
+        # exactly what the flag asserts. A park interrupted before this point
+        # (anything later in the tick raising) leaves the record unflagged and
+        # re-runs from the top next tick.
+        entry["parked"] = True
+        # The top-level root_file is the LEGACY mirror for the set's FIRST
+        # image. Parking that image makes it stale: _protect_set and every
+        # legacy reader would pair this file with whatever image_id the new set
+        # goes on to write. Move it into the record that actually owns it.
+        if state.get("root_file") == fname:
+            entry.setdefault("root_file", fname)
+            state.pop("root_file", None)
+        # The acquisition cycle ends here (the stage copy is gone), so the
+        # transfer identity must not outlive it: coming back into the set is a
+        # fresh download and mints a fresh transfer_id. This pass is the
+        # cycle-boundary owner the old state.pop(prev) used to be.
+        telemetry_report.clear_transfer(state, key)
+        # Provenance (Directive 2, reviewer PROBE2 fix): origin/download_started
+        # describe a placement fact about this exact acquisition cycle, and
+        # that cycle ends the moment the image leaves the assigned set —
+        # whether the file was just deleted (nothing left to prove) or left
+        # in place untouched (still fine to call it unproven going forward;
+        # fail-safe is never wrong to re-derive from). The steady-state
+        # short-circuit that will greet this record on reassignment never
+        # revisits copy_to_root as long as done/copied read true, so an
+        # operator who restages a byte-identical file under the SAME name
+        # while the image is unassigned must not inherit a stale
+        # 'downloaded' verdict from the PREVIOUS occupant of that name — that
+        # is exactly what let the incident recur on the next unassign.
+        # Cleared unconditionally rather than only on the deleted branch, so
+        # re-derivation always starts from "unproven" instead of an
+        # assumption this cycle can no longer back.
+        entry.pop("origin", None)
+        entry.pop("download_started", None)
+        if protected:
+            detail = "torrent stopped, root copy left in place (adopted)"
+        elif deps.copy_in_place:
+            # stage IS root on this platform: remove_stage above just
+            # deleted the SAME file this message used to call "kept".
+            detail = "torrent stopped, root copy removed"
+        else:
+            detail = "torrent stopped, stage copy deleted, root copy kept"
+        deps.emit("PARKED",
+                  "%s removed from the assignment set; %s" % (key, detail))
+    # Only sweep when EVERY assigned image resolved to a filename. The sweep
+    # deletes every staged artifact outside the keep set, so an image the
+    # catalog merely failed to answer for this tick must never look unassigned
+    # — that would discard a fully downloaded image over a transient 404.
+    if resolved == len(ids):
+        deps.purge_others(keep_files, list(ids))
+
+
+def _staged_image_ids(state, ids):
+    """The images of the set this device has fully staged: content verified
+    (`done`) AND placed at the target-FS root (`copied`) — the same pair the
+    steady-state short-circuit trusts."""
+    return [i for i in ids
+            if (state.get(i) or {}).get("done") and (state.get(i) or {}).get("copied")]
+
+
+# Aggregate stage_state for a set of more than one image, most actionable
+# first. "ready" only when every image is staged; otherwise report whichever
+# gate or failure an image actually hit, rather than a bland "staging" for a
+# device that is out of room or has given up placing. Which images are done
+# rides staged_image_ids, and why one is not rides stage_error.
+_SET_STAGE_STATES = ("flash_full_seeding_only", "flash_full", "error",
+                     "copy_failed")
+
+
+def _send_set_heartbeat(deps, sid, state, ids, ticks):
+    """POST the tick's single heartbeat for the whole set; return the response.
+
+    A one-image set POSTs its recorded payload verbatim — same keys, same
+    values, no staged_image_ids or errored_image_ids (the server falls back
+    to current_image_id/stage_state for one-image agents, as it must for
+    every agent that predates the fields)."""
+    live = [t for t in ticks if t.hb is not None]
+    if not live:
+        # Every image bailed before its heartbeat (a rejected catalog filename
+        # is the only such path). Say nothing, exactly as before.
+        return None
+    if len(ids) == 1:
+        return _send_heartbeat(deps, sid, live[0].build())
+    staged = _staged_image_ids(state, ids)
+    # Which assigned images THIS TICK's own per-image status calls a
+    # terminal failure -- the same _SET_STAGE_STATES vocabulary `failed`
+    # below already checks each live tick's stage_state against. Paired
+    # with staged_image_ids, this tells the server "N images stuck in
+    # error" apart from "one erred, the rest are still in flight" instead
+    # of guessing from the set's single collapsed stage_state.
+    errored = [img_id for img_id, t in zip(ids, ticks)
+              if t.hb is not None and t.stage_state in _SET_STAGE_STATES]
+    hb = live[0].build(staged_image_ids=staged, errored_image_ids=errored)
+    seen = [t.stage_state for t in live]
+    # Identity is NOT forced to ids[0]: it comes from live[0], the first image
+    # that actually produced heartbeat data this tick, whose payload this is.
+    # Overriding it filed live[0]'s observation, target_fs and free-byte
+    # reading under a DIFFERENT image's id whenever the first image bailed
+    # before reporting (a rejected catalog filename). For a healthy set — and
+    # for every one-image set, which returns above — live[0] IS ids[0], so the
+    # compat pointer is unchanged.
+    #
+    # `staged` is read from STATE, so it still counts an image that was staged
+    # on an earlier tick but FAILED on this one (the catalog dropped it, flash
+    # filled up, placement gave up). Reporting "ready" then contradicts the
+    # stage_error travelling in the same payload, so this tick's own verdicts
+    # have to agree before the set is called ready.
+    failed = [s for s in seen if s in _SET_STAGE_STATES]
+    if len(staged) == len(ids) and not failed:
+        hb["stage_state"] = "ready"
+    else:
+        hb["stage_state"] = next((s for s in _SET_STAGE_STATES if s in seen),
+                                 "staging")
+    hb["stage_error"] = next((t.stage_error for t in live if t.stage_error),
+                             None)
+    return _send_heartbeat(deps, sid, hb)
+
+
+def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
+                 legacy_pointer=False):
+    """Stage ONE image of the assigned set and return its status string.
+
+    This is the whole of the pre-multi-image run_once() from the catalog
+    lookup down, unchanged: the same steady-state short-circuit, the same
+    sha/copy-to-root gate, the same download branch, the same return-string
+    vocabulary ("no-image" | "bad-filename" | "complete" | "bad-sha" |
+    "seeding-only" | "no-space" | "aria2-down" | "downloading"). run_once()
+    calls it once per assigned image.
+
+    Two things it no longer owns, because they belong to the whole set rather
+    than to one image:
+
+      * the heartbeat POST and the telemetry tick. The device has ONE row on
+        the server, so the set gets ONE heartbeat per tick — but its
+        stage_state and staged_image_ids can only be settled after every image
+        has been checked. So this function still decides exactly what it would
+        report, exactly where it always did, and records it on `tick`;
+        run_once composes the one payload, POSTs it, and replays the telemetry
+        against the answer. (The container-mode `transferring_to_ios` publish
+        is the exception: it exists to be seen BEFORE a long blocking
+        transfer, so it still POSTs on the spot.)
+      * parking and un-parking images as they leave and re-enter the set
+        (see _reconcile_set).
+
+    The top-level state["image_id"] pointer IS still written here, for the
+    first image of the set only (`legacy_pointer`), at the point in the tick
+    the single-image agent wrote it — see below.
+    """
     sid = cfg["device_id"]
     stage_dir = cfg["stage_dir"]
-    tele_on = telemetry_report.enabled(cfg)
-    stream_on = telemetry_report.stream_enabled(cfg)
-
-    # Upgrade from an older agent: clear "copied" so the next copy_to_root
-    # re-verifies the flash-root copy instead of trusting the old flag.
-    # Keep root_file — the reassignment cleanup below needs it to delete the
-    # old root copy. Only emit UPGRADE if we actually cleared something.
-    if state.get("schema_version", 1) < _STATE_SCHEMA:
-        cleared = False
-        for v in state.values():
-            if isinstance(v, dict) and v.get("copied"):
-                v["copied"] = False
-                cleared = True
-        state["schema_version"] = _STATE_SCHEMA
-        if cleared:
-            deps.emit("UPGRADE", "re-verifying flash-root copy after upgrade")
-
-    policy = deps.catalog.get_policy(sid)
-    img_id = policy.get("approved_image_id")
-    if not img_id:
-        # Still heartbeat: an unassigned device must register (devices.json,
-        # swarm map, telemetry posture) or console onboarding can never see
-        # it come up — assignment only gates staging, not presence.
-        _send_heartbeat(deps, sid,
-                        _heartbeat(None, deps, "unassigned",
-                                   target_fs=cfg.get("target_fs"),
-                                   tele_on=tele_on, stream_on=stream_on,
-                                   observation=_not_active_observation(
-                                       tele_on, time.time())))
-        return "no-assignment"
     image = deps.catalog.get_image(img_id)
     if image is None:
         deps.emit("ERROR", "assigned image %s not in catalog" % img_id)
-        _send_heartbeat(deps, sid,
-                        _heartbeat(None, deps, "error",
-                                   target_fs=cfg.get("target_fs"),
-                                   tele_on=tele_on, stream_on=stream_on,
-                                   stage_error="assigned image %s not in catalog"
-                                               % img_id,
-                                   observation=_not_active_observation(
-                                       tele_on, time.time())))
+        tick.heartbeat(None, deps, "error",
+                       target_fs=cfg.get("target_fs"),
+                       tele_on=tele_on, stream_on=stream_on,
+                       stage_error="assigned image %s not in catalog"
+                                   % img_id,
+                       observation=_not_active_observation(
+                           tele_on, time.time()))
         return "no-image"
 
     # Reject a bad catalog filename before it reaches any IOS command.
@@ -654,52 +1146,98 @@ def run_once(cfg, deps, state):
     # checks (no hashing). If content changed, or either copy went missing, fall
     # through to re-acquire (re-download a missing/stale staged file; re-copy a
     # missing root file).
+    # The image's OWN record decides, not a top-level "current image" pointer:
+    # every image of the set gets the same short-circuit, and an image that
+    # comes back into the set after being parked gets it too (its root copy
+    # survived parking, so this is the presence-and-size confirm that spares
+    # it a full re-placement).
     done_st = state.get(img_id, {})
-    if state.get("image_id") == img_id and done_st.get("done") \
-            and done_st.get("copied"):
+    if done_st.get("done") and done_st.get("copied"):
         content_ok = done_st.get("sha", image["sha256"]) == image["sha256"]
         staged_ok = deps.file_size(stage) is not None
-        root_ok = deps.root_present(image["filename"], state.get("stage_fs", "flash:"))
+        root_ok = deps.root_present(image["filename"], state.get("stage_fs", "flash:"),
+                                    size)
         if content_ok and staged_ok and root_ok:
             obs, _ = _build_observation(cfg, deps, state, img_id, stage,
                                         "steady", time.time())
-            hb = _send_heartbeat(deps, sid,
-                                 _heartbeat(image, deps, "ready",
-                                            target_fs=state.get("stage_fs"),
-                                            tele_on=tele_on,
-                                            observation=obs,
-                                            stream_on=stream_on))
-            _telemetry_tick(cfg, deps, state, img_id, stage, "steady",
-                            hb, time.time())
+            hb = tick.heartbeat(image, deps, "ready",
+                                target_fs=state.get("stage_fs"),
+                                tele_on=tele_on,
+                                observation=obs,
+                                stream_on=stream_on)
+            tick.telemetry(cfg, deps, state, img_id, stage, "steady",
+                           hb, time.time())
             return "complete"
         deps.emit("RECHECK", "%s re-acquiring (content=%s staged=%s root=%s)"
                   % (image["filename"], content_ok, staged_ok, root_ok))
+        if not staged_ok:
+            # Provenance (Directive 2, reviewer PROBE1/PROBE2 follow-up): the
+            # placement this record's origin/download_started describe is
+            # gone, or was not re-verified THIS cycle — on a stage-equals-root
+            # platform (deps.copy_in_place, e.g. XR) staged_ok and root_ok are
+            # literally the same fact, so this also covers a root copy that
+            # vanished or was silently replaced OUTSIDE an unassign. Whatever
+            # eventually lands at this name next is judged on its OWN
+            # evidence (a fresh copy_to_root re-derives origin), never on a
+            # provenance fact this record can no longer vouch for.
+            done_st.pop("origin", None)
+            done_st.pop("download_started", None)
         if staged_ok and not content_ok:
+            # A republished image under the SAME id is the ORDINARY catalog
+            # event, not a rare edge case: image ids are DERIVED from the
+            # filename (server/publish.py's derive_id strips the known image
+            # suffixes), so a rebuild published under an unchanged filename
+            # routinely lands here with new content under the SAME id and
+            # the SAME name. Refusing this delete would leave the device
+            # stuck on stale content forever with no path back to the
+            # catalog's current target, on every such republish — so
+            # convergence wins even over an adopted file (the operator's
+            # file is not assumed to match either the old or the new
+            # content; the catalog changed, not necessarily anything about
+            # what is actually sitting at this name). The one thing owed to
+            # the operator is honesty: say so before overriding it.
+            if deps.copy_in_place and done_st.get("origin") != "downloaded":
+                deps.emit("ROOTCOPY-REPLACED",
+                          "replacing operator-adopted %s: catalog content "
+                          "changed under image id %s" % (image["filename"],
+                                                          img_id))
             deps.remove_stage(stage)      # stale content on disk -> drop, re-download
             staged_ok = False
             # Same catalog id with new content is a genuine image change, so a
             # previous terminal placement failure must not poison the new bytes.
             _reset_copy_failures(done_st)
+            # A fresh acquisition cycle starts here: whatever provenance the
+            # OLD content had must not leak into the verdict for the NEW
+            # content (e.g. a genuine download's leftover flag wrongly
+            # marking a subsequent operator-adopted replacement as
+            # 'downloaded'). aria_add re-sets it later THIS SAME tick if the
+            # file really is gone and a fresh download starts.
+            done_st.pop("origin", None)
+            done_st.pop("download_started", None)
+        # 'copied' is a fact about the FLASH-ROOT copy, and root_present()
+        # above just checked THAT copy by presence AND exact catalog size.
+        # Clearing it unconditionally threw that answer away and re-ran a
+        # ~1.2 GB placement for a copy demonstrably still in place — which is
+        # precisely where an un-parked image lands (park deletes the stage
+        # copy and deliberately keeps the root copy, so the only thing missing
+        # is the staged file). Content that CHANGED invalidates the root copy
+        # too, so a stale sha still forces the re-placement, as does a root
+        # copy that is missing or the wrong size.
         done_st["done"] = staged_ok       # keep 'done' only for a root-only loss
-        done_st["copied"] = False         # always re-copy
+        done_st["copied"] = bool(root_ok and content_ok)
 
-    # reassigned to a DIFFERENT image? clean up everything from the old one FIRST
-    # (operator requirement: no stale files on the device). Removes the old torrent
-    # from aria2c, deletes old staged files, and deletes the old flash-root copy —
-    # but ONLY the one IRIS itself placed there (tracked in state).
-    prev = state.get("image_id")
-    if prev and prev != img_id:
-        deps.purge_others(image["filename"], img_id)
-        old_root = state.pop("root_file", None)
-        if old_root and old_root != image["filename"]:
-            pending = state.setdefault("pending_root_deletes", [])
-            if old_root not in pending:
-                pending.append(old_root)
-        state.pop(prev, None)             # old image's done/copied flags
-        # Returning to an image id seen in older state is still a new catalog
-        # assignment and is allowed to clear that image's terminal retry gate.
-        _reset_copy_failures(state.setdefault(img_id, {}))
-    state["image_id"] = img_id
+    # Legacy bookkeeping: the old agent's one-image world had a single
+    # top-level "current image" pointer, and readers of the state file (plus
+    # the top-level root_file mirror written on placement) still expect it.
+    # The FIRST image of the set owns it; the per-image records under
+    # state[<image id>] are the real thing.
+    # Written HERE rather than in run_once to keep the single-image agent's
+    # ORDER: the pointer only ever advanced AFTER the catalog answered for the
+    # image and its filename passed the whitelist, so a device assigned an
+    # image the catalog does not have — or one it names illegally — keeps
+    # pointing at the image it actually staged.
+    if legacy_pointer:
+        state["image_id"] = img_id
 
     # Delete replaced flash-root images, VERIFYING each is actually gone
     # before claiming CLEANUP: AAA nodes silently no-op a raw exec `delete`
@@ -710,15 +1248,41 @@ def run_once(cfg, deps, state):
     # retried every tick (the applet may still be running when we look; the
     # next tick's re-check settles it). The whitelist re-check guards the
     # destructive interpolation against a hand-edited state file.
+    # NOTHING QUEUES HERE ANY MORE: an image dropped from the assignment set is
+    # parked and its root copy deliberately kept (_reconcile_set). The drain
+    # stays for state files written by the agent that did queue replaced root
+    # copies — those deletes were promised to an operator and must still land.
+    #
+    # Provenance gate (Directive 2): pending_root_deletes names a FILE, not
+    # the per-image record that placed it, so its origin is looked up by
+    # root_file. Gated on deps.copy_in_place exactly like the park guard: a
+    # platform that physically writes its own root copy (every IOS-XE
+    # platform) has no adoption concept at all, so a legacy entry with no
+    # owning record there is deleted exactly as it always was — treating it
+    # as "operator-adopted" would be a false claim, and worse, would strand
+    # a genuinely replaced image on flash forever with nothing left to
+    # retry it. On a platform WITH an adoption concept (copy_in_place), a
+    # name whose owning record says 'downloaded' is deleted exactly as
+    # before; 'adopted' or unproven (no owning record at all, or one with
+    # no origin — a state file older than this field) is left in place,
+    # logged once, and resolved out of the queue immediately rather than
+    # retried forever — there is nothing a retry could ever change.
     pending = state.get("pending_root_deletes") or []
     if pending:
         fs = state.get("stage_fs", "flash:")
         doomed = [n for n in pending
                   if n != image["filename"] and _FILENAME_RE.match(n)]
-        if doomed:
-            deps.reclaim_bundle(fs, doomed)
+        deletable = [n for n in doomed
+                    if not deps.copy_in_place
+                    or _root_file_origin(state, n) == "downloaded"]
+        for protected in doomed:
+            if protected not in deletable:
+                deps.emit("ROOTCOPY-KEPT",
+                          "left in place: operator-adopted %s" % protected)
+        if deletable:
+            deps.reclaim_bundle(fs, deletable)
         still = []
-        for old_root in doomed:
+        for old_root in deletable:
             if deps.root_present(old_root, fs):
                 still.append(old_root)
                 deps.emit("CLEANUP-PENDING",
@@ -762,24 +1326,32 @@ def run_once(cfg, deps, state):
                           % (image["filename"], img_id))
             # Place at flash root via NATIVE EEM. The agent templates the
             # IRIS-COPYROOT applet and fires it; the applet clears any stale
-            # same-named leftover, then runs `copy /verify` (copy + Cisco
-            # signature, enforced by IOS in one step — a bad signature fails the
-            # copy and deletes the destination). The agent then polls for the
-            # file at flash root: presence proves THIS attempt's copy/verify
-            # passed. copy_to_root returns False if the file never appears ->
-            # st['copied'] stays False so the next tick retries.
+            # same-named leftover, then runs a plain `copy` — no in-band
+            # signature check. The agent then polls for the file at flash
+            # root and blesses the copy only on presence AND an exact
+            # byte-size match against the catalog's declared size for this
+            # image. copy_to_root returns False if the file never appears or
+            # never reaches the expected size -> st['copied'] stays False so
+            # the next tick retries.
             # Copy gate: placing the flash-root copy needs room for a SECOND
-            # full-size image alongside the staged/seeding scratch. On a tight
-            # device that fit one image but not two, degrade to keep-seeding-only
-            # — the staged file keeps feeding the swarm, the running image is
-            # untouched, and we surface the shortfall instead of failing a copy.
+            # full-size image alongside the staged/seeding scratch — UNLESS
+            # copy_to_root never duplicates bytes at all (deps.copy_in_place,
+            # e.g. XR's attest_in_place: stage_dir IS the root, so "placing"
+            # the copy is just a stat of the file already staged there). On a
+            # tight device that fit one image but not two, degrade to
+            # keep-seeding-only — the staged file keeps feeding the swarm,
+            # the running image is untouched, and we surface the shortfall
+            # instead of failing a copy.
             if not st.get("copied"):
                 mode = deps.detect_mode()
                 target_prefix, free = deps.target_fs()
                 state["stage_fs"] = target_prefix
                 # Container placement first creates an IOS-visible scratch and
-                # then the root copy, so it transiently consumes two full images.
-                copy_bytes = size * (2 if deps.io_transfer else 1)
+                # then the root copy, so it transiently consumes two full
+                # images; a platform whose root copy IS the staged file (no
+                # new bytes written) needs no additional headroom at all.
+                copy_bytes = (0 if deps.copy_in_place else
+                              size * (2 if deps.io_transfer else 1))
                 if not flashcheck.has_room(free, copy_bytes):
                     # Only burn the once-guard when reclaim ACTUALLY ran — a
                     # transient mode=None (or unconfirmable running image) does
@@ -799,20 +1371,19 @@ def run_once(cfg, deps, state):
                         obs, peers = _build_observation(
                             cfg, deps, state, img_id, stage, "seeding-only",
                             time.time())
-                        hb = _send_heartbeat(
-                            deps, sid, _heartbeat(image, deps,
-                                                  "flash_full_seeding_only",
-                                                  target_fs=state.get("stage_fs"),
-                                                  tele_on=tele_on,
-                                                  observation=obs,
-                                                  stream_on=stream_on))
-                        _telemetry_tick(cfg, deps, state, img_id, stage,
-                                        "seeding-only", hb, time.time(),
-                                        peers=peers)
+                        hb = tick.heartbeat(image, deps,
+                                            "flash_full_seeding_only",
+                                            target_fs=state.get("stage_fs"),
+                                            tele_on=tele_on,
+                                            observation=obs,
+                                            stream_on=stream_on)
+                        tick.telemetry(cfg, deps, state, img_id, stage,
+                                       "seeding-only", hb, time.time(),
+                                       peers=peers)
                         return "seeding-only"
                 st.pop("blocked_no_space", None)
                 # Container-mode IOx devices must SCP the completed image into
-                # IOS-visible storage before the final copy /verify. That large
+                # IOS-visible storage before the final placement copy. That large
                 # transfer blocks this agent process, so publish its state first
                 # instead of leaving the Console on ambiguous "staging".
                 now = time.time()
@@ -829,6 +1400,10 @@ def run_once(cfg, deps, state):
                               "%s retry deferred until %d"
                               % (image["filename"], st["copy_next_ts"]))
                 elif deps.io_transfer:
+                    # POSTed on the spot, not deferred with the tick's set
+                    # heartbeat: its whole point is to be visible BEFORE the
+                    # long blocking transfer below, so the Console does not sit
+                    # on an ambiguous "staging" for minutes.
                     _send_heartbeat(
                         deps, sid, _heartbeat(image, deps, "transferring_to_ios",
                                               target_fs=target_prefix,
@@ -836,7 +1411,10 @@ def run_once(cfg, deps, state):
                                               stream_on=stream_on))
                 if not st.get("copy_terminal") \
                         and now >= st.get("copy_next_ts", 0):
-                    result = deps.copy_to_root(image["filename"], target_prefix)
+                    result = deps.copy_to_root(image["filename"], target_prefix, size)
+                    # ROOT_COPY_NOT_ATTEMPTED is a truthy object(), so it MUST be
+                    # excluded before any plain truth test on `result`.
+                    attempted = result is not ROOT_COPY_NOT_ATTEMPTED
                     if result is ROOT_COPY_RUNNING_IMAGE_UNKNOWN:
                         # Transient: the running-image scrape glitched, not a
                         # copy failure. Leave copy_attempts/copy_next_ts alone
@@ -844,21 +1422,49 @@ def run_once(cfg, deps, state):
                         # copy_failed terminal state — retry next tick exactly
                         # as before the bounded-retry schedule existed.
                         pass
-                    elif result:
+                    elif attempted and result:
                         st["copied"] = True
-                        state["root_file"] = image["filename"]
+                        # Per image, because a set can have several root copies
+                        # placed at once — and parking one has to know which
+                        # file it placed. The top-level key stays as the legacy
+                        # mirror for the FIRST image of the set (state files are
+                        # read by older code paths and by _protect_set).
+                        st["root_file"] = image["filename"]
+                        if state.get("image_id") == img_id:
+                            state["root_file"] = image["filename"]
+                        # Provenance (Directive 2): a platform whose
+                        # copy_to_root PHYSICALLY writes the root copy
+                        # (copy_in_place=False, every IOS-XE platform) has no
+                        # adoption path at all — this agent's own copy/scp
+                        # wrote those bytes, full stop. A platform whose
+                        # copy_to_root is attest-in-place can succeed WITHOUT
+                        # this agent ever transferring anything, so its
+                        # verdict depends on whether THIS agent's aria2
+                        # session is what fetched the file
+                        # (download_started, set at the aria_add call site) —
+                        # absent means attest_in_place adopted bytes that
+                        # were already at the mount. Every deletion path
+                        # keyed on 'origin' treats anything but 'downloaded'
+                        # as adopted, including a missing origin (legacy
+                        # state), fail-safe by construction.
+                        st["origin"] = ("downloaded" if not deps.copy_in_place
+                                       or st.get("download_started")
+                                       else "adopted")
                         _reset_copy_failures(st)
-                        # Record the IOS copy /verify outcome INTO STATE at the
-                        # decision point (spec §3D): 'ok' means this attempt's
-                        # copy /verify passed. Independent of content_sha256.
-                        # Durability follows the report (freeze checkpoint /
-                        # final save); re-derived idempotently after a crash.
-                        st.setdefault("tele", {})["ios_copy_verify_state"] = "ok"
                     else:
+                        if attempted:
+                            # A genuine failure that got past the delete-first:
+                            # IOS work ran, so a file at the image name now is
+                            # OUR partial. This is the ONLY thing that arms the
+                            # terminal reclaim (Layer 1). A pre-IOS refusal
+                            # still counts as an attempt below — the operator
+                            # must still reach the terminal state — but it
+                            # deleted nothing, so it must never authorise a
+                            # delete. Cleared with copy_attempts in
+                            # _reset_copy_failures.
+                            st["ios_copy_started"] = True
                         attempts = st.get("copy_attempts", 0) + 1
                         st["copy_attempts"] = attempts
-                        st.setdefault("tele", {})[
-                            "ios_copy_verify_state"] = "failed"
                         st["stage_error"] = (
                             "final IOS placement failed; inspect IRIS ROOTCOPY-FAIL")
                         if attempts >= _ROOT_COPY_MAX_ATTEMPTS:
@@ -867,6 +1473,22 @@ def run_once(cfg, deps, state):
                             deps.emit("ROOTCOPY-GIVEUP",
                                       "%s placement failed %d times; manual intervention required"
                                       % (image["filename"], attempts))
+                            # Transition-only: copy_terminal short-circuits the
+                            # whole copy block from the next tick on, so this
+                            # runs exactly once. Nothing else owns the leftover.
+                            # Layer 1: only a genuine post-delete-first failure
+                            # proves the file at that name is ours to delete.
+                            if st.get("ios_copy_started"):
+                                _reclaim_failed_root_copy(deps, target_prefix,
+                                                          image)
+                            else:
+                                deps.emit(
+                                    "ROOTCOPY-RECLAIM-REFUSED",
+                                    "%s left in place at %s: no attempt reached "
+                                    "IOS (every failure was refused or failed "
+                                    "before the delete-first), so anything at "
+                                    "that name is not ours to delete"
+                                    % (image["filename"], target_prefix))
                         else:
                             if attempts == 1:
                                 # Retry on the next tick for fast recovery from
@@ -880,18 +1502,17 @@ def run_once(cfg, deps, state):
             # the heartbeat never claims a verified root copy that isn't there.
             obs, _ = _build_observation(cfg, deps, state, img_id, stage,
                                         "seeding-only", time.time())
-            hb = _send_heartbeat(
-                deps, sid, _heartbeat(image, deps,
-                                       "ready" if st.get("copied") else
-                                       ("copy_failed" if st.get("copy_terminal")
-                                        else "staging"),
-                                       target_fs=state.get("stage_fs"),
-                                       tele_on=tele_on,
-                                       stage_error=st.get("stage_error"),
-                                       observation=obs,
-                                       stream_on=stream_on))
-            _telemetry_tick(cfg, deps, state, img_id, stage, "copied",
-                            hb, time.time())
+            hb = tick.heartbeat(image, deps,
+                                "ready" if st.get("copied") else
+                                ("copy_failed" if st.get("copy_terminal")
+                                 else "staging"),
+                                target_fs=state.get("stage_fs"),
+                                tele_on=tele_on,
+                                stage_error=st.get("stage_error"),
+                                observation=obs,
+                                stream_on=stream_on)
+            tick.telemetry(cfg, deps, state, img_id, stage, "copied",
+                           hb, time.time())
             return "complete"
         deps.emit("ERROR", "%s sha256 MISMATCH - discarding" % image["filename"])
         # Record the mismatch fact INTO STATE at the decision point (spec §3D):
@@ -929,13 +1550,12 @@ def run_once(cfg, deps, state):
                        % (image["filename"], free,
                           stage_bytes + flashcheck.HEADROOM,
                          mode))
-            hb = _send_heartbeat(
-                deps, sid, _heartbeat(image, deps, "flash_full",
-                                      target_fs=state.get("stage_fs"),
-                                      tele_on=tele_on,
-                                      stream_on=stream_on))
-            _telemetry_tick(cfg, deps, state, img_id, stage, "no-space",
-                            hb, time.time())
+            hb = tick.heartbeat(image, deps, "flash_full",
+                                target_fs=state.get("stage_fs"),
+                                tele_on=tele_on,
+                                stream_on=stream_on)
+            tick.telemetry(cfg, deps, state, img_id, stage, "no-space",
+                           hb, time.time())
             return "no-space"
 
     # stage the torrent, then kick aria2c — but ONLY if the image file isn't there
@@ -956,14 +1576,49 @@ def run_once(cfg, deps, state):
         # the device never heartbeats and is invisible exactly while broken.
         # OSError covers the whole family (URLError subclasses it). Degrade to
         # an error heartbeat; the next tick retries after bootstrap relaunches.
-        # A fresh download of this image starts here: drop any peer-receipt
+        # A fresh download of this image starts here: drop any peer-transfer
         # snapshot left by a PREVIOUS transfer of the same file, which is the
         # only thing that shares its sidecar name.
-        _discard_peer_receipts(stage)
+        _discard_peer_transfer_records(stage)
         try:
             deps.aria_remove(image["filename"])
             deps.aria_add(torrent, stage_dir)
+            # Provenance (Directive 2): proof, for the eventual origin
+            # verdict, that THIS agent's own aria2 session is what is
+            # fetching this image — recorded only once the call actually
+            # went through (an RPC failure below re-tries the whole thing,
+            # including this, next tick).
+            state.setdefault(img_id, {})["download_started"] = True
         except OSError as e:
+            # An HTTP 400/401 from the RPC endpoint is NOT a dead daemon: it is
+            # aria2c rejecting our token, which is the ordinary state of a
+            # freshly-onboarded device. The installer bakes rpc-secret EMPTY on
+            # purpose, guestshell-start.sh seeds aria2c from that file, and the
+            # real secret only arrives on this agent's first token refresh --
+            # so until bootstrap.sh's step 2 syncs the file and bounces the
+            # daemon, every RPC we make is unauthorized. aria2-next answers
+            # that with HTTP 400 (upstream aria2 returns a JSON-RPC error
+            # object instead, which is why this never showed up before the
+            # fork), and urllib's HTTPError is an OSError subclass -- so this
+            # arm reported a healthy device mid-bringup as a staging FAILURE,
+            # "aria2c RPC unreachable: HTTP Error 400: Bad Request", which
+            # cleared itself a tick or two later once bootstrap ran again.
+            #
+            # Reported as 'staging' with NO stage_error: the device really is
+            # in the staging lifecycle and nothing has failed. 'staging' is
+            # also an already-valid wire value (catalog.py _V2_STAGE_STATES),
+            # so this cannot make a heartbeat get rejected. The return string
+            # stays "aria2-down" because bootstrap logs and tests key off that
+            # vocabulary -- what changes is what the OPERATOR is told, not the
+            # control flow.
+            if getattr(e, "code", None) in (400, 401):
+                deps.emit("ARIA2-AUTH",
+                          "aria2c has not adopted the rotated RPC secret yet; "
+                          "bootstrap will resync and bounce it (%s)" % e)
+                tick.heartbeat(image, deps, "staging",
+                               target_fs=state.get("stage_fs"),
+                               tele_on=tele_on, stream_on=stream_on)
+                return "aria2-down"
             deps.emit("ARIA2-DOWN",
                       "aria2c RPC unreachable; cannot stage %s: %s"
                       % (image["filename"], e))
@@ -976,13 +1631,11 @@ def run_once(cfg, deps, state):
                     image_id=img_id)
             except Exception:
                 pass
-            _send_heartbeat(deps, sid,
-                            _heartbeat(image, deps, "error",
-                                       target_fs=state.get("stage_fs"),
-                                       tele_on=tele_on, stream_on=stream_on,
-                                       observation=rpc_obs,
-                                       stage_error="aria2c RPC unreachable: %s"
-                                                   % e))
+            tick.heartbeat(image, deps, "error",
+                           target_fs=state.get("stage_fs"),
+                           tele_on=tele_on, stream_on=stream_on,
+                           observation=rpc_obs,
+                           stage_error="aria2c RPC unreachable: %s" % e)
             return "aria2-down"
         deps.emit("STAGING", "downloading %s via private swarm" % image["filename"])
     else:
@@ -992,39 +1645,148 @@ def run_once(cfg, deps, state):
                   % (image["filename"], have * 100 // size, have >> 20, size >> 20))
     obs, peers = _build_observation(cfg, deps, state, img_id, stage,
                                     "downloading", time.time())
-    hb = _send_heartbeat(deps, sid, _heartbeat(image, deps,
-                                               target_fs=state.get("stage_fs"),
-                                               tele_on=tele_on,
-                                               observation=obs,
-                                               stream_on=stream_on))
-    _telemetry_tick(cfg, deps, state, img_id, stage, "downloading",
-                    hb, time.time(), peers=peers)
+    hb = tick.heartbeat(image, deps,
+                        target_fs=state.get("stage_fs"),
+                        tele_on=tele_on,
+                        observation=obs,
+                        stream_on=stream_on)
+    tick.telemetry(cfg, deps, state, img_id, stage, "downloading",
+                   hb, time.time(), peers=peers)
     return "downloading"
 
 
-# ---- catalog TLS context selection (#12: verify-if-present) ----
-# Pure + unit-tested (test_catalog_tls.py) so the verify/warn branch is covered
-# off-box even though build_deps itself is `# pragma: no cover`.
+def run_once(cfg, deps, state):
+    # Self-refresh the catalog token BEFORE any catalog work, once it's past
+    # half-life (or its expiry is unknown). Best-effort: deps.refresh() does the
+    # POST + client rebind + atomic conf rewrite and returns the updated cfg,
+    # or None on failure — on failure we log and proceed on the current
+    # in-memory cfg (a 7d TTL + half-life refresh leaves a ~3.5d retry buffer,
+    # so a few failed ticks never strand the device; the live client's bearer
+    # is _refresh_impl's concern, see its docstring for the failure split).
+    if needs_refresh(time.time(),
+                     int(float(cfg.get("token_expires_at", 0) or 0)),
+                     _TOKEN_TTL, _TOKEN_REFRESH_AT):
+        new_cfg = deps.refresh()
+        if new_cfg is None:
+            deps.emit("TOKEN-REFRESH-FAIL",
+                      "catalog token refresh failed; proceeding on current token")
+        else:
+            cfg = new_cfg
+    sid = cfg["device_id"]
+    stage_dir = cfg["stage_dir"]
+    tele_on = telemetry_report.enabled(cfg)
+    stream_on = telemetry_report.stream_enabled(cfg)
 
-def make_catalog_context(cfg, warn):
+    # Upgrade from an older agent: clear "copied" so the next copy_to_root
+    # re-verifies the flash-root copy instead of trusting the old flag.
+    # Keep root_file — the park pass below needs it to know which file each
+    # image placed. Only emit UPGRADE if we actually cleared something.
+    # Runs ONCE per tick, before the set is reconciled or any image is staged.
+    if state.get("schema_version", 1) < _STATE_SCHEMA:
+        cleared = False
+        for v in state.values():
+            if isinstance(v, dict) and v.get("copied"):
+                v["copied"] = False
+                cleared = True
+        state["schema_version"] = _STATE_SCHEMA
+        if cleared:
+            deps.emit("UPGRADE", "re-verifying flash-root copy after upgrade")
+
+    policy = deps.catalog.get_policy(sid)
+    # The server assigns an ORDERED SET of images (at most 10). Older servers,
+    # and policy rows they wrote, carry only the singular approved_image_id —
+    # fall back to it and stage a set of one, which is byte-for-byte the old
+    # single-image behaviour.
+    ids = policy.get("approved_image_ids")
+    if not isinstance(ids, (list, tuple)) or not ids:
+        single = policy.get("approved_image_id")
+        ids = [single] if single else []
+    # De-duplicate, keeping assignment order. The server rejects duplicates, so
+    # this only guards a hand-edited policy: staging the same id twice in one
+    # tick would double every emit and list it twice in staged_image_ids.
+    ids = list(dict.fromkeys(i for i in ids if i))
+    if not ids:
+        # Still heartbeat: an unassigned device must register (devices.json,
+        # swarm map, telemetry posture) or console onboarding can never see
+        # it come up — assignment only gates staging, not presence.
+        _send_heartbeat(deps, sid,
+                        _heartbeat(None, deps, "unassigned",
+                                   target_fs=cfg.get("target_fs"),
+                                   tele_on=tele_on, stream_on=stream_on,
+                                   observation=_not_active_observation(
+                                       tele_on, time.time())))
+        return "no-assignment"
+
+    # Settle what the set means for what is already on the device — park what
+    # left it, un-park what came back — BEFORE staging anything.
+    _reconcile_set(deps, state, ids, stage_dir)
+
+    ticks = []
+    statuses = []
+    for idx, img_id in enumerate(ids):
+        tick = _ImageTick()
+        ticks.append(tick)
+        # The FIRST image of the set carries the legacy top-level "image_id"
+        # pointer; _stage_image writes it where the single-image agent did,
+        # after that image's own catalog and filename checks pass.
+        statuses.append(_stage_image(cfg, deps, state, img_id, tele_on,
+                                     stream_on, tick,
+                                     legacy_pointer=(idx == 0)))
+
+    # ONE heartbeat for the whole set (the device is one row on the server),
+    # then each image's telemetry replayed against the answer it carried.
+    hb_resp = _send_set_heartbeat(deps, sid, state, ids, ticks)
+    for tick in ticks:
+        tick.replay(hb_resp)
+
+    # A one-image set returns EXACTLY the string the single-image agent did —
+    # bootstrap logs and tests key off that vocabulary. A real set reports
+    # every image's status, in the order the server assigned them.
+    if len(ids) == 1:
+        return statuses[0]
+    return "multi:" + ",".join(statuses)
+
+
+# ---- catalog TLS context selection (#12: FAIL CLOSED on an unpinned CA) ----
+# Pure + unit-tested (test_catalog_tls.py) so the verify/refuse branch is
+# covered off-box even though build_deps itself is `# pragma: no cover`.
+
+class CatalogTLSConfigError(Exception):
+    """Raised by make_catalog_context() when catalog_ca is unset or its file
+    is missing. Never caught to fall back to an unverified connection: the
+    previous "verify-if-present" behavior silently downgraded to
+    ssl._create_unverified_context() (no chain or hostname validation at all)
+    whenever a dropped conf happened to omit catalog_ca -- a real
+    MITM-exploitable TLS downgrade on the device's control-plane channel,
+    logged only by a single warn() call nobody was watching for. Every
+    platform entrypoint bakes/synthesizes a real catalog_ca on first boot, so
+    a device that raises this has a genuine misconfiguration, not a
+    legitimate legacy state."""
+
+
+def make_catalog_context(cfg, error):
     """Return the ssl.SSLContext for the catalog connection.
 
-    verify-if-present (LOCKED back-compat, spec §4.6):
+    FAIL CLOSED (security fix; replaces the old "verify-if-present", spec
+    §4.6 back-compat fallback):
       * catalog_ca set AND the file exists -> a VERIFYING context
         (ssl.create_default_context(cafile=...) does full chain + hostname/IP-SAN
         validation; catalog_url uses the SAN IP so the match succeeds);
-      * otherwise -> today's UNVERIFIED context, but call warn(msg) once so an
-        agent-only upgrade (new bundle, old config with no catalog_ca) does NOT
-        break the running fleet — it just logs that TLS is not pinned.
-    `warn` is the agent's syslog emit (injected so this is testable off-box)."""
+      * otherwise -> call error(msg) once, then raise CatalogTLSConfigError.
+        The connection attempt fails outright -- an operator sees a device
+        that cannot reach the catalog, never one silently exposed over an
+        unverified TLS connection. This function must NEVER return
+        ssl._create_unverified_context().
+    `error` is the agent's syslog emit (injected so this is testable off-box)."""
     import os
     import ssl
     ca = cfg.get("catalog_ca")
     if ca and os.path.exists(ca):
         return ssl.create_default_context(cafile=ca)
-    warn("catalog_ca not set or file missing - TLS NOT verified (legacy); "
-         "re-run installer to pin")
-    return ssl._create_unverified_context()
+    msg = ("catalog_ca is not set; refusing an unverified TLS connection - "
+           "set catalog_ca in the agent conf")
+    error(msg)
+    raise CatalogTLSConfigError(msg)
 
 
 # ---- Phase 2: catalog token self-refresh (half-life, stdlib only) ----
@@ -1056,25 +1818,42 @@ def needs_refresh(now, expires_at, ttl, refresh_at):
     return now >= expires_at - ttl * (1 - refresh_at)
 
 
-def _refresh_impl(cfg, conf_path, refresh_token_fn, emit_fn):
-    """Refresh the catalog token and persist the new secret bag.
+def _refresh_impl(cfg, conf_path, catalog, emit_fn):
+    """Refresh the catalog token, re-point the live client, persist the bag.
 
-    1. POST token-refresh (refresh_token_fn) -> {catalog_token, expires_at,
-       announce_token, rpc_secret}.
-    2. Merge into a copy of cfg, atomically rewrite conf_path, return the
+    1. POST token-refresh (catalog.refresh_token) -> {catalog_token,
+       expires_at, announce_token, rpc_secret}.
+    2. Re-point catalog.token at the new bearer IMMEDIATELY: the server
+       rotates on the POST, and heartbeat/telemetry reject the rolled token
+       even inside the overlap window. token-refresh alone can reissue the
+       current bag to recover a lost response or failed conf write, but the
+       rest of THIS tick — the heartbeat is its last step — must authenticate
+       with the new token; leaving the client on the old one ends every refresh
+       tick in a spurious HTTP 401 heartbeat.
+    3. Merge into a copy of cfg, atomically rewrite conf_path, return the
        reloaded cfg.
 
     Best-effort: ANY failure (network, write) logs TOKEN-REFRESH-FAIL and
     returns None so the caller proceeds on the current in-memory cfg. On the
-    POST-failure path the on-disk conf is never touched (no partial write).
-    Module-level + injected callables so it's unit-testable; build_deps wires
-    the real CatalogClient.refresh_token + emit."""
+    POST-failure path the on-disk conf is never touched (no partial write)
+    and the client keeps its current bearer. On a conf-WRITE failure the
+    client still keeps the NEW bearer — the server has already rotated, so
+    the new token is the only one the device-bound routes will accept for
+    the rest of this process; the stale on-disk conf is the next process's
+    problem for the next tick, which can now recover the current bag using the
+    previous token until that token's original expiry.
+    Module-level + injected client/emit so it's unit-testable; build_deps
+    passes the real CatalogClient + emit."""
     sid = cfg["device_id"]
+    refresh_token_fn = catalog.refresh_token  # attr lookup outside the try:
+    # a mis-wired catalog (e.g. a bare callable) must fail loud, not be
+    # swallowed into a best-effort TOKEN-REFRESH-FAIL every tick.
     try:
         bag = refresh_token_fn(sid)
     except Exception as e:
         emit_fn("TOKEN-REFRESH-FAIL", "%s refresh POST failed: %s" % (sid, e))
         return None
+    catalog.token = bag["catalog_token"]
     new_cfg = dict(cfg)
     new_cfg["catalog_token"] = bag["catalog_token"]
     new_cfg["token_expires_at"] = str(bag["expires_at"])
@@ -1157,15 +1936,15 @@ def _find_aria_gid(rpc, stage_path):
     return None
 
 
-def _take_peer_receipt_sidecar(path):
-    """Read AND remove the hook's peer-receipt snapshot at `path`; returns the
+def _take_peer_transfer_sidecar(path):
+    """Read AND remove the hook's peer-transfer snapshot at `path`; returns the
     raw bytes, or None when there is nothing usable there. NEVER raises.
 
     Removal is unconditional, including when the document turns out to be
     garbage: this agent is one-shot, so a snapshot that cannot be used now
     never becomes usable later, and a leftover file keyed by staged FILENAME
     would be a candidate for folding into the next transfer of the same image.
-    Bounded by RECEIPT_MAX_BYTES — the hook writes a few hundred bytes per
+    Bounded by PEER_TRANSFER_MAX_BYTES — the hook writes a few hundred bytes per
     peer, so anything larger is not a snapshot and is not worth reading into a
     CPU-capped Guest Shell."""
     try:
@@ -1174,9 +1953,9 @@ def _take_peer_receipt_sidecar(path):
         return None                 # absent is the ordinary case: no hook ran
     raw = None
     try:
-        if size <= telemetry_report.RECEIPT_MAX_BYTES:
+        if size <= telemetry_report.PEER_TRANSFER_MAX_BYTES:
             with open(path, "rb") as f:
-                raw = f.read(telemetry_report.RECEIPT_MAX_BYTES)
+                raw = f.read(telemetry_report.PEER_TRANSFER_MAX_BYTES)
     except OSError:
         raw = None
     try:
@@ -1186,19 +1965,19 @@ def _take_peer_receipt_sidecar(path):
     return raw
 
 
-def _discard_peer_receipts(stage_path):
+def _discard_peer_transfer_records(stage_path):
     """Drop any snapshot left next to `stage_path` before a NEW download of the
     same image starts. The sidecar is keyed by staged filename, so this is what
-    keeps a previous transfer's receipts from ever being in a position to be
-    attributed to this one (telemetry_report.fold_peer_receipts' started_ts
+    keeps a previous transfer's transfer records from ever being in a position to be
+    attributed to this one (telemetry_report.fold_peer_transfer_records' started_ts
     check is the second, independent line of defence). Never raises."""
     try:
-        os.remove(telemetry_report.receipt_sidecar_path(stage_path))
+        os.remove(telemetry_report.peer_transfer_sidecar_path(stage_path))
     except OSError:
         pass
 
 
-def _ingest_peer_receipts(deps, tele, stage_path, now):
+def _ingest_peer_transfer_records(deps, tele, stage_path, now):
     """Fold the hook's exact per-peer byte snapshot into `tele`, then delete it.
 
     Called once per transfer, at the completion tick, BEFORE done_ts freezes
@@ -1210,15 +1989,15 @@ def _ingest_peer_receipts(deps, tele, stage_path, now):
     (daemon-mode stderr is /dev/null), so this must never be able to fail a
     tick. Returns True only when a snapshot was accepted."""
     try:
-        raw = _take_peer_receipt_sidecar(
-            telemetry_report.receipt_sidecar_path(stage_path))
+        raw = _take_peer_transfer_sidecar(
+            telemetry_report.peer_transfer_sidecar_path(stage_path))
         if raw is None:
             return False
-        block = telemetry_report.parse_receipt_snapshot(raw)
-        if not telemetry_report.fold_peer_receipts(tele, block, now):
+        block = telemetry_report.parse_peer_transfer_snapshot(raw)
+        if not telemetry_report.fold_peer_transfer_records(tele, block, now):
             return False
         deps.emit("TELEMETRY",
-                  "peer receipts: %d peers, %d bytes from peers (measured)"
+                  "peer transfer records: %d peers, %d bytes from peers (measured)"
                   % (block.get("rows_total", 0),
                      block.get("bytes_from_all_senders_total", 0)))
         return True
@@ -1333,31 +2112,101 @@ def _optional_progress(value):
 # with injected cli_execute / sha256 callables; build_deps below wires it up
 # with the real on-box implementations) ----
 
+_DIR_ROW_RE_TMPL = r"(?m)^\s*\d+\s+[^d\s]\S*\s+(\d+)\s+.*\s%s\s*$"
+
+
+def _dir_size_of(dir_out, fname):
+    """Byte size of *fname* from IOS `dir` output, or None when the row is
+    absent, unparseable, or a directory row. Anchored to the row END so
+    cat9k.bin never reads cat9k.bin.backup's size. The permissions column is
+    matched as any non-directory token ([^d\\s]\\S*) rather than a bare \\S+,
+    so a same-named directory (row starts with `d...`) is never mistaken for
+    a file — IOS file rows carry `-rw-`-style tokens, sometimes with a
+    trailing `.` (e.g. `-rw-rw-r--.`)."""
+    if not dir_out:
+        return None
+    m = re.search(_DIR_ROW_RE_TMPL % re.escape(fname), dir_out)
+    return int(m.group(1)) if m else None
+
+
+def _root_present_from_dir(dir_out, fname, expected_size=None):
+    """Steady-state presence verdict for the placed root copy, from one `dir`
+    read. Pure (module-level so it's unit-testable); build_deps.root_present
+    wraps it with the CLI call.
+
+    True unless IOS positively says the file is gone. When `expected_size` is
+    given, a parsed size that DISAGREES is False — a partial file left by an
+    interrupted transfer must not pass as "still there".
+
+    A row that is present but whose size can't be parsed returns True, for the
+    same reason build_deps.root_present returns True when the `dir` call itself
+    raises: one flaky or unparseable tick must not trigger a full ~GB re-copy,
+    and a real loss shows up as plain absence on the next tick."""
+    if not dir_out:
+        return False
+    if "%Error" in dir_out or "No such file" in dir_out:
+        return False
+    if fname not in dir_out:
+        return False
+    if expected_size is None:
+        return True
+    observed = _dir_size_of(dir_out, fname)
+    if observed is None:
+        return True
+    return observed == expected_size
+
+
 def _agent_reverify_root(fname, target_prefix, cli_execute_fn, emit_fn,
                         poll_attempts=180, poll_interval_s=5.0,
-                        sleep_fn=time.sleep):
-    """Bless the target-FS root copy once the IRIS-COPYROOT applet's
-    `copy /verify` has completed.
+                        sleep_fn=time.sleep, expected_size=None):
+    """Bless the target-FS root copy by presence AND exact size, independent
+    of however the file arrived at the target-FS root.
 
-    We trust `copy /verify`: IOS copies the file AND enforces the Cisco
-    signature in one step, and a failed signature fails the copy and deletes
-    the destination. The applet deletes any stale same-named leftover BEFORE
-    the copy (see _copy_to_root_impl), so after it runs a file at
-    <FS><fname> can only be one this attempt's `copy /verify` wrote and
-    signature-verified. That makes file presence a sound, attempt-scoped
-    verdict — and the device's guestshell can't read the FS root as a file or
-    run `verify` (it hangs) anyway, so `dir <FS><fname>` (a small, fast cli
-    call) is all it needs.
+    The contract this function owns: `dir <FS><fname>` must report a byte
+    count matching `expected_size` (the catalog's declared size for this
+    image) before the copy is called good. Presence alone is not a
+    verdict — a copy that dies mid-transfer can leave a PARTIAL file at the
+    destination rather than nothing. When `expected_size` is None, callers
+    get the old presence-only behaviour (used where the caller has no
+    catalog size to check against).
+
+    Whatever lands the file may still be in flight when this function polls:
+    a row that's present but the WRONG size partway through the poll window
+    just means the transfer is still running, so polling continues. Only a
+    size mismatch that persists all the way to the end of the poll budget is
+    treated as a failure. There's nothing extra to clean up here: it's on
+    whatever re-fires the copy on the next tick to clear any stale partial
+    before retrying.
+
+    This function makes no claim about how the file got there or whether any
+    signature was checked as part of landing it — it does not establish
+    content integrity or authenticity. The agent already computed a sha256
+    over the staged file before the copy ran, and authenticity of that
+    staged content is a server-side, publish-time property (the catalog
+    entry the sha256 was checked against). This poll only confirms presence
+    and exact catalog byte size at the target-FS root.
+
+    A row that IS present but whose size can't be parsed out of the `dir`
+    output (an unexpected format) is handled exactly like a wrong size: keep
+    polling, and if it persists to the end of the budget, fail — but say so
+    truthfully. Claiming the copy "never appeared" when it plainly did would
+    send an operator looking for the wrong fault.
 
     Polls `dir <FS><fname>` and returns bool:
-      * file appears  -> emit ROOTCOPY, return True
-      * never appears within the poll budget (signature failed -> dest deleted,
-        or the copy never ran) -> emit ROOTCOPY-FAIL, return False. Nothing to
-        delete; the next tick re-fires the applet.
+      * file appears with the expected size (or, when expected_size is None,
+        appears at all) -> emit ROOTCOPY, return True
+      * a size mismatch, or a present-but-unreadable size, persists through the
+        whole poll budget, or the file never appears at all -> emit
+        ROOTCOPY-FAIL naming which of those it was, return False.
 
-    Default poll budget (180 * 5 s ≈ 895 s) tracks the applet's `maxrun 900` so
-    a legitimately slow ~1.2 GB copy isn't abandoned a few minutes early."""
-    emit_fn("ROOTCOPY-VERIFYING", "%s applet running copy /verify" % fname)
+    Default poll budget (180 * 5 s ≈ 895 s) is sized to track a copy path's
+    typical ~900 s execution budget, so a legitimately slow ~1.2 GB copy
+    isn't abandoned a few minutes early."""
+    emit_fn("ROOTCOPY-VERIFYING", "%s awaiting root copy" % fname)
+    last_size = None
+    # Records the outcome of the LAST poll that actually saw the row, so the
+    # failure message below describes what was observed rather than guessing.
+    size_unreadable = False
     for i in range(poll_attempts):
         try:
             dir_out = cli_execute_fn("dir %s%s" % (target_prefix, fname))
@@ -1365,54 +2214,89 @@ def _agent_reverify_root(fname, target_prefix, cli_execute_fn, emit_fn,
             dir_out = ""
         if dir_out and "%Error" not in dir_out and "No such file" not in dir_out \
                 and fname in dir_out:
-            emit_fn("ROOTCOPY", "%s placed at flash root + verified" % fname)
-            return True
+            if expected_size is None:
+                emit_fn("ROOTCOPY", "%s placed at flash root" % fname)
+                return True
+            observed = _dir_size_of(dir_out, fname)
+            if observed is None:
+                # Present, but the row didn't parse. Treat it like a wrong
+                # size — keep polling — rather than declaring the copy absent.
+                size_unreadable = True
+            else:
+                size_unreadable = False
+                last_size = observed
+                if last_size == expected_size:
+                    emit_fn("ROOTCOPY", "%s placed at flash root, size verified "
+                            "(%d bytes)" % (fname, expected_size))
+                    return True
+            # present but wrong/unreadable size: may still be mid-copy — keep
+            # polling.
         if i < poll_attempts - 1:
             sleep_fn(poll_interval_s)
-    emit_fn("ROOTCOPY-FAIL",
-            "%s verify timed out (no file appeared at flash root)" % fname)
+    if size_unreadable:
+        emit_fn("ROOTCOPY-FAIL",
+                "%s root copy present but size unreadable from dir output; "
+                "cannot confirm the catalog's %s bytes — treated as unplaced"
+                % (fname, expected_size))
+    elif last_size is not None:
+        emit_fn("ROOTCOPY-FAIL", "%s root copy size mismatch: dir shows %d, "
+                "catalog says %d — partial copy treated as absent"
+                % (fname, last_size, expected_size))
+    else:
+        emit_fn("ROOTCOPY-FAIL",
+                "%s root copy never appeared at flash root" % fname)
     return False
 
 
 def _copy_to_root_impl(fname, target_prefix, cli_configure_fn, cli_execute_fn,
                        emit_fn, reverify_fn=_agent_reverify_root,
-                       copy_source=None, running_image_fn=None):
+                       copy_source=None, running_image_fn=None,
+                       expected_size=None):
     """Copy the staged image to the target filesystem root, then confirm it
     landed.
 
     The IRIS-COPYROOT EEM applet does the privileged work inside native IOS
     (operator requirement + `authorization bypass` for AAA nodes), because the
-    device's guestshell can't run `copy`/`verify` directly:
+    device's guestshell can't run `copy` directly:
       1. After confirming `<fname>` is not the running image, `delete /force
          <FS><fname>` clears any stale same-named leftover so
          the presence check below is scoped to THIS attempt. Harmless if no
          such file exists (`file prompt quiet` suppresses the prompt).
-      2. `copy /verify <FS>/guest-share/iris/<fname> <FS><fname>` — copy +
-         Cisco signature in one IOS-enforced step; a bad signature fails the
-         copy and leaves no destination file. Source and destination are both
-         the chosen staging FS: flash: on the C9300, sdflash: on the IE3k (where
-         IOx and the guest-share scratch live on the SD card).
-    The applet logs a NEUTRAL `ROOTCOPY-ATTEMPTED` breadcrumb only — it makes no
-    pass/fail claim. The agent (reverify_fn) owns the verdict: it polls for the
-    file and emits the authoritative `ROOTCOPY ... + verified` log on presence.
+      2. `copy <FS>/guest-share/iris/<fname> <FS><fname>` — a plain copy, no
+         in-band signature check. Source and destination are both the chosen
+         staging FS: flash: on the C9300, sdflash: on the IE3k (where IOx and
+         the guest-share scratch live on the SD card).
+    The applet logs a NEUTRAL `ROOTCOPY-ATTEMPTED` breadcrumb only — it makes
+    no pass/fail claim. The verdict belongs entirely to reverify_fn
+    (_agent_reverify_root) — see its docstring for the presence + exact
+    catalog byte size contract this function relies on.
 
-    Module-level + injected callables so it's unit-testable. Returns bool.
+    Module-level + injected callables so it's unit-testable. Returns True/False
+    — or ROOT_COPY_NOT_ATTEMPTED when it gives up before any IOS command runs
+    (either running-image refusal, or the applet run raising), because the
+    caller's terminal reclaim must not treat those as "our partial is at that
+    name".
 
-    `copy_source` (optional) overrides the `copy /verify` SOURCE. Default (None)
-    is the Guest Shell scratch on the staging FS (`<FS>/guest-share/iris/<fname>`)
+    `copy_source` (optional) overrides the copy SOURCE. Default (None) is
+    the Guest Shell scratch on the staging FS (`<FS>/guest-share/iris/<fname>`)
     — the C9300 path, unchanged. The IOx path SCP-pushes its local scratch to
     that same IOS-visible location before using the direct SSH copy helper. The
-    destination is always the target-FS root."""
+    destination is always the target-FS root.
+
+    `expected_size` is forwarded to reverify_fn unchanged; None (the default)
+    keeps the old presence-only behaviour for callers with no catalog size."""
     if running_image_fn is not None:
         running = running_image_fn()
         if not running:
             emit_fn("ROOTCOPY-REFUSED",
-                    "%s running image unknown; refusing destructive replacement" % fname)
-            return False
+                    "%s running image unknown; refusing destructive replacement "
+                    "(nothing was deleted — no IOS command ran)" % fname)
+            return ROOT_COPY_NOT_ATTEMPTED
         if _ios_basename(running).casefold() == fname.casefold():
             emit_fn("ROOTCOPY-REFUSED",
-                    "%s is the running image; refusing destructive replacement" % fname)
-            return False
+                    "%s is the running image; refusing destructive replacement "
+                    "(nothing was deleted — no IOS command ran)" % fname)
+            return ROOT_COPY_NOT_ATTEMPTED
     src = (copy_source(fname, target_prefix) if copy_source
            else "%s/guest-share/iris/%s" % (target_prefix, fname))
     cli_configure_fn([
@@ -1421,71 +2305,95 @@ def _copy_to_root_impl(fname, target_prefix, cli_configure_fn, cli_execute_fn,
         "event none maxrun 900",
         'action 010 cli command "enable"',
         'action 020 cli command "delete /force %s%s"' % (target_prefix, fname),
-        'action 030 cli command "copy /verify %s %s%s"'
-        % (src, target_prefix, fname),
+        'action 030 cli command "copy %s %s%s"' % (src, target_prefix, fname),
         'action 040 syslog msg "ROOTCOPY-ATTEMPTED %s"' % fname,
     ])
     try:
         cli_execute_fn("event manager run IRIS-COPYROOT")
     except Exception as e:
-        emit_fn("ROOTCOPY-FAIL", "%s applet run raised: %s" % (fname, e))
-        return False
-    return reverify_fn(fname, target_prefix, cli_execute_fn, emit_fn)
+        # The applet never fired (or we cannot tell that it did), so its
+        # action 020 delete-first cannot be assumed to have run. Anything at
+        # the target name is therefore NOT provably our partial: report the
+        # failure, but withhold the reclaim authorisation.
+        emit_fn("ROOTCOPY-FAIL",
+                "%s applet run raised before any IOS work could be confirmed: "
+                "%s" % (fname, e))
+        return ROOT_COPY_NOT_ATTEMPTED
+    return reverify_fn(fname, target_prefix, cli_execute_fn, emit_fn,
+                       expected_size=expected_size)
 
 
 def _copy_to_root_direct_impl(fname, target_prefix, cli_execute_fn, emit_fn,
                               reverify_fn=_agent_reverify_root, copy_source=None,
                               delete_source_on_success=False,
-                              running_image_fn=None):
-    """Copy the staged image to the target-FS root by running `copy /verify`
+                              running_image_fn=None, expected_size=None):
+    """Copy the staged image to the target-FS root by running a plain `copy`
     DIRECTLY in the agent's IOS vty — no EEM applet. This is the container /
     SSH-to-self (IE-3x00) path.
 
     The IRIS-COPYROOT applet offload (see _copy_to_root_impl) exists ONLY because
-    the C9300's Guest Shell `cli` module can't drive an interactive
-    `copy`/`verify` (it hangs). The IE-3x00 agent reaches IOS over a real
-    SSH-to-self vty (identical to `lab/device-run.sh`), which runs `copy /verify`
-    to completion — and on that platform/IOS-XE the EEM `action cli command
-    "copy …"` is a NO-OP (the applet completes in ~3 s reporting success but
-    transfers nothing), so the applet path is both unnecessary and broken here.
+    the C9300's Guest Shell `cli` module can't drive an interactive `copy`
+    (it hangs). The IE-3x00 agent reaches IOS over a real SSH-to-self vty
+    (identical to `lab/device-run.sh`), which runs `copy` to completion — and
+    on that platform/IOS-XE the EEM `action cli command "copy …"` is a NO-OP
+    (the applet completes in ~3 s reporting success but transfers nothing),
+    so the applet path is both unnecessary and broken here.
 
     Same two privileged steps the applet did, now issued directly:
       1. After confirming `<fname>` is not the running image, `delete /force
          <FS><fname>` clears any stale same-named leftover so the
          dir-presence verdict is scoped to THIS attempt (`file prompt quiet`
          suppresses the prompt; harmless if absent).
-      2. `copy /verify <src> <FS><fname>` — copy + Cisco signature in one
-         IOS-enforced step; a bad signature fails the copy and leaves no
-         destination file. `copy /verify` is synchronous, so the file is present
-         the moment it returns.
-    Verdict is owned by reverify_fn's dir-presence poll, exactly as the applet
-    path — keeping the success-log gating identical and unit-testable. Returns
-    bool. `copy_source` overrides the SOURCE like _copy_to_root_impl."""
+      2. `copy <src> <FS><fname>` — a plain copy, no in-band signature check.
+         `copy` is synchronous, so the file is present the moment it returns
+         (though possibly still short of its final size on a slow transfer).
+    Verdict belongs entirely to reverify_fn (_agent_reverify_root) — see its
+    docstring for the presence + exact catalog byte size contract this
+    function relies on (and to which `expected_size` is forwarded unchanged).
+    Keeps the success-log gating identical to the applet path and
+    unit-testable. Returns True/False — or ROOT_COPY_NOT_ATTEMPTED when it gives
+    up before the delete-first completes (either running-image refusal, or the
+    delete itself raising), because the caller's terminal reclaim must not treat
+    those as "our partial is at that name". A `copy` that raises AFTER the
+    delete-first is a plain False: that leftover really is ours. `copy_source`
+    overrides the SOURCE like _copy_to_root_impl."""
     if running_image_fn is not None:
         running = running_image_fn()
         if not running:
             emit_fn("ROOTCOPY-REFUSED",
-                    "%s running image unknown; refusing destructive replacement" % fname)
-            return False
+                    "%s running image unknown; refusing destructive replacement "
+                    "(nothing was deleted — no IOS command ran)" % fname)
+            return ROOT_COPY_NOT_ATTEMPTED
         if _ios_basename(running).casefold() == fname.casefold():
             emit_fn("ROOTCOPY-REFUSED",
-                    "%s is the running image; refusing destructive replacement" % fname)
-            return False
+                    "%s is the running image; refusing destructive replacement "
+                    "(nothing was deleted — no IOS command ran)" % fname)
+            return ROOT_COPY_NOT_ATTEMPTED
     src = (copy_source(fname, target_prefix) if copy_source
            else "%s/guest-share/iris/%s" % (target_prefix, fname))
     dst = "%s%s" % (target_prefix, fname)
     try:
         cli_execute_fn("delete /force %s" % dst)
-        cli_execute_fn("copy /verify %s %s" % (src, dst))
     except Exception as e:
-        emit_fn("ROOTCOPY-FAIL", "%s direct copy /verify raised: %s" % (fname, e))
+        # The delete-first itself failed, so the name was never cleared: a file
+        # there is the operator's, not ours. Withhold reclaim authorisation.
+        emit_fn("ROOTCOPY-FAIL",
+                "%s delete-first raised; no copy attempted: %s" % (fname, e))
+        return ROOT_COPY_NOT_ATTEMPTED
+    try:
+        cli_execute_fn("copy %s %s" % (src, dst))
+    except Exception as e:
+        # delete-first DID run: whatever is at the name now is our own partial,
+        # so a plain False (reclaim-authorising) is correct here.
+        emit_fn("ROOTCOPY-FAIL", "%s direct copy raised: %s" % (fname, e))
         return False
-    ok = reverify_fn(fname, target_prefix, cli_execute_fn, emit_fn)
+    ok = reverify_fn(fname, target_prefix, cli_execute_fn, emit_fn,
+                     expected_size=expected_size)
     # In container mode the scp-pushed guest-share scratch is a transfer
     # intermediary (the swarm seeds from the CAF-persistent stage_dir), so a
     # verified placement deletes it — otherwise a duplicate image doubles
     # steady-state target-FS usage. Kept on failure: the next tick re-runs
-    # copy /verify from it instead of re-pushing over the slow scp path.
+    # copy from it instead of re-pushing over the slow scp path.
     if ok and delete_source_on_success:
         try:
             cli_execute_fn("delete /force %s" % src)
@@ -1499,8 +2407,11 @@ def _reclaim_bundle_impl(target_prefix, names, cli_configure_fn, cli_execute_fn)
     IRIS-RECLAIM-BUNDLE authorization-bypass applet (AAA nodes silently no-op
     a raw exec `delete`). Callers own the never-delete-that guarantee: the
     bundle-mode download gate passes only names outside its protect set
-    (running/staging/seeding image + IRIS's own root copy), and the
-    replaced-root cleanup passes only re-whitelisted IRIS-placed root copies.
+    (running/staging/seeding image + IRIS's own root copy), the replaced-root
+    cleanup passes only re-whitelisted IRIS-placed root copies, and the
+    failed-placement reclaim (_reclaim_failed_root_copy) passes the single name
+    an attempt's own delete-first had already cleared, and only after its own
+    running-image check clears it.
     Fire-and-forget — callers that need proof re-check afterwards (the
     replaced-root cleanup verifies file presence; the download gate re-reads
     free space).
@@ -1536,10 +2447,11 @@ def _share_settings(cfg):
 # for a uid-0 container shell, while 100 MB writes to the CAF-created share
 # root ran at 1.5 GB/s). Isolation therefore comes from a NAME PREFIX: every
 # file IRIS writes or sweeps here starts with "iris-", and operator/CAF files
-# at the root are never touched. copy /verify reads the fixed staged name and
-# writes the REAL image name to the target FS, verifying the Cisco signature
-# from the bytes — the staged name is cosmetic. The swarm seeds from the
-# CAF-persistent stage_dir copy, never from the share.
+# at the root are never touched. The final copy reads the fixed staged name
+# and writes the REAL image name to the target FS — the staged name is
+# cosmetic. Content was already verified by sha256 before staging; the agent
+# attests this placement by exact byte size against the catalog. The swarm
+# seeds from the CAF-persistent stage_dir copy, never from the share.
 _SHARE_PREFIX = "iris-"
 _SHARE_PROBE = "iris-probe.txt"
 _SHARE_STAGE = "iris-staged.bin"
@@ -1549,8 +2461,8 @@ def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
                           copy_direct_fn, emit_fn, cli_execute_fn):
     """Land the downloaded scratch in the bind-mounted app-hosting share
     (C9k: usbflash1:iox_host_data_share, mounted into the container via
-    run-opts -v), then have IOS place it with an INTERNAL disk-to-disk
-    `copy /verify` — no scp, no control-plane punt path, no CoPP ceiling.
+    run-opts -v), then have IOS place it with an INTERNAL disk-to-disk plain
+    `copy` — no scp, no control-plane punt path, no CoPP ceiling.
 
     Everything IRIS writes lives at the share root under the reserved `iris-`
     filename prefix, so the orphan sweep below can never touch operator files
@@ -1570,7 +2482,7 @@ def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
     Returns None when the share cannot be used (unconfigured, not mounted,
     probe failed, or the local copy failed) so the caller falls back to the
     scp push. Otherwise returns copy_direct_fn's bool verdict: an IOS-side
-    `copy /verify` failure AFTER a good probe is FINAL — scp would push the
+    placement failure AFTER a good probe is FINAL — scp would push the
     same bytes. The transient share copy is always removed (the swarm seeds
     from the scratch under stage_dir, not from the share)."""
     if not (share_dir and share_ios_path and os.path.isdir(share_dir)):
@@ -1617,9 +2529,10 @@ def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
         _sweep()
         return None
     try:
-        # copy /verify reads the fixed staged name and writes the REAL image
-        # name to the target FS (the caller's dst); the Cisco signature is
-        # verified from the bytes, so the source name is cosmetic.
+        # The final copy reads the fixed staged name and writes the REAL
+        # image name to the target FS (the caller's dst) — the source name
+        # is cosmetic; the agent attests placement afterward by exact byte
+        # size against the catalog.
         return copy_direct_fn(
             lambda f, target_prefix: "%s/%s" % (share_ios_path, _SHARE_STAGE))
     finally:
@@ -1629,32 +2542,55 @@ def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
 # ---- on-box wiring (not exercised by unit tests) ----
 
 def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
+    # Platform seam. Everything below wires the IOS-XE families (Guest Shell
+    # and the SSH-to-self container), all of which reach the device through a
+    # CLI. An IOS-XR appmgr container has no CLI at all — it bind-mounts
+    # harddisk: and every device fact is a filesystem call — so conf
+    # `mode = xr` (written by device/xr/entrypoint.sh) selects that builder
+    # wholesale instead. Same 27-field Deps, same run_once.
+    if (cfg.get("mode") or "").strip() == "xr":
+        import xr_deps
+        return xr_deps.build_deps(cfg, conf_path, state_path)
     import base64
     import urllib.request
     import catalog_client
 
-    ctx = make_catalog_context(cfg, lambda m: emit("TLS-WARN", m))
+    # Runtime-mode seam: Guest Shell `cli` on the C9300 (default, unchanged) or
+    # an SSH-to-self transport in a plain IOx Docker app on the IE-3400. Gated by
+    # IRIS_RUNTIME_MODE / conf `runtime_mode`; see cli_ssh.select_cli. Bound
+    # (and `emit` defined) BEFORE make_catalog_context below: its fail-closed
+    # path calls the error callback SYNCHRONOUSLY, unlike copy_to_root/reclaim
+    # further down whose closures over `emit`/`cli_execute` aren't invoked
+    # until well after build_deps has returned. Calling make_catalog_context
+    # first (as this used to) reached that callback before `emit` -- itself
+    # relying on `cli_execute` -- had been assigned in this scope at all,
+    # which is a NameError, not a warning: only ever missed because build_deps
+    # is `# pragma: no cover` and the unit tests exercise make_catalog_context
+    # directly (test_catalog_tls.py), bypassing this wiring entirely.
+    import cli_ssh
+    cli_execute, cli_configure = cli_ssh.select_cli(cfg)
+
+    def emit(mnemonic, msg):
+        _emit_impl(cli_execute, mnemonic, msg)
+
+    ctx = make_catalog_context(cfg, lambda m: emit("TLS-ERROR", m))
     catalog = catalog_client.CatalogClient(
         cfg["catalog_url"], cfg["catalog_token"], context=ctx)
 
     def refresh():
-        # Thin wrapper — the POST + atomic conf rewrite + reload lives in the
-        # module-level _refresh_impl so it's unit-testable. Returns the reloaded
-        # cfg or None (best-effort).
-        return _refresh_impl(cfg, conf_path, catalog.refresh_token, emit)
-
-    # Runtime-mode seam: Guest Shell `cli` on the C9300 (default, unchanged) or
-    # an SSH-to-self transport in a plain IOx Docker app on the IE-3400. Gated by
-    # IRIS_RUNTIME_MODE / conf `runtime_mode`; see cli_ssh.select_cli.
-    import cli_ssh
-    cli_execute, cli_configure = cli_ssh.select_cli(cfg)
+        # Thin wrapper — the POST + client rebind + atomic conf rewrite +
+        # reload lives in the module-level _refresh_impl so it's unit-testable.
+        # Pass the CLIENT, not a bound method: _refresh_impl re-points
+        # catalog.token after the POST. Returns the reloaded cfg or None
+        # (best-effort).
+        return _refresh_impl(cfg, conf_path, catalog, emit)
 
     # IE3x00 IOx app: IOx can't bind-mount sdflash: into the container, and inbound
     # to the container is blocked, so the agent can't write the IOS-visible SD
     # directly. Instead it scp-PUSHES the downloaded scratch to sdflash:guest-share/
     # iris via the device's SCP server (container -> device, the proven direction —
-    # same as the SSH-to-self CLI), then the SSH vty runs
-    # `copy /verify sdflash:guest-share/iris/<img> sdflash:<img>` — byte-identical
+    # same as the SSH-to-self CLI), then the SSH vty runs a plain
+    # `copy sdflash:guest-share/iris/<img> sdflash:<img>` — byte-identical
     # to the C9300 flash:guest-share -> flash: flow. Guest Shell (C9300) writes its
     # scratch via the in-VM mount, so it pushes nothing here.
     _mode = (os.environ.get("IRIS_RUNTIME_MODE")
@@ -1663,8 +2599,8 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
 
     def _push_scratch(fname, target_prefix):
         # create the IOS-side scratch dir (idempotent; file prompt quiet => no
-        # prompt) then scp the downloaded file into it so `copy /verify` has a
-        # source IOS can read.
+        # prompt) then scp the downloaded file into it so the placement copy
+        # has a source IOS can read.
         for d in ("%sguest-share" % target_prefix,
                   "%sguest-share/iris" % target_prefix):
             try:
@@ -1674,10 +2610,12 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
         local = os.path.join(cfg["stage_dir"], fname)
         _transport.put(local, "%sguest-share/iris/%s" % (target_prefix, fname))
 
-    def copy_to_root(fname, target_prefix="flash:"):
+    def copy_to_root(fname, target_prefix="flash:", expected_size=None):
         # Thin wrapper — the actual flow lives in module-level impls so
         # behavioural tests can inject all callables and prove the success log
-        # is gated by _agent_reverify_root's pass.
+        # is gated by _agent_reverify_root's pass. expected_size is forwarded
+        # unchanged to whichever impl the platform branch below selects, and
+        # from there to _agent_reverify_root's presence + exact-size contract.
         running = running_image()
         if not running:
             emit("ROOTCOPY-REFUSED",
@@ -1691,9 +2629,14 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
             return ROOT_COPY_RUNNING_IMAGE_UNKNOWN
         if _ios_basename(running).casefold() == fname.casefold():
             emit("ROOTCOPY-REFUSED",
-                 "%s is the running image; refusing destructive replacement"
-                 % fname)
-            return False
+                 "%s is the running image; refusing destructive replacement "
+                 "(nothing was deleted — no IOS command ran)" % fname)
+            # NOT plain False: this refusal happens before any IOS command, so
+            # the delete-first never ran and the file at that name is the
+            # RUNNING IMAGE. A False here would authorise the terminal reclaim
+            # to delete it. Counts as an attempt all the same — see
+            # ROOT_COPY_NOT_ATTEMPTED.
+            return ROOT_COPY_NOT_ATTEMPTED
         # Freeze the confirmed value for this operation. Re-querying show version
         # after a 1.2 GB scratch transfer adds failure modes without improving the
         # basename safety decision made before any destructive command.
@@ -1701,8 +2644,8 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
         if _mode == "container" and _transport is not None:
             # C9k container: the SSD share (usbflash1:iox_host_data_share) is
             # bind-mounted at IRIS_SHARE_DIR, so the scratch lands there at
-            # disk speed and IOS places it with an internal disk-to-disk
-            # `copy /verify` — no scp, no CoPP-policed punt traffic. None =
+            # disk speed and IOS places it with an internal disk-to-disk plain
+            # `copy` — no scp, no CoPP-policed punt traffic. None =
             # share unusable -> fall through to the scp push below.
             share_dir, share_ios_path = _share_settings(cfg)
             if share_dir:
@@ -1711,32 +2654,39 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
                     lambda copy_source: _copy_to_root_direct_impl(
                         fname, target_prefix, cli_execute, emit,
                         copy_source=copy_source,
-                        running_image_fn=confirmed_running),
+                        running_image_fn=confirmed_running,
+                        expected_size=expected_size),
                     emit, cli_execute)
                 if shared is not None:
                     return shared
             # IE-3x00 / container fallback: push the scratch onto the
-            # IOS-visible SD, then `copy /verify` DIRECTLY over the SSH-to-self
-            # vty. The EEM applet offload is only needed for the C9300 Guest
-            # Shell cli module (can't drive interactive copy); a real vty runs
-            # copy fine, and the EEM `cli command "copy"` action is a no-op on
-            # this platform — so the direct path is both correct and necessary.
+            # IOS-visible SD, then run a plain `copy` DIRECTLY over the
+            # SSH-to-self vty. The EEM applet offload is only needed for the
+            # C9300 Guest Shell cli module (can't drive interactive copy); a
+            # real vty runs copy fine, and the EEM `cli command "copy"` action
+            # is a no-op on this platform — so the direct path is both correct
+            # and necessary.
             try:
                 _push_scratch(fname, target_prefix)
             except Exception as e:
+                # Pure container-side transfer failure: no IOS command ran, so
+                # no delete-first cleared the target name.
                 emit("ROOTCOPY-FAIL",
-                     "%s scp push to %s failed: %s" % (fname, target_prefix, e))
-                return False
+                     "%s scp push to %s failed before any IOS work: %s"
+                     % (fname, target_prefix, e))
+                return ROOT_COPY_NOT_ATTEMPTED
             # NOTE: like the Guest Shell path, placement transiently needs
             # ~2x the image on the target FS (scratch + root copy); the
             # verified-delete below reclaims the scratch afterwards.
             return _copy_to_root_direct_impl(fname, target_prefix,
                                              cli_execute, emit,
                                              delete_source_on_success=True,
-                                             running_image_fn=confirmed_running)
+                                             running_image_fn=confirmed_running,
+                                             expected_size=expected_size)
         return _copy_to_root_impl(fname, target_prefix,
                                   cli_configure, cli_execute, emit,
-                                  running_image_fn=confirmed_running)
+                                  running_image_fn=confirmed_running,
+                                  expected_size=expected_size)
 
     def reclaim():
         # Free flash with `install remove inactive` — the ONLY automated reclaim
@@ -1766,9 +2716,6 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
             'action 030 cli command "y"',
         ])
         cli_execute("event manager run IRIS-RECLAIM")
-
-    def emit(mnemonic, msg):
-        _emit_impl(cli_execute, mnemonic, msg)
 
     def ios(cmd):
         return cli_execute(cmd)
@@ -1808,40 +2755,52 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
     def aria_session():
         return _aria_session_impl(_rpc)
 
-    def purge_others(keep_filename, keep_id):
-        # 1. drop every download except the current image from aria2c
+    def purge_others(keep_filenames, keep_ids):
+        # Keep the WHOLE assigned SET, not one survivor: a device stages every
+        # image the server assigned it, so anything outside that set is what
+        # this sweep is for. (Called with a single survivor it would delete the
+        # other assigned images' downloads and staged files.)
+        keep_filenames = list(keep_filenames)
+        # 1. drop every download outside the assigned set from aria2c
         for gid, names in _aria_downloads(_rpc):
-            if keep_filename not in names:
+            if not any(k in names for k in keep_filenames):
                 _aria_drop(_rpc, gid)
         # 2. delete stale staged image artifacts (never the agent's own files)
         import glob
-        keep = {keep_filename, keep_filename + ".aria2", keep_id + ".torrent",
-                # this image's own peer-receipt snapshot: it may be sitting
-                # here waiting for the completion tick to fold it in
-                keep_filename + telemetry_report.RECEIPT_SIDECAR_SUFFIX}
+        keep = set()
+        for keep_filename in keep_filenames:
+            keep.update((keep_filename, keep_filename + ".aria2",
+                         # this image's own peer-transfer snapshot: it may be
+                         # sitting here waiting for the completion tick to fold
+                         # it in
+                         keep_filename
+                         + telemetry_report.PEER_TRANSFER_SIDECAR_SUFFIX))
+        keep.update(keep_id + ".torrent" for keep_id in keep_ids)
         for path in glob.glob(os.path.join(cfg["stage_dir"], "*")):
             base = os.path.basename(path)
             if base in keep:
                 continue
             if base.endswith((".bin", ".torrent", ".aria2",
-                              telemetry_report.RECEIPT_SIDECAR_SUFFIX)):
+                              telemetry_report.PEER_TRANSFER_SIDECAR_SUFFIX)):
                 try:
                     os.remove(path)
                 except OSError:
                     pass
 
-    def root_present(fname, prefix="flash:"):
+    def root_present(fname, prefix="flash:", expected_size=None):
         # Cheap existence check of the staged root copy (no hashing).
         # IOS says it's gone -> False (re-copy). cli_execute itself raised
         # (transient glitch) -> True, so one flaky tick doesn't trigger a full
         # 1.2 GB re-copy; a real loss still shows as "No such file" next tick.
+        # The verdict on the output itself lives in the module-level
+        # _root_present_from_dir so it's unit-testable off-box (including the
+        # present-but-unparseable case, which is tolerated for exactly the same
+        # reason as the raise above).
         try:
             out = cli_execute("dir %s%s" % (prefix, fname))
         except Exception:
             return True
-        if "%Error" in out or "No such file" in out:
-            return False
-        return fname in out
+        return _root_present_from_dir(out, fname, expected_size)
 
     def remove_stage(path):
         try:
@@ -1931,9 +2890,25 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
 
     def reclaim_bundle(target_prefix, names):
         # Thin wrapper — the applet templating lives in the module-level impl
-        # so it's unit-tested off-box. Serves both the bundle-mode download
-        # gate and the replaced-root cleanup in run_once (see the impl's
-        # docstring for each caller's safety guarantee).
+        # so it's unit-tested off-box. Serves the bundle-mode download gate,
+        # the replaced-root cleanup, and the failed-placement reclaim in
+        # run_once (see each caller's docstring for its safety guarantee).
+        #
+        # Platform split mirrors copy_to_root's. The EEM applet exists because
+        # the C9300 Guest Shell `cli` module can't drive privileged exec work,
+        # and a raw exec `delete` silently no-ops on AAA/TACACS-managed nodes
+        # without `authorization bypass`. The container / SSH-to-self platforms
+        # reach IOS over a real vty, where `delete /force` runs directly — the
+        # same command _copy_to_root_direct_impl already issues there before
+        # every copy. Best-effort per name so one failure can't strand the rest.
+        if _mode == "container" and _transport is not None:
+            for n in names:
+                try:
+                    cli_execute("delete /force %s%s" % (target_prefix, n))
+                except Exception as e:
+                    emit("RECLAIM-FAIL",
+                         "%s%s delete failed: %s" % (target_prefix, n, e))
+            return
         _reclaim_bundle_impl(target_prefix, names, cli_configure, cli_execute)
 
     def version():
@@ -1965,7 +2940,8 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
                 reclaim_bundle=reclaim_bundle, model=model, refresh=refresh,
                 aria_stats=aria_stats, aria_peers=aria_peers,
                 io_transfer=(_mode == "container"),
-                checkpoint=checkpoint, aria_session=aria_session)
+                checkpoint=checkpoint, aria_session=aria_session,
+                copy_in_place=False)
 
 
 def main():  # pragma: no cover

@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Getting Started
 
-This path brings up the IRIS server, publishes an IOS-XE image, generates device installers, and assigns an image to a device. Docker Compose is the server runtime.
+This path brings up the IRIS server, publishes an image, generates device installers, and assigns an image to a device. Docker Compose is the server runtime.
 
 It uses the command line throughout because it starts from an empty host. Once the server is running, everything after bring-up can also be done in the browser — see [Web Console](console.md).
 
@@ -18,7 +18,7 @@ It uses the command line throughout because it starts from an empty host. Once t
 | Reachable server IP | Devices must reach the host on the published IRIS ports. |
 | Handed-in `aria2c` binary | Not downloaded or built by this repository. `tools/get-aria2c.sh amd64` installs the pinned static binary before the first build — the Dockerfile's `COPY bin/aria2c` step fails without it. |
 | `age` identity | Encrypts server secrets at rest. Keep the private identity outside the repository. |
-| IOS-XE image files | Store outside Git, normally under `/opt/images`. The tree must be readable and traversable by uid `10001`. The required IOS-XE license tier is outside IRIS's scope — check it at [cisco.com](https://www.cisco.com/) for the respective platform. |
+| Cisco image files | Store outside Git, normally under `/opt/images`. The tree must be readable and traversable by uid `10001`. The required license tier for the target platform is outside IRIS's scope — check [cisco.com](https://www.cisco.com/). |
 | Device credentials | Used only for installation or GUI-driven onboarding. Do not commit real credentials. |
 
 ## Configure the server
@@ -105,14 +105,15 @@ docker compose -f server/docker-compose.yml exec iris \
   iris-publish /opt/images/iosxe/c9300/<image>.bin
 ```
 
-`iris-publish` computes `sha256` and `sha512`, creates a private torrent, hands it to the seeder, and records catalog metadata. The server does not decide whether the Cisco image signature is trusted; the device-side copy and verify path is the final gate.
+`iris-publish` computes `sha256` and `sha512`, creates a private torrent, hands it to the seeder, and records catalog metadata. The server can check the recorded `sha512` against Cisco's signed Bulk Hash feed and quarantines the image on a mismatch; what the device checks is the staged file's `sha256` against this catalog entry.
 
 ### Import an image already on disk
 
 Uploading a multi-gigabyte file through the browser is unnecessary when the file
 is already on the server. The **Import from disk** panel on the Console Images
-screen lists every `.bin` under the uploads volume (`IRIS_IMAGES_DIR`) and under
-the read-only import root (`IMAGES_ROOT`) that is not yet in the catalog, and
+screen lists every eligible `.bin`, `.iso`, `.tar`, or `.rpm` under the uploads
+volume (`IRIS_IMAGES_DIR`) and read-only import root (`IMAGES_ROOT`) that is not
+yet in the catalog, and
 publishes it in place with one click. Nothing is copied, and the `.torrent` is
 written to the state directory rather than next to the image, so the read-only
 import root stays read-only. See
@@ -131,26 +132,34 @@ cp fleet/devices.csv.example fleet/devices.csv
 
 The inventory contains network onboarding information only, as an
 management-type-aware CSV v2. Each device declares `routed`, `inband`,
-`router-routed`, or `router-nat` as its `management_type`:
+`router-routed`, `router-nat`, or `xr-host` as its `management_type`:
 
 ```text
 device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,vpg_number,nat_interface,platform
 ```
 
 Fill the routed columns (`iris_vlan`, `svi_*`) for routed devices, or the inband
-columns (`inband_vlan`, `app_*`) for inband devices. `model`/`platform` are
-optional; blank `platform` auto-selects from the model. See
-[Inventory (CSV v2)](network-attachment.md#inventory-csv-v2).
+columns (`inband_vlan`, `app_*`) for inband devices. The Add Device form requires
+an explicit `platform`: `guestshell`, `iox`, `router`, or `xr-appmgr`; it narrows
+the choices from `model` rather than silently choosing one. Existing inventory
+and CSV imports may leave the field blank as an inventory-only transition state,
+in which case onboarding resolves known IOS-XE models and refuses uncertainty.
+See
+[Inventory (CSV v2)](management-type.md#inventory-csv-v2).
 
 For a Catalyst 8000 router, use `router-routed` with a VPG number, plus routes
 you provide between the app subnet and IRIS, or `router-nat` with an outside
 interface, which adds static TCP PAT on port 6881. Both router modes stage to
 `bootflash:` only, so size it for about 2× the image plus 200 MB. Support is
 designed for the Catalyst 8000 family and lab-tested on Catalyst 8000V; see
-[Router routed and router NAT](network-attachment.md#router-routed-and-router-nat-iris-managed-virtualportgroup).
+[Router routed and router NAT](management-type.md#router-routed-and-router-nat-iris-managed-virtualportgroup).
 
-Management-type-aware onboarding runs through the **Console** (or API), which records
-a durable receipt and drives teardown from it. The legacy CLI generator below is
+For a Cisco 8000-series IOS-XR router, use `management_type=xr-host` and
+`platform=xr-appmgr`; leave every VLAN, SVI, app-address, VPG, and NAT field
+empty. Build `artifacts/iris-xr.rpm` before onboarding.
+
+Management-type-aware onboarding runs through the **Console** (or API), which creates
+a durable deployment record and drives teardown from it. The legacy CLI generator below is
 routed-only and refuses a v2 (`management_type`) header:
 
 ```bash

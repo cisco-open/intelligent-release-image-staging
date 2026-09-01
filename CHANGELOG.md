@@ -6,10 +6,311 @@ documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project uses **Calendar Versioning (CalVer)**: `YYYY.0M.0D` with an optional
 `.MICRO` counter for multiple releases on the same day (e.g. `2026.06.11`, then
-`2026.06.11.1`). Releases are tagged `vYYYY.0M.0D`. The current version is in the
-top-level `VERSION` file.
+`2026.06.11.1`). A release tag is `v` plus the exact value in `VERSION`, including
+any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
+
+## [2026.09.01]
+
+### Added
+- The console now shows an enrolled device with no image assigned as its own
+  "unassigned" status, and the status filter can select them — previously they
+  read simply as "enrolled", so there was no way to ask the table which devices
+  still need an image. The status filter is now ordered alphabetically by label,
+  with "Status: any" first and "Needs attention (any)" last.
+- Import from disk now recognizes the explicit Cisco software suffixes `.bin`,
+  `.iso`, `.tar`, and `.rpm`. IOS-XR base images, GISOs, and package bundles no
+  longer disappear from the import panel solely because they are not `.bin`;
+  other extensions and compound archives such as `.tar.gz` remain hidden.
+- A device can now stage up to ten images at once: pick them per device or for a
+  whole selection in the console, transfers run in parallel, and each image
+  reports its own state. Unchecking an image stops its torrent and frees the
+  staging copy while leaving the staged file on the boot filesystem, still
+  tracked by IRIS. The console now says "Agent install" instead of "platform",
+  labels bare inventory honestly, only offers installs the device model can run,
+  and refuses an IOS-XE install on an IOS-XR device with the same clear message
+  on every path.
+- IOS-XR staging, for Cisco 8000 series routers. A device set to the new
+  "XR appmgr container" agent install onboards from the console, runs the agent
+  as an appmgr Docker application, and downloads its assigned images straight
+  onto `harddisk:` through a bind mount — there is no separate copy step, so the
+  bytes the device verifies and seeds are the bytes already at their final
+  location. As on every other platform IRIS distributes, verifies, and stages:
+  nothing is installed, activated, or reloaded, and no boot variable is touched.
+  Onboarding refuses a router whose banner does not read IOS-XR, or one that
+  still carries a previous IRIS deployment; undeploy removes the application,
+  its package source, the staged RPM, and everything inside the agent's working
+  directory. The empty directory itself is left in place: XR's CLI has no
+  prompt-free way to remove a directory, and undeploy reports the leftover
+  plainly rather than pretending it is gone.
+  The full lifecycle is lab-validated on Cisco 8201 hardware — see
+  [Validation](docs/zensical/validation.md#validated-platforms).
+- Catalog images can now be checked against Cisco's published Bulk Hash feed:
+  a scheduled run (off/daily/weekly, weekly anchored to Monday UTC), a manual
+  "Refresh now" in the console, or an offline upload of the feed tar for
+  air-gapped servers all join each image by file name and size — or by file
+  name alone when a feed row publishes no size, a real gap seen on Cisco's
+  live feed — and compare its sha512. The feed tar's X.509 signature is verified against a
+  certificate pinned in-repo before anything in it is parsed, and any fetch,
+  signature, or parse failure leaves every prior verdict untouched. A sha512
+  mismatch quarantines the image — seeding stops, it is auto-unassigned from
+  every device that had it approved, and it cannot be newly assigned — until
+  an operator releases it, either because the catalog's own sha512 now agrees
+  or by typing the image's filename to override a mismatch that persists.
+  See [Image verification](docs/zensical/operations.md#image-verification).
+- IOS-XR routers running the agent as an appmgr Docker container now have
+  their own management type, `xr-host`, matching the platform's real
+  networking: the container runs on the router's own network stack, so there
+  is no VLAN, SVI, app IP/mask/gateway, VPG, or NAT interface, and `xr-host`
+  and the XR appmgr container agent install are mutually required on any
+  fully-classified device. The console auto-selects XR host for a Cisco 8000
+  series router model or that agent install and hides every addressing field
+  for it; the devices table, its filter, and CSV v2 (no new columns; the
+  addressing columns stay empty) carry the same value, and the example CSV
+  template documents it. Plans, receipts, and undeploy describe exactly what
+  IRIS owns on the router — the appmgr application, its registered package
+  source, the staged RPM, and the agent's working directory — and leave
+  everything else, including the router's networking configuration, alone.
+- Undeploy on IOS-XR routers is now bounded, idempotent, and provenance-aware.
+  Every command session to the router runs under a wall-clock bound,
+  `IRIS_XR_SESSION_TIMEOUT` (default 150 seconds; 0 disables it), on top of
+  SSH keepalives, so a wedged router yields a failed job with a real exit
+  code instead of an unbounded run. Teardown composes at most two such
+  bounded sessions per run: a read-only session that probes the appmgr
+  application table and unconditionally deactivates the application, and a
+  second, destructive session (uninstall, file removal, sidecar sweep, and
+  final verify) that is only ever composed once the first session's
+  deactivate has been adjudicated by pairing it against that same early
+  probe, rather than trusted on its own reported exit status; a still-
+  running application after a rejected deactivate refuses to continue
+  before anything destructive is sent. A teardown interrupted partway
+  through converges cleanly on a second run, receipted or forced. The agent now records whether each
+  staged image was downloaded by IRIS or adopted from a file an operator
+  already staged, and an adopted (or legacy, origin-unknown) file is never
+  deleted by teardown or by the agent's own cleanup paths, except when the
+  catalog republishes different content under the same image id, which
+  replaces the file and logs the replacement. Both `APPID` and
+  `SOURCE_NAME` overrides are now escaped before they build the router-table
+  and file-listing match patterns those steps use, so a name containing a
+  regex metacharacter (for example `iris.x`) can no longer loosen a match
+  into an unrelated table row.
+- `tools/check-package-freshness.sh` now also covers the XR RPM
+  (`iris-xr.rpm`), previously left for an operator to check by hand: it
+  cannot unpack the RPM the way it unpacks the two IOx tars' inner archive,
+  so it compares the RPM's build time against the moment the live catalog
+  certificate came into existence instead of inspecting pinned contents, and
+  says so plainly in its output. `tools/start-compose-server.sh` runs the same
+  comparison at bring-up and warns when a staged `iris-xr.rpm` predates the
+  certificate it just (re)provisioned, so a stale package is visible before
+  a router is ever onboarded from it rather than only in a later manual
+  check.
+
+### Changed
+- Image verification is now the same on every platform: the agent proves integrity by
+  sha256 against the catalog's published value, and placement onto the boot filesystem
+  is attested by exact byte size. The on-device `copy /verify` step is retired; device
+  telemetry reports its state as `not_run`.
+- **Terminology rename — management type, deployment record, peer transfer
+  record:** renamed `attachment`/`network_attachment` to **management type**
+  (`management_type`), deployment `receipt` to **deployment record**
+  (`record`/`record_id`), and agent peer `receipt` to **peer transfer record**
+  (`peer_transfer_records`) across the API, state files, env vars, UI, and
+  docs. Breaking, no backward compatibility, in the same style as the
+  device-neutral rename (#25): the server ignores any existing
+  `deployment_receipts.json` and starts a fresh, empty
+  `deployment_records.json` — operators re-adopt devices that already had a
+  deployment record. The fleet.json `network_attachment` read-alias (and the
+  matching CSV header alias) is gone; a row or export still carrying only the
+  old key reads as unclassified until re-saved or re-exported. The
+  `NETWORK_ATTACHMENT` env var is renamed to `MANAGEMENT_TYPE`; all six
+  install/uninstall scripts that read it now abort with a clear error if
+  `NETWORK_ATTACHMENT` is set but `MANAGEMENT_TYPE` is not, rather than
+  silently falling back to the routed default. OTLP names changed
+  (`iris.device.peer_receipt` → `iris.device.peer_transfer_record`,
+  `iris.receipt.*` → `iris.transfer_record.*`, `iris.transfer.peer_receipts.*`
+  → `iris.transfer.peer_records.*`); Splunk dashboards and saved searches
+  built on the old names need updating, and the queries documented in
+  `docs/zensical/telemetry-export.md`, `docs/zensical/observability.md`, and
+  `docs/zensical/dashboards/README.md` already use the new ones. The
+  published docs page moves from `/network-attachment/` to
+  `/management-type/` with no redirect — a redirect stub is not just declined
+  but impossible, because the nav-completeness gate forbids an orphan page
+  and the docs workflow publishes with `force_orphan: true`. Device images
+  and agent bundles must be rebuilt and republished (the peer-transfer hook
+  script filename changed inside the XR RPM and IOx tars); an
+  already-deployed agent keeps working against the new server, but the
+  server drops its old `peer_receipts` key by allow-list reconstruction
+  rather than rejecting it, so per-peer attribution is simply absent until
+  that device is redeployed, and the agent's own persisted telemetry state
+  carries the old key across its own upgrade too, discarding one in-flight
+  transfer's already-measured peer data at that upgrade.
+  `plan.resolved.attachment` is now `plan.resolved.management_type`, on both
+  the plan/preview endpoint and the deployment-record response — any
+  external consumer of `GET`/`POST /api/devices/<id>/plan` or `/deployment`
+  breaks. The onboard-job-status routes break the same way: `GET
+  /api/onboard/jobs` and `/api/onboard/jobs/<id>` now serve `record_id`
+  instead of `receipt_id`, and the installer output streamed over a job's
+  SSE log (`/api/onboard/jobs/<id>/stream`) carries the renamed wording
+  (e.g. "deployment record" in place of "receipt") — a poller or scraper
+  keyed on the old field name or matching the old log text breaks too.
+  Audit detail wording changed for two events, adopting a device and
+  retiring one (`device_delete`); existing `audit.jsonl` lines keep their
+  original wording, so a saved search over audit detail for either event
+  should match both the old and the new phrasing until the old entries age
+  out.
+- **Console facelift — Magnetic design system.** The operator console has a
+  new visual design built on Cisco Magnetic tokens: Sharp Sans headings over
+  Inter body copy, Roboto Mono reserved for machine-readable values (IPs,
+  hashes, filenames, IDs, timestamps) and never for prose, a 4px spacing
+  scale, and named elevation tiers in place of the previous dark theme. A
+  light product-bar-and-nav-rail shell replaces the old chrome. Every status
+  surface — the Devices table, Overview's attention cards, image
+  verification, the Cisco Bulk Hash verdict — now renders through one shared
+  icon-plus-sentence-case-label pill (`levelPillHTML`/`statusPillHTML`), so
+  status is never carried by color alone. The Staging Boundary (Catalogued →
+  Source checked → Assigned → Transferring → Verified → Staged, ending at a
+  hatched "Operator control" terminus marking where IRIS's own
+  responsibility stops — installation, activation, and reload stay with the
+  operator) is now a first-class rendered component, shared verbatim by
+  Overview and the device/image detail drawers. The device status
+  previously labelled `deployed` now displays as **Staged**: the wire key is
+  unchanged, only the rendered text moves to match the boundary's own last
+  step. Setup is now a guided stepper with inline image verification in
+  place of the old flat settings form. Devices-view polling is now owned
+  solely by the hash router, removing a second, redundant 10-second
+  `/api/devices` polling loop that ran unconditionally for the page's
+  lifetime alongside the router's own view-scoped one. All console fonts
+  are self-hosted under `server/webroot/fonts/`; Sharp Sans is licensed to
+  Cisco and excluded from this source distribution, so the console falls
+  back to Inter for headings when it is not staged separately. See
+  `NOTICE` for full font/icon attribution.
+
+### Fixed
+- A dead tracker, catalog, artifact server, or console no longer leaves the
+  server container reporting itself healthy. Those run as separate listeners, so
+  `/healthz` — which answers 200 unconditionally, by contract, because container
+  and orchestrator probes read the status code — only ever proved the metrics
+  server was alive; under Kubernetes a pod whose artifact server had died stayed
+  Ready and was never restarted, and devices failed at [5/7] with "cannot
+  connect". A new `/readyz` endpoint connects to each expected listener and
+  answers 503 naming the ones that are down, and the Kubernetes startup,
+  readiness, and liveness probes now use it. Set `IRIS_HEALTH_LISTENERS` to
+  `name:port,…` to change what is expected, or to `off` for a deployment that
+  runs only some of the services.
+- A freshly onboarded device no longer reports a transient rejected aria2 RPC
+  token as a staging failure. Before bootstrap has copied the first refreshed
+  RPC secret and bounced aria2c, aria2-next returns HTTP 400; IRIS now reports
+  that short window as staging with an `ARIA2-AUTH` breadcrumb and no
+  `stage_error`, while connection-refused and genuinely unreachable RPC still
+  remain errors.
+- Artifact downloads no longer serialize their TLS handshakes on the server's
+  single accept thread. Handshakes now complete in per-connection workers under
+  a 30-second bound, the listen backlog is 128, staging cleanup runs on a timer
+  instead of on each GET, and every artifact access logs method, path, status,
+  duration, and in-flight count. One stalled client can no longer block a fleet
+  wave before worker threads are even created.
+- IOS-XE sessions no longer send `enable` and its secret before knowing that the
+  device is at user EXEC. On already-privileged devices the secret had been
+  executed as a command and resolved as a hostname, adding about 48 seconds per
+  session on a segment where that lookup black-holed. IRIS now learns the prompt
+  emitted by the device, escalates only when required, and warns when IOS reports
+  that any submitted line was resolved as a hostname.
+- Persisted onboard and undeploy logs now prefix every captured line with its
+  offset from the job start, making the slow phase visible without changing the
+  live stream or line-matching contract. Guest Shell readiness polling starts at
+  two seconds and ramps to fifteen instead of always overshooting by fifteen;
+  first-contact probe budgets were raised to cover a genuinely slow SSH session.
+- A device no longer needs manual re-onboarding when a catalog-token refresh
+  commits on the server but its response or the device's atomic config rewrite
+  is lost. The one previous token may now reissue the already-current secret
+  bag on the same device's token-refresh route, without rotating again, until
+  that previous token's original expiry. This recovery permission does not
+  extend to heartbeat or telemetry, does not extend the short shared-route
+  overlap, and is revalidated under the secrets-store lock so revocation and a
+  newer rotation still win.
+- A tick that refreshes the catalog token no longer ends in a spurious
+  `%IRIS-6-HEARTBEAT-FAIL` HTTP 401. The refresh rewrote the conf and the
+  local cfg but left the live catalog client on the pre-rotation bearer,
+  which the server's heartbeat and telemetry routes reject even inside the
+  120-second overlap window — so staging proceeded while the
+  tick's closing heartbeat failed, once per refresh, since the first
+  release. The refresh now re-points the client at the new bearer the
+  moment the server mints it, on both the IOS-XE and IOS-XR builders, and
+  it does so even when the conf rewrite then fails, because the server has
+  already rotated by that point and the new token is the only one the
+  device-bound routes will accept for the rest of the tick.
+- The console no longer offers "auto by model" as an agent install. Picking it
+  handed the decision to a model guess, which is how an IOS-XR router was sent
+  down an install its hardware cannot run. The install is now chosen
+  explicitly, and saving a device without one is refused with a clear message
+  rather than resolved silently.
+- The origin now seeds every published image instead of only the first five.
+  A seeding torrent never completes, so each one permanently occupied one of
+  aria2's five default concurrent-download slots and any image published after
+  that was queued and never served. A device assigned such an image reported
+  staging indefinitely with no error recorded anywhere, because aria2 reports a
+  held-back torrent as waiting rather than as a failure. The same cap is lifted
+  on every device-side launcher, where a device holding five staged images
+  would otherwise never start a sixth transfer. Both limits are overridable
+  (`SEED_MAX_CONCURRENT` on the origin, `IRIS_MAX_CONCURRENT` /
+  `MAX_CONCURRENT` on devices).
+- The seeder now reports how many published torrents it is holding back, as
+  `queued_torrents` in the swarm observation and as the
+  `iris_seeder_queued_torrents` metric. A non-zero value means the origin is
+  refusing to serve a published image, which previously had no signal at all.
+- IOS-XR undeploy no longer fails against a router it has just cleaned. The
+  transport stripped a carriage return only where it sat immediately before a
+  newline, but the router also emits one at the *start* of an output line, and
+  that leading character defeated the anchored patterns the verify step uses:
+  an empty `iris-work` directory was read as still holding artifacts and the
+  teardown exited non-zero. Carriage returns are now stripped wherever they
+  appear, which also closes the opposite risk of an end-anchored match missing
+  a leftover sidecar file.
+- XR RPM freshness is judged against the catalog certificate's own creation
+  time rather than the modification time of a copy of it. The served
+  `iris-catalog.pem` is restaged at every bring-up, so its mtime tracked the
+  last staging rather than the certificate, and re-copying it alone was enough
+  to report a current `iris-xr.rpm` as needing a rebuild. Both the Console's
+  setup card and `tools/check-package-freshness.sh` now compare against the
+  certificate's `notBefore`; when that cannot be read, the row reports unknown
+  rather than falling back to the mtime.
+- A forced router undeploy now reclaims the VirtualPortGroup, NAT ACL, overload
+  rule and static mapping that IRIS itself created, identified by the description
+  IRIS writes into every VPG it creates and by IRIS's own name on the NAT objects.
+  Previously they were left on the device and onboarding refused the router until
+  an operator cleared them by hand. Anything not carrying IRIS's mark is untouched.
+- Device onboarding now reads the operating-system family from the `show version`
+  banner. An IOS-XR device is refused with an explanatory error instead of being
+  handed an IOS-XE recipe — previously an ASR 9000 matched the same `^ASR`
+  prefix as an IOS-XE ASR 1000 and was onboarded as a Guest Shell device.
+- The Devices management-type filter's "Inventory only — management type not
+  chosen" option matched zero rows: every server path that creates an
+  unclassified device writes the truthy string `management_type:
+  "legacy_routed"`, and the filter's `d.management_type || 'legacy'`
+  fallback only substituted `'legacy'` when the field was empty, which
+  never happened. The comparison now normalizes `legacy_routed` to
+  `legacy` before comparing, matching the row label's own equivalence; the
+  filter option itself is unchanged.
+- A device's status cell now shows its running onboard/undeploy job's
+  current step and elapsed time (for example `Staging [2/5] · 4 min`)
+  instead of a bare status word, so a long-running job reads as making
+  progress instead of looking stuck.
+- "Offline (expected during undeploy)" is now gated on the device's own
+  undeploy job actually being in the `running` state, not merely on its
+  status key reading `undeploying` — previously a device still queued
+  behind the onboard concurrency cap could show the same "agent
+  deactivated, no heartbeat expected" pill before its job had touched the
+  device at all.
+- Overview's attention band now shows "Fleet status unavailable" instead of
+  a false all-clear "All clear" card when the device or image fetch it
+  depends on fails — "no data to report a problem from" and "confirmed no
+  problem" no longer render identically.
+- A package absent for an architecture a deployment does not build (for
+  example `iris-arm64.tar` on an amd64-only site) no longer rolls up to a
+  persistent, uncleanable amber Warning in Settings > Setup and the setup
+  wizard's package step; `absent` is now treated the same as `unknown` — an
+  honest not-applicable, not a claimed gap the operator failed to fill.
 
 ## [2026.08.26]
 

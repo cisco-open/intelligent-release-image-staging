@@ -26,6 +26,11 @@ the catalog schema. Every page is listed in the [Overview](index.md).
 | `device/iox/install.sh` | Install the IOx app path. |
 | `device/iox/uninstall.sh` | Remove the IOx app path. |
 | `device/iox/build.sh --image-only` | Build the ARM64 app-hosting image; set `IOX_ARCH=amd64` for x86_64. |
+| `tools/provision-iox-packages.sh` | Build and stage both architecture-specific IOx packages. |
+| `CATALOG_PEM=<pem> tools/build-xr-package.sh --out artifacts/` | Build the IOS-XR appmgr RPM against the live catalog certificate. |
+| `device/xr-install.sh` | Onboard the IOS-XR appmgr agent. |
+| `device/xr-uninstall.sh` | Remove the IOS-XR appmgr agent footprint. |
+| `tools/check-package-freshness.sh` | Check IOx certificate pins and the XR RPM build-time proxy against the live certificate. |
 | `kubectl apply -k kubernetes` | Deploy the optional single-replica Kubernetes seed server. |
 
 Most of these have a console equivalent; the command line is not the only way to run them — see [When to use the CLI](console.md#when-to-use-the-cli).
@@ -69,9 +74,17 @@ Compose refuses to start without these; none has a default.
 | `IRIS_SAMPLE_INTERVAL` | `15` (seconds) | Seeder/telemetry poll cadence. A transfer that completes inside one interval can be observed with no connected peer, so per-peer rates and the map's measured edges never appear — a 1 GB image at ~90 MB/s lands in about 15 seconds. Lower it to 2–5 on a fast fabric or for a live demo; the cost is more aria2 RPC calls. |
 | `IRIS_REQUIRE_IDENTITY_GATE` | unset (off) | Set to `1` to make the catalog answer 503 to every per-device torrent request until the checkpoint file `identity-compatible-ready` exists under `IRIS_STATE` — the file a proven seeder rotation writes and `--recover` removes. Read per request, so opening or closing the gate needs no restart. The canonical (service) torrent path is unaffected. A deployment that does not set it serves per-device torrents as before. |
 | `IRIS_ONBOARD_CONCURRENCY` | `25` | Maximum onboard/undeploy jobs the worker pool runs at once; the rest queue. `GET /api/onboard/jobs` reports the active value as `max_concurrent`. |
+| `IRIS_XR_SESSION_TIMEOUT` | `150` seconds | Wall-clock bound for each IOS-XR command session. `0` disables it; an invalid value falls back to the default with a warning. |
+| `IRIS_DEVICE_ENABLE_ALWAYS` | unset (off) | Compatibility escape hatch that always sends `enable` plus its secret on IOS-XE SSH sessions. Normally IRIS learns whether escalation is needed from the device prompt and sends neither line to already-privileged logins. |
 
 The host-side ownership these paths need is in
 [Server](server.md#host-paths-to-chown-on-every-deploy).
+
+The code also reads `IRIS_TOKEN_TTL`, `IRIS_TOKEN_REFRESH_AT`,
+`IRIS_TOKEN_OVERLAP`, and `IRIS_TOKEN_SKEW_GRACE`. These are internal protocol
+tuning values rather than supported independent deployment knobs: server and
+device timing must remain coordinated, and Compose deliberately does not expose
+them. Do not override one side in isolation.
 
 ### Container paths
 
@@ -192,7 +205,8 @@ on the authenticated routes additionally require the session's CSRF token in an
 `X-CSRF-Token` header (double submit); without it the request is rejected with
 403. The two pre-auth routes carry no CSRF token, because there is no session
 yet. JSON request bodies are capped at 64 KiB — the exceptions are the CSV import
-at 8 MiB and the streamed image upload at 4 GiB.
+at 8 MiB, the streamed image upload at 4 GiB, and the offline Bulk Hash feed
+upload at 256 MiB.
 
 ### Session and settings
 
@@ -203,7 +217,7 @@ at 8 MiB and the streamed image upload at 4 GiB.
 | `POST /api/logout` | Revokes the current session and expires the cookie. |
 | `GET /api/session` | The current session's info, or 401. |
 | `GET /api/settings` | Console settings, published port, and the running version — plus the active console certificate (`gui_cert`), the installed trust entries (`trust`), the CA download settings (`ca_trust`), the effective telemetry destination with its source (`telemetry_destination`), and the audit-export destination with its last-run status (`audit_export`; a `password_set` flag only, never the password). |
-| `GET /api/settings/setup-status` | The setup status behind both the first-run wizard (`#setup`) and the Settings → Setup panel: `admin`, `telemetry`, `stage_host`, and `packages`, each with a `state` of `ok`, `unset`, `stale`, `absent`, or `unknown`. `telemetry` is `ok` only when export is enabled *and* an endpoint resolves, and also carries `source` (`override` or `env`), `endpoint`, and `enabled`. `packages` additionally carries `items` (per-package build time, state, and reason), `reference_fingerprint`, and a `remedy` command. See [Setup](console.md#setup). |
+| `GET /api/settings/setup-status` | The setup status behind both the first-run wizard (`#setup`) and the Settings → Setup panel: `admin`, `telemetry`, `stage_host`, `packages`, and `image_verification`, each with a `state` of `ok`, `unset`, `stale`, `absent`, or `unknown`. `telemetry` is `ok` only when export is enabled *and* an endpoint resolves, and also carries `source` (`override` or `env`), `endpoint`, and `enabled`. `packages` additionally carries `items` — the two IOx tars plus the IOS-XR agent RPM (`iris-xr.rpm`), each with its own build time, state, reason, and rebuild `remedy` command (the RPM's differs from the tars' — see [Setup](console.md#setup)); the RPM entry also carries a `detail` string naming exactly what was and was not verified, since its baked certificate cannot be pinned the way the tars' can — `reference_fingerprint`, and the card-level `remedy` command (the IOx tars' rebuild script). See [Setup](console.md#setup). |
 | `POST /api/settings/password` | `{current, new, confirm}`; changes the admin password and revokes every other session. |
 | `POST /api/settings/sessions/revoke-others` | Revokes every session except the caller's. |
 | `POST /api/settings/stage-host` | Stores the stage-host SSH credential; returns the redacted record. |
@@ -247,6 +261,32 @@ the file vanished between listing and import, and 409 if a publish of the same
 catalog id is already in flight. Every outcome writes an `image_import` audit
 event, with `result=fail` and the reason on a rejection.
 
+### Image verification
+
+| Route | Body / result |
+| --- | --- |
+| `GET /api/settings/image-verification` | `{mode, hour_utc, last_run}` — the Cisco Bulk Hash reconciliation schedule and the outcome of its most recent run. |
+| `POST /api/settings/image-verification` | `{mode, hour_utc}` — a full replace of the schedule; `mode` is `off`, `daily`, or `weekly` (weekly always anchors to Monday UTC — there is no day-of-week field), `hour_utc` is 0-23. `last_run` is server-managed and cannot be set here. |
+| `POST /api/image-verification/refresh` | Runs the reconciler now (`source=manual`), synchronously on this request. `{outcome: "ok", matched, mismatched, not_in_feed}` (200); `{outcome: "already_running"}` (409, another run is already in flight); `{outcome: "fail", detail}` (502 — fetch, signature, parse, or reconcile failed, and the catalog is left untouched). |
+| `POST /api/image-verification/offline` | Raw `.tar` body (256 MiB cap), for air-gapped servers — runs the identical verify-then-parse pipeline against the uploaded file instead of fetching one (`source=offline`); same result shape and status codes as refresh. |
+| `POST /api/images/<id>/release-quarantine` | `{override, confirm_text}` — lifts an active quarantine. `override=false` re-checks the image's sha512 against the stored feed verdict and releases it if that now agrees, else 409 `quarantine_still_mismatched` with the verdict. `override=true` requires `confirm_text` to exactly match the image's filename (400 otherwise) and releases regardless of the mismatch, recorded as a distinct `release_override` audit action; the stored verdict itself is left as `mismatch`. 404 if the image does not exist; 400 if it is not currently quarantined. |
+
+Each catalog entry in `GET /api/images` carries a `quarantined` bool and a
+`hash_verification` object — `{state, checked_at, feed_published_at, source,
+deferral}` — once at least one reconciliation run has covered it; both are
+absent/falsy on an entry the reconciler has never touched. `state` is
+`verified`, `mismatch`, or `not_in_feed` (no feed row matches the image by
+file name and size, or by file name alone against a feed row publishing no
+size — the expected state for a customer-built image Cisco never
+published); `source` is `scheduled`, `manual`, or `offline`,
+whichever run last produced the verdict; `deferral` is `true` when the
+matched feed row's `DEFERRAL_STATUS` is present and not `Active` — a
+Cisco-side warning that never affects `state`. `checked_at` is the Unix
+timestamp of that run; `feed_published_at` is Cisco's own `PUBLISH_DATE`
+string from the feed row, carried through unparsed. See [Cisco Bulk Hash
+verification](security.md#cisco-bulk-hash-verification) and [Image
+verification](operations.md#image-verification).
+
 ### Devices
 
 | Route | Body / result |
@@ -258,14 +298,15 @@ event, with `result=fail` and the reason on a rejection.
 | `POST /api/devices/import-csv` | Bulk inventory import (8 MiB cap, all-or-nothing); returns per-row stats. |
 | `GET /api/devices/<id>/plan` | `{plan}` — the resolved deployment plan; 409 when it cannot resolve. |
 | `GET /api/devices/<id>/reports` | `{reports: [...]}` — the device's stored telemetry ring. |
-| `GET /api/devices/<id>/deployment` | `{receipt, total}` — the receipt that best describes the device (the active one, else the teardown-authorizing one, else the newest) plus the stored-receipt count; `receipt` is `null` when none exists. Read-only — feeds the deployment-details panel. |
-| `POST /api/devices/<id>/assign`, `.../credential`, `.../platform` | Sets the approved image, the credential profile, or the platform and storage target; each returns `{ok: true}`. |
+| `GET /api/devices/<id>/deployment` | `{record, total}` — the deployment record that best describes the device (the active one, else the teardown-authorizing one, else the newest) plus the stored-record count; `record` is `null` when none exists. Read-only — feeds the deployment-details panel. |
+| `POST /api/devices/<id>/assign` | `{image_ids: [...]}` sets the device's ordered, up-to-ten-image approved set (an empty array unassigns); the singular `{image_id: <id or null>}` is the pre-multi-image compat shape and always means a one-element set. 400 for more than ten ids, a duplicate, or an id not in the catalog; 400 `image_quarantined` with the blocking verdict if one of the ids is currently quarantined by the Cisco Bulk Hash reconciler (see [Image verification](#image-verification)). See [Policy schema](#policy-schema). |
+| `POST /api/devices/<id>/credential`, `.../platform` | Sets the credential profile, or the platform (Agent install choice) and storage target; each returns `{ok: true}`. |
 | `POST /api/devices/<id>/request-report` | Requests a fresh telemetry report; `{ok: true, expires_at}`, or 429 while one is already pending. |
-| `POST /api/devices/<id>/adopt` | Requires `{"acknowledge_adopt": true}`; returns `{receipt_id}`. 409 when the device already has an active receipt; routers cannot be adopted. |
-| `POST /api/devices/<id>/onboard`, `POST /api/devices/<id>/undeploy` | Starts the job; `{job_id}`. 409 when the device is busy with the opposite action. Undeploy also answers 409 when the device has no deployment receipt — send `{"force": true}` to run it anyway, which removes only the IRIS-named agent footprint and leaves operator-owned network state (VLAN/SVI, VirtualPortGroup, NAT) untouched, audited as `undeploy_forced`. |
+| `POST /api/devices/<id>/adopt` | Requires `{"acknowledge_adopt": true}`; returns `{record_id}`. 409 when the device already has an active deployment record; routers cannot be adopted. |
+| `POST /api/devices/<id>/onboard`, `POST /api/devices/<id>/undeploy` | Starts the job; `{job_id}`. 409 when the device is busy with the opposite action. Undeploy also answers 409 when the device has no deployment record — send `{"force": true}` to run it anyway, which removes only the IRIS-named agent footprint and leaves operator-owned network state (VLAN/SVI, VirtualPortGroup, NAT) untouched, audited as `undeploy_forced`. |
 
 Router deployments carry extra preflight and ownership rules — see
-[Management Type and VLAN Ownership](network-attachment.md#router-preflight-and-ownership).
+[Management Type and VLAN Ownership](management-type.md#router-preflight-and-ownership).
 
 ### Onboarding jobs
 
@@ -318,8 +359,9 @@ fail to appear. There are exactly three reasons.
 | `ambiguous name in more than one location` | The same basename, or the same derived id, exists under more than one root. The startup re-seed can resolve a torrent to a directory by basename and the seeder runs with `bt-seed-unverified`, so a wrong guess would serve the wrong bytes under correct piece hashes. IRIS refuses rather than guess: keep one copy. |
 | `not readable by the server` | The file exists but uid 10001 cannot open it. Listing a file needs only its directory, so without this check an unreadable image would pass discovery and fail deep inside publish. Root-owned mode `0600` images left in a volume by an older root-runtime container land here; the fix is the volume-ownership migration in [Server](server.md#upgrading-from-a-root-runtime-deployment). |
 
-A file is only listed at all if it is a `.bin`, its basename passes the catalog
-filename charset (`A-Za-z0-9._-`), it is not a dotfile, sidecar `.torrent`, or
+A file is only listed at all if it ends in `.bin`, `.iso`, `.tar`, or `.rpm`,
+its basename passes the catalog filename charset (`A-Za-z0-9._-`), it is not a
+dotfile, sidecar `.torrent`, or
 `.upload-*` temp file, and its resolved path is still inside the root it was
 found under — a symlink cannot pull a file from outside the mount into the set.
 Each distinct tree is walked once, so pointing both roots at the same directory,
@@ -335,10 +377,12 @@ written to `<state>/torrents/<image_id>.torrent`, never next to the image itself
 | `id` | Catalog id, derived from the filename by stripping `.SPA.bin` or `.bin`. What a device policy names. |
 | `filename` | Basename of the image file, as it reaches the device. |
 | `source_dir` | Absolute directory the image is seeded from. Set by `publish()`. |
-| `size` | Image size in bytes. |
+| `size` | Image size in bytes. What the agent attests the placed copy against. |
 | `sha256` | Checked by the agent against the staged file. |
-| `sha512` | Checked by the agent against the flash-root copy via `verify /sha512` (IOS has `/sha512` but not `/sha256`). |
-| `cisco_signature_verified` | Whether the Cisco signature was verified elsewhere. The server never checks it; the device is the on-box trust gate. |
+| `sha512` | Recorded at publish time and never recomputed on a device. Once this image is joined to a Cisco Bulk Hash feed row (by file name and size), this is the value compared against that row's published sha512 — see [Image verification](#image-verification). |
+| `cisco_signature_verified` | `True` exactly when this entry's `hash_verification.state` is `verified` — kept in sync by the Cisco Bulk Hash reconciler on every run that covers this image. `False` for `mismatch`, `not_in_feed`, or before the first run ever covers it. On the device, the check is still the agent's sha256 of the staged file against this entry's `sha256`; nothing re-hashes the placed copy. |
+| `hash_verification` | `{state, checked_at, feed_published_at, source, deferral}` — the reconciler's most recent verdict for this image; absent until the first reconciliation run covers this entry. See [Image verification](#image-verification). |
+| `quarantined` | `True` once a `mismatch` verdict has quarantined this image. Only `POST /api/images/<id>/release-quarantine` clears it — a later `verified` verdict alone does not. See [Releasing a quarantine](operations.md#releasing-a-quarantine). |
 | `info_hash_hex` | Torrent info hash, used to stop seeding on delete. |
 | `published_at` | Unix timestamp of the publish. |
 
@@ -349,6 +393,28 @@ is never destroyed. Entries published before `source_dir` was recorded keep the
 older behaviour: their delete unlinks `IRIS_IMAGES_DIR/<filename>`. The startup
 re-seed likewise prefers `source_dir`, falling back to its basename walk for
 entries with no `source_dir` or whose recorded directory has gone away.
+
+## Policy schema
+
+`policy.json` (`<state>/policy.json`) holds per-device staging approval — what
+IRIS is allowed to stage, never what it installs, activates, or reloads.
+
+| Field | Meaning |
+| --- | --- |
+| `approved_image_ids` | Ordered list of catalog image ids, up to ten. The agent stages and verifies every id in the set, transferring them in parallel. Authoritative: a raw read of this file, or a stale write, is resolved from this key, never from `approved_image_id`. |
+| `approved_image_id` | The set's first element, or `null` when empty. Recomputed from `approved_image_ids` on every read and write — kept only so a reader that predates the ordered set (a raw `policy.json` parse, or an agent that has not yet upgraded) still sees a single assignment. |
+
+`POST /api/devices/<id>/assign` (see [Devices](#devices)) writes this file.
+
+The device's heartbeat (`devices.json`, `<state>/devices.json`) reports
+per-image staging progress against that set:
+
+| Field | Meaning |
+| --- | --- |
+| `current_image_id` | Wire-compatible identity pointer: the first image of the set that produced heartbeat data this tick — typically one already staged. It is **not** the image being transferred, and per-image state must not be read from it; it exists so a reader that predates the ordered set still sees a single image id. |
+| `stage_state` | One state string for the whole tick. On a one-image heartbeat it is that image's own state (for example `staging`, `downloading`, `transferring_to_ios`, `ready`, `error`). For a set the agent collapses the tick into the single most actionable state across every assigned image, so it describes the set, not `current_image_id`. `stage_error`, likewise, is one reason per tick. |
+| `staged_image_ids` | Which of the assigned images this agent has staged and verified, as of its last heartbeat. Absent on a one-image heartbeat (and on an agent that predates multi-image staging), in which case staged/not-staged falls back to `stage_state == "ready"` paired with `current_image_id`. |
+| `errored_image_ids` | Which of the assigned images hit a terminal per-image failure on the agent's last tick, including retryable ones such as a full boot filesystem. Absent on a one-image heartbeat and on an agent that predates the field. |
 
 ## Device agent config keys
 

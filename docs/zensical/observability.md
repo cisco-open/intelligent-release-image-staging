@@ -53,7 +53,7 @@ Device reports are useful for both current status and post-incident review. Typi
 | Identity | Device id, platform, storage target. |
 | Assignment | Approved image id and current staged image. |
 | Transfer | Download state, progress, peer information, seeder participation. |
-| Verification | Hash checks, IOS copy or verify result, failure reason. |
+| Verification | Hash checks, staged-copy byte-size confirmation, failure reason. |
 | Timing | Last poll, last report, and operation duration. |
 
 ## Legacy participants
@@ -222,7 +222,7 @@ names. Event identity is the top-level `eventName` field:
 `iris.device.transfer.report` (v2 reports), `iris.device.report` (legacy v1
 reports), `iris.tracker.peer` (tracker lifecycle), `iris.peer.policy`,
 `iris.swarm.peer_rate`, `iris.swarm.peer_bytes` (origin-side traced bytes)
-and `iris.device.peer_receipt` (device-side exact per-peer bytes).
+and `iris.device.peer_transfer_record` (device-side exact per-peer bytes).
 
 Key attributes per event. `iris.device.transfer.report`: `device.id`,
 `iris.image.id`, `iris.transfer.id`, `iris.report.event`,
@@ -257,7 +257,7 @@ aria2-next 2.5.6 keeps a **cumulative per-peer session counter** of its own
 rather than integrated. Two records carry it, and they measure different things
 — never sum them together.
 
-`iris.device.peer_receipt` is the exact one, emitted once per peer per completed
+`iris.device.peer_transfer_record` is the exact one, emitted once per peer per completed
 device transfer. An `--on-bt-download-complete` hook on the device reads the
 counters at the instant the last piece lands, before aria2 flips the download to
 seed-only and the connections drain. Attributes: `device.id` (the *receiving*
@@ -265,7 +265,7 @@ device), `iris.image.id`, `iris.transfer.id`, `network.peer.address`,
 `network.peer.port`, `iris.transfer.session_bytes_from_peer` /
 `iris.transfer.session_bytes_to_peer`, `iris.peer.attribution`,
 `iris.peer.device.id`, `iris.peer.has_complete_file` and
-`iris.receipt.capture_complete`.
+`iris.transfer_record.capture_complete`.
 
 `iris.peer.attribution` is the attribute that makes the number mean anything.
 The origin seeder is an ordinary BitTorrent peer of every device, so it appears
@@ -292,7 +292,7 @@ opened and closed between two polls. It is kept as its own quantity
 (`iris_peer_unattributed_bytes_total`) and never spread across the peers — an
 even split would be arithmetic presented as observation.
 
-!!! warning "The receipt is a floor, not a census"
+!!! warning "The transfer record is a floor, not a census"
     The hook reads only the peers aria2 still has a live connection to.
     `DefaultPeerStorage` erases a peer from `usedPeers_` the moment it
     disconnects, so a peer that fed the device 400 MB and then dropped before
@@ -302,10 +302,10 @@ even split would be arithmetic presented as observation.
     what the device received, and it will not reconcile with
     `iris.transfer.completed_content_bytes`. Rows the device or the server
     dropped at a cap *are* accounted for, in
-    `iris.transfer.peer_receipts.rows_omitted` and
+    `iris.transfer.peer_records.rows_omitted` and
     `iris.transfer.bytes_from_all_senders_omitted`;
-    `iris.transfer.peer_receipts.capture_complete` goes false when the capture
-    itself was lossy. A transfer with no usable snapshot carries no peer-receipt
+    `iris.transfer.peer_records.capture_complete` goes false when the capture
+    itself was lossy. A transfer with no usable snapshot carries no peer-transfer-record
     attributes at all rather than a zeroed set.
 
 ### Sizing
@@ -336,7 +336,7 @@ what a future bump will require.
 | Device never appears | Installer output, artifact server reachability, catalog trustpoint, enrollment token expiry. |
 | Download does not start | Tracker port, announce key, seeder port, device route to server. |
 | Download stalls | Swarm view, peer count, seeder availability, storage capacity. |
-| Verification fails | Catalog hash, file name, IOS copy output, image integrity. |
+| Verification fails | Catalog hash, file name, staged-copy byte size, image integrity. |
 | Console stale | Telemetry health, catalog service logs, device report interval. |
 | Prometheus target down, dashboard blank | `IRIS_OBSERVABILITY` — unset means `/metrics` answers 404 by design; then check reachability to port 9101. |
 | `403` on `:9101/swarm` | Swarm data is console-gated by design: use the console's Swarm tab, the authenticated `GET /api/swarm`, or `docker compose -f server/docker-compose.yml exec iris curl -s http://127.0.0.1:9101/swarm` (`kubectl exec` on Kubernetes). `IRIS_SWARM_PUBLIC=1` reopens remote access. |

@@ -5,13 +5,13 @@ All secrets (per-device catalog tokens, the rpc-secret, the catalog URL) are han
 automatically by the generator — it talks to the running server on this machine.
 
 ## Files
-- `devices.csv` — attachment-aware inventory (CSV v2). Each row declares a
+- `devices.csv` — management-type-aware inventory (CSV v2). Each row declares a
   `management_type` (`routed` or `inband`) plus its addressing:
   `device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,platform`.
   **routed** uses `iris_vlan`/`svi_*` (IRIS creates the VLAN/SVI); **inband**
   uses `inband_vlan`/`app_*` and attaches to an existing operator-owned VLAN
-  that IRIS never changes. Attachment-aware onboarding runs through the
-  Console/API (it records a receipt and runs preflight). The generator below is
+  that IRIS never changes. Management-type-aware onboarding runs through the
+  Console/API (it creates a deployment record and runs preflight). The generator below is
   **routed-only** and refuses a v2 header — it is for legacy positional
   `device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip` CSVs.
 - `dist/` — generated: `install-<device_id>.sh` per device + `install-all.sh`. Gitignored

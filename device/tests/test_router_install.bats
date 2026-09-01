@@ -8,11 +8,19 @@ setup() {
   INSTALL="$BATS_TEST_DIRNAME/../router-install.sh"
   export MODEL=C8000V DEVICE_IP=192.0.2.10 DEVICE_ID=router-1 \
     CATALOG_URL=https://192.0.2.20:8443 CATALOG_TOKEN=deadbeef \
-    STAGE_HOST=192.0.2.20 NETWORK_ATTACHMENT=router-routed VPG_NUMBER=10 \
+    STAGE_HOST=192.0.2.20 MANAGEMENT_TYPE=router-routed VPG_NUMBER=10 \
     APP_IP=10.8.0.2 APP_MASK=255.255.255.252 APP_GATEWAY=10.8.0.1
 }
 
-@test "router-routed renders a VPG Guest Shell attachment" {
+@test "stale NETWORK_ATTACHMENT without MANAGEMENT_TYPE aborts; a normal env is unaffected" {
+  run env -u MANAGEMENT_TYPE NETWORK_ATTACHMENT=router-routed bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"NETWORK_ATTACHMENT was renamed to MANAGEMENT_TYPE"* ]] || return 1
+  run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ]
+}
+
+@test "router-routed renders a VPG Guest Shell interface" {
   run bash "$INSTALL" --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" == *"interface VirtualPortGroup10"* ]]
@@ -29,7 +37,7 @@ setup() {
 }
 
 @test "router-nat renders overload and deterministic inbound swarm PAT" {
-  NETWORK_ATTACHMENT=router-nat NAT_INTERFACE=GigabitEthernet1 \
+  MANAGEMENT_TYPE=router-nat NAT_INTERFACE=GigabitEthernet1 \
     run bash "$INSTALL" --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" == *"interface GigabitEthernet1"* ]]
@@ -42,7 +50,7 @@ setup() {
 }
 
 @test "router renderer never emits switch network primitives" {
-  NETWORK_ATTACHMENT=router-nat NAT_INTERFACE=GigabitEthernet1 \
+  MANAGEMENT_TYPE=router-nat NAT_INTERFACE=GigabitEthernet1 \
     run bash "$INSTALL" --dry-run
   [ "$status" -eq 0 ]
   ! grep -Eq '(^|[[:space:]])vlan [0-9]|interface Vlan|switchport|ip router isis|vrf definition|AppGigabitEthernet' <<<"$output"
@@ -343,7 +351,13 @@ PY2
   # loop and was not folded into verify_request()/the step [6/7] merge.
   step4_line="$(grep -n '^echo "\[4/7\] guestshell enable' "$INSTALL" | head -1 | cut -d: -f1)"
   step5_line="$(grep -n '^echo "\[5/7\] install trustpoint' "$INSTALL" | head -1 | cut -d: -f1)"
-  for_line="$(grep -n 'for i in \$(seq 1 30); do' "$INSTALL" | head -1 | cut -d: -f1)"
+  # The iteration count is a tunable (it moved when the flat 15s wait became a
+  # ramp), so match the loop, not the number -- and search inside the step
+  # [4/7] window so the earlier destroy-wait loop cannot be picked up instead.
+  for_rel="$(sed -n "${step4_line},${step5_line}p" "$INSTALL" \
+    | grep -n 'for i in \$(seq 1 [0-9][0-9]*); do' | head -1 | cut -d: -f1)"
+  for_line=""
+  [ -n "$for_rel" ] && for_line=$((step4_line + for_rel - 1))
   poll_call_line="$(sed -n "${step4_line},${step5_line}p" "$INSTALL" \
     | grep -n 'show app-hosting list' | head -1 | cut -d: -f1)"
   [ -n "$step4_line" ] && [ -n "$for_line" ] && [ -n "$poll_call_line" ]

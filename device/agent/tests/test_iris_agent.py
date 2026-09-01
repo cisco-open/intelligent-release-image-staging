@@ -90,10 +90,11 @@ def make_deps(catalog, sizes, verify_ok=True, free=9_000_000_000,
         verify=lambda p, sha: verify_ok,
         free_bytes=lambda prefix="flash:": free,
         version=lambda: "17.18.03",
-        copy_to_root=lambda fname, target_prefix="flash:": copied.append(fname) or True,
+        copy_to_root=lambda fname, target_prefix="flash:", expected_size=None:
+            copied.append(fname) or True,
         purge_others=lambda keep, kid: purged.append((keep, kid)),
         reclaim=lambda: reclaimed.append(True),
-        root_present=lambda fname, prefix="flash:": root_ok,
+        root_present=lambda fname, prefix="flash:", expected_size=None: root_ok,
         remove_stage=_remove_stage,
         aria_remove=lambda fname: None,
         detect_mode=lambda: mode,
@@ -110,6 +111,7 @@ def make_deps(catalog, sizes, verify_ok=True, free=9_000_000_000,
         checkpoint=lambda state: checkpoints.append(
             __import__("copy").deepcopy(state)),
         aria_session=lambda: None,
+        copy_in_place=False,
     )
     return (deps, emitted, ios_cmds, aria_calls, copied, purged, reclaimed,
             bundle_reclaimed)
@@ -167,6 +169,19 @@ def test_complete_and_verified_emits_done_once():
     assert copied == ["img1.bin"]              # still only once
 
 
+def test_placement_via_a_real_copy_always_records_origin_downloaded():
+    # copy_in_place=False (every IOS-XE platform) always WRITES the root
+    # bytes itself via a real copy — there is no attest-only/adoption path
+    # here, so every successful placement is unconditionally "downloaded".
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 5,
+                       "sha256": "abc"})
+    deps, _, _, _, _, _, _, _ = make_deps(cat, {"/stage/img1.bin": 5})
+    state = {}
+    assert iris_agent.run_once(CFG, deps, state) == "complete"
+    assert state["img1"]["origin"] == "downloaded"
+
+
 def test_steady_state_never_rehashes():
     # once done+copied, ticks must NOT re-verify (hashing 1.2GB > the 60s timer
     # caused overlapping runs that double-fired the root copy)
@@ -199,21 +214,35 @@ def test_state_is_per_image_so_reassignment_recopies():
     assert copied == ["img2.bin"]
 
 
+# --- pending_root_deletes drain ---------------------------------------------
+# The queue is no longer FED by reassignment: an image dropped from the
+# assignment set is PARKED and its root copy deliberately kept (multi-image
+# assignment; see tests/test_multi_image.py). The drain below still runs on
+# every tick, for state files written by the agent that did queue replaced root
+# copies, and its delete-then-verify contract is unchanged — so these tests
+# seed the queue directly instead of provoking it with a reassignment.
+
+
 def test_replaced_image_cleanup_claim_gated_on_actual_absence():
     # AAA nodes silently no-op a raw exec `delete` (the reclaim/copyroot EEM
     # applets exist for exactly that reason) — so the delete must run through
     # the authorization-bypass applet, and the CLEANUP log and root_file
     # bookkeeping must be gated on the file actually being gone, else the
-    # replaced image is stranded on flash while IRIS claims otherwise
+    # replaced image is stranded on flash while IRIS claims otherwise.
+    # old.bin is explicitly IRIS's own DOWNLOAD (origin="downloaded"): a
+    # provenance-unknown/adopted entry is covered by the adopted-file tests
+    # below and never reaches the delete applet at all.
     cat = FakeCatalog({"approved_image_id": "img2"},
                       {"id": "img2", "filename": "img2.bin", "size": 7,
                        "sha256": "def"})
     deps, emitted, ios_cmds, _, _, _, _, bundle_reclaimed = make_deps(
         cat, {"/stage/img2.bin": 7}, verify_ok=True)
     deps = deps._replace(                       # the old root REFUSES to die
-        root_present=lambda fname, prefix="flash:": fname == "old.bin")
+        root_present=lambda fname, prefix="flash:", expected_size=None: fname == "old.bin")
     state = {"schema_version": iris_agent._STATE_SCHEMA,
-             "image_id": "img1", "root_file": "old.bin"}
+             "image_id": "img2", "pending_root_deletes": ["old.bin"],
+             "old-img": {"root_file": "old.bin", "copied": True,
+                        "origin": "downloaded"}}
     iris_agent.run_once(CFG, deps, state)
     assert bundle_reclaimed == [("flash:", ["old.bin"])]   # via the bypass applet
     assert all("delete" not in c for c in ios_cmds)        # never a raw exec delete
@@ -233,9 +262,11 @@ def test_replaced_image_cleanup_retry_refires_bypass_applet():
     deps, _, ios_cmds, _, _, _, _, bundle_reclaimed = make_deps(
         cat, {"/stage/img2.bin": 7}, verify_ok=True)
     deps = deps._replace(                       # the old root REFUSES to die
-        root_present=lambda fname, prefix="flash:": fname == "old.bin")
+        root_present=lambda fname, prefix="flash:", expected_size=None: fname == "old.bin")
     state = {"schema_version": iris_agent._STATE_SCHEMA,
-             "image_id": "img1", "root_file": "old.bin"}
+             "image_id": "img2", "pending_root_deletes": ["old.bin"],
+             "old-img": {"root_file": "old.bin", "copied": True,
+                        "origin": "downloaded"}}
     iris_agent.run_once(CFG, deps, state)
     iris_agent.run_once(CFG, deps, state)
     assert bundle_reclaimed == [("flash:", ["old.bin"]),
@@ -251,13 +282,102 @@ def test_replaced_image_cleanup_confirmed_when_gone():
     deps, emitted, ios_cmds, _, _, _, _, bundle_reclaimed = make_deps(
         cat, {"/stage/img2.bin": 7}, verify_ok=True)
     deps = deps._replace(                        # old root really deleted
-        root_present=lambda fname, prefix="flash:": fname != "old.bin")
+        root_present=lambda fname, prefix="flash:", expected_size=None: fname != "old.bin")
     state = {"schema_version": iris_agent._STATE_SCHEMA,
-             "image_id": "img1", "root_file": "old.bin"}
+             "image_id": "img2", "pending_root_deletes": ["old.bin"],
+             "old-img": {"root_file": "old.bin", "copied": True,
+                        "origin": "downloaded"}}
     iris_agent.run_once(CFG, deps, state)
     assert bundle_reclaimed == [("flash:", ["old.bin"])]
     assert "pending_root_deletes" not in state
     assert any(m == "CLEANUP" and "old.bin" in msg for m, msg in emitted)
+
+
+def test_pending_delete_of_an_adopted_file_is_skipped_and_cleared():
+    # The Directive-2 incident: attest-in-place ADOPTED an operator's
+    # pre-existing file as IRIS's staged copy; the OLD pending-delete queue
+    # must never be allowed to delete it. Skipped, logged, and the queue
+    # entry is resolved (cleared) rather than retried forever. Only
+    # meaningful on a platform with an adoption concept at all
+    # (copy_in_place) — see the XE counterpart below.
+    cat = FakeCatalog({"approved_image_id": "img2"},
+                      {"id": "img2", "filename": "img2.bin", "size": 7,
+                       "sha256": "def"})
+    deps, emitted, ios_cmds, _, _, _, _, bundle_reclaimed = make_deps(
+        cat, {"/stage/img2.bin": 7}, verify_ok=True)
+    deps = deps._replace(copy_in_place=True)
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "image_id": "img2", "pending_root_deletes": ["old.bin"],
+             "old-img": {"root_file": "old.bin", "copied": True,
+                        "origin": "adopted"}}
+    iris_agent.run_once(CFG, deps, state)
+    assert bundle_reclaimed == []                # delete never attempted
+    assert all("delete" not in c for c in ios_cmds)
+    assert "pending_root_deletes" not in state   # resolved, not retried forever
+    kept = [msg for m, msg in emitted if m == "ROOTCOPY-KEPT"]
+    assert kept and "old.bin" in kept[0] and "operator-adopted" in kept[0]
+
+
+def test_pending_delete_of_a_legacy_missing_origin_file_is_never_deleted_on_xr():
+    # No per-image record at all claims old.bin's provenance (a state file
+    # from before this feature existed). Missing/unknown origin is the
+    # fail-safe default on a platform with an adoption concept
+    # (copy_in_place): treated exactly like "adopted".
+    cat = FakeCatalog({"approved_image_id": "img2"},
+                      {"id": "img2", "filename": "img2.bin", "size": 7,
+                       "sha256": "def"})
+    deps, emitted, ios_cmds, _, _, _, _, bundle_reclaimed = make_deps(
+        cat, {"/stage/img2.bin": 7}, verify_ok=True)
+    deps = deps._replace(copy_in_place=True)
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "image_id": "img2", "pending_root_deletes": ["old.bin"]}
+    iris_agent.run_once(CFG, deps, state)
+    assert bundle_reclaimed == []
+    assert "pending_root_deletes" not in state
+    assert any(m == "ROOTCOPY-KEPT" and "old.bin" in msg for m, msg in emitted)
+
+
+def test_pending_delete_ignores_the_origin_gate_on_a_platform_with_no_adoption():
+    # IMPORTANT 3: copy_in_place=False (every IOS-XE platform) has NO
+    # adoption concept at all — a legacy entry with no owning per-image
+    # record must still be deleted exactly as before every deletion path
+    # here learned about provenance, never mislabelled 'operator-adopted'
+    # and stranded on flash.
+    cat = FakeCatalog({"approved_image_id": "img2"},
+                      {"id": "img2", "filename": "img2.bin", "size": 7,
+                       "sha256": "def"})
+    deps, emitted, ios_cmds, _, _, _, _, bundle_reclaimed = make_deps(
+        cat, {"/stage/img2.bin": 7}, verify_ok=True)
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "image_id": "img2", "pending_root_deletes": ["old.bin"]}
+    iris_agent.run_once(CFG, deps, state)
+    assert bundle_reclaimed == [("flash:", ["old.bin"])]
+    assert all(m != "ROOTCOPY-KEPT" for m, _ in emitted)
+
+
+def test_pending_delete_mixed_queue_only_deletes_the_downloaded_entry():
+    cat = FakeCatalog({"approved_image_id": "img3"},
+                      {"id": "img3", "filename": "img3.bin", "size": 7,
+                       "sha256": "xyz"})
+    deps, emitted, ios_cmds, _, _, _, _, bundle_reclaimed = make_deps(
+        cat, {"/stage/img3.bin": 7}, verify_ok=True)
+    deps = deps._replace(copy_in_place=True)
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "image_id": "img3",
+             "pending_root_deletes": ["adopted.bin", "downloaded.bin"],
+             # already 'parked' -- these represent OLD, already-fully-parked
+             # records (exactly what a pending_root_deletes-carrying state
+             # file predates), so _reconcile_set's own stale-park pass
+             # leaves them alone this tick and their origin survives for
+             # the drain below to read.
+             "old-a": {"root_file": "adopted.bin", "copied": True,
+                      "origin": "adopted", "parked": True},
+             "old-b": {"root_file": "downloaded.bin", "copied": True,
+                      "origin": "downloaded", "parked": True}}
+    iris_agent.run_once(CFG, deps, state)
+    assert bundle_reclaimed == [("flash:", ["downloaded.bin"])]
+    assert any(m == "ROOTCOPY-KEPT" and "adopted.bin" in msg
+              for m, msg in emitted)
 
 
 def test_replaced_image_cleanup_whitelists_names_before_applet():
@@ -364,6 +484,28 @@ def test_copy_gate_room_for_one_copy_downloads_seeds_but_blocks_root_copy():
     assert any(m == "FLASH-FULL" for m, _ in emitted)
 
 
+def test_copy_gate_charges_nothing_for_attest_in_place_platforms():
+    # F2: same tight-free-space scenario as the test above (free covers
+    # exactly the staged copy, nothing more), but copy_in_place=True (XR:
+    # attest_in_place stats the bytes already at stage_dir, it writes
+    # nothing new). The gate must charge ZERO extra headroom and complete,
+    # not degrade to seeding-only -- a device that fits exactly one image
+    # must not sit blocked forever waiting for room it never needed.
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 500_000_000,
+                       "sha256": "abc"})
+    deps, emitted, _, _, copied, _, _, _ = make_deps(
+        cat, {"/stage/img1.bin": 500_000_000}, free=300_000_000,
+        mode="bundle", reclaimables=[])
+    deps = deps._replace(copy_in_place=True)
+    state = {}
+    result = iris_agent.run_once(CFG, deps, state)
+    assert result == "complete"
+    assert copied == ["img1.bin"]                        # root copy WAS placed
+    assert not state.get("img1", {}).get("blocked_no_space")
+    assert not any(m == "FLASH-FULL" for m, _ in emitted)
+
+
 def test_copy_gate_room_for_two_copies_completes():
     cat = FakeCatalog({"approved_image_id": "img1"},
                       {"id": "img1", "filename": "img1.bin", "size": 5,
@@ -458,6 +600,52 @@ def test_aria_add_rpc_down_heartbeats_error_instead_of_crashing():
     assert "aria2c" in hb["stage_error"]
 
 
+def test_aria_rpc_400_reports_staging_not_a_staging_failure():
+    """A rejected RPC TOKEN is not a dead daemon.
+
+    The installer bakes rpc-secret EMPTY on purpose and the real secret only
+    reaches the device on this agent's first token refresh, so until
+    bootstrap.sh resyncs the file and bounces aria2c every RPC we make is
+    unauthorized. aria2-next answers that with HTTP 400 (upstream aria2
+    returns a JSON-RPC error object instead). HTTPError is an OSError
+    subclass, so it used to land in the same arm as connection-refused and a
+    healthy device mid-bringup reported "aria2c RPC unreachable: HTTP Error
+    400: Bad Request" as a staging FAILURE, clearing itself a tick later.
+    """
+    import urllib.error
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin",
+                       "size": 1000, "sha256": "abc"})
+    deps, emitted, _, _, _, _, _, _ = make_deps(cat, {}, free=9_000_000_000)
+
+    def _unauthorized(torrent, dest):
+        raise urllib.error.HTTPError(
+            "http://127.0.0.1:6800/jsonrpc", 400, "Bad Request", {}, None)
+
+    deps = deps._replace(aria_add=_unauthorized)
+    # return vocabulary is deliberately unchanged -- bootstrap logs key off it
+    assert iris_agent.run_once(CFG, deps, {}) == "aria2-down"
+    hb = cat.heartbeats[-1]
+    assert hb["stage_state"] == "staging", \
+        "a rejected token must not be reported as a staging failure"
+    assert not hb.get("stage_error"), \
+        "no stage_error: nothing has actually failed"
+    assert any("ARIA2-AUTH" in str(e) for e in emitted), emitted
+    # and a genuinely unreachable daemon must STILL be an error (guards the
+    # fix from swallowing the 2026-08-20 incident class it sits next to)
+    cat2 = FakeCatalog({"approved_image_id": "img1"},
+                       {"id": "img1", "filename": "img1.bin",
+                        "size": 1000, "sha256": "abc"})
+    deps2, _, _, _, _, _, _, _ = make_deps(cat2, {}, free=9_000_000_000)
+
+    def _refused(torrent, dest):
+        raise ConnectionRefusedError(111, "Connection refused")
+
+    deps2 = deps2._replace(aria_add=_refused)
+    assert iris_agent.run_once(CFG, deps2, {}) == "aria2-down"
+    assert cat2.heartbeats[-1]["stage_state"] == "error"
+
+
 def test_aria_remove_rpc_down_heartbeats_error_instead_of_crashing():
     # Same failure class one call earlier: the stale-entry clear hits the RPC
     # first, and urllib wraps the refusal in URLError. Must not crash either.
@@ -478,52 +666,109 @@ def test_aria_remove_rpc_down_heartbeats_error_instead_of_crashing():
     assert "aria2c" in hb["stage_error"]
 
 
-def test_reassignment_purges_old_image_everywhere():
-    # device completed img1 (incl. root copy); operator reassigns img2 ->
-    # the agent must purge the old torrent/files and delete the old root copy
+def test_reassignment_parks_old_image_and_keeps_its_root_copy():
+    # device completed img1 (incl. root copy); operator reassigns img2 -> img1
+    # is PARKED, not purged: its torrent is stopped and its stage copy deleted,
+    # its record stays in state, and the root copy it placed is KEPT. (Deleting
+    # it was the old single-image behaviour; with an assignment SET an image
+    # that leaves it can come back, and the surviving root copy is what makes
+    # that a presence check instead of another 1.2 GB placement.)
     cat = FakeCatalog({"approved_image_id": "img2"},
                       {"id": "img2", "filename": "img2.bin",
                        "size": 1000, "sha256": "def"})
     deps, emitted, ios_cmds, _, _, purged, _, bundle_reclaimed = make_deps(
         cat, {}, free=9_000_000_000)
-    deps = deps._replace(   # the delete genuinely lands: old root reads absent
-        root_present=lambda fname, prefix="flash:": fname != "img1.bin")
     state = {"schema_version": iris_agent._STATE_SCHEMA,
              "image_id": "img1", "root_file": "img1.bin",
              "img1": {"done": True, "copied": True}}
     assert iris_agent.run_once(CFG, deps, state) == "downloading"
-    assert purged == [("img2.bin", "img2")]            # old torrent/files purged
-    # old ROOT copy removed (ours) — via the bypass applet, never a raw delete
-    assert bundle_reclaimed == [("flash:", ["img1.bin"])]
+    # the stage/aria2 sweep keeps the whole assigned SET, not one survivor
+    assert purged == [(["img2.bin"], ["img2"])]
+    assert bundle_reclaimed == []                      # root copy NOT deleted
+    assert "pending_root_deletes" not in state         # and never queued
     assert all("delete" not in c for c in ios_cmds)
-    assert any(m == "CLEANUP" for m, _ in emitted)
-    assert "img1" not in state and state["image_id"] == "img2"
+    assert any(m == "PARKED" for m, _ in emitted)
+    assert state["img1"]["parked"] is True             # remembered, not dropped
+    assert state["image_id"] == "img2"
+    # XE wording pin: copy_in_place=False (this fixture's default) has no
+    # adoption concept at all, so the stage/root split is unconditional --
+    # the PARKED detail must say so in those exact terms, unchanged by the
+    # XR-specific wording the two tests below pin.
+    parked_msg = [msg for m, msg in emitted if m == "PARKED"][0]
+    assert "stage copy deleted, root copy kept" in parked_msg
 
 
-def test_reassignment_purges_old_root_on_cached_stage_fs():
-    # Device previously staged on sdflash: (cached). Reassigned to a new image ->
-    # the old root copy must be deleted from sdflash:, not flash:.
+def test_reassignment_parks_an_adopted_root_on_xr_and_logs_left_in_place():
+    # XR wording pin (copy_in_place=True): the old image's root copy was
+    # ADOPTED (attest-in-place, never downloaded by this agent), so park
+    # must leave it exactly where it is and say so -- the same
+    # never-delete-an-adopted-file guarantee _protect_adopted_root enforces
+    # elsewhere, worded for the PARKED detail specifically.
+    cat = FakeCatalog({"approved_image_id": "img2"},
+                      {"id": "img2", "filename": "img2.bin",
+                       "size": 1000, "sha256": "def"})
+    deps, emitted, ios_cmds, _, _, purged, _, bundle_reclaimed = make_deps(
+        cat, {}, free=9_000_000_000)
+    deps = deps._replace(copy_in_place=True)
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "image_id": "img1",
+             "img1": {"done": True, "copied": True,
+                      "root_file": "img1.bin", "origin": "adopted"}}
+    assert iris_agent.run_once(CFG, deps, state) == "downloading"
+    assert bundle_reclaimed == []                      # adopted root NOT deleted
+    assert all("delete" not in c for c in ios_cmds)
+    parked_msg = [msg for m, msg in emitted if m == "PARKED"][0]
+    assert "root copy left in place (adopted)" in parked_msg
+
+
+def test_reassignment_parks_a_downloaded_root_on_xr_and_logs_removed():
+    # XR wording pin (copy_in_place=True), the mirror case: the old image's
+    # root copy was DOWNLOADED by this agent, so on this platform (stage
+    # dir IS the target-FS root) park's stage-copy delete really does
+    # remove the root copy -- the PARKED detail must say "removed", not the
+    # XE "kept" wording, since here there is no separate copy left behind.
+    cat = FakeCatalog({"approved_image_id": "img2"},
+                      {"id": "img2", "filename": "img2.bin",
+                       "size": 1000, "sha256": "def"})
+    deps, emitted, ios_cmds, _, _, purged, _, bundle_reclaimed = make_deps(
+        cat, {}, free=9_000_000_000)
+    deps = deps._replace(copy_in_place=True)
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "image_id": "img1",
+             "img1": {"done": True, "copied": True,
+                      "root_file": "img1.bin", "origin": "downloaded"}}
+    assert iris_agent.run_once(CFG, deps, state) == "downloading"
+    parked_msg = [msg for m, msg in emitted if m == "PARKED"][0]
+    assert "root copy removed" in parked_msg
+
+
+def test_queued_root_delete_uses_cached_stage_fs():
+    # Device previously staged on sdflash: (cached). A root copy still queued
+    # for deletion must be deleted from sdflash:, not flash:.
     cat = FakeCatalog({"approved_image_id": "img2"},
                       {"id": "img2", "filename": "img2.bin", "size": 5,
                        "sha256": "abc"})
     deps, _, _, _, _, _, _, bundle_reclaimed = make_deps(
         cat, {"/stage/img2.bin": 5}, mode="bundle")
     deps = deps._replace(target_fs=lambda: ("sdflash:", 9_000_000_000))
-    state = {"image_id": "img1", "root_file": "img1.bin", "stage_fs": "sdflash:",
-             "img1": {"done": True, "copied": True}}
+    state = {"image_id": "img2", "stage_fs": "sdflash:",
+             "pending_root_deletes": ["img1.bin"],
+             "old-img": {"root_file": "img1.bin", "copied": True,
+                        "origin": "downloaded"}}
     iris_agent.run_once(CFG, deps, state)
     assert bundle_reclaimed == [("sdflash:", ["img1.bin"])]
 
 
-def test_reassignment_purge_defaults_to_flash_for_legacy_state():
+def test_queued_root_delete_defaults_to_flash_for_legacy_state():
     # Pre-#24 state has no stage_fs; the old root copy was placed on flash:.
     cat = FakeCatalog({"approved_image_id": "img2"},
                       {"id": "img2", "filename": "img2.bin", "size": 5,
                        "sha256": "abc"})
     deps, _, _, _, _, _, _, bundle_reclaimed = make_deps(
         cat, {"/stage/img2.bin": 5}, mode="bundle")
-    state = {"image_id": "img1", "root_file": "img1.bin",
-             "img1": {"done": True, "copied": True}}
+    state = {"image_id": "img2", "pending_root_deletes": ["img1.bin"],
+             "old-img": {"root_file": "img1.bin", "copied": True,
+                        "origin": "downloaded"}}
     iris_agent.run_once(CFG, deps, state)
     assert bundle_reclaimed == [("flash:", ["img1.bin"])]
 
@@ -596,6 +841,46 @@ def test_self_heal_redownloads_when_content_sha_changed():
     assert iris_agent.run_once(CFG, deps, _DONE(sha="OLDSHA")) == "downloading"
     assert removed == ["/stage/img1.bin"]              # stale content discarded
     assert aria == [("/stage/img1.torrent", "/stage")]  # re-downloaded
+    # copy_in_place=False here (default fixture): no adoption concept, so no
+    # replace warning is due regardless of origin.
+    assert all(m != "ROOTCOPY-REPLACED" for m, _ in emitted)
+
+
+def test_content_republish_on_an_adopted_file_warns_before_replacing_it():
+    # IMPORTANT 4: same-id republish stays UNGUARDED -- convergence to the
+    # catalog's current target wins over provenance protection here, by
+    # design -- but overriding a file this agent never downloaded must say
+    # so honestly, in the same tick, before the delete.
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 5,
+                       "sha256": "NEWSHA"})
+    deps, emitted, _, aria, _, _, _, _ = make_deps(cat, {"/stage/img1.bin": 5})
+    deps = deps._replace(copy_in_place=True)
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "image_id": "img1", "root_file": "img1.bin",
+             "img1": {"done": True, "copied": True, "sha": "OLDSHA",
+                      "origin": "adopted"}}
+    assert iris_agent.run_once(CFG, deps, state) == "downloading"
+    replaced = [msg for m, msg in emitted if m == "ROOTCOPY-REPLACED"]
+    assert replaced
+    assert replaced[0] == ("replacing operator-adopted img1.bin: catalog "
+                           "content changed under image id img1")
+    # still converges -- the whole point of the adjudication
+    assert aria == [("/stage/img1.torrent", "/stage")]
+
+
+def test_content_republish_on_a_downloaded_file_stays_silent():
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 5,
+                       "sha256": "NEWSHA"})
+    deps, emitted, _, aria, _, _, _, _ = make_deps(cat, {"/stage/img1.bin": 5})
+    deps = deps._replace(copy_in_place=True)
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "image_id": "img1", "root_file": "img1.bin",
+             "img1": {"done": True, "copied": True, "sha": "OLDSHA",
+                      "origin": "downloaded"}}
+    assert iris_agent.run_once(CFG, deps, state) == "downloading"
+    assert all(m != "ROOTCOPY-REPLACED" for m, _ in emitted)
 
 
 def test_self_heal_drops_stale_aria_entry_before_redownload():
@@ -624,6 +909,58 @@ def test_self_heal_recopy_does_not_touch_aria():
     deps = deps._replace(aria_remove=lambda fn: aria_removed.append(fn))
     assert iris_agent.run_once(CFG, deps, _DONE()) == "complete"
     assert copied == ["img1.bin"] and aria_removed == []
+
+
+# --- Task 3: the catalog's declared byte size must thread into both the
+# current-image copy/presence checks, but NOT into the old-root cleanup
+# check (a replaced image's size is unknown and irrelevant -- it is about
+# to be deleted). ---
+
+def test_run_once_passes_catalog_size_to_copy_and_presence():
+    # root_present (steady-state check) reports the flash-root copy missing,
+    # which drives the self-heal re-copy path -- exercising BOTH deps calls
+    # for the CURRENT image in a single tick.
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 5,
+                       "sha256": "abc"})
+    seen = {}
+
+    def copy_to_root(fname, prefix, expected_size):
+        seen["copy_size"] = expected_size
+        return True
+
+    def root_present(fname, prefix, expected_size=None):
+        seen.setdefault("present_sizes", []).append(expected_size)
+        return False   # root missing -> triggers the self-heal re-copy below
+
+    deps, _, _, _, _, _, _, _ = make_deps(cat, {"/stage/img1.bin": 5})
+    deps = deps._replace(copy_to_root=copy_to_root, root_present=root_present)
+    assert iris_agent.run_once(CFG, deps, _DONE()) == "complete"
+    assert seen["copy_size"] == 5
+    assert 5 in seen["present_sizes"]
+
+
+def test_old_root_cleanup_root_present_no_catalog_size():
+    # queued root delete: the replaced image's root_present check stays
+    # presence-only -- no catalog size exists for an image that is about to
+    # be deleted, so the call must NOT carry a third (size) argument.
+    cat = FakeCatalog({"approved_image_id": "img2"},
+                      {"id": "img2", "filename": "img2.bin", "size": 7,
+                       "sha256": "def"})
+    calls = []
+
+    def root_present(fname, prefix, expected_size=None):
+        calls.append((fname, prefix, expected_size))
+        return fname != "old.bin"   # confirm the old root is gone
+
+    deps, _, _, _, _, _, _, _ = make_deps(cat, {}, verify_ok=True)
+    deps = deps._replace(root_present=root_present)
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "image_id": "img2", "pending_root_deletes": ["old.bin"],
+             "old-img": {"root_file": "old.bin", "copied": True,
+                        "origin": "downloaded"}}
+    iris_agent.run_once(CFG, deps, state)
+    assert ("old.bin", "flash:", None) in calls
 
 
 def test_steady_state_holds_when_files_present_and_sha_matches():
@@ -666,7 +1003,7 @@ def test_root_copy_failure_does_not_mark_copied_and_retries_next_tick():
         cat, {"/stage/img1.bin": 5}, verify_ok=True)
     calls = []
 
-    def failing_copy(fname, target_prefix="flash:"):
+    def failing_copy(fname, target_prefix="flash:", expected_size=None):
         calls.append(fname)
         return False
 
@@ -693,7 +1030,7 @@ def test_root_copy_failure_then_success_settles_to_complete():
     results = iter([False, True])
     calls = []
 
-    def flaky_copy(fname, target_prefix="flash:"):
+    def flaky_copy(fname, target_prefix="flash:", expected_size=None):
         calls.append(fname)
         return next(results)
 
@@ -716,7 +1053,7 @@ def test_root_copy_backoff_starts_after_second_failure(monkeypatch):
         cat, {"/stage/img1.bin": 5}, verify_ok=True)
     calls = []
     deps = deps._replace(
-        copy_to_root=lambda fname, target_prefix="flash:": calls.append(fname) or False)
+        copy_to_root=lambda fname, target_prefix="flash:", expected_size=None: calls.append(fname) or False)
     now = [1_000.0]
     monkeypatch.setattr(iris_agent.time, "time", lambda: now[0])
     state = {}
@@ -739,6 +1076,365 @@ def test_root_copy_backoff_starts_after_second_failure(monkeypatch):
     assert "copy_next_ts" not in state["img1"]
 
 
+# --- A terminal placement failure must not strand a partial image at the
+# boot-FS root. Once copy_terminal is set no further copy fires, so the
+# placement path's delete-first never runs again — and the leftover carries the
+# REAL Cisco image name, so it both wastes ~1.2 GB and looks like a good image
+# to an operator listing flash:. state['root_file'] is only set on SUCCESS, so
+# nothing else owns the cleanup. ---
+
+def _terminal_copy_deps(bundle_sink_wanted=True):
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 5,
+                       "sha256": "abc"})
+    deps, emitted, _, _, _, _, _, bundle_reclaimed = make_deps(
+        cat, {"/stage/img1.bin": 5}, verify_ok=True)
+    deps = deps._replace(
+        copy_to_root=lambda fname, target_prefix="flash:", expected_size=None: False)
+    return deps, emitted, bundle_reclaimed
+
+
+def test_terminal_placement_failure_reclaims_this_attempts_partial(monkeypatch):
+    deps, emitted, bundle_reclaimed = _terminal_copy_deps()
+    now = [1_000.0]
+    monkeypatch.setattr(iris_agent.time, "time", lambda: now[0])
+    state = {}
+    for _ in range(iris_agent._ROOT_COPY_MAX_ATTEMPTS):
+        iris_agent.run_once(CFG, deps, state)
+        now[0] += 3600           # clear any armed backoff
+    assert state["img1"]["copy_terminal"] is True
+    # EXACTLY the one filename IRIS itself wrote — the delete-first at the head
+    # of this attempt means a file at that name can only be this attempt's
+    # partial, never an operator's image. Nothing else may be swept.
+    assert bundle_reclaimed == [("flash:", ["img1.bin"])]
+    assert any(m == "ROOTCOPY-RECLAIM" for m, _ in emitted)
+
+
+def test_terminal_reclaim_fires_once_not_every_tick(monkeypatch):
+    deps, _, bundle_reclaimed = _terminal_copy_deps()
+    now = [1_000.0]
+    monkeypatch.setattr(iris_agent.time, "time", lambda: now[0])
+    state = {}
+    for _ in range(iris_agent._ROOT_COPY_MAX_ATTEMPTS + 5):
+        iris_agent.run_once(CFG, deps, state)
+        now[0] += 3600
+    assert len(bundle_reclaimed) == 1
+
+
+def test_non_terminal_placement_failure_never_reclaims(monkeypatch):
+    # Retries are still coming, and each one starts by deleting the name
+    # itself. Reclaiming between attempts would be pure churn.
+    deps, emitted, bundle_reclaimed = _terminal_copy_deps()
+    now = [1_000.0]
+    monkeypatch.setattr(iris_agent.time, "time", lambda: now[0])
+    state = {}
+    for _ in range(iris_agent._ROOT_COPY_MAX_ATTEMPTS - 1):
+        iris_agent.run_once(CFG, deps, state)
+        now[0] += 3600
+    assert state["img1"]["copy_attempts"] == iris_agent._ROOT_COPY_MAX_ATTEMPTS - 1
+    assert state["img1"].get("copy_terminal") is not True
+    assert bundle_reclaimed == []
+    assert not any(m == "ROOTCOPY-RECLAIM" for m, _ in emitted)
+
+
+def test_transient_running_image_unknown_never_reclaims():
+    # The sentinel is not a copy failure at all, so it must neither go terminal
+    # nor delete anything.
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 5,
+                       "sha256": "abc"})
+    deps, _, _, _, _, _, _, bundle_reclaimed = make_deps(
+        cat, {"/stage/img1.bin": 5}, verify_ok=True)
+    deps = deps._replace(
+        copy_to_root=lambda fname, target_prefix="flash:", expected_size=None:
+            iris_agent.ROOT_COPY_RUNNING_IMAGE_UNKNOWN)
+    state = {}
+    for _ in range(iris_agent._ROOT_COPY_MAX_ATTEMPTS + 2):
+        iris_agent.run_once(CFG, deps, state)
+    assert bundle_reclaimed == []
+
+
+def test_terminal_reclaim_failure_is_logged_and_swallowed(monkeypatch):
+    # The device is already reported as copy_failed; a delete that raises must
+    # not take the tick down with it.
+    deps, emitted, _ = _terminal_copy_deps()
+
+    def boom(prefix, names):
+        raise RuntimeError("cli glitch")
+
+    deps = deps._replace(reclaim_bundle=boom)
+    now = [1_000.0]
+    monkeypatch.setattr(iris_agent.time, "time", lambda: now[0])
+    state = {}
+    for _ in range(iris_agent._ROOT_COPY_MAX_ATTEMPTS):
+        iris_agent.run_once(CFG, deps, state)
+        now[0] += 3600
+    assert state["img1"]["copy_terminal"] is True
+    assert any(m == "ROOTCOPY-RECLAIM-FAIL" for m, _ in emitted)
+
+
+# --- CRITICAL: the terminal reclaim must never delete a file IRIS did not
+# write. Its whole safety argument rests on "this attempt's delete-first
+# already cleared the name" — an invariant that is FALSE for every path that
+# gives up BEFORE any IOS command runs (the running-image refusals, an scp
+# push that raised, an applet run that never fired). On the running-image
+# refusal the file at that name IS the operator's running image, and deleting
+# it lands a bundle-mode box in rommon at the next reload. Two independent
+# layers below; each is tested on its own so a regression in one is still
+# caught by the other's tests. ---
+
+def _reclaim_probe_deps(running="running.bin"):
+    """run_once harness whose copy_to_root verdict the caller supplies."""
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 5,
+                       "sha256": "abc"})
+    deps, emitted, _, _, _, _, _, bundle_reclaimed = make_deps(
+        cat, {"/stage/img1.bin": 5}, verify_ok=True)
+    return deps._replace(running_image=lambda: running), emitted, bundle_reclaimed
+
+
+def _tick_to_terminal(deps, monkeypatch, ticks=None):
+    now = [1_000.0]
+    monkeypatch.setattr(iris_agent.time, "time", lambda: now[0])
+    state = {}
+    for _ in range(ticks or iris_agent._ROOT_COPY_MAX_ATTEMPTS):
+        iris_agent.run_once(CFG, deps, state)
+        now[0] += 3600          # clear any armed backoff
+    return state
+
+
+# --- Layer 1: only a failure that got PAST the delete-first arms the reclaim ---
+
+def test_running_image_refusal_at_terminal_never_reclaims(monkeypatch):
+    # The reviewer's scenario. copy_to_root refuses because the assigned image
+    # IS the running image (reachable with copied=False on a fresh/lost state
+    # file, after the schema-2 upgrade clears "copied", or when the operator
+    # already reloaded onto the staged image). Four refusals reach the terminal
+    # state — and the reclaim must delete NOTHING: no IOS command ran, so the
+    # only file at flash:img1.bin is the running image itself.
+    deps, emitted, bundle_reclaimed = _reclaim_probe_deps(running="img1.bin")
+    ios_cmds = []
+
+    def real_copy(fname, target_prefix="flash:", expected_size=None):
+        # the REAL Guest Shell impl, refusing on its own running-image check
+        return iris_agent._copy_to_root_impl(
+            fname, target_prefix, lambda lines: ios_cmds.extend(lines),
+            lambda c: ios_cmds.append(c) or "",
+            lambda m, msg: emitted.append((m, msg)),
+            reverify_fn=lambda *a, **k: True,
+            running_image_fn=lambda: "flash:img1.bin",
+            expected_size=expected_size)
+
+    deps = deps._replace(copy_to_root=real_copy)
+    state = _tick_to_terminal(deps, monkeypatch)
+    assert ios_cmds == []                              # never touched IOS
+    assert state["img1"]["copy_terminal"] is True      # operator still sees it
+    assert state["img1"]["copy_attempts"] == iris_agent._ROOT_COPY_MAX_ATTEMPTS
+    assert state["img1"].get("ios_copy_started") is not True
+    assert bundle_reclaimed == []                      # nothing deleted, ever
+    assert not any(m == "ROOTCOPY-RECLAIM" for m, _ in emitted)
+    # "no attempt reached IOS" is Layer 1 speaking; Layer 2 has its own wording,
+    # so this pins the ios_copy_started gate specifically.
+    assert any(m == "ROOTCOPY-RECLAIM-REFUSED" and "no attempt reached IOS" in msg
+               for m, msg in emitted)
+
+
+def test_scp_push_failure_at_terminal_never_reclaims(monkeypatch):
+    # Container path: the scp scratch push raised, so no IOS command ran. The
+    # running image has a DIFFERENT name here, so Layer 2 cannot be what saves
+    # the file — this isolates Layer 1's ios_copy_started gate.
+    deps, emitted, bundle_reclaimed = _reclaim_probe_deps(running="running.bin")
+    deps = deps._replace(
+        copy_to_root=lambda fname, target_prefix="flash:", expected_size=None:
+            iris_agent.ROOT_COPY_NOT_ATTEMPTED)
+    state = _tick_to_terminal(deps, monkeypatch)
+    assert state["img1"]["copy_terminal"] is True
+    assert bundle_reclaimed == []
+    assert any(m == "ROOTCOPY-RECLAIM-REFUSED" for m, _ in emitted)
+
+
+def test_not_attempted_sentinel_is_never_mistaken_for_success():
+    # ROOT_COPY_NOT_ATTEMPTED is a truthy object(); a plain `if result:` would
+    # report a placement that never happened as a verified root copy.
+    deps, _, _ = _reclaim_probe_deps(running="img1.bin")
+    deps = deps._replace(
+        copy_to_root=lambda fname, target_prefix="flash:", expected_size=None:
+            iris_agent.ROOT_COPY_NOT_ATTEMPTED)
+    state = {}
+    iris_agent.run_once(CFG, deps, state)
+    assert state["img1"].get("copied") is not True
+    assert state.get("root_file") is None
+    assert state["img1"]["copy_attempts"] == 1        # counts, like plain False
+
+
+def test_mixed_cycle_one_refusal_then_real_failures_still_reclaims(monkeypatch):
+    # A refusal followed by attempts that DID run the delete-first: the genuine
+    # failures set ios_copy_started, so the leftover partial is still reclaimed.
+    deps, emitted, bundle_reclaimed = _reclaim_probe_deps(running="running.bin")
+    results = iter([iris_agent.ROOT_COPY_NOT_ATTEMPTED, False, False, False])
+    deps = deps._replace(
+        copy_to_root=lambda fname, target_prefix="flash:", expected_size=None:
+            next(results))
+    state = _tick_to_terminal(deps, monkeypatch)
+    assert state["img1"]["copy_terminal"] is True
+    assert bundle_reclaimed == [("flash:", ["img1.bin"])]
+    assert any(m == "ROOTCOPY-RECLAIM" for m, _ in emitted)
+
+
+def test_ios_copy_started_clears_when_copy_failures_reset():
+    # The flag is per-image-cycle: a success must clear it with copy_attempts,
+    # or a later cycle of pure refusals would inherit the authorisation.
+    deps, _, _ = _reclaim_probe_deps(running="running.bin")
+    results = iter([False, True])
+    deps = deps._replace(
+        copy_to_root=lambda fname, target_prefix="flash:", expected_size=None:
+            next(results))
+    state = {}
+    iris_agent.run_once(CFG, deps, state)             # genuine failure
+    assert state["img1"]["ios_copy_started"] is True
+    iris_agent.run_once(CFG, deps, state)             # success resets the cycle
+    assert state["img1"]["copied"] is True
+    assert state["img1"].get("ios_copy_started") is None
+    assert state["img1"].get("copy_attempts") is None
+
+
+def test_genuine_placement_failure_through_the_real_impl_still_reclaims(monkeypatch):
+    # End-to-end through the REAL direct impl: delete-first runs, the copy runs,
+    # and reverify fails on a short file. That leftover IS ours, so the terminal
+    # reclaim must still fire — the fix must not disarm the legitimate case.
+    deps, emitted, bundle_reclaimed = _reclaim_probe_deps(running="running.bin")
+    cli_calls = []
+
+    def cli_exec(cmd):
+        cli_calls.append(cmd)
+        if cmd.startswith("dir "):
+            return "  121  -rw-  3  Jun 16 2026  img1.bin"    # short: 3 != 5
+        return ""
+
+    def real_copy(fname, target_prefix="flash:", expected_size=None):
+        return iris_agent._copy_to_root_direct_impl(
+            fname, target_prefix, cli_exec,
+            lambda m, msg: emitted.append((m, msg)),
+            reverify_fn=lambda *a, **k: iris_agent._agent_reverify_root(
+                *a, poll_attempts=1, sleep_fn=lambda s: None, **k),
+            running_image_fn=lambda: "flash:running.bin",
+            expected_size=expected_size)
+
+    deps = deps._replace(copy_to_root=real_copy)
+    state = _tick_to_terminal(deps, monkeypatch)
+    assert "delete /force flash:img1.bin" in cli_calls    # delete-first DID run
+    assert state["img1"]["ios_copy_started"] is True
+    assert bundle_reclaimed == [("flash:", ["img1.bin"])]
+    assert any(m == "ROOTCOPY-RECLAIM" for m, _ in emitted)
+
+
+# --- Layer 2: _reclaim_failed_root_copy's own unconditional last-line check.
+# Tested by calling it DIRECTLY with a plain-False cycle behind it, i.e. as if
+# Layer 1 had regressed. ---
+
+def _direct_reclaim(running):
+    deps, emitted, bundle_reclaimed = _reclaim_probe_deps(running=running)
+    iris_agent._reclaim_failed_root_copy(
+        deps, "flash:", {"id": "img1", "filename": "img1.bin"})
+    return emitted, bundle_reclaimed
+
+
+def test_reclaim_refuses_to_delete_the_running_image():
+    emitted, bundle_reclaimed = _direct_reclaim("flash:img1.bin")
+    assert bundle_reclaimed == []
+    assert any(m == "ROOTCOPY-RECLAIM-REFUSED" and "IS the running image" in msg
+               for m, msg in emitted)
+
+
+def test_reclaim_running_image_match_is_case_insensitive():
+    # IOS is inconsistent about filename case in `show version`; a case-only
+    # difference must not open the delete path.
+    emitted, bundle_reclaimed = _direct_reclaim("bootflash:/IMG1.BIN")
+    assert bundle_reclaimed == []
+    assert any(m == "ROOTCOPY-RECLAIM-REFUSED" for m, _ in emitted)
+
+
+def test_reclaim_refuses_when_running_image_is_unknown():
+    # Same rule _reclaim_for_mode already follows (#4): with no confirmable
+    # running image there is no safe protect set, so no delete may run.
+    emitted, bundle_reclaimed = _direct_reclaim(None)
+    assert bundle_reclaimed == []
+    assert any(m == "ROOTCOPY-RECLAIM-REFUSED" and "running image unknown" in msg
+               for m, msg in emitted)
+
+
+def test_reclaim_refuses_when_the_running_image_read_raises():
+    deps, emitted, bundle_reclaimed = _reclaim_probe_deps()
+
+    def boom():
+        raise RuntimeError("show version glitch")
+
+    deps = deps._replace(running_image=boom)
+    iris_agent._reclaim_failed_root_copy(
+        deps, "flash:", {"id": "img1", "filename": "img1.bin"})
+    assert bundle_reclaimed == []
+    assert any(m == "ROOTCOPY-RECLAIM-REFUSED" and "running image unknown" in msg
+               for m, msg in emitted)
+
+
+def test_reclaim_deletes_when_the_target_is_not_the_running_image():
+    emitted, bundle_reclaimed = _direct_reclaim("flash:running.bin")
+    assert bundle_reclaimed == [("flash:", ["img1.bin"])]
+    assert any(m == "ROOTCOPY-RECLAIM" for m, _ in emitted)
+
+
+def test_layer2_alone_blocks_the_reviewer_scenario_end_to_end(monkeypatch):
+    # Layer 1 deliberately bypassed: copy_to_root returns a plain False
+    # (exactly what the regressed build returned for the running-image
+    # refusal), so ios_copy_started IS set and the caller asks for the reclaim.
+    # Layer 2 must still refuse, because the target is the running image.
+    deps, emitted, bundle_reclaimed = _reclaim_probe_deps(running="img1.bin")
+    deps = deps._replace(
+        copy_to_root=lambda fname, target_prefix="flash:", expected_size=None: False)
+    state = _tick_to_terminal(deps, monkeypatch)
+    assert state["img1"]["copy_terminal"] is True
+    assert bundle_reclaimed == []             # NOT [("flash:", ["img1.bin"])]
+    assert any(m == "ROOTCOPY-RECLAIM-REFUSED" and "IS the running image" in msg
+               for m, msg in emitted)
+
+
+# --- The pre-IOS/post-IOS classification at its source: the copy impls. ---
+
+def test_copy_impls_refusals_return_not_attempted():
+    for impl, args in (
+            (iris_agent._copy_to_root_impl,
+             ("img1.bin", "flash:", lambda lines: None, lambda c: "")),
+            (iris_agent._copy_to_root_direct_impl,
+             ("img1.bin", "flash:", lambda c: ""))):
+        for running in ("flash:img1.bin", "flash:IMG1.BIN", None):
+            emitted = []
+            out = impl(*args, emit_fn=lambda m, msg: emitted.append((m, msg)),
+                       reverify_fn=lambda *a, **k: True,
+                       running_image_fn=lambda: running)
+            assert out is iris_agent.ROOT_COPY_NOT_ATTEMPTED, (impl, running)
+            assert any(m == "ROOTCOPY-REFUSED" and "no IOS command ran" in msg
+                       for m, msg in emitted)
+
+
+def test_copy_to_root_direct_delete_first_raise_is_not_attempted():
+    # The delete-first never cleared the name, so the name is not ours.
+    emitted, reverify_calls = [], []
+
+    def cli_exec(cmd):
+        if cmd.startswith("delete"):
+            raise RuntimeError("vty glitch")
+        return ""
+
+    out = iris_agent._copy_to_root_direct_impl(
+        "img1.bin", "sdflash:", cli_exec,
+        lambda m, msg: emitted.append((m, msg)),
+        reverify_fn=lambda *a, **k: reverify_calls.append(1) or True)
+    assert out is iris_agent.ROOT_COPY_NOT_ATTEMPTED
+    assert reverify_calls == []
+    assert any(m == "ROOTCOPY-FAIL" and "delete-first raised" in msg
+               for m, msg in emitted)
+
+
 def test_first_retry_timestamp_from_regressed_state_is_ignored(monkeypatch):
     cat = FakeCatalog({"approved_image_id": "img1"},
                       {"id": "img1", "filename": "img1.bin", "size": 5,
@@ -747,7 +1443,7 @@ def test_first_retry_timestamp_from_regressed_state_is_ignored(monkeypatch):
         cat, {"/stage/img1.bin": 5}, verify_ok=True)
     calls = []
     deps = deps._replace(
-        copy_to_root=lambda fname, target_prefix="flash:": calls.append(fname) or True)
+        copy_to_root=lambda fname, target_prefix="flash:", expected_size=None: calls.append(fname) or True)
     monkeypatch.setattr(iris_agent.time, "time", lambda: 1_000.0)
     state = {"schema_version": iris_agent._STATE_SCHEMA,
              "image_id": "img1",
@@ -780,7 +1476,7 @@ def test_root_copy_running_image_unknown_does_not_count_toward_terminal():
         cat, {"/stage/img1.bin": 5}, verify_ok=True)
     calls = []
 
-    def unknown_running_copy(fname, target_prefix="flash:"):
+    def unknown_running_copy(fname, target_prefix="flash:", expected_size=None):
         calls.append(fname)
         return iris_agent.ROOT_COPY_RUNNING_IMAGE_UNKNOWN
 
@@ -810,7 +1506,7 @@ def test_root_copy_running_image_unknown_then_resolves_copies_normally():
                     True])
     calls = []
 
-    def flaky_then_ok(fname, target_prefix="flash:"):
+    def flaky_then_ok(fname, target_prefix="flash:", expected_size=None):
         calls.append(fname)
         return next(results)
 
@@ -839,7 +1535,7 @@ def test_root_copy_unknown_interleaved_with_real_failures_only_real_ones_count()
                     False])
     calls = []
 
-    def mixed(fname, target_prefix="flash:"):
+    def mixed(fname, target_prefix="flash:", expected_size=None):
         calls.append(fname)
         return next(results)
 
@@ -855,12 +1551,14 @@ def test_root_copy_unknown_interleaved_with_real_failures_only_real_ones_count()
 
 
 # --- Direct tests of _agent_reverify_root (the real code path).
-# The IRIS-COPYROOT EEM applet deletes any stale leftover, then runs
-# `copy /verify` — copy + Cisco signature in one IOS-enforced step. A failed
-# signature fails the copy and deletes the dest, and the pre-copy delete scopes
-# the result to THIS attempt, so file presence at flash root IS the verdict.
-# The agent polls `dir flash:<fname>` (small, fast cli call) and blesses on
-# presence — no syslog parsing required. ---
+# The IRIS-COPYROOT EEM applet deletes any stale leftover, then runs a plain
+# `copy` (no /verify) — a plain copy that dies mid-transfer can leave a
+# PARTIAL file, so presence alone is no longer sound. The agent polls
+# `dir flash:<fname>` (small, fast cli call): with no expected_size, presence
+# is still the verdict (legacy callers); with an expected_size, presence AND
+# exact byte size is the verdict — a wrong size mid-poll just means the copy
+# is still running, and only a mismatch that persists to the end of the poll
+# budget fails. ---
 
 _FNAME = "cat9k.bin"
 
@@ -912,25 +1610,27 @@ def test_reverify_happy_path_emits_rootcopy_success():
     assert sum(c.startswith("dir flash:") for c in cli_calls) == 1
     # heartbeat for operators + authoritative success log, both agent-owned
     assert any(m == "ROOTCOPY-VERIFYING" for m, _ in emitted)
-    assert ("ROOTCOPY", "cat9k.bin placed at flash root + verified") in emitted
+    assert ("ROOTCOPY", "cat9k.bin placed at flash root") in emitted
 
 
 def test_reverify_no_file_means_signature_failed_or_copy_aborted():
-    # Cisco `copy /verify` deletes the destination on a failed signature, so a
-    # missing file means signature failed (or the copy never ran). The agent
-    # times out and emits FAIL (nothing to delete — the applet cleared any
-    # stale leftover up front).
+    # Placement is a plain `copy` now — there's no on-box signature check to
+    # fail. A missing file after the poll window just means the copy never
+    # completed (aborted, hung, or never started); any partial from a prior
+    # attempt gets cleared by the applet's delete-first step, not left behind
+    # for the agent to see. The agent times out and emits FAIL (nothing to
+    # delete here — the applet already cleared any stale leftover up front).
     cli, emit, _, emitted = _make_reverify_cli(dir_out=_DIR_MISSING)
     ok = _reverify(cli, emit, poll_attempts=3)
     assert ok is False
-    assert any(m == "ROOTCOPY-FAIL" and "no file appeared" in msg
+    assert any(m == "ROOTCOPY-FAIL" and "never appeared" in msg
                for m, msg in emitted)
     assert all(m != "ROOTCOPY" for m, _ in emitted)
 
 
 def test_reverify_polls_until_file_appears():
     # The applet runs ~2-4 min while the agent polls. dir reports
-    # "No such file" until the copy /verify finishes — then the file is there
+    # "No such file" until the copy finishes — then the file is there
     # at the expected path. The agent must keep polling, then pass.
     seq = iter([_DIR_MISSING, _DIR_MISSING, _DIR_OK])
     sleeps = []
@@ -958,7 +1658,7 @@ def test_reverify_dir_raises_every_poll_times_out():
     cli, emit, _, emitted = _make_reverify_cli(raise_on="dir")
     ok = _reverify(cli, emit, poll_attempts=3)
     assert ok is False
-    assert any(m == "ROOTCOPY-FAIL" and "no file appeared" in msg
+    assert any(m == "ROOTCOPY-FAIL" and "never appeared" in msg
                for m, msg in emitted)
 
 
@@ -973,24 +1673,204 @@ def test_reverify_does_not_confuse_other_filenames_in_dir_output():
     assert all(m != "ROOTCOPY" for m, _ in emitted)
 
 
+# --- _dir_size_of: parses the byte size out of an IOS `dir` row, anchored to
+# the row end so a whitelisted filename never reads a sibling row's size
+# (e.g. cat9k.bin must not match cat9k.bin.backup). Plain copy (no /verify)
+# can leave a partial file, so _agent_reverify_root now needs size, not just
+# presence. ---
+
+def test_dir_size_of_parses_ios_dir_line():
+    out = ("Directory of flash:/\n"
+           "  121  -rw-      1260618344  Jun 16 2026 12:30:01 +00:00  cat9k.bin\n"
+           "11353194496 bytes total (8438681600 bytes free)\n")
+    assert iris_agent._dir_size_of(out, "cat9k.bin") == 1260618344
+
+
+def test_dir_size_of_absent_file_returns_none():
+    assert iris_agent._dir_size_of("No such file or directory", "cat9k.bin") is None
+    assert iris_agent._dir_size_of("", "cat9k.bin") is None
+
+
+def test_dir_size_of_matches_whole_name_not_substring():
+    # cat9k.bin must not match the cat9k.bin.backup row's size
+    out = "  122  -rw-  999  Jun 16 2026 12:30:01 +00:00  cat9k.bin.backup\n"
+    assert iris_agent._dir_size_of(out, "cat9k.bin") is None
+
+
+def test_dir_size_of_ignores_directory_rows():
+    # A same-named directory must not report its nominal size as a file size.
+    out = "  121  drwx  4096  Jun 16 2026  cat9k.bin"
+    assert iris_agent._dir_size_of(out, "cat9k.bin") is None
+
+
+def test_reverify_size_match_succeeds():
+    emits = []
+    out = "  121  -rw-  1260618344  Jun 16 2026  cat9k.bin"
+    ok = iris_agent._agent_reverify_root(
+        "cat9k.bin", "flash:", lambda c: out,
+        lambda tag, msg: emits.append((tag, msg)),
+        poll_attempts=1, poll_interval_s=0, expected_size=1260618344)
+    assert ok is True
+    assert emits[-1][0] == "ROOTCOPY"
+
+
+def test_reverify_partial_file_fails_with_size_reason():
+    # A plain copy that died mid-way leaves a short file: presence alone must NOT pass.
+    emits = []
+    out = "  121  -rw-  1048576  Jun 16 2026  cat9k.bin"
+    ok = iris_agent._agent_reverify_root(
+        "cat9k.bin", "flash:", lambda c: out,
+        lambda tag, msg: emits.append((tag, msg)),
+        poll_attempts=2, poll_interval_s=0, sleep_fn=lambda s: None,
+        expected_size=1260618344)
+    assert ok is False
+    assert emits[-1][0] == "ROOTCOPY-FAIL"
+    assert "size" in emits[-1][1]
+
+
+def test_reverify_keeps_polling_while_size_grows_then_succeeds():
+    # Mid-copy: dir shows a short, growing file across successive polls. The
+    # poll must NOT fail on the first wrong-size reading — the copy landing
+    # the file is asynchronous from the agent's point of view, and a short
+    # file partway through the poll window usually just means still-copying.
+    # Only a mismatch that persists to the end of the poll budget is a
+    # failure; here the full size shows up before the budget runs out, so
+    # the call must succeed.
+    sizes = iter([100, 1048576, 1260618344])
+
+    def cli(cmd):
+        return "  121  -rw-  %d  Jun 16 2026  cat9k.bin" % next(sizes)
+
+    emits = []
+    ok = iris_agent._agent_reverify_root(
+        "cat9k.bin", "flash:", cli,
+        lambda tag, msg: emits.append((tag, msg)),
+        poll_attempts=3, poll_interval_s=0, sleep_fn=lambda s: None,
+        expected_size=1260618344)
+    assert ok is True
+    assert emits[-1][0] == "ROOTCOPY"
+
+
+def test_reverify_without_expected_size_keeps_presence_only():
+    out = "  121  -rw-  1048576  Jun 16 2026  cat9k.bin"
+    ok = iris_agent._agent_reverify_root(
+        "cat9k.bin", "flash:", lambda c: out, lambda tag, msg: None,
+        poll_attempts=1, poll_interval_s=0)
+    assert ok is True
+
+
+# --- present-but-unparseable `dir` row: the file IS there, the row just didn't
+# parse (unexpected format). That must be handled like a wrong size — keep
+# polling — and the eventual failure must say what was actually seen, not
+# "never appeared". A false "never appeared" sends an operator hunting the
+# wrong fault. ---
+
+# a row the size regex cannot read: no permissions column at all
+_DIR_UNPARSEABLE = "Directory of flash:/\n  cat9k.bin\n"
+
+
+def test_reverify_present_but_unparseable_row_keeps_polling():
+    # Poll 1 and 2 return an unreadable row; poll 3 returns a well-formed row
+    # with the right size. The unreadable ticks must not end the poll early.
+    seq = iter([_DIR_UNPARSEABLE, _DIR_UNPARSEABLE,
+                "  121  -rw-  1260618344  Jun 16 2026  cat9k.bin"])
+    sleeps = []
+    emits = []
+    ok = iris_agent._agent_reverify_root(
+        "cat9k.bin", "flash:", lambda c: next(seq),
+        lambda tag, msg: emits.append((tag, msg)),
+        poll_attempts=5, poll_interval_s=0,
+        sleep_fn=lambda s: sleeps.append(s), expected_size=1260618344)
+    assert ok is True
+    assert len(sleeps) == 2
+    assert emits[-1][0] == "ROOTCOPY"
+
+
+def test_reverify_present_but_unparseable_fails_with_an_honest_reason():
+    # Persisting to the end of the budget IS a failure — but the file was
+    # plainly present, so the log must not claim it never appeared.
+    emits = []
+    ok = iris_agent._agent_reverify_root(
+        "cat9k.bin", "flash:", lambda c: _DIR_UNPARSEABLE,
+        lambda tag, msg: emits.append((tag, msg)),
+        poll_attempts=2, poll_interval_s=0, sleep_fn=lambda s: None,
+        expected_size=1260618344)
+    assert ok is False
+    tag, msg = emits[-1]
+    assert tag == "ROOTCOPY-FAIL"
+    assert "present but size unreadable from dir output" in msg
+    assert "never appeared" not in msg
+
+
+def test_reverify_readable_mismatch_after_unparseable_reports_the_mismatch():
+    # The message describes the LAST thing the poll actually saw: a readable
+    # short size beats an earlier unreadable row.
+    seq = iter([_DIR_UNPARSEABLE,
+                "  121  -rw-  1048576  Jun 16 2026  cat9k.bin"])
+    emits = []
+    ok = iris_agent._agent_reverify_root(
+        "cat9k.bin", "flash:", lambda c: next(seq),
+        lambda tag, msg: emits.append((tag, msg)),
+        poll_attempts=2, poll_interval_s=0, sleep_fn=lambda s: None,
+        expected_size=1260618344)
+    assert ok is False
+    assert "size mismatch" in emits[-1][1]
+
+
+# --- _root_present_from_dir: the steady-state presence verdict build_deps.
+# root_present wraps. Absence is the ONLY hard False (besides a readable size
+# that disagrees); anything ambiguous stays True so one bad tick can't cost a
+# full ~GB re-copy. ---
+
+def test_root_present_from_dir_absent_is_false():
+    assert iris_agent._root_present_from_dir(
+        "%Error opening flash:/cat9k.bin (No such file or directory)",
+        "cat9k.bin", 1260618344) is False
+    assert iris_agent._root_present_from_dir("", "cat9k.bin") is False
+    assert iris_agent._root_present_from_dir(
+        "  121  -rw-  5  Jun 16 2026  other.bin", "cat9k.bin") is False
+
+
+def test_root_present_from_dir_exact_size_matches():
+    out = "  121  -rw-  1260618344  Jun 16 2026  cat9k.bin"
+    assert iris_agent._root_present_from_dir(out, "cat9k.bin", 1260618344) is True
+
+
+def test_root_present_from_dir_readable_short_size_is_false():
+    # a partial left by an interrupted transfer must not pass as "still there"
+    out = "  121  -rw-  1048576  Jun 16 2026  cat9k.bin"
+    assert iris_agent._root_present_from_dir(out, "cat9k.bin", 1260618344) is False
+
+
+def test_root_present_from_dir_unparseable_row_stays_present():
+    # The file IS there; only the row format defeated the parser. Returning
+    # False here would re-copy ~1.2 GB over a parse quirk — same rationale as
+    # the raise-tolerating path: a real loss shows as absence next tick.
+    assert iris_agent._root_present_from_dir(
+        _DIR_UNPARSEABLE, "cat9k.bin", 1260618344) is True
+
+
 # --- Source-level guard: the templated applet inside iris_agent.py must do the
 # COPY only and log a NEUTRAL breadcrumb — never claim a verified copy. Only the
-# agent emits the "+ verified" log, after _agent_reverify_root sees the file.
+# agent emits the "placed at flash root" log, after _agent_reverify_root sees
+# the file (and, when given expected_size, the matching size).
 # Refuter 3 caught that the bats test only inspects the reference .cfg, not the
 # runtime-templated string. ---
 
 def test_iris_agent_source_applet_is_neutral_no_self_verdict():
     """The templated applet must (a) delete any stale leftover before copying,
-    (b) run `copy /verify` (copy + Cisco signature), and (c) log only a NEUTRAL
-    ROOTCOPY-ATTEMPTED breadcrumb — never a pass/fail verdict or a "+ verified"
-    claim. The agent owns the verdict via file presence. Plus a HW-driven
-    regression guard: the broken $_arg1 trigger must not return. The bats only
-    inspects the reference .cfg; this checks the runtime template living inside
-    iris_agent.py itself."""
+    (b) run a plain `copy` (no /verify, no in-band signature check), and (c)
+    log only a NEUTRAL ROOTCOPY-ATTEMPTED breadcrumb — never a pass/fail
+    verdict or a "placed at flash root" claim. The agent owns the verdict via
+    file presence (and,
+    where checked, size). Plus a HW-driven regression guard: the broken
+    $_arg1 trigger must not return. The bats only inspects the reference
+    .cfg; this checks the runtime template living inside iris_agent.py
+    itself."""
     src = open(iris_agent.__file__).read()
     # the authoritative success log lives in the agent's emit(), issued ONLY
     # after _agent_reverify_root passes — never inside an applet syslog action.
-    assert "placed at flash root + verified" in src
+    assert "placed at flash root" in src
     syslog_lines = [l for l in src.splitlines()
                     if "syslog msg" in l and "action 0" in l]
     assert syslog_lines, "missing the templated applet syslog action line"
@@ -1004,11 +1884,13 @@ def test_iris_agent_source_applet_is_neutral_no_self_verdict():
     # presence is the verdict, so the applet must clear any stale leftover first
     assert 'delete /force %s%s' in src, \
         "applet must delete any stale same-named leftover before the copy"
-    # the applet copies WITH /verify (copy + Cisco signature in one step) and
-    # does NOT run a second standalone verify (the agent reads no syslog verdict).
+    # the applet copies PLAINLY (no /verify, no in-band signature check) and
+    # does NOT run any standalone verify (the agent reads no syslog verdict).
     # The copy SOURCE is parameterized (default = the guest-share scratch on the
     # staging FS for the C9300; an injected http:// URL for the IE3x00 container).
-    assert "copy /verify %s %s%s" in src            # parameterized src + dst
+    assert "copy %s %s%s" in src            # parameterized src + dst
+    assert "copy /verify %s %s%s" not in src, \
+        "REGRESSION: the templated action must not return to copy /verify"
     assert "%s/guest-share/iris/%s" in src          # default (C9300) source
     assert "$_ok" not in src and "regexp" not in src, \
         "REGRESSION: the dead syslog-verdict capture (_ok/regexp) is back"
@@ -1053,24 +1935,25 @@ def test_copy_to_root_impl_fires_applet_then_calls_reverify():
     cli_cfg, cli_exec, emit, configured, cli_calls, emitted = _capture_calls()
     reverify_calls = []
 
-    def reverify(fname, prefix, cli_exec_arg, emit_arg):
+    def reverify(fname, prefix, cli_exec_arg, emit_arg, expected_size=None):
         reverify_calls.append(fname)
         return True
 
     ok = iris_agent._copy_to_root_impl(
         "img1.bin", "flash:", cli_cfg, cli_exec, emit, reverify_fn=reverify)
     assert ok is True
-    # the applet was templated: clear-leftover (delete) + copy /verify + a
-    # NEUTRAL breadcrumb. No verdict capture, no second verify, no claim.
+    # the applet was templated: clear-leftover (delete) + plain copy + a
+    # NEUTRAL breadcrumb. No verdict capture, no signature check, no claim.
     assert len(configured) == 1
     body = "\n".join(configured[0])
     assert "delete /force flash:img1.bin" in body
-    assert "copy /verify flash:/guest-share/iris/img1.bin flash:img1.bin" in body
+    assert "copy flash:/guest-share/iris/img1.bin flash:img1.bin" in body
+    assert "/verify" not in body
     assert "ROOTCOPY-ATTEMPTED img1.bin" in body
     assert "placed at flash root + verified" not in body          # neutral applet
     assert "$_ok" not in body and "regexp" not in body            # no dead verdict capture
     assert "verify /sha512" not in body, \
-        "applet must NOT run a second verify — copy /verify is the verification"
+        "applet must NOT run a signature verify — the agent owns the verdict"
     # applet was fired
     assert cli_calls == ["event manager run IRIS-COPYROOT"]
     # reverify got the filename
@@ -1083,10 +1966,10 @@ def test_copy_applet_uses_target_prefix():
     cli_cfg, cli_exec, emit, configured, cli_calls, emitted = _capture_calls()
     iris_agent._copy_to_root_impl(
         "img1.bin", "sdflash:", cli_cfg, cli_exec, emit,
-        reverify_fn=lambda fname, prefix, c, e: True)
+        reverify_fn=lambda fname, prefix, c, e, expected_size=None: True)
     body = "\n".join(configured[0])
     assert "delete /force sdflash:img1.bin" in body
-    assert "copy /verify sdflash:/guest-share/iris/img1.bin sdflash:img1.bin" in body
+    assert "copy sdflash:/guest-share/iris/img1.bin sdflash:img1.bin" in body
 
 
 def test_copy_to_root_impl_reverify_false_returns_false_no_success_log():
@@ -1108,7 +1991,9 @@ def test_copy_to_root_impl_reverify_false_returns_false_no_success_log():
 
 def test_copy_to_root_impl_applet_fire_raises_no_reverify():
     """If `event manager run` itself raises, the wrapper bails before reverify.
-    Returns False + ROOTCOPY-FAIL with `applet run raised:` reason."""
+    Returns ROOT_COPY_NOT_ATTEMPTED + ROOTCOPY-FAIL naming the applet run: the
+    applet's action 020 delete-first cannot be assumed to have run, so this
+    failure must not authorise the terminal reclaim to delete that name."""
     cli_cfg, _, emit, _, _, emitted = _capture_calls()
 
     def cli_execute_fn(cmd):
@@ -1122,13 +2007,35 @@ def test_copy_to_root_impl_applet_fire_raises_no_reverify():
 
     ok = iris_agent._copy_to_root_impl(
         "img1.bin", "flash:", cli_cfg, cli_execute_fn, emit, reverify_fn=reverify)
-    assert ok is False
+    assert ok is iris_agent.ROOT_COPY_NOT_ATTEMPTED
     assert reverify_calls == []   # reverify never reached
     assert any(m == "ROOTCOPY-FAIL" and "applet run raised" in msg
                for m, msg in emitted)
 
 
-# --- Direct-copy path (container / IE-3x00 SSH-to-self): `copy /verify` is run
+def test_applet_template_uses_plain_copy():
+    cfg_lines = []
+    iris_agent._copy_to_root_impl(
+        "img.bin", "flash:", lambda lines: cfg_lines.extend(lines),
+        lambda c: "", lambda t, m: None, reverify_fn=lambda *a, **k: True)
+    joined = "\n".join(cfg_lines)
+    assert 'copy flash:/guest-share/iris/img.bin flash:img.bin' in joined
+    assert "/verify" not in joined
+    assert 'delete /force flash:img.bin' in joined  # delete-first stays load-bearing
+
+
+def test_applet_impl_passes_expected_size_to_reverify():
+    seen = {}
+    def fake_reverify(fname, prefix, cli, emit, expected_size=None):
+        seen["size"] = expected_size
+        return True
+    iris_agent._copy_to_root_impl(
+        "img.bin", "flash:", lambda lines: None, lambda c: "",
+        lambda t, m: None, reverify_fn=fake_reverify, expected_size=1234)
+    assert seen["size"] == 1234
+
+
+# --- Direct-copy path (container / IE-3x00 SSH-to-self): plain `copy` is run
 # DIRECTLY in the agent's real vty, NOT via the IRIS-COPYROOT EEM applet (whose
 # `cli command "copy"` action is a no-op on the IE3x00 — completes "success" in
 # ~3 s, transfers nothing). delete-then-copy is issued directly; the verdict is
@@ -1141,7 +2048,7 @@ def test_copy_to_root_direct_runs_copy_then_reverify():
         cli_calls.append(cmd)
         return ""
 
-    def reverify(fname, prefix, cli_arg, emit_arg):
+    def reverify(fname, prefix, cli_arg, emit_arg, expected_size=None):
         reverify_calls.append(fname)
         return True
 
@@ -1152,21 +2059,33 @@ def test_copy_to_root_direct_runs_copy_then_reverify():
     # delete-then-copy issued DIRECTLY — no applet templating, no `event manager run`
     assert cli_calls == [
         "delete /force sdflash:img1.bin",
-        "copy /verify sdflash:/guest-share/iris/img1.bin sdflash:img1.bin",
+        "copy sdflash:/guest-share/iris/img1.bin sdflash:img1.bin",
     ]
     assert all("event manager" not in c for c in cli_calls)
     assert reverify_calls == ["img1.bin"]
     assert all(m != "ROOTCOPY-FAIL" for m, _ in emitted)
 
 
+def test_direct_impl_uses_plain_copy_and_passes_size():
+    cmds, seen = [], {}
+    def fake_reverify(fname, prefix, cli, emit, expected_size=None):
+        seen["size"] = expected_size
+        return True
+    iris_agent._copy_to_root_direct_impl(
+        "img.bin", "sdflash:", lambda c: cmds.append(c) or "",
+        lambda t, m: None, reverify_fn=fake_reverify, expected_size=99)
+    assert any(c.startswith("copy ") and "/verify" not in c for c in cmds)
+    assert seen["size"] == 99
+
+
 def test_copy_to_root_direct_uses_copy_source_override():
     cli_calls = []
     iris_agent._copy_to_root_direct_impl(
         "img1.bin", "sdflash:", lambda c: cli_calls.append(c) or "",
-        lambda m, msg: None, reverify_fn=lambda *a: True,
+        lambda m, msg: None, reverify_fn=lambda *a, **k: True,
         copy_source=lambda f, p: "http://10.0.0.1:8000/%s" % f)
     assert cli_calls[1] == \
-        "copy /verify http://10.0.0.1:8000/img1.bin sdflash:img1.bin"
+        "copy http://10.0.0.1:8000/img1.bin sdflash:img1.bin"
 
 
 def test_copy_to_root_direct_copy_raises_no_reverify():
@@ -1180,10 +2099,10 @@ def test_copy_to_root_direct_copy_raises_no_reverify():
     ok = iris_agent._copy_to_root_direct_impl(
         "img1.bin", "sdflash:", cli_exec,
         lambda m, msg: emitted.append((m, msg)),
-        reverify_fn=lambda *a: reverify_calls.append(1) or True)
+        reverify_fn=lambda *a, **k: reverify_calls.append(1) or True)
     assert ok is False
     assert reverify_calls == []          # bailed before reverify
-    assert any(m == "ROOTCOPY-FAIL" and "direct copy /verify raised" in msg
+    assert any(m == "ROOTCOPY-FAIL" and "direct copy raised" in msg
                for m, msg in emitted)
 
 
@@ -1191,7 +2110,7 @@ def test_copy_to_root_direct_reverify_false_returns_false():
     emitted = []
     ok = iris_agent._copy_to_root_direct_impl(
         "bad.bin", "sdflash:", lambda c: "",
-        lambda m, msg: emitted.append((m, msg)), reverify_fn=lambda *a: False)
+        lambda m, msg: emitted.append((m, msg)), reverify_fn=lambda *a, **k: False)
     assert ok is False
     assert all(m != "ROOTCOPY" for m, _ in emitted)
 
@@ -1204,7 +2123,7 @@ def test_copy_to_root_direct_deletes_scp_scratch_after_success():
     cli_calls = []
     ok = iris_agent._copy_to_root_direct_impl(
         "img1.bin", "flash:", lambda c: cli_calls.append(c) or "",
-        lambda m, msg: None, reverify_fn=lambda *a: True,
+        lambda m, msg: None, reverify_fn=lambda *a, **k: True,
         delete_source_on_success=True)
     assert ok is True
     assert cli_calls[-1] == "delete /force flash:/guest-share/iris/img1.bin"
@@ -1216,7 +2135,7 @@ def test_copy_to_root_direct_keeps_scratch_on_failure():
     cli_calls = []
     ok = iris_agent._copy_to_root_direct_impl(
         "img1.bin", "flash:", lambda c: cli_calls.append(c) or "",
-        lambda m, msg: None, reverify_fn=lambda *a: False,
+        lambda m, msg: None, reverify_fn=lambda *a, **k: False,
         delete_source_on_success=True)
     assert ok is False
     assert all(not c.startswith("delete /force flash:/guest-share")
@@ -1253,7 +2172,7 @@ def test_reclaim_bundle_impl_empty_names_is_a_no_op():
 # --- Share-mount staging (C9k IOx): the app-hosting SSD share
 # (usbflash1:iox_host_data_share) is bind-mounted into the container, so the
 # agent lands its scratch there at DISK speed and the final placement is an
-# IOS-internal `copy /verify` from the SSD to the target FS — no scp, no
+# IOS-internal plain `copy` from the SSD to the target FS — no scp, no
 # control-plane punt path, no CoPP ceiling. Falls back to the scp push when
 # the share is not mounted (IE-3x00, or a failed -v mount). ---
 
@@ -1283,7 +2202,7 @@ def test_stage_via_share_lands_file_then_copy_verifies_from_share(tmp_path):
     seen = {}
 
     def copy_direct(copy_source):
-        # the share copy must be fully in place when copy /verify fires
+        # the share copy must be fully in place before the plain copy runs
         seen["source"] = copy_source("img1.bin", "flash:")
         seen["bytes"] = (share / iris_agent._SHARE_STAGE).read_bytes()
         return True
@@ -1295,9 +2214,10 @@ def test_stage_via_share_lands_file_then_copy_verifies_from_share(tmp_path):
     # IRIS stages at the share ROOT (container-created SUBDIRS become
     # inaccessible to the container itself on the C9300 SSD share —
     # hardware-observed; the CAF-created root stays writable at disk speed)
-    # under its own iris- prefixed fixed name. copy /verify reads that source
-    # and writes the REAL image name to flash:, verifying the signature from
-    # the bytes, so the staged name is cosmetic.
+    # under its own iris- prefixed fixed name. The plain copy reads that
+    # source and writes the REAL image name to flash:, so the staged name is
+    # cosmetic — content integrity is the agent's own sha256 against the
+    # catalog, checked before this copy runs.
     assert seen["source"] == \
         "usbflash1:iox_host_data_share/" + iris_agent._SHARE_STAGE
     assert iris_agent._SHARE_STAGE.startswith("iris-")
@@ -1341,7 +2261,7 @@ def test_stage_via_share_probe_failure_falls_back_before_big_copy(tmp_path):
         lambda m, msg: emitted.append((m, msg)),
         lambda cmd: "%Error opening usbflash1:WRONG/ (No such device)")
     assert result is None          # -> scp fallback
-    assert calls == []             # copy /verify never attempted
+    assert calls == []             # the copy was never attempted
     assert any(m == "SHARE-FALLBACK" for m, _ in emitted)
     assert _iris_share_files(share) == []  # probe cleaned, image never copied
 
@@ -1401,9 +2321,9 @@ def test_stage_via_share_local_copy_failure_falls_back(tmp_path):
 
 
 def test_stage_via_share_copy_verify_failure_is_final_and_cleans_up(tmp_path):
-    # IOS-side copy /verify genuinely failed AFTER a successful probe (e.g.
-    # signature rejection): scp would push the SAME bytes, so there is no
-    # fallback — the verdict is False and the share copy is still removed.
+    # IOS-side plain copy genuinely failed AFTER a successful probe (e.g. a
+    # transport error mid-copy): scp would push the SAME bytes, so there is
+    # no fallback — the verdict is False and the share copy is still removed.
     stage = _mk_scratch(tmp_path)
     share = tmp_path / "share"
     share.mkdir()
@@ -1510,16 +2430,16 @@ def test_rejects_catalog_filename_with_path_traversal():
 
 
 def test_run_once_threads_filename_to_copy_to_root():
-    """run_once must pass the catalog filename into copy_to_root. Nothing else
-    is needed — `copy /verify` is the verification (the signature covers the
-    content), so no size or per-image sha needs to thread through."""
+    """run_once must pass the catalog filename into copy_to_root (the catalog
+    byte size is covered separately by test_run_once_passes_catalog_size_to_
+    copy_and_presence)."""
     cat = FakeCatalog({"approved_image_id": "img1"},
                       {"id": "img1", "filename": "img1.bin", "size": 5,
                        "sha256": "abc"})
     captured = []
     deps, _, _, _, _, _, _, _ = make_deps(cat, {"/stage/img1.bin": 5})
     deps = deps._replace(
-        copy_to_root=lambda fname, target_prefix="flash:": captured.append(fname) or True)
+        copy_to_root=lambda fname, target_prefix="flash:", expected_size=None: captured.append(fname) or True)
     assert iris_agent.run_once(CFG, deps, {}) == "complete"
     assert captured == ["img1.bin"]
 
@@ -1585,7 +2505,7 @@ def test_heartbeat_not_ready_when_copy_failed():
     deps, _, _, _, copied, _, _, _ = make_deps(cat, {"/stage/img1.bin": 5})
     deps = deps._replace(
         catalog=_HeartbeatSpy(cat, sent),
-        copy_to_root=lambda fname, target_prefix="flash:": False)  # copy fails
+        copy_to_root=lambda fname, target_prefix="flash:", expected_size=None: False)  # copy fails
     assert iris_agent.run_once(CFG, deps, {}) == "complete"
     assert copied == []
     assert sent[-1]["stage_state"] == "staging"          # NOT "ready"
@@ -1616,7 +2536,7 @@ def test_run_once_bundle_ie3k_copies_to_sdflash():
     calls = []
     deps = deps._replace(
         target_fs=lambda: ("sdflash:", 9_000_000_000),
-        copy_to_root=lambda fname, target_prefix="flash:":
+        copy_to_root=lambda fname, target_prefix="flash:", expected_size=None:
             calls.append((fname, target_prefix)) or True)
     assert iris_agent.run_once(CFG, deps, {}) == "complete"
     assert calls == [("img1.bin", "sdflash:")]   # copy placed on sdflash:, not flash:
@@ -1648,7 +2568,7 @@ def test_steady_state_root_check_probes_cached_stage_fs():
     deps, _, _, _, _, _, _, _ = make_deps(cat, {"/stage/img1.bin": 5}, mode="bundle")
     probed = []
     deps = deps._replace(
-        root_present=lambda fname, prefix="flash:":
+        root_present=lambda fname, prefix="flash:", expected_size=None:
             (probed.append(prefix) or prefix == "sdflash:"))
     state = dict(_DONE(), stage_fs="sdflash:")
     assert iris_agent.run_once(CFG, deps, state) == "complete"
@@ -1662,7 +2582,7 @@ def test_run_once_c9300_still_copies_to_flash():
     deps, _, _, _, _, _, _, _ = make_deps(cat, {"/stage/img1.bin": 5}, mode="bundle")
     calls = []
     deps = deps._replace(           # default target_fs returns ("flash:", free)
-        copy_to_root=lambda fname, target_prefix="flash:":
+        copy_to_root=lambda fname, target_prefix="flash:", expected_size=None:
             calls.append((fname, target_prefix)) or True)
     assert iris_agent.run_once(CFG, deps, {}) == "complete"
     assert calls == [("img1.bin", "flash:")]
@@ -1827,10 +2747,33 @@ def test_run_once_uses_refreshed_cfg_for_device_id():
 
 
 # --- Phase 2: _refresh_impl (the on-box refresh body, injectable so the
-# POST -> atomic conf rewrite -> reload flow is unit-testable). Returns the
-# reloaded cfg on success, None on any failure (best-effort). ---
+# POST -> client rebind -> atomic conf rewrite -> reload flow is
+# unit-testable). Returns the reloaded cfg on success, None on any failure
+# (best-effort). Takes the live CatalogClient itself, not a bare callable:
+# the impl must re-point the client's bearer after the POST, because the
+# server rotates immediately and heartbeat/telemetry reject the rolled token
+# even inside the overlap window — the old wiring left the live client on the
+# stale bearer for the rest of the tick (one spurious HTTP 401 heartbeat per
+# refresh tick,
+# observed live on the c8000v fleet 2026-09-01). ---
 
-def test_refresh_impl_writes_new_secrets_and_returns_reloaded_cfg(tmp_path):
+class _RefreshClient:
+    """The seam _refresh_impl needs from CatalogClient: the live bearer it
+    must re-point, and the POST that mints the new bag."""
+    def __init__(self, bag=None, exc=None):
+        self.token = "OLD"
+        self.calls = []
+        self._bag = bag
+        self._exc = exc
+
+    def refresh_token(self, device_id):
+        self.calls.append(device_id)
+        if self._exc is not None:
+            raise self._exc
+        return self._bag
+
+
+def test_refresh_impl_writes_new_secrets_and_rebinds_the_live_client(tmp_path):
     conf = tmp_path / "iris-agent.conf"
     conf.write_text(
         "catalog_url = https://x\n"
@@ -1840,23 +2783,23 @@ def test_refresh_impl_writes_new_secrets_and_returns_reloaded_cfg(tmp_path):
         "rpc_secret = \n")
     cfg = {"catalog_url": "https://x", "catalog_token": "OLD",
            "device_id": "sw1", "token_expires_at": "0", "rpc_secret": ""}
-    bag = {"catalog_token": "NEW", "expires_at": 1750000000,
-           "announce_token": "anntok", "rpc_secret": "rpcsecret"}
-    written = []
+    client = _RefreshClient(bag={"catalog_token": "NEW",
+                                 "expires_at": 1750000000,
+                                 "announce_token": "anntok",
+                                 "rpc_secret": "rpcsecret"})
 
-    def refresh_token_fn(device_id):
-        written.append(device_id)
-        return bag
-
-    out = iris_agent._refresh_impl(
-        cfg, str(conf), refresh_token_fn, lambda m, msg: None)
-    assert written == ["sw1"]
+    out = iris_agent._refresh_impl(cfg, str(conf), client, lambda m, msg: None)
+    assert client.calls == ["sw1"]
     # returned cfg reflects the new secrets...
     assert out["catalog_token"] == "NEW"
     assert out["token_expires_at"] == "1750000000"
     assert out["rpc_secret"] == "rpcsecret"
     assert out["announce_token"] == "anntok"
-    # ...and they were persisted to disk (next process reads them)
+    # ...the LIVE client now carries the new bearer, so the rest of THIS tick
+    # (heartbeat, telemetry — device-bound routes that reject the rolled
+    # token) authenticates with the token the server now expects...
+    assert client.token == "NEW"
+    # ...and the secrets were persisted to disk (next process reads them)
     import agent_config
     disk = agent_config.load(str(conf))
     assert disk["catalog_token"] == "NEW"
@@ -1871,18 +2814,91 @@ def test_refresh_impl_returns_none_and_logs_on_post_failure(tmp_path):
         "token_expires_at = 0\n")
     cfg = {"catalog_url": "https://x", "catalog_token": "OLD",
            "device_id": "sw1", "token_expires_at": "0"}
-
-    def boom(device_id):
-        raise catalog_client.CatalogError("unreachable")
+    client = _RefreshClient(exc=catalog_client.CatalogError("unreachable"))
 
     emitted = []
-    out = iris_agent._refresh_impl(cfg, str(conf), boom,
+    out = iris_agent._refresh_impl(cfg, str(conf), client,
                                    lambda m, msg: emitted.append((m, msg)))
     assert out is None
+    # nothing was minted, so the live client keeps its current bearer
+    assert client.token == "OLD"
     # the conf on disk is UNCHANGED (still OLD) — no partial write
     import agent_config
     assert agent_config.load(str(conf))["catalog_token"] == "OLD"
     assert any(m == "TOKEN-REFRESH-FAIL" for m, _ in emitted)
+
+
+def test_refresh_impl_rebinds_the_client_even_when_the_conf_write_fails(
+        tmp_path):
+    # POST succeeded -> the server has ALREADY rotated; the old bearer is
+    # half-dead (shared routes only after 120s; refresh recovery lasts until
+    # the token's original expiry). Whatever happens to the conf write, the
+    # live client must follow the server. The next process
+    # still loads the stale conf, then recovers the current bag through the
+    # token-refresh-only recovery path; THIS tick's heartbeat/telemetry must
+    # not 401 either.
+    conf_in_missing_dir = tmp_path / "no-such-dir" / "iris-agent.conf"
+    cfg = {"catalog_url": "https://x", "catalog_token": "OLD",
+           "device_id": "sw1", "token_expires_at": "0"}
+    client = _RefreshClient(bag={"catalog_token": "NEW",
+                                 "expires_at": 1750000000})
+
+    emitted = []
+    out = iris_agent._refresh_impl(cfg, str(conf_in_missing_dir), client,
+                                   lambda m, msg: emitted.append((m, msg)))
+    assert out is None
+    assert client.token == "NEW"
+    assert any(m == "TOKEN-REFRESH-FAIL" for m, _ in emitted)
+
+
+def test_refresh_impl_next_process_recovers_after_conf_write_failure(
+        tmp_path, monkeypatch):
+    """A lost local write must converge on the next one-shot process."""
+    import agent_config
+
+    conf = tmp_path / "iris-agent.conf"
+    conf.write_text(
+        "catalog_url = https://x\ncatalog_token = OLD\ndevice_id = sw1\n"
+        "token_expires_at = 0\n")
+    bag = {"catalog_token": "NEW", "expires_at": 1750000000}
+    server = {"rotated": False}
+
+    class RecoveringClient:
+        def __init__(self, token):
+            self.token = token
+
+        def refresh_token(self, device_id):
+            assert device_id == "sw1"
+            assert self.token == "OLD"
+            server["rotated"] = True
+            return bag
+
+    real_write = agent_config.write_conf
+    writes = []
+
+    def fail_first_write(path, cfg):
+        writes.append(cfg["catalog_token"])
+        if len(writes) == 1:
+            raise OSError("disk full")
+        return real_write(path, cfg)
+
+    monkeypatch.setattr(agent_config, "write_conf", fail_first_write)
+    old_cfg = agent_config.load(str(conf))
+    first = RecoveringClient(old_cfg["catalog_token"])
+    assert iris_agent._refresh_impl(
+        old_cfg, str(conf), first, lambda m, msg: None) is None
+    assert server["rotated"] is True
+    assert agent_config.load(str(conf))["catalog_token"] == "OLD"
+
+    # A fresh one-shot process rebuilds its client from the unchanged conf.
+    next_cfg = agent_config.load(str(conf))
+    second = RecoveringClient(next_cfg["catalog_token"])
+    recovered = iris_agent._refresh_impl(
+        next_cfg, str(conf), second, lambda m, msg: None)
+    assert recovered["catalog_token"] == "NEW"
+    assert second.token == "NEW"
+    assert agent_config.load(str(conf))["catalog_token"] == "NEW"
+    assert writes == ["NEW", "NEW"]
 
 
 # ---------------------------------------------------------------------------
@@ -2098,11 +3114,11 @@ def test_copy_to_root_impl_uses_injected_copy_source():
     cli_cfg, cli_exec, emit, configured, cli_calls, emitted = _capture_calls()
     iris_agent._copy_to_root_impl(
         "img1.bin", "sdflash:", cli_cfg, cli_exec, emit,
-        reverify_fn=lambda fname, prefix, c, e: True,
+        reverify_fn=lambda fname, prefix, c, e, expected_size=None: True,
         copy_source=lambda f, p: "http://100.92.100.254:8090/%s" % f)
     body = "\n".join(configured[0])
     assert "delete /force sdflash:img1.bin" in body
-    assert "copy /verify http://100.92.100.254:8090/img1.bin sdflash:img1.bin" in body
+    assert "copy http://100.92.100.254:8090/img1.bin sdflash:img1.bin" in body
     assert "guest-share/iris/img1.bin" not in body   # default source NOT used
 
 
@@ -2249,14 +3265,15 @@ def test_deps_gains_telemetry_and_io_transfer_fields_appended_at_end():
     # Contract: these fields are appended (so pre-existing positional
     # construction and index-based code stay valid). The defaults keep legacy
     # test scenarios on the Guest Shell path unchanged.
-    assert iris_agent.Deps._fields[-5:] == (
+    assert iris_agent.Deps._fields[-6:] == (
         "aria_stats", "aria_peers", "io_transfer", "checkpoint",
-        "aria_session")
+        "aria_session", "copy_in_place")
     cat = FakeCatalog({"approved_image_id": None}, None)
     deps, _, _, _, _, _, _, _ = make_deps(cat, {})
     assert deps.aria_stats("/stage/img1.bin") is None
     assert deps.aria_peers("/stage/img1.bin") == []
     assert deps.io_transfer is False
+    assert deps.copy_in_place is False
 
 
 # ---------------------------------------------------------------------------
@@ -2339,7 +3356,7 @@ def test_fast_download_reports_totals_only():
     assert report["peers_total"] == 0
     assert report["content"]["completed_content_bytes"] == 5
     assert report["content_sha256"]["state"] == "verified"
-    assert report["ios_copy_verify"]["state"] == "ok"
+    assert report["ios_copy_verify"]["state"] == "not_run"
     assert "avg_bps" not in report and "transfer" not in report
     assert len(report["report_id"]) == 32 and len(report["transfer_id"]) == 32
     tele = state["img1"]["tele"]

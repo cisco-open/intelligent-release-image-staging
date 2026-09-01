@@ -122,7 +122,7 @@ readable and traversable by uid `10001`. A conventional `755` tree is fine; a
 
 | Path | Role |
 | --- | --- |
-| `/var/lib/iris` | Catalog state, policies, torrent metadata, audit state, and deployment receipts. |
+| `/var/lib/iris` | Catalog state, policies, torrent metadata, audit state, and deployment records. |
 | `/etc/iris` | Encrypted secrets and generated TLS material. |
 | `/run/iris` | Plaintext runtime secrets on tmpfs. |
 | `/var/lib/iris-images` | Uploads volume (`IRIS_IMAGES_DIR`); images the console received over HTTP. |
@@ -133,10 +133,10 @@ Those two image locations are the server's only image roots. The uploads volume
 is writable and owned by the runtime uid; the import root is where operators
 stage images on the host and stays read-only to the container.
 
-Deployment receipts (`deployment_receipts.json`, the applied-lifecycle state
+Deployment records (`deployment_records.json`, the applied-lifecycle state
 that drives undeploy) live under `IRIS_STATE` — `/var/lib/iris` on Compose,
 `/data/state` on the Kubernetes PVC — and hold no secrets. See
-[Management Type and VLAN Ownership](network-attachment.md).
+[Management Type and VLAN Ownership](management-type.md).
 
 Docker Compose uses separate named volumes for state, encrypted config, and GUI
 image uploads. The Kubernetes alpha maps all durable paths into one ReadWriteOnce
@@ -199,4 +199,10 @@ for the address and scaling constraints.
 
 ## Self-provisioned artifacts
 
-On startup, the container refreshes derivable served files such as the Guest Shell agent bundle, bootstrap script, and catalog certificate. Operator-supplied IOx packaging artifacts, such as `iris-arm64.tar`, remain operator-owned; the container serves them but does not modify them. Because those tars bake the catalog CA in at build time and are never rebuilt automatically, a certificate rotation refreshes the served `iris-catalog.pem` but leaves already-built IOx packages pinned to the old certificate — see [TLS rotation and IOx packages](operations.md#tls-rotation-and-iox-packages).
+On startup, the container refreshes derivable served files such as the Guest
+Shell agent bundle, bootstrap script, and catalog certificate. The two IOx tars
+and `iris-xr.rpm` remain operator-built: the container serves them but does not
+modify them. All three bake the catalog CA and shared agent at build time, so
+rebuild them after a certificate rotation **or any `device/agent/` change**.
+See [TLS rotation and device packages](operations.md#tls-rotation-and-device-packages)
+and [Embedded agent packages](development.md#embedded-agent-packages).

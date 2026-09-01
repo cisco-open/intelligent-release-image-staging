@@ -2,11 +2,14 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""#12 verify-if-present: the agent's catalog TLS context (iris_agent.make_catalog
-_context) VERIFIES the catalog cert against the pinned CA when catalog_ca is set,
-REJECTS a wrong/absent anchor, and WARNS + stays unverified when catalog_ca is
-absent (locked back-compat). Uses an in-process HTTPS stub with a throwaway cert,
-mirroring test_catalog_client.py's stub pattern. catalog_client is unchanged."""
+"""#12 FAIL CLOSED: the agent's catalog TLS context (iris_agent.make_catalog
+_context) VERIFIES the catalog cert against the pinned CA when catalog_ca is
+set, REJECTS a wrong anchor, and now REFUSES the connection (raises
+CatalogTLSConfigError, never constructs an unverified context) when
+catalog_ca is absent or empty -- replacing the old "verify-if-present"
+warn-and-downgrade back-compat. Uses an in-process HTTPS stub with a
+throwaway cert, mirroring test_catalog_client.py's stub pattern.
+catalog_client is unchanged."""
 import os
 import ssl
 import subprocess
@@ -16,6 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 import catalog_client
+import cli_ssh
 import iris_agent
 
 
@@ -89,22 +93,68 @@ def test_wrong_cafile_rejects(https_stub, tmp_path):
         client.get_policy("sw1")
 
 
-def test_absent_catalog_ca_warns_and_stays_unverified(https_stub):
-    # The LOCKED back-compat path: no catalog_ca -> unverified context + ONE warning,
-    # and the call still proceeds (the self-signed stub is accepted unverified).
-    base, crt, _ = https_stub
-    warned = []
-    ctx = iris_agent.make_catalog_context({}, warned.append)
-    assert ctx.verify_mode == ssl.CERT_NONE
-    assert len(warned) == 1 and "NOT verified" in warned[0]
-    client = catalog_client.CatalogClient(base, "tok", context=ctx)
-    assert client.get_policy("sw1") == {"approved_image_id": "img1"}
+def test_absent_catalog_ca_fails_closed(monkeypatch):
+    # SECURITY (#12 fix): no catalog_ca key at all -> refuse. error() fires
+    # once with an honest message, an exception is raised, and above all
+    # ssl._create_unverified_context() must NEVER be called -- assert on the
+    # ssl call itself so a future regression back to the silent downgrade
+    # can't slip past a looser assertion.
+    called = []
+    monkeypatch.setattr(
+        ssl, "_create_unverified_context",
+        lambda *a, **k: called.append(1) or ssl.SSLContext())
+    errors = []
+    with pytest.raises(iris_agent.CatalogTLSConfigError) as exc_info:
+        iris_agent.make_catalog_context({}, errors.append)
+    assert called == []
+    assert len(errors) == 1
+    assert "catalog_ca" in errors[0] and "refusing" in errors[0]
+    assert "catalog_ca" in str(exc_info.value)
 
 
-def test_empty_string_catalog_ca_is_treated_as_absent(https_stub):
-    # agent_config DEFAULTS gives catalog_ca = "" (falsy) when unset -> unverified.
-    base, crt, _ = https_stub
-    warned = []
-    ctx = iris_agent.make_catalog_context({"catalog_ca": ""}, warned.append)
-    assert ctx.verify_mode == ssl.CERT_NONE
-    assert len(warned) == 1
+def test_empty_string_catalog_ca_fails_closed(monkeypatch):
+    # agent_config no longer backfills catalog_ca = "" for an absent key, but
+    # an explicit empty string (e.g. a hand-edited conf) must refuse the same
+    # way as a missing key -- "" is exactly as unpinned as absent.
+    called = []
+    monkeypatch.setattr(
+        ssl, "_create_unverified_context",
+        lambda *a, **k: called.append(1) or ssl.SSLContext())
+    errors = []
+    with pytest.raises(iris_agent.CatalogTLSConfigError):
+        iris_agent.make_catalog_context({"catalog_ca": ""}, errors.append)
+    assert called == []
+    assert len(errors) == 1
+
+
+def test_missing_catalog_ca_file_fails_closed(tmp_path):
+    # catalog_ca points somewhere, but the pinned file isn't actually there
+    # (e.g. a botched install) -- same refusal as unset, not a silent
+    # downgrade.
+    errors = []
+    with pytest.raises(iris_agent.CatalogTLSConfigError):
+        iris_agent.make_catalog_context(
+            {"catalog_ca": str(tmp_path / "no-such-cert.pem")}, errors.append)
+    assert len(errors) == 1
+
+
+def test_build_deps_wires_the_fail_closed_context_without_a_nameerror(
+        monkeypatch, tmp_path):
+    # Reproduces the real on-box wiring in iris_agent.build_deps (normally
+    # `# pragma: no cover`): a NameError bug there meant the fail-closed
+    # error callback could never actually run -- `emit` (and the
+    # `cli_execute` it wraps) weren't yet bound in build_deps' scope at the
+    # point make_catalog_context's callback fires synchronously. Stubbing
+    # cli_ssh.select_cli lets this run off-box without a real device; the
+    # regression this guards against is CatalogTLSConfigError turning into a
+    # NameError, not build_deps reaching a real switch.
+    sent = []
+    monkeypatch.setattr(
+        cli_ssh, "select_cli",
+        lambda cfg: (lambda cmd: sent.append(cmd), lambda cmds: sent.extend(cmds)))
+    conf_path = str(tmp_path / "iris-agent.conf")
+    cfg = {"catalog_url": "https://198.51.100.1:8443", "catalog_token": "tok",
+           "device_id": "d1", "rpc_port": "6800"}
+    with pytest.raises(iris_agent.CatalogTLSConfigError):
+        iris_agent.build_deps(cfg, conf_path)
+    assert any("TLS-ERROR" in cmd for cmd in sent), sent

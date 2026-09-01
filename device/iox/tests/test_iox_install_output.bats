@@ -43,8 +43,18 @@ setup() {
   INSTALL="$BATS_TEST_DIRNAME/../install.sh"
 }
 
+@test "stale NETWORK_ATTACHMENT without MANAGEMENT_TYPE aborts; a normal env is unaffected" {
+  NETWORK_ATTACHMENT=inband run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"NETWORK_ATTACHMENT was renamed to MANAGEMENT_TYPE"* ]] || return 1
+  MANAGEMENT_TYPE=inband INBAND_VLAN=120 APP_IP=192.0.2.21 APP_MASK=255.255.255.0 \
+    APP_GATEWAY=192.0.2.1 IOS_SSH_HOST=192.0.2.1 \
+    run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ]
+}
+
 @test "inband dry-run creates no VLAN/SVI and never replaces the AppGig allowed list" {
-  NETWORK_ATTACHMENT=inband INBAND_VLAN=120 APP_IP=192.0.2.21 APP_MASK=255.255.255.0 \
+  MANAGEMENT_TYPE=inband INBAND_VLAN=120 APP_IP=192.0.2.21 APP_MASK=255.255.255.0 \
     APP_GATEWAY=192.0.2.1 IOS_SSH_HOST=192.0.2.1 \
     run bash "$INSTALL" --dry-run
   [ "$status" -eq 0 ]
@@ -55,7 +65,7 @@ setup() {
 }
 
 @test "inband dry-run trunks the AppGig additively (allowed vlan add)" {
-  NETWORK_ATTACHMENT=inband INBAND_VLAN=120 APP_IP=192.0.2.21 APP_MASK=255.255.255.0 \
+  MANAGEMENT_TYPE=inband INBAND_VLAN=120 APP_IP=192.0.2.21 APP_MASK=255.255.255.0 \
     APP_GATEWAY=192.0.2.1 IOS_SSH_HOST=192.0.2.1 \
     run bash "$INSTALL" --dry-run
   [[ "$output" == *"interface AppGigabitEthernet1/1"* ]] && \
@@ -64,7 +74,7 @@ setup() {
 }
 
 @test "inband dry-run points the app SSH-to-IOS at the existing management SVI" {
-  NETWORK_ATTACHMENT=inband INBAND_VLAN=120 APP_IP=192.0.2.21 APP_MASK=255.255.255.0 \
+  MANAGEMENT_TYPE=inband INBAND_VLAN=120 APP_IP=192.0.2.21 APP_MASK=255.255.255.0 \
     APP_GATEWAY=192.0.2.1 IOS_SSH_HOST=192.0.2.1 \
     run bash "$INSTALL" --dry-run
   [[ "$output" == *"IRIS_DEVICE_SSH_HOST=192.0.2.1"* ]] && \
@@ -72,7 +82,7 @@ setup() {
 }
 
 @test "inband real run requires IOS_SSH_HOST" {
-  NETWORK_ATTACHMENT=inband INBAND_VLAN=120 APP_IP=192.0.2.21 APP_MASK=255.255.255.0 \
+  MANAGEMENT_TYPE=inband INBAND_VLAN=120 APP_IP=192.0.2.21 APP_MASK=255.255.255.0 \
     APP_GATEWAY=192.0.2.1 IRIS_CRT_FILE=/dev/null run bash "$INSTALL"
   [ "$status" -ne 0 ] && [[ "$output" == *"IOS_SSH_HOST"* ]]
 }

@@ -17,10 +17,20 @@ EXEC_DIR="${EXEC_DIR:-/home/guestshell}"
 ARIA2_SRC="${ARIA2_SRC:-$STAGE_DIR/aria2c}"
 RPC_PORT="${RPC_PORT:-6800}"
 RPC_SECRET_FILE="${RPC_SECRET_FILE:-$STAGE_DIR/rpc-secret}"
-HOOK_SRC="${HOOK_SRC:-$STAGE_DIR/agent/peer-receipt-hook.sh}"
-HOOK_DST="${HOOK_DST:-$EXEC_DIR/iris-peer-receipt-hook}"
+HOOK_SRC="${HOOK_SRC:-$STAGE_DIR/agent/peer-transfer-hook.sh}"
+HOOK_DST="${HOOK_DST:-$EXEC_DIR/iris-peer-transfer-hook}"
 LOG="${LOG:-$STAGE_DIR/aria2c.log}"
 MAX_PEERS="${MAX_PEERS:-10}"     # cap BT peer connections per torrent on a device
+# Lift aria2's concurrency cap, which defaults to 5. A SEEDING torrent counts
+# against that cap and never completes (--seed-ratio=0.0 below means seed
+# forever, which is the point -- staged devices seed to their peers), so a
+# device holding five staged images would queue the download for a sixth and
+# never start it. A device may be assigned up to ten. The starvation is silent:
+# aria2 reports the extra as `waiting`, not an error, so the device would report
+# staging indefinitely with no fault recorded anywhere. Bandwidth is bounded by
+# --bt-max-peers and transfer limits, never by this; using it as a throttle only
+# starves. Same defect fixed on the origin in server/seed-launch.sh.
+MAX_CONCURRENT="${MAX_CONCURRENT:-100}"
 BT_LISTEN_PORT="${BT_LISTEN_PORT:-}"
 
 if [ -n "$BT_LISTEN_PORT" ]; then
@@ -42,7 +52,7 @@ fi
 RPC_SECRET="$(tr -d '[:space:]' < "$RPC_SECRET_FILE" 2>/dev/null || true)"
 RPC_SECRET="${RPC_SECRET:-iris}"
 
-# The per-peer receipt hook (--on-bt-download-complete, appended below).
+# The per-peer transfer-record hook (--on-bt-download-complete, appended below).
 # aria2 execs the value directly -- execlp with no shell (util.cc:2328) -- so
 # it must be a real file with the exec bit, exactly like aria2c itself. /flash
 # denies chmod, which is why aria2c is copied to $EXEC_DIR; a hook left in the
@@ -66,10 +76,10 @@ if [ -f "$HOOK_SRC" ]; then
   else
     rm -f "$_hook_tmp" 2>/dev/null || true
     # Not fatal, and deliberately so: without the hook a transfer still
-    # completes and the report simply omits the per-peer receipts ("not
-    # measured"). Aborting the launcher over telemetry would silence the
-    # device, which is the 2026-08-20 failure mode.
-    echo "cannot install the peer-receipt hook at $HOOK_DST; transfers will run without per-peer receipts" >&2
+    # completes and the report simply omits the per-peer transfer records
+    # ("not measured"). Aborting the launcher over telemetry would silence
+    # the device, which is the 2026-08-20 failure mode.
+    echo "cannot install the peer-transfer hook at $HOOK_DST; transfers will run without per-peer transfer records" >&2
   fi
   unset _hook_tmp
 fi
@@ -132,6 +142,7 @@ exec "$ARIA2" \
   --enable-peer-exchange=false \
   --bt-enable-lpd=false \
   --bt-max-peers="$MAX_PEERS" \
+  --max-concurrent-downloads="$MAX_CONCURRENT" \
   "$@" \
   --bt-seed-unverified=true \
   --seed-ratio=0.0 \

@@ -59,6 +59,15 @@ IOx onboarding already ran a live preflight and failed the same way.
 Submit-time rejections render in the console and are audited like any other
 onboarding failure.
 
+IRIS does not send `enable` and its secret unless the device's own prompt has
+shown that the login lands at user EXEC (`>`). Sending that pair to a login
+already at privileged EXEC (`#`) executes the secret as a command, which IOS may
+try to resolve as a hostname and can delay every session by tens of seconds. A
+device that genuinely needs enable fails its first unprivileged session loudly,
+is learned from the prompt, and succeeds on retry. Set
+`IRIS_DEVICE_ENABLE_ALWAYS=1` only to restore the old unconditional behavior for
+a known environment.
+
 ## Bulk device actions
 
 Network-wide changes come from the Devices toolbar, which acts on every checked
@@ -72,9 +81,9 @@ individual effects are documented in
 
 A batch onboard no longer blocks its HTTP request on a router's live SSH
 session. `POST /api/devices/<id>/onboard` resolves the plan, checks for a
-conflicting deployment receipt, and returns a job id immediately; router
+conflicting deployment record, and returns a job id immediately; router
 preflight — the read-only collision, identity, and NAT checks in
-[Router preflight and ownership](network-attachment.md#router-preflight-and-ownership)
+[Router preflight and ownership](management-type.md#router-preflight-and-ownership)
 — runs afterward, in the bounded onboarding worker pool, right before that
 job mints its enrollment token. Selecting a large batch of routers therefore
 shows queued and running progress at once instead of the page hanging while
@@ -91,9 +100,9 @@ Worker concurrency is bounded and configurable with `IRIS_ONBOARD_CONCURRENCY`
 The generated installers and Console recipes also cut down on device logins:
 the read-only pre-checks before an install and the verification checks after
 an install or undeploy each now run over a single device session instead of
-one login per command. State-gated poll and retry loops — waiting for
-`guestshell destroy`, IOx readiness, or app-hosting state — are unchanged,
-because each iteration has to re-observe live device state.
+one login per command. State-gated poll and retry loops still use a new live
+observation per iteration; Guest Shell readiness now waits 2, 4, 6, and so on up
+to 15 seconds between observations instead of imposing a flat 15-second delay.
 
 ## Peer-policy operations and their backlog
 
@@ -182,39 +191,164 @@ records it in a known-hosts file under the server state directory
 changes. Verify the fingerprint out of band where the destination warrants
 it, and remove that file after an intentional host rebuild.
 
+Audit detail wording can change between releases without rewriting entries
+already on disk — `audit.jsonl` is append-only, so old lines keep their
+original text. The clearest current example is the deployment-record rename:
+the `adopt` action's detail text and the device-retirement (`device_delete`)
+detail text naming abandoned deployment records both moved to the new
+wording. A saved search over audit detail for either event should match both
+the old and the new phrasing until the old entries age out.
+
+## Image verification
+
+*Settings → Image verification* checks the catalog's images against Cisco's
+published Bulk Hash feed and quarantines a sha512 mismatch — see [Cisco Bulk
+Hash verification](security.md#cisco-bulk-hash-verification) for what the
+check does and what a quarantine changes. A locally-rebuilt image that
+reuses a Cisco filename mismatches and quarantines on its next verification
+run; the check has no way to distinguish that from tampering, which is the
+point.
+
+The schedule has three modes: **off** (the default), **daily**, and
+**weekly** — both timed modes fire at a configured `hour_utc` (0-23), and
+weekly always anchors to Monday UTC; there is no day-of-week setting. A slot
+the server was down for is skipped, not made up: the next scheduled slot
+runs normally, and nothing catches up for the one that was missed. **Refresh
+now** in the same pane runs the check immediately; if a run is already in
+progress, the button and the API both answer "already in progress" rather
+than starting a second one.
+
+Air-gapped servers can upload the feed tar directly instead of the server
+fetching it: the same pane's offline upload takes a raw `.tar` (256 MiB cap)
+and runs it through the identical signature-verification-then-parse
+pipeline, recorded as `source=offline`. A scheduled run is
+`source=scheduled`; **Refresh now** is `source=manual`.
+
+The pane's status line shows the last run's time, source, outcome, and
+matched/mismatched/not_in_feed counts. Every run is audited as
+`bulkhash-refresh` — scheduled runs record `actor=system`, a manual refresh
+or offline upload records the console operator who triggered it; a schedule
+change is audited separately as `bulkhash-schedule-config`, and an offline
+upload additionally as `bulkhash-offline-upload`.
+
+### Releasing a quarantine
+
+An image quarantined by a sha512 mismatch cannot be newly assigned to a
+device — an assignment attempt is refused with the verdict that blocked it.
+From the image's detail view, **Release** re-runs the sha512 comparison
+against the stored feed verdict: if the catalog's own sha512 now agrees
+(the file was replaced with a corrected copy), the quarantine lifts and the
+verdict updates to verified. If it still disagrees, the release is refused
+unless the operator types the image's own filename to confirm an override,
+recorded as a distinct `release_override` audit action rather than a plain
+release. An override does not change the recorded verdict back to verified —
+it only permits assignment despite the mismatch — and re-running the check
+later and getting that same mismatch again does not re-quarantine an
+overridden image; a genuinely different mismatch does.
+
 ## Scaling notes
 
 Private BitTorrent reduces server load by letting devices exchange pieces after the seeder introduces the content. The server remains important for tracker announces, catalog policy, initial seeding, and telemetry. Watch the seeder data port, tracker health, and device storage pressure during large network waves.
 
 On Catalyst 9300 IOx devices the final agent-to-IOS transfer uses the bind-mounted SSD share and runs at disk speed; Catalyst 9300 Guest Shell writes through the guest-share; Catalyst 8000 routers stage over Guest Shell to `bootflash:`. On IE-3400 (or a Catalyst 9300 that fell back to the scp push) that transfer is capped by the platform's default control-plane policing at roughly 1.4 MB/s; IRIS never modifies CoPP.
 
+### How many torrents are served at once
+
+Both the origin seeder and every device agent raise aria2's concurrency limit well above any realistic catalog, because a *seeding* torrent never finishes and so would otherwise hold one of aria2's five default slots forever. Left at the default, the sixth published image is never served at all and any device assigned it reports staging indefinitely — aria2 treats a held-back torrent as waiting rather than as an error, so nothing is logged. Override with `SEED_MAX_CONCURRENT` (origin, default 1000) or `IRIS_MAX_CONCURRENT` / `MAX_CONCURRENT` (devices, default 100). These are not throughput controls: bandwidth is governed by peer limits and transfer policy, and lowering these only starves images.
+
+`iris_seeder_queued_torrents` is the signal to watch. Any non-zero value means the origin is holding back a published image; alert on it.
+
 ## Cleanup
 
-Use `device/device-uninstall.sh` (Guest Shell devices), `device/router-uninstall.sh` (Catalyst 8000 routers), or the IOx uninstall path for device cleanup. Cleanup removes IRIS-owned EEM applets, Guest Shell or IOx agent wiring, trustpoint binding, and staged agent artifacts. It still does not reload the device.
+Use `device/device-uninstall.sh` (Guest Shell devices),
+`device/router-uninstall.sh` (Catalyst 8000 IOS-XE routers),
+`device/iox/uninstall.sh` (IOx), or `device/xr-uninstall.sh` (IOS-XR appmgr).
+Cleanup removes only the platform's IRIS-owned agent footprint and staged agent
+artifacts. It still does not reload the device or remove a staged software image.
 
-Undeploy is driven by the device's applied **receipt**, not its editable
+Undeploy is driven by the device's applied **deployment record**, not its editable
 inventory row, so a later inventory edit cannot retarget cleanup. An
 **inband** device's teardown removes the app footprint and every other
 IRIS-named artifact — the EEM applets, the IRISQ discriminator and its logging
 bindings, and the IRIS PKI trustpoint and HTTP-client binding — and preserves
-the operator-owned VLAN/SVI/routes/VRF. A device deployed before receipts
+the operator-owned VLAN/SVI/routes/VRF. A device deployed before deployment records
 existed
-has no active receipt and must be **adopted** (an explicit, audited, no-change
+has no active deployment record and must be **adopted** (an explicit, audited, no-change
 recording of ownership) before it can be undeployed, or undeployed with
-**Force** to strip only the agent footprint when there is no receipt at all —
+**Force** to strip only the agent footprint when there is no deployment record at all —
 see [Bulk device actions](console.md#bulk-device-actions). A Catalyst 8000
 router cannot be adopted, and preflight refuses an onboard over a live agent, so
-a receipt-less router's only path is Force. Force behaves identically on every
+a router with no deployment record has only Force as its path. Force behaves identically on every
 platform: it removes every artifact identifiable by name as IRIS — the IRIS EEM
 applets, the IRISQ logging discriminator and its buffered/console/monitor
 bindings, `crypto pki trustpoint IRIS` and `ip http client secure-trustpoint
 IRIS`, the app-hosting stanza, and the staged IRIS files — and leaves only the
 operator's network exactly as it is: the VLAN/SVI, the VirtualPortGroup, and the
-NAT rules, which no receipt proves IRIS created. Undeploy therefore clears
+NAT rules, which no deployment record proves IRIS created. Undeploy therefore clears
 exactly what preflight refuses, so a forced teardown leaves the device able to be
-onboarded again. A missing, drifted, or uncertain receipt otherwise stops cleanup
+onboarded again. A missing, drifted, or uncertain deployment record otherwise stops cleanup
 in `needs-reconcile` rather than guessing. See
-[Management Type and VLAN Ownership](network-attachment.md).
+[Management Type and VLAN Ownership](management-type.md).
+
+### Recovering an interrupted IOS-XR teardown
+
+An IOS-XR undeploy that was interrupted partway through needs no special
+recovery: re-run undeploy (record-backed or Force) and it converges, because
+each step re-probes the router's own state — including the appmgr
+application's — before acting rather than assuming an earlier attempt
+succeeded. A step that cannot even trust its own probe — a transport error,
+or a truncated read — refuses to continue rather than guess, and a failed
+teardown leaves the device's deployment record in `needs-reconcile` (a red badge in
+the console); undeploy or Force is legal to run again directly from that
+state, and the re-run converges the same way. Every command session to the
+router is bounded by `IRIS_XR_SESSION_TIMEOUT` (tracked default 150 seconds
+in `lab/xr-run.sh`; a value exported in the server's environment always
+takes precedence over that default, `0` disables the bound entirely, and an
+invalid value falls back to the default with a logged warning), so a
+wedged router fails the job with a real exit code instead of hanging it. The
+150-second default sits at the top of a recon-derived 120-150-second band:
+every healthy session measured or inferred from recovered `.20` job logs ran
+~15-20 seconds, so 150s carries 6-10x headroom over that ceiling for both
+install and teardown alike — the install Up-poll is 30 short,
+client-looped sessions rather than one long one, so it shares the same
+bound safely without a separate knob
+(`agentinfo/xr-support/teardown-speed-recon.md`, section 1.4). Undeploy
+composes at most two bounded sessions per run — a read-only probe and
+deactivate session, then a destructive uninstall/remove/sweep/verify
+session — so a completely unresponsive router
+now holds a teardown job for at most 300 seconds (two stalled sessions) at
+the default bound, down from the roughly two-hour worst case the old
+six-to-eleven-session, 900-second-default design could reach. A deployment
+with a tighter job-queue deadline can still export a lower
+`IRIS_XR_SESSION_TIMEOUT` (e.g. `60`) in the server's environment. XR's CLI
+has no prompt-free way to remove a directory, so a completed teardown may
+honestly leave an empty `iris-work/` directory behind on harddisk: rather
+than failing over it — a later onboarding simply reuses that same directory
+(it only ever ensures the directory exists, never requires it be absent).
+
+`.20` operators: its `server/docker-compose.override.yml` still carries
+`IRIS_XR_SESSION_TIMEOUT=300`, set back when the tracked default was 900
+seconds and per-teardown session counts ran six to eleven. That override was
+always a per-session cap, not a total-teardown one: at that same 300-second
+override, live runs recovered from the old design still took 929-964
+seconds end to end (`agentinfo/xr-support/teardown-speed-recon.md`, section
+1.2 — roughly three stalled-to-the-bound sessions each), not 300 seconds.
+It is now redundant for teardown — Task 2's at-most-two-session composite
+plus the tracked 150-second default already keep a stalled teardown's
+worst case to a comfortable 300 seconds without any override in play — but
+leaving it in place is harmless: it only widens the per-session bound back
+out to 300s (a 600s worst case across two stalls) rather than
+reintroducing the old multi-hour exposure. Removing it tightens the worst
+case back down to the tracked default; that edit is the operator's to
+make, not something this change makes for them. Undeploy itself never touches a bare
+image filename and reports, in one summary line, that any operator-staged
+image was left in place. Undeploy never unassigns an image, so it never
+produces the agent's own per-file record on its own: that line — the file
+was kept, or replaced, if the catalog had republished different content
+under the same image id — only exists for an image the agent actually
+unassigned or republished while it was running. A device undeployed with
+its images still assigned leaves every image file in place with no such
+line at all; undeploy's own summary is the only confirmation there is.
 
 Deleting an inventory row is not an undeploy — undeploy before deleting anything
 still deployed. See [Bulk device actions](console.md#bulk-device-actions).
@@ -245,45 +379,85 @@ decision comes from the entry's recorded directory, not from its filename. See
 [Catalog entry fields](reference.md#catalog-entry-fields) for the exact rule,
 including the fallback for entries published before that field existed.
 
-## TLS rotation and IOx packages
+## Artifact-server diagnostics
 
-Rotating or regenerating the server's TLS certificate invalidates IOx packages
-that were already built: each `iris-arm64.tar` / `iris-amd64.tar` bakes the
-catalog's certificate in at **build** time, and the server only refreshes the
-*served* `iris-catalog.pem` on container start — it does not rebuild the
-tars. A rebuilt server, a fresh volume, or a deliberate certificate rotation
-all silently break every package that was built before the change.
+The artifact server logs one line per GET with the method, path, response
+status, duration, and in-flight request count. TLS handshakes happen in the
+per-connection worker rather than the accept loop, have a 30-second handshake
+bound, and use a listen backlog of 128. During a slow fleet onboard, compare the
+persisted deployment-log offsets with lines such as `artifacts GET ... in
+0.123s (inflight 20)` to distinguish device-side delay from server-side
+concurrency. Expired staging credentials are swept on a five-minute timer, not
+on a request path, so one fetch cannot trigger deletion work for another.
 
-Symptom: the device installs cleanly and its IOx app reports RUNNING, and its
-TCP connection to the catalog even succeeds, but it can never authenticate and
-so never checks in. The only evidence is a `TOKEN-REFRESH-FAIL` line in the
-**device's own syslog** — nothing on the server distinguishes "never
-onboarded" from "onboarded but rejecting our certificate". Guest Shell
-devices are immune: their served artifacts, including `iris-catalog.pem`, are
-regenerated on every container start, and the installer always fetches
-whatever is current.
+## TLS rotation and device packages
+
+Rotating or regenerating the server's TLS certificate invalidates prebuilt
+device packages: each `iris-arm64.tar` / `iris-amd64.tar` bakes the catalog's
+certificate in at **build** time, and so does `iris-xr.rpm`, the IOS-XR agent
+package for Cisco 8000 Series Routers (`tools/build-xr-package.sh`). The
+server only refreshes the *served* `iris-catalog.pem` on container start — it
+does not rebuild any of the three. A rebuilt server, a fresh volume, or a
+deliberate certificate rotation all silently break every package that was
+built before the change.
+
+Symptom: the device installs cleanly and its IOx app (or, on IOS-XR, its
+appmgr container) reports RUNNING, and its TCP connection to the catalog even
+succeeds, but it can never authenticate and so never checks in. The only
+evidence is a `TOKEN-REFRESH-FAIL` line in the **device's own syslog** —
+nothing on the server distinguishes "never onboarded" from "onboarded but
+rejecting our certificate". Guest Shell devices are immune: their served
+artifacts, including `iris-catalog.pem`, are regenerated on every container
+start, and the installer always fetches whatever is current.
 
 Two ways to catch this before it reaches a device:
 
 - Console **Settings → Setup** carries a *device packages* card showing each
   package's build time and state (`ok`, `stale`, `absent`, `unknown`) against
-  the server's live certificate — see [Setup](console.md#setup).
-- `tools/check-package-freshness.sh` is the read-only, scriptable equivalent.
-  It compares the certificate the catalog actually serves, the copy handed to
-  Guest Shell devices, and the certificate pinned inside each served IOx
-  package, and exits non-zero if any package is stale:
+  the server's live certificate, including the `iris-xr.rpm` row — see
+  [Setup](console.md#setup). That row is checked differently from the two
+  tars: this module has no RPM/cpio reader, so it can only compare the RPM's
+  build time against the live certificate, not pin the certificate baked
+  inside it the way it does for the tars.
+- `tools/check-package-freshness.sh` is the read-only, scriptable equivalent
+  for all three packages. It compares the certificate the catalog actually
+  serves, the copy handed to Guest Shell devices, and the certificate pinned
+  inside each served IOx package. For `iris-xr.rpm`, it uses the same explicit
+  build-time proxy as the Setup card: built before the certificate's
+  `notBefore` is stale; built after it is only `OK-BY-MTIME`, never a contents
+  inspection:
 
   ```bash
   tools/check-package-freshness.sh              # report only
   tools/check-package-freshness.sh --rebuild    # report, then rebuild if stale
   ```
 
-  Run it after any catalog certificate change.
+  Run it after any catalog certificate change. `--rebuild` rebuilds stale IOx
+  tars only; build the XR RPM separately with the command below.
 
 Remedy: re-run `tools/provision-iox-packages.sh`, then re-onboard the affected
-IOx devices. If instead the certificate the server currently serves disagrees
-with the copy already handed to devices, rebuilding packages alone will not
-fix it — new onboards are affected too — so reconcile the certificate first.
+IOx devices. For IOS-XR, rebuild the RPM with `tools/build-xr-package.sh
+--out artifacts/`, pointing `CATALOG_PEM` at the NEW live certificate
+(certificate block only — the same rebuild the fresh-volume reset sequence in
+[aiagent.md](aiagent.md) performs for IOS-XR after bring-up), then redeploy
+the affected Cisco 8000 Series routers. If instead the certificate the server
+currently serves disagrees with the copy already handed to devices,
+rebuilding packages alone will not fix it — new onboards are affected too —
+so reconcile the certificate first.
+
+## Redeploying agents after an artifact rebuild
+
+Rebuilding an XR RPM, IOx tar, or agent bundle changes what is baked inside
+it — including any script or hook filename — so a rebuild must also be
+republished, and a device must be redeployed to pick it up. Until then, an
+already-deployed agent keeps working against the current server, but any name
+it reports that the server no longer recognizes is dropped by the server's
+allow-list reconstruction rather than rejected: per-peer transfer attribution
+is simply absent from that device's report until it is redeployed, not an
+error. The agent's own persisted telemetry state can carry an old key across
+its own upgrade too, so the first report after upgrading a running agent can
+discard whatever peer data it had already measured for the transfer in
+progress — a one-time gap for that transfer, not a recurring one.
 
 ## Rotating the seeder announce credential
 

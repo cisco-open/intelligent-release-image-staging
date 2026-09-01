@@ -65,6 +65,11 @@ def main(argv=None):
     # mint and write it back, dropping the freshly minted enrollment token.
     with secrets_store.store_lock(secrets_path):
         store = secrets_store.load(secrets_path)
+        # Explicit re-enrollment begins a new credential lineage. A previous
+        # token retained for refresh-response recovery must not be able to
+        # retrieve the newly enrolled device's secret bag.
+        store.get("devices", {}).get(device_id, {}).pop(
+            "catalog_token_prev", None)
         token = secrets_store.mint(store, device_id, "catalog_token", now)
 
         # Override the registry TTL: enrollment tokens are intentionally short-lived.

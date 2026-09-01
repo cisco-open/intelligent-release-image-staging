@@ -3,12 +3,13 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 import os
+import re
 import threading
 import time
 from types import SimpleNamespace
 
 import catalog as catalog_mod
-import deployment_receipts
+import deployment_records
 import gui_onboard
 import pytest
 
@@ -71,6 +72,7 @@ def _svc(run_fn, stage_host=None, **kw):
     fleet = _Fleet({"d1": {"device_id": "d1", "device_ip": "10.0.0.1", "vlan": "666",
                            "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
                            "guest_ip": "10.0.0.3", "model": "C9300",
+                           "management_type": "routed",
                            "credential_profile_id": "lab"}})
     profs = {"lab": {"device_user": "admin", "device_pass": "s3cret",
                      "enable_secret": "en"}}
@@ -180,7 +182,8 @@ def test_onboard_missing_credential_errors(tmp_path):
 
 def test_enable_secret_defaults_to_device_pass(tmp_path):
     fleet = _Fleet({"d1": {"device_id": "d1", "device_ip": "10.0.0.1",
-                           "model": "C9300", "credential_profile_id": "lab"}})
+                           "model": "C9300", "management_type": "routed",
+                           "credential_profile_id": "lab"}})
     creds = _Creds({"lab": {"device_user": "u", "device_pass": "pw",
                             "enable_secret": ""}})
     seen = {}
@@ -210,7 +213,8 @@ def test_device_install_env_override(monkeypatch):
 def test_old_terminal_onboard_jobs_evicted():
     clock = {"t": 1000}
     fleet = _Fleet({"d1": {"device_id": "d1", "device_ip": "10.0.0.1",
-                           "model": "C9300", "credential_profile_id": "lab"}})
+                           "model": "C9300", "management_type": "routed",
+                           "credential_profile_id": "lab"}})
     creds = _Creds({"lab": {"device_user": "u", "device_pass": "p",
                             "enable_secret": ""}})
     svc = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
@@ -311,6 +315,23 @@ def test_build_env_honors_iris_artifacts_dir_env(monkeypatch):
     assert env["IRIS_ARTIFACTS_DIR"] == "/custom/artifacts"
 
 
+def test_build_env_raises_without_management_type():
+    """Task 2 (spec decision 6): _build_env used to default a missing
+    attachment/management_type to "routed" -- a PARTIAL rename that kept
+    that default would silently retarget teardown scope instead of erroring.
+    A target dict (device row or resolved plan) lacking management_type
+    must fail loud."""
+    fleet = _Fleet({"d1": {"device_id": "d1", "device_ip": "10.0.0.1",
+                           "credential_profile_id": "lab"}})
+    creds = _Creds({"lab": {"device_user": "u", "device_pass": "p",
+                            "enable_secret": "e"}})
+    svc = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
+                                     run_fn=lambda p, e, on: 0,
+                                     mint_fn=lambda d: "TOK")
+    with pytest.raises(KeyError, match="management_type"):
+        svc._build_env("d1")
+
+
 # --- resolve_platform ---------------------------------------------------
 
 def test_resolve_platform_explicit_wins_over_model():
@@ -388,12 +409,546 @@ def test_resolve_platform_probe_returning_none_raises():
         assert "d1" in str(exc)
 
 
+def test_resolve_platform_xr_family_refuses_xe_recipe():
+    # ASR 9000 runs IOS-XR. ^ASR would otherwise map it to guestshell.
+    dev = {"device_id": "d1", "model": "ASR-9906"}
+    try:
+        gui_onboard.resolve_platform(dev, os_family="xr")
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "IOS-XR" in str(exc)
+        assert "d1" in str(exc)
+
+
+def test_resolve_platform_xr_family_refuses_even_explicit_xe_platform():
+    # An operator forcing platform=guestshell on an XR box is still wrong.
+    dev = {"device_id": "d1", "platform": "guestshell", "model": "ASR-9906"}
+    try:
+        gui_onboard.resolve_platform(dev, os_family="xr")
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "IOS-XR" in str(exc)
+
+
+def test_resolve_platform_refuses_xr_cached_on_device_record():
+    # No os_family= argument at all -- only the fleet-stored record carries
+    # the cached family. gui_server._plan calls resolve_platform(device) with
+    # no keyword, so the record itself must be enough to refuse.
+    dev = {"device_id": "d1", "model": "ASR-9906", "os_family": "xr"}
+    try:
+        gui_onboard.resolve_platform(dev)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "IOS-XR" in str(exc)
+        assert "d1" in str(exc)
+
+
+def test_resolve_platform_record_family_refuses_without_argument_for_explicit_platform():
+    # A cached record family must refuse even when the device also carries an
+    # explicit platform -- an explicit platform cannot bypass a cached family.
+    dev = {"device_id": "d1", "platform": "guestshell", "model": "ASR-9906",
+           "os_family": "xr"}
+    try:
+        gui_onboard.resolve_platform(dev)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "IOS-XR" in str(exc)
+
+
+def test_resolve_platform_xe_family_still_resolves_asr_to_guestshell():
+    # ASR 1000 IS IOS-XE and must keep working exactly as before.
+    dev = {"device_id": "d1", "model": "ASR1001-X"}
+    assert gui_onboard.resolve_platform(dev, os_family="xe") == "guestshell"
+
+
+def test_resolve_platform_unknown_family_behaves_as_before():
+    # os_family omitted or '' -> unchanged legacy behaviour.
+    dev = {"device_id": "d1", "model": "C9300-48UXM"}
+    assert gui_onboard.resolve_platform(dev) == "guestshell"
+    assert gui_onboard.resolve_platform(dev, os_family="") == "guestshell"
+
+
+def test_resolve_platform_refuses_xr_discovered_by_probe():
+    # First contact: nothing cached, so the entry guard sees os_family=None.
+    # The probe learns the family; resolution must refuse on THAT, not fall
+    # through to the model map (where ^ASR would return 'guestshell').
+    dev = {"device_id": "d1"}
+
+    def probe(d):
+        d["os_family"] = "xr"
+        return "ASR-9906"
+
+    try:
+        gui_onboard.resolve_platform(dev, probe=probe)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "IOS-XR" in str(exc)
+
+
+def test_resolve_platform_probes_ambiguous_model_for_family():
+    # A cached model with no os_family short-circuits on the model map on
+    # every later onboard. ^ASR spans both IOS-XE and IOS-XR, so a cached
+    # 'ASR-9906' with no classified family must not resolve to guestshell --
+    # it must consult the probe first and refuse once the probe learns 'xr'.
+    dev = {"device_id": "d1", "model": "ASR-9906"}
+
+    def probe(d):
+        d["os_family"] = "xr"
+
+    try:
+        gui_onboard.resolve_platform(dev, probe=probe)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "IOS-XR" in str(exc)
+
+
+def test_resolve_platform_unambiguous_model_does_not_probe():
+    # C9300 is never IOS-XR -- probing it would be a needless SSH round-trip
+    # on every onboard.
+    dev = {"device_id": "d1", "model": "C9300-48UXM"}
+    calls = []
+
+    def probe(d):
+        calls.append(d)
+
+    assert gui_onboard.resolve_platform(dev, probe=probe) == "guestshell"
+    assert calls == []
+
+
+def test_resolve_platform_unrecognized_model_refuses_when_record_carries_xr():
+    # The entry guard is (os_family or dev.get("os_family")) == "xr": an
+    # explicit os_family= argument that disagrees with the cached record
+    # short-circuits it before dev's own field is ever consulted. A model
+    # this table does not recognize must still refuse honestly instead of
+    # advising "set 'platform' (guestshell|iox|router)" -- advice no XR box
+    # could ever act on.
+    dev = {"device_id": "d1", "model": "N9K-C93180YC-EX", "os_family": "xr"}
+    with pytest.raises(ValueError, match="IOS-XR"):
+        gui_onboard.resolve_platform(dev, os_family="xe")
+
+
+# --- IOS-XR: the appmgr container agent ----------------------------------
+# IRIS stages to IOS-XR now (a Docker app under appmgr, writing straight to
+# harddisk: through a bind mount). The family refusal therefore stops being
+# absolute: 'xr-appmgr' is the ONE platform an XR device may run, and every
+# IOS-XE recipe stays refused for it.
+
+def test_resolve_platform_xr_resolves_the_appmgr_container():
+    dev = {"device_id": "d1", "platform": "xr-appmgr", "model": "8201"}
+    assert gui_onboard.resolve_platform(dev, os_family="xr") == "xr-appmgr"
+    # and from a cached family, with no os_family argument at all
+    cached = {"device_id": "d1", "platform": "xr-appmgr", "model": "8201",
+              "os_family": "xr"}
+    assert gui_onboard.resolve_platform(cached) == "xr-appmgr"
+
+
+def test_resolve_platform_xr_without_an_explicit_platform_still_refuses():
+    """Auto-resolution cannot pick the XR recipe: the model table is keyed on
+    IOS-XE prefixes and an XR box's model is bare digits. The operator sets
+    the platform, and the refusal has to say so."""
+    dev = {"device_id": "d1", "model": "8201"}
+    with pytest.raises(ValueError, match="xr-appmgr"):
+        gui_onboard.resolve_platform(dev, os_family="xr")
+
+
+def test_refuse_xr_message_names_the_platform_to_set():
+    """The old message said to wait for XR support. That is no longer true,
+    and 'forcing platform will not work' is now actively wrong advice. Since
+    xr-host <-> xr-appmgr is now a mutual requirement (gui_fleet.validate_record),
+    the operator needs BOTH settings named, not just the platform -- setting
+    platform alone still leaves the record unclassified (legacy_routed) and
+    unable to plan/deploy."""
+    with pytest.raises(ValueError) as exc:
+        gui_onboard._refuse_xr("d1")
+    message = str(exc.value)
+    assert "d1" in message and "IOS-XR" in message and "xr-appmgr" in message
+    assert "xr-host" in message and "management type" in message
+    assert "wait for" not in message
+
+
+def test_resolve_platform_refuses_the_xr_recipe_on_an_ios_xe_device():
+    """The inverse guardrail: device/xr-install.sh speaks appmgr and IOS-XR
+    config mode. Handing it an IOS-XE box is the same class of mistake as
+    handing device-install.sh an ASR 9000."""
+    dev = {"device_id": "d1", "platform": "xr-appmgr", "model": "C9300-48UXM",
+           "os_family": "xe"}
+    with pytest.raises(ValueError, match="IOS-XE"):
+        gui_onboard.resolve_platform(dev)
+
+
+def test_xr_recipes_are_registered_and_present():
+    assert gui_onboard._PLATFORM_RECIPES["xr-appmgr"] == "device/xr-install.sh"
+    assert gui_onboard._UNINSTALL_RECIPES["xr-appmgr"] == "device/xr-uninstall.sh"
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(
+        gui_onboard.__file__)))
+    for relative in (gui_onboard._PLATFORM_RECIPES["xr-appmgr"],
+                     gui_onboard._UNINSTALL_RECIPES["xr-appmgr"]):
+        assert os.path.exists(os.path.join(repo_root, relative)), relative
+
+
+def _xr_show_version(model="8000"):
+    return ("Cisco IOS XR Software, Version 25.4.2 LNT\n"
+            "cisco %s (VXR)\ncisco 8201-SYS (VXR) processor\n" % model)
+
+
+def _xr_preflight_stub(monkeypatch, version=None, apps="", sources="",
+                       returncode=0, seen=None):
+    def run(argv, input=None, **kwargs):
+        if seen is not None:
+            seen["argv"] = argv
+            seen["input"] = input
+        return SimpleNamespace(returncode=returncode, stdout=(
+            "__IRIS_PREFLIGHT_VERSION__\n"
+            + (version if version is not None else _xr_show_version())
+            + "\n__IRIS_PREFLIGHT_APPS__\n" + apps
+            + "\n__IRIS_PREFLIGHT_SOURCES__\n" + sources))
+    monkeypatch.setattr(gui_onboard.subprocess, "run", run)
+
+
+def test_default_xr_preflight_passes_a_clean_router(monkeypatch):
+    seen = {}
+    _xr_preflight_stub(monkeypatch, apps="No entries found\n",
+                       sources="No entries found\n", seen=seen)
+    dev = {"device_id": "8010-R1"}
+    evidence = gui_onboard._default_xr_preflight(
+        dev, {"DEVICE_IP": "100.90.170.81"}, {}, "/repo")
+    assert evidence == {"status": "passed", "detected_model": "8000"}
+    assert dev["os_family"] == "xr"
+    # driven over the XR transport, not the IOS-XE one
+    assert seen["argv"][1].endswith("lab/xr-run.sh")
+
+
+def test_default_xr_preflight_does_not_reprobe_free_space(monkeypatch):
+    """device/xr-install.sh's own step [1/5] reads `dir harddisk:` and refuses
+    below its headroom floor. Asking again here would be a second SSH login
+    per device to learn a number the recipe re-reads anyway, moments later."""
+    seen = {}
+    _xr_preflight_stub(monkeypatch, seen=seen)
+    gui_onboard._default_xr_preflight({}, {"DEVICE_IP": "10.0.0.1"}, {}, "/repo")
+    assert "dir harddisk:" not in seen["input"]
+
+
+def test_default_xr_preflight_refuses_an_ios_xe_device(monkeypatch):
+    _xr_preflight_stub(monkeypatch, version=(
+        "Cisco IOS XE Software, Version 17.9.4\n"
+        "cisco C9300-48UXM (X86) processor\n"))
+    dev = {"device_id": "sw1"}
+    with pytest.raises(ValueError, match="IOS-XE"):
+        gui_onboard._default_xr_preflight(
+            dev, {"DEVICE_IP": "10.0.0.1"}, {}, "/repo")
+    assert dev["os_family"] == "xe"
+
+
+def test_default_xr_preflight_refuses_an_unclassifiable_banner(monkeypatch):
+    """Fail closed: an unreadable banner is not proof of anything, and the
+    recipe about to run speaks IOS-XR config mode."""
+    _xr_preflight_stub(monkeypatch, version="garbage\n")
+    with pytest.raises(ValueError, match="could not"):
+        gui_onboard._default_xr_preflight(
+            {}, {"DEVICE_IP": "10.0.0.1"}, {}, "/repo")
+
+
+def test_default_xr_preflight_refuses_a_router_that_still_carries_iris(monkeypatch):
+    """The IRIS-named collision check every platform runs, in XR's own
+    vocabulary: the application and the registered package source."""
+    _xr_preflight_stub(monkeypatch,
+                       apps="iris  docker  iris-xr  Up  app_manager\n")
+    with pytest.raises(ValueError, match="already"):
+        gui_onboard._default_xr_preflight(
+            {}, {"DEVICE_IP": "10.0.0.1"}, {}, "/repo")
+
+    _xr_preflight_stub(monkeypatch,
+                       sources="iris-xr  0.1.0  ThinXR_7.3.15  app_manager\n")
+    with pytest.raises(ValueError, match="already"):
+        gui_onboard._default_xr_preflight(
+            {}, {"DEVICE_IP": "10.0.0.1"}, {}, "/repo")
+
+
+def test_default_xr_preflight_ignores_a_foreign_app_of_its_own(monkeypatch):
+    """Only IRIS's own names are collisions. Another operator app -- or the
+    lab's leftover 'irisprobe' source -- is none of IRIS's business."""
+    _xr_preflight_stub(monkeypatch,
+                       apps="telemetry-agent  docker  ta  Up  app_manager\n",
+                       sources="irisprobe  0.1.0  ThinXR_7.3.15  app_manager\n")
+    evidence = gui_onboard._default_xr_preflight(
+        {}, {"DEVICE_IP": "10.0.0.1"}, {}, "/repo")
+    assert evidence["status"] == "passed"
+
+
+def test_default_xr_preflight_raises_when_the_transport_fails(monkeypatch):
+    _xr_preflight_stub(monkeypatch, returncode=1)
+    with pytest.raises(ValueError, match="could not run"):
+        gui_onboard._default_xr_preflight(
+            {}, {"DEVICE_IP": "10.0.0.1"}, {}, "/repo")
+
+
+def _xr_svc(run_fn, **kw):
+    fleet = _Fleet({"d1": {"device_id": "d1", "device_ip": "100.90.170.81",
+                           "vlan": "666", "svi_ip": "10.0.0.2",
+                           "svi_mask": "255.255.255.252",
+                           "guest_ip": "10.0.0.3", "model": "8010",
+                           "os_family": "xr", "platform": "xr-appmgr",
+                           "management_type": "xr-host",
+                           "credential_profile_id": "lab"}})
+    creds = _Creds({"lab": {"device_user": "admin", "device_pass": "s3cret"}})
+    kw.setdefault("probe_fn", lambda dev, env: "8010")
+    kw.setdefault("xr_preflight_fn",
+                  lambda dev, env, resolved: {"status": "passed",
+                                              "detected_model": "8010"})
+    kw.setdefault("mint_fn", lambda did: "TOK-" + did)
+    return gui_onboard.OnboardService(
+        fleet, creds, crt_public="/fake/crt.pem", host_ip="10.9.9.9",
+        run_fn=run_fn, **kw)
+
+
+def test_xr_onboard_runs_the_xr_recipe_with_the_env_it_documents(tmp_path):
+    """The whole point of the wiring: an XR device onboards from the console
+    with the same env every other recipe gets -- device/xr-install.sh reads
+    DEVICE_IP/DEVICE_ID/CATALOG_URL/CATALOG_TOKEN/DEVICE_USER/DEVICE_PASS and
+    finds its RPM under IRIS_ARTIFACTS_DIR."""
+    seen = {}
+
+    def fake_run(install_path, env, on_line):
+        seen["path"] = install_path
+        seen["env"] = env
+        return 0
+
+    svc = _xr_svc(fake_run, artifacts_dir=str(tmp_path))
+    job = _wait(svc, svc.start("d1", resolved={"platform": "xr-appmgr",
+                                               "management_type": "xr-host"}))
+    assert job["state"] == "done", job["lines"]
+    assert seen["path"].endswith("device/xr-install.sh")
+    env = seen["env"]
+    assert env["DEVICE_IP"] == "100.90.170.81"
+    assert env["DEVICE_ID"] == "d1"
+    assert env["CATALOG_TOKEN"] == "TOK-d1"
+    assert env["CATALOG_URL"] == "https://10.9.9.9:8443"
+    assert env["DEVICE_USER"] == "admin" and env["DEVICE_PASS"] == "s3cret"
+    assert env["IRIS_ARTIFACTS_DIR"]
+
+
+def test_xr_undeploy_runs_the_xr_teardown_recipe(tmp_path):
+    seen = {}
+
+    def fake_run(install_path, env, on_line):
+        seen["path"] = install_path
+        return 0
+
+    svc = _xr_svc(fake_run, artifacts_dir=str(tmp_path))
+    job = _wait(svc, svc.start("d1", action="undeploy"))
+    assert job["state"] == "done", job["lines"]
+    assert seen["path"].endswith("device/xr-uninstall.sh")
+
+
+def test_xr_onboard_refuses_when_the_preflight_refuses(tmp_path):
+    ran = []
+
+    def fake_run(install_path, env, on_line):
+        ran.append(install_path)
+        return 0
+
+    def refuse(dev, env, resolved):
+        dev["os_family"] = "xe"
+        raise ValueError("100.90.170.81 reports IOS-XE, not IOS-XR")
+
+    svc = _xr_svc(fake_run, artifacts_dir=str(tmp_path),
+                  xr_preflight_fn=refuse)
+    job = _wait(svc, svc.start("d1", resolved={"platform": "xr-appmgr",
+                                               "management_type": "xr-host"}))
+    assert job["state"] == "error"
+    assert any("IOS-XE" in line for line in job["lines"]), job["lines"]
+    assert ran == []
+    # the classification it just learned is cached, like every other platform
+    assert svc.fleet._d["d1"]["os_family"] == "xe"
+
+
+def test_service_preflight_dispatches_the_xr_platform(tmp_path):
+    svc = _xr_svc(lambda p, e, on: 0, artifacts_dir=str(tmp_path),
+                  xr_preflight_fn=lambda dev, env, resolved: {
+                      "status": "passed", "detected_model": "8010"})
+    evidence = svc.preflight("d1", {"platform": "xr-appmgr",
+                                    "management_type": "xr-host"})
+    assert evidence == {"status": "passed", "detected_model": "8010"}
+
+
+# --- install_options_for / normalize_model -------------------------------
+
+def test_install_options_for_c9k_allows_guestshell_and_iox():
+    for model in ("C9300-48UXM", "c9300-48uxm", "C9500-24Y4C"):
+        assert gui_onboard.install_options_for(model, "") == ["guestshell", "iox"], model
+
+
+def test_install_options_for_iox_only_models():
+    for model in ("IE-3400", "ie-3400", "IR1101", "IR1800"):
+        assert gui_onboard.install_options_for(model, "") == ["iox"], model
+
+
+def test_install_options_for_c8k_router_only():
+    for model in ("C8000V", "C8200-1N-4T", "C8300-2N2S-6T", "C8500-12X"):
+        assert gui_onboard.install_options_for(model, "") == ["router"], model
+
+
+def test_install_options_for_legacy_router_family_guestshell():
+    for model in ("ISR4451", "ASR1001", "CSR1000v"):
+        assert gui_onboard.install_options_for(model, "") == ["guestshell"], model
+
+
+def test_install_options_for_xr_os_family_offers_only_the_appmgr_container():
+    # os_family alone is authoritative, independent of what the model prefix
+    # would otherwise suggest -- e.g. an 8000-series device matches no
+    # IOS-XE row in the table -- so a blank or XR-shaped model gets the one
+    # recipe that IS IOS-XR, never one of the IOS-XE three.
+    assert gui_onboard.install_options_for("8201", "xr") == ["xr-appmgr"]
+    assert gui_onboard.install_options_for("", "xr") == ["xr-appmgr"]
+
+
+def test_install_options_for_xr_os_family_refuses_non_8000_models():
+    # v1 is validated on the Cisco 8000 series only (agentinfo plan scope:
+    # "8000-series first, capability-gated"). os_family is still
+    # authoritative -- neither of these falls through to an IOS-XE recipe
+    # (ASR-9906 matches the ISR/ASR/CSR prefix, C9300-48UXM matches the C9k
+    # prefix, and both would otherwise misroute exactly the way the 8201
+    # incident did) -- but a non-8000 XR device is refused outright ([]),
+    # never left as "no opinion" (None) for validate_record to wave through.
+    assert gui_onboard.install_options_for("ASR-9906", "xr") == []
+    assert gui_onboard.install_options_for("C9300-48UXM", "xr") == []
+    assert gui_onboard.install_options_for("NCS-5501", "xr") == []
+
+
+def test_install_options_for_8xxx_model_offers_xr_even_without_os_family():
+    # Belt-and-suspenders: an XR-shaped model number decides on its own, even
+    # when os_family was never probed/cached -- the 8201 incident this
+    # guardrail closes (an 8201 offered iox and died on an XE-flavoured arch
+    # error).
+    for model in ("8201", "8201-SYS", "820", "8999"):
+        assert gui_onboard.install_options_for(model, "") == ["xr-appmgr"], model
+    # os_family omitted entirely
+    assert gui_onboard.install_options_for("8201") == ["xr-appmgr"]
+
+
+def test_install_options_for_unknown_or_blank_model_returns_none():
+    # None means "no guardrail opinion" -- console still offers Auto, and
+    # validate_record does not restrict the explicit platform choice.
+    assert gui_onboard.install_options_for("", "") is None
+    assert gui_onboard.install_options_for(None, None) is None
+    assert gui_onboard.install_options_for("WS-C2960", "") is None
+
+
+def test_install_options_for_matches_model_platforms_table():
+    # The guardrail table and the auto-resolution table must not drift: every
+    # family's auto-resolution default (what resolve_platform picks) is the
+    # FIRST entry install_options_for returns for that same model.
+    for model in ("C9300-48UXM", "IE-3400", "IR1101", "C8000V", "ISR4451"):
+        options = gui_onboard.install_options_for(model, "")
+        assert options[0] == gui_onboard.resolve_platform({"device_id": "d", "model": model})
+
+
+def test_normalize_model_strips_sys_suffix():
+    assert gui_onboard.normalize_model("8201-SYS") == "8201"
+    assert gui_onboard.normalize_model("8201") == "8201"
+    assert gui_onboard.normalize_model("C9300-48UXM") == "C9300-48UXM"   # untouched
+    assert gui_onboard.normalize_model("") == ""
+    assert gui_onboard.normalize_model(None) == ""
+    assert gui_onboard.normalize_model("  8201-SYS  ") == "8201"         # whitespace trimmed
+
+
+# --- _iox_arch_env ---------------------------------------------------------
+
+def test_iox_arch_env_refuses_an_8xxx_model():
+    # The live incident this closes: an 8201 resolved to iox (no preflight
+    # had run yet to catch it) and only failed here, with a confusing "needs
+    # a recognized device model" arch-selection error that never named
+    # IOS-XR.
+    with pytest.raises(ValueError, match="IOS-XR"):
+        gui_onboard._iox_arch_env("d1", "8201")
+
+
+def test_iox_arch_env_refuses_an_8xxx_sys_model_case_insensitively():
+    with pytest.raises(ValueError, match="IOS-XR"):
+        gui_onboard._iox_arch_env("d1", "8201-sys")
+
+
+# --- parse_os_family ----------------------------------------------------
+
+def test_parse_os_family_xe_banner():
+    text = "Cisco IOS XE Software, Version 17.09.04a\ncisco C9300-48UXM (X86) processor\n"
+    assert gui_onboard.parse_os_family(text) == "xe"
+
+
+def test_parse_os_family_xr_banner():
+    text = "Cisco IOS XR Software, Version 24.4.1\ncisco ASR9K (Intel 686 F6M14S4)\n"
+    assert gui_onboard.parse_os_family(text) == "xr"
+
+
+def test_parse_os_family_is_case_insensitive():
+    assert gui_onboard.parse_os_family("cisco ios xr software, version 25.1.1") == "xr"
+
+
+def test_parse_os_family_unknown_returns_empty():
+    assert gui_onboard.parse_os_family("Cisco Adaptive Security Appliance Software") == ""
+    assert gui_onboard.parse_os_family("") == ""
+
+
+def test_parse_os_family_xr_not_confused_by_xe_substring():
+    # 'IOS XE' and 'IOS XR' differ by one character; a loose match returns the
+    # wrong family and silently misroutes the device.
+    assert gui_onboard.parse_os_family("Cisco IOS XE Software") == "xe"
+    assert gui_onboard.parse_os_family("Cisco IOS XR Software") == "xr"
+
+
+def test_parse_os_family_classic_ios_is_xe_family():
+    # 12.x/15.x Catalysts print no 'XE' token but are driven by the same recipes.
+    assert gui_onboard.parse_os_family(
+        "Cisco IOS Software, C3750E Software (C3750E-UNIVERSALK9-M), Version 15.0(2)") == "xe"
+
+
+def test_parse_os_family_matches_virtual_xr_platforms():
+    # XRv9000 is a virtual platform whose banner spells the token 'XRv', not
+    # 'XR' followed by a boundary; a device that falls through here silently
+    # misroutes to the legacy code path instead of the XR one.
+    assert gui_onboard.parse_os_family(
+        "cisco IOS-XRv 9000 (VXR) processor") == "xr"
+    assert gui_onboard.parse_os_family("Cisco IOS XRv Software") == "xr"
+
+
+def test_parse_os_family_xrv_match_does_not_over_match_xe():
+    # Guard against the trailing-'v' allowance in the XR pattern bleeding
+    # into XE banners.
+    text = "Cisco IOS XE Software, Version 17.09.04a\ncisco C9300-48UXM (X86) processor\n"
+    assert gui_onboard.parse_os_family(text) == "xe"
+
+
+def test_parse_os_family_ignores_an_xr_shaped_hostname():
+    # lab/device-run.sh runs `ssh -tt`, so the text handed to the classifier is
+    # the whole transcript: MOTD, login banner and the prompt echoed with every
+    # command. A C9300 whose hostname happens to be 'ios-xr-lab-01' is IOS-XE,
+    # and a false 'xr' is UNRECOVERABLE -- _refuse_xr tells the operator that
+    # forcing 'platform' will not work, and the family is cached on the fleet
+    # row. Only a banner line may decide the family.
+    text = ("\r\nios-xr-lab-01#show version\r\n"
+            "Cisco IOS XE Software, Version 17.09.04a\r\n"
+            "cisco C9300-48UXM (X86) processor\r\n"
+            "ios-xr-lab-01#\r\n")
+    assert gui_onboard.parse_os_family(text) == "xe"
+
+
+def test_parse_os_family_ignores_an_xr_mention_in_the_login_banner():
+    # Same failure through the MOTD rather than the prompt: free prose naming
+    # the family is not a version banner.
+    text = ("*** lab pod 4 -- IOS XR gear lives on 10.9.0.0/24 ***\r\n"
+            "sw1#show version\r\n"
+            "Cisco IOS XE Software, Version 17.09.04a\r\n"
+            "cisco C9300-48UXM (X86) processor\r\n")
+    assert gui_onboard.parse_os_family(text) == "xe"
+
+
 # --- OnboardService: platform-aware recipe selection --------------------
 
 def _iox_fleet(platform=None, model=None):
     dev = {"device_id": "d1", "device_ip": "10.0.0.1", "vlan": "666",
            "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
-           "guest_ip": "10.0.0.3", "credential_profile_id": "lab"}
+           "guest_ip": "10.0.0.3", "management_type": "routed",
+           "credential_profile_id": "lab"}
     if platform is not None:
         dev["platform"] = platform
     if model is not None:
@@ -440,6 +995,115 @@ def test_probe_resolves_iox_and_caches_model(tmp_path):
     assert any("platform: iox (model IE-3400)" in l for l in job["lines"])
 
 
+def test_probe_normalizes_sys_suffix_before_caching(tmp_path):
+    # '8201-SYS' and '8201' must read identically wherever a model is
+    # recorded -- gui_fleet.validate_record normalizes it on the console/CSV
+    # path; the probe must do the same on ITS path, or the two would drift
+    # (a device onboarded via a live probe could carry a suffixed model the
+    # fleet UI/API never sees on a console-entered one).
+    fleet = _iox_fleet()
+    creds = _iox_creds()
+    dev = {"device_id": "d1", "credential_profile_id": "lab"}
+    env = {"DEVICE_IP": "10.0.0.1"}
+
+    def fake_probe(d, e):
+        return "8201-SYS"
+
+    svc = gui_onboard.OnboardService(
+        fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
+        run_fn=lambda *a, **k: 0, probe_fn=fake_probe,
+        artifacts_dir=str(tmp_path))
+    # '8201' has no _MODEL_PLATFORMS entry (a bare-digit IOS-XR model number),
+    # so resolution itself still fails after the probe runs -- what matters
+    # here is what got cached onto the fleet row, not whether onboarding
+    # proceeds.
+    with pytest.raises(ValueError):
+        svc._resolve("d1", dev, env, "onboard")
+    assert {"device_id": "d1", "model": "8201"} in fleet.upserts
+
+
+def test_probe_does_not_wipe_cached_os_family(tmp_path):
+    # A device previously classified "xr" (however that got recorded) must
+    # keep that classification when a LATER probe finds a model but can't
+    # parse a family from a truncated/unparseable banner. FleetStore.upsert
+    # filters None but keeps "" (server/gui_fleet.py:291), so writing
+    # os_family="" here would silently erase the "xr" tag on disk and
+    # reopen the ASR9k -> guestshell misroute this guard exists to close.
+    #
+    # Calls _resolve() directly rather than through svc.start(): once a
+    # device's os_family is cached as "xr", resolve_platform's entry guard
+    # refuses it before probe() ever runs again, so the full onboard flow
+    # can never exercise this closure a second time for that device. This
+    # isolates the closure's own invariant -- it must never overwrite a
+    # cached family with an empty one -- independent of that guard.
+    fleet = _iox_fleet()
+    fleet._d["d1"]["os_family"] = "xr"  # already known, from a prior probe
+    creds = _iox_creds()
+    # This call's dev has no cached model/family of its own -- the same
+    # shape probe() always receives on a device's first classification.
+    dev = {"device_id": "d1", "credential_profile_id": "lab"}
+    env = {"DEVICE_IP": "10.0.0.1"}
+
+    def fake_probe(d, e):
+        # Found a model, but the banner didn't parse to a family this time.
+        return "ASR-9906"
+
+    svc = gui_onboard.OnboardService(
+        fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
+        run_fn=lambda *a, **k: 0, probe_fn=fake_probe,
+        artifacts_dir=str(tmp_path))
+    svc._resolve("d1", dev, env, "onboard")
+    assert {"device_id": "d1", "model": "ASR-9906"} in fleet.upserts
+    assert not any("os_family" in u for u in fleet.upserts)
+    # The fake fleet's upsert merges onto the stored dict same as the real
+    # one (minus the None/"" filtering) -- the cached family must survive.
+    assert fleet._d["d1"]["os_family"] == "xr"
+
+
+# The console never calls start() bare: gui_server._plan() resolves the platform
+# up front, bakes it into plan["resolved"], and start() is handed that dict. So
+# _build_env copies platform onto the device, resolve_platform takes the
+# EXPLICIT branch, and every family check inside resolution -- the entry guard,
+# the ambiguous-model re-probe, the post-probe re-check -- is bypassed. These
+# two tests walk that production path; the resolution-level tests above cannot
+# see it.
+
+def _xr_probe(d, env):
+    """A live probe against an ASR 9000: reads the banner, records the family
+    (exactly what _default_probe does) and returns the model string."""
+    d["os_family"] = "xr"
+    return "ASR-9906"
+
+
+def test_preresolved_guestshell_platform_still_refuses_an_xr_device(tmp_path):
+    ran = []
+
+    def fake_run(install_path, env, on_line):
+        ran.append(install_path)
+        return 0
+
+    svc = _svc(fake_run, probe_fn=_xr_probe)
+    svc.fleet._d["d1"]["model"] = "ASR-9906"
+    job = _wait(svc, svc.start("d1", resolved={"platform": "guestshell", "management_type": "routed"}))
+    assert job["state"] == "error"
+    assert any("IOS-XR" in line for line in job["lines"]), job["lines"]
+    # The whole point: device/device-install.sh must never be handed an
+    # IOS-XR box.
+    assert ran == []
+
+
+def test_preresolved_onboard_caches_the_family_it_just_learned(tmp_path):
+    # Nothing back-fills os_family onto existing fleet rows, so the refusal is
+    # only durable if the onboard that discovered the family writes it down.
+    # Without this the console re-probes (and re-refuses) on every attempt, and
+    # the devices table never shows why.
+    svc = _svc(lambda p, e, on: 0, probe_fn=_xr_probe)
+    svc.fleet._d["d1"]["model"] = "ASR-9906"
+    _wait(svc, svc.start("d1", resolved={"platform": "guestshell", "management_type": "routed"}))
+    assert {"device_id": "d1", "os_family": "xr"} in svc.fleet.upserts
+    assert svc.fleet._d["d1"]["os_family"] == "xr"
+
+
 def test_probe_returning_none_errors_without_running(tmp_path):
     fleet = _iox_fleet()
     creds = _iox_creds()
@@ -456,6 +1120,43 @@ def test_probe_returning_none_errors_without_running(tmp_path):
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "error"
     assert called == []
+
+
+def test_default_probe_records_os_family_on_dev(monkeypatch):
+    banner = ("Cisco IOS XR Software, Version 24.4.1\n"
+              "cisco ASR-9906 (Intel 686 F6M14S4)\n")
+
+    class _Out:
+        stdout = banner
+        returncode = 0
+
+    monkeypatch.setattr(gui_onboard.subprocess, "run", lambda *a, **k: _Out())
+    dev = {"device_id": "d1"}
+    model = gui_onboard._default_probe(dev, {"DEVICE_IP": "10.0.0.1"}, "/repo")
+    assert model == "ASR-9906"
+    assert dev["os_family"] == "xr"
+
+
+def test_default_probe_still_returns_falsy_when_unreachable(monkeypatch):
+    # The reachability check at gui_onboard.py:831 does `if not self._probe(...)`.
+    # The return value must stay falsy on failure or that check silently breaks.
+    def _boom(*a, **k):
+        raise OSError("unreachable")
+
+    monkeypatch.setattr(gui_onboard.subprocess, "run", _boom)
+    dev = {"device_id": "d1"}
+    assert not gui_onboard._default_probe(dev, {"DEVICE_IP": "10.0.0.1"}, "/repo")
+
+
+def test_default_probe_xe_device_records_xe(monkeypatch):
+    class _Out:
+        stdout = "Cisco IOS XE Software, Version 17.09.04a\ncisco C9300-48UXM (X86) processor\n"
+        returncode = 0
+
+    monkeypatch.setattr(gui_onboard.subprocess, "run", lambda *a, **k: _Out())
+    dev = {"device_id": "d1"}
+    assert gui_onboard._default_probe(dev, {"DEVICE_IP": "10.0.0.1"}, "/repo") == "C9300-48UXM"
+    assert dev["os_family"] == "xe"
 
 
 def test_iox_env_has_ssh_creds(tmp_path):
@@ -512,7 +1213,7 @@ def test_router_recipe_and_env_plumbing(tmp_path):
     job = _wait(svc, svc.start("r1"))
     assert job["state"] == "done"
     assert seen["install_path"].endswith("device/router-install.sh")
-    assert seen["env"]["NETWORK_ATTACHMENT"] == "router-nat"
+    assert seen["env"]["MANAGEMENT_TYPE"] == "router-nat"
     assert seen["env"]["VPG_NUMBER"] == "10"
     assert seen["env"]["NAT_INTERFACE"] == "GigabitEthernet1"
     assert seen["env"]["BT_LISTEN_PORT"] == "6881"
@@ -520,7 +1221,7 @@ def test_router_recipe_and_env_plumbing(tmp_path):
     assert "DEVICE_SSH_PASS" not in seen["env"]
 
 
-def test_router_undeploy_uses_router_recipe_and_receipt_ownership(tmp_path):
+def test_router_undeploy_uses_router_recipe_and_record_ownership(tmp_path):
     fleet = _Fleet({"r1": {
         "device_id": "r1", "device_ip": "192.0.2.10", "model": "C8000V",
         "platform": "router", "credential_profile_id": "lab"}})
@@ -528,7 +1229,7 @@ def test_router_undeploy_uses_router_recipe_and_receipt_ownership(tmp_path):
     svc = gui_onboard.OnboardService(
         fleet, _iox_creds(), host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
         run_fn=_run_capture(seen), artifacts_dir=str(tmp_path))
-    resolved = {"platform": "router", "attachment": "router-nat",
+    resolved = {"platform": "router", "management_type": "router-nat",
                 "device_ip": "192.0.2.10", "device_identity": "9ABC123",
                 "vpg_number": "10", "nat_interface": "GigabitEthernet1",
                 "app_ip": "10.8.0.2", "app_mask": "255.255.255.252",
@@ -578,11 +1279,11 @@ def test_router_execution_preflight_failure_never_mints_or_runs(tmp_path):
         "app_mask": "255.255.255.252", "app_gateway": "10.8.0.1",
         "credential_profile_id": "lab"}})
     minted, ran = [], []
-    receipts = deployment_receipts.ReceiptStore(str(tmp_path / "state"))
-    receipt = receipts.create({
+    record_store = deployment_records.DeploymentRecordStore(str(tmp_path / "state"))
+    record = record_store.create({
         "controller_id": "controller-1", "device_id": "r1",
         "inventory_revision": 1, "plan_hash": "queued-plan",
-        "resolved": {"platform": "router", "attachment": "router-routed"},
+        "resolved": {"platform": "router", "management_type": "router-routed"},
         "preflight": {"status": "passed"},
         "resources": [{"kind": "virtualportgroup", "name": "10",
                        "ownership": "iris-created"}],
@@ -591,15 +1292,112 @@ def test_router_execution_preflight_failure_never_mints_or_runs(tmp_path):
         fleet, _iox_creds(), host_ip="10.9.9.9",
         mint_fn=lambda d: minted.append(d) or "TOK",
         run_fn=lambda p, e, on: ran.append(1) or 0,
-        receipts=receipts,
+        record_store=record_store,
         preflight_fn=lambda *args: (_ for _ in ()).throw(
             ValueError("VirtualPortGroup10 appeared while queued")))
-    job = _wait(svc, svc.start("r1", prepare=lambda: receipt["receipt_id"]))
+    job = _wait(svc, svc.start("r1", prepare=lambda: record["record_id"]))
     assert job["state"] == "error"
     assert minted == [] and ran == []
     assert any("preflight failed" in line for line in job["lines"])
-    assert receipts.get(receipt["receipt_id"])["state"] == "removed"
-    assert receipts.recoverable_for_device("r1") is None
+    assert record_store.get(record["record_id"])["state"] == "removed"
+    assert record_store.recoverable_for_device("r1") is None
+
+
+def _router_fleet():
+    return _Fleet({"r1": {
+        "device_id": "r1", "device_ip": "192.0.2.10", "model": "C8000V",
+        "platform": "router", "management_type": "router-nat",
+        "vpg_number": "10", "nat_interface": "GigabitEthernet1",
+        "app_ip": "10.8.0.2", "app_mask": "255.255.255.252",
+        "app_gateway": "10.8.0.1", "credential_profile_id": "lab"}})
+
+
+def test_router_onboard_persists_xr_family_on_refusal(tmp_path):
+    # The router preflight classifies os_family onto a LOCAL dev dict
+    # (_default_router_preflight sets dev["os_family"] and then refuses via
+    # _refuse_xr) -- nothing here wrote that back to the fleet store, so a
+    # retry re-probed the same XR router over SSH instead of short-circuiting
+    # at resolve_platform's cached-family guard.
+    fleet = _router_fleet()
+
+    def preflight(dev, env, resolved):
+        dev["os_family"] = "xr"
+        gui_onboard._refuse_xr(dev.get("device_id"))
+
+    svc = gui_onboard.OnboardService(
+        fleet, _iox_creds(), host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
+        run_fn=lambda p, e, on: 0, artifacts_dir=str(tmp_path),
+        preflight_fn=preflight)
+    job = _wait(svc, svc.start("r1"))
+    assert job["state"] == "error"
+    assert any("IOS-XR" in line for line in job["lines"]), job["lines"]
+    assert {"device_id": "r1", "os_family": "xr"} in fleet.upserts
+    assert fleet._d["r1"]["os_family"] == "xr"
+
+
+def test_iox_onboard_persists_xr_family_on_refusal(tmp_path):
+    # Same gap as the router path above, but for the IOx execution preflight.
+    # The model is C9k-shaped (not 8xxx) so _resolve's _iox_arch_env lets the
+    # device through to the iox preflight itself -- an 8xxx-shaped model
+    # would refuse earlier, inside _iox_arch_env, without ever reaching it.
+    fleet = _iox_fleet(platform="iox", model="C9300")
+    creds = _iox_creds()
+
+    def iox_preflight(dev, env, resolved):
+        dev["os_family"] = "xr"
+        gui_onboard._refuse_xr(dev.get("device_id"))
+
+    svc = gui_onboard.OnboardService(
+        fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
+        run_fn=lambda p, e, on: 0, iox_preflight_fn=iox_preflight,
+        artifacts_dir=str(tmp_path))
+    job = _wait(svc, svc.start("d1"))
+    assert job["state"] == "error"
+    assert any("IOS-XR" in line for line in job["lines"]), job["lines"]
+    assert {"device_id": "d1", "os_family": "xr"} in fleet.upserts
+    assert fleet._d["d1"]["os_family"] == "xr"
+
+
+def test_router_onboard_second_attempt_short_circuits_on_cached_family(tmp_path):
+    # Once the family is persisted (the fix under test above), a later
+    # onboard attempt must be refused by resolve_platform's cached-family
+    # guard BEFORE the router preflight (or any probe) runs again -- that is
+    # the whole point of writing the classification down.
+    fleet = _router_fleet()
+    calls = []
+
+    def first_preflight(dev, env, resolved):
+        calls.append("preflight-1")
+        dev["os_family"] = "xr"
+        gui_onboard._refuse_xr(dev.get("device_id"))
+
+    def spy_probe(dev, env):
+        calls.append("probe")
+        return "C8000V"
+
+    def spy_run(p, e, on):
+        calls.append("run")
+        return 0
+
+    svc = gui_onboard.OnboardService(
+        fleet, _iox_creds(), host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
+        run_fn=spy_run, probe_fn=spy_probe, artifacts_dir=str(tmp_path),
+        preflight_fn=first_preflight)
+    job1 = _wait(svc, svc.start("r1"))
+    assert job1["state"] == "error"
+    assert {"device_id": "r1", "os_family": "xr"} in fleet.upserts
+
+    def second_preflight(dev, env, resolved):
+        calls.append("preflight-2")
+        return {"status": "passed"}
+
+    svc._router_preflight = second_preflight
+    job2 = _wait(svc, svc.start("r1"))
+    assert job2["state"] == "error"
+    assert any("IOS-XR" in line for line in job2["lines"]), job2["lines"]
+    # Only the first attempt's preflight ran; the second never reached the
+    # router preflight, the probe, or the installer.
+    assert calls == ["preflight-1"]
 
 
 def _router_preflight_stub(monkeypatch, running="", apps="", guest_share="%Error opening",
@@ -628,11 +1426,25 @@ def _router_preflight_stub(monkeypatch, running="", apps="", guest_share="%Error
     monkeypatch.setattr(gui_onboard.subprocess, "run", run)
 
 
-def _router_resolved(attachment="router-nat"):
-    return {"attachment": attachment, "vpg_number": "10",
+def _router_resolved(management_type="router-nat"):
+    return {"management_type": management_type, "vpg_number": "10",
             "app_ip": "10.8.0.2", "app_mask": "255.255.255.252",
             "app_gateway": "10.8.0.1", "nat_interface": "Gi1",
             "swarm_port": "6881"}
+
+
+def test_apply_router_preflight_raises_without_management_type():
+    """Task 2 (spec decision 6): apply_router_preflight's own three-level
+    fallback (attachment -> management_type -> network_attachment -> "")
+    was the 11th silent-default site the Task 1 re-derivation found -- a
+    live router-preflight code path. A resolved plan missing management_type
+    must fail loud, not silently bind evidence as attachment=""."""
+    resolved = {"vpg_number": "10", "app_ip": "10.8.0.2",
+                "app_mask": "255.255.255.252", "app_gateway": "10.8.0.1",
+                "nat_interface": "Gi1", "swarm_port": "6881"}
+    evidence = {"status": "passed", "device_identity": "9ABC123"}
+    with pytest.raises(KeyError, match="management_type"):
+        gui_onboard.apply_router_preflight(resolved, evidence)
 
 
 def test_default_router_preflight_canonicalizes_interface_and_records_globals(monkeypatch):
@@ -722,6 +1534,36 @@ def test_default_router_preflight_rejects_populated_guest_share(monkeypatch):
             _router_resolved("router-routed"), "/repo")
 
 
+def test_default_router_preflight_refuses_an_ios_xr_device(monkeypatch):
+    """The router preflight never probed the family before -- a C8xxx-shaped
+    device whose banner actually reads IOS-XR must refuse here (not with the
+    unrelated 'router modes support the Catalyst 8000 family only' message)
+    before device/router-install.sh ever runs."""
+    def run(_argv, input=None, **_kwargs):
+        return SimpleNamespace(returncode=0, stdout=(
+            "__IRIS_PREFLIGHT_VERSION__\n"
+            "Cisco IOS XR Software, Version 24.4.1\n"
+            "cisco ASR-9906 (Intel 686 F6M14S4)\n"
+            "Processor board ID FOX1234ABCD\n"
+            "__IRIS_PREFLIGHT_RUNNING__\nhostname xr1\n"
+            "__IRIS_PREFLIGHT_APPS__\nNo App found\n"
+            "__IRIS_PREFLIGHT_GUEST_SHARE__\n%Error opening\n"))
+    monkeypatch.setattr(gui_onboard.subprocess, "run", run)
+    dev = {"device_id": "xr1"}
+    with pytest.raises(ValueError, match="IOS-XR"):
+        gui_onboard._default_router_preflight(
+            dev, {"DEVICE_IP": "192.0.2.10"},
+            _router_resolved("router-routed"), "/repo")
+
+
+def test_default_router_preflight_records_the_family_it_read(monkeypatch):
+    _router_preflight_stub(monkeypatch, running="hostname r1\n", apps="No App found\n")
+    dev = {"device_id": "r1"}
+    gui_onboard._default_router_preflight(
+        dev, {"DEVICE_IP": "192.0.2.10"}, _router_resolved("router-routed"), "/repo")
+    assert dev["os_family"] == "xe"
+
+
 # --- IOx preflight: device/iox/install.sh hard-requires EXPECTED_DEVICE_
 # IDENTITY (and MODEL) via ':?' on every non-dry-run install -- a guard so a
 # typo'd DEVICE_IP can't tear down the app on the wrong switch. The console
@@ -752,6 +1594,39 @@ def test_default_iox_preflight_extracts_identity_and_model(monkeypatch):
         {}, {"DEVICE_IP": "192.0.2.30"}, {}, "/repo")
     assert evidence == {"status": "passed", "device_identity": "9ABC123",
                         "detected_model": "IE-3400"}
+
+
+def test_default_iox_preflight_refuses_an_ios_xr_device(monkeypatch):
+    """The live incident: the IOx path never asked the device what it runs,
+    so an XR 8201 sailed through this preflight and only failed later, deep
+    inside _iox_arch_env, on a confusing XE-flavoured 'needs a recognized
+    device model' arch-selection error that never named IOS-XR."""
+    def run(argv, input=None, **kwargs):
+        return SimpleNamespace(returncode=0, stdout=(
+            "__IRIS_PREFLIGHT_VERSION__\n"
+            "Cisco IOS XR Software, Version 24.4.1\n"
+            "cisco 8201 (Intel 686 F6M14S4)\n"
+            "Processor board ID FOX1234ABCD\n"
+            "\n__IRIS_PREFLIGHT_RUNNING__\nhostname xr1\n"
+            "\n__IRIS_PREFLIGHT_APPS__\nNo App found\n"))
+    monkeypatch.setattr(gui_onboard.subprocess, "run", run)
+    dev = {"device_id": "xr1"}
+    with pytest.raises(ValueError, match="IOS-XR"):
+        gui_onboard._default_iox_preflight(
+            dev, {"DEVICE_IP": "192.0.2.30"}, {}, "/repo")
+
+
+def test_default_iox_preflight_records_the_family_it_read(monkeypatch):
+    def run(argv, input=None, **kwargs):
+        return SimpleNamespace(returncode=0, stdout=(
+            "__IRIS_PREFLIGHT_VERSION__\n" + _iox_show_version() +
+            "\n__IRIS_PREFLIGHT_RUNNING__\nhostname sw1\n"
+            "\n__IRIS_PREFLIGHT_APPS__\nNo App found\n"))
+    monkeypatch.setattr(gui_onboard.subprocess, "run", run)
+    dev = {"device_id": "sw1"}
+    gui_onboard._default_iox_preflight(
+        dev, {"DEVICE_IP": "192.0.2.30"}, {}, "/repo")
+    assert dev["os_family"] == "xe"
 
 
 def test_default_iox_preflight_raises_when_command_fails(monkeypatch):
@@ -992,7 +1867,8 @@ def _multi_svc(n, run_fn, **kw):
     for i in range(1, n + 1):
         did = "d%d" % i
         devs[did] = {"device_id": did, "device_ip": "10.0.0.%d" % i,
-                     "model": "C9300", "credential_profile_id": "lab"}
+                     "model": "C9300", "management_type": "routed",
+                     "credential_profile_id": "lab"}
     creds = _Creds({"lab": {"device_user": "admin", "device_pass": "s3cret",
                             "enable_secret": "en"}})
     kw.setdefault("probe_fn", lambda dev, env: "C9300")  # see _svc: guestshell reachability gate
@@ -1253,9 +2129,9 @@ def test_conflicting_action_on_active_job_raises():
 
 
 def test_prepare_runs_once_and_not_on_dedup():
-    """start()'s prepare() (used to mint the receipt) must fire exactly once for
+    """start()'s prepare() (used to mint the record) must fire exactly once for
     a genuinely new job and NEVER when a second same-action start dedups onto the
-    running job -- otherwise a double-onboard would strand an orphan receipt."""
+    running job -- otherwise a double-onboard would strand an orphan record."""
     release = threading.Event()
 
     def run_fn(p, e, on):
@@ -1269,7 +2145,7 @@ def test_prepare_runs_once_and_not_on_dedup():
     j2 = svc.start("d1", prepare=lambda: calls.append(1) or "rcpt-2")
     assert j1 == j2                                # deduped onto the running job
     assert calls == [1]                            # prepare fired only once
-    assert svc.get_job(j1)["receipt_id"] == "rcpt-1"
+    assert svc.get_job(j1)["record_id"] == "rcpt-1"
     release.set()
     assert _wait(svc, j1)["state"] == "done"
 
@@ -1628,62 +2504,68 @@ def test_abort_unknown_job_is_false():
     assert svc.abort("nope") is False
 
 
-# --- Receipt lifecycle races in the worker thread: a concurrent action can
-# retire (supersede) the receipt a job bound between the job's start and its
-# worker's receipt transitions. Those transitions then raise — and must not
+# --- Record lifecycle races in the worker thread: a concurrent action can
+# retire (supersede) the record a job bound between the job's start and its
+# worker's record transitions. Those transitions then raise — and must not
 # kill the worker before _finish(), which would wedge the job "running" and
 # the device "busy" until a server restart. ---
 
-def _receipted_svc(tmp_path, run_fn):
-    import deployment_receipts
-    receipts = deployment_receipts.ReceiptStore(str(tmp_path))
-    svc = _svc(run_fn, receipts=receipts)
-    return svc, receipts
+def _record_backed_svc(tmp_path, run_fn):
+    import deployment_records
+    record_store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    svc = _svc(run_fn, record_store=record_store)
+    return svc, record_store
 
 
-def _active_receipt(receipts, rid, device_id="d1"):
-    receipts.create({"receipt_id": rid, "controller_id": "c", "device_id": device_id,
+def _active_record(record_store, rid, device_id="d1"):
+    record_store.create({"record_id": rid, "controller_id": "c", "device_id": device_id,
                      "inventory_revision": 1, "plan_hash": "h" * 64,
                      "resolved": {"platform": "guestshell"},
                      "preflight": {}, "resources": []})
-    receipts.transition(rid, "applying")
-    receipts.transition(rid, "active")
+    record_store.transition(rid, "applying")
+    record_store.transition(rid, "active")
 
 
-def test_undeploy_with_superseded_receipt_aborts_cleanly(tmp_path):
+def test_undeploy_with_superseded_record_aborts_cleanly(tmp_path):
     ran = []
-    svc, receipts = _receipted_svc(tmp_path, lambda p, e, on: ran.append(1) or 0)
-    _active_receipt(receipts, "r1")
-    _active_receipt(receipts, "r2")   # supersedes r1 (the race winner)
+    svc, record_store = _record_backed_svc(tmp_path, lambda p, e, on: ran.append(1) or 0)
+    _active_record(record_store, "r1")
+    _active_record(record_store, "r2")   # supersedes r1 (the race winner)
     job = _wait(svc, svc.start("d1", action="undeploy",
-                               resolved={"platform": "guestshell"},
+                               resolved={"platform": "guestshell",
+                                         "management_type": "routed"},
                                prepare=lambda: "r1"))
     # the worker must FINISH (error), not die mid-thread leaving "running"
     assert job["state"] == "error"
-    assert ran == []                  # stale-receipt teardown never ran
-    assert any("receipt" in line for line in job["lines"])
+    assert ran == []                  # stale-record teardown never ran
+    # _transition_or_note logs "record %s -> %s not applied: %s" on a failed
+    # transition (the superseded r1 raises when the worker tries to move it).
+    assert any("record" in line for line in job["lines"])
 
 
-def test_receipt_retired_during_run_does_not_wedge_the_job(tmp_path):
+def test_record_retired_during_run_does_not_wedge_the_job(tmp_path):
     holder = {}
 
     def run_fn(p, e, on):
-        # simulate a concurrent reconciliation retiring the in-flight receipt
+        # simulate a concurrent reconciliation retiring the in-flight record
         # mid-script (applying -> unknown), so the worker's terminal
         # transition (removed) becomes invalid
-        holder["receipts"].transition("r1", "unknown")
+        holder["record_store"].transition("r1", "unknown")
         return 0
 
-    svc, receipts = _receipted_svc(tmp_path, run_fn)
-    holder["receipts"] = receipts
-    _active_receipt(receipts, "r1")
+    svc, record_store = _record_backed_svc(tmp_path, run_fn)
+    holder["record_store"] = record_store
+    _active_record(record_store, "r1")
     job = _wait(svc, svc.start("d1", action="undeploy",
-                               resolved={"platform": "guestshell"},
+                               resolved={"platform": "guestshell",
+                                         "management_type": "routed"},
                                prepare=lambda: "r1"))
-    # script succeeded -> job reports the script's truth; the receipt
+    # script succeeded -> job reports the script's truth; the record
     # discrepancy is surfaced as a job line instead of killing the worker
     assert job["state"] == "done"
-    assert any("receipt" in line for line in job["lines"])
+    # same "record %s -> %s not applied: %s" line as
+    # test_undeploy_with_superseded_record_aborts_cleanly above.
+    assert any("record" in line for line in job["lines"])
 
 
 # ---- telemetry onboarding flags (device transfer telemetry spec 8.1) ----
@@ -1740,7 +2622,14 @@ def test_finish_persists_log_file_with_header_and_lines(tmp_path):
         "started_at=%s finished_at=%s platform=guestshell"
         % (job["id"], job["queued_at"], job["started_at"],
            job["finished_at"]))
-    assert lines[1:] == job["lines"]
+    # Each body line carries its offset from started_at, so a slow job says
+    # WHERE it was slow; the in-memory lines the console streams stay bare.
+    assert len(lines[1:]) == len(job["lines"])
+    for written, raw in zip(lines[1:], job["lines"]):
+        m = re.match(r"^\[\+ *(\d+\.\d)s\] (.*)$", written)
+        assert m, "no elapsed prefix on %r" % written
+        assert m.group(2) == raw
+        assert float(m.group(1)) >= 0.0
 
 
 def test_failed_job_log_persisted_with_error_state(tmp_path):
@@ -1758,7 +2647,8 @@ def test_persisted_log_filename_sanitizes_device_but_header_keeps_raw(tmp_path):
     log_dir = str(tmp_path / "deploy-logs")
     did = "sw 1/a"          # not filesystem-safe
     fleet = _Fleet({did: {"device_id": did, "device_ip": "10.0.0.1",
-                          "model": "C9300", "credential_profile_id": "lab"}})
+                          "model": "C9300", "management_type": "routed",
+                          "credential_profile_id": "lab"}})
     creds = _Creds({"lab": {"device_user": "u", "device_pass": "p"}})
     svc = gui_onboard.OnboardService(
         fleet, creds, device_install="/fake/device-install.sh",
@@ -1842,11 +2732,12 @@ _IRIS_NAMED = [
 ]
 
 
-def _common_preflight_stub(monkeypatch, running="", apps="", files=""):
+def _common_preflight_stub(monkeypatch, running="", apps="", files="",
+                           version=None):
     """Feed a marker-delimited transcript to the shared preflight probe."""
     def run(argv, input=None, **kwargs):
         out = []
-        for name, body in (("VERSION", _iox_show_version()),
+        for name, body in (("VERSION", version or _iox_show_version()),
                            ("RUNNING", running), ("APPS", apps),
                            ("FILES", files)):
             out.append("__IRIS_PREFLIGHT_%s__\n%s" % (name, body))
@@ -1879,6 +2770,34 @@ def test_guestshell_preflight_passes_on_a_clean_device(monkeypatch):
     assert evidence["device_identity"]
 
 
+def test_guestshell_preflight_refuses_an_ios_xr_device(monkeypatch):
+    """The preflight already holds 'show version', so it can classify without
+    another SSH round trip -- and it is the LAST gate before
+    device/device-install.sh touches the box. A console onboard arrives with
+    the platform already resolved, so nothing inside resolve_platform ever
+    looked at the family."""
+    _common_preflight_stub(
+        monkeypatch,
+        version=("Cisco IOS XR Software, Version 24.4.1\n"
+                 "cisco ASR-9906 (Intel 686 F6M14S4)\n"
+                 "Processor board ID FOX1234ABCD\n"),
+        running="hostname xr1\n", apps="No App found\n",
+        files="Directory of bootflash:/guest-share/\n\nNo files in directory\n")
+    dev = {"device_id": "xr1"}
+    with pytest.raises(ValueError, match="IOS-XR"):
+        _REAL_GUESTSHELL_PREFLIGHT(dev, {"DEVICE_IP": "192.0.2.20"},
+                                   {"platform": "guestshell"}, "/repo")
+
+
+def test_guestshell_preflight_records_the_family_it_read(monkeypatch):
+    _common_preflight_stub(monkeypatch, running="hostname sw1\n", apps="No App found\n",
+                           files="Directory of bootflash:/guest-share/\n\nNo files in directory\n")
+    dev = {"device_id": "sw1"}
+    _REAL_GUESTSHELL_PREFLIGHT(dev, {"DEVICE_IP": "192.0.2.20"},
+                               {"platform": "guestshell"}, "/repo")
+    assert dev["os_family"] == "xe"
+
+
 def test_iox_preflight_still_returns_the_identity_it_always_did(monkeypatch):
     _common_preflight_stub(monkeypatch, running="hostname sw1\n", apps="No App found\n")
     evidence = gui_onboard._default_iox_preflight(
@@ -1902,7 +2821,8 @@ def test_preflight_is_required_on_every_platform():
     svc._iox_preflight = stub
     svc._guestshell_preflight = stub
     for platform in ("router", "guestshell", "iox"):
-        result = svc.preflight("d1", {"platform": platform})
+        result = svc.preflight("d1", {"platform": platform,
+                                      "management_type": "routed"})
         assert result.get("status") != "not-required", \
             "%s still skips the collision preflight" % platform
     assert seen == {"router": True, "guestshell": True, "iox": True}
@@ -1920,7 +2840,7 @@ def _stuck_job(svc, device_id="d1", action="onboard", state="running",
         "id": jid, "device_id": device_id, "action": action, "state": state,
         "queued_at": started_at, "started_at": started_at, "finished_at": None,
         "lines": [], "returncode": None, "_line_bytes": 0,
-        "_log_truncated": False, "receipt_id": None, "resolved": None,
+        "_log_truncated": False, "record_id": None, "resolved": None,
         "env_extra": None}
     return jid
 
@@ -1993,3 +2913,80 @@ def test_cancel_device_stops_queued_and_running_work():
 def test_cancel_device_is_a_no_op_for_an_unknown_device():
     svc = _svc(lambda *a, **k: 0)
     assert svc.cancel_device("never-existed") == {"cancelled": 0, "aborted": 0}
+
+
+def test_log_is_on_disk_before_the_job_reports_terminal(tmp_path):
+    """The deploy log must be fully written BEFORE the job's terminal state is
+    visible to pollers. The console (and the API's own tests) poll the job to
+    'done' and immediately read /api/deploy-logs; persisting after the state
+    flip raced that read — an operator got a created-but-empty file. Pin the
+    ordering itself: at the moment _persist_log runs, the job must still be
+    reported as running."""
+    log_dir = str(tmp_path / "deploy-logs")
+    svc = _svc(lambda p, e, on: (on("[1/6] hi"), on("[6/6] done"), 0)[2],
+               log_dir=log_dir)
+    seen = {}
+    real_persist = svc._persist_log
+
+    def spying_persist(job):
+        live = svc.get_job(job["id"])
+        seen["state_at_persist"] = live["state"] if live else None
+        real_persist(job)
+
+    svc._persist_log = spying_persist
+    job = _wait(svc, svc.start("d1"))
+    assert job["state"] == "done"
+    assert seen, "persist hook never ran"
+    assert seen["state_at_persist"] not in ("done", "error"), (
+        "log persisted AFTER the terminal state was already visible: %r"
+        % seen["state_at_persist"])
+
+
+def test_persist_failure_still_finishes_the_job(tmp_path):
+    """Persisting before the state flip must not let a persist failure wedge
+    the job in 'running' forever — best-effort stays best-effort."""
+    log_dir = str(tmp_path / "deploy-logs")
+    svc = _svc(lambda p, e, on: (on("[6/6] done"), 0)[1], log_dir=log_dir)
+
+    def broken_persist(job):
+        raise OSError("volume is read-only")
+
+    svc._persist_log = broken_persist
+    job = _wait(svc, svc.start("d1"))
+    assert job["state"] == "done"
+    assert job["returncode"] == 0
+
+
+def test_probe_sections_survive_an_input_echoing_transport(monkeypatch):
+    """An ssh -tt runner (the XR transport) echoes the whole piped request at
+    the TOP of the transcript before any command runs, so every marker appears
+    twice: once in the input-echo blob (whose 'section' is just the next typed
+    line) and once where it actually executed. Section extraction must read
+    the EXECUTED one — first-match returned the typed text and made the XR
+    preflight classify an empty banner on the first live onboard."""
+    transcript = (
+        "echo __IRIS_PREFLIGHT_VERSION__\n"
+        "show version\n"
+        "echo __IRIS_PREFLIGHT_APPS__\n"
+        "show appmgr application-table\n"
+        "\n"
+        "RP/0/RP0/CPU0:r1#echo __IRIS_PREFLIGHT_VERSION__\n"
+        "% Invalid input detected at '^' marker.\n"
+        "RP/0/RP0/CPU0:r1#show version\n"
+        "Cisco IOS XR Software, Version 25.4.2 LNT\n"
+        "RP/0/RP0/CPU0:r1#echo __IRIS_PREFLIGHT_APPS__\n"
+        "% Invalid input detected at '^' marker.\n"
+        "RP/0/RP0/CPU0:r1#show appmgr application-table\n"
+    )
+
+    class _Out:
+        returncode = 0
+        stdout = transcript
+
+    monkeypatch.setattr(gui_onboard.subprocess, "run", lambda *a, **k: _Out())
+    sections = gui_onboard._probe_sections(
+        "runner.sh", {"DEVICE_IP": "10.0.0.1"},
+        (("version", "show version"), ("apps", "show appmgr application-table")),
+        "xr")
+    assert "Cisco IOS XR Software" in sections["version"]
+    assert gui_onboard.parse_os_family(sections["version"]) == "xr"

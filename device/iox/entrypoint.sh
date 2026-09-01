@@ -24,12 +24,12 @@ MAX_PEERS="${IRIS_MAX_PEERS:-10}"
 TARGET_FS="${IRIS_TARGET_FS:-}"
 ARIA2="/opt/iris/bin/aria2c"
 AGENT="/opt/iris/agent/iris_agent.py"
-# --on-bt-download-complete: the per-peer receipt hook. Baked into the image by
+# --on-bt-download-complete: the per-peer transfer-record hook. Baked into the image by
 # the Dockerfile (already executable), so unlike the Guest Shell launcher there
 # is no copy-to-an-exec-capable-filesystem dance here. Checked once: an image
 # built before this existed simply runs without it, and aria2c must not be
 # handed an empty option value (Aria2 Next rejects those outright).
-HOOK="/opt/iris/agent/peer-receipt-hook.sh"
+HOOK="/opt/iris/agent/peer-transfer-hook.sh"
 [ -x "$HOOK" ] || HOOK=""
 
 export IRIS_STAGE_DIR="$STAGE_DIR"
@@ -40,7 +40,7 @@ export IRIS_RPC_PORT="$RPC_PORT"
 
 # Image hand-off to IOS: on C9k the app-hosting SSD share is bind-mounted in
 # (IRIS_SHARE_DIR, run-opts -v) and the agent lands its scratch there at disk
-# speed for an IOS-internal `copy /verify`; without a share (IE-3x00) it
+# speed for an IOS-internal plain `copy`; without a share (IE-3x00) it
 # scp-pushes the image to <target>guest-share/iris through the device's SCP
 # server instead.
 mkdir -p "$STAGE_DIR" "$(dirname "$CONF")" "$(dirname "$STATE")"
@@ -147,6 +147,7 @@ start_aria2c() {
     --rpc-listen-port="$RPC_PORT" --rpc-secret="$secret" \
     --enable-dht=false --enable-peer-exchange=false --bt-enable-lpd=false \
     --bt-max-peers="$MAX_PEERS" --bt-seed-unverified=true --seed-ratio=0.0 \
+    --max-concurrent-downloads="${IRIS_MAX_CONCURRENT:-100}" \
     "$@" \
     --file-allocation=none --dir="$STAGE_DIR" \
     --log-level=warn --summary-interval=0 \

@@ -88,7 +88,17 @@ logs with:
 kubectl -n iris get pods,svc,pvc
 kubectl -n iris logs deployment/iris-seed-server -c iris
 curl -fsS http://<external-ip>:9101/healthz
+curl -fsS http://<external-ip>:9101/readyz
 ```
+
+`/healthz` answers 200 unconditionally and proves only that the telemetry
+server on `:9101` is alive. `/readyz` is the one with a meaningful status code:
+it TCP-probes the tracker, catalog, artifact server and console — separate
+listeners inside the container, any of which can die while the process stays
+up — and answers 503 naming the offenders. All three pod probes point at
+`/readyz` for exactly that reason. `IRIS_HEALTH_LISTENERS`
+(`"name:port,..."`, or `off`) narrows the set for a deployment that runs a
+subset of the services.
 
 Images uploaded through the console are stored under `/data/images` on the PVC.
 For an operator-managed image, copy it into the pod and publish it through the
@@ -101,6 +111,35 @@ kubectl -n iris cp --no-preserve image.bin "$POD:/data/images/image.bin"
 kubectl -n iris exec deployment/iris-seed-server -- \
   iris-publish /data/images/image.bin
 ```
+
+### Operator-supplied device artifacts
+
+The container regenerates the *derivable* served files at startup
+(`iris-agent.tgz`, `bootstrap.sh`, `iris-catalog.pem`), so a fresh pod can
+onboard Guest Shell and router devices with no manual step. The IOx packages
+and the XR appmgr RPM are **not** derivable — they are built out of tree
+(`tools/provision-iox-packages.sh`, `tools/build-xr-package.sh`) and have to be
+placed in the artifacts directory by hand.
+
+`tools/stage-iox-package.sh` stages them with `docker cp` into a container
+literally named `iris`, which does not exist here. On Kubernetes copy them into
+`$IRIS_ARTIFACTS_DIR` (`/data/artifacts`, on the PVC, so they survive a
+restart):
+
+```bash
+POD="$(kubectl -n iris get pod -l app.kubernetes.io/name=iris-seed-server \
+  -o jsonpath='{.items[0].metadata.name}')"
+for f in iris-arm64.tar iris-amd64.tar iris-xr.rpm; do
+  [ -f "artifacts/$f" ] || continue
+  kubectl -n iris cp --no-preserve "artifacts/$f" "$POD:/data/artifacts/$f"
+done
+kubectl -n iris exec "$POD" -- ls -la /data/artifacts
+```
+
+Without this, onboarding an IE-3x00 (IOx) or an IOS-XR device fails at the
+artifact fetch while every other platform works — the failure looks like a
+device problem, not a missing file. Re-copy after any rebuild of those
+packages: nothing on the cluster side notices that they went stale.
 
 Back up the PVC and the age identity together. If the external IP changes, plan
 a controlled certificate rotation and device trust update; changing only the

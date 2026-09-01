@@ -13,7 +13,8 @@
 #     snapshots; the hook program itself lives in the app image)
 #   - remove the app-hosting appid + the IRIS VLAN/SVI
 #   - remove any IRIS-COPYROOT / IRIS-AGENT EEM applet the agent created at
-#     runtime for its copy /verify (no-op if absent — IOx has no 60s timer)
+#     runtime for its plain-copy placement (no-op if absent — IOx has no 60s
+#     timer)
 #   - remove crypto pki trustpoint IRIS + ip http client secure-trustpoint IRIS
 #   - delete the staged app package (<pkg-fs>iris-arm64.tar) and, on C9k share
 #     deployments, the IRIS iris/ subdir of the CAF share (transient transfer
@@ -23,8 +24,8 @@
 #   iox, file prompt quiet, the AppGigabitEthernet trunk, ip scp server enable,
 #   the staged OS image on the selected IOS disk. Successful cleanup is
 #   persisted to startup-config so a reload cannot restore IRIS configuration.
-# IRIS_FORCE_AGENT_ONLY=1 forces the same reduction NETWORK_ATTACHMENT=inband
-#   already applies, regardless of NETWORK_ATTACHMENT: preserve the operator's
+# IRIS_FORCE_AGENT_ONLY=1 forces the same reduction MANAGEMENT_TYPE=inband
+#   already applies, regardless of MANAGEMENT_TYPE: preserve the operator's
 #   VLAN/SVI network, but remove appid, applets, IRISQ, and IRIS PKI because
 #   those globals carry IRIS's own name.
 #
@@ -39,11 +40,15 @@ DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
 # VLAN_IN preserves whether a VLAN was actually supplied; the 666 default is
 # ONLY for --dry-run text. A real run re-requires a non-empty VLAN below, so we
 # never tear down the wrong SVI/VLAN and then falsely verify clean.
-NETWORK_ATTACHMENT="${NETWORK_ATTACHMENT:-routed}"
+if [ -n "${NETWORK_ATTACHMENT:-}" ] && [ -z "${MANAGEMENT_TYPE:-}" ]; then
+  echo "ERROR: NETWORK_ATTACHMENT was renamed to MANAGEMENT_TYPE; refusing to fall back to the routed default" >&2
+  exit 1
+fi
+MANAGEMENT_TYPE="${MANAGEMENT_TYPE:-routed}"
 VLAN_IN="${VLAN:-${INBAND_VLAN:-}}"
 VLAN="${VLAN_IN:-666}"
 # See header: force preserves only the operator's VLAN/SVI network. Everything
-# carrying IRIS's own name is still removed regardless of NETWORK_ATTACHMENT.
+# carrying IRIS's own name is still removed regardless of MANAGEMENT_TYPE.
 FORCE_AGENT_ONLY="${IRIS_FORCE_AGENT_ONLY:-0}"
 PKG="${PKG:-iris-arm64.tar}"; PKG_FS="${PKG_FS:-flash:}"
 # C9k share-mount transfer: when set, [3/4] also deletes OUR iris/ subdir of
@@ -65,12 +70,12 @@ config_cleanup() {
 # agent never self-removes. IRIS-AGENT won't exist on IOx (no 60s timer) but
 # the no-op is harmless. All no-ops if absent.
 #
-# Inband preserves the operator-owned VLAN/SVI, which no receipt proves IRIS
-# created. It still removes everything carrying IRIS's own name, including the
-# IRISQ discriminator and the IRIS PKI trustpoint / HTTP-client binding:
+# Inband preserves the operator-owned VLAN/SVI, which no deployment record
+# proves IRIS created. It still removes everything carrying IRIS's own name,
+# including the IRISQ discriminator and the IRIS PKI trustpoint / HTTP-client binding:
 # leaving those behind strands the device against its own next onboard, which
 # preflight refuses while any of them is present.
-if [ "$NETWORK_ATTACHMENT" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
+if [ "$MANAGEMENT_TYPE" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
 cat <<EOF
 no app-hosting appid $APPID
 no event manager applet IRIS-AGENT
@@ -105,7 +110,7 @@ if [ "$DRY" -eq 1 ]; then
   echo "===== [1/4] app-hosting stop -> deactivate -> uninstall '$APPID' ====="
   printf 'app-hosting stop appid %s\napp-hosting deactivate appid %s\napp-hosting uninstall appid %s\n' \
     "$APPID" "$APPID" "$APPID"
-  if [ "$NETWORK_ATTACHMENT" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
+  if [ "$MANAGEMENT_TYPE" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
     echo "===== [2/4] IRIS-named config removal (operator VLAN/SVI left in place) ====="
   else
     echo "===== [2/4] remove config footprint (appid, VLAN$VLAN, applets, trustpoint) ====="
@@ -128,13 +133,13 @@ fi
 : "${DEVICE_IP:?set DEVICE_IP}"; : "${DEVICE_USER:?set DEVICE_USER}"
 : "${DEVICE_PASS:?set DEVICE_PASS}"
 if [ "$FORCE_AGENT_ONLY" = "1" ]; then
-  echo "===== FORCE: IRIS-named footprint teardown (no receipt) ====="
+  echo "===== FORCE: IRIS-named footprint teardown (no deployment record) ====="
   echo "  Removing: IRIS EEM applets, the '$APPID' app, staged files, IRISQ, and IRIS PKI."
-  echo "  Preserving: operator VLAN/SVI network configuration, because no receipt"
-  echo "  proves IRIS created it."
+  echo "  Preserving: operator VLAN/SVI network configuration, because no"
+  echo "  deployment record proves IRIS created it."
 else
-  # Only a receipted teardown removes Vlan$VLAN, so only it needs the number.
-  # Demanding one in force mode re-strands the receipt-less device this mode
+  # Only a record-driven teardown removes Vlan$VLAN, so only it needs the number.
+  # Demanding one in force mode re-strands the record-less device this mode
   # exists to rescue -- a bare fleet row carries no vlan at all.
   [ -n "$VLAN_IN" ] || { echo "ERROR: VLAN not set (the device's fleet row is" \
     "missing its vlan); refusing to guess — set the vlan on the device and retry" >&2; exit 1; }
@@ -158,7 +163,7 @@ done
 st="$(app_state)"
 [ -z "$st" ] || echo "  WARN: '$APPID' still shows state '$st' after uninstall"
 
-if [ "$NETWORK_ATTACHMENT" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
+if [ "$MANAGEMENT_TYPE" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
   echo "[2/4] remove IRIS-named footprint (operator VLAN/SVI preserved)"
 else
   echo "[2/4] remove config footprint (appid, Vlan$VLAN, EEM applets, PKI trustpoint)"
@@ -181,7 +186,7 @@ echo "  removing the scp-push staging dir $IRIS_STAGE_DIR"
 printf 'delete /force /recursive %s\n\n' "$IRIS_STAGE_DIR" | RUN >/dev/null 2>&1 || true
 
 echo "[4/4] verify no '$APPID' app, config footprint, or $IRIS_STAGE_DIR remains"
-if [ "$NETWORK_ATTACHMENT" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
+if [ "$MANAGEMENT_TYPE" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
   # VLAN/SVI preserved (operator network); IRIS-named artifacts removed, so
   # they are verified here too.
   inc="app-hosting appid $APPID|applet IRIS-|crypto pki trustpoint IRIS|discriminator IRISQ"

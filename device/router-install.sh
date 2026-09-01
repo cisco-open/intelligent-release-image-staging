@@ -14,11 +14,15 @@ set -euo pipefail
 : "${VPG_NUMBER:?set VPG_NUMBER}"; : "${APP_IP:?set APP_IP}"
 : "${APP_MASK:?set APP_MASK}"; : "${APP_GATEWAY:?set APP_GATEWAY}"
 
-NETWORK_ATTACHMENT="${NETWORK_ATTACHMENT:-router-routed}"
-case "$NETWORK_ATTACHMENT" in
+if [ -n "${NETWORK_ATTACHMENT:-}" ] && [ -z "${MANAGEMENT_TYPE:-}" ]; then
+  echo "ERROR: NETWORK_ATTACHMENT was renamed to MANAGEMENT_TYPE; refusing to fall back to the router-routed default" >&2
+  exit 1
+fi
+MANAGEMENT_TYPE="${MANAGEMENT_TYPE:-router-routed}"
+case "$MANAGEMENT_TYPE" in
   router-routed) NAT_INTERFACE="" ;;
   router-nat) : "${NAT_INTERFACE:?set NAT_INTERFACE}" ;;
-  *) echo "ERROR: NETWORK_ATTACHMENT must be router-routed or router-nat" >&2; exit 1 ;;
+  *) echo "ERROR: MANAGEMENT_TYPE must be router-routed or router-nat" >&2; exit 1 ;;
 esac
 [[ "$VPG_NUMBER" =~ ^[0-9]+$ ]] && [ "$VPG_NUMBER" -ge 0 ] \
   && [ "$VPG_NUMBER" -le 31 ] \
@@ -51,7 +55,7 @@ RPC_SECRET_FILE="rpc-secret-$CAP"
 MODEL="${MODEL:-}"
 EXPECTED_DEVICE_IDENTITY="${EXPECTED_DEVICE_IDENTITY:-}"
 if [ "$DRY" -eq 0 ]; then
-  : "${EXPECTED_DEVICE_IDENTITY:?set EXPECTED_DEVICE_IDENTITY from the deployment receipt}"
+  : "${EXPECTED_DEVICE_IDENTITY:?set EXPECTED_DEVICE_IDENTITY from the deployment record}"
   VERSION_OUT="$(printf 'show version\n' \
     | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>/dev/null)"
   LIVE_MODEL="$(printf '%s\n' "$VERSION_OUT" \
@@ -95,7 +99,7 @@ interface VirtualPortGroup$VPG_NUMBER
  description IRIS Guest Shell VPG
  ip address $APP_GATEWAY $APP_MASK
 EOF
-if [ "$NETWORK_ATTACHMENT" = "router-nat" ]; then
+if [ "$MANAGEMENT_TYPE" = "router-nat" ]; then
 cat <<EOF
  ip nat inside
 EOF
@@ -104,7 +108,7 @@ cat <<EOF
  no shutdown
 !
 EOF
-if [ "$NETWORK_ATTACHMENT" = "router-nat" ]; then
+if [ "$MANAGEMENT_TYPE" = "router-nat" ]; then
 cat <<EOF
 interface $NAT_INTERFACE
  ip nat outside
@@ -248,14 +252,22 @@ if [ -n "$existing" ]; then
   done
 fi
 
-echo "[3/7] apply IOS config ($NETWORK_ATTACHMENT VirtualPortGroup)"
+echo "[3/7] apply IOS config ($MANAGEMENT_TYPE VirtualPortGroup)"
 { echo "configure terminal"; ios_config; } \
   | "$HERE/../lab/device-run.sh" "$DEVICE_IP" >/dev/null
 printf 'mkdir %s\n\n' "$IOS_ROOT" \
   | "$HERE/../lab/device-run.sh" "$DEVICE_IP" >/dev/null 2>&1 || true
 
 echo "[4/7] guestshell enable"
-for i in $(seq 1 30); do
+# Every iteration is its own login, deliberately: this is a state-gated poll,
+# and collapsing repeated observations into one session is precisely what the
+# 2026-08-29..31 fail-open wave was about (a marker proves what was typed,
+# never what ran). What IS wrong here is the flat wait -- a guest that came up
+# in 20 s still paid a full 15 s of overshoot, and the first observation was
+# 15 s late for no reason. The sleep ramps 2,4,6..15 instead, which keeps the
+# same overall budget (~431 s of sleep across 32 steps vs 450 s across 30)
+# while finding a fast bring-up almost immediately.
+for i in $(seq 1 32); do
   state="$(printf 'show app-hosting list\n' \
     | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>/dev/null \
     | grep -i guestshell || true)"
@@ -264,9 +276,11 @@ for i in $(seq 1 30); do
     printf 'guestshell enable\n' \
       | "$HERE/../lab/device-run.sh" "$DEVICE_IP" >/dev/null 2>&1 || true
   fi
-  [ "$i" -ne 30 ] \
-    || { echo "ERROR: guestshell not RUNNING after ~7 minutes" >&2; exit 1; }
-  sleep 15
+  [ "$i" -ne 32 ] \
+    || { echo "ERROR: guestshell not RUNNING after ~9 minutes" >&2; exit 1; }
+  backoff=$((i * 2))
+  [ "$backoff" -gt 15 ] && backoff=15
+  sleep "$backoff"
 done
 
 echo "[5/7] install trustpoint and copy agent artifacts over verified HTTPS"
@@ -411,7 +425,7 @@ require_text "$APP_STATE" "RUNNING" "Guest Shell RUNNING state" || verify_failed
 require_text "$FILES" "bootstrap.sh" "bootflash:guest-share/bootstrap.sh" || verify_failed=1
 require_text "$FILES" "iris-agent.conf" "the staged agent config" || verify_failed=1
 
-if [ "$NETWORK_ATTACHMENT" = "router-nat" ]; then
+if [ "$MANAGEMENT_TYPE" = "router-nat" ]; then
   OUTSIDE_RUNNING="$(printf '%s\n' "$RUNNING" | config_block "$NAT_INTERFACE")"
   require_text "$VPG_RUNNING" "ip nat inside" "the VPG NAT-inside marking" \
     || verify_failed=1

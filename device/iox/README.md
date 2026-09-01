@@ -151,17 +151,19 @@ How the agent hands the downloaded image to IOS depends on the platform:
 - **C9k (share mount, the Console default)**: the app-hosting SSD share
   (`usbflash1:iox_host_data_share`, host-side `/vol/usb1/…`) is bind-mounted
   into the container, so the agent writes the image to the share ROOT as
-  `iris-staged.bin` at disk speed and runs an IOS-internal
-  `copy /verify usbflash1:iox_host_data_share/iris-staged.bin flash:<img>`
+  `iris-staged.bin` at disk speed and runs an IOS-internal plain
+  `copy usbflash1:iox_host_data_share/iris-staged.bin flash:<img>`
   over the SSH-to-self session — bootflash-root placement like Guest Shell
-  (the real image name and Cisco signature come from the copy), no image
-  bytes on the CoPP-policed punt path. IRIS uses only `iris-` prefixed
-  filenames at the share root (container-created subdirs lock the container
-  out on this platform). Before the multi-GB copy the agent probes that IOS
-  can actually read the share and otherwise falls back to the scp push below;
-  the transient share copy is removed after placement.
+  (the real image name comes from the copy; the agent attests placement by
+  dir presence and catalog byte size, and content integrity by its own
+  sha256 against the catalog), no image bytes on the CoPP-policed punt path.
+  IRIS uses only `iris-` prefixed filenames at the share root
+  (container-created subdirs lock the container out on this platform).
+  Before the multi-GB copy the agent probes that IOS can actually read the
+  share and otherwise falls back to the scp push below; the transient share
+  copy is removed after placement.
 - **IE-3x00 (scp push)**: IOx can't bind-mount `sdflash:` there, so the agent
   **scp-pushes** the image to `<target>guest-share/iris/` through the device's
   SCP server (`ip scp server enable`, set by `install.sh`), then runs
-  `copy /verify <target>guest-share/iris/<img> <target><img>` and confirms the
+  `copy <target>guest-share/iris/<img> <target><img>` and confirms the
   destination appears before reporting `ready`.

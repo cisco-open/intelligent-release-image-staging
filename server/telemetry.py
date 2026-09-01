@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import secrets
+import socket
 import threading
 import time
 import urllib.request
@@ -126,6 +127,12 @@ def poll_seeder(rpc):
         "upload_speed": _int(g.get("uploadSpeed")),
         "download_speed": _int(g.get("downloadSpeed")),
         "active_torrents": _int(g.get("numActive")),
+        # Torrents aria2 is holding back behind its concurrency cap. A seeding
+        # torrent never completes, so a queued one is never served at all and
+        # aria2 raises no error about it -- a device assigned that image just
+        # reports staging forever. Non-zero here means the seeder is refusing
+        # to serve a published image, which is otherwise invisible.
+        "queued_torrents": _int(g.get("numWaiting")),
         "connections": connections,
         "torrent_upload_bps": upload_bps,
     }, names, totals
@@ -444,16 +451,16 @@ def _metric_points(rows, extras, now, export_signals=None, peer_status=None,
     return pts
 
 
-RECEIPT_SOURCE_CLASSES = ("origin", "device", "unknown")
+TRANSFER_RECORD_SOURCE_CLASSES = ("origin", "device", "unknown")
 
 
-def receipt_source_class(ip, origin_ips, device_by_ip):
-    """Who sent the bytes in one ``peer_receipts`` row: ``"origin"`` (the
+def transfer_record_source_class(ip, origin_ips, device_by_ip):
+    """Who sent the bytes in one ``peer_transfer_records`` row: ``"origin"`` (the
     authenticated ``service:seeder``), ``"device"`` (a device whose heartbeat
     claims that swarm address), or ``"unknown"``.
 
     THREE answers, never two. The origin seeder is an ordinary BitTorrent peer
-    of every device, so it owns a receipt row like anyone else; an address that
+    of every device, so it owns a transfer-record row like anyone else; an address that
     resolves to neither the origin nor a known device is UNKNOWN and stays
     unknown -- folding it into either side would be inventing the very
     attribution this function exists to establish. (Unknown is normal, not a
@@ -478,8 +485,8 @@ def receipt_source_class(ip, origin_ips, device_by_ip):
     return "unknown"
 
 
-def classify_peer_receipts(block, origin_ips, device_by_ip):
-    """Aggregate one stored ``peer_receipts`` block by sender class, or None
+def classify_peer_transfer_records(block, origin_ips, device_by_ip):
+    """Aggregate one stored ``peer_transfer_records`` block by sender class, or None
     when there is no block to classify (NOT MEASURED -- never a zeroed answer).
 
     The device measured exact bytes per BitTorrent peer and, correctly, made no
@@ -511,7 +518,7 @@ def classify_peer_receipts(block, origin_ips, device_by_ip):
     for row in rows:
         if not isinstance(row, dict):
             continue
-        cls = receipt_source_class(row.get("ip"), origin_ips, device_by_ip)
+        cls = transfer_record_source_class(row.get("ip"), origin_ips, device_by_ip)
         got = _int(row.get("session_bytes_from_peer"))
         out[cls + "_rows"] += 1
         out[cls + "_bytes"] += got
@@ -1061,14 +1068,14 @@ class Telemetry:
             for rep in ring:
                 if not isinstance(rep, dict):
                     continue
-                # peer_receipts is per REPORT, not per device, so its
+                # peer_transfer_records is per REPORT, not per device, so its
                 # origin/device/unknown split rides with the report it
                 # describes. Absent block -> absent key: not measured is not
                 # zero, and an all-zero split would read as "no peer bytes".
-                split = classify_peer_receipts(
-                    rep.get("peer_receipts"), origin_ips, device_by_ip)
+                split = classify_peer_transfer_records(
+                    rep.get("peer_transfer_records"), origin_ips, device_by_ip)
                 rep_enrich = enrich if split is None else dict(
-                    enrich, peer_receipt_attribution=split)
+                    enrich, peer_transfer_record_attribution=split)
                 event_id, record = _report_event_id(rep, str(device_id))
                 ring_event_ids.add(event_id)
                 try:
@@ -1087,7 +1094,7 @@ class Telemetry:
                     and not self.log_queue.contains(event_id)):
                 self.log_queue.emit(otlp.build_report_record(
                     report, device_id, enrich=enrich))
-                # Fan the receipt block out into one record per peer. Without
+                # Fan the transfer-record block out into one record per peer. Without
                 # this the exact device-side measurement stops in the catalog
                 # and only the per-transfer rollups leave the server -- the
                 # lossy sampled estimate (iris.swarm.peer_bytes) would be the
@@ -1095,9 +1102,9 @@ class Telemetry:
                 # round. classify is bound here, not inside otlp: a second copy
                 # of the origin/device identity rule would drift, and the copy
                 # that drifts is the one an operator reads a peer share off.
-                for peer_record in otlp.build_peer_receipt_records(
+                for peer_record in otlp.build_peer_transfer_records(
                         report, device_id, enrich=enrich,
-                        classify=lambda ip: receipt_source_class(
+                        classify=lambda ip: transfer_record_source_class(
                             ip, origin_ips, device_by_ip)):
                     self.log_queue.emit(peer_record)
 
@@ -1119,7 +1126,7 @@ class Telemetry:
 
         Identity comes from the authenticated principal, never from an address
         list or a peer's own seeder flag. Never breaks: an unreadable registry
-        yields an empty set, which sends every receipt row to ``unknown``
+        yields an empty set, which sends every transfer-record row to ``unknown``
         rather than quietly promoting the origin's bytes to peer-delivered."""
         ips = set()
         try:
@@ -1162,7 +1169,10 @@ class Telemetry:
             ``tracker`` (authenticated presence), optional ``device_observation``
             (freshness-gated live snapshot), optional current
             ``server_observation.peer`` (this-connection rate), optional
-            ``latest_report``, optional ``peer_policy``/``peer_enforcement``.
+            ``latest_report``, optional ``peer_policy``/``peer_enforcement``,
+            optional heartbeat staging state (``current_image_id``,
+            ``stage_state``, ``staged_image_ids``, ``errored_image_ids`` --
+            issue: multi-image assignment) for a typed device principal.
 
         Identity joins (device_observation / latest_report / policy /
         enforcement) are keyed ONLY by the authenticated device **principal id**
@@ -1262,6 +1272,7 @@ class Telemetry:
                 "receive_bps": self._seeder["download_speed"],
                 "connections": self._seeder["connections"],
                 "active_torrents": self._seeder["active_torrents"],
+                "queued_torrents": self._seeder.get("queued_torrents", 0),
             }
             observation["torrent"] = torrents
         if service:
@@ -1593,6 +1604,20 @@ def _peer_row(p, total, up_now, devices_by_id, report_by_device,
         if model is not None:
             row["model"] = model
         row["device_id"] = device_id
+        # Multi-image staging state, straight from the same heartbeat record
+        # (issue: multi-image assignment) -- unmodified, so the swarm-map
+        # drawer can list every image this device's agent is currently
+        # tracking state for. Omitted (not None-valued) when the heartbeat
+        # never carried the field, matching model/device_observation/etc
+        # above: absence is a fact, never invented as null.
+        if rec.get("current_image_id") is not None:
+            row["current_image_id"] = rec.get("current_image_id")
+        if rec.get("stage_state") is not None:
+            row["stage_state"] = rec.get("stage_state")
+        if rec.get("staged_image_ids") is not None:
+            row["staged_image_ids"] = rec.get("staged_image_ids")
+        if rec.get("errored_image_ids") is not None:
+            row["errored_image_ids"] = rec.get("errored_image_ids")
     return row
 
 
@@ -2012,11 +2037,71 @@ def moved_page():
             % (console, console)).encode("ascii")
 
 
+def _probe_listeners(listeners):
+    """TCP-connect each name->port on loopback. Returns {name: "up"|"down"}.
+
+    Loopback only, 2s, never raises: this is called from a probe handler, so a
+    failure to MEASURE must not itself look like a failure of the thing being
+    measured (an unknown port is reported "down" only because it could not be
+    connected to, which is exactly the question being asked).
+    """
+    out = {}
+    for name, prt in sorted((listeners or {}).items()):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        try:
+            sock.connect(("127.0.0.1", int(prt)))
+            out[name] = "up"
+        except Exception:
+            out[name] = "down"
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+    return out
+
+
+def parse_health_listeners(spec, default=None):
+    """Parse "name:port,name:port" (IRIS_HEALTH_LISTENERS) -> {name: port}.
+
+    Blank/unset -> *default*. The literal "off" -> {} (checks nothing), for a
+    deployment that runs a subset of the services and does not want the
+    missing ones reported down."""
+    text = (spec or "").strip()
+    if not text:
+        return dict(default or {})
+    if text.lower() == "off":
+        return {}
+    out = {}
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        name, _, prt = part.partition(":")
+        try:
+            out[name.strip()] = int(prt)
+        except ValueError:
+            continue        # ignore a malformed entry rather than fail closed
+    return out
+
+
 def make_metrics_server(host, port, provider, swarm_provider=None, html=None,
-                        health=None, swarm_public=False):
+                        health=None, swarm_public=False, listeners=None):
     """HTTP server. `/healthz` is always served (JSON; `health` is an optional
     zero-arg callable adding the otlp_export block — spec 7.7. Status stays
     200: container HEALTHCHECK and orchestrator probes are status-code based);
+
+    `/readyz` is the STATUS-CODE probe /healthz deliberately is not. `/healthz`
+    answering 200 only ever proved that THIS server (:9101) was alive: the
+    tracker, catalog, artifact server, console and seeder are separate
+    listeners started by docker-entrypoint.sh, so any of them could die with
+    the container still reporting healthy and, under Kubernetes, never being
+    restarted -- devices would fail at [5/7] with "cannot connect" against a
+    pod marked Ready. `/readyz` TCP-probes `listeners` ({name: port}, or a
+    zero-arg callable returning one) and answers 503 with the offenders named
+    when any is down. `listeners=None` -> 200 and nothing probed, so the
+    endpoint is inert until a deployment declares what it expects;
     `/metrics` is served only when `provider` is given (None -> 404, the
     observability-off posture); /swarm answers only loopback peers unless
     `swarm_public` (the console proxies it over container loopback — swarm
@@ -2046,7 +2131,23 @@ def make_metrics_server(host, port, provider, swarm_provider=None, html=None,
                         doc["otlp_export"] = health()
                     except Exception:
                         pass
+                # Informational here, load-bearing on /readyz below: the status
+                # code for THIS path stays 200 by contract (above).
+                want = listeners() if callable(listeners) else listeners
+                if want:
+                    doc["listeners"] = _probe_listeners(want)
                 self._send(200, json.dumps(doc).encode(),
+                           "application/json; charset=utf-8")
+            elif path == "/readyz":
+                want = listeners() if callable(listeners) else listeners
+                state = _probe_listeners(want) if want else {}
+                down = sorted(n for n, v in state.items() if v != "up")
+                doc = {"ok": not down}
+                if state:
+                    doc["listeners"] = state
+                if down:
+                    doc["down"] = down
+                self._send(503 if down else 200, json.dumps(doc).encode(),
                            "application/json; charset=utf-8")
             elif path == "/swarm" and swarm_provider is not None:
                 if not swarm_peer_allowed(self.client_address[0],

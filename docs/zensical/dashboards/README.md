@@ -6,8 +6,8 @@ much load does it carry, and among whom — and nothing else.
 
 | File | Backend | Board title / UID |
 | --- | --- | --- |
-| `grafana-iris-swarm.json` | Grafana (Prometheus + Loki) | *IRIS — Peer-to-Peer Distribution*, uid `iris-swarm-p2p` |
 | `splunk-iris-swarm.xml` | Splunk (Simple XML view) | *IRIS — Peer-to-Peer Distribution (measured peer tracing)* |
+| `grafana-iris-swarm.json` | Grafana (Prometheus + Loki) | *IRIS — Peer-to-Peer Distribution*, uid `iris-swarm-p2p` |
 
 Both are optional. IRIS does not install, require, or talk to either backend;
 it emits OpenTelemetry and serves a Prometheus text endpoint, and the operator
@@ -37,7 +37,7 @@ Two conditions gate that endpoint:
   404 while the rest of the 9101 listener (`/healthz`, `/swarm`, `/swarmmap`)
   keeps running — so Prometheus reads the target as **down** and the board
   renders blank. That is telemetry being off, not a broken server. See
-  [observability](../zensical/observability.md).
+  [observability](../observability.md).
 * `IRIS_METRICS_PORT` must not be empty or `0`, which disables the listener
   entirely.
 
@@ -78,39 +78,7 @@ you have already written keeps working while the panel above it says *traced*.
 
 Per-peer and per-device detail is deliberately **not** in Prometheus — it would
 put unbounded peer identity into label cardinality. That detail arrives as OTLP
-log records and is read from Loki (Grafana) or the event index (Splunk).
-
-## Importing the Grafana board
-
-**No UID rewriting is needed.** The board uses datasource *template variables*
-rather than hardcoded datasource UIDs: every panel targets `${ds_prom}` or
-`${ds_loki}`, and the two variables are typed `datasource`, so Grafana
-populates them from the instance you import into and picks a default. If your
-Prometheus or Loki datasource is not the default, change it from the two
-pickers at the top of the board.
-
-**Via the UI** — Dashboards → New → Import → *Upload dashboard JSON file* (or
-paste the file contents) → Import. Grafana will prompt for a folder.
-
-**Via the API** — the `/api/dashboards/db` endpoint takes the dashboard object
-wrapped in an envelope, not the bare file:
-
-```bash
-jq '{dashboard: ., folderUid: "", overwrite: true}' grafana-iris-swarm.json \
-  | curl -sS -X POST https://grafana.example.net/api/dashboards/db \
-      -H "Authorization: Bearer $GRAFANA_TOKEN" \
-      -H 'Content-Type: application/json' \
-      --data-binary @-
-```
-
-The file ships with `"version": 1` and `"id"` absent, so the first POST creates
-the board. `overwrite: true` lets a later POST update it in place under the same
-uid `iris-swarm-p2p`.
-
-Panels sourced from Loki (`Per-edge detail — who received what`, the raw
-`iris.swarm.peer_bytes` records, per-device peer share) need the OTLP log
-records to reach Loki. Without Loki those panels are empty while the aggregate
-panels above still work.
+log records and is read from the event index (Splunk) or Loki (Grafana).
 
 ## Importing the Splunk view
 
@@ -152,6 +120,38 @@ the `IN()` lists can be halved:
 | mcatalog values(metric_name) WHERE index=iris_metrics metric_name="iris_*bytes*"
 ```
 
+## Importing the Grafana board
+
+**No UID rewriting is needed.** The board uses datasource *template variables*
+rather than hardcoded datasource UIDs: every panel targets `${ds_prom}` or
+`${ds_loki}`, and the two variables are typed `datasource`, so Grafana
+populates them from the instance you import into and picks a default. If your
+Prometheus or Loki datasource is not the default, change it from the two
+pickers at the top of the board.
+
+**Via the UI** — Dashboards → New → Import → *Upload dashboard JSON file* (or
+paste the file contents) → Import. Grafana will prompt for a folder.
+
+**Via the API** — the `/api/dashboards/db` endpoint takes the dashboard object
+wrapped in an envelope, not the bare file:
+
+```bash
+jq '{dashboard: ., folderUid: "", overwrite: true}' grafana-iris-swarm.json \
+  | curl -sS -X POST https://grafana.example.net/api/dashboards/db \
+      -H "Authorization: Bearer $GRAFANA_TOKEN" \
+      -H 'Content-Type: application/json' \
+      --data-binary @-
+```
+
+The file ships with `"version": 1` and `"id"` absent, so the first POST creates
+the board. `overwrite: true` lets a later POST update it in place under the same
+uid `iris-swarm-p2p`.
+
+Panels sourced from Loki (`Per-edge detail — who received what`, the raw
+`iris.swarm.peer_bytes` records, per-device peer share) need the OTLP log
+records to reach Loki. Without Loki those panels are empty while the aggregate
+panels above still work.
+
 ## Reading the boards honestly
 
 Panel titles carry a `(measured)` or `(derived)` marker, and each panel's
@@ -166,7 +166,7 @@ rather than hidden, and they explain most surprising readings:
   its own counter, `iris_peer_unattributed_bytes_total`, and drawn as the
   untraced band. That band can step *down*: it is a difference of two counters,
   and bytes traced late leave it. A step down is not a counter reset.
-* **Device receipts are a floor, not a census.** The device-side
+* **Device transfer records are a floor, not a census.** The device-side
   `--on-bt-download-complete` hook snapshots `getPeers` at the completion
   instant, which is exact for peers still connected — but `DefaultPeerStorage`
   erases a peer on disconnect, so peers that left mid-download are simply gone.
@@ -175,7 +175,7 @@ rather than hidden, and they explain most surprising readings:
   panel reads "no data" only for an image with no catalog entry.
 
 The exact and the estimated per-peer figures are kept in separate OTLP record
-names on purpose — `iris.device.peer_receipt` (exact, device-reported) versus
+names on purpose — `iris.device.peer_transfer_record` (exact, device-reported) versus
 `iris.swarm.peer_bytes` (sampled, origin-side estimate) — so a backend `sum`
 cannot silently mix them. Do not merge the two record names in a custom panel.
 

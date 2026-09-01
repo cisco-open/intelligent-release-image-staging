@@ -16,23 +16,24 @@ IRIS is designed around least surprise: it moves images, verifies images, and re
 | No reload | IRIS does not reload or schedule reloads. |
 | No boot mutation | IRIS does not change boot variables or running software state. |
 | No inband network mutation | For inband devices, IRIS never creates, changes, or removes the existing VLAN, SVI, gateway, routes, or VRF. |
-| Device-side verification | The device verifies the staged copy before reporting success. |
+| Device-side content check | The agent hashes the staged file with sha256 against its catalog entry before placing it, and confirms the placed copy by exact catalog byte size. |
 | Private swarm | Torrents use private metadata and authenticated announces. |
 | Unprivileged runtime | Every server process runs as a fixed non-root uid with all Linux capabilities dropped. |
 
-Deployment lifecycle state is recorded in durable, non-secret **receipts** under
-`IRIS_STATE`, and a normal teardown is driven from a device's recorded receipt
-rather than its editable inventory. The one exception is a **forced undeploy**,
-for a device stranded with no readable receipt: it is planned from inventory,
+Deployment lifecycle state is recorded in durable, non-secret **deployment
+records** under `IRIS_STATE`, and a normal teardown is driven from a device's
+recorded deployment record rather than its editable inventory. The one
+exception is a **forced undeploy**, for a device stranded with no readable
+deployment record: it is planned from inventory,
 removes only what is identifiable by name as IRIS's own, deliberately leaves the
 operator's network (VLAN/SVI, VirtualPortGroup, NAT rules) untouched because
 nothing proves IRIS created it, and is recorded distinctly in the audit trail as
 `undeploy_forced`. Teardown is otherwise never driven from
-its editable inventory. Receipts contain no passwords, tokens, certificate keys,
-or raw device configuration. Router receipts additionally bind the management IP
+its editable inventory. Deployment records contain no passwords, tokens, certificate keys,
+or raw device configuration. Router deployment records additionally bind the management IP
 and processor-board identity and own only collision-free named globals and
 `guest-share` resources. See
-[Router preflight and ownership](network-attachment.md#router-preflight-and-ownership).
+[Router preflight and ownership](management-type.md#router-preflight-and-ownership).
 
 ## Container runtime privileges
 
@@ -84,7 +85,7 @@ that against your storage class before deploying. See
 ```mermaid
 flowchart TB
     subgraph OperatorZone["Operator zone"]
-        Images["IOS-XE image files"]
+        Images["Image files"]
         Credentials["Stage-host and device credentials"]
     end
     subgraph ServerZone["IRIS server"]
@@ -95,7 +96,7 @@ flowchart TB
     subgraph DeviceZone["Device"]
         Agent["Agent token"]
         Flash["Staged image on storage"]
-        IOS["IOS verification"]
+        IOS["Plain copy, byte-size attested"]
     end
 
     Images --> Catalog
@@ -259,6 +260,16 @@ trusted network until you have.
 
 Server secret material is encrypted at rest with age recipients. Plaintext lives only in `/run/iris` while the container runs. Device enrollment tokens are short-lived and generated per device by the running server.
 
+Catalog-token rotation is recoverable without making a rolled token a general
+device credential. If the server commits a rotation but the response or the
+device's atomic config write is lost, that device's one previous token may ask
+only the token-refresh route to reissue the already-current secret bag. It
+cannot heartbeat or submit telemetry, its access to shared catalog routes still
+ends after the short overlap, and recovery ends at the token's original expiry.
+The normal clock-skew allowance still applies. The retry is revalidated under
+the server's secrets-store lock, so revocation or a newer successful rotation
+takes precedence.
+
 The age private key is deliberately kept outside the directory holding the
 ciphertext it opens. Co-locating them would mean any backup, snapshot, or read
 of the config directory yields both halves at once, making the at-rest
@@ -271,7 +282,7 @@ Do not commit:
 - Real `creds/` files.
 - `fleet/devices.csv` or `fleet/assignments.csv` with sensitive lab data.
 - Private keys, certificates, tokens, or RPC secrets.
-- IOS-XE images or generated release artifacts.
+- Cisco images, patches, or generated release artifacts.
 
 ## Importing images from disk
 
@@ -293,6 +304,30 @@ The operator walkthrough is in
 [Importing images already on disk](console.md#importing-images-already-on-disk),
 and the refusal reasons are in
 [Import skip reasons](reference.md#import-skip-reasons).
+
+## Cisco Bulk Hash verification
+
+The catalog can check a published image's sha512 against Cisco's own Bulk
+Hash feed — the authenticity half of the trust story that the "Device-side
+content check" guardrail above does not cover: that check proves a device
+received what the catalog holds, not that the catalog holds a genuine Cisco
+file.
+
+Before anything in a downloaded feed is parsed, its X.509 signature is
+verified against a Cisco certificate pinned in-repo
+(`server/certs/cisco_bulkhash_verify.pem`; the file's own header records its
+provenance and fingerprint) — never a certificate found inside the feed
+itself. Any fetch, signature, or parse failure leaves every stored
+verification verdict untouched: a broken or tampered feed can never
+quarantine an image.
+
+A sha512 mismatch quarantines the image: seeding stops, it can no longer be
+newly assigned, and it is auto-unassigned from every device that already had
+it approved. `DEFERRAL_STATUS` on a matched feed row surfaces as a console
+warning and never quarantines — an image Cisco has deferred is not treated
+as tampered. See [Image verification](operations.md#image-verification) for
+the schedule, the offline path for air-gapped servers, and how an operator
+releases a quarantine.
 
 ## TLS and certificates
 

@@ -13,9 +13,14 @@ import cli_ssh
 
 
 # A real raw transcript captured from the IE-3400 (100.90.168.99) over SSH with
-# `-tt`. The login lands at priv-15 (prompt `3400-1#`), so the `enable` password
-# line runs as a bogus exec command and emits a `% Bad IP address ...` noise line
-# BEFORE the real command echo -- it must never leak into extracted output.
+# `-tt`, from BEFORE the transport stopped sending `enable` unconditionally.
+# The login lands at priv-15 (prompt `3400-1#`), so the enable password line
+# ran as a bogus exec command and emitted a `% Bad IP address ...` noise line
+# BEFORE the real command echo. Two things are pinned here, deliberately:
+# extraction must never leak that noise (below), and the transport must no
+# longer PRODUCE it (test_sshcli_execute_uses_runner_and_extracts). Keeping the
+# raw transcript means a device that emits such a line for any other reason is
+# still parsed correctly.
 IE3400_FS_TRANSCRIPT = """\
 \r
 \r
@@ -103,10 +108,47 @@ def test_sshcli_execute_uses_runner_and_extracts():
                          password="pw", enable="en", runner=fake_runner)
     out = cli.execute("show file systems")
     assert out.splitlines()[0] == "File Systems:"
-    # the script the runner was handed drives an enable + terminal length 0 + cmd
+    # the script the runner was handed drives terminal length 0 + the command
     assert "show file systems" in captured["script"]
     assert "terminal length 0" in captured["script"]
-    assert "enable" in captured["script"]
+    # ...and, by DEFAULT, neither `enable` nor the secret. This login lands at
+    # priv-15, where `enable` is a no-op and the secret is executed as an EXEC
+    # command -- the hostname lookup that costs +48 s per session on a segment
+    # where it black-holes, and the very noise line the fixture above carries.
+    assert "enable" not in captured["script"]
+    assert "en" not in captured["script"].split("\n")
+    # nothing in that transcript says the device wants enable, so it stays off
+    assert cli._needs_enable is False
+
+
+def test_sshcli_escalates_only_when_the_device_answers_at_user_exec():
+    """The escalation is driven by the DEVICE's prompt, never by a guess."""
+    scripts = []
+
+    def fake_runner(script):
+        scripts.append(script)
+        # user-EXEC prompt next to our own first command: this box wants enable
+        return ("3400-1>terminal length 0\r\n3400-1>show clock\r\n"
+                "10:00:00.000 UTC Tue Aug 25 2026\r\n3400-1>exit\r\n")
+
+    cli = cli_ssh.SSHCli(host="h", user="u", password="pw", enable="en",
+                         runner=fake_runner)
+    # First contact sends nothing extra and FAILS LOUDLY: a priv-1 session
+    # cannot be parsed, so it raises rather than handing a parser something
+    # half-read. Fail-closed is the trade for never typing a stray token.
+    try:
+        cli.execute("show clock")
+        assert False, "expected a priv-1 session to fail rather than parse"
+    except cli_ssh.CliTransportError:
+        pass
+    assert "enable" not in scripts[0]
+    assert cli._needs_enable is True         # ...but it learned from the prompt
+    try:
+        cli.execute("show clock")
+    except cli_ssh.CliTransportError:
+        pass                                 # same stub, still a '>' transcript
+    assert "enable" in scripts[1]            # the pair goes out next time
+    assert "en" in scripts[1].split("\n")
 
 
 def test_sshcli_configure_wraps_lines_in_config_mode():

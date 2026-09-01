@@ -45,6 +45,9 @@ _SEEDER_GAUGES = (
      "Seeder aggregate download rate (bytes/sec)"),
     ("iris_seeder_active_torrents", "active_torrents",
      "Number of torrents the seeder is actively serving"),
+    ("iris_seeder_queued_torrents", "queued_torrents",
+     "Published torrents the seeder is NOT serving, held behind its "
+     "concurrency cap (non-zero starves any device assigned that image)"),
     ("iris_seeder_connections", "connections",
      "Total peer connections across the seeder's active torrents"),
 )

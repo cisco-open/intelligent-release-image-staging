@@ -13,13 +13,13 @@ Validate documentation, server behavior, device packaging, and lab behavior sepa
 Run the Python tests:
 
 ```bash
-python3 -m pytest server/tests/ device/agent/tests/ device/iox/tests/ device/test_verify_image.py -q
+python3 -m pytest server/tests/ device/agent/tests/ device/iox/tests/ lab/tests/ device/test_verify_image.py -q
 ```
 
 Run the Bats tests:
 
 ```bash
-bats device/test_guestshell_start.bats device/test_bootstrap.bats device/tests/ device/iox/tests/ server/tests/*.bats
+bats device/test_guestshell_start.bats device/test_bootstrap.bats device/tests/ device/iox/tests/ device/xr/tests/ server/tests/*.bats
 ```
 
 ## Documentation build
@@ -27,6 +27,27 @@ bats device/test_guestshell_start.bats device/test_bootstrap.bats device/tests/ 
 The docs site builds clean from the repository root, with no reported issues.
 For the commands and the pinned Zensical and Python versions, see
 [Documentation loop](development.md#documentation-loop).
+
+## Validated platforms
+
+| Platform | Device staging | Status |
+| --- | --- | --- |
+| Catalyst 9300 | Guest Shell | Lab-validated |
+| Catalyst 9300 | IOx on app-hosting SSD share | Lab-validated runtime and direct share hand-off to `flash:` |
+| Catalyst 8000V | Guest Shell (router, VirtualPortGroup) | Lab-validated |
+| IE-3400 | IOx | Lab-validated |
+| Cisco 8000 series (IOS-XR) | appmgr container (stages to `harddisk:`) | Lab-validated on a Cisco 8201 (IOS-XR 25.4.2): console onboard, direct-to-`harddisk:` staging with sha256 verification against the catalog, telemetry reporting, and record-driven teardown |
+
+The IOS-XR validation covers the full lifecycle, not only package delivery:
+build the `iris-xr.rpm`, scp it to `harddisk:`, register and activate the
+appmgr container, download directly through the bind mount, verify sha256,
+report telemetry, and undeploy from the deployment record. The later teardown
+hardening was also exercised on 8010-R4: a record-driven teardown completed in
+62 seconds after the fail-closed command-adjudication fixes.
+
+Image import and swarm distribution have always worked for Cisco 8000 series
+images regardless: `.iso`, `.tar`, and `.rpm` artifacts publish to the catalog
+and distribute through the swarm like any other image.
 
 ## Lab checklist
 
@@ -37,23 +58,24 @@ For the commands and the pinned Zensical and Python versions, see
 | Admin exists | Console login succeeds. |
 | Image publishes | Catalog lists image id, hashes, and info hash. |
 | Import publishes in place | A file already under the read-only image root imports from the Console, and the read-only root is unchanged: no copy of the image and no `.torrent` beside it. |
-| Management type recorded | Device shows routed, inband, router-routed, or router-nat; onboarding records an applied receipt. |
-| Installer runs | Device has trustpoint, Guest Shell or IOx app, bootstrap, and agent config. |
+| Management type recorded | Device shows routed, inband, router-routed, router-nat, or xr-host; onboarding creates an applied deployment record. |
+| Installer runs | Device has the expected Guest Shell, IOx, or XR appmgr agent plus its bootstrap/configuration. |
 | Inband preserves network | For inband, before/after `show running-config` shows the existing VLAN/SVI/gateway/VRF unchanged. |
-| Catalyst 8000V router path | `router-routed` and `router-nat` onboard, stage a verified image, and undeploy from their receipts. Swarm Map shows the device, and the operator's OTLP backend shows its telemetry when observability is enabled. |
+| Catalyst 8000V router path | `router-routed` and `router-nat` onboard, stage a verified image, and undeploy from their deployment records. Swarm Map shows the device, and the operator's OTLP backend shows its telemetry when observability is enabled. |
+| IOS-XR appmgr path | `xr-host` + `xr-appmgr` onboards, stages directly to `harddisk:`, reports telemetry, and converges under record-driven or repeated undeploy without touching router networking. |
 | Assignment applies | Device reports the approved image id. |
 | Download completes | Swarm state shows completed pieces. |
-| Verification passes | Agent reports the staged file and IOS verify success. |
-| Undeploy from receipt | Teardown targets only receipt-owned resources; router adoption is refused and requires re-onboarding. For `router-nat`, teardown clears only translations for the receipt's app IP, verifies the overload rule is gone before deleting its ACL, and reports no leftover IRIS NAT rule. |
+| Verification passes | Agent reports the staged file and a sha256 match against the catalog's known-good value. |
+| Undeploy from deployment record | Teardown targets only resources tracked in the deployment record; router adoption is refused and requires re-onboarding. For `router-nat`, teardown clears only translations for the deployment record's app IP, verifies the overload rule is gone before deleting its ACL, and reports no leftover IRIS NAT rule. |
 | No activation occurs | Boot variables, install state, and reload state remain operator-controlled. |
 
-Automated coverage for the management-type/receipt behavior lives in
-`server/tests/test_deployment_receipts.py`, `server/tests/test_gui_fleet.py`,
+Automated coverage for the management-type/deployment-record behavior lives in
+`server/tests/test_deployment_records.py`, `server/tests/test_gui_fleet.py`,
 the inband command-stream assertions in
 `device/tests/test_device_uninstall.bats`, and the router install/teardown
 command streams in `device/tests/test_router_install.bats` and
 `device/tests/test_router_uninstall.bats`. See
-[Management Type and VLAN Ownership](network-attachment.md).
+[Management Type and VLAN Ownership](management-type.md).
 
 ## What automated tests do not cover
 
@@ -74,4 +96,6 @@ Check these by hand when the map or its data source changes:
 
 ## Reporting bugs
 
-Include platform, IOS-XE version, boot mode, server host OS, Docker version, image id, agent report, relevant console audit lines, and whether the Guest Shell or IOx path is in use.
+Include platform, device software version, boot mode, server host OS, Docker
+version, image id, agent report, relevant console audit lines, and whether the
+Guest Shell, IOx, or XR appmgr path is in use.
