@@ -59,6 +59,15 @@ IOx onboarding already ran a live preflight and failed the same way.
 Submit-time rejections render in the console and are audited like any other
 onboarding failure.
 
+IRIS does not send `enable` and its secret unless the device's own prompt has
+shown that the login lands at user EXEC (`>`). Sending that pair to a login
+already at privileged EXEC (`#`) executes the secret as a command, which IOS may
+try to resolve as a hostname and can delay every session by tens of seconds. A
+device that genuinely needs enable fails its first unprivileged session loudly,
+is learned from the prompt, and succeeds on retry. Set
+`IRIS_DEVICE_ENABLE_ALWAYS=1` only to restore the old unconditional behavior for
+a known environment.
+
 ## Bulk device actions
 
 Network-wide changes come from the Devices toolbar, which acts on every checked
@@ -91,9 +100,9 @@ Worker concurrency is bounded and configurable with `IRIS_ONBOARD_CONCURRENCY`
 The generated installers and Console recipes also cut down on device logins:
 the read-only pre-checks before an install and the verification checks after
 an install or undeploy each now run over a single device session instead of
-one login per command. State-gated poll and retry loops — waiting for
-`guestshell destroy`, IOx readiness, or app-hosting state — are unchanged,
-because each iteration has to re-observe live device state.
+one login per command. State-gated poll and retry loops still use a new live
+observation per iteration; Guest Shell readiness now waits 2, 4, 6, and so on up
+to 15 seconds between observations instead of imposing a flat 15-second delay.
 
 ## Peer-policy operations and their backlog
 
@@ -251,7 +260,11 @@ Both the origin seeder and every device agent raise aria2's concurrency limit we
 
 ## Cleanup
 
-Use `device/device-uninstall.sh` (Guest Shell devices), `device/router-uninstall.sh` (Catalyst 8000 routers), or the IOx uninstall path for device cleanup. Cleanup removes IRIS-owned EEM applets, Guest Shell or IOx agent wiring, trustpoint binding, and staged agent artifacts. It still does not reload the device.
+Use `device/device-uninstall.sh` (Guest Shell devices),
+`device/router-uninstall.sh` (Catalyst 8000 IOS-XE routers),
+`device/iox/uninstall.sh` (IOx), or `device/xr-uninstall.sh` (IOS-XR appmgr).
+Cleanup removes only the platform's IRIS-owned agent footprint and staged agent
+artifacts. It still does not reload the device or remove a staged software image.
 
 Undeploy is driven by the device's applied **deployment record**, not its editable
 inventory row, so a later inventory edit cannot retarget cleanup. An
@@ -366,7 +379,18 @@ decision comes from the entry's recorded directory, not from its filename. See
 [Catalog entry fields](reference.md#catalog-entry-fields) for the exact rule,
 including the fallback for entries published before that field existed.
 
-## TLS rotation and IOx packages
+## Artifact-server diagnostics
+
+The artifact server logs one line per GET with the method, path, response
+status, duration, and in-flight request count. TLS handshakes happen in the
+per-connection worker rather than the accept loop, have a 30-second handshake
+bound, and use a listen backlog of 128. During a slow fleet onboard, compare the
+persisted deployment-log offsets with lines such as `artifacts GET ... in
+0.123s (inflight 20)` to distinguish device-side delay from server-side
+concurrency. Expired staging credentials are swept on a five-minute timer, not
+on a request path, so one fetch cannot trigger deletion work for another.
+
+## TLS rotation and device packages
 
 Rotating or regenerating the server's TLS certificate invalidates prebuilt
 device packages: each `iris-arm64.tar` / `iris-amd64.tar` bakes the catalog's
@@ -396,19 +420,20 @@ Two ways to catch this before it reaches a device:
   build time against the live certificate, not pin the certificate baked
   inside it the way it does for the tars.
 - `tools/check-package-freshness.sh` is the read-only, scriptable equivalent
-  for the two IOx tars only. It compares the certificate the catalog actually
+  for all three packages. It compares the certificate the catalog actually
   serves, the copy handed to Guest Shell devices, and the certificate pinned
-  inside each served IOx package, and exits non-zero if any package is stale.
-  It does not check `iris-xr.rpm` — for the same reason the Setup card checks
-  that row differently, there is nothing baked inside the RPM this tool can
-  extract and pin, so XR package freshness is Console-only:
+  inside each served IOx package. For `iris-xr.rpm`, it uses the same explicit
+  build-time proxy as the Setup card: built before the certificate's
+  `notBefore` is stale; built after it is only `OK-BY-MTIME`, never a contents
+  inspection:
 
   ```bash
   tools/check-package-freshness.sh              # report only
   tools/check-package-freshness.sh --rebuild    # report, then rebuild if stale
   ```
 
-  Run it after any catalog certificate change.
+  Run it after any catalog certificate change. `--rebuild` rebuilds stale IOx
+  tars only; build the XR RPM separately with the command below.
 
 Remedy: re-run `tools/provision-iox-packages.sh`, then re-onboard the affected
 IOx devices. For IOS-XR, rebuild the RPM with `tools/build-xr-package.sh

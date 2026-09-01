@@ -125,8 +125,9 @@ image. The import runs as an ordinary publish job with the same progress
 reporting as an upload, and is recorded in Audit as `image_import` (also with
 `result=fail` when a request is rejected).
 
-A file is offered only when it is a `.bin`, passes the filename charset gate, is
-not a dotfile or a `.torrent`/`.upload` temporary, resolves inside its own root
+A file is offered only when it has an explicit Cisco software suffix (`.bin`,
+`.iso`, `.tar`, or `.rpm`), passes the filename charset gate, is not a dotfile
+or a `.torrent`/`.upload` temporary, resolves inside its own root
 (so a symlink cannot reach outside it), is readable by the server, is not
 already published, and is not ambiguous. Files failing the silent gates (wrong
 extension, dotfiles, temporaries, symlinks escaping the root) are hidden
@@ -390,6 +391,12 @@ ever shows the selected window. The same list, already filtered to one device,
 sits at the bottom of that device's deployment-details panel on the Devices
 screen.
 
+Each line in the persisted log is prefixed with its elapsed offset from the job
+start, for example `[+   42.3s] [4/7] waiting for Guest Shell`. The live SSE
+stream remains unchanged. These offsets identify whether a slow onboard spent
+its time in device reachability, Guest Shell readiness, artifact download, or a
+later verification step instead of exposing only one total duration.
+
 ## Settings
 
 Settings is a sidebar feature with its own sub-menu — **Setup**, **General**,
@@ -428,7 +435,7 @@ volume, a deliberate rotation — every package already built against the old
 certificate silently stops working: the device installs and its app reports
 RUNNING, but it can never authenticate to the catalog and so never checks
 in. See
-[TLS rotation and IOx packages](operations.md#tls-rotation-and-iox-packages)
+[TLS rotation and device packages](operations.md#tls-rotation-and-device-packages)
 for the full failure mode and the fix. The card lists each package's build
 time and state against the server's live certificate; `absent` for an
 architecture you do not deploy (for example `iris-amd64.tar` at a site with

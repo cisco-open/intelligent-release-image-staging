@@ -37,7 +37,7 @@ Two conditions gate that endpoint:
   404 while the rest of the 9101 listener (`/healthz`, `/swarm`, `/swarmmap`)
   keeps running — so Prometheus reads the target as **down** and the board
   renders blank. That is telemetry being off, not a broken server. See
-  [observability](../zensical/observability.md).
+  [observability](../observability.md).
 * `IRIS_METRICS_PORT` must not be empty or `0`, which disables the listener
   entirely.
 

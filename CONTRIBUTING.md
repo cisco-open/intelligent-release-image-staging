@@ -33,9 +33,11 @@ Before sending a new pull request, take a look at existing pull requests and
 issues to see if the proposed change or fix has been discussed in the past, or
 if the change was already implemented but not yet released.
 
-We expect new pull requests to include tests for any affected behavior, and, as
-we follow semantic versioning, we may reserve breaking changes until the next
-major version release.
+We expect new pull requests to include tests for affected behavior and an entry
+under `CHANGELOG.md` → `Unreleased` for operator-visible changes. The project
+uses calendar versioning (`YYYY.0M.0D`, with an optional same-day `.MICRO`
+suffix), not semantic versioning; maintainers decide when accumulated changes
+are cut into a dated release.
 
 ## Other Ways to Contribute
 
@@ -46,9 +48,9 @@ you can do:
 - Help ensure that existing issues follows the recommendations from the
   _[Reporting Issues](#reporting-issues)_ section, providing feedback to the
   issue's author on what might be missing.
-- Review and update the existing content of our
-  [Wiki](https://github.com/cisco-open/intelligent-release-image-staging/wiki) with up-to-date
-  instructions and code samples.
+- Review and update the reference documentation under `docs/zensical/`; build
+  or preview it with the Zensical commands in
+  [DEVELOPMENT.md](DEVELOPMENT.md).
 - Review existing pull requests, and testing patches against real existing
   applications that use `intelligent-release-image-staging`.
 - Write a test, or add a missing test case to an existing test.

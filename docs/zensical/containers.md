@@ -6,15 +6,16 @@ SPDX-License-Identifier: Apache-2.0
 
 # Container deployments
 
-IRIS ships two container roles built around the same catalog and private-swarm
-protocol. The seed server coordinates and originates content; the app-hosting
-agent consumes an assignment, verifies the synchronized image, and writes it to
-IOS-managed storage without installing or activating it.
+IRIS ships a seed-server role plus two app-hosting agent variants built around
+the same catalog and private-swarm protocol. The seed server coordinates and
+originates content; each agent consumes an assignment, verifies the synchronized
+image, and writes it to platform storage without installing or activating it.
 
 | Role | Image architecture | Durable storage | Deployment target |
 | --- | --- | --- | --- |
 | Seed server | `linux/amd64` | State, encrypted config, images, served artifacts | Docker Compose or one Kubernetes pod |
 | App-hosting agent | `linux/arm64` or `linux/amd64` | CAF persistent disk | Cisco IE or Catalyst 9300 IOx app hosting |
+| IOS-XR appmgr agent | `linux/amd64` | Router `harddisk:` bind mount | Cisco 8000-series IOS-XR appmgr |
 
 ## End-to-end data path
 

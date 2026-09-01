@@ -159,7 +159,7 @@ catalog certificate change nobody triggered locally, such as a rebuilt server
 or a fresh volume — run the read-only `tools/check-package-freshness.sh`
 (`--rebuild` fixes what it finds), or check the console's Settings → Setup
 page, which surfaces the same drift per package. See
-[TLS rotation and IOx packages](operations.md#tls-rotation-and-iox-packages).
+[TLS rotation and device packages](operations.md#tls-rotation-and-device-packages).
 
 ## Artifact handling
 

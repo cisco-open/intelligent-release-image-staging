@@ -34,17 +34,17 @@ replica, a pod restart marks any in-flight (`planned`/`applying`) deployment rec
 operation. See
 [Management Type and VLAN Ownership](management-type.md).
 
-IOx onboarding (routed or inband, on IE-3400 or Catalyst 9300) needs the IOx app
-packages staged on the PVC: copy `iris-arm64.tar` and/or `iris-amd64.tar` into
-`/data/artifacts`. Kubernetes does not run the Compose host-side package
-builder, so build them elsewhere (`tools/provision-iox-packages.sh`) and copy
-them in with `kubectl cp`. Guest Shell onboarding, including Catalyst 8000
-router VPG deployments, needs no staged package.
+IOx onboarding (routed or inband, on IE-3400 or Catalyst 9300) needs
+`iris-arm64.tar` and/or `iris-amd64.tar` staged under `/data/artifacts` on the
+PVC. IOS-XR onboarding likewise needs `iris-xr.rpm` there. Kubernetes does not
+run the host-side package builders, so build the required packages elsewhere
+(`tools/provision-iox-packages.sh` and `tools/build-xr-package.sh --out
+artifacts/`) and copy them in with `kubectl cp`. Guest Shell onboarding,
+including Catalyst 8000 router VPG deployments, needs no prebuilt package.
 
-Rebuild and re-copy those packages after any certificate rotation — each tar
-bakes the catalog CA in at build time, so a package built against an older
-certificate connects but never heartbeats; see
-[TLS rotation and IOx packages](operations.md#tls-rotation-and-iox-packages).
+Rebuild and re-copy those packages after any certificate rotation or shared
+agent change. Each package bakes both at build time; see
+[TLS rotation and device packages](operations.md#tls-rotation-and-device-packages).
 
 The published console port shown on the Settings page follows `IRIS_CONSOLE_URL`
 when set (otherwise it defaults to the Service's `8080`); set it if you front

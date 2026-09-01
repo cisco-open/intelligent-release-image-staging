@@ -199,4 +199,10 @@ for the address and scaling constraints.
 
 ## Self-provisioned artifacts
 
-On startup, the container refreshes derivable served files such as the Guest Shell agent bundle, bootstrap script, and catalog certificate. Operator-supplied IOx packaging artifacts, such as `iris-arm64.tar`, remain operator-owned; the container serves them but does not modify them. Because those tars bake the catalog CA in at build time and are never rebuilt automatically, a certificate rotation refreshes the served `iris-catalog.pem` but leaves already-built IOx packages pinned to the old certificate — see [TLS rotation and IOx packages](operations.md#tls-rotation-and-iox-packages).
+On startup, the container refreshes derivable served files such as the Guest
+Shell agent bundle, bootstrap script, and catalog certificate. The two IOx tars
+and `iris-xr.rpm` remain operator-built: the container serves them but does not
+modify them. All three bake the catalog CA and shared agent at build time, so
+rebuild them after a certificate rotation **or any `device/agent/` change**.
+See [TLS rotation and device packages](operations.md#tls-rotation-and-device-packages)
+and [Embedded agent packages](development.md#embedded-agent-packages).

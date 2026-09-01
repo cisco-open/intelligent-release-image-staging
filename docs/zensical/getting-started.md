@@ -111,8 +111,9 @@ docker compose -f server/docker-compose.yml exec iris \
 
 Uploading a multi-gigabyte file through the browser is unnecessary when the file
 is already on the server. The **Import from disk** panel on the Console Images
-screen lists every `.bin` under the uploads volume (`IRIS_IMAGES_DIR`) and under
-the read-only import root (`IMAGES_ROOT`) that is not yet in the catalog, and
+screen lists every eligible `.bin`, `.iso`, `.tar`, or `.rpm` under the uploads
+volume (`IRIS_IMAGES_DIR`) and read-only import root (`IMAGES_ROOT`) that is not
+yet in the catalog, and
 publishes it in place with one click. Nothing is copied, and the `.torrent` is
 written to the state directory rather than next to the image, so the read-only
 import root stays read-only. See
@@ -131,15 +132,19 @@ cp fleet/devices.csv.example fleet/devices.csv
 
 The inventory contains network onboarding information only, as an
 management-type-aware CSV v2. Each device declares `routed`, `inband`,
-`router-routed`, or `router-nat` as its `management_type`:
+`router-routed`, `router-nat`, or `xr-host` as its `management_type`:
 
 ```text
 device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,vpg_number,nat_interface,platform
 ```
 
 Fill the routed columns (`iris_vlan`, `svi_*`) for routed devices, or the inband
-columns (`inband_vlan`, `app_*`) for inband devices. `model`/`platform` are
-optional; blank `platform` auto-selects from the model. See
+columns (`inband_vlan`, `app_*`) for inband devices. The Add Device form requires
+an explicit `platform`: `guestshell`, `iox`, `router`, or `xr-appmgr`; it narrows
+the choices from `model` rather than silently choosing one. Existing inventory
+and CSV imports may leave the field blank as an inventory-only transition state,
+in which case onboarding resolves known IOS-XE models and refuses uncertainty.
+See
 [Inventory (CSV v2)](management-type.md#inventory-csv-v2).
 
 For a Catalyst 8000 router, use `router-routed` with a VPG number, plus routes
@@ -148,6 +153,10 @@ interface, which adds static TCP PAT on port 6881. Both router modes stage to
 `bootflash:` only, so size it for about 2× the image plus 200 MB. Support is
 designed for the Catalyst 8000 family and lab-tested on Catalyst 8000V; see
 [Router routed and router NAT](management-type.md#router-routed-and-router-nat-iris-managed-virtualportgroup).
+
+For a Cisco 8000-series IOS-XR router, use `management_type=xr-host` and
+`platform=xr-appmgr`; leave every VLAN, SVI, app-address, VPG, and NAT field
+empty. Build `artifacts/iris-xr.rpm` before onboarding.
 
 Management-type-aware onboarding runs through the **Console** (or API), which creates
 a durable deployment record and drives teardown from it. The legacy CLI generator below is

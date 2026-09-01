@@ -13,13 +13,13 @@ Validate documentation, server behavior, device packaging, and lab behavior sepa
 Run the Python tests:
 
 ```bash
-python3 -m pytest server/tests/ device/agent/tests/ device/iox/tests/ device/test_verify_image.py -q
+python3 -m pytest server/tests/ device/agent/tests/ device/iox/tests/ lab/tests/ device/test_verify_image.py -q
 ```
 
 Run the Bats tests:
 
 ```bash
-bats device/test_guestshell_start.bats device/test_bootstrap.bats device/tests/ device/iox/tests/ server/tests/*.bats
+bats device/test_guestshell_start.bats device/test_bootstrap.bats device/tests/ device/iox/tests/ device/xr/tests/ server/tests/*.bats
 ```
 
 ## Documentation build
@@ -33,22 +33,17 @@ For the commands and the pinned Zensical and Python versions, see
 | Platform | Device staging | Status |
 | --- | --- | --- |
 | Catalyst 9300 | Guest Shell | Lab-validated |
+| Catalyst 9300 | IOx on app-hosting SSD share | Lab-validated runtime and direct share hand-off to `flash:` |
 | Catalyst 8000V | Guest Shell (router, VirtualPortGroup) | Lab-validated |
 | IE-3400 | IOx | Lab-validated |
 | Cisco 8000 series (IOS-XR) | appmgr container (stages to `harddisk:`) | Lab-validated on a Cisco 8201 (IOS-XR 25.4.2): console onboard, direct-to-`harddisk:` staging with sha256 verification against the catalog, telemetry reporting, and record-driven teardown |
 
-The IOS-XR staging agent exists: a device set to the `xr-appmgr` agent
-install onboards from the Console, runs as an appmgr Docker application, and
-downloads its assigned images straight onto `harddisk:` through a bind mount,
-verifying each against the catalog's sha256 and seeding it to the swarm like
-any other device.
-
-It is **not yet lab-validated**. Its delivery pipeline was proven end to end
-on real hardware — package build, scp to `harddisk:`, `appmgr package
-install`, activation, container write-through to `harddisk:`, and
-container-to-server HTTPS — but a full onboard-stage-verify-undeploy cycle on
-a live router has not yet been recorded. Until it has, treat the row above as
-"expected to work, unproven" rather than as a validated platform.
+The IOS-XR validation covers the full lifecycle, not only package delivery:
+build the `iris-xr.rpm`, scp it to `harddisk:`, register and activate the
+appmgr container, download directly through the bind mount, verify sha256,
+report telemetry, and undeploy from the deployment record. The later teardown
+hardening was also exercised on 8010-R4: a record-driven teardown completed in
+62 seconds after the fail-closed command-adjudication fixes.
 
 Image import and swarm distribution have always worked for Cisco 8000 series
 images regardless: `.iso`, `.tar`, and `.rpm` artifacts publish to the catalog
@@ -63,10 +58,11 @@ and distribute through the swarm like any other image.
 | Admin exists | Console login succeeds. |
 | Image publishes | Catalog lists image id, hashes, and info hash. |
 | Import publishes in place | A file already under the read-only image root imports from the Console, and the read-only root is unchanged: no copy of the image and no `.torrent` beside it. |
-| Management type recorded | Device shows routed, inband, router-routed, or router-nat; onboarding creates an applied deployment record. |
-| Installer runs | Device has trustpoint, Guest Shell or IOx app, bootstrap, and agent config. |
+| Management type recorded | Device shows routed, inband, router-routed, router-nat, or xr-host; onboarding creates an applied deployment record. |
+| Installer runs | Device has the expected Guest Shell, IOx, or XR appmgr agent plus its bootstrap/configuration. |
 | Inband preserves network | For inband, before/after `show running-config` shows the existing VLAN/SVI/gateway/VRF unchanged. |
 | Catalyst 8000V router path | `router-routed` and `router-nat` onboard, stage a verified image, and undeploy from their deployment records. Swarm Map shows the device, and the operator's OTLP backend shows its telemetry when observability is enabled. |
+| IOS-XR appmgr path | `xr-host` + `xr-appmgr` onboards, stages directly to `harddisk:`, reports telemetry, and converges under record-driven or repeated undeploy without touching router networking. |
 | Assignment applies | Device reports the approved image id. |
 | Download completes | Swarm state shows completed pieces. |
 | Verification passes | Agent reports the staged file and a sha256 match against the catalog's known-good value. |
@@ -100,4 +96,6 @@ Check these by hand when the map or its data source changes:
 
 ## Reporting bugs
 
-Include platform, device software version, boot mode, server host OS, Docker version, image id, agent report, relevant console audit lines, and whether the Guest Shell or IOx path is in use.
+Include platform, device software version, boot mode, server host OS, Docker
+version, image id, agent report, relevant console audit lines, and whether the
+Guest Shell, IOx, or XR appmgr path is in use.

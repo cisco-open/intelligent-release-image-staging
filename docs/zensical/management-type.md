@@ -174,7 +174,8 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
 - **router-routed** rows fill `app_ip`, `app_mask`, `app_gateway`, and
   `vpg_number`; router fields cannot be combined with switch VLAN/SVI fields.
 - **router-nat** rows additionally fill `nat_interface`. `platform=router` is
-  required (and selected automatically for a known Catalyst 8000 (C8xxx) model).
+  explicit in the Add Device form; an imported blank can resolve from a known
+  Catalyst 8000 (C8xxx) model at onboard time.
 - **xr-host** rows fill only `model` and `platform` (`xr-appmgr`, required);
   every addressing column stays empty.
 - `ios_ssh_host` is an OPTIONAL advanced override: the IOS endpoint the inband
@@ -186,6 +187,12 @@ The same server-side validator is applied to the Console, the API, and CSV
 import: strict IDs, IPv4 addresses and contiguous masks, VLAN range 1–4094, and
 static host/subnet consistency. Older positional CSVs still import but are
 classified `legacy_routed`; they are never inferred as inband.
+
+The Add Device form requires an explicit agent install. The row editor and CSV
+can still hold a blank `platform` as inventory-only intent; onboarding resolves
+only known IOS-XE model mappings and fails closed when the platform or OS family
+is uncertain. `xr-host` is never inferred from a blank platform: it requires
+`xr-appmgr` explicitly.
 
 ## Deployment plans and applied records
 

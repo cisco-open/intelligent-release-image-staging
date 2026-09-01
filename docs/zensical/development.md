@@ -15,6 +15,7 @@ This page explains where to make changes without changing the repository's core 
 | `server/` | Server services, web console, catalog, telemetry, Docker build, and server tests. |
 | `device/` | Guest Shell installer, bootstrap, EEM applets, agent code, and device tests. |
 | `device/iox/` | IOx package build, install, entrypoint, and tests. |
+| `device/xr/` | IOS-XR appmgr image, entrypoint, package-build support, and tests. |
 | `fleet/` | CSV templates and generated per-device installer output. |
 | `tools/` | Operator helpers for bundles, installers, assignments, release packaging, and torrents. |
 | `lab/` | Lab helpers and diagnostics. |
@@ -31,6 +32,33 @@ Do not add code or documentation that causes IRIS to install, activate, commit, 
 3. Run focused tests first, then the wider Python and Bats suites.
 4. Update documentation when the operator workflow changes.
 5. Avoid committing generated artifacts, credentials, images, or lab-only evidence.
+
+## Embedded agent packages
+
+Every Python source under `device/agent/` is embedded into the Guest Shell
+bundle, both IOx tars, and the IOS-XR RPM. An agent change is therefore not
+ready for device testing until the packages in use have been rebuilt:
+
+```bash
+docker compose -f server/docker-compose.yml up -d --build
+tools/provision-iox-packages.sh
+CATALOG_PEM=<live-certificate-only-pem> \
+  tools/build-xr-package.sh --out artifacts/
+tools/check-package-freshness.sh
+```
+
+The freshness command detects certificate drift, not source drift: it inspects
+the IOx certificate pins and uses a build-time proxy for the XR RPM. A green
+result cannot prove that a package contains the current agent. Rebuild after
+any shared-agent change and redeploy each affected device.
+
+## Release process
+
+Keep operator-visible changes under `CHANGELOG.md` → `Unreleased` during normal
+development. To cut a release, move those entries under the current CalVer
+heading, set `VERSION` to the same `YYYY.0M.0D[.MICRO]` value, run the complete
+tests and documentation build, and run `tools/make-release.sh`. The release tag
+is `v` plus the exact `VERSION`, including a `.MICRO` suffix when present.
 
 ## Documentation loop
 
@@ -55,4 +83,3 @@ Two versions are pinned so a local build matches the published one. Change eithe
 | Python | `.github/workflows/docs.yml` (`actions/setup-python`) | `3.12` |
 
 The GitHub Pages workflow publishes the static website at the root of the `gh-pages` branch and the generated Zensical site under `/docs/`.
-

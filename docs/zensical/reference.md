@@ -26,6 +26,11 @@ the catalog schema. Every page is listed in the [Overview](index.md).
 | `device/iox/install.sh` | Install the IOx app path. |
 | `device/iox/uninstall.sh` | Remove the IOx app path. |
 | `device/iox/build.sh --image-only` | Build the ARM64 app-hosting image; set `IOX_ARCH=amd64` for x86_64. |
+| `tools/provision-iox-packages.sh` | Build and stage both architecture-specific IOx packages. |
+| `CATALOG_PEM=<pem> tools/build-xr-package.sh --out artifacts/` | Build the IOS-XR appmgr RPM against the live catalog certificate. |
+| `device/xr-install.sh` | Onboard the IOS-XR appmgr agent. |
+| `device/xr-uninstall.sh` | Remove the IOS-XR appmgr agent footprint. |
+| `tools/check-package-freshness.sh` | Check IOx certificate pins and the XR RPM build-time proxy against the live certificate. |
 | `kubectl apply -k kubernetes` | Deploy the optional single-replica Kubernetes seed server. |
 
 Most of these have a console equivalent; the command line is not the only way to run them — see [When to use the CLI](console.md#when-to-use-the-cli).
@@ -69,9 +74,17 @@ Compose refuses to start without these; none has a default.
 | `IRIS_SAMPLE_INTERVAL` | `15` (seconds) | Seeder/telemetry poll cadence. A transfer that completes inside one interval can be observed with no connected peer, so per-peer rates and the map's measured edges never appear — a 1 GB image at ~90 MB/s lands in about 15 seconds. Lower it to 2–5 on a fast fabric or for a live demo; the cost is more aria2 RPC calls. |
 | `IRIS_REQUIRE_IDENTITY_GATE` | unset (off) | Set to `1` to make the catalog answer 503 to every per-device torrent request until the checkpoint file `identity-compatible-ready` exists under `IRIS_STATE` — the file a proven seeder rotation writes and `--recover` removes. Read per request, so opening or closing the gate needs no restart. The canonical (service) torrent path is unaffected. A deployment that does not set it serves per-device torrents as before. |
 | `IRIS_ONBOARD_CONCURRENCY` | `25` | Maximum onboard/undeploy jobs the worker pool runs at once; the rest queue. `GET /api/onboard/jobs` reports the active value as `max_concurrent`. |
+| `IRIS_XR_SESSION_TIMEOUT` | `150` seconds | Wall-clock bound for each IOS-XR command session. `0` disables it; an invalid value falls back to the default with a warning. |
+| `IRIS_DEVICE_ENABLE_ALWAYS` | unset (off) | Compatibility escape hatch that always sends `enable` plus its secret on IOS-XE SSH sessions. Normally IRIS learns whether escalation is needed from the device prompt and sends neither line to already-privileged logins. |
 
 The host-side ownership these paths need is in
 [Server](server.md#host-paths-to-chown-on-every-deploy).
+
+The code also reads `IRIS_TOKEN_TTL`, `IRIS_TOKEN_REFRESH_AT`,
+`IRIS_TOKEN_OVERLAP`, and `IRIS_TOKEN_SKEW_GRACE`. These are internal protocol
+tuning values rather than supported independent deployment knobs: server and
+device timing must remain coordinated, and Compose deliberately does not expose
+them. Do not override one side in isolation.
 
 ### Container paths
 
@@ -346,8 +359,9 @@ fail to appear. There are exactly three reasons.
 | `ambiguous name in more than one location` | The same basename, or the same derived id, exists under more than one root. The startup re-seed can resolve a torrent to a directory by basename and the seeder runs with `bt-seed-unverified`, so a wrong guess would serve the wrong bytes under correct piece hashes. IRIS refuses rather than guess: keep one copy. |
 | `not readable by the server` | The file exists but uid 10001 cannot open it. Listing a file needs only its directory, so without this check an unreadable image would pass discovery and fail deep inside publish. Root-owned mode `0600` images left in a volume by an older root-runtime container land here; the fix is the volume-ownership migration in [Server](server.md#upgrading-from-a-root-runtime-deployment). |
 
-A file is only listed at all if it is a `.bin`, its basename passes the catalog
-filename charset (`A-Za-z0-9._-`), it is not a dotfile, sidecar `.torrent`, or
+A file is only listed at all if it ends in `.bin`, `.iso`, `.tar`, or `.rpm`,
+its basename passes the catalog filename charset (`A-Za-z0-9._-`), it is not a
+dotfile, sidecar `.torrent`, or
 `.upload-*` temp file, and its resolved path is still inside the root it was
 found under — a symlink cannot pull a file from outside the mount into the set.
 Each distinct tree is walked once, so pointing both roots at the same directory,

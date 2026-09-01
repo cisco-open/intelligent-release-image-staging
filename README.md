@@ -31,7 +31,7 @@ Start at the [documentation overview](docs/zensical/index.md), or jump to a sect
 
 **Onboard devices**
 
-- [Device agents](docs/zensical/device-agents.md) — Guest Shell and IOx behavior on the device
+- [Device agents](docs/zensical/device-agents.md) — Guest Shell, IOx, and IOS-XR appmgr behavior
 - [Management type and VLAN ownership](docs/zensical/management-type.md) — management types, VPG/NAT ownership, deployment records
 - [IOx app](docs/zensical/iox.md) — building, staging, and transfer paths
 
@@ -58,6 +58,7 @@ The public website source is in [docs/](docs/index.html). The GitHub Pages workf
 | `server/` | Tracker, catalog, seeder, artifact server, console, telemetry, encrypted state, and server tests. |
 | `device/` | Catalyst Guest Shell installer, EEM applets, bootstrap, agent code, and device tests. |
 | `device/iox/` | ARM64 and x86_64 IOx app packaging and install path for supported Cisco platforms. |
+| `device/xr/` | IOS-XR appmgr image, entrypoint, package-build support, and tests. |
 | `kubernetes/` | Optional single-replica seed-server deployment with persistent storage. |
 | `fleet/` | CSV templates for device inventory and image assignments. |
 | `tools/` | Operator helpers for agent bundles, per-device installers, assignments, torrents, and releases. |
@@ -65,10 +66,8 @@ The public website source is in [docs/](docs/index.html). The GitHub Pages workf
 
 ## Platform support
 
-IRIS stages Cisco software on IOS-XE switches/routers and IOS-XR routers. Which agent runs where, how each platform stages, and what has
-been lab-validated is documented in
-[device agents](docs/zensical/device-agents.md) and
-[validation](docs/zensical/validation.md).
+IRIS stages Cisco software on IOS-XE switches/routers and IOS-XR routers. Which agent runs where, how each platform stages, and what has been lab-validated is documented in
+[device agents](docs/zensical/device-agents.md) and [validation](docs/zensical/validation.md).
 
 ## Security, Conduct, and License
 

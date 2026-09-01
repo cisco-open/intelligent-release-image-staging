@@ -61,8 +61,8 @@ the guest-share root, over a `copy https://` that the PKI trustpoint step
 `CAP` is a fresh 128-bit random capability minted per install run (not one
 fixed filename reused by every device — that was the old shared
 `rpc-secret`). The staged copies live under the artifact server's `staging/`
-prefix and are only reachable for the ~600 seconds it retains them, ample
-headroom for the installer's own 3-attempt retry loop.
+prefix and are only reachable for the 3600 seconds it retains them, ample
+headroom for queued fleet work and the installer's own retry loop.
 
 The installer then installs one EEM applet:
 
@@ -145,6 +145,14 @@ posture. The agent's first successful heartbeat is therefore the signal that
 installation succeeded — that is what makes a device appear in the Console
 device table and Swarm Map (see [Web Console](console.md)). Nothing before
 that point is visible outside device-side logs.
+
+Immediately after first boot, aria2c may still be running with the empty RPC
+secret deliberately shipped by the installer while the agent has just fetched
+the real one. aria2-next reports that brief mismatch as HTTP 400. IRIS treats it
+as a normal `staging` state, emits `ARIA2-AUTH`, and lets the next bootstrap tick
+copy the refreshed secret and restart aria2c; it does not show a false staging
+failure. A connection-refused or otherwise unreachable RPC endpoint remains a
+real error.
 
 ### Failure mode: aria2c alive but not serving
 

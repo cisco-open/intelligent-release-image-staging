@@ -21,8 +21,9 @@ cp fleet/devices.csv.example fleet/devices.csv
 The inventory is a management-type-aware, named-header **CSV v2**. Every device
 declares a `management_type`: `routed` (IRIS creates a dedicated VLAN and SVI),
 `inband` (the agent attaches to an existing operator-owned management VLAN),
-`router-routed` (an IRIS-managed VirtualPortGroup subnet), or `router-nat`
-(that VPG subnet behind NAT):
+`router-routed` (an IRIS-managed VirtualPortGroup subnet), `router-nat` (that
+VPG subnet behind NAT), or `xr-host` (an IOS-XR appmgr container sharing the
+router's own network stack):
 
 ```text
 device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,vpg_number,nat_interface,platform
@@ -35,15 +36,22 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
   DHCP is not supported. For inband **IOx**, `ios_ssh_host` (the IOS endpoint
   the app SSHes to) defaults to the device's management IP — only set it for
   an asymmetric topology (Guest Shell leaves it blank).
-- `model`/`platform` are optional; blank `platform` auto-selects from the model.
+- `model` and `platform` may be blank in imported inventory. The Add Device form
+  requires an explicit `guestshell`, `iox`, `router`, or `xr-appmgr` choice and
+  filters those choices by model. A blank imported platform remains an
+  inventory transition state: onboarding may resolve a known IOS-XE model, but
+  it refuses an unclassified or uncertain device rather than guessing.
 - **router-routed** — fill `app_ip`, `app_mask`, `app_gateway`, and
-  `vpg_number`; use `platform=router` (automatic for a known Catalyst 8000 (C8xxx) model). The
+  `vpg_number`; use `platform=router`. The
   operator must route the VPG subnet to IRIS and peers.
 - **router-nat** — additionally fill `nat_interface`. It creates static PAT
   for TCP 6881; the interface is canonicalized and teardown preserves an
   outside NAT marking that pre-dates IRIS. The router path targets the Catalyst
   8000 family and is lab-tested on Catalyst 8000V; see
   [Router routed and router NAT](management-type.md#router-routed-and-router-nat-iris-managed-virtualportgroup).
+- **xr-host** — use `platform=xr-appmgr` on supported Cisco 8000-series IOS-XR
+  routers and leave every addressing, VPG, and NAT field empty. Onboarding
+  requires a current `artifacts/iris-xr.rpm`.
 
 See [Management Type and VLAN Ownership](management-type.md) for the full
 ownership rules. Older positional CSVs (e.g. `device_id,device_ip,vlan,...`)

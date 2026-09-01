@@ -72,7 +72,7 @@ sequenceDiagram
     DeviceB->>Server: Download initial pieces
     DeviceA<<->>DeviceB: Exchange missing pieces
     DeviceA->>DeviceA: Verify downloaded image hash
-    DeviceA->>IOS: Copy staged image
+    DeviceA->>IOS: Place at platform storage root (copy on IOS-XE; direct bind mount on IOS-XR)
     DeviceA->>Server: Report staged status
 ```
 
@@ -123,3 +123,8 @@ file to IOS — a disk-speed write through the bind-mounted share where
 available, an scp push on IE-3400 or as the fallback — and IOS performs the
 final placement as a plain copy, which the agent attests by polling for the
 file and confirming it matches the catalog's declared byte size exactly.
+
+On IOS-XR, the appmgr container shares the router's own network stack and bind-
+mounts `/misc/disk1` as `/hostmount`; that mount is `harddisk:`. The agent
+downloads, verifies, and seeds the file at its final location, so there is no
+IOS placement copy and no app-network VLAN, SVI, VPG, or NAT configuration.

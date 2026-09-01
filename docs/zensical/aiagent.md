@@ -31,7 +31,7 @@ Gather these non-secret decisions before starting:
 | --- | --- |
 | Server runtime | Docker Compose for a single host, or Kubernetes for the single-replica alpha deployment. |
 | Stable server address | A device-reachable IPv4 address, used in the server certificate and tracker announces. |
-| Image source | A host path to the Cisco image (`.bin`) file. |
+| Image source | A host path to a Cisco `.bin`, `.iso`, `.tar`, or `.rpm` software artifact. |
 | Device inventory | Management IP, management type, VLAN or app addressing, and model for every device — see [Management type](management-type.md) for which columns each type needs. |
 | Catalyst 9300 hosting mode | Guest Shell, or IOx on an SSD-equipped Catalyst 9300. |
 | IOx package availability | `iris-arm64.tar` for IE-3400; `iris-amd64.tar` for Catalyst 9300 IOx. |
@@ -111,10 +111,10 @@ At the end of every step, state the next action required from me.
    `iris-publish` from inside the server container. Publishing creates catalog
    and torrent metadata; it does not change any device.
 5. **Add devices.** Use the Console Devices page or its example CSV. Set each
-   model when known. Leave `platform` blank for automatic selection, force
-   `guestshell` for the standard C9300 path, `iox` only for a supported IOx
-   device, `router` for a Catalyst 8000 (C8xxx, IOS-XE) router VPG deployment,
-   or `xr-appmgr` for a Cisco 8000 series (IOS-XR) router — `xr-appmgr` rows
+   model when known and choose the agent install explicitly: `guestshell` for
+   the standard C9300 path, `iox` only for a supported IOx device, `router` for
+   a Catalyst 8000 (C8xxx, IOS-XE) router VPG deployment, or `xr-appmgr` for a
+   Cisco 8000 series (IOS-XR) router — `xr-appmgr` rows
    use management type `xr-host` and app addressing instead of VLAN/SVI fields;
    see [Management type](management-type.md) for the full column matrix.
 6. **Confirm device packages are ready.** The server bring-up step stages arm64
@@ -131,7 +131,8 @@ At the end of every step, state the next action required from me.
    catalog certificate, and covers the XR RPM too — by build time against the
    moment that certificate came into existence (its `notBefore`), since it
    cannot unpack the RPM to check what it actually pins the way it does for
-   the tars; contents are not inspected either way. The comparison is
+   the tars. The IOx certificate contents are inspected; the XR RPM contents
+   are not. The comparison is
    deliberately against the certificate's own `notBefore` rather than the
    mtime of the `iris-catalog.pem` file: that file is a staged copy rewritten
    at every bring-up, so its mtime tracks the last staging rather than the
