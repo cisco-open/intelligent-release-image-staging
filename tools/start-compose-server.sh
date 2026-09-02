@@ -14,7 +14,10 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 COMPOSE=(docker compose -f "$REPO/server/docker-compose.yml")
 
-"${COMPOSE[@]}" build
+# --pull: server/Dockerfile's base is a floating tag; without it a rebuild
+# silently reuses the host's cached python:3.12-slim-trixie and misses
+# Debian security updates already on the tag (issue #13; measured 2026-09-02).
+"${COMPOSE[@]}" build --pull
 "${COMPOSE[@]}" run --rm iris iris-bootstrap
 "${COMPOSE[@]}" up -d
 

@@ -172,7 +172,7 @@ IMAGE_TAR_NAME="${RPM_NAME}.tar.gz"
 if [ "$DRY_RUN" -eq 1 ]; then
   cat <<PLAN
 >> [dry-run] would stage x86_64 aria2c + agent python + Dockerfile/entrypoint.sh into a build context
->> [dry-run] would run: docker build --platform linux/amd64 -t $IMAGE_TAG <context>
+>> [dry-run] would run: docker build --pull --platform linux/amd64 -t $IMAGE_TAG <context>
 >> [dry-run] would reuse an existing xr-appmgr-build clone at $APPMGR_BUILD_DIR
    or clone $APPMGR_BUILD_REPO_URL @ $APPMGR_BUILD_COMMIT there
 >> [dry-run] would run: docker save $IMAGE_TAG -o $APPMGR_BUILD_DIR/$IMAGE_TAR_NAME
@@ -252,7 +252,11 @@ cp "$REPO/VERSION" "$CTX/agent/VERSION"
 cp "$DOCKERFILE" "$ENTRYPOINT" "$CTX/"
 
 echo ">> docker build ($IMAGE_TAG)"
-docker build --platform linux/amd64 -t "$IMAGE_TAG" "$CTX"
+# --pull for the same reason device/iox/build.sh gives: a floating base tag
+# is only as current as the build host's cache (issue #13). IRIS_NO_PULL=1
+# keeps the cached base for an A/B build.
+PULL_FLAG="--pull"; [ -n "${IRIS_NO_PULL:-}" ] && PULL_FLAG="--pull=false"
+docker build "$PULL_FLAG" --platform linux/amd64 -t "$IMAGE_TAG" "$CTX"
 
 echo ">> resolving ios-xr/xr-appmgr-build"
 mkdir -p "$(dirname "$APPMGR_BUILD_DIR")"

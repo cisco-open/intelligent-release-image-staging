@@ -95,6 +95,14 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   whole build context — a second copy of aria2c, the agent sources, the
   Dockerfile and the cert — into `artifacts.tar.gz` as ~3.3 MB (5.6%) of
   dead weight in every `iris-*.tar`.
+- **Image builds now refresh their base image.** `device/iox/build.sh`,
+  `tools/build-xr-package.sh` and `tools/start-compose-server.sh` pass
+  `--pull` to `docker build`, so a build starts from the current
+  `python:3.12-slim-trixie` tag instead of whatever the build host cached.
+  Measured on the lab server on 2026-09-02: a 19-day-old cache had shipped
+  every image 12 Debian security updates behind, OpenSSL 3.5.6 where the tag
+  already carried 3.5.7 (issue #13). `IRIS_NO_PULL=1` keeps the cached base
+  for an A/B build of an unrelated change.
 - **Standing assignments made before this release carry no plan until they are
   Applied once more.** Until then their devices keep minting their own transfer
   ids and their plans emit no lifecycle events at all. Re-assign from the

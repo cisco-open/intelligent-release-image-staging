@@ -20,8 +20,13 @@ root for `linux/amd64`:
 
 ```bash
 tools/get-aria2c.sh amd64
-docker build --platform linux/amd64 -f server/Dockerfile -t iris:latest .
+docker build --pull --platform linux/amd64 -f server/Dockerfile -t iris:latest .
 ```
+
+`--pull` matters: the base is a floating tag, and without it Docker reuses
+whatever `python:3.12-slim-trixie` the host cached, which can be weeks of
+Debian security updates behind the tag. `tools/start-compose-server.sh`
+passes it for you.
 
 Compose builds and runs `iris:latest`, so tag a hand-built image the same way —
 the volume-ownership migration below runs a throwaway container from that tag.

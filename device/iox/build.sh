@@ -195,7 +195,13 @@ cp "$HERE/Dockerfile" "$HERE/entrypoint.sh" "$HERE/reconcile.sh" "$CTX/"
 cp "$PACKAGE_DESCRIPTOR" "$CTX/package.yaml"
 
 echo ">> docker build ($DOCKER_PLATFORM)"
-docker build --platform "$DOCKER_PLATFORM" -t "$IMAGE_TAG" "$CTX"
+# --pull: the Dockerfile's base is a floating tag, so without it a build
+# silently reuses whatever python:3.12-slim-trixie the build host cached
+# (measured 2026-09-02: a cache 19 days old shipped 12 Debian security
+# updates behind, OpenSSL 3.5.6 vs 3.5.7 -- issue #13). Set IRIS_NO_PULL=1
+# only to A/B a change against an already-cached base.
+PULL_FLAG="--pull"; [ -n "${IRIS_NO_PULL:-}" ] && PULL_FLAG="--pull=false"
+docker build "$PULL_FLAG" --platform "$DOCKER_PLATFORM" -t "$IMAGE_TAG" "$CTX"
 
 if [ "$PACKAGE" -eq 0 ]; then
   echo ">> image ready: $IMAGE_TAG (IOx packaging skipped)"
