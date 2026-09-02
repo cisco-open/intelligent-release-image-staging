@@ -403,8 +403,22 @@ IRIS is allowed to stage, never what it installs, activates, or reloads.
 | --- | --- |
 | `approved_image_ids` | Ordered list of catalog image ids, up to ten. The agent stages and verifies every id in the set, transferring them in parallel. Authoritative: a raw read of this file, or a stale write, is resolved from this key, never from `approved_image_id`. |
 | `approved_image_id` | The set's first element, or `null` when empty. Recomputed from `approved_image_ids` on every read and write — kept only so a reader that predates the ordered set (a raw `policy.json` parse, or an agent that has not yet upgraded) still sees a single assignment. |
+| `plans` | Per-image transfer identity, keyed by image id: `plan_id` and `transfer_id` (both 32 lowercase hex), `planned_at` (epoch seconds) and `info_hash` (the torrent info hash of the image as the catalog held it at mint time, `null` when the catalog has no entry yet). Minted when an image **enters** the set and carried forward verbatim while it stays there, so a repeat Apply — including one that only adds or removes some other image, and the quarantine auto-unassign rewrite — never re-mints and never restarts an in-flight transfer's identity. Unassigning an image drops its entry and re-assigning it mints a new plan, which is what keeps two successive transfers of the same image to the same device distinct. A row written before this key existed simply has no `plans`, and gains one at its next Apply. |
 
 `POST /api/devices/<id>/assign` (see [Devices](#devices)) writes this file.
+
+The agent reads its own row from `GET /v1/devices/<device_id>/policy`. That
+response carries the two approval keys above plus a `plans` map projected down
+to the two device-visible fields, `plan_id` and `transfer_id`, for image ids
+that are in the approved set and whose stored ids are both 32 lowercase hex;
+`planned_at` and `info_hash` stay on the server, because the agent has no use
+for either. The key is always present, possibly empty. The agent adopts the
+`transfer_id` before it starts a download and stamps it on every observation
+and terminal report for that image, so one transfer carries one id from
+assignment to seed; an agent that predates the key ignores it and keeps minting
+its own id, which is what makes the addition safe mid-rollout. The internal
+`get_policy()` contract is deliberately left at its two keys — the `plans` map
+exists only on the wire projection.
 
 The device's heartbeat (`devices.json`, `<state>/devices.json`) reports
 per-image staging progress against that set:
@@ -415,6 +429,154 @@ per-image staging progress against that set:
 | `stage_state` | One state string for the whole tick. On a one-image heartbeat it is that image's own state (for example `staging`, `downloading`, `transferring_to_ios`, `ready`, `error`). For a set the agent collapses the tick into the single most actionable state across every assigned image, so it describes the set, not `current_image_id`. `stage_error`, likewise, is one reason per tick. |
 | `staged_image_ids` | Which of the assigned images this agent has staged and verified, as of its last heartbeat. Absent on a one-image heartbeat (and on an agent that predates multi-image staging), in which case staged/not-staged falls back to `stage_state == "ready"` paired with `current_image_id`. |
 | `errored_image_ids` | Which of the assigned images hit a terminal per-image failure on the agent's last tick, including retryable ones such as a full boot filesystem. Absent on a one-image heartbeat and on an agent that predates the field. |
+
+## Transfer lifecycle
+
+Every plan is followed from the moment it is minted to the moment the server can
+honestly say the device is seeding it, and both transitions leave the server as
+OTLP log records named `iris.transfer.lifecycle`. The schemas are here; what to
+join on and how to query them is in
+[Observability](observability.md#log-attributes-operator-contract), and how the
+records leave the server is in [Telemetry export](telemetry-export.md).
+
+### `transfer-lifecycle.json`
+
+`<state>/transfer-lifecycle.json` holds one row per plan. It is **derived
+state**: plan identity lives in `policy.json`, and this file keeps only the
+latched observations behind the seeding decision plus the markers saying which
+records have already reached the export queue. It is therefore safe to delete —
+the next sample pass rebuilds every row from `policy.json` with the same ids,
+and the bounded re-emission that follows carries byte-identical records under
+the same `event.id`, so a backend sees duplicates of events it already has
+rather than new ones. The tracker process is the file's only writer; the catalog
+writes plan identity into `policy.json` and never touches this file.
+
+| Field | Meaning |
+| --- | --- |
+| `plan_id`, `transfer_id`, `device_id`, `image_id`, `info_hash`, `planned_at` | Copied from the plan's `policy.json` row and refreshed from it on every pass. This file mints no identity of its own. |
+| `state` | `planned` at creation; `seeding` once both latches below are set; `cancelled` when the assignment is withdrawn before that. Both `seeding` and `cancelled` are terminal — a later unassign never un-seeds a transfer that already happened, and a cancelled plan can never be promoted. |
+| `checksum_verified_at` | First precondition, latched first-write-wins: the server-stamped `received_at` of the earliest terminal report (`staging-complete` or `seeding-only`) from that device carrying **this plan's own** `transfer_id` with `content_sha256.state == "verified"`. Both terminal events are reachable only after the agent hashed the fully downloaded file, so this single fact carries both "the content is complete on the device" and "its checksum verified". `null` until such a report arrives. |
+| `tracker_seeder_at` | Second precondition, latched first-write-wins: when this tracker saw the device itself announce `left = 0` on the image's torrent under its own authenticated principal — the peer registry row's `completed_at`, falling back to `last_seen`. A device announcing on a legacy or shared seeder token proves no identity and can never satisfy this. `null` until then. |
+| `seeding_started_at` | `max(checksum_verified_at, tracker_seeder_at, planned_at)`: the instant the later of the two preconditions became true, floored at the plan's own creation so a planned→seeding duration can never render negative. Computed once, at promotion, before any record is built, and never recomputed — which is what makes a replay after a crash byte-identical. |
+| `observed_at` | The end of the attesting report's measurement window, on the **device's** clock. Carried for correlation only, and never subtracted from the server instants above: two clocks. |
+| `updated_at` | When this row was last written. Drives retention and eviction order. |
+| `emitted` | The durable markers, `{"planned": <ts>, "seeding_started": <ts>}`, each key absent until the export queue has accepted that record. Written only after the queue accepts, never before — marking first would lose an event permanently the moment the queue refused it. |
+
+Bounds: at most 4096 rows, and rows that owe nothing — terminal **and** fully
+emitted — are pruned a week after their last write. At the cap the oldest such
+rows go first; an eviction forced to drop a row that still owes an event is
+counted in the store's `plans_dropped_unemitted` rather than disappearing
+quietly. `plans_awaiting_report` counts plans the tracker has already watched
+seed for which no matching report has arrived.
+
+### Lifecycle events
+
+Two events per plan, in this order and no other: `planned` when the assignment
+mints it, and `seeding_started` when **both** preconditions above have been
+observed. There is deliberately nothing in between — the server has no honest
+instant for "downloading" — and a plan whose transfer never completes simply
+never produces the second record. Records are queued only where telemetry export
+is configured, but the facts are latched whether or not it is, so turning a
+destination on later still publishes the plans that were in flight while it was
+off.
+
+| Attribute | Events | Meaning |
+| --- | --- | --- |
+| `event` | both | `planned` or `seeding_started`. |
+| `iris.plan.id` | both | The join key: stable across both records of one plan, and distinct across two plans for the same device and image. |
+| `iris.transfer.id` | both | The id the device stamps on every observation and terminal report for this transfer — the join to `iris.device.transfer.report`. |
+| `iris.device.id`, `device.id` | both | The same device id under both spellings. Emitted deliberately, so a query joining either existing record's convention works without a coalesce; an exported attribute cannot be withdrawn additively, so this is a permanent commitment. |
+| `iris.image.id` | both | Catalog image id. |
+| `iris.torrent.info_hash` | both | The image's torrent, as captured when the plan was minted. Omitted when the plan captured none. |
+| `iris.transfer.planned_at` | both | When the assignment minted the plan. Repeated on the `seeding_started` record on purpose, so planned→seeding duration is computable from that one record without joining back to a `planned` record a bounded queue may have dropped. |
+| `iris.transfer.seeding_started_at` | `seeding_started` | The latched promotion instant described above. |
+| `iris.transfer.checksum_verified_at`, `iris.transfer.tracker_seeder_at` | `seeding_started` | The two preconditions, exported separately so it is visible which one was the laggard: a device whose sha256 of a ~1.2 GB image runs minutes after aria2 first announced `left = 0` shows `tracker_seeder_at` well ahead of `checksum_verified_at`, and the reverse ordering means the swarm, not the device, was the wait. |
+| `iris.device.observed_at` | `seeding_started` | The attesting report's device-clock instant, as an epoch float — named exactly as `iris.device.transfer.report` names it. |
+| `event.id` | both | `<plan_id>.<event>`, derived and never minted per emission, so a replay after a crash between the queue accepting a record and its marker landing carries an identical key the backend can dedupe. |
+| `iris.telemetry.schema.version` | both | `2`. A new record name is not a schema revision; nothing existing changed. |
+
+The four timestamp attributes are RFC3339 in UTC with **exactly** three
+fractional digits and a literal `Z` (`2026-09-02T14:03:11.482Z`), which is what
+the Splunk extraction `%Y-%m-%dT%H:%M:%S.%N%Z` needs: a whole-second instant
+rendered without the fraction, or a `+00:00` offset in place of the `Z`, fails
+that pattern outright. An attribute whose source value is missing or uncoercible
+is omitted from the record entirely — an absent attribute means *not known*, and
+nothing here is defaulted. `timeUnixNano` is the record's **source** instant
+(`planned_at`, or `seeding_started_at`), not the emit instant and not an
+ingestion time; this is the opposite choice from `iris.device.transfer.report`,
+which times off the server's `received_at` because the only thing the server
+knows for certain about a device report is when it arrived. Its trailing digits
+are an artefact of converting a float epoch to nanoseconds, not precision.
+
+A `planned` record, exactly as exported:
+
+```json
+{
+  "timeUnixNano": "1788357791482000128",
+  "eventName": "iris.transfer.lifecycle",
+  "severityNumber": 9,
+  "severityText": "INFO",
+  "body": { "stringValue": "transfer lifecycle planned" },
+  "attributes": [
+    { "key": "otel.log.name", "value": { "stringValue": "iris.transfer.lifecycle" } },
+    { "key": "iris.telemetry.schema.version", "value": { "intValue": "2" } },
+    { "key": "event", "value": { "stringValue": "planned" } },
+    { "key": "iris.transfer.id", "value": { "stringValue": "4b7e0c92d1a54f38a6c25e91b307fd6c" } },
+    { "key": "iris.plan.id", "value": { "stringValue": "9f3c1a77b0d24e5188ac0b6f7d21e4a3" } },
+    { "key": "iris.device.id", "value": { "stringValue": "100.92.9.3" } },
+    { "key": "device.id", "value": { "stringValue": "100.92.9.3" } },
+    { "key": "iris.image.id", "value": { "stringValue": "cat9k_iosxe.26.01.01" } },
+    { "key": "iris.torrent.info_hash", "value": { "stringValue": "3a9f1c0b8e7d6452af10cd3b92e5170864bd2fa1" } },
+    { "key": "iris.transfer.planned_at", "value": { "stringValue": "2026-09-02T14:03:11.482Z" } },
+    { "key": "event.id", "value": { "stringValue": "9f3c1a77b0d24e5188ac0b6f7d21e4a3.planned" } }
+  ]
+}
+```
+
+The `seeding_started` record for the same plan, 24 minutes later. The device
+announced `left = 0` at 14:22:57, and its sha256 of the staged file only
+finished — and was reported and accepted — at 14:27:24, so the later of the two,
+the checksum, is the promotion instant:
+
+```json
+{
+  "timeUnixNano": "1788359244118000128",
+  "eventName": "iris.transfer.lifecycle",
+  "severityNumber": 9,
+  "severityText": "INFO",
+  "body": { "stringValue": "transfer lifecycle seeding_started" },
+  "attributes": [
+    { "key": "otel.log.name", "value": { "stringValue": "iris.transfer.lifecycle" } },
+    { "key": "iris.telemetry.schema.version", "value": { "intValue": "2" } },
+    { "key": "event", "value": { "stringValue": "seeding_started" } },
+    { "key": "iris.transfer.id", "value": { "stringValue": "4b7e0c92d1a54f38a6c25e91b307fd6c" } },
+    { "key": "iris.plan.id", "value": { "stringValue": "9f3c1a77b0d24e5188ac0b6f7d21e4a3" } },
+    { "key": "iris.device.id", "value": { "stringValue": "100.92.9.3" } },
+    { "key": "device.id", "value": { "stringValue": "100.92.9.3" } },
+    { "key": "iris.image.id", "value": { "stringValue": "cat9k_iosxe.26.01.01" } },
+    { "key": "iris.torrent.info_hash", "value": { "stringValue": "3a9f1c0b8e7d6452af10cd3b92e5170864bd2fa1" } },
+    { "key": "iris.transfer.planned_at", "value": { "stringValue": "2026-09-02T14:03:11.482Z" } },
+    { "key": "iris.transfer.seeding_started_at", "value": { "stringValue": "2026-09-02T14:27:24.118Z" } },
+    { "key": "iris.transfer.checksum_verified_at", "value": { "stringValue": "2026-09-02T14:27:24.118Z" } },
+    { "key": "iris.transfer.tracker_seeder_at", "value": { "stringValue": "2026-09-02T14:22:57.905Z" } },
+    { "key": "iris.device.observed_at", "value": { "doubleValue": 1788359241.7 } },
+    { "key": "event.id", "value": { "stringValue": "9f3c1a77b0d24e5188ac0b6f7d21e4a3.seeding_started" } }
+  ]
+}
+```
+
+### Rolling this change
+
+IRIS ships a single shared on-device agent, so the `plans` key and the agent
+that adopts it roll together. Per the shared-agent rule, any change under
+`device/agent/` requires a fresh Guest Shell bundle, both IOx tars and
+`iris-xr.rpm` before device rollout; see
+[Embedded agent packages](development.md#embedded-agent-packages).
+
+A device that has not yet received the bundle ignores `plans` and keeps minting
+its own `transfer_id`, so its plans emit `planned` and never `seeding_started`.
+There is deliberately **no** fallback that promotes a plan from a report bearing
+some other transfer's id.
 
 ## Device agent config keys
 

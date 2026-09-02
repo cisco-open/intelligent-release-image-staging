@@ -11,6 +11,75 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+### Added
+- **Transfer lifecycle telemetry.** Every assignment now mints a *plan*: the
+  server writes a `plan_id`, `transfer_id`, `planned_at` and the image's
+  torrent info hash into the device's `policy.json` row, in the same atomic
+  write as the assignment itself, and the agent adopts that `transfer_id`
+  instead of minting its own — so one transfer carries one identity from the
+  moment it is approved to the moment it seeds. The tracker exports two OTLP
+  log records per plan under the new event name `iris.transfer.lifecycle`:
+  `planned` when the assignment is made, and `seeding_started` only once
+  **both** a terminal device report bearing that plan's own `transfer_id` has
+  verified the file's sha256 **and** this tracker has seen the device announce
+  `left = 0` on that image's torrent under its own authenticated principal.
+  Either fact alone would lie: aria2 announces `left = 0` the instant the last
+  piece lands, minutes before the agent's sha256 of a ~1.2 GB image runs, and
+  the device never talks to the tracker at all. The four timestamp attributes
+  are RFC3339 UTC with exactly three fractional digits and a literal `Z`
+  (`2026-09-02T14:03:11.482Z`), and each record's OTLP event time is the
+  instant it describes rather than the moment it was exported. Purely
+  additive: no existing record, attribute, log name, or event time changed and
+  `iris.telemetry.schema.version` stays `2`. As everywhere else in IRIS this is
+  staging telemetry — nothing is installed, activated, or reloaded. See
+  [Transfer lifecycle](docs/zensical/reference.md#transfer-lifecycle) and
+  [Observability](docs/zensical/observability.md#log-attributes-operator-contract).
+- Each lifecycle event is exported **exactly once**, including across a server
+  restart, from durable receipts in the new tracker-owned state file
+  `<state>/transfer-lifecycle.json`. That file is derived state — identity
+  lives in `policy.json` — so it is safe to delete: the next sample pass
+  rebuilds every row with the same ids, and any record re-sent afterwards is
+  byte-identical under the same deterministic `event.id`, which a backend
+  dedupes rather than double-counting. It is bounded at 4096 plans, prunes
+  rows that owe nothing a week after their last write, and reports what it
+  dropped instead of dropping it quietly. The facts behind a seeding event are
+  latched whether or not telemetry export is switched on, so enabling a
+  destination later still publishes the transfers that were in flight while it
+  was off.
+- A plan is minted when an image **enters** a device's approved set and carried
+  forward verbatim while it stays there, so a repeat Apply — including one that
+  only touches some other image, and the quarantine auto-unassign rewrite —
+  never re-mints and never restarts an in-flight transfer's identity.
+  Unassigning and re-assigning the same image mints a genuinely new plan, which
+  is what keeps two successive transfers of the same image to the same device
+  distinct in the telemetry. When that second plan lands on an image the device
+  has already staged, the agent re-hashes the staged file once so the new
+  transfer is attested by its own checksum instead of inheriting the previous
+  one's; the syslog tags `REPLAN` and `REPLAN-VERIFY` record it on the device.
+  `GET /v1/devices/<id>/policy` gains a `plans` map alongside the existing
+  approval keys, carrying only `plan_id` and `transfer_id`; an agent that
+  predates the key ignores it, and the server's internal `get_policy()`
+  contract is unchanged.
+
+### Changed
+- **Standing assignments made before this release carry no plan until they are
+  Applied once more.** Until then their devices keep minting their own transfer
+  ids and their plans emit no lifecycle events at all. Re-assign from the
+  console, or re-run `tools/apply-assignments.sh` — it is idempotent, and an
+  image that already carries a plan keeps it.
+- **A shared-agent change ships in three packages.** `device/agent/` changed, so
+  a fresh Guest Shell bundle, **both** IOx tars and `iris-xr.rpm` must be built
+  and republished before device rollout — `tools/provision-iox-packages.sh` and
+  `tools/build-xr-package.sh --out artifacts/` after the server rebuild.
+  `tools/check-package-freshness.sh` detects certificate drift, not stale
+  source, so a green result does not waive this. Until a device has the new
+  bundle it keeps minting its own transfer id, and its plans emit `planned` and
+  never `seeding_started`: there is deliberately no fallback that promotes a
+  plan from a report bearing a different transfer's id, because that would mean
+  publishing "seeding" on the strength of a checksum computed for some other
+  transfer. Silence, not a wrong answer — and the tracker counts those plans in
+  `plans_awaiting_report` so the rollout gap is visible rather than inferred.
+
 ## [2026.09.01]
 
 ### Added

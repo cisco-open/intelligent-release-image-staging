@@ -25,6 +25,20 @@ removes them on sight; see observe_peers.)
 tele['peer_transfer_records'] holds the one exact per-peer byte measurement (folded in
 from the aria2 --on-bt-download-complete hook's sidecar; see
 parse_peer_transfer_snapshot). It is a counter read once, never a sampled rate.
+
+tele['plan_id'] + tele['transfer_id'] are the transfer identity the SERVER
+minted at assignment time and this agent adopted from the policy body (see
+adopt_plan, called from iris_agent._stage_image once that image's catalog
+lookup and filename whitelist have passed — adopting any earlier materialises a
+record for an image the device may never stage, and the park pass cannot retire
+one of those); tele['replan_verify'] is the one-shot flag adopt_plan raises when
+a new plan lands on an image that is already staged and placed. All three obey the
+ADDITIVE-ONLY rule above: they are per-image keys under state[img_id]['tele'],
+they add no TOP-LEVEL state key, and iris_agent._STATE_SCHEMA must NOT be bumped
+for them — a bump clears every 'copied' flag and re-copies ~1.2 GB per device
+across the whole fleet to gain nothing (an agent that reads a state file written
+before these keys existed simply finds them absent, which is exactly the
+no-server-plan case adopt_plan and ensure_transfer_id already handle).
 """
 import ipaddress
 import json
@@ -121,7 +135,12 @@ def ensure_transfer_id(state, img_id):
     three distinct ids. P1
     boundaries (changed hash / local loss) keep the same image id and its stored
     transfer, so they intentionally reuse the existing id — dedupe/freshness
-    still advance via report_id/sample_seq."""
+    still advance via report_id/sample_seq. This is now the FALLBACK path: when
+    the server sends a plan for this image, adopt_plan has already stored its
+    transfer_id earlier in the tick (in _stage_image, ahead of the
+    steady-state short-circuit and of every aria_add) and this get-or-mint
+    returns that value untouched, so a mint here means the server offered no
+    plan."""
     tele = _tele(state, img_id)
     tid = tele.get("transfer_id")
     if not tid:
@@ -149,6 +168,154 @@ def clear_transfer(state, img_id):
     if isinstance(tele, dict):
         tele.pop("transfer_id", None)
         tele.pop("sample_seq", None)
+
+
+def adopt_plan(state, img_id, plan_id, transfer_id):
+    """Adopt the SERVER-MINTED plan for `img_id` from the policy body. Returns
+    None (nothing adopted), 'same' (already on this plan), or 'new' (a plan
+    boundary was crossed and the image's telemetry bag was reset).
+
+    WHY THE SERVER MINTS AND THE DEVICE ADOPTS. Two facts the device cannot
+    know made a device-minted transfer_id unable to answer "when was this
+    transfer decided, and when did it start seeding":
+      * The id is minted too late. ensure_transfer_id's first call of a tick is
+        _build_observation, which the download path reaches only AFTER aria2
+        has already been told to start — so the device's own id can never date
+        the DECISION, only the observation of it.
+      * The id cannot separate two plans. The acquisition-cycle boundary the
+        device does own is the park pass (clear_transfer), and it fires only
+        when the agent OBSERVES an image leaving the assignment set at a ~60 s
+        tick boundary. An unassign+reassign of the same image inside one tick
+        window is invisible: the record never goes stale, park never runs, and
+        the second plan silently inherits the first plan's id.
+    The server has both instants exactly, because every assignment path funnels
+    through one write. So it mints, and this function is the whole of the
+    device's half, called from _stage_image once that image's catalog lookup
+    and filename whitelist have passed: seeding tele['transfer_id'] here is
+    what makes every
+    downstream reader (the observation envelope, the heartbeat, both report
+    builders, the RPC-down envelope) inherit the server's id with no further
+    plumbing, since ensure_transfer_id is a get-or-mint and the only writer of
+    that key in the tree.
+
+    WHY BOTH IDS ARE VALIDATED AS 32 LOWERCASE HEX, AND WHY REJECTION IS
+    SILENT. transfer_id is re-validated against the same shape on the server at
+    ingest, and a non-hex id there fails the WHOLE report or heartbeat envelope
+    — so a garbage id adopted here would cost the device its telemetry, not
+    just its plan. Anything that does not validate is therefore refused while
+    touching NO state, which also makes the old-server and no-plans cases free:
+    they leave ensure_transfer_id's mint path exactly as it is today.
+
+    WHY 'same' TOUCHES NOTHING. Every steady tick re-reads the policy and calls
+    this. Rewriting the bag on an unchanged plan would reset sample_seq, drop a
+    frozen report mid-retry and disarm a pending terminal report, i.e. break a
+    transfer in flight once a minute. Equality of BOTH ids is the test: an
+    identical plan_id with a different transfer_id is a server that re-minted,
+    and that is a real boundary.
+
+    WHY 'new' REPLACES THE BAG WHOLESALE rather than popping keys. Everything in
+    tele — sample_seq, frozen_report, event, report_pending/attempts/next_ts/
+    sent_ts, started_ts, done_ts, content_sha256_state, peers, peers_v2,
+    peer_transfer_records — is scoped to the transfer that is now over, and
+    carrying any of it forward would attest the NEW transfer with the OLD
+    transfer's evidence. Wholesale replacement is also the fix for a future
+    key: a field added later is dropped at the boundary by construction instead
+    of being forgotten in a pop list. state[img_id]'s own keys ('done', 'sha',
+    'copied', 'root_file') are facts about the FILE on disk, not about the
+    transfer, and legitimately survive.
+
+    WHY replan_verify. A second plan for an image the device ALREADY has staged
+    and placed would otherwise never produce a terminal report under the new
+    transfer_id: _stage_image short-circuits on state[img_id]['done'] and
+    ['copied'] with phase 'steady', and a terminal report is armed only on
+    phase 'copied'/'seeding-only'. Those two flags live in the image record,
+    not in this bag, so no amount of telemetry reset reaches them. Raising the
+    flag here — only on a real plan boundary, and only when the image is
+    already done AND copied — tells the short-circuit to re-hash the staged
+    file ONCE (take_replan_verify) so the new transfer is attested by evidence
+    gathered UNDER the new transfer, never by a checksum inherited from the
+    previous one.
+
+    WHY 'done' AND 'copied' ARE NOT PROOF THE BYTES ARE STILL THERE, and who
+    settles that. Both flags are facts this record last believed, not a stat of
+    the filesystem, and the park pass deliberately leaves them set while
+    DELETING the staged file (it keeps only the root copy). So a
+    park-then-replan raises the flag over content that has to be re-downloaded
+    first. This function cannot tell — it has no filesystem access by design,
+    which is what keeps it pure and testable — so the flag is raised
+    optimistically here and the caller settles it: _stage_image's steady-state
+    short-circuit consumes it when the staged file really is present, and its
+    re-acquire fall-through (the RECHECK branch) DROPS it when it is not, so a
+    stale flag can never survive a re-download and re-hash ~1.2 GB that the
+    download path just hashed anyway. The park pass drops it too, for a flag
+    that outlived a tick through a crash."""
+    if not isinstance(plan_id, str) or not _HEX32.match(plan_id):
+        return None
+    if not isinstance(transfer_id, str) or not _HEX32.match(transfer_id):
+        return None
+    rec = state.get(img_id)
+    rec = rec if isinstance(rec, dict) else None
+    tele = rec.get("tele") if rec is not None else None
+    if isinstance(tele, dict) and tele.get("plan_id") == plan_id \
+            and tele.get("transfer_id") == transfer_id:
+        return "same"
+    fresh = {"plan_id": plan_id, "transfer_id": transfer_id}
+    if rec is not None and rec.get("done") and rec.get("copied"):
+        fresh["replan_verify"] = True
+    # CARRY AN ARMED-BUT-UNDELIVERED TERMINAL REPORT ACROSS THE BOUNDARY.
+    # The wholesale reset above is what makes the new transfer's telemetry
+    # honest -- none of the previous transfer's measurements may attest this
+    # one. But a report that was already FROZEN and is still being retried is
+    # not a measurement of the new transfer at all: it is a finished statement
+    # about the OLD one, carrying the old transfer_id inside the frozen body,
+    # and the server matches it back to the old plan by that id. Dropping it
+    # here loses the previous transfer's only completion evidence, and nothing
+    # ever re-arms it -- the image is already done+copied, so _stage_image
+    # takes the steady-state short-circuit and never rebuilds a report for a
+    # transfer that has finished. That is a silent data loss on every plan
+    # boundary, and fleet-wide on the first tick after an agent upgrade, where
+    # every staged image crosses a boundary at once (no stored plan_id).
+    #
+    # Only the DELIVERY MACHINERY travels: what the retry loop at
+    # iris_agent.py:525-543 needs to finish sending the frozen body, plus
+    # avg_bps, which it reads to classify the link tier (a property of the
+    # link, not of the transfer). Deliberately NOT carried: sample_seq (the
+    # new transfer starts its own sequence), event, peers, peer_transfer_records
+    # and the byte/timing measurements -- and above all content_sha256_state,
+    # which is the whole point of the reset: a 'verified' inherited from the
+    # previous transfer would attest content this transfer never hashed.
+    if isinstance(tele, dict) and tele.get("report_pending"):
+        for k in ("frozen_report", "report_pending", "report_attempts",
+                  "report_next_ts", "avg_bps"):
+            if k in tele:
+                fresh[k] = tele[k]
+    state.setdefault(img_id, {})["tele"] = fresh
+    return "new"
+
+
+def take_replan_verify(state, img_id):
+    """Consume the one-shot re-verify flag adopt_plan raised on a plan boundary
+    for an already-staged image: True exactly once per boundary, False forever
+    after.
+
+    Pop-and-return, never a plain read: the caller re-hashes a ~1.2 GB staged
+    file when this answers True, and a flag that survived its own consumption
+    would re-hash on every 60 s tick for the life of the assignment. Popping
+    before the hash runs is deliberate too — a hash that fails is a decision
+    already made (the staged copy is discarded), not a reason to try again next
+    tick.
+
+    Also called for its SIDE EFFECT, with the answer thrown away, wherever the
+    flag has become meaningless: _stage_image's re-acquire fall-through (the
+    staged bytes it would have hashed are gone or stale, and the download path
+    about to run hashes the replacements itself) and the park pass (the image
+    left the set and park deleted the staged copy). Both are the same idea as
+    the pop above — the flag is a one-shot permission to hash content that is
+    sitting right there, and it must not outlive that content."""
+    tele = (state.get(img_id) or {}).get("tele")
+    if not isinstance(tele, dict):
+        return False
+    return bool(tele.pop("replan_verify", False))
 
 
 def next_sample_seq(state, img_id):

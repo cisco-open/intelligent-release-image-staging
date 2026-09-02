@@ -763,7 +763,15 @@ class CatalogStore:
         reconciler currently has quarantined (see apply_hash_verification()/
         release_quarantine()) -- unassigning (an *ids* that DROPS a
         quarantined id, or an empty *ids*) is always allowed; only naming
-        one in the set being written is refused."""
+        one in the set being written is refused.
+
+        Every write also maintains the row's ``plans`` map -- one transfer
+        plan (plan_id, transfer_id, planned_at, info_hash) per image id in
+        the set, minted here and carried forward verbatim for any id that
+        was already assigned. This is the sole mint site for both ids; see
+        the comment at the write below for why the merge is load-bearing.
+        A refused write -- PolicyConflict or QuarantinedImage -- mints
+        nothing, because both checks run before any plan is computed."""
         if approved_image_id is not None and approved_image_ids is not None:
             raise ValueError(
                 "pass approved_image_id or approved_image_ids, not both")
@@ -799,6 +807,65 @@ class CatalogStore:
                     if [str(i) for i in expect_image_ids] != current:
                         raise PolicyConflict(current)
                 pol = self._read(self.policy_path)
+                # --- transfer plans: minted here, and ONLY here ---
+                # A plan is the server's durable name for one intended
+                # transfer of one image to one device: a plan_id, the
+                # transfer_id the device will adopt and stamp on every
+                # observation and terminal report, the instant the decision
+                # was made, and the info_hash the tracker will see announced.
+                # Minting at assignment time (rather than on the device, at
+                # download time) is what makes two consecutive assignments of
+                # the SAME image distinguishable -- an unassign+reassign
+                # inside one agent tick window is invisible to the device, so
+                # a device-minted id would silently merge the two into one.
+                #
+                # The write below replaces the WHOLE row, so the plans map has
+                # to be merged forward explicitly: an image id that was
+                # already in the set keeps its existing plan row verbatim.
+                # Without this merge every Apply -- including one that only
+                # adds or removes some OTHER image, and including the
+                # quarantine auto-unassign path, which rewrites the row for
+                # devices it is not otherwise touching -- would re-mint a new
+                # transfer_id for every image the device is already pulling,
+                # restarting each in-flight transfer's identity and orphaning
+                # every report already in flight under the old id.
+                #
+                # An id that LEAVES the set simply has no entry in the new
+                # map, so a later re-assignment mints a genuinely new plan --
+                # which is exactly the distinction the replan case needs.
+                #
+                # Both ids are 32 lowercase hex (secrets.token_hex(16)):
+                # transfer_id is re-validated against _HEX32 on ingest (see
+                # _sanitize_report_v2 above and live_samples), and a value
+                # that fails it would fail the device's WHOLE report, so the
+                # shape is a hard requirement rather than a convention.
+                # A carried-forward row is re-validated for the same reason:
+                # policy.json is an operator-editable file on disk, and a
+                # hand-edited or truncated plan row must be re-minted here
+                # rather than travel to the device and poison its reports.
+                prev = pol.get(device_id)
+                prev = prev if isinstance(prev, dict) else {}
+                prev_plans = prev.get("plans")
+                prev_plans = prev_plans if isinstance(prev_plans, dict) else {}
+                planned_at = time.time()
+                plans = {}
+                for iid in ids:
+                    row = prev_plans.get(iid)
+                    if isinstance(row, dict) \
+                            and _HEX32.match(str(row.get("plan_id", ""))) \
+                            and _HEX32.match(str(row.get("transfer_id", ""))):
+                        plans[iid] = row        # carry forward -- NEVER re-mint
+                        continue
+                    # info_hash is captured from the catalog entry set_policy
+                    # already has in hand, so the tracker can join an announce
+                    # back to this plan without re-reading catalog.json at a
+                    # later, possibly changed, moment. None on the legacy
+                    # bootstrap path where catalog.json does not exist yet.
+                    entry = self.get_image(iid) or {}
+                    plans[iid] = {"plan_id": secrets.token_hex(16),
+                                  "transfer_id": secrets.token_hex(16),
+                                  "planned_at": planned_at,
+                                  "info_hash": entry.get("info_hash_hex")}
                 # Keep writing approved_image_id (first-or-None) alongside
                 # approved_image_ids: raw policy.json readers that predate the
                 # ordered set (gui_server's device-view merge and Overview
@@ -806,7 +873,8 @@ class CatalogStore:
                 # get_policy()'s normalisation) must keep seeing an assignment
                 # without themselves knowing about the plural key.
                 pol[device_id] = {"approved_image_id": ids[0] if ids else None,
-                                  "approved_image_ids": ids}
+                                  "approved_image_ids": ids,
+                                  "plans": plans}
                 _atomic_write_json(self.policy_path, pol)
 
     def get_policy(self, device_id):
@@ -832,6 +900,45 @@ class CatalogStore:
         ids = [str(i) for i in ids if i]
         return {"approved_image_id": ids[0] if ids else None,
                 "approved_image_ids": ids}
+
+    def device_policy_view(self, device_id):
+        """The WIRE projection of a device's policy: what GET
+        /v1/devices/<id>/policy serves to the agent.
+
+        get_policy() is the INTERNAL contract and is deliberately left at its
+        two keys -- set_policy's own compare-and-set, the heartbeat
+        live-sample admission gate and the v2 ingest gate all read it, and
+        several tests pin its exact shape as the guard that it never widens.
+        This wrapper adds the one thing the device needs and nothing else.
+
+        Only ``plan_id`` and ``transfer_id`` are projected. ``planned_at`` and
+        ``info_hash`` stay server-side: the agent has no use for either (it
+        gets its info_hash from the personalised torrent), and shipping a
+        field is a promise to keep shipping it.
+
+        A plan row is projected only when BOTH ids are 32 lowercase hex and
+        the image is in the normalised approved set. Anything else -- a
+        hand-edited policy.json, a row for an image that has since been
+        unassigned -- is omitted rather than sent through: the agent's
+        adoption path rejects a malformed id anyway, and a transfer_id that
+        fails _HEX32 would fail the device's whole report on the way back."""
+        view = self.get_policy(device_id)
+        rec = self._read(self.policy_path).get(device_id)
+        rows = rec.get("plans") if isinstance(rec, dict) else None
+        rows = rows if isinstance(rows, dict) else {}
+        plans = {}
+        for image_id in view["approved_image_ids"]:
+            row = rows.get(image_id)
+            if not isinstance(row, dict):
+                continue
+            plan_id = str(row.get("plan_id", ""))
+            transfer_id = str(row.get("transfer_id", ""))
+            if not _HEX32.match(plan_id) or not _HEX32.match(transfer_id):
+                continue
+            plans[image_id] = {"plan_id": plan_id,
+                               "transfer_id": transfer_id}
+        view["plans"] = plans
+        return view
 
     def list_policies(self):
         return self._read(self.policy_path)
@@ -1483,7 +1590,12 @@ class Catalog:
             return self._json(200, {"devices": self.store.list_devices()})
         if len(parts) == 4 and parts[:2] == ["v1", "devices"] \
                 and parts[3] == "policy":
-            return self._json(200, self.store.get_policy(parts[2]))
+            # device_policy_view, not get_policy: the agent adopts the
+            # server-minted transfer_id from the ``plans`` map, and this poll
+            # is the earliest point of the agent's tick -- ahead of the
+            # download and of every telemetry touch -- so the id is in hand
+            # before anything can mint one of its own.
+            return self._json(200, self.store.device_policy_view(parts[2]))
         return self._json(404, {"error": "not found"})
 
     # Extra response headers the handler must emit for a personalized torrent

@@ -220,7 +220,8 @@ Terminal per-device reports, tracker lifecycle events, peer-policy operations an
 measured peer rates and byte totals flow as OTLP logs with OpenTelemetry semantic-convention
 names. Event identity is the top-level `eventName` field:
 `iris.device.transfer.report` (v2 reports), `iris.device.report` (legacy v1
-reports), `iris.tracker.peer` (tracker lifecycle), `iris.peer.policy`,
+reports), `iris.tracker.peer` (tracker lifecycle), `iris.transfer.lifecycle`
+(server-side plan lifecycle), `iris.peer.policy`,
 `iris.swarm.peer_rate`, `iris.swarm.peer_bytes` (origin-side traced bytes)
 and `iris.device.peer_transfer_record` (device-side exact per-peer bytes).
 
@@ -238,7 +239,12 @@ Key attributes per event. `iris.device.transfer.report`: `device.id`,
 `iris.enforcement.desired_ip_count`. `iris.swarm.peer_rate`: `iris.principal`,
 `iris.image.id`, `iris.torrent.info_hash`, `network.peer.address`,
 `network.peer.port`, `iris.transfer.peer_send_bps`, `iris.torrent.left`,
-`iris.peer.role`.
+`iris.peer.role`. `iris.transfer.lifecycle`: `event`, `iris.transfer.id`,
+`iris.plan.id`, `iris.device.id`, `device.id`, `iris.image.id`,
+`iris.torrent.info_hash`, `iris.transfer.planned_at`, and — on the
+`seeding_started` event only — `iris.transfer.seeding_started_at`,
+`iris.transfer.checksum_verified_at`, `iris.transfer.tracker_seeder_at` and
+`iris.device.observed_at`. That record is described in full below.
 
 The attributes `device.model.identifier`, `iris.link.tier`,
 `iris.transfer.throughput_avg`, `network.transport` and the structured
@@ -246,6 +252,282 @@ The attributes `device.model.identifier`, `iris.link.tier`,
 lives in `iris.swarm.peer_rate` and the byte records described below. `iris.transfer.peers_total` still
 carries the exact distinct peer count, saturating at the device's 512-IP
 tracking cap; rows beyond the named cap are counted there, not listed.
+
+### Transfer lifecycle events
+
+Every other log record on this page describes something a *device* said or
+something the tracker measured on the wire. The `iris.transfer.lifecycle`
+record is different: it is the **server's own account of a transfer plan**,
+from the moment an operator assigned an image to the moment the server could
+prove the device holds that image and is seeding it. It answers the one
+question the per-device reports cannot answer on their own — *how long did it
+take, from the decision to the device becoming a source for its neighbours* —
+and it answers it on a single clock, because both instants are the tracker's.
+
+A **plan** is the decision that one device should hold one image. It is minted
+by the server when an image id **enters** a device's approved set, and it
+carries two ids for the life of that transfer:
+
+| Attribute | Meaning |
+| --- | --- |
+| `iris.plan.id` | 32 lowercase hex. Identifies the *decision*. Stable across both events of one plan, and distinct across two plans for the same device and image. **This is the key to group on.** |
+| `iris.transfer.id` | 32 lowercase hex. Identifies the *transfer* the device performs for that plan, and is the same value the device stamps on its own `iris.device.transfer.report`. This is the join between the two record families. |
+
+Re-applying an assignment that has not changed does **not** mint new ids — an
+in-flight transfer keeps its identity across repeated Applies. Unassigning and
+re-assigning the same image *does*, so the two attempts stay separately
+measurable. See [Policy schema](reference.md#policy-schema) for where the ids
+live on disk.
+
+The record carries exactly two `event` values, in the only order they can
+occur:
+
+| `event` | Meaning |
+| --- | --- |
+| `planned` | The assignment was recorded. Emitted once per plan, whether or not the transfer ever completes. |
+| `seeding_started` | The server has confirmed the device holds verified content **and** is announcing itself as a seeder for it. Emitted at most once per plan. |
+
+There is deliberately no `downloading` event between them. The server has no
+honest instant for one: it learns a transfer started only from the device's
+next heartbeat, up to a minute later.
+
+#### A `planned` event
+
+```json
+{
+  "timeUnixNano": "1788352991482000128",
+  "eventName": "iris.transfer.lifecycle",
+  "severityNumber": 9,
+  "severityText": "INFO",
+  "body": { "stringValue": "transfer lifecycle planned" },
+  "attributes": [
+    { "key": "otel.log.name", "value": { "stringValue": "iris.transfer.lifecycle" } },
+    { "key": "iris.telemetry.schema.version", "value": { "intValue": "2" } },
+    { "key": "event", "value": { "stringValue": "planned" } },
+    { "key": "iris.transfer.id", "value": { "stringValue": "4d1a6e0c73b94f2ea85d10c6b7f3928a" } },
+    { "key": "iris.plan.id", "value": { "stringValue": "9f2c4b7a1d8e4f60b3a25c9107de4412" } },
+    { "key": "iris.device.id", "value": { "stringValue": "100.92.9.3" } },
+    { "key": "device.id", "value": { "stringValue": "100.92.9.3" } },
+    { "key": "iris.image.id", "value": { "stringValue": "cat9k_iosxe.26.01.01" } },
+    { "key": "iris.torrent.info_hash", "value": { "stringValue": "c8f4e2a1b09d7635fe1428a0d5c93b7614e0af82" } },
+    { "key": "iris.transfer.planned_at", "value": { "stringValue": "2026-09-02T12:43:11.482Z" } },
+    { "key": "event.id", "value": { "stringValue": "9f2c4b7a1d8e4f60b3a25c9107de4412.planned" } }
+  ]
+}
+```
+
+#### A `seeding_started` event
+
+The same plan, ten minutes later. It repeats every attribute of the `planned`
+record — including `iris.transfer.planned_at` — so the planned-to-seeding
+duration is computable from this one record, without joining back to a
+`planned` event that a bounded queue may have dropped.
+
+```json
+{
+  "timeUnixNano": "1788353624117000192",
+  "eventName": "iris.transfer.lifecycle",
+  "severityNumber": 9,
+  "severityText": "INFO",
+  "body": { "stringValue": "transfer lifecycle seeding_started" },
+  "attributes": [
+    { "key": "otel.log.name", "value": { "stringValue": "iris.transfer.lifecycle" } },
+    { "key": "iris.telemetry.schema.version", "value": { "intValue": "2" } },
+    { "key": "event", "value": { "stringValue": "seeding_started" } },
+    { "key": "iris.transfer.id", "value": { "stringValue": "4d1a6e0c73b94f2ea85d10c6b7f3928a" } },
+    { "key": "iris.plan.id", "value": { "stringValue": "9f2c4b7a1d8e4f60b3a25c9107de4412" } },
+    { "key": "iris.device.id", "value": { "stringValue": "100.92.9.3" } },
+    { "key": "device.id", "value": { "stringValue": "100.92.9.3" } },
+    { "key": "iris.image.id", "value": { "stringValue": "cat9k_iosxe.26.01.01" } },
+    { "key": "iris.torrent.info_hash", "value": { "stringValue": "c8f4e2a1b09d7635fe1428a0d5c93b7614e0af82" } },
+    { "key": "iris.transfer.planned_at", "value": { "stringValue": "2026-09-02T12:43:11.482Z" } },
+    { "key": "iris.transfer.seeding_started_at", "value": { "stringValue": "2026-09-02T12:53:44.117Z" } },
+    { "key": "iris.transfer.checksum_verified_at", "value": { "stringValue": "2026-09-02T12:53:44.117Z" } },
+    { "key": "iris.transfer.tracker_seeder_at", "value": { "stringValue": "2026-09-02T12:48:30.905Z" } },
+    { "key": "iris.device.observed_at", "value": { "doubleValue": 1788353602.0 } },
+    { "key": "event.id", "value": { "stringValue": "9f2c4b7a1d8e4f60b3a25c9107de4412.seeding_started" } }
+  ]
+}
+```
+
+An attribute is **absent when the value is not known** — never defaulted, never
+an empty string. A plan minted before its torrent existed carries no
+`iris.torrent.info_hash`; a report whose measurement window was unusable
+carries no `iris.device.observed_at`. A missing attribute is honest where a
+fabricated one is not, so write queries that tolerate absence rather than
+matching on a sentinel.
+
+The device id rides **twice**, as `iris.device.id` and as `device.id`.
+`iris.device.transfer.report` names it `device.id` and `iris.swarm.peer_bytes`
+names it `iris.device.id`, so emitting both lets either join be written without
+a coalesce. An attribute cannot be withdrawn once it has shipped, so this is a
+permanent commitment, made knowingly, and not a transitional duplication.
+
+#### The timestamp shape
+
+`iris.transfer.planned_at`, `iris.transfer.seeding_started_at`,
+`iris.transfer.checksum_verified_at` and `iris.transfer.tracker_seeder_at` are
+RFC 3339 **strings** with a fixed shape, which is contract:
+
+```
+2026-09-02T12:43:11.482Z
+```
+
+* **UTC**, always — the value is formatted from `gmtime`, so re-zoning a host
+  cannot change what an exported instant means.
+* **Exactly three fractional digits**, always present. A whole-second instant
+  is still written `...:11.000Z`, never `...:11Z`, so an extraction pattern
+  never faces a missing or variable-width field.
+* **A literal `Z`**, never `+00:00`. Splunk's `%Z` matches a zone *name* and
+  will not consume a numeric offset.
+
+The matching Splunk pattern is `%Y-%m-%dT%H:%M:%S.%N%Z`. These are string
+attributes by construction and need **no** numeric coercion — the "int64 rides
+the wire as a string" caveat that applies to the byte counters does not apply
+here.
+
+`timeUnixNano` on both records is the **source** instant — `planned_at` for
+`planned`, `seeding_started_at` for `seeding_started` — never the emit instant
+and never an ingestion time. This differs from `iris.device.transfer.report`,
+which times off the server's marker because the only thing it knows for
+certain about a device report is when it arrived.
+
+`iris.device.observed_at` is the odd attribute out, and is deliberately
+unchanged from how `iris.device.transfer.report` already reports it: a float
+epoch, on the **device's** clock, being the end of the attesting report's
+measurement window. It is a second clock. Show it, but never subtract it from
+the server instants above.
+
+#### What `seeding_started` proves
+
+Three conditions must hold before a plan is promoted, and all three are
+required:
+
+1. **The content is complete on the device.** The agent reached a terminal
+   report only after finding the staged file at the exact catalog size with no
+   aria2 control file beside it.
+2. **The checksum verified.** That same report carries
+   `content_sha256.state = verified`, computed by the device over the staged
+   file — and it carries **this plan's** `transfer_id`.
+3. **This tracker saw the device seeding.** The device's own aria2 announced
+   `left = 0` on the image's torrent, authenticated by the personalised
+   announce token that resolves to that device's principal.
+
+Conditions 1 and 2 arrive together on one report and are latched as
+`iris.transfer.checksum_verified_at` (the server-stamped marker time of the
+earliest attesting report). Condition 3 is latched separately as
+`iris.transfer.tracker_seeder_at`.
+
+Neither fact is sufficient alone, which is why both are exported. aria2 begins
+announcing `left = 0` the instant the last piece lands, while the agent's
+sha256 of a ~1.2 GB image does not start until its next tick and then runs for
+minutes: publishing on the tracker fact alone would announce "seeding" for
+content nobody has verified. Conversely the device can neither see nor attest
+the tracker fact — it never talks to the tracker; only its aria2 announces. The
+two attributes let an operator see **which** condition was the laggard:
+`tracker_seeder_at` well before `checksum_verified_at` is the ordinary case
+(the device was hashing); the reverse ordering means the swarm, not the device,
+was the wait.
+
+Each condition is latched **durably and independently** at first observation,
+because neither is durable in itself: a peer row is pruned after 60 seconds,
+popped outright on a `stopped` announce, and has its completion instant erased
+when a re-download begins. Requiring both to be visible in the same pass would
+let a vanishing peer row block the event permanently.
+
+`iris.transfer.seeding_started_at` is then `max(checksum_verified_at,
+tracker_seeder_at, planned_at)` — the instant the **last** condition became
+true, floored at the plan's own creation so a dashboard can never render a
+negative duration. All three inputs are server-clock instants from the same
+container, so `seeded − planned` is a single-clock subtraction.
+
+It is a **server observation**, not a device-attested instant. The tracker
+evaluates the conditions on its sample pass (`IRIS_SAMPLE_INTERVAL`, 15 s by
+default), so the value can be up to one pass late relative to the physical
+moment. It is latched once, before any record is built, and is never
+recomputed — so a replay after a crash carries the original value rather than a
+second, disagreeing one.
+
+#### Delivery: exactly once, with a stable identity
+
+Each event is emitted **once per plan**, and the markers are on disk, so a
+tracker restart does not re-emit an event that already shipped. This is
+stronger than the per-device report ring, which deliberately replays after a
+restart.
+
+`event.id` is derived from the plan — `<plan_id>.planned` and
+`<plan_id>.seeding_started` — never minted per emission. The two suffixes must
+differ, and do: the export queue refuses a key it is already carrying, so a
+shared id would make the second record vanish silently rather than fail
+loudly.
+
+The guarantee degrades to **at-least-once with a byte-identical record** in
+exactly two windows: a crash between the queue accepting a record and its
+marker landing on disk, and a corrupt lifecycle state file. Because the
+`event.id` and every timestamp are latched before the emit, a replay is a
+backend-side duplicate of a record you have already seen, never a second
+version of it. Deduplicate on `event.id`.
+
+The lifecycle state is *derived*: the plan ids live in the policy record, and
+deleting `<state>/transfer-lifecycle.json` costs only the markers. Every row
+rebuilds on the next pass with the same ids, and a bounded set of records is
+re-emitted under those same `event.id`s.
+
+Facts are latched whether or not OTLP export is switched on. Turning a
+destination on later publishes the plans that were already in flight, rather
+than losing their start instants.
+
+#### Why there is no weaker promotion path
+
+A plan is promoted only by a report bearing **that plan's** `transfer_id`.
+There is deliberately no fallback that promotes a plan from a report carrying
+some other transfer's id — accepting one would mean publishing "seeding" on the
+strength of a checksum computed for a different transfer, which is the one
+guarantee this event exists to make.
+
+IRIS ships a single shared on-device agent, so this change is rolled fleet-wide
+with the agent bundle: a change under `device/agent/` requires a fresh Guest
+Shell bundle, **both** IOx tars and `iris-xr.rpm` before device rollout. Until a
+device has that bundle it mints its own transfer id and its plans emit `planned`
+and never `seeding_started` — silence, not a wrong answer.
+
+Standing assignments made before this release carry no plan at all until they
+are applied once more, and emit nothing until then;
+`tools/apply-assignments.sh` is idempotent for images that already carry a
+plan.
+
+Two further cases where a plan legitimately stays at `planned` forever:
+
+* **The assignment was withdrawn while the device was still verifying.** A
+  terminal report for an image no longer in the device's approved set is
+  refused at ingest, so the checksum condition can never be met. The plan is
+  cancelled on the next pass and shows planned-never-seeded. The bytes may well
+  have landed; the server simply never received the attestation.
+* **The device announces on a legacy or rotated-out seeder credential.** Such a
+  peer is authenticated but unattributed — it resolves to a `legacy` principal
+  with no device identity (see [Legacy participants](#legacy-participants)) — so
+  it can never satisfy condition 3. This is intentional: an unattributed
+  announce is not evidence about a named device.
+
+#### Time-to-seed, as a query
+
+```
+index=iris "otel.log.name"="iris.transfer.lifecycle"
+| eval planned=strptime('iris.transfer.planned_at', "%Y-%m-%dT%H:%M:%S.%N%Z"),
+       seeded =strptime('iris.transfer.seeding_started_at', "%Y-%m-%dT%H:%M:%S.%N%Z")
+| stats min(planned) as planned, max(seeded) as seeded
+    by 'iris.transfer.id','iris.plan.id','iris.device.id','iris.image.id'
+| eval seconds_to_seed = seeded - planned
+```
+
+Grouping on `iris.plan.id` is what keeps two attempts at the same
+device-and-image pair from collapsing into one row. A plan that produced only a
+`planned` event yields a null `seeded` — that is the planned-never-seeded
+population, and it is worth alerting on directly rather than filtering away.
+
+There is deliberately **no** `iris.transfer.seconds_to_seeding` attribute and
+no `*_epoch` duplicates of the timestamps: `timeUnixNano` already carries the
+epoch on both records, and an attribute that ships once can never be withdrawn.
 
 ### Per-peer bytes (and what they do not cover)
 

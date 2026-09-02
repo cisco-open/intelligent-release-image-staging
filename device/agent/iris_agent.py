@@ -981,6 +981,15 @@ def _reconcile_set(deps, state, ids, stage_dir):
         # fresh download and mints a fresh transfer_id. This pass is the
         # cycle-boundary owner the old state.pop(prev) used to be.
         telemetry_report.clear_transfer(state, key)
+        # ...and with it any replan re-verify that was still owed. The flag is
+        # normally raised and consumed inside a single _stage_image call, so
+        # this is the durability net rather than the common path: state is only
+        # checkpointed at a few points in a tick, so a process killed between
+        # the raise and the consume can persist the flag, and an image that
+        # then leaves the set has no staged file left to hash — park just
+        # deleted it. Clearing here keeps that ghost from firing a pointless
+        # ~1.2 GB pass on whatever the image re-downloads when it comes back.
+        telemetry_report.take_replan_verify(state, key)
         # Provenance (Directive 2, reviewer PROBE2 fix): origin/download_started
         # describe a placement fact about this exact acquisition cycle, and
         # that cycle ends the moment the image leaves the assigned set —
@@ -1083,7 +1092,7 @@ def _send_set_heartbeat(deps, sid, state, ids, ticks):
 
 
 def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
-                 legacy_pointer=False):
+                 legacy_pointer=False, plan_row=None):
     """Stage ONE image of the assigned set and return its status string.
 
     This is the whole of the pre-multi-image run_once() from the catalog
@@ -1111,6 +1120,12 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
     The top-level state["image_id"] pointer IS still written here, for the
     first image of the set only (`legacy_pointer`), at the point in the tick
     the single-image agent wrote it — see below.
+
+    `plan_row` is this image's row of the policy body's `plans` map (the
+    server-minted transfer identity), or None when the server sent no plan for
+    it. Adoption happens here rather than in run_once because it must sit
+    BEHIND the catalog lookup and the filename whitelist — see the ADOPT THE
+    SERVER'S TRANSFER IDENTITY block below.
     """
     sid = cfg["device_id"]
     stage_dir = cfg["stage_dir"]
@@ -1137,6 +1152,49 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
     stage = os.path.join(stage_dir, fname)
     size = int(image["size"])
 
+    # ADOPT THE SERVER'S TRANSFER IDENTITY. `plan_row` carries the plan_id and
+    # transfer_id the server minted when it DECIDED this transfer. Adopting the
+    # transfer_id here is the whole of the device's half of the change:
+    # ensure_transfer_id is a get-or-mint and the ONLY writer of
+    # tele['transfer_id'] in this tree, so seeding the key makes the observation
+    # envelope, the heartbeat sample, both report builders and the
+    # aria2-RPC-down envelope all inherit the server's id with no further
+    # plumbing.
+    #
+    # WHY THIS EXACT CALL SITE — three constraints pin it, and moving it breaks
+    # one of them:
+    #   * BEFORE the steady-state short-circuit below. A plan boundary on an
+    #     already-staged image raises tele['replan_verify'], and that
+    #     short-circuit is the only thing that consumes it; adopting after it
+    #     would defer every replan re-verify by a full tick.
+    #   * BEFORE deps.aria_add() far below. The download must start under the
+    #     id the server minted at assignment time, not under one this agent
+    #     invents once the bytes are already moving.
+    #   * AFTER the catalog lookup and the filename whitelist above. This used
+    #     to run as a loop over the assigned ids up in run_once, which wrote
+    #     state[img_id]['tele'] for an image the device had not yet confirmed
+    #     it could stage at all. 'tele' is one of _IMAGE_ENTRY_FIELDS, so that
+    #     bare {'tele': {...}} entry looks exactly like a real image record to
+    #     the park pass — and a record with no 'root_file', for an id the
+    #     catalog does not answer for, can be neither named nor retired, so the
+    #     moment the id left the assignment set the device emitted
+    #     PARK-DEFERRED for it on every tick, forever. Past both gates, any id
+    #     reaching this line is one this device can genuinely stage.
+    #
+    # A server that sends no 'plans' (older server, legacy-bootstrap policy row,
+    # captive-portal garbage) leaves plan_row None or unusable; adopt_plan
+    # validates both ids and refuses everything else while touching NO state, so
+    # ensure_transfer_id mints exactly as it does today.
+    #
+    # plan_id is stored and NEVER echoed back: the server owns the
+    # transfer_id -> plan_id mapping, so no report or heartbeat field is added
+    # and the ingest whitelist needs no change.
+    if isinstance(plan_row, dict):
+        if telemetry_report.adopt_plan(state, img_id, plan_row.get("plan_id"),
+                                       plan_row.get("transfer_id")) == "new":
+            deps.emit("REPLAN", "%s adopted plan %s"
+                      % (img_id, plan_row.get("plan_id")))
+
     # steady state: image done + copied -> just heartbeat. Do NOT re-hash the
     # 1.2 GB file every tick — hashing takes longer than the 60s timer and the
     # overlapping runs double-fired the root copy (two concurrent IOS copies
@@ -1158,6 +1216,48 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
         root_ok = deps.root_present(image["filename"], state.get("stage_fs", "flash:"),
                                     size)
         if content_ok and staged_ok and root_ok:
+            # REPLAN RE-VERIFY. A NEW server plan landed on an image this
+            # device already has staged AND placed. Without this, that plan
+            # could never be attested: this short-circuit deliberately never
+            # re-hashes, and _telemetry_tick arms a terminal report only on
+            # phase 'copied'/'seeding-only' — and 'done'/'copied' live in the
+            # IMAGE record, not in the telemetry bag, so adopt_plan's wholesale
+            # reset of that bag cannot reach them. The transfer would sit at
+            # 'planned' forever while the file it needs is sitting right there.
+            #
+            # The honest answer is evidence gathered UNDER the new transfer, so
+            # hash the staged file ONCE here and arm the report under the newly
+            # adopted transfer_id. Accepting the PREVIOUS transfer's checksum
+            # instead would be cheaper and is exactly the thing this must not
+            # do — it would attest one transfer with another's verification.
+            #
+            # take_replan_verify pops the flag BEFORE the hash runs, so a
+            # mismatch cannot re-hash a ~1.2 GB file on every 60 s tick for the
+            # life of the assignment: a failed hash is a decision already made
+            # (the staged copy is discarded), not a reason to try again.
+            phase = "steady"
+            if telemetry_report.take_replan_verify(state, img_id):
+                if deps.verify(stage, image["sha256"]):
+                    # Recorded at the decision point and read back verbatim by
+                    # the report, exactly as the download path does.
+                    state[img_id]["tele"]["content_sha256_state"] = "verified"
+                    phase = "copied"
+                    deps.emit("REPLAN-VERIFY", "%s sha256-ok under the new plan"
+                              % image["filename"])
+                else:
+                    deps.emit("ERROR", "%s sha256 MISMATCH - discarding"
+                              % image["filename"])
+                    state[img_id]["tele"]["content_sha256_state"] = "mismatch"
+                    # Lower both flags so the next tick falls out of this
+                    # short-circuit and re-acquires: the bytes on disk do not
+                    # match the catalog, whatever a previous transfer believed.
+                    done_st["done"] = False
+                    done_st["copied"] = False
+                    deps.remove_stage(stage)
+                    return "bad-sha"
+            # The observation phase stays 'steady' whatever the report does:
+            # aria2 is seeding here, not downloading, and _build_observation
+            # takes an aria snapshot only for 'downloading'/'seeding-only'.
             obs, _ = _build_observation(cfg, deps, state, img_id, stage,
                                         "steady", time.time())
             hb = tick.heartbeat(image, deps, "ready",
@@ -1165,11 +1265,26 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
                                 tele_on=tele_on,
                                 observation=obs,
                                 stream_on=stream_on)
-            tick.telemetry(cfg, deps, state, img_id, stage, "steady",
+            tick.telemetry(cfg, deps, state, img_id, stage, phase,
                            hb, time.time())
             return "complete"
         deps.emit("RECHECK", "%s re-acquiring (content=%s staged=%s root=%s)"
                   % (image["filename"], content_ok, staged_ok, root_ok))
+        # DROP A STALE REPLAN FLAG. replan_verify only ever means one thing:
+        # "the staged bytes are already here, hash them ONCE under the new
+        # plan". Reaching this line says they are not here in any form worth
+        # hashing — the staged file is gone, or the catalog content moved under
+        # it, or the root copy vanished — so the flag has nothing left to
+        # verify. Left in the bag it would survive the whole re-acquisition
+        # (adopt_plan raises it on 'done' AND 'copied', which a park+reassign
+        # leaves set even after park deleted the staged file) and then fire one
+        # tick AFTER the download path's own verify() had already hashed the
+        # very same bytes under the very same transfer_id: a second
+        # multi-minute pass over ~1.2 GB that can only agree with the first.
+        # Nothing is lost by dropping it, because EVERY fall-through from here
+        # ends in that download path, which hashes and arms the terminal report
+        # under the adopted id on its own.
+        telemetry_report.take_replan_verify(state, img_id)
         if not staged_ok:
             # Provenance (Directive 2, reviewer PROBE1/PROBE2 follow-up): the
             # placement this record's origin/download_started describe is
@@ -1705,6 +1820,23 @@ def run_once(cfg, deps, state):
     # this only guards a hand-edited policy: staging the same id twice in one
     # tick would double every emit and list it twice in staged_image_ids.
     ids = list(dict.fromkeys(i for i in ids if i))
+    # The server's per-image transfer identities, to be adopted per image by
+    # _stage_image. Only the SHAPE is settled here: a `plans` value that is not
+    # a map at all (older server, legacy-bootstrap policy row, captive-portal
+    # garbage) collapses to an empty map, every image is handed None, and the
+    # agent mints its own ids exactly as it does today.
+    #
+    # The adoption itself deliberately does NOT happen in a loop right here,
+    # which is where it first lived. Adopting for an id straight off the policy
+    # writes state[img_id]['tele'] for an image the device may have no record
+    # of and may never be able to stage; 'tele' is one of _IMAGE_ENTRY_FIELDS,
+    # so that bare entry reads as a real image record to the park pass below
+    # and — having no root_file, for an id the catalog cannot name — becomes a
+    # PARK-DEFERRED emit on every tick, forever, the moment the id leaves the
+    # set. _stage_image adopts instead, behind that image's catalog lookup and
+    # filename whitelist and still ahead of every deps.aria_add().
+    plans = policy.get("plans")
+    plan_rows = plans if isinstance(plans, dict) else {}
     if not ids:
         # Still heartbeat: an unassigned device must register (devices.json,
         # swarm map, telemetry posture) or console onboarding can never see
@@ -1731,7 +1863,8 @@ def run_once(cfg, deps, state):
         # after that image's own catalog and filename checks pass.
         statuses.append(_stage_image(cfg, deps, state, img_id, tele_on,
                                      stream_on, tick,
-                                     legacy_pointer=(idx == 0)))
+                                     legacy_pointer=(idx == 0),
+                                     plan_row=plan_rows.get(img_id)))
 
     # ONE heartbeat for the whole set (the device is one row on the server),
     # then each image's telemetry replayed against the answer it carried.

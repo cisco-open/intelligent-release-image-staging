@@ -2586,3 +2586,312 @@ def test_peer_transfer_records_survives_the_store_bound(tmp_path):
     assert len(stored["peer_transfer_records"]["rows"]) == 32
     assert stored["peer_transfer_records"]["bytes_from_all_senders_total"] == sum(
         r["session_bytes_from_peer"] for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# Transfer plans: set_policy is the SOLE mint site for (plan_id, transfer_id)
+#
+# A plan is the server's durable name for one intended transfer of one image
+# to one device. Minting it at assignment time -- rather than on the device at
+# download time -- is what makes two consecutive assignments of the SAME image
+# distinguishable: an unassign+reassign inside one agent tick window is
+# invisible to the agent, so a device-minted id would silently merge the two
+# transfers into one. Everything below pins the two facts the tracker's
+# lifecycle telemetry rests on: a plan is NEVER re-minted while its image
+# stays assigned, and a re-assignment after a real unassign ALWAYS gets a new
+# one.
+#
+# The exact-dict-equality assertions on get_policy() further up this file
+# (test_store_heartbeat_and_policy, test_policy_unassign_with_empty_list,
+# test_purge_device_clears_all_state) are deliberately left as they were: they
+# are the regression guard that the internal contract did not widen when the
+# wire projection did.
+# ---------------------------------------------------------------------------
+
+def _plans(store, device_id):
+    """The device's RAW plans map straight off policy.json.
+
+    Read through list_policies() rather than get_policy(): get_policy()
+    deliberately does not expose plans, and reading the raw row is also how
+    the tracker's lifecycle pass sees it, so these tests fail if the on-disk
+    shape drifts even when the wire projection still looks right."""
+    rec = store.list_policies().get(device_id) or {}
+    return rec.get("plans") or {}
+
+
+def _is_hex32(value):
+    return isinstance(value, str) and catalog._HEX32.match(value) is not None
+
+
+def test_get_policy_still_returns_exactly_two_keys(tmp_path):
+    """Named explicitly so the guarantee is a stated one rather than an
+    accident of the older assertions above.
+
+    get_policy() is the INTERNAL contract: set_policy's own compare-and-set,
+    the heartbeat live-sample admission gate and the v2 ingest gate all read
+    it. Widening it would change what those three see; the plans map reaches
+    the device through device_policy_view() instead."""
+    store = _store_with_images(tmp_path, ["img-a"])
+    store.set_policy("d1", approved_image_ids=["img-a"])
+    assert set(store.get_policy("d1")) == {"approved_image_id",
+                                           "approved_image_ids"}
+    # and on a device that has never been assigned anything
+    assert set(store.get_policy("never-seen")) == {"approved_image_id",
+                                                   "approved_image_ids"}
+
+
+def test_assignment_mints_a_plan_and_transfer_id_on_every_caller_shape(tmp_path):
+    """set_policy is the single funnel for every production assignment path --
+    the console /assign route, the iris-assign CLI (and so every
+    apply-assignments row), and this class's own quarantine auto-unassign --
+    so a plan can only be missed if set_policy itself misses it. All three
+    shapes are exercised here."""
+    # the plural kwarg: the console and the CLI's multi-image form
+    store = _store_with_images(tmp_path, ["img-a", "img-b"])
+    store.set_policy("d1", approved_image_ids=["img-a", "img-b"])
+    assert sorted(_plans(store, "d1")) == ["img-a", "img-b"]
+
+    # the singular kwarg: rows and callers from the single-image era
+    store.set_policy("d2", approved_image_id="img-a")
+    assert sorted(_plans(store, "d2")) == ["img-a"]
+
+    # the quarantine auto-unassign path, which rewrites the row from inside
+    # the catalog itself. Imported locally: this module's own imports are the
+    # older set and this is the only test here that needs the reconciler's
+    # state constants.
+    import bulkhash
+    store.apply_hash_verification(
+        {"img-b": {"state": bulkhash.STATE_MISMATCH, "feed_sha512": "bb" * 64,
+                   "publish_date": "2026-08-01", "deferral": False}},
+        source="scheduled", now=1000)
+    # the quarantined image is gone from the set AND from the plans map, and
+    # the survivor still has a plan -- the auto-unassign rewrites the whole
+    # row, so a dropped plans map would show up here
+    assert store.get_policy("d1")["approved_image_ids"] == ["img-a"]
+    assert sorted(_plans(store, "d1")) == ["img-a"]
+    assert _is_hex32(_plans(store, "d1")["img-a"]["transfer_id"])
+
+
+def test_minted_ids_are_32_lowercase_hex_and_distinct_from_each_other(tmp_path):
+    """The shape is a hard requirement, not a convention: transfer_id is
+    re-validated against _HEX32 on ingest (_sanitize_report_v2 and the live
+    sample path), and a value that failed it would fail the device's WHOLE
+    report. plan_id shares the shape; the two must never be the same value,
+    or a plan and its transfer would be indistinguishable in telemetry."""
+    store = _store_with_images(tmp_path, ["img-a", "img-b"])
+    store.set_policy("d1", approved_image_ids=["img-a", "img-b"])
+    seen = set()
+    for image_id, row in _plans(store, "d1").items():
+        assert _is_hex32(row["plan_id"]), image_id
+        assert _is_hex32(row["transfer_id"]), image_id
+        assert row["plan_id"] != row["transfer_id"]
+        seen.add(row["plan_id"])
+        seen.add(row["transfer_id"])
+    # four distinct ids across the two plans: no id is shared between images
+    assert len(seen) == 4
+
+
+def test_repeat_apply_of_the_same_set_carries_the_same_plan_and_transfer_id_forward(tmp_path):
+    """Re-applying an unchanged set must be a no-op for identity.
+
+    The row write replaces the WHOLE record, so without the explicit
+    merge-forward every Apply would re-mint a transfer_id for every image the
+    device is already pulling -- restarting each in-flight transfer's identity
+    and orphaning every report already on the wire under the old id."""
+    store = _store_with_images(tmp_path, ["img-a", "img-b"])
+    store.set_policy("d1", approved_image_ids=["img-a", "img-b"])
+    before = _plans(store, "d1")
+    store.set_policy("d1", approved_image_ids=["img-a", "img-b"])
+    store.set_policy("d1", approved_image_ids=["img-a", "img-b"])
+    assert _plans(store, "d1") == before
+    # re-ordering the same membership is still the same set of transfers
+    store.set_policy("d1", approved_image_ids=["img-b", "img-a"])
+    assert _plans(store, "d1") == before
+
+
+def test_adding_an_image_mints_only_the_new_plan_and_leaves_the_others_alone(tmp_path):
+    """Adding a third image to a device already pulling two must not disturb
+    the two in flight -- the common console Apply, and the one that would
+    otherwise restart every transfer on the device."""
+    store = _store_with_images(tmp_path, ["img-a", "img-b", "img-c"])
+    store.set_policy("d1", approved_image_ids=["img-a", "img-b"])
+    before = _plans(store, "d1")
+    store.set_policy("d1", approved_image_ids=["img-a", "img-b", "img-c"])
+    after = _plans(store, "d1")
+    assert after["img-a"] == before["img-a"]
+    assert after["img-b"] == before["img-b"]
+    assert _is_hex32(after["img-c"]["plan_id"])
+    assert after["img-c"]["plan_id"] not in (before["img-a"]["plan_id"],
+                                             before["img-b"]["plan_id"])
+    # removing one leaves the others verbatim and drops only its own plan
+    store.set_policy("d1", approved_image_ids=["img-a", "img-c"])
+    assert "img-b" not in _plans(store, "d1")
+    assert _plans(store, "d1")["img-a"] == before["img-a"]
+    assert _plans(store, "d1")["img-c"] == after["img-c"]
+
+
+def test_unassign_then_reassign_mints_a_distinct_plan_and_transfer_id(tmp_path):
+    """The replan case, and the reason the ids are minted here at all.
+
+    An image id that LEAVES the set has no entry in the new plans map, so the
+    re-assignment mints a genuinely new plan. On the device this whole cycle
+    can happen inside one ~60s tick window and is invisible to the agent --
+    which is exactly why a device-minted id cannot keep the two transfers
+    apart, and why the server must."""
+    store = _store_with_images(tmp_path, ["img-a"])
+    store.set_policy("d1", approved_image_ids=["img-a"])
+    first = _plans(store, "d1")["img-a"]
+    store.set_policy("d1", approved_image_ids=[])
+    assert _plans(store, "d1") == {}
+    store.set_policy("d1", approved_image_ids=["img-a"])
+    second = _plans(store, "d1")["img-a"]
+    assert second["plan_id"] != first["plan_id"]
+    assert second["transfer_id"] != first["transfer_id"]
+    assert _is_hex32(second["plan_id"]) and _is_hex32(second["transfer_id"])
+
+
+def test_a_refused_conditional_apply_mints_nothing(tmp_path):
+    """PolicyConflict is raised inside the policy lock and BEFORE any plan is
+    computed, so a losing race leaves no orphan plan behind -- a plan row for
+    an image the device was never assigned would be a transfer the tracker
+    waits on forever."""
+    store = _store_with_images(tmp_path, ["img-a", "img-b"])
+    store.set_policy("d1", approved_image_ids=["img-a"])
+    before = _plans(store, "d1")
+    with pytest.raises(catalog.PolicyConflict):
+        store.set_policy("d1", approved_image_ids=["img-b"],
+                         expect_image_ids=[])
+    assert _plans(store, "d1") == before
+    assert "img-b" not in _plans(store, "d1")
+
+
+def test_a_quarantined_image_mints_nothing(tmp_path):
+    """QuarantinedImage is likewise raised before any plan is computed. A
+    quarantined image is never staged, so it must never acquire the plan that
+    would tell the tracker to expect a transfer of it."""
+    store = _store_with_images(tmp_path, ["img-a"])
+    entry = store.get_image("img-a")
+    entry["quarantined"] = True
+    store.save_image(entry)
+    store.set_policy("d1", approved_image_ids=[])
+    with pytest.raises(catalog.QuarantinedImage):
+        store.set_policy("d1", approved_image_ids=["img-a"])
+    assert _plans(store, "d1") == {}
+    assert store.get_policy("d1")["approved_image_ids"] == []
+
+
+def test_device_policy_view_carries_plans_and_get_policy_does_not(tmp_path):
+    """device_policy_view() is the WIRE projection -- what GET
+    /v1/devices/<id>/policy serves the agent -- and carries exactly the two
+    ids the agent adopts. planned_at and info_hash stay server-side: the
+    agent has no use for either (its info_hash comes from the personalised
+    torrent), and shipping a field is a promise to keep shipping it.
+
+    'plans' is ALWAYS present, possibly empty, so the agent's adoption loop
+    can read it unconditionally."""
+    store = _store_with_images(tmp_path, ["img-a", "img-b"])
+    store.set_policy("d1", approved_image_ids=["img-a", "img-b"])
+    view = store.device_policy_view("d1")
+    assert set(view) == {"approved_image_id", "approved_image_ids", "plans"}
+    assert view["approved_image_ids"] == ["img-a", "img-b"]
+    assert sorted(view["plans"]) == ["img-a", "img-b"]
+    for image_id, row in view["plans"].items():
+        assert set(row) == {"plan_id", "transfer_id"}, image_id
+        assert row["plan_id"] == _plans(store, "d1")[image_id]["plan_id"]
+        assert row["transfer_id"] == _plans(store, "d1")[image_id]["transfer_id"]
+    # the internal contract is untouched by the projection
+    assert set(store.get_policy("d1")) == {"approved_image_id",
+                                           "approved_image_ids"}
+    # an unassigned device still gets the key, so the agent can read it blind
+    assert store.device_policy_view("never-seen") == {
+        "approved_image_id": None, "approved_image_ids": [], "plans": {}}
+
+
+def test_a_hand_edited_plan_row_is_not_served_and_is_re_minted_on_the_next_apply(tmp_path):
+    """policy.json is an operator-editable file on disk. A truncated or
+    hand-edited id must not reach the device: transfer_id is re-validated
+    against _HEX32 on ingest, so a malformed one would fail the device's
+    whole report on the way back. Such a row is omitted from the wire
+    projection and re-minted at the next set_policy rather than carried
+    forward."""
+    store = _store_with_images(tmp_path, ["img-a"])
+    store.set_policy("d1", approved_image_ids=["img-a"])
+    raw = store.list_policies()
+    raw["d1"]["plans"]["img-a"]["transfer_id"] = "NOT-HEX"
+    _write_policy_json(store, raw)
+    assert store.device_policy_view("d1")["plans"] == {}
+    store.set_policy("d1", approved_image_ids=["img-a"])
+    row = _plans(store, "d1")["img-a"]
+    assert _is_hex32(row["plan_id"]) and _is_hex32(row["transfer_id"])
+    assert store.device_policy_view("d1")["plans"]["img-a"]["transfer_id"] \
+        == row["transfer_id"]
+
+
+def test_plan_row_captures_the_catalog_info_hash(tmp_path):
+    """The plan captures the info_hash the tracker will see announced, from
+    the catalog entry set_policy already has in hand, so the lifecycle pass
+    can join an announce back to this plan without re-reading catalog.json at
+    a later, possibly changed, moment."""
+    store = _store_with_images(tmp_path, ["img-a"])
+    store.set_policy("d1", approved_image_ids=["img-a"])
+    row = _plans(store, "d1")["img-a"]
+    assert row["info_hash"] == "cc" * 20
+    assert isinstance(row["planned_at"], float)
+    assert row["planned_at"] <= time.time()
+
+
+def test_plan_row_info_hash_is_none_on_the_legacy_bootstrap_path(tmp_path):
+    """set_policy stays usable with no catalog.json at all (the legacy
+    bootstrap callers -- the existence check is explicitly skipped then), and
+    a plan is still minted. There is simply no info_hash to capture, and the
+    row says so with a null rather than omitting the key."""
+    store = catalog.CatalogStore(str(tmp_path))       # no save_image() at all
+    assert not os.path.exists(store.catalog_path)
+    store.set_policy("d1", approved_image_ids=["img-a"])
+    row = _plans(store, "d1")["img-a"]
+    assert row["info_hash"] is None
+    assert _is_hex32(row["plan_id"]) and _is_hex32(row["transfer_id"])
+
+
+def test_purge_device_removes_the_plans_with_the_policy_row(tmp_path):
+    """The plans live IN the policy row, so purge_device already takes them
+    with it -- no second store to keep in step. A device deleted and added
+    back must get brand-new plan ids, or it could inherit an 'already seeded'
+    marker for a transfer that never happened on the new device."""
+    store = _store_with_images(tmp_path, ["img-a"])
+    store.set_policy("d1", approved_image_ids=["img-a"])
+    first = _plans(store, "d1")["img-a"]
+    assert store.purge_device("d1") is True
+    assert _plans(store, "d1") == {}
+    assert store.device_policy_view("d1")["plans"] == {}
+    store.set_policy("d1", approved_image_ids=["img-a"])
+    second = _plans(store, "d1")["img-a"]
+    assert second["plan_id"] != first["plan_id"]
+    assert second["transfer_id"] != first["transfer_id"]
+    # forget_device (undeploy) deliberately keeps the assignment, so it also
+    # keeps the plan: the same transfer is still the one in flight
+    kept = _plans(store, "d1")["img-a"]
+    store.record_heartbeat("d1", {"current_image_id": "img-a"}, now=222)
+    assert store.forget_device("d1") is True
+    assert _plans(store, "d1")["img-a"] == kept
+
+
+def test_a_legacy_row_with_no_plans_key_reads_back_and_gains_plans_on_the_next_apply(tmp_path):
+    """A row written by a previous release has no plans key at all. It must
+    read back cleanly through both accessors -- with an empty plans map on
+    the wire, which the agent treats as 'no plan, mint your own as before' --
+    and gain a real plan at the next set_policy, with no migration step."""
+    store = _store_with_images(tmp_path, ["img-a"])
+    _write_policy_json(store, {"d1": {"approved_image_id": "img-a",
+                                      "approved_image_ids": ["img-a"]}})
+    assert store.get_policy("d1")["approved_image_ids"] == ["img-a"]
+    view = store.device_policy_view("d1")
+    assert view["approved_image_ids"] == ["img-a"]
+    assert view["plans"] == {}
+    # the single-image-era row shape (no plural key) reads the same way
+    _write_policy_json(store, {"d1": {"approved_image_id": "img-a"}})
+    assert store.device_policy_view("d1")["plans"] == {}
+    store.set_policy("d1", approved_image_ids=["img-a"])
+    assert _is_hex32(_plans(store, "d1")["img-a"]["transfer_id"])
+    assert set(store.device_policy_view("d1")["plans"]["img-a"]) == {
+        "plan_id", "transfer_id"}

@@ -2883,3 +2883,704 @@ def test_image_size_family_reaches_the_metrics_endpoint(tmp_path):
     assert ('iris_image_size_bytes{image="cat9k.bin",info_hash="%s"} 973065200'
             % ("ab" * 20)) in text
     assert "half.bin" not in text
+
+
+# ---------------------------------------------------------------------------
+# iris.transfer.lifecycle -- the server-side planned -> seeding_started events.
+#
+# Tested through Telemetry.sample(), never through
+# otlp.build_transfer_lifecycle_record directly: a builder unit test passes
+# whether or not anything calls the builder, which is exactly how
+# iris.device.peer_transfer_record came to exist in otlp.py and never leave the
+# server (see test_peer_transfer_records_reach_the_log_queue_not_just_the_catalog).
+# Records are counted off hub.log_queue by their otel.log.name attribute --
+# what a backend actually indexes on -- so a record that never reaches the
+# queue fails the assertion instead of hiding behind a green builder test.
+#
+# The imports sit here rather than at the top of the file so this section is a
+# pure APPEND: nothing above it is touched, and in particular the existing
+# exact-shape assertions stay the regression guard they were written to be.
+import auth
+import transfer_lifecycle
+
+_LIFECYCLE_NAME = "iris.transfer.lifecycle"
+_REPORT_NAME = "iris.device.transfer.report"
+_LC_DEVICE = "iris8kv-1"
+_LC_IMAGE = "cat9k"
+_LC_INFO_HASH = "ab" * 20
+_LC_IMAGES = {_LC_IMAGE: {"filename": "cat9k.bin",
+                          "info_hash_hex": _LC_INFO_HASH,
+                          "size": 973065200}}
+_LC_PLANNED_AT = 1000.0
+
+# sample() reaches the EMISSION stage only when an exporter is wired
+# (`self.exporter is not None`); the LATCH deliberately runs regardless, which
+# is what test_facts_latch_with_the_exporter_disabled_and_emit_after_it_is_turned_on
+# pins. A bare sentinel is enough to open that gate: with no _log_transport the
+# queue is never flushed, so the records stay inspectable in
+# hub.log_queue.snapshot() instead of disappearing into a sender.
+_EXPORT_ON = object()
+
+
+def _lc_id(n):
+    """A 32-lowercase-hex id. The shape is load-bearing, not cosmetic: the
+    device echoes transfer_id back on every report and both ingest paths
+    re-validate it against that pattern, so live_plans_from_policy drops a plan
+    whose ids are any other shape -- a test id like "plan-1" would silently
+    test nothing."""
+    return "%032x" % n
+
+
+def _lc_plan_row(plan_id, transfer_id, planned_at=_LC_PLANNED_AT,
+                 info_hash=_LC_INFO_HASH):
+    return {"plan_id": plan_id, "transfer_id": transfer_id,
+            "planned_at": planned_at, "info_hash": info_hash}
+
+
+def _lc_policy(plan_id, transfer_id, device_id=_LC_DEVICE, image_id=_LC_IMAGE,
+               **plan_row):
+    """policy.json exactly as CatalogStore.set_policy writes it: the two
+    pre-existing assignment keys plus the per-image `plans` map that carries
+    the minted identity."""
+    return {device_id: {"approved_image_id": image_id,
+                        "approved_image_ids": [image_id],
+                        "plans": {image_id: _lc_plan_row(plan_id, transfer_id,
+                                                         **plan_row)}}}
+
+
+def _lc_report(transfer_id, received_at=1200.0, image_id=_LC_IMAGE,
+               event="staging-complete", sha_state="verified",
+               window_end=None, report_id=None):
+    """One stored v2 terminal report in the shape the catalog's telemetry.json
+    ring holds. `received_at` is the SERVER clock stamp -- the instant the
+    checksum attestation reached this container -- which is what the store
+    latches; `window.end` is the DEVICE's own clock and only ever rides as an
+    attribute."""
+    report = {"schema": "v2",
+              "report_id": report_id or ("rep-%s" % transfer_id[-6:]),
+              "image_id": image_id, "transfer_id": transfer_id,
+              "event": event,
+              "content_sha256": {"algo": "sha256", "state": sha_state},
+              "received_at": received_at}
+    if window_end is not None:
+        report["window"] = {"end": window_end}
+    return report
+
+
+def _lc_hub(tmp_path, policy, reports=None, images=None, exporting=True):
+    """A tracker hub wired exactly as from_env() wires the real one: a real
+    PeerRegistry, a real TransferLifecycle over a real state dir, and the two
+    plain-data callables. Returns (hub, store) so a test can assert both what
+    reached the wire and what was durably latched behind it."""
+    store = transfer_lifecycle.TransferLifecycle(str(tmp_path))
+    hub = telemetry.Telemetry(
+        PeerRegistry(),
+        reports_info=lambda: reports if reports is not None else {},
+        images_info=lambda: images if images is not None else _LC_IMAGES,
+        assignments_info=lambda: policy,
+        transfer_lifecycle=store)
+    if exporting:
+        hub.exporter = _EXPORT_ON
+    return hub, store
+
+
+def _lc_announce(hub, now, device_id=_LC_DEVICE, info_hash=_LC_INFO_HASH,
+                 left=0, peer_id="p1", ip="10.0.0.2"):
+    """The device's aria2 announcing on its personalised token. The typed
+    principal IS the authenticated join -- principal_id is the catalog's own
+    device id -- so this is the same identity path the tracker sees in
+    production, not an address match."""
+    hub._registry.announce(info_hash, peer_id, ip, 6881, left=left, now=now,
+                           principal=auth.Principal("device", device_id))
+
+
+def _lc_attrs(record):
+    return {a["key"]: a["value"] for a in record.get("attributes") or []}
+
+
+def _lc_log_name(record):
+    return (_lc_attrs(record).get("otel.log.name") or {}).get("stringValue")
+
+
+def _lc_records(hub, name=_LIFECYCLE_NAME):
+    return [r for r in hub.log_queue.snapshot() if _lc_log_name(r) == name]
+
+
+def _lc_events(hub):
+    """[(event, plan_id), ...] for every lifecycle record, in queue order."""
+    out = []
+    for record in _lc_records(hub):
+        attrs = _lc_attrs(record)
+        out.append((attrs["event"]["stringValue"],
+                    attrs["iris.plan.id"]["stringValue"]))
+    return out
+
+
+def _lc_event_ids(hub):
+    return [_lc_attrs(r)["event.id"]["stringValue"] for r in _lc_records(hub)]
+
+
+def test_planned_reaches_the_log_queue_for_every_live_plan(tmp_path):
+    """Every assignment the catalog minted becomes exactly one `planned` event,
+    carrying the identity that was minted with it. The ids are asserted on the
+    RECORD, not on the store, because the whole point of the plan living in
+    policy.json is that the same transfer_id the device adopted is the one the
+    backend can join on."""
+    policy = _lc_policy(_lc_id(1), _lc_id(2))
+    policy["iris8kv-2"] = {
+        "approved_image_id": _LC_IMAGE,
+        "approved_image_ids": [_LC_IMAGE],
+        "plans": {_LC_IMAGE: _lc_plan_row(_lc_id(3), _lc_id(4))}}
+    hub, _store = _lc_hub(tmp_path, policy)
+
+    hub.sample(now=1100.0)
+
+    assert _lc_events(hub) == [("planned", _lc_id(1)), ("planned", _lc_id(3))]
+    attrs = _lc_attrs(_lc_records(hub)[0])
+    assert attrs["iris.transfer.id"]["stringValue"] == _lc_id(2)
+    assert attrs["iris.device.id"]["stringValue"] == _LC_DEVICE
+    assert attrs["device.id"]["stringValue"] == _LC_DEVICE
+    assert attrs["iris.image.id"]["stringValue"] == _LC_IMAGE
+    assert attrs["iris.torrent.info_hash"]["stringValue"] == _LC_INFO_HASH
+    # The decision instant is the policy row's own planned_at, never the pass
+    # that first noticed it: the assignment happened when it was written.
+    assert _lc_records(hub)[0]["timeUnixNano"] == str(int(_LC_PLANNED_AT * 1e9))
+
+
+def test_seeding_started_reaches_the_log_queue_when_all_three_preconditions_hold(
+        tmp_path):
+    """Complete content, a verified checksum, and this tracker seeing the
+    device itself announce left=0 -- only the conjunction publishes a seeding
+    event, and only the tracker can see all three at once."""
+    plan, transfer = _lc_id(1), _lc_id(2)
+    reports = {_LC_DEVICE: [_lc_report(transfer, received_at=1200.0,
+                                       window_end=1190.0)]}
+    hub, store = _lc_hub(tmp_path, _lc_policy(plan, transfer), reports=reports)
+    _lc_announce(hub, now=1150.0)
+
+    hub.sample(now=1150.0)
+
+    assert _lc_events(hub) == [("planned", plan), ("seeding_started", plan)]
+    row = store.get(plan)
+    assert row["state"] == "seeding"
+    # The instant the LAST precondition became true. aria2 announced left=0 at
+    # 1150 but the device's sha256 did not attest until 1200, so 1200 is the
+    # honest answer -- not the earlier, unverified one.
+    assert row["seeding_started_at"] == 1200.0
+    record = _lc_records(hub)[1]
+    assert record["timeUnixNano"] == str(int(1200.0 * 1e9))
+    attrs = _lc_attrs(record)
+    assert attrs["iris.transfer.seeding_started_at"]["stringValue"] \
+        == "1970-01-01T00:20:00.000Z"
+    # Both preconditions ride separately so an operator can see WHICH one was
+    # the laggard rather than inferring it.
+    assert attrs["iris.transfer.checksum_verified_at"]["stringValue"] \
+        == "1970-01-01T00:20:00.000Z"
+    assert attrs["iris.transfer.tracker_seeder_at"]["stringValue"] \
+        == "1970-01-01T00:19:10.000Z"
+    # The device's own clock, kept as a float epoch and never subtracted from
+    # the server instants above.
+    assert attrs["iris.device.observed_at"]["doubleValue"] == 1190.0
+
+
+def test_planned_is_emitted_before_seeding_started_for_the_same_plan(tmp_path):
+    """A backend must never see a transfer start before it was planned, even
+    when both facts are already true on the first pass that ever looks. The two
+    records must also carry DIFFERENT event.ids: LogQueue.emit refuses a key
+    already queued or in flight, so a shared id would drop the second record
+    silently rather than fail loudly."""
+    plan, transfer = _lc_id(1), _lc_id(2)
+    reports = {_LC_DEVICE: [_lc_report(transfer, received_at=1200.0)]}
+    hub, _store = _lc_hub(tmp_path, _lc_policy(plan, transfer), reports=reports)
+    _lc_announce(hub, now=1150.0)
+
+    hub.sample(now=1150.0)
+
+    events = [event for event, _plan in _lc_events(hub)]
+    assert events.index("planned") < events.index("seeding_started")
+    assert _lc_event_ids(hub) == ["%s.planned" % plan,
+                                  "%s.seeding_started" % plan]
+    assert len(set(_lc_event_ids(hub))) == 2
+
+
+def test_each_lifecycle_event_is_emitted_exactly_once_across_repeated_sample_passes(
+        tmp_path):
+    """The durable marker, not the in-memory queue, is what makes this hold:
+    LogQueue discards its dedupe key after a successful flush, so a queue-only
+    guard would re-emit both events on the very next pass."""
+    plan, transfer = _lc_id(1), _lc_id(2)
+    reports = {_LC_DEVICE: [_lc_report(transfer, received_at=1200.0)]}
+    hub, store = _lc_hub(tmp_path, _lc_policy(plan, transfer), reports=reports)
+    _lc_announce(hub, now=1150.0)
+
+    for now in (1150.0, 1160.0, 1170.0, 1180.0):
+        hub.sample(now=now)
+
+    assert _lc_events(hub) == [("planned", plan), ("seeding_started", plan)]
+    assert sorted(store.get(plan)["emitted"]) == ["planned", "seeding_started"]
+
+
+def test_a_fresh_hub_over_the_same_state_dir_does_not_re_emit_either_event(
+        tmp_path):
+    """Restart is the case requirement 4 exists for, and the one nothing
+    existing covers: _seen_report_event_ids is a plain in-process set, and
+    test_report_cursor_queues_equal_timestamps_once_and_replays_on_restart
+    asserts the report ring DOES replay on a fresh hub -- by design, because
+    those records are backend-deduped by report_id. The lifecycle markers are
+    durable instead, so the same restart re-queues the report and NOT the
+    lifecycle events."""
+    plan, transfer = _lc_id(1), _lc_id(2)
+    policy = _lc_policy(plan, transfer)
+    reports = {_LC_DEVICE: [_lc_report(transfer, received_at=1200.0)]}
+    hub, _store = _lc_hub(tmp_path, policy, reports=reports)
+    _lc_announce(hub, now=1150.0)
+    hub.sample(now=1150.0)
+    assert len(_lc_records(hub)) == 2
+
+    restarted, _store2 = _lc_hub(tmp_path, policy, reports=reports)
+    _lc_announce(restarted, now=1300.0)
+    restarted.sample(now=1300.0)
+
+    assert _lc_records(restarted) == []
+    assert len(_lc_records(restarted, _REPORT_NAME)) == 1, \
+        "the report ring replay is deliberate and must not have been broken"
+
+
+def test_a_refused_emit_leaves_the_plan_unmarked_and_retries_next_pass_with_an_identical_record(
+        tmp_path):
+    """MARK AFTER THE EFFECT. A full queue returns False from emit; writing the
+    marker anyway would lose the event permanently, because nothing else ever
+    revisits a marked row. The retry must also be byte-identical -- every
+    instant in the record was latched into the store before the record existed,
+    so a later retry cannot re-stamp it off the wall clock."""
+    plan, transfer = _lc_id(1), _lc_id(2)
+    hub, store = _lc_hub(tmp_path, _lc_policy(plan, transfer))
+    hub.log_queue._max = 0              # the queue refuses everything
+
+    hub.sample(now=1100.0)
+
+    assert _lc_records(hub) == []
+    assert store.get(plan)["emitted"] == {}
+
+    hub.log_queue._max = 1000
+    hub.sample(now=1500.0)             # a much later pass
+
+    assert _lc_events(hub) == [("planned", plan)]
+    assert "planned" in store.get(plan)["emitted"]
+    record = _lc_records(hub)[0]
+    assert record["timeUnixNano"] == str(int(_LC_PLANNED_AT * 1e9))
+    assert _lc_attrs(record)["event.id"]["stringValue"] == "%s.planned" % plan
+
+
+def test_seeder_without_a_verified_report_never_emits_seeding_started(tmp_path):
+    """aria2 starts announcing left=0 the instant the last piece lands, while
+    the agent's sha256 of a ~1.2 GB image does not run until its next tick and
+    then takes minutes. Publishing on the tracker fact alone would report a
+    seeding transfer for content nobody has verified -- for that whole window.
+    The fact is still LATCHED, because the peer row is pruned at 2*INTERVAL."""
+    plan, transfer = _lc_id(1), _lc_id(2)
+    hub, store = _lc_hub(tmp_path, _lc_policy(plan, transfer))
+    _lc_announce(hub, now=1150.0)
+
+    hub.sample(now=1150.0)
+
+    assert _lc_events(hub) == [("planned", plan)]
+    row = store.get(plan)
+    assert row["state"] == "planned"
+    assert row["tracker_seeder_at"] == 1150.0
+    assert row["checksum_verified_at"] is None
+
+
+def test_verified_report_without_a_tracker_seeder_never_emits_seeding_started(
+        tmp_path):
+    """The device can attest its own checksum but can neither see nor attest
+    that it is serving the swarm -- it never talks to the tracker; only its
+    aria2 announces. A verified report alone therefore says the bytes are
+    staged, not that anything is being seeded."""
+    plan, transfer = _lc_id(1), _lc_id(2)
+    reports = {_LC_DEVICE: [_lc_report(transfer, received_at=1200.0)]}
+    hub, store = _lc_hub(tmp_path, _lc_policy(plan, transfer), reports=reports)
+
+    hub.sample(now=1250.0)
+
+    assert _lc_events(hub) == [("planned", plan)]
+    row = store.get(plan)
+    assert row["state"] == "planned"
+    assert row["checksum_verified_at"] == 1200.0
+    assert row["tracker_seeder_at"] is None
+
+
+def test_a_sha_mismatch_report_never_promotes_the_plan(tmp_path):
+    """A terminal report whose content_sha256 did not verify is the one case
+    where every other signal looks right -- the bytes are complete, the device
+    is seeding them -- and the answer is still no."""
+    plan, transfer = _lc_id(1), _lc_id(2)
+    reports = {_LC_DEVICE: [_lc_report(transfer, received_at=1200.0,
+                                       sha_state="mismatch")]}
+    hub, store = _lc_hub(tmp_path, _lc_policy(plan, transfer), reports=reports)
+    # Announced on this pass's own clock, so the swarm row is still inside the
+    # registry's 2*INTERVAL window and precondition 3 really does hold here.
+    _lc_announce(hub, now=1250.0)
+
+    hub.sample(now=1250.0)
+
+    assert _lc_events(hub) == [("planned", plan)]
+    assert store.get(plan)["tracker_seeder_at"] == 1250.0
+    assert store.get(plan)["checksum_verified_at"] is None
+
+
+def test_a_report_bearing_another_transfers_id_never_promotes_the_plan(tmp_path):
+    """STRICT BINDING. A report attests a plan only when it carries THAT plan's
+    transfer_id. Here the device is seeding the right image and has a verified
+    terminal report for it -- but under an id it minted itself, which is what
+    an agent too old to adopt the server's plan looks like. Promoting on it
+    would publish "seeding" on the strength of a checksum computed for a
+    different transfer, so the plan stays at `planned` and the fleet gap is
+    visible in stats() rather than papered over with a wrong answer."""
+    plan, transfer = _lc_id(1), _lc_id(2)
+    reports = {_LC_DEVICE: [_lc_report(_lc_id(99), received_at=1200.0)]}
+    hub, store = _lc_hub(tmp_path, _lc_policy(plan, transfer), reports=reports)
+    _lc_announce(hub, now=1250.0)
+
+    hub.sample(now=1250.0)
+
+    assert _lc_events(hub) == [("planned", plan)]
+    row = store.get(plan)
+    assert row["state"] == "planned"
+    assert row["checksum_verified_at"] is None
+    assert store.stats()["plans_awaiting_report"] == 1
+
+
+def test_a_transfer_that_never_reports_stays_planned_forever(tmp_path):
+    """Silence, never a guess. A plan whose device never delivers a report
+    bearing its transfer_id emits `planned` and nothing else, for as many
+    passes as you care to run -- there is deliberately no fallback that
+    promotes it from some other evidence."""
+    plan, transfer = _lc_id(1), _lc_id(2)
+    hub, store = _lc_hub(tmp_path, _lc_policy(plan, transfer))
+    _lc_announce(hub, now=1150.0)
+
+    for now in (1150.0, 1400.0, 2000.0, 5000.0, 90000.0):
+        hub.sample(now=now)
+
+    assert _lc_events(hub) == [("planned", plan)]
+    assert store.get(plan)["state"] == "planned"
+
+
+def test_the_seeder_fact_latched_before_prune_all_still_yields_an_event_when_the_report_lands_later(
+        tmp_path):
+    """Why the latch is mandatory rather than an optimisation. The registry
+    prunes a peer row at 2*INTERVAL, and the device's checksum report arrives
+    minutes after aria2 first announced left=0. Requiring both facts in the
+    SAME pass would mean the row vanishing in between blocks the event
+    permanently."""
+    plan, transfer = _lc_id(1), _lc_id(2)
+    reports = {}
+    hub, store = _lc_hub(tmp_path, _lc_policy(plan, transfer), reports=reports)
+    _lc_announce(hub, now=1150.0)
+    hub.sample(now=1150.0)
+    assert store.get(plan)["tracker_seeder_at"] == 1150.0
+
+    hub._registry.prune_all(now=1400.0)
+    assert hub._registry.snapshot(now=1400.0) == {}
+
+    reports[_LC_DEVICE] = [_lc_report(transfer, received_at=1400.0)]
+    hub.sample(now=1400.0)
+
+    assert _lc_events(hub) == [("planned", plan), ("seeding_started", plan)]
+    # The latched instant, not the pass that noticed the pair complete.
+    assert store.get(plan)["seeding_started_at"] == 1400.0
+    assert store.get(plan)["tracker_seeder_at"] == 1150.0
+
+
+def test_two_plans_for_the_same_device_and_image_emit_two_distinct_pairs(
+        tmp_path):
+    """Requirement 7's headline case: unassign and re-assign the same image and
+    the second transfer is a genuinely separate one. Device-minted ids could
+    not do this -- an unassign+reassign inside one agent tick is invisible to
+    the device, so plan 2 would inherit plan 1's id and the two transfers would
+    collapse into one timeline. The first plan is already `seeding` and is
+    NEVER cancelled by the unassign: a later withdrawal does not un-happen a
+    transfer that occurred."""
+    plan1, transfer1 = _lc_id(1), _lc_id(2)
+    plan2, transfer2 = _lc_id(3), _lc_id(4)
+    policy = _lc_policy(plan1, transfer1)
+    reports = {_LC_DEVICE: [_lc_report(transfer1, received_at=1200.0)]}
+    hub, store = _lc_hub(tmp_path, policy, reports=reports)
+    _lc_announce(hub, now=1150.0)
+    hub.sample(now=1150.0)
+
+    policy[_LC_DEVICE]["plans"] = {
+        _LC_IMAGE: _lc_plan_row(plan2, transfer2, planned_at=1300.0)}
+    reports[_LC_DEVICE].append(_lc_report(transfer2, received_at=1400.0))
+    _lc_announce(hub, now=1400.0, peer_id="p2")
+    hub.sample(now=1400.0)
+
+    assert _lc_events(hub) == [("planned", plan1), ("seeding_started", plan1),
+                               ("planned", plan2), ("seeding_started", plan2)]
+    assert len(set(_lc_event_ids(hub))) == 4
+    assert store.get(plan1)["state"] == "seeding"
+    assert store.get(plan1)["seeding_started_at"] == 1200.0
+    assert store.get(plan2)["seeding_started_at"] == 1400.0
+
+
+def test_facts_latch_with_the_exporter_disabled_and_emit_after_it_is_turned_on(
+        tmp_path):
+    """Latching sits OUTSIDE sample()'s exporter guard on purpose: a deployment
+    that enables OTLP export later must publish the plans that were already in
+    flight while it was off, with the instants observed at the time -- not with
+    the moment the operator flipped the switch, and not silently losing them."""
+    plan, transfer = _lc_id(1), _lc_id(2)
+    reports = {_LC_DEVICE: [_lc_report(transfer, received_at=1200.0)]}
+    hub, store = _lc_hub(tmp_path, _lc_policy(plan, transfer), reports=reports,
+                         exporting=False)
+    _lc_announce(hub, now=1150.0)
+
+    hub.sample(now=1150.0)
+
+    assert hub.log_queue.snapshot() == []
+    assert store.get(plan)["state"] == "seeding"
+    assert store.get(plan)["seeding_started_at"] == 1200.0
+
+    hub.exporter = _EXPORT_ON          # the console enables the destination
+    hub.sample(now=99000.0)
+
+    assert _lc_events(hub) == [("planned", plan), ("seeding_started", plan)]
+    assert _lc_records(hub)[0]["timeUnixNano"] == str(int(_LC_PLANNED_AT * 1e9))
+    assert _lc_records(hub)[1]["timeUnixNano"] == str(int(1200.0 * 1e9))
+
+
+def test_the_info_hash_to_image_id_join_comes_from_catalog_json_not_from_names(
+        tmp_path):
+    """The swarm row is keyed by info_hash and the plan by image_id; the join
+    between them is catalog.json's info_hash_hex. telemetry._names is NOT that
+    join -- it is an aria2 file BASENAME harvested from the origin's RPC, and
+    joining on it would match the wrong image (or nothing) the moment a
+    filename and an image id differ."""
+    plan, transfer = _lc_id(1), _lc_id(2)
+    reports = {_LC_DEVICE: [_lc_report(transfer, received_at=1200.0)]}
+    # The plan row captured no info_hash (published after the assignment), so
+    # only the catalog can supply the join key.
+    policy = _lc_policy(plan, transfer, info_hash=None)
+    hub, store = _lc_hub(tmp_path / "with-catalog", policy, reports=reports)
+    hub._names = {_LC_INFO_HASH: "cat9k.bin"}   # a basename, never an image id
+    _lc_announce(hub, now=1150.0)
+
+    hub.sample(now=1150.0)
+
+    assert ("seeding_started", plan) in _lc_events(hub)
+    assert store.get(plan)["tracker_seeder_at"] == 1150.0
+
+    # And with the catalog entry carrying no info_hash_hex there is NO join key
+    # at all: no event, never a guess from the basename map.
+    blind, blind_store = _lc_hub(tmp_path / "no-catalog", policy,
+                                 reports=reports,
+                                 images={_LC_IMAGE: {"filename": "cat9k.bin"}})
+    blind._names = {_LC_INFO_HASH: "cat9k.bin"}
+    _lc_announce(blind, now=1150.0)
+
+    blind.sample(now=1150.0)
+
+    assert _lc_events(blind) == [("planned", plan)]
+    assert blind_store.get(plan)["tracker_seeder_at"] is None
+
+
+def test_existing_report_records_are_unchanged_by_the_lifecycle_pass(tmp_path):
+    """The additive guarantee, asserted at the PIPELINE rather than at the
+    builder: the report records a lifecycle-wired hub puts on the queue must be
+    identical, attribute for attribute, to the ones a hub with no lifecycle
+    wiring at all produces from the same inputs."""
+    plan, transfer = _lc_id(1), _lc_id(2)
+    report = _lc_report(transfer, received_at=1200.0, window_end=1190.0)
+    hub, _store = _lc_hub(tmp_path, _lc_policy(plan, transfer),
+                          reports={_LC_DEVICE: [report]})
+    _lc_announce(hub, now=1150.0)
+    hub.sample(now=1150.0)
+
+    plain = telemetry.Telemetry(PeerRegistry(),
+                                reports_info=lambda: {_LC_DEVICE: [report]})
+    plain.exporter = _EXPORT_ON
+    plain.sample(now=1150.0)
+
+    assert _lc_records(hub, _REPORT_NAME) == _lc_records(plain, _REPORT_NAME)
+    assert len(_lc_records(hub, _REPORT_NAME)) == 1
+    # In particular the plan identity did NOT leak into the report event: an
+    # attribute shipped once can never be withdrawn additively.
+    report_attrs = _lc_attrs(_lc_records(hub, _REPORT_NAME)[0])
+    assert "iris.plan.id" not in report_attrs
+    assert "iris.transfer.planned_at" not in report_attrs
+    assert "iris.transfer.seeding_started_at" not in report_attrs
+
+
+# --- lifecycle records must survive a queue that drops them ---------------
+#
+# Appended as a pure block. These drive sample() through a REAL transport
+# whose sender fails and then recovers, because that is the only way the
+# difference between "the queue accepted it" and "the collector got it" is
+# observable at all -- with no transport wired nothing is ever delivered and
+# every enqueue looks like a success.
+
+
+def _lc_flaky_hub(tmp_path, policy, reports=None, max_queue=1000):
+    """(hub, store, outbox, link) over a real LogQueue + OTLPLogTransport.
+
+    `link["up"]` switches the collector on and off; while it is down the
+    sender raises, which is exactly what OTLPLogTransport.send promises to do
+    on failure so the queue retains the batch. `outbox` collects the bodies
+    that really went out.
+    """
+    outbox, link = [], {"up": False}
+
+    def sender(_url, body):
+        if not link["up"]:
+            raise OSError("collector unreachable")
+        outbox.append(body)
+
+    exp = otlp.OTLPLogExporter("http://c:4318", sender=sender,
+                               max_queue=max_queue)
+    store = transfer_lifecycle.TransferLifecycle(str(tmp_path))
+    hub = telemetry.Telemetry(
+        PeerRegistry(), exporter=exp,
+        reports_info=lambda: reports if reports is not None else {},
+        images_info=lambda: _LC_IMAGES,
+        assignments_info=lambda: policy,
+        transfer_lifecycle=store)
+    return hub, store, outbox, link
+
+
+def _lc_sent_event_ids(outbox):
+    ids = []
+    for body in outbox:
+        payload = json.loads(body.decode())
+        for resource in payload.get("resourceLogs", []):
+            for scope in resource.get("scopeLogs", []):
+                for record in scope.get("logRecords", []):
+                    attrs = _lc_attrs(record)
+                    if _lc_log_name(record) == _LIFECYCLE_NAME:
+                        ids.append(attrs["event.id"]["stringValue"])
+    return ids
+
+
+def test_a_lifecycle_event_is_marked_delivered_only_by_a_successful_send(
+        tmp_path):
+    """The durable marker that retires an event is written from the queue's
+    delivered-callback, which fires only after a send succeeded. Until then the
+    row is queued but unconfirmed -- because LogQueue.emit returning True says
+    only that the deque took the record, and an unreachable collector is
+    precisely when that is not the same thing."""
+    plan, transfer = _lc_id(1), _lc_id(2)
+    hub, store, outbox, link = _lc_flaky_hub(tmp_path,
+                                             _lc_policy(plan, transfer))
+
+    hub.sample(now=1100.0)                      # queued, send fails
+
+    row = store.get(plan)
+    assert "planned" in row["emitted"]
+    assert row["delivered"] == {}
+    assert store.stats()["plans_unconfirmed"] == 1
+    assert outbox == []
+
+    link["up"] = True
+    hub.sample(now=1110.0)                      # the collector comes back
+
+    assert store.get(plan)["delivered"].keys() == {"planned"}
+    assert store.stats()["plans_unconfirmed"] == 0
+    assert _lc_sent_event_ids(outbox) == ["%s.planned" % plan]
+    # And the record went out ONCE: the still-queued copy was never queued a
+    # second time behind it (LogQueue.contains, as _export_new_reports does).
+    hub.sample(now=1120.0)
+    assert _lc_sent_event_ids(outbox) == ["%s.planned" % plan]
+
+
+def test_a_lifecycle_record_evicted_from_a_full_queue_is_re_queued_not_lost(
+        tmp_path):
+    """The failure the durable marker exists to prevent, and the one an
+    enqueue-time marker cannot.
+
+    LogQueue.emit returns False only for a duplicate key or a zero-capacity
+    queue. A FULL queue does not refuse: it pops its oldest record, counts a
+    drop and returns True. So an unreachable collector plus ordinary announce
+    traffic evicts a lifecycle record that was already marked, and nothing
+    ever revisits a marked row -- the event would be delivered zero times,
+    forever. Held unconfirmed instead, it is simply queued again.
+    """
+    plan, transfer = _lc_id(1), _lc_id(2)
+    hub, store, outbox, link = _lc_flaky_hub(tmp_path,
+                                             _lc_policy(plan, transfer),
+                                             max_queue=2)
+
+    hub.sample(now=1100.0)                      # queued, send fails
+    assert "planned" in store.get(plan)["emitted"]
+
+    for n in range(4):                          # announces overrun the queue
+        hub.on_swarm_event({"event": "join", "ip": "10.0.0.%d" % n, "ts": 0,
+                            "principal_type": "device", "principal_id": "d1",
+                            "event_id": "evt-%d" % n})
+    assert _lc_records(hub) == [], "the record must really have been evicted"
+
+    link["up"] = True
+    hub.sample(now=1110.0)
+
+    assert _lc_sent_event_ids(outbox) == ["%s.planned" % plan]
+    assert store.get(plan)["delivered"].keys() == {"planned"}
+
+
+def test_the_report_delivery_cursor_still_advances_through_the_shared_callback(
+        tmp_path):
+    """LogQueue has ONE delivered-callback slot and the report path already
+    owned it. Lifecycle deliveries are fanned out from a wrapper rather than
+    registered over the top of it: whichever registered last would otherwise
+    silently disable the other, and the report replay guard failing open is
+    invisible until a backend is holding every stored report twice."""
+    plan, transfer = _lc_id(1), _lc_id(2)
+    report = _lc_report(transfer, received_at=1200.0)
+    hub, store, outbox, link = _lc_flaky_hub(
+        tmp_path, _lc_policy(plan, transfer),
+        reports={_LC_DEVICE: [report]})
+    link["up"] = True
+
+    hub.sample(now=1250.0)
+
+    assert hub._seen_report_event_ids, \
+        "the report cursor did not advance on delivery"
+    assert len(_lc_sent_event_ids(outbox)) == 1
+    sent = len(outbox)
+
+    hub.sample(now=1260.0)                      # nothing new to say
+
+    assert len(outbox) == sent
+    assert store.get(plan)["delivered"].keys() == {"planned"}
+
+
+def test_one_sample_pass_marks_every_lifecycle_event_in_a_single_store_write(
+        tmp_path, monkeypatch):
+    """Two plans promoting on one pass is four records, and marking them one
+    at a time is four full read-modify-write cycles of the whole store -- on
+    the same thread that then has to flush telemetry. The pass writes twice:
+    once for the observation, once for the whole batch of markers."""
+    plan1, transfer1 = _lc_id(1), _lc_id(2)
+    plan2, transfer2 = _lc_id(3), _lc_id(4)
+    policy = _lc_policy(plan1, transfer1)
+    policy["iris8kv-2"] = {
+        "approved_image_id": _LC_IMAGE,
+        "approved_image_ids": [_LC_IMAGE],
+        "plans": {_LC_IMAGE: _lc_plan_row(plan2, transfer2)}}
+    reports = {_LC_DEVICE: [_lc_report(transfer1, received_at=1200.0)],
+               "iris8kv-2": [_lc_report(transfer2, received_at=1200.0)]}
+    hub, store = _lc_hub(tmp_path, policy, reports=reports)
+    _lc_announce(hub, now=1150.0)
+    _lc_announce(hub, now=1150.0, device_id="iris8kv-2", peer_id="p2",
+                 ip="10.0.0.3")
+
+    writes = []
+    real = transfer_lifecycle._atomic_write_json
+
+    def counted(path, obj):
+        writes.append(path)
+        return real(path, obj)
+
+    monkeypatch.setattr(transfer_lifecycle, "_atomic_write_json", counted)
+    hub.sample(now=1150.0)
+
+    assert len(_lc_events(hub)) == 4
+    assert len(writes) == 2

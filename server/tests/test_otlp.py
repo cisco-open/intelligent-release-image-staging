@@ -874,3 +874,280 @@ def test_peer_transfer_records_ride_the_logs_payload_unchanged():
     sent = payload["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
     assert sent == recs
     assert json.loads(json.dumps(payload))  # serialises as-is
+
+
+# --- transfer lifecycle (iris.transfer.lifecycle, server-side plan events) ---
+
+def _plan_row(**over):
+    """A promoted (state ``seeding``) transfer_lifecycle store row.
+
+    Both instants are server-clock epochs minted inside the tracker container,
+    which is what makes ``seeding_started_at - planned_at`` a single-clock
+    subtraction; ``observed_at`` is the DEVICE's clock off the attesting
+    report's ``window.end`` and is deliberately a different number."""
+    row = {
+        "plan_id": "9b0c1d2e3f405162738495a6b7c8d9e0",
+        "transfer_id": "3f0a9c1d8e2b4a6f9017c3d5e7b1a2c4",
+        "device_id": "iris8kv-1",
+        "image_id": "cat9k_iosxe.17.15.01.SPA.bin",
+        "info_hash": "a" * 40,
+        "planned_at": 1755743200.482,
+        "state": "seeding",
+        "checksum_verified_at": 1755743450.0,
+        "tracker_seeder_at": 1755743380.25,
+        "seeding_started_at": 1755743500.75,
+        "observed_at": 1755743495.0,
+    }
+    row.update(over)
+    return row
+
+
+def test_planned_record_carries_the_lifecycle_name_and_the_four_correlation_ids():
+    rec = otlp.build_transfer_lifecycle_record(_plan_row(), "planned")
+    assert rec["eventName"] == "iris.transfer.lifecycle"
+    attrs = _attrs(rec)
+    assert attrs["otel.log.name"] == {
+        "stringValue": "iris.transfer.lifecycle"}
+    assert attrs["iris.telemetry.schema.version"] == {"intValue": "2"}
+    assert attrs["event"] == {"stringValue": "planned"}
+    # The four correlation ids. iris.plan.id is the join key an operator groups
+    # on; the transfer id is what the device's own reports carry.
+    assert attrs["iris.plan.id"] == {
+        "stringValue": "9b0c1d2e3f405162738495a6b7c8d9e0"}
+    assert attrs["iris.transfer.id"] == {
+        "stringValue": "3f0a9c1d8e2b4a6f9017c3d5e7b1a2c4"}
+    assert attrs["iris.image.id"] == {
+        "stringValue": "cat9k_iosxe.17.15.01.SPA.bin"}
+    assert attrs["iris.torrent.info_hash"] == {"stringValue": "a" * 40}
+    # BOTH device-id spellings ride, so a join against
+    # iris.device.transfer.report (device.id) or against iris.swarm.peer_bytes
+    # (iris.device.id) can be written without a coalesce.
+    assert attrs["device.id"] == {"stringValue": "iris8kv-1"}
+    assert attrs["iris.device.id"] == {"stringValue": "iris8kv-1"}
+    assert attrs["iris.transfer.planned_at"] == {
+        "stringValue": "2025-08-21T02:26:40.482Z"}
+
+
+def test_planned_record_omits_the_seeding_instants_it_cannot_yet_know():
+    """A plan is ``planned`` before any precondition has latched, and the store
+    may hand the builder a row that already carries latches (the pair is
+    emitted in order, so ``planned`` can be built after promotion). The planned
+    record must still describe only the planning decision -- shipping a seeding
+    timestamp on it would date the transfer's completion to its assignment."""
+    attrs = _attrs(otlp.build_transfer_lifecycle_record(_plan_row(), "planned"))
+    for gone in ("iris.transfer.seeding_started_at",
+                 "iris.transfer.checksum_verified_at",
+                 "iris.transfer.tracker_seeder_at",
+                 "iris.device.observed_at"):
+        assert gone not in attrs, gone
+
+
+def test_seeding_started_record_carries_the_four_correlation_ids_and_both_timestamps():
+    rec = otlp.build_transfer_lifecycle_record(_plan_row(), "seeding_started")
+    assert rec["eventName"] == "iris.transfer.lifecycle"
+    attrs = _attrs(rec)
+    assert attrs["otel.log.name"] == {
+        "stringValue": "iris.transfer.lifecycle"}
+    assert attrs["iris.telemetry.schema.version"] == {"intValue": "2"}
+    assert attrs["event"] == {"stringValue": "seeding_started"}
+    assert attrs["iris.plan.id"] == {
+        "stringValue": "9b0c1d2e3f405162738495a6b7c8d9e0"}
+    assert attrs["iris.transfer.id"] == {
+        "stringValue": "3f0a9c1d8e2b4a6f9017c3d5e7b1a2c4"}
+    assert attrs["device.id"] == {"stringValue": "iris8kv-1"}
+    assert attrs["iris.device.id"] == {"stringValue": "iris8kv-1"}
+    assert attrs["iris.image.id"] == {
+        "stringValue": "cat9k_iosxe.17.15.01.SPA.bin"}
+    # planned_at is repeated here on purpose: the duration is then computable
+    # from this record alone, without joining back to a planned record a
+    # bounded queue may have dropped.
+    assert attrs["iris.transfer.planned_at"] == {
+        "stringValue": "2025-08-21T02:26:40.482Z"}
+    assert attrs["iris.transfer.seeding_started_at"] == {
+        "stringValue": "2025-08-21T02:31:40.750Z"}
+    # The two preconditions ride separately so an operator can see WHICH one
+    # was the laggard -- the device's sha256 or the swarm.
+    assert attrs["iris.transfer.checksum_verified_at"] == {
+        "stringValue": "2025-08-21T02:30:50.000Z"}
+    assert attrs["iris.transfer.tracker_seeder_at"] == {
+        "stringValue": "2025-08-21T02:29:40.250Z"}
+    # The device's own clock, a float epoch named exactly as the v2 report
+    # names it, and never subtracted from the server instants above.
+    assert attrs["iris.device.observed_at"]["doubleValue"] == 1755743495.0
+
+
+def test_lifecycle_event_time_is_the_source_instant_not_the_emit_instant():
+    """timeUnixNano is the instant the SERVER minted or observed -- planned_at
+    for planned, seeding_started_at for seeding_started -- never the moment the
+    record was queued or ingested. Timing off the emit would report a queue
+    delay as a transfer fact, and a crash-replay would then move an instant a
+    backend already holds under an identical event.id. This is the deliberate
+    departure from iris.device.transfer.report, which times off the server's
+    received_at because arrival is the only thing it knows for certain."""
+    row = _plan_row()
+    planned = otlp.build_transfer_lifecycle_record(row, "planned")
+    seeding = otlp.build_transfer_lifecycle_record(row, "seeding_started")
+    assert planned["timeUnixNano"] == str(int(1755743200.482 * 1e9))
+    assert seeding["timeUnixNano"] == str(int(1755743500.75 * 1e9))
+
+
+def test_rfc3339_is_utc_milliseconds_with_a_literal_z():
+    """Stands in for the operator-facing Splunk extraction
+    ``%Y-%m-%dT%H:%M:%S.%N%Z``: %N needs a fractional field that is always
+    present and always three digits, and %Z matches a zone NAME, so it will not
+    consume a numeric +00:00 offset. The strptime round-trip below is the
+    machine-checkable proxy for that pattern."""
+    import datetime
+    value = otlp._rfc3339_millis(1755743200.482)
+    assert value == "2025-08-21T02:26:40.482Z"
+    assert datetime.datetime.strptime(
+        value, "%Y-%m-%dT%H:%M:%S.%fZ") == datetime.datetime(
+            2025, 8, 21, 2, 26, 40, 482000)
+    # A whole-second instant still renders three fractional digits: a bare
+    # "...:50Z" would fail the pattern outright.
+    assert otlp._rfc3339_millis(1755743450) == "2025-08-21T02:30:50.000Z"
+    assert otlp._rfc3339_millis(0) == "1970-01-01T00:00:00.000Z"
+    # UTC via time.gmtime, never the container's local zone.
+    assert value.endswith("Z") and "+" not in value
+
+
+def test_rfc3339_rounding_carry_rolls_the_second():
+    # 1.9996s rounds to 2000 millis: it must become ...:02.000Z, never
+    # ...:01.1000Z, which is four fractional digits and breaks the pattern.
+    assert otlp._rfc3339_millis(1.9996) == "1970-01-01T00:00:02.000Z"
+    assert otlp._rfc3339_millis(0.9999) == "1970-01-01T00:00:01.000Z"
+
+
+def test_rfc3339_returns_none_for_anything_it_cannot_honestly_render():
+    # None means the caller DROPS the attribute pair; an absent instant is
+    # honest where a fabricated one is not. bool is rejected explicitly
+    # because it is an int subclass and would render True as ...:01.000Z.
+    for bad in (None, True, False, "nope", {}, [], float("nan"),
+                float("inf"), -float("inf"), -1.0):
+        assert otlp._rfc3339_millis(bad) is None, repr(bad)
+
+
+def test_event_id_is_stable_across_a_repeat_build():
+    """The id is DERIVED from the plan, never minted per emission, so a replay
+    after a crash between the queue accepting a record and its durable marker
+    landing carries a byte-identical record."""
+    row = _plan_row()
+    rec = otlp.build_transfer_lifecycle_record(row, "seeding_started")
+    again = otlp.build_transfer_lifecycle_record(dict(row), "seeding_started")
+    assert rec["attributes"] == again["attributes"]
+    assert rec == again
+    assert _attrs(rec)["event.id"] == {
+        "stringValue": "9b0c1d2e3f405162738495a6b7c8d9e0.seeding_started"}
+
+
+def test_planned_and_seeding_started_carry_different_event_ids():
+    """They MUST differ: LogQueue.emit refuses a key already in
+    _keys/_inflight_keys, so a shared event.id would make the second record of
+    a plan vanish silently rather than fail loudly."""
+    row = _plan_row()
+    planned = _attrs(otlp.build_transfer_lifecycle_record(row, "planned"))
+    seeding = _attrs(
+        otlp.build_transfer_lifecycle_record(row, "seeding_started"))
+    assert planned["event.id"] == {
+        "stringValue": "9b0c1d2e3f405162738495a6b7c8d9e0.planned"}
+    assert seeding["event.id"] == {
+        "stringValue": "9b0c1d2e3f405162738495a6b7c8d9e0.seeding_started"}
+    assert planned["event.id"] != seeding["event.id"]
+
+
+def test_event_id_is_an_attribute_not_a_top_level_key():
+    rec = otlp.build_transfer_lifecycle_record(_plan_row(), "planned")
+    assert "event.id" not in rec
+    assert _attrs(rec)["event.id"]["stringValue"].endswith(".planned")
+
+
+def test_lifecycle_record_omits_what_it_does_not_know():
+    """An absent attribute means NOT KNOWN. Nothing is defaulted: an empty
+    string info_hash or a fabricated instant is worse than a missing one."""
+    row = _plan_row()
+    del row["info_hash"]
+    del row["observed_at"]
+    row["tracker_seeder_at"] = None
+    attrs = _attrs(otlp.build_transfer_lifecycle_record(row, "seeding_started"))
+    for gone in ("iris.torrent.info_hash", "iris.device.observed_at",
+                 "iris.transfer.tracker_seeder_at"):
+        assert gone not in attrs, gone
+    # ...and the ones it does know are unaffected by the omissions.
+    assert attrs["iris.transfer.seeding_started_at"] == {
+        "stringValue": "2025-08-21T02:31:40.750Z"}
+    assert attrs["iris.transfer.checksum_verified_at"] == {
+        "stringValue": "2025-08-21T02:30:50.000Z"}
+
+
+def test_lifecycle_record_never_labels_a_transfer_id_as_device_reported():
+    """There is exactly ONE promotion path: a plan promotes only on a terminal
+    report bearing that plan's own transfer_id. No divergent / mixed-fleet
+    fallback exists, so no attribute may claim one -- even if a row somehow
+    carries such keys, they never reach the wire. An attribute cannot be
+    withdrawn additively, so shipping one would be permanent."""
+    row = _plan_row(id_source="device_divergent",
+                    device_reported_id="ffffffffffffffffffffffffffffffff")
+    for event in ("planned", "seeding_started"):
+        attrs = _attrs(otlp.build_transfer_lifecycle_record(row, event))
+        assert "iris.transfer.id_source" not in attrs
+        assert "iris.transfer.device_reported_id" not in attrs
+        # the plan's own transfer id is the only one exported
+        assert attrs["iris.transfer.id"] == {
+            "stringValue": "3f0a9c1d8e2b4a6f9017c3d5e7b1a2c4"}
+
+
+def test_lifecycle_record_tolerates_garbage():
+    # A builder never raises on bad input (the house rule); _ts_nano yields
+    # "0" rather than blowing up, and every uncoercible value drops its pair.
+    for row in (None, "total garbage", 7, [], {}):
+        rec = otlp.build_transfer_lifecycle_record(row, "planned")
+        assert rec["timeUnixNano"] == "0"
+        assert rec["eventName"] == "iris.transfer.lifecycle"
+        attrs = _attrs(rec)
+        assert attrs["otel.log.name"] == {
+            "stringValue": "iris.transfer.lifecycle"}
+        assert "iris.plan.id" not in attrs
+        assert "iris.transfer.planned_at" not in attrs
+    junk = _plan_row(planned_at="soon", seeding_started_at=float("nan"),
+                     observed_at="later")
+    rec = otlp.build_transfer_lifecycle_record(junk, "seeding_started")
+    assert rec["timeUnixNano"] == "0"
+    attrs = _attrs(rec)
+    assert "iris.transfer.planned_at" not in attrs
+    assert "iris.transfer.seeding_started_at" not in attrs
+    assert "iris.device.observed_at" not in attrs
+    assert attrs["iris.plan.id"] == {
+        "stringValue": "9b0c1d2e3f405162738495a6b7c8d9e0"}
+
+
+def test_lifecycle_records_ride_the_logs_payload_unchanged():
+    """build_logs_payload discriminates solely on the presence of
+    timeUnixNano, so a pre-built lifecycle record passes through untouched --
+    which is why the builder needs no registration anywhere."""
+    recs = [otlp.build_transfer_lifecycle_record(_plan_row(), "planned"),
+            otlp.build_transfer_lifecycle_record(_plan_row(),
+                                                 "seeding_started")]
+    payload = otlp.build_logs_payload(recs, {"service.name": "iris-tracker"})
+    sent = payload["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
+    assert sent == recs
+    assert json.loads(json.dumps(payload))  # serialises as-is
+
+
+def test_existing_report_record_attributes_are_unchanged_by_the_lifecycle_addition():
+    """The lifecycle event is PURELY ADDITIVE: no existing builder gained an
+    attribute, and in particular the device report is NOT given a plan id.
+    plan_id never travels device -> server at all, so a report cannot honestly
+    carry one; the server owns the transfer_id -> plan_id mapping."""
+    for rec in (otlp.build_report_record(_v2_report(), "iris8kv-1"),
+                otlp.build_report_record(_v1_report(), "d1")):
+        attrs = _attrs(rec)
+        for gone in ("iris.plan.id", "iris.transfer.planned_at",
+                     "iris.transfer.seeding_started_at",
+                     "iris.transfer.checksum_verified_at",
+                     "iris.transfer.tracker_seeder_at", "event"):
+            assert gone not in attrs, gone
+        assert rec["eventName"] != "iris.transfer.lifecycle"
+    # the report event time and schema version are untouched by this change
+    v2 = otlp.build_report_record(_v2_report(), "iris8kv-1")
+    assert v2["timeUnixNano"] == str(int(1755743200.0 * 1e9))   # received_at
+    assert _attrs(v2)["iris.telemetry.schema.version"] == {"intValue": "2"}

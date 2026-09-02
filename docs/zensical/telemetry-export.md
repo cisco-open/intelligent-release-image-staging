@@ -84,6 +84,7 @@ a panel does not blank out when the swarm goes idle.
 | `iris.swarm.peer_bytes` | Server-side peer ledger | Origin-side **sampled estimate** of one edge's bytes |
 | `iris.device.peer_transfer_record` | Device-side completion hook | Device-**measured exact** bytes received from one peer |
 | `iris.device.report` | Device agent | Terminal per-device transfer report |
+| `iris.transfer.lifecycle` | Tracker (server-side assignment + swarm observation) | Plan lifecycle: assignment recorded, seeding confirmed |
 | `iris.swarm.start` / `.complete` / `.stop` / `.stale` | Server | Swarm lifecycle events |
 
 !!! danger "Never sum the two peer record names together"
@@ -106,9 +107,44 @@ origin; the server can, and does.** A row the server did not resolve stays
 outcome (a peer that has not heartbeated, a NAT address, a non-IRIS seeder),
 not an error.
 
+Key attributes on `iris.transfer.lifecycle`: `event` (`planned` or
+`seeding_started`), `iris.plan.id` and `iris.transfer.id` (the plan's two
+correlation ids, both 32 lowercase hex), `iris.device.id` **and** `device.id`
+(the same value under both spellings, so either join can be written without a
+coalesce), `iris.image.id`, `iris.torrent.info_hash`, and
+`iris.transfer.planned_at`. The `seeding_started` event adds
+`iris.transfer.seeding_started_at` together with the two observations behind
+it, `iris.transfer.checksum_verified_at` and `iris.transfer.tracker_seeder_at`,
+plus the device's own clock as `iris.device.observed_at`. Group on
+`iris.plan.id`: it is stable across both events of one plan and distinct across
+two plans for the same device and image. The full contract — what
+`seeding_started` proves, the exactly-once delivery guarantee, and what a
+missing `seeding_started` means during an agent rollout — is in
+[Transfer lifecycle events](observability.md#transfer-lifecycle-events).
+
 !!! warning "Int64 attributes ride the wire as strings"
     Byte attributes are int64 and therefore travel as JSON **strings** in
     OTLP. A backend query that sums them must coerce first.
+
+!!! note "The lifecycle timestamps are strings already, and need no coercion"
+    Do not carry the caveat above over to `iris.transfer.lifecycle`.
+    `iris.transfer.planned_at`, `iris.transfer.seeding_started_at`,
+    `iris.transfer.checksum_verified_at` and
+    `iris.transfer.tracker_seeder_at` are **RFC 3339 string attributes by
+    construction** — UTC, exactly three fractional digits, a literal trailing
+    `Z` (`2026-09-02T12:43:11.482Z`, Splunk pattern
+    `%Y-%m-%dT%H:%M:%S.%N%Z`). Parse them with a time function, not a numeric
+    cast.
+
+    The lifecycle records also time differently from the device report
+    records. `timeUnixNano` on a lifecycle record is the **source event
+    time** — the instant the plan was minted, or the instant the last seeding
+    precondition became true — never the emit or ingest time. The device report records
+    carry server **ingest** time in `timeUnixNano` and put the device's own
+    clock in `iris.device.observed_at`; the lifecycle records carry that
+    attribute too, on `seeding_started`, with the same meaning and the same
+    float-epoch shape. It is a second clock: never subtract it from the RFC
+    3339 server instants.
 
 ## Turning export on
 

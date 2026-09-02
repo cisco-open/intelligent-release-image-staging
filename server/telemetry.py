@@ -32,6 +32,7 @@ import peer_enforcement as _peer_enforcement
 import peer_ledger as _peer_ledger
 import peer_policy as _peer_policy
 import telemetry_destination
+import transfer_lifecycle as _transfer_lifecycle
 from peer_registry import PeerRegistry
 
 DEFAULT_INTERVAL = 15
@@ -543,9 +544,20 @@ class Telemetry:
                  metrics_exporter=None, export_health=None,
                  device_metrics=False, dest_settings=None,
                  env_endpoint="", env_enabled=False, headers=None,
-                 policy_info=None, enforcement_info=None, peer_ledger=None):
+                 policy_info=None, enforcement_info=None, peer_ledger=None,
+                 assignments_info=None, transfer_lifecycle=None):
         self.exporter = exporter
         self._seen_report_event_ids = set()
+        # event.id -> (plan_id, event, transfer_id) for every lifecycle record
+        # this process has put on the queue and not yet seen acknowledged. The
+        # queue's delivered-callback hands back event.ids and nothing else, so
+        # this is how a delivery is turned back into the durable marker it
+        # confirms. Bounded by the store's outstanding set, and pruned to it on
+        # every pass that enumerates it (_emit_transfer_lifecycle). Declared
+        # BEFORE configure_dedupe below, because that wires the callback that
+        # reads it.
+        self._lifecycle_queued = {}
+        self._lifecycle_lock = threading.Lock()
         # Task 22: the OTLP log queue is a STABLE object owned by the hub for
         # the whole process; only the destination transport is mutable and
         # swapped on a console destination change/disable/re-enable, so
@@ -560,8 +572,13 @@ class Telemetry:
         else:
             self.log_queue = otlp.LogQueue()
             self._log_transport = None
+        # ONE delivered-callback slot, two consumers: report ids advance the
+        # in-process replay guard, lifecycle ids write the durable delivery
+        # marker. They are fanned out from a single wrapper rather than
+        # competing for the slot -- whichever registered last would otherwise
+        # silently disable the other.
         self.log_queue.configure_dedupe(
-            _otlp_record_event_id, self._reports_delivered)
+            _otlp_record_event_id, self._log_delivered)
         # Sender override hook (tests). Applied to every rebuilt transport.
         self._log_sender = None
         self.rpc = rpc
@@ -623,6 +640,24 @@ class Telemetry:
         #   enforcement_info() -> peer-enforcement.json dict (or None)
         self._policy_info = policy_info
         self._enforcement_info = enforcement_info
+        # Optional callable -> the catalog's policy.json ({device_id: {…,
+        # "plans": {image_id: {plan_id, transfer_id, planned_at,
+        # info_hash}}}}), and the tracker's own TransferLifecycle
+        # store. Together they drive the iris.transfer.lifecycle events
+        # (planned -> seeding_started).
+        #
+        # `assignments_info` is NOT `policy_info`: that one is peer-policy
+        # (per-participant network intent) and is a different file, a different
+        # shape and a different subsystem. The names are one letter of intent
+        # apart and would be silently interchangeable at the call site, so they
+        # are deliberately kept distinct here rather than overloaded.
+        #
+        # Both default to None, and every lifecycle stage returns immediately
+        # when either is unwired, so direct-construction callers (the whole
+        # test suite, standalone runs) behave exactly as they did before this
+        # existed: no store touched, no records queued.
+        self._assignments_info = assignments_info
+        self.transfer_lifecycle = transfer_lifecycle
         # Per-process report ids already queued. Bound this set to the current
         # stored ring universe on every scan: a new hub deliberately replays the
         # ring at-least-once, while equal received_at values never shadow one
@@ -1020,12 +1055,24 @@ class Telemetry:
                     self._images_info() if self._images_info else {}, now)
             except Exception:
                 pass                        # telemetry never breaks on bad input
+        # Latch OUTSIDE the exporter guard (see _observe_transfer_lifecycle):
+        # the facts behind a seeding event are durable observations, and a
+        # deployment that enables OTLP export later must be able to publish the
+        # plans that were already in flight while it was off.
+        try:
+            self._observe_transfer_lifecycle(now)
+        except Exception:
+            pass                            # telemetry never breaks on bad input
         if self.exporter is not None and self._reports_info is not None:
             try:
                 self._export_new_reports()
             except Exception:
                 pass                        # telemetry never breaks on bad input
         if self.exporter is not None:
+            try:
+                self._emit_transfer_lifecycle()
+            except Exception:
+                pass                        # telemetry never breaks on bad input
             delivered = self._flush_logs(now)
         if self.metrics_exporter is not None:
             # Every pass exports the latest snapshot (conflation, spec 7.5) —
@@ -1041,6 +1088,141 @@ class Telemetry:
                 legacy_participants=self._legacy_participant_count(),
                 seeder_torrents=self._seeder_torrent_metrics(now)))
             self.export_health.record(ok, "metrics", now)
+
+    def _observe_transfer_lifecycle(self, now):
+        """Latch this pass's transfer-lifecycle facts into the durable store.
+
+        The tracker is the only process that can do this at all: it owns the
+        PeerRegistry (precondition 3 — this device is announcing left=0 on the
+        image's torrent under its own authenticated principal) while the
+        catalog's policy.json and telemetry.json give it the plan set and the
+        device's verified terminal reports (preconditions 1+2). No other
+        process sees all three at once.
+
+        Called OUTSIDE sample()'s exporter guard on purpose. Latching is a
+        durable observation, not an export: a fleet running with OTLP export
+        switched off still accumulates its facts, so turning the destination on
+        later publishes the plans that were already in flight instead of
+        silently losing their start instants. Emission is the separate
+        `_emit_transfer_lifecycle` stage, which does sit behind the guard.
+
+        `observe()` is called on EVERY pass, including one that finds no live
+        plans: it is also what cancels a row whose assignment was withdrawn and
+        what prunes retired rows, so short-circuiting on an empty plan set
+        would leave a fleet's worth of rows open forever. (A transiently
+        unreadable policy.json therefore reads as "nothing assigned" for one
+        pass; the store reopens such a row when the plan reappears, which is
+        why that read failure is survivable rather than terminal.)
+        """
+        store = self.transfer_lifecycle
+        if store is None or self._assignments_info is None:
+            return
+        live = _transfer_lifecycle.live_plans_from_policy(
+            self._assignments_info())
+        # Each fact source is read defensively on its own: these are separate
+        # cross-process JSON files plus one in-process registry, and losing one
+        # of them must cost only the facts it carries. An empty reports map
+        # simply latches no checksum this pass; an empty snapshot latches no
+        # seeder. Both latches are first-write-wins and durable, so a pass that
+        # sees less than the last one can never retract what was already
+        # observed.
+        try:
+            reports = (self._reports_info() or {}) \
+                if self._reports_info is not None else {}
+        except Exception:
+            reports = {}
+        try:
+            images = self._images_info() if self._images_info else {}
+        except Exception:
+            images = {}
+        try:
+            snapshot = self._registry.snapshot(now=now)
+        except Exception:
+            snapshot = {}
+        verified = _transfer_lifecycle.verified_facts(live, reports)
+        seeder = _transfer_lifecycle.seeder_facts(live, snapshot, images)
+        store.observe(live, verified, seeder, now)
+
+    def _emit_transfer_lifecycle(self):
+        """Queue every lifecycle record the collector has not acknowledged.
+
+        MARK AFTER THE EFFECT, NEVER BEFORE. `LogQueue.emit` returns a bool and
+        `is not False` is the house signal for "the queue accepted it" (the
+        same test `tracker._export_outbox` uses to advance its watermark). On a
+        refusal — a zero-capacity queue — the marker stays unwritten and the
+        next pass retries with a byte-identical record, because both the
+        timestamps and the deterministic `event.id` were latched into the row
+        before any record was built. Writing the marker first would instead
+        lose the event for good.
+
+        ACCEPTANCE IS NOT DELIVERY, so the enqueue marker is not the end of it.
+        A FULL queue does not refuse: it evicts its oldest record and returns
+        True, and a record already queued can be evicted by later announce
+        traffic before any flush succeeds. The store therefore keeps a row
+        outstanding until `mark_delivered_many` confirms a successful send, and
+        this pass re-queues any outstanding record the queue no longer holds —
+        `contains` first, exactly as `_export_new_reports` does, so a record
+        still waiting is never queued twice.
+
+        The retry only runs with a live transport. With no destination wired
+        nothing can ever be acknowledged, so re-queueing evicted records would
+        do nothing but churn a bounded queue and evict other signals to make
+        room for records that cannot leave either.
+
+        The residual window is a crash between a successful send and its
+        marker, which re-emits the SAME record under the SAME `event.id` —
+        at-least-once with a backend-dedupable id, the contract peer_policy's
+        outbox already states.
+        """
+        store = self.transfer_lifecycle
+        if store is None:
+            return
+        retry = self._log_transport is not None
+        due = store.outstanding_emissions() if retry \
+            else store.pending_emissions()
+        # Build first, register second, emit third. Registering before the
+        # emit closes the window where a flush delivers a record whose
+        # event.id is not yet in the map and the delivery is lost.
+        records = []
+        for plan_id, row, event in due:
+            record = otlp.build_transfer_lifecycle_record(row, event)
+            event_id = _otlp_record_event_id(record)
+            if event_id is None:
+                continue                # unkeyed: nothing could confirm it
+            emitted = row.get("emitted")
+            records.append((event_id, record,
+                            (plan_id, event, row.get("transfer_id")),
+                            isinstance(emitted, dict) and event in emitted))
+        with self._lifecycle_lock:
+            for event_id, _record, item, _marked in records:
+                self._lifecycle_queued[event_id] = item
+            # Anything else in the map belongs to a row that has since been
+            # acknowledged, evicted or pruned, so the map stays the size of
+            # what the store still owes rather than growing an entry per plan
+            # for the life of the process. Dropping an entry costs nothing:
+            # only a delivery consumes one, a delivery needs a transport, and
+            # with a transport the next pass re-registers the whole
+            # outstanding set anyway.
+            live = {event_id for event_id, _r, _i, _m in records}
+            for event_id in [key for key in self._lifecycle_queued
+                             if key not in live]:
+                del self._lifecycle_queued[event_id]
+        marks = []
+        for event_id, record, item, marked in records:
+            if self.log_queue.contains(event_id):
+                continue                # still queued or in flight
+            if self.log_queue.emit(record) is False:
+                continue                # refused: stays pending for next pass
+            if not marked:
+                marks.append(item)
+        # One locked read-modify-write for the whole pass. Marking one at a
+        # time re-serialised and re-renamed the entire store per event, on the
+        # thread that then has to flush telemetry. Each item carries its
+        # expected transfer_id, which makes the mark refuse a row that was
+        # replaced by a NEW plan for the same device+image between the read
+        # above and this write: without it the new plan would inherit the old
+        # one's marker and never be published.
+        store.mark_emitted_many(marks)
 
     def _export_new_reports(self):
         """Emit one OTLP log record per stored device report not yet queued.
@@ -1154,8 +1336,42 @@ class Telemetry:
                 for did, rec in devices.items()
                 if isinstance(rec, dict) and rec.get("swarm_ip")}
 
+    def _log_delivered(self, event_ids):
+        """The queue's single delivered-callback, fanned out to both owners.
+
+        Called from `LogQueue.flush` ONLY after a send succeeded, with the
+        event.ids of the batch that went out. Reports first: that guard is a
+        plain set update and cannot fail, so the lifecycle store's file write
+        can never cost the report path its cursor.
+        """
+        self._reports_delivered(event_ids)
+        self._lifecycle_delivered(event_ids)
+
     def _reports_delivered(self, event_ids):
         self._seen_report_event_ids.update(event_ids)
+
+    def _lifecycle_delivered(self, event_ids):
+        """Turn delivered event.ids back into durable delivery markers.
+
+        This is the ONLY thing that retires a lifecycle event: everything
+        before it says the record reached a queue that may still drop it. A
+        failed write leaves the row outstanding, so the next pass re-queues the
+        same record under the same event.id — at-least-once, backend-dedupable,
+        which is the right way round to fail.
+        """
+        store = self.transfer_lifecycle
+        marks = []
+        with self._lifecycle_lock:
+            for event_id in event_ids or ():
+                item = self._lifecycle_queued.pop(event_id, None)
+                if item is not None:
+                    marks.append(item)
+        if store is None or not marks:
+            return
+        try:
+            store.mark_delivered_many(marks)
+        except Exception:
+            pass                        # telemetry is never on the critical path
 
     # --- live per-peer swarm view (for the swarm map) ---
     def swarm_snapshot(self, now=None):
@@ -1453,6 +1669,9 @@ def from_env(env=None):
     reports_info = lambda: _read_reports(state_dir)
     live_info = lambda: _read_live_samples(state_dir)
     images_info = lambda: _read_images(state_dir)
+    # The catalog's assignment file, carrying the plan ids minted by
+    # set_policy. Read fresh per pass like every other cross-process file here.
+    assignments_info = lambda: _read_assignments(state_dir)
     # Per-participant policy/enforcement facts (spec §7/§10.3). Read the tracker
     # process's own durable stores — same process, no cross-process identity
     # assumption. peer-policy resolves the current authoritative/LKG/fail-closed
@@ -1470,6 +1689,14 @@ def from_env(env=None):
         ledger = _peer_ledger.PeerLedger(state_dir)
     except OSError:
         ledger = None
+    # Durable plan lifecycle. Same rule as the ledger: an unwritable state dir
+    # costs the lifecycle events and nothing else, and the identity those
+    # events carry lives in policy.json regardless, so nothing is lost that a
+    # later pass over a writable directory cannot rebuild.
+    try:
+        lifecycle = _transfer_lifecycle.TransferLifecycle(state_dir)
+    except OSError:
+        lifecycle = None
     hub = Telemetry(rpc=rpc, interval=interval,
                     device_info=device_info, reports_info=reports_info,
                     live_info=live_info, images_info=images_info,
@@ -1481,7 +1708,9 @@ def from_env(env=None):
                     headers=headers,
                     policy_info=policy_info,
                     enforcement_info=enforcement_info,
-                    peer_ledger=ledger)
+                    peer_ledger=ledger,
+                    assignments_info=assignments_info,
+                    transfer_lifecycle=lifecycle)
     # Build the initial exporters NOW (not on the first pass) so swarm events
     # from the announce path are captured from process start, exactly as the
     # construction-time exporters were before the destination became editable.
@@ -1495,6 +1724,24 @@ def _read_devices(state_dir):
     try:
         with open(os.path.join(state_dir, "devices.json")) as f:
             return json.load(f)
+    except Exception:
+        return {}
+
+
+def _read_assignments(state_dir):
+    """The catalog's policy.json ({device_id: assignment record, including its
+    per-image ``plans`` map}) or {} if it isn't there yet / unreadable / not a
+    dict. Read fresh each call, like _read_devices.
+
+    This is the ASSIGNMENT policy written by CatalogStore.set_policy — not
+    peer-policy.json, which _read_policy handles and which is an unrelated
+    subsystem. Returning {} on an unreadable file is safe here only because the
+    lifecycle store reopens a plan that reappears: no id lives in this
+    process, so a transient read failure costs one pass, never an identity."""
+    try:
+        with open(os.path.join(state_dir, "policy.json")) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
     except Exception:
         return {}
 

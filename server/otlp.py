@@ -15,6 +15,7 @@ import collections
 import json
 import os
 import threading
+import time
 import urllib.request
 
 import trust
@@ -176,6 +177,61 @@ def _ts_nano(value):
         return "0"
 
 
+def _rfc3339_millis(value):
+    """Epoch seconds -> ``2026-09-02T14:03:11.482Z``: UTC, EXACTLY three
+    fractional digits, a literal trailing ``Z``.
+
+    Three properties the operator-facing Splunk extraction
+    ``%Y-%m-%dT%H:%M:%S.%N%Z`` depends on, none of them incidental:
+      1. UTC via ``time.gmtime``, never the container's local zone -- the
+         exported instant must not change meaning when a host is re-zoned.
+      2. The fractional field is ALWAYS present and ALWAYS exactly three
+         digits, so ``%N`` never faces a missing or variable-width field. A
+         whole-second instant rendered as ``...:11Z`` fails the pattern
+         outright, which is why the millis are formatted unconditionally.
+      3. A literal ``Z``, never ``+00:00``: ``%Z`` matches a zone NAME and
+         will not consume a numeric offset.
+    The date part is assembled with explicit ``%`` conversions off the
+    ``time.gmtime`` fields rather than ``strftime``, whose output is
+    locale-sensitive in some builds; an operator's LANG must not be able to
+    change the shape of an exported timestamp.
+
+    Returns None for anything uncoercible -- ``bool`` included, since it is an
+    ``int`` subclass and would otherwise render True as
+    ``1970-01-01T00:00:01.000Z``. None means the caller DROPS the attribute
+    pair (``attrs = [_attr(k, v) for k, v in pairs if v is not None]``), which
+    is the house rule here: a builder never raises on bad input, and an absent
+    attribute is honest where a fabricated instant is not."""
+    if isinstance(value, bool):
+        return None
+    try:
+        ts = float(value)
+    except (TypeError, ValueError):
+        return None
+    # NaN is the only value unequal to itself; an infinity would blow up
+    # int() below. A negative epoch is not a thing IRIS can observe -- it
+    # means a corrupt row, not a pre-1970 transfer.
+    if ts != ts or abs(ts) == float("inf") or ts < 0:
+        return None
+    whole = int(ts)
+    millis = int(round((ts - whole) * 1000))
+    if millis == 1000:
+        # The rounding carried: 1.9996 is ...:02.000Z, never ...:01.1000Z,
+        # which would be four fractional digits and break property 2 above.
+        whole += 1
+        millis = 0
+    try:
+        tm = time.gmtime(whole)
+    except (OverflowError, ValueError, OSError):
+        # A year outside the platform's time_t range. Same contract as every
+        # other rejection: drop the attribute rather than raise inside an
+        # exporter that must never break the caller.
+        return None
+    return "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ" % (
+        tm.tm_year, tm.tm_mon, tm.tm_mday,
+        tm.tm_hour, tm.tm_min, tm.tm_sec, millis)
+
+
 def _build_v2_report_record(report, device_id, enrich=None):
     """v2 terminal report -> ``iris.device.transfer.report`` (design §10.8).
     OTLP event time = server ``received_at`` (device ``observed_at`` rides as an
@@ -323,6 +379,105 @@ def build_policy_record(entry, status=None):
     return _record("iris.peer.policy", _ts_nano(entry.get("created_at")),
                    attrs, event_id=entry.get("event_id"),
                    body="peer policy operation")
+
+
+_LIFECYCLE_NAME = "iris.transfer.lifecycle"
+
+# The two transitions a transfer plan can report, in the only order they can
+# occur. ``planned`` is minted with the assignment; ``seeding_started`` is the
+# server's observation that the device holds verified content AND is announcing
+# as a seeder for it. There is deliberately no "downloading" between them: the
+# server has no honest instant for one.
+_LIFECYCLE_EVENTS = ("planned", "seeding_started")
+
+
+def build_transfer_lifecycle_record(row, event):
+    """One ``transfer_lifecycle`` store row -> ``iris.transfer.lifecycle``,
+    the server-side plan lifecycle event (``event`` is one of
+    ``_LIFECYCLE_EVENTS``).
+
+    OTLP event time is the SOURCE instant -- ``planned_at`` for ``planned``,
+    ``seeding_started_at`` for ``seeding_started`` -- never the emit instant
+    and never an ingestion time. This is a deliberate departure from
+    ``_build_v2_report_record``, which times off the server's ``received_at``
+    because the only thing it knows for certain about a device report is when
+    it arrived. Here the server itself minted and observed both instants, so
+    timing the record off the emit would report a queue delay as a transfer
+    fact, and a crash-replay would then move an already-exported timestamp.
+
+    ``event.id`` is DERIVED from the plan (``<plan_id>.<event>``), never minted
+    per emission, so a replay after a crash between the queue accepting the
+    record and the durable marker landing carries a byte-identical record. The
+    two events MUST therefore differ in that suffix: ``LogQueue.emit`` refuses
+    a key already in ``_keys``/``_inflight_keys``, so a shared id would make
+    the second record vanish silently rather than fail loudly.
+
+    Both device-id spellings ride on purpose. ``iris.device.transfer.report``
+    carries ``device.id`` and ``iris.swarm.peer_bytes`` carries
+    ``iris.device.id``; emitting both here lets either join be written without
+    a coalesce. An attribute cannot be withdrawn additively, so this is a
+    permanent commitment, made knowingly.
+
+    Garbage-tolerant throughout: a non-dict row reads as empty, every
+    uncoercible timestamp drops its own attribute pair (see
+    ``_rfc3339_millis``), and ``_ts_nano`` yields ``"0"`` rather than raising.
+    An absent attribute means NOT KNOWN -- nothing here is defaulted, because a
+    defaulted plan id or instant is worse than a missing one."""
+    if not isinstance(row, dict):
+        row = {}
+    seeding = event == "seeding_started"
+    pairs = [
+        ("otel.log.name", _LIFECYCLE_NAME),
+        (_SCHEMA_ATTR, 2),
+        ("event", _enrich_str(event)),
+        # The four correlation ids. ``iris.plan.id`` is the join key an
+        # operator groups on: it is stable across both events of one plan and
+        # distinct across two plans for the same device and image.
+        ("iris.transfer.id", _enrich_str(row.get("transfer_id"))),
+        ("iris.plan.id", _enrich_str(row.get("plan_id"))),
+        ("iris.device.id", _enrich_str(row.get("device_id"))),
+        ("device.id", _enrich_str(row.get("device_id"))),
+        ("iris.image.id", _enrich_str(row.get("image_id"))),
+        ("iris.torrent.info_hash", _enrich_str(row.get("info_hash"))),
+        # Repeated on BOTH events so plan-to-seeding duration is computable
+        # from the seeding_started record alone, without joining back to the
+        # planned record that may have been dropped by a bounded queue.
+        ("iris.transfer.planned_at", _rfc3339_millis(row.get("planned_at"))),
+    ]
+    at = row.get("planned_at")
+    if seeding:
+        at = row.get("seeding_started_at")
+        pairs.extend([
+            ("iris.transfer.seeding_started_at",
+             _rfc3339_millis(row.get("seeding_started_at"))),
+            # The two preconditions that produced it, exported separately so
+            # an operator can see WHICH one was the laggard: a device whose
+            # sha256 of a ~1.2 GB image runs minutes after aria2 first
+            # announced left=0 shows tracker_seeder_at well before
+            # checksum_verified_at, and the reverse ordering means the swarm,
+            # not the device, was the wait. Both are honest per-transfer
+            # facts, latched once by the store and never recomputed.
+            ("iris.transfer.checksum_verified_at",
+             _rfc3339_millis(row.get("checksum_verified_at"))),
+            ("iris.transfer.tracker_seeder_at",
+             _rfc3339_millis(row.get("tracker_seeder_at"))),
+        ])
+    attrs = [_attr(k, v) for k, v in pairs if v is not None]
+    if seeding:
+        # The DEVICE's own clock for the attesting report, kept as a float
+        # epoch and named exactly as ``_build_v2_report_record`` names it, so
+        # the two records answer "what did the device think the time was" the
+        # same way. It is a second clock and is never subtracted from the
+        # server instants above.
+        observed = row.get("observed_at")
+        try:
+            if observed is not None:
+                attrs.append(_attr("iris.device.observed_at", float(observed)))
+        except (TypeError, ValueError):
+            pass
+    return _record(_LIFECYCLE_NAME, _ts_nano(at), attrs,
+                   event_id="%s.%s" % (row.get("plan_id"), event),
+                   body="transfer lifecycle %s" % event)
 
 
 def build_tracker_record(event):
