@@ -89,6 +89,12 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   stopped daemon is replaced within a tick. `ps`, `top`, `free` and
   `/usr/bin/kill` leave the images with `procps`; nothing in the product
   used them. Saves ~1 MB unpacked (1.6 MB on arm64) per image.
+- **IOx packages no longer carry the docker build context.**
+  `device/iox/build.sh` packages from a directory holding only
+  `package.yaml` and `rootfs.tar`; `ioxclient package` had been tarring the
+  whole build context — a second copy of aria2c, the agent sources, the
+  Dockerfile and the cert — into `artifacts.tar.gz` as ~3.3 MB (5.6%) of
+  dead weight in every `iris-*.tar`.
 - **Standing assignments made before this release carry no plan until they are
   Applied once more.** Until then their devices keep minting their own transfer
   ids and their plans emit no lifecycle events at all. Re-assign from the

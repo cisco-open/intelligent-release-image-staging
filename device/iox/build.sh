@@ -227,7 +227,17 @@ if tar xOf "$CTX/rootfs.tar" manifest.json 2>/dev/null | grep -q "attestation-ma
 fi
 
 echo ">> ioxclient package -> $PACKAGE_NAME"
-( cd "$CTX" && "$IOXCLIENT" package . )
-cp "$CTX/package.tar" "$OUT/$PACKAGE_NAME"
+# Package from a directory holding ONLY the descriptor and rootfs.tar.
+# `ioxclient package` tars its whole working directory into artifacts.tar.gz,
+# and the descriptor references nothing but rootfs.tar -- packaging the docker
+# build context itself shipped a second copy of aria2c, the agent sources,
+# the Dockerfile and the cert as dead weight (~3.3 MB, 5.6% of every IOx tar;
+# measured 2026-09-02, scrubber #75).
+PKG="$CTX/pkg"
+mkdir -p "$PKG"
+mv "$CTX/rootfs.tar" "$PKG/rootfs.tar"
+cp "$PACKAGE_DESCRIPTOR" "$PKG/package.yaml"
+( cd "$PKG" && "$IOXCLIENT" package . )
+cp "$PKG/package.tar" "$OUT/$PACKAGE_NAME"
 echo ">> done: $OUT/$PACKAGE_NAME"
 ls -la "$OUT/$PACKAGE_NAME"
