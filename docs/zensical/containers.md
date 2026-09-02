@@ -122,6 +122,30 @@ emulation; if it is not already enabled, `stage-iox-package.sh` requires
 `BINFMT_IMAGE_DIGEST` — an audited `tonistiigi/binfmt` sha256 digest — and
 fails closed without it.
 
+### Package footprint
+
+Approximate figures, measured on 2026-09-02 from packages built with these
+scripts on the current `python:3.12-slim-trixie` (IOx) and
+`python:3.12-alpine3.24` (XR) bases; a rebuild on a newer base tag moves them
+by a few megabytes. *Delivered* is the file the device downloads and stores;
+*on device* is what stays after install — the unpacked image layers for a
+container, the unpacked bundle for Guest Shell. The IOx descriptor's
+`memory: 768` and `disk: 2048` are runtime quotas, not package use, and
+staged IOS images are deliberately not counted.
+
+| Agent package | Delivered | On device | Notes |
+| --- | ---: | ---: | --- |
+| `iris-agent.tgz` (Guest Shell: Catalyst 9300, routers) | ~5 MB | ~15 MB | static `aria2c` (~8 MB) plus the exec-capable copy Guest Shell keeps in its home directory; the Guest Shell runtime itself is part of IOS-XE |
+| `iris-amd64.tar` (Catalyst 9000 IOx) | ~60 MB | ~160 MB | Debian trixie base with CPython, OpenSSH client and `aria2c` |
+| `iris-arm64.tar` (IE-3x00 / IR IOx) | ~60 MB | ~185 MB | same image on aarch64 |
+| `iris-xr.rpm` (Cisco 8000 appmgr) | ~30 MB | ~70 MB | Alpine base; about half of the earlier Debian-based RPM |
+
+The base image dominates: Debian userland plus CPython account for roughly
+130 MB of the IOx image, while IRIS's own additions are the static `aria2c`
+(7.7 MB), the OpenSSH client the IOx SSH-to-self transport needs (about
+5.5 MB) and under 0.5 MB of agent code. Rebuilding on a newer base tag
+changes these numbers by a few megabytes either way.
+
 `aria2c` is handed in, never downloaded: the build takes it from an explicit
 `ARIA2C_BIN` override, a matching local agent bundle, or the handed-in
 `deliverables/aria2c-<arch>` binary, verifying it against

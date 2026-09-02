@@ -62,6 +62,19 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   contract is unchanged.
 
 ### Changed
+- **The IOS-XR agent image moves to Alpine.** `device/xr/Dockerfile` now builds
+  from `python:3.12-alpine3.24`, pinned by index digest, with only `curl` and
+  `ca-certificates` added. `iris-xr.rpm` drops from 51.6 MB to 26.4 MB
+  delivered and from 145 MB to 71 MB unpacked on the router. Every functional
+  gate was run side by side with the Debian image before adoption: pinned
+  catalog TLS (success and wrong-certificate rejection with identical
+  error text), Python ssl/gzip/hashlib/fcntl/statvfs, DNS on musl, the
+  BusyBox-ash entrypoint including secret rotation and crash recovery,
+  interrupted-torrent resume, indefinite seeding, the completion hook, and
+  the agent's own test suite inside the image. This is a deliberate
+  departure from the Debian-trixie lineage the server and IOx images keep
+  in lockstep (issue #13): the XR image has no `openssl` CLI consumer and
+  the RPM is the size-critical delivery. Bump the digest when the tag moves.
 - **Container agents supervise aria2c by exact PID; `procps` is gone from
   both device images.** `device/iox/entrypoint.sh` and
   `device/xr/entrypoint.sh` now launch aria2c as a tracked child of the

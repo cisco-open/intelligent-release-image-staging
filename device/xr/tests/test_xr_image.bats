@@ -382,18 +382,34 @@ EOF
 }
 
 @test "Dockerfile does not install an SSH/CLI transport -- XR needs none" {
-  # Check only the actual apt-get install line, not the explanatory comment
-  # above it (which names openssh-client/sshpass deliberately, to say why
-  # they are absent here unlike device/iox/Dockerfile).
-  run grep 'apt-get install' "$DOCKERFILE"
+  # Check only the actual package-install line (apk add on the Alpine base),
+  # not the explanatory comment above it (which names openssh-client/sshpass
+  # deliberately, to say why they are absent here unlike device/iox/Dockerfile).
+  run grep -E '^RUN apk add' "$DOCKERFILE"
   [ "$status" -eq 0 ]
   [[ "$output" != *"openssh-client"* ]]
   [[ "$output" != *"sshpass"* ]]
 }
 
+@test "Dockerfile installs only the runtime packages the entrypoint needs" {
+  # curl (RPC health probe + peer-transfer hook) and ca-certificates; the
+  # aria2c supervisor's pgrep/pkill come from the base image's BusyBox, so
+  # procps must NOT be pulled in, and nothing may be pip-installed.
+  run grep -E '^RUN apk add' "$DOCKERFILE"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--no-cache"* ]]
+  [[ "$output" == *" curl"* ]]
+  [[ "$output" == *" ca-certificates"* ]]
+  [[ "$output" != *"procps"* ]]
+  ! grep -qE '^RUN .*pip3? install' "$DOCKERFILE"
+}
+
 @test "Dockerfile is a multi-stage-free x86_64 build (no arch-pinned base image)" {
-  grep -qE '^FROM python:3\.12-slim-[a-z]+$' "$DOCKERFILE"
+  # Official python image on Alpine, pinned by INDEX digest (tag@sha256:...)
+  # so a rebuild is reproducible; the tag stays for human readability.
+  grep -qE '^FROM python:3\.12-alpine[0-9.]+@sha256:[0-9a-f]{64}$' "$DOCKERFILE"
   ! grep -qE '^FROM (arm64v8|amd64|i386|arm32v7)/' "$DOCKERFILE"
+  [ "$(grep -c '^FROM ' "$DOCKERFILE")" -eq 1 ]
 }
 
 # ---------------------------------------------------------------------------
