@@ -19,13 +19,14 @@ LABEL org.opencontainers.image.title="IRIS XR staging agent" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.source="https://github.com/cisco-open/intelligent-release-image-staging"
 
-# procps: pkill/pgrep for the aria2c supervisor in entrypoint.sh
 # ca-certificates/curl: TLS roots + the RPC health probe
+# (no procps: entrypoint.sh supervises aria2c by the exact PID of its own
+# tracked child and never needs pgrep/pkill)
 # (no openssh-client/sshpass here: XR needs no CLI transport -- the bind
 # mount at /hostmount writes through to harddisk: directly, so there is no
 # SSH-to-self and no scp-push the way the IOx image needs for its platforms)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      procps ca-certificates curl \
+      ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Architecture-matched statically-linked aria2c (x86_64 only -- Cisco 8000 is

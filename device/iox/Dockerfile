@@ -16,10 +16,11 @@ LABEL org.opencontainers.image.title="IRIS IOx staging agent" \
       org.opencontainers.image.source="https://github.com/cisco-open/intelligent-release-image-staging"
 
 # openssh-client + sshpass: the SSH-to-self CLI transport (cli_ssh._default_runner)
-# procps: pkill/pgrep for the aria2c supervisor in entrypoint.sh
 # ca-certificates/curl: TLS roots + diagnostics
+# (no procps: entrypoint.sh supervises aria2c by the exact PID of its own
+# tracked child and never needs pgrep/pkill)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      openssh-client sshpass procps ca-certificates curl \
+      openssh-client sshpass ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Architecture-matched statically-linked aria2c staged by build.sh.

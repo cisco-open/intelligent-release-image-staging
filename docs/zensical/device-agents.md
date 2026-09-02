@@ -176,6 +176,15 @@ loop. Copy and chmod failures during relaunch are no longer swallowed, so a
 failed relaunch now surfaces in the logs instead of silently leaving a dead
 binary in place.
 
+The container entrypoints (IOx and IOS-XR) went one step further: they run
+aria2c as a tracked child of the PID-1 shell and supervise it by that exact
+PID, never by process-name matching. A daemon that is alive but wedged or
+stopped is sent TERM, then KILL after five seconds, reaped, and relaunched
+within a tick — the earlier `pkill`-based loop could not replace a daemon
+that ignored TERM, and its relaunch failed to bind the RPC port every tick
+while the log claimed success. The same path runs on container stop, so an
+interrupted download keeps its `.aria2` checkpoint for resume.
+
 ## Agent loop
 
 The agent loop is deliberately boring:

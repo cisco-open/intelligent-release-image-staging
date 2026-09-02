@@ -126,10 +126,62 @@ read_secret() {
     | tr -d '[:space:]'
 }
 
+# aria2c is owned by exact PID, never by process-name matching: it runs as a
+# tracked background child of this PID-1 shell (no --daemon=true, which would
+# double-fork and setsid() it out of reach), and ARIA2_PID plus the child's
+# /proc starttime are the identity everything below acts on. That is what lets
+# the image drop procps (pgrep/pkill) altogether.
+ARIA2_PID=""
+ARIA2_START=""
+
+proc_stat() {
+  # Sets PROC_STATE / PROC_START (state letter, starttime -- /proc/<pid>/stat
+  # fields 3 and 22); fails once the PID is gone. comm (field 2) may contain
+  # spaces, so split after the LAST ") ". Builtins only: no fork, so the check
+  # itself can never reap the zombie it is about to report.
+  read -r _stat 2>/dev/null < "/proc/$1/stat" || return 1
+  set -- ${_stat##*) }
+  PROC_STATE="${1:-}"; PROC_START="${20:-}"
+}
+
+aria2_alive() {
+  # Alive means: the recorded PID exists, is the process we started (same
+  # starttime -- a recycled PID number belongs to somebody else and must never
+  # be signalled), and has not exited. A zombie still passes kill -0, which is
+  # why the state letter decides; stop_aria2c's wait is what reaps it.
+  [ -n "$ARIA2_PID" ] || return 1
+  proc_stat "$ARIA2_PID" || return 1
+  [ "$PROC_START" = "$ARIA2_START" ] || return 1
+  case "$PROC_STATE" in Z|X) return 1 ;; esac
+}
+
+stop_aria2c() {
+  # TERM first -- aria2c saves its .aria2 control files on TERM, so an
+  # interrupted download resumes on the next start -- then a bounded wait,
+  # then KILL. CONT rides along because a stopped child cannot act on TERM.
+  # wait(1) reaps the child, so PID 1 never leaves a zombie behind.
+  if aria2_alive; then
+    kill -TERM "$ARIA2_PID" 2>/dev/null || true
+    kill -CONT "$ARIA2_PID" 2>/dev/null || true
+    _w=0
+    while aria2_alive && [ "$_w" -lt 5 ]; do
+      sleep 1; _w=$((_w + 1))
+    done
+    if aria2_alive; then kill -KILL "$ARIA2_PID" 2>/dev/null || true; fi
+  fi
+  # Reap only our own child (already gone, or still ours by starttime): a
+  # recycled PID number can be a running process re-parented to PID 1, and
+  # wait(1) on that would block the supervisor for as long as it lives.
+  [ -n "$ARIA2_PID" ] || return 0
+  if ! proc_stat "$ARIA2_PID" || [ "$PROC_START" = "$ARIA2_START" ]; then
+    wait "$ARIA2_PID" 2>/dev/null || true
+  fi
+  ARIA2_PID=""; ARIA2_START=""
+}
+
 start_aria2c() {
   secret="$1"
-  pkill -f 'aria2c.*enable-rpc' 2>/dev/null || true
-  sleep 1
+  stop_aria2c
   # Hand the hook the secret this daemon is being started with, by inheritance
   # through aria2c's fork. Deliberately not re-read from $CONF: the agent
   # rewrites that file on every token refresh, and a hook reading a secret the
@@ -142,8 +194,14 @@ start_aria2c() {
   # above, so reusing $@ here is safe.
   set --
   case "${HOOK:-}" in ?*) set -- "--on-bt-download-complete=$HOOK" ;; esac
+  # A tracked child with its stdio on /dev/null -- exactly what --daemon=true's
+  # daemon(0,0) did, minus the double fork. The redirect is not optional:
+  # aria2c writes a progress readout line every second, to a pipe as readily
+  # as to a terminal, for as long as anything is downloading OR seeding, and a
+  # staged device seeds indefinitely -- that would flood the app log. The
+  # aria2c options themselves are unchanged.
   "$ARIA2" \
-    --daemon=true --enable-rpc=true --rpc-listen-all=false \
+    --enable-rpc=true --rpc-listen-all=false \
     --rpc-listen-port="$RPC_PORT" --rpc-secret="$secret" \
     --enable-dht=false --enable-peer-exchange=false --bt-enable-lpd=false \
     --bt-max-peers="$MAX_PEERS" --bt-seed-unverified=true --seed-ratio=0.0 \
@@ -151,7 +209,13 @@ start_aria2c() {
     "$@" \
     --file-allocation=none --dir="$STAGE_DIR" \
     --log-level=warn --summary-interval=0 \
-    && echo "IRIS-ENTRYPOINT: aria2c (re)started on :$RPC_PORT"
+    </dev/null >/dev/null 2>&1 &
+  ARIA2_PID=$!
+  # starttime is fixed at fork and survives the exec, so it can be read right
+  # away; it is what makes this PID *ours* on every later check.
+  ARIA2_START=""
+  if proc_stat "$ARIA2_PID"; then ARIA2_START="$PROC_START"; fi
+  echo "IRIS-ENTRYPOINT: aria2c (re)started on :$RPC_PORT (pid $ARIA2_PID)"
 }
 
 rpc_healthy() {
@@ -172,7 +236,7 @@ stop_agent() {
   for pid in "$AGENT_PID" "$SLEEP_PID"; do
     [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
   done
-  pkill -f 'aria2c.*enable-rpc' 2>/dev/null || true
+  stop_aria2c
   for pid in "$AGENT_PID" "$SLEEP_PID"; do
     [ -n "$pid" ] && wait "$pid" 2>/dev/null || true
   done
@@ -187,7 +251,7 @@ while true; do
   want="$(read_secret)"
   [ -z "$want" ] && want="iris"          # placeholder until the agent fetches the real secret
   if [ "$want" != "$cur" ] \
-     || ! pgrep -f 'aria2c.*enable-rpc' >/dev/null 2>&1 \
+     || ! aria2_alive \
      || ! rpc_healthy "$want"; then
     start_aria2c "$want" && cur="$want"
   fi

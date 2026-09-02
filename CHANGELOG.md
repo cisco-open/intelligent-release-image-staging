@@ -62,6 +62,20 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   contract is unchanged.
 
 ### Changed
+- **Container agents supervise aria2c by exact PID; `procps` is gone from
+  both device images.** `device/iox/entrypoint.sh` and
+  `device/xr/entrypoint.sh` now launch aria2c as a tracked child of the
+  PID-1 shell (stdio on `/dev/null`, exactly what `--daemon` did) and act
+  only on that PID plus its `/proc` start time — never on `pgrep -f` /
+  `pkill -f` name matching. Two latent supervisor faults go with it: a
+  stopped or wedged aria2c that ignored SIGTERM could never be replaced
+  (the relaunch failed to bind every tick while the log said "(re)started"),
+  and a container stop killed aria2c before it saved its `.aria2` control
+  file. The supervisor now sends TERM (and CONT), waits up to 5 s, then
+  KILLs and reaps, so an interrupted download keeps its checkpoint and a
+  stopped daemon is replaced within a tick. `ps`, `top`, `free` and
+  `/usr/bin/kill` leave the images with `procps`; nothing in the product
+  used them. Saves ~1 MB unpacked (1.6 MB on arm64) per image.
 - **Standing assignments made before this release carry no plan until they are
   Applied once more.** Until then their devices keep minting their own transfer
   ids and their plans emit no lifecycle events at all. Re-assign from the

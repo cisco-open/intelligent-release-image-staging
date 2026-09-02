@@ -94,65 +94,86 @@ _appid_block_output() {
 # Finding #2 — entrypoint.sh: supervisor must restart a crashed aria2c
 # ---------------------------------------------------------------------------
 
-@test "entrypoint.sh calls start_aria2c when aria2c is absent even if secret unchanged" {
-  # Exercise entrypoint.sh's actual read_secret + supervisor loop condition
-  # (not a re-implementation): source the real functions from the script, stub
-  # only start_aria2c and the blocking agent/sleep calls, then verify a call
-  # happens when cur==want but no aria2c process is running.
-  TMPD="$(mktemp -d)"
-  CONF="$TMPD/iris-agent.conf"
-  echo "rpc_secret = mysecret" > "$CONF"
-  CALL_LOG="$TMPD/calls"
-  touch "$CALL_LOG"
-
-  # We extract read_secret and start_aria2c definitions from the real entrypoint,
-  # then run one iteration of the loop condition using the actual if-expression.
-  # If entrypoint.sh's condition regresses (drops the pgrep clause), this test fails.
-  LOOP_COND="$(awk '/^  if \[/{found=1} found{print; if(/; then/) exit}' "$ENTRYPOINT")"
-
-  run bash -c '
+# Run ONE iteration of entrypoint.sh's actual supervisor condition (the real
+# if-expression, not a re-implementation) with the real read_secret, proc_stat
+# and aria2_alive sourced from the script, start_aria2c stubbed to a call log,
+# and $1 evaluated first to set the scenario up (ARIA2_PID / ARIA2_START and a
+# rpc_healthy stub). cur already equals the conf's secret, so only the
+# scenario can trigger a call. Prints the number of start_aria2c calls.
+_loop_cond_calls() {
+  local scenario="$1" tmpd conf log cond
+  tmpd="$(mktemp -d)"
+  conf="$tmpd/iris-agent.conf"; log="$tmpd/calls"
+  echo "rpc_secret = mysecret" > "$conf"
+  touch "$log"
+  # If entrypoint.sh's condition regresses (drops the liveness or the health
+  # clause), the tests below fail on the real text. Anchored on the secret
+  # comparison so no other `if [` earlier in the script can be picked up.
+  cond="$(awk '/^  if \[ "\$want" != "\$cur" \]/{found=1} found{print; if(/; then/) exit}' "$ENTRYPOINT")"
+  [ -n "$cond" ] || { echo "loop condition not found in $ENTRYPOINT" >&2; return 1; }
+  bash -c '
     set -u
-    CONF="'"$CONF"'"
-    CALL_LOG_FILE="'"$CALL_LOG"'"
-
-    # Source the real read_secret and start_aria2c from entrypoint.sh.
-    # We must stub the env vars it references so sourcing does not abort.
-    IRIS_STAGE_DIR="'"$TMPD"'" IRIS_AGENT_CONF="'"$CONF"'" \
-    IRIS_RPC_PORT=6800 IRIS_TICK_SECONDS=60 IRIS_MAX_PEERS=10
-
-    eval "$(awk "/^read_secret\(\)/,/^}/" "'"$ENTRYPOINT"'")"
-
+    CONF="'"$conf"'"
+    CALL_LOG_FILE="'"$log"'"
+    eval "$(awk "/^(read_secret|proc_stat|aria2_alive)\(\)/,/^}/" "'"$ENTRYPOINT"'")"
     # Stub start_aria2c so it logs the call without launching a real daemon.
     start_aria2c() { echo "started:$1" >> "$CALL_LOG_FILE"; }
-    # Make the daemon-absent precondition deterministic. A test runner command
-    # line can itself mention aria2c and otherwise produce a false pgrep match.
-    pgrep() { return 1; }
-
-    # Simulate: cur already equals want (secret did not change).
+    ARIA2_PID=""; ARIA2_START=""
+    '"$scenario"'
     cur=mysecret
     want="$(read_secret)"
     [ -z "$want" ] && want="iris"
-
-    # Run the ACTUAL condition from entrypoint.sh (not a re-implementation).
-    '"$LOOP_COND"'
+    '"$cond"'
       start_aria2c "$want" && cur="$want"
     fi
   '
-  CALLS="$(wc -l < "$CALL_LOG" | tr -d ' ')"
-  rm -rf "$TMPD"
-  # start_aria2c must have been called even though the secret matched —
-  # because no aria2c process is running (pgrep returns non-zero in CI).
-  [ "$CALLS" -ge 1 ]
+  wc -l < "$log" | tr -d ' '
+  rm -rf "$tmpd"
+}
+
+# The supervisor's own liveness scenario: this very shell stands in for a live
+# aria2c child, with its starttime recorded through the real proc_stat.
+_ALIVE='ARIA2_PID=$$; proc_stat "$$"; ARIA2_START="$PROC_START"'
+
+@test "entrypoint.sh calls start_aria2c when aria2c is absent even if secret unchanged" {
+  # No child recorded -- the state after a crash has been reaped, or before
+  # the first launch. Health answers yes, so liveness alone must relaunch.
+  run _loop_cond_calls 'rpc_healthy() { return 0; }'
+  [ "$status" -eq 0 ]
+  [ "$output" -ge 1 ]
+}
+
+@test "entrypoint.sh calls start_aria2c when the recorded aria2c has exited" {
+  # A child that exited and was reaped: /proc/<pid> is gone, so the recorded
+  # PID must read as dead even though the secret is unchanged and health is
+  # not consulted.
+  run _loop_cond_calls 'sleep 0 & ARIA2_PID=$!; proc_stat "$ARIA2_PID" && ARIA2_START="$PROC_START"; wait "$ARIA2_PID"; rpc_healthy() { return 0; }'
+  [ "$status" -eq 0 ]
+  [ "$output" -ge 1 ]
+}
+
+@test "entrypoint.sh calls start_aria2c when aria2c is alive but not answering RPC" {
+  # Liveness alone deadlocked Guest Shell devices in the field (2026-08-20):
+  # an aria2c that was running but not serving blocked its own relaunch, so
+  # the agent hit ECONNREFUSED on every tick and never reached its first
+  # heartbeat. The IOx supervisor had the identical latent fault.
+  run _loop_cond_calls "$_ALIVE"'; rpc_healthy() { return 1; }'
+  [ "$status" -eq 0 ]
+  [ "$output" -ge 1 ]
+}
+
+@test "entrypoint.sh leaves a live, healthy aria2c with an unchanged secret alone" {
+  # The inverse guard: a healthy daemon must not be bounced every tick.
+  run _loop_cond_calls "$_ALIVE"'; rpc_healthy() { return 0; }'
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 0 ]
 }
 
 @test "entrypoint.sh supervisor checks aria2c HEALTH, not just liveness" {
   # Static analysis: the loop body must restart the daemon when it is dead
-  # (pgrep/kill -0) AND when it is alive but not answering RPC. Liveness alone
-  # deadlocked Guest Shell devices in the field (2026-08-20): an aria2c that
-  # was running but not serving blocked its own relaunch, so the agent hit
-  # ECONNREFUSED on every tick and never reached its first heartbeat. The IOx
-  # supervisor had the identical condition and the identical latent fault.
-  grep -q 'pgrep\|kill -0' "$ENTRYPOINT"
+  # (aria2_alive -- the exact PID it launched, never a process-name match)
+  # AND when it is alive but not answering RPC (rpc_healthy).
+  grep -q 'aria2_alive' "$ENTRYPOINT"
   grep -q 'rpc_healthy\|jsonrpc' "$ENTRYPOINT"
 }
 
