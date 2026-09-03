@@ -54,7 +54,7 @@ directly with `docker build --platform linux/amd64 -f server/Dockerfile .`.
 
 ### Running a dev checkout beside a live deployment
 
-`server/docker-compose.yml` declares `name: iris`, so every checkout of this
+`server/docker-compose.yml` declares `name: server`, so every checkout of this
 repository resolves to the **same** Compose project and the same named volumes
 (`server_iris-state`, `server_iris-config`, `server_iris-images`). Bringing a dev
 checkout up on a host that already runs IRIS would otherwise adopt the live
@@ -69,10 +69,10 @@ COMPOSE_PROJECT_NAME=iris-dev IRIS_CONTAINER=iris-dev \
 
 Put both in `server/.env` if you work in that checkout regularly.
 `IRIS_CONTAINER` is the override the helpers under `tools/` already honour, so
-it also points them at the dev container. A deployment created before the
-project name was declared keeps `server_`-prefixed volumes and needs a one-time
-migration — see [Compose project
-name](docs/zensical/server.md#compose-project-name).
+it also points them at the dev container. Declaring the project name changes
+nothing for a deployment that already exists — the declared value is the same
+one the directory used to derive — so there is nothing to migrate; see
+[Compose project name](docs/zensical/server.md#compose-project-name).
 
 ## Embedded agent packages
 
