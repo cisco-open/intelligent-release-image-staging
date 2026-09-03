@@ -56,7 +56,7 @@ directly with `docker build --platform linux/amd64 -f server/Dockerfile .`.
 
 `server/docker-compose.yml` declares `name: iris`, so every checkout of this
 repository resolves to the **same** Compose project and the same named volumes
-(`iris_iris-state`, `iris_iris-config`, `iris_iris-images`). Bringing a dev
+(`server_iris-state`, `server_iris-config`, `server_iris-images`). Bringing a dev
 checkout up on a host that already runs IRIS would otherwise adopt the live
 container, re-bootstrap live state with `run --rm iris iris-bootstrap`, and
 delete all three volumes on `down -v`. Give the dev stack its own project name

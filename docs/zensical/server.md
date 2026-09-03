@@ -94,17 +94,17 @@ default capabilities, not through the Compose service:
 
 ```bash
 docker run --rm -u 0 \
-  -v iris_iris-state:/var/lib/iris \
-  -v iris_iris-config:/etc/iris \
-  -v iris_iris-images:/var/lib/iris-images \
+  -v server_iris-state:/var/lib/iris \
+  -v server_iris-config:/etc/iris \
+  -v server_iris-images:/var/lib/iris-images \
   iris:latest chown -R 10001:10001 /var/lib/iris /etc/iris /var/lib/iris-images
 ```
 
 `iris:latest` is the image Compose builds. The volume names carry the Compose
-project prefix — `iris_`, from the `name:` in `server/docker-compose.yml`. A
-deployment created before that line existed has `server_`-prefixed volumes; see
-[Compose project name](#compose-project-name) below, and substitute the prefix
-your `docker volume ls` actually shows.
+project prefix — `server_`, from the `name:` in `server/docker-compose.yml`
+(see [Compose project name](#compose-project-name) below). If you run the stack
+under your own `COMPOSE_PROJECT_NAME`, substitute the prefix your
+`docker volume ls` actually shows.
 
 `docker compose run --user 0` does not work for this: that form inherits the
 service's `cap_drop: [ALL]`, so every path is denied with
@@ -127,9 +127,9 @@ readable and traversable by uid `10001`. A conventional `755` tree is fine; a
 
 ## Compose project name
 
-`server/docker-compose.yml` declares `name: iris`, so the Compose project — and
-with it the named volumes `iris_iris-state`, `iris_iris-config` and
-`iris_iris-images` — is stable wherever the repository is checked out.
+`server/docker-compose.yml` declares `name: server`, so the Compose project —
+and with it the named volumes `server_iris-state`, `server_iris-config` and
+`server_iris-images` — is stable wherever the repository is checked out.
 
 Without that line Compose names the project after the directory holding the
 compose file, which is always `server`. Every checkout of this repository on a
@@ -139,39 +139,15 @@ container, `docker compose run --rm iris iris-bootstrap` re-bootstrapped
 production state, and `docker compose down -v` deleted the state, the encrypted
 config and the published images.
 
-### One-time migration for a deployment created before the rename
+The declared value is deliberately the same string the directory used to
+derive. **An existing deployment therefore needs no migration**: it keeps the
+`server_`-prefixed volumes it already has, and nothing moves. What the line
+buys is that the project name is now a fact of this file rather than an
+accident of where it was checked out, so it cannot change under a directory
+rename, and a second clone no longer silently inherits the live deployment's
+data.
 
-A deployment first started under the old default has `server_`-prefixed volumes.
-Compose will not find them under the new project name; it creates empty ones
-instead, and the server comes up as if it had never been bootstrapped. The old
-volumes are not touched, so nothing is lost — but pick one of these before the
-next `up`:
-
-* **Keep the old project name.** Add `COMPOSE_PROJECT_NAME=server` to
-  `server/.env`. `COMPOSE_PROJECT_NAME` overrides the declared `name:`, so the
-  deployment keeps its `server_` volumes and its container. Nothing else
-  changes, and the collision is now at least explicit rather than implied by a
-  directory name.
-* **Move the data to the new names.** With the stack **down**, copy each volume
-  and then start normally:
-
-    ```bash
-    COMPOSE_PROJECT_NAME=server docker compose -f server/docker-compose.yml down
-    for v in iris-state iris-config iris-images; do
-      docker volume create "iris_$v"
-      docker run --rm -u 0 -v "server_$v":/from -v "iris_$v":/to \
-        iris:latest sh -c 'cp -a /from/. /to/'
-    done
-    ```
-
-    `COMPOSE_PROJECT_NAME=server` on the `down` matters: without it Compose
-    looks for the *new* project and leaves the old container running on the
-    ports. `-u 0` on the copy matters for the same reason the ownership
-    migration above needs it — volume content may still be root-owned. Verify
-    the console and the Images screen, then remove the old `server_*` volumes
-    when you are satisfied.
-
-Check which set is live with `docker volume ls | grep iris`.
+Check which volumes are live with `docker volume ls | grep iris`.
 
 ### Running a second stack on the same host
 

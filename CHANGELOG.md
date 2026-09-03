@@ -92,21 +92,18 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   `device/agent/tests/test_report_v2.py` inherited `IRIS_RUNTIME_MODE` from the
   environment, so it failed whenever the agent suite ran inside the IOx image,
   which sets that variable; the test now clears it.
-- **The Compose project name is declared, not derived — and a deployment made
-  before this needs a one-time migration.** `server/docker-compose.yml` now sets
-  `name: iris`. Compose used to name the project after the compose file's parent
-  directory, which is always `server`, so a second checkout of this repository
-  on a host already running IRIS resolved to the *same* project and the *same*
-  named volumes as the live deployment: `up` adopted the production container,
-  `run --rm iris iris-bootstrap` re-bootstrapped production state, and
-  `down -v` deleted the state, the encrypted config and the published images.
-  **Migration:** an existing deployment's volumes are `server_iris-state`,
-  `server_iris-config` and `server_iris-images`; Compose will not find them under
-  the new name and will create empty ones instead (the old volumes are left
-  intact). Either keep the old project by adding `COMPOSE_PROJECT_NAME=server` to
-  `server/.env`, or copy the three volumes across with the stack down — both
-  paths are written out in [Server → Compose project
-  name](docs/zensical/server.md#compose-project-name). `container_name` is now
+- **The Compose project name is declared, not derived.**
+  `server/docker-compose.yml` now sets `name: server`. Compose used to name the
+  project after the compose file's parent directory, which is always `server`,
+  so a second checkout of this repository on a host already running IRIS
+  resolved to the *same* project and the *same* named volumes as the live
+  deployment: `up` adopted the production container, `run --rm iris
+  iris-bootstrap` re-bootstrapped production state, and `down -v` deleted the
+  state, the encrypted config and the published images. The declared value is
+  deliberately the string the directory used to derive, so **an existing
+  deployment keeps its `server_`-prefixed volumes and needs no migration**;
+  what changes is that the name can no longer move under a directory rename or
+  be inherited by a second clone. `container_name` is now
   `${IRIS_CONTAINER:-iris}`, so a second stack can take a container name of its
   own (names are host-global) with the same variable the helpers under `tools/`
   already honour; the default is unchanged, so `docker exec iris …` keeps

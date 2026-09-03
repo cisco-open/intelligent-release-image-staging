@@ -33,9 +33,9 @@
 # project prefix (`iris_` from the `name:` below; `server_` on a deployment
 # created before that line existed — see the migration note there):
 #   docker run --rm -u 0 \
-#     -v iris_iris-state:/var/lib/iris \
-#     -v iris_iris-config:/etc/iris \
-#     -v iris_iris-images:/var/lib/iris-images \
+#     -v server_iris-state:/var/lib/iris \
+#     -v server_iris-config:/etc/iris \
+#     -v server_iris-images:/var/lib/iris-images \
 #     iris:latest chown -R 10001:10001 /var/lib/iris /etc/iris /var/lib/iris-images
 # This applies per volume, so a RESET that removes some volumes but KEEPS others
 # still needs it for the ones kept — e.g. wiping iris-config/iris-state to redo
@@ -49,12 +49,18 @@
 # IRIS resolves to the SAME project and the SAME named volumes as the live
 # deployment: `up` adopts the production container, `run --rm iris
 # iris-bootstrap` re-bootstraps production state, and `down -v` deletes it.
+#
+# The value is deliberately "server", the same name the directory used to
+# derive, so declaring it changes NOTHING for an existing deployment: the
+# volumes it already has (`server_iris-state` and friends) stay exactly where
+# they are and no migration is needed. What the line buys is that the name is
+# now a fact of this file rather than an accident of where it was checked out,
+# so it can no longer change under a rename or a second clone.
+#
 # COMPOSE_PROJECT_NAME (and `-p`) still override this, which is how you run a
 # dev stack beside a live one — set IRIS_CONTAINER too, since container names
 # are host-global. See docs/zensical/server.md -> "Compose project name".
-# UPGRADING: a deployment created before this line has volumes prefixed
-# `server_`, not `iris_`; that same page carries the one-time migration.
-name: iris
+name: server
 services:
   iris:
     platform: linux/amd64

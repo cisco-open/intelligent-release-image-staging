@@ -32,10 +32,12 @@ def _doc():
 
 def test_project_name_is_declared_not_derived():
     doc = _doc()
-    assert doc.get("name") == "iris", (
+    assert doc.get("name") == "server", (
         "server/docker-compose.yml must declare a top-level `name:`; without "
-        "one Compose derives the project name from the parent directory "
-        "('server'), so a second checkout shares the live deployment's volumes"
+        "one Compose derives the project name from the parent directory, so a "
+        "second checkout shares the live deployment's volumes. The value is "
+        "deliberately the same string the directory used to derive, so "
+        "declaring it needs no migration of an existing deployment's volumes"
     )
 
 
@@ -47,13 +49,12 @@ def test_container_name_is_overridable_via_iris_container():
     assert svc["container_name"] == "${IRIS_CONTAINER:-iris}"
 
 
-def test_volume_migration_snippet_uses_the_declared_project_prefix():
-    """The in-file chown migration names real volumes; with `name: iris` the
-    prefix is `iris_`, and the old `server_` prefix survives only as the
-    documented upgrade note."""
+def test_volume_snippet_uses_the_declared_project_prefix():
+    """The in-file chown snippet names real volumes, so its prefix has to be
+    the one Compose actually creates. Declaring `name: server` keeps that
+    prefix `server_` -- the same volumes an existing deployment already has,
+    which is the point of choosing that value."""
     text = _text()
     for vol in ("iris-state", "iris-config", "iris-images"):
-        assert "-v iris_%s:" % vol in text
-        assert "-v server_%s:" % vol not in text
-    assert "server_" in text, \
-        "the upgrade note naming the pre-rename volume prefix must stay"
+        assert "-v server_%s:" % vol in text
+        assert "-v iris_%s:" % vol not in text

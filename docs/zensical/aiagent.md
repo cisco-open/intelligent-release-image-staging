@@ -41,6 +41,22 @@ Review [Network Ports and Flows](network-ports.md) before bringing up the
 server. Devices need reachability to the server and to each other for the
 private swarm.
 
+### Settings that fail closed
+
+Several controls refuse to guess rather than doing something unsafe. Each
+stops with a message naming the variable, so the failure is legible, but
+knowing them in advance saves a stalled PoC:
+
+| You see | Why | What to set |
+| --- | --- | --- |
+| The console refuses to start and exits rather than serving plain HTTP | A console served over HTTP puts the operator password on the wire in clear text | Provide a certificate (the normal path), or set `IRIS_GUI_ALLOW_PLAINTEXT=1` to accept the risk deliberately on an isolated lab network |
+| A device refuses the SSH connection, naming legacy algorithms | Old SHA-1 key exchange and `ssh-rsa` host keys are no longer offered by default | `IRIS_SSH_LEGACY=1`, only for devices too old to offer anything current |
+| A device's SSH host key does not match the one recorded on first contact | The device was re-imaged or replaced, or the address now answers to a different box | Confirm which, then remove that host's entry from the known-hosts file under the IRIS state directory |
+| Routed Guest Shell onboarding leaves the new interface out of your routing domain | IRIS no longer applies a routing protocol to the interfaces it creates unless asked | `SVI_IGP=isis` when the fabric runs IS-IS; leave unset otherwise |
+| IOx package staging aborts asking for an image digest | The cross-architecture emulation helper runs privileged, so it is pinned by digest rather than a moving tag | `BINFMT_IMAGE_DIGEST` to the audited digest, or preconfigure emulation on the host |
+
+Set the host-side ones in `server/.env`, which Compose passes through.
+
 ## Assistant operating rules
 
 Pick a deliberately economical assistant. This sequence is prescriptive
@@ -202,6 +218,12 @@ first-run slate instead of deploying over live state:
    restart-looping container, never the first-run page). Then continue from
    step 3 of the guided sequence: the default first-run credential works again
    because no admin account exists in the fresh state.
+
+Adding a recovery recipient does **not** need any of this. `iris-bootstrap
+--add-recipient` and `--rekey` re-encrypt the existing state in place, keeping
+every device credential, the admin account and the pinned certificate.
+`--force` is the one that regenerates them all, and it now refuses to run
+without `--yes` and names what it would destroy first.
 
 The reset erases fleet rows, catalog entries and verification verdicts, the
 image-verification schedule, deployment records, settings, credential
