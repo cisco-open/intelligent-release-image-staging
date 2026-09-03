@@ -1033,12 +1033,29 @@
     var e = peerPolicy.enforcement || {};
     var state = ['pending', 'enforced', 'degraded', 'rpc_unavailable', 'fail_closed'].indexOf(e.state) !== -1
       ? e.state : 'pending';
+    // IRIS-99: the tracker reconciler can freeze (its own degraded-pass
+    // write failing, or the process dying) with peer-enforcement.json's
+    // last recorded state left at "enforced" forever -- the API's `stale`
+    // flag (server-computed from last_reconciled_at, since "now" belongs
+    // there) is what tells this apart from a genuinely current pass. A
+    // stale claim is shown as stale REGARDLESS of the frozen state: an old
+    // "enforced" must not read as healthy just because nothing rewrote it.
+    var stale = !!e.stale;
+    var label = stale ? state + ' (stale)' : state;
     var details = 'Last tracker enforcement: ' + state + '; desired peers: ' +
       (typeof e.desired_ip_count === 'number' ? e.desired_ip_count : 0);
+    details += '; last reconciled: ' +
+      (e.last_reconciled_at ? fmtDate(e.last_reconciled_at) : 'never');
+    if (stale) {
+      details += ' (STALE -- enforcement may not reflect current policy; ' +
+        'check the tracker process)';
+    }
+    if (e.last_error) details += '; last error: ' + e.last_error;
     if (e.conflict_count) details += '; conflicts: ' + (e.conflict_types || []).join(', ');
-    return '<span class="badge ' + (state === 'enforced' ? 'badge-ok' :
-      (state === 'degraded' || state === 'fail_closed' ? 'badge-fail' : 'badge-queued')) +
-      '" title="' + esc(details) + '">' + esc(state) + '</span>';
+    var badgeClass = stale ? 'badge-fail' : (state === 'enforced' ? 'badge-ok' :
+      (state === 'degraded' || state === 'fail_closed' ? 'badge-fail' : 'badge-queued'));
+    return '<span class="badge ' + badgeClass +
+      '" title="' + esc(details) + '">' + esc(label) + '</span>';
   }
   var devicesRefreshGeneration = 0, devicesRefreshController = null;
   async function setQuarantine(btn) {

@@ -5,7 +5,7 @@
 """Pure telemetry-report logic for the IRIS device agent (issue #13).
 
 Everything here is deterministic and side-effect free (single exception:
-build_report reads the IRIS_RUNTIME_MODE env var, mirroring cli_ssh.select_cli's
+build_report_v2 reads the IRIS_RUNTIME_MODE env var, mirroring cli_ssh.select_cli's
 runtime gate), so it is fully unit-testable off-box. All I/O — aria2 RPC
 sampling, the report POST, syslog — lives in iris_agent._telemetry_tick and
 CatalogClient. Stdlib only (no requests/psutil): the agent runs in Guest Shell
@@ -609,58 +609,6 @@ def observe_peers(tele, peers, now=None):
             elif len(v2) < STATE_PEER_SET_CAP:
                 v2[ip] = {"first_observed": float(now),
                           "last_observed": float(now), "observations": 1}
-
-
-def build_report(cfg, state, img_id, event, now):
-    """Assemble the report body (exact shape: spec section 2). Pure read of
-    cfg/state — the caller (iris_agent._telemetry_tick) owns sampling, jitter
-    and the POST. event: 'staging-complete' | 'seeding-only' | 'pull'.
-    peers/peers_total are participation-only (see observe_peers); rows
-    beyond PEER_CAP are counted in peers_total but not named."""
-    st = state.get(img_id) or {}
-    tele = st.get("tele") or {}
-    link = state.get("link") or {}
-    rtts = link.get("rtt_ms") or []
-    avg_bps = int(tele.get("avg_bps", 0) or 0)
-    if st.get("copied"):
-        stage_state = "ready"
-    elif st.get("blocked_no_space"):
-        stage_state = "flash_full_seeding_only"
-    else:
-        stage_state = "staging"
-    # Participation only: rows carry just the observed peer IPs in observation
-    # order. peers_total = distinct IPs observed (saturates at
-    # STATE_PEER_SET_CAP); rows beyond PEER_CAP are counted, not named.
-    # Per-peer BYTES exist now -- aria2-next 2.5.6 keeps a cumulative per-peer
-    # session counter and the completion hook reads it (parse_peer_transfer_snapshot)
-    # -- but they are a v2-only block. v1 has no place to put them and no
-    # server-side classifier to tell the origin's bytes from a peer's, so this
-    # path stays participation-only rather than shipping an unattributed total.
-    # Keys-only read: also safe on legacy {ip: [rx, tx]} state (pull-before-
-    # first-observe), where values are ignored anyway.
-    observed = tele.get("peers") or {}
-    peer_rows = [{"ip": ip} for ip in list(observed)[:PEER_CAP]]
-    runtime_mode = (os.environ.get("IRIS_RUNTIME_MODE")
-                    or cfg.get("runtime_mode") or "guestshell")
-    return {
-        "ts": int(now),
-        "image_id": img_id,
-        "event": event,
-        "transfer": {"total_bytes": int(tele.get("total_bytes", 0) or 0),
-                     "elapsed_s": round(float(tele.get("elapsed_s", 0) or 0), 1),
-                     "avg_bps": avg_bps,
-                     "sha_ok": bool(tele.get("sha_ok", False)),
-                     "stage_state": stage_state},
-        "link": {"tier": classify(state, avg_bps),
-                 "rtt_ms_median": int(round(_median(rtts))),
-                 "rtt_samples": len(rtts),
-                 "hb_failures": int(link.get("fail_streak", 0)),
-                 "trimmed": False},
-        "peers": peer_rows,
-        "peers_total": len(observed),
-        "agent": {"version": cfg.get("agent_version", "unknown"),
-                  "runtime_mode": runtime_mode},
-    }
 
 
 def _report_peer_rows_v2(tele):

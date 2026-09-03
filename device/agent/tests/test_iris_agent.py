@@ -562,18 +562,87 @@ def test_full_size_but_aria2_control_present_is_not_complete():
     assert all(m not in ("DONE", "ERROR") for m, _ in emitted)
 
 
+def test_completed_file_with_a_stale_untracked_control_file_is_resumed():
+    """Board #70's second case. A COMPLETED file's .aria2 control file
+    normally clears on aria2's own next auto-save, but the entrypoint's stop
+    path can SIGKILL aria2c inside that window (issue #71), leaving a stale
+    control file beside an already-complete file. Read above as
+    'downloading' forever (test_full_size_but_aria2_control_present_is_not_complete),
+    the device could never reach the hash/DONE path once aria2 itself forgot
+    the download too -- nothing would ever re-add it to load the stale
+    bitfield, confirm it, and let aria2's own next auto-save clear the
+    control file. The SAME fix (aria2's own knowledge, not file presence)
+    covers this case as well as the partial-file one."""
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin",
+                       "size": 5, "sha256": "abc"})
+    deps, emitted, _, aria, copied, _, _, _ = make_deps(
+        cat, {"/stage/img1.bin": 5, "/stage/img1.bin.aria2": 100})
+    assert iris_agent.run_once(CFG, deps, {}) == "downloading"
+    assert copied == []                                     # not hashed/copied yet
+    assert aria == [("/stage/img1.torrent", "/stage")]       # re-added to resume
+    assert any(m == "STAGING" and "lost track" in msg for m, msg in emitted)
+
+
 def test_in_progress_download_is_not_re_added():
+    # A partial file is present (500<1000) AND aria2 ITSELF confirms it holds
+    # a download for it -> genuinely in progress; the 60s timer must NOT
+    # re-addTorrent. Board #70 tightened the guard: presence alone is no
+    # longer enough to conclude that -- see the two tests immediately below
+    # for what happens when aria2 does NOT confirm it.
     cat = FakeCatalog({"approved_image_id": "img1"},
                       {"id": "img1", "filename": "img1.bin",
                        "size": 1000, "sha256": "abc"})
-    # a partial file is present (500<1000) -> aria2 is already downloading it;
-    # the 60s timer must NOT re-addTorrent
     deps, emitted, _, aria, _, _, _, _ = make_deps(
         cat, {"/stage/img1.bin": 500}, free=9_000_000_000)
+    deps = deps._replace(aria_stats=lambda p: {"gid": "g1", "status": "active"})
     assert iris_agent.run_once(CFG, deps, {}) == "downloading"
     assert aria == []                          # NOT re-added
     assert all(m != "STAGING" for m, _ in emitted)
     assert any(m == "PROGRESS" for m, _ in emitted)   # one progress line, not a flood
+
+
+def test_untracked_partial_with_control_file_is_resumed():
+    """Board #70, hardware-reproduced twice (IOx and an XR appmgr container on
+    a Cisco 8010): the appmgr/IOx container -- and aria2c's in-memory session
+    with it -- can be recreated (crash restart, redeploy, upgrade) while the
+    mount keeps the partial file AND its .aria2 control file untouched. A
+    present file no longer proves anything is in progress: aria2 has no
+    record of this download at all (aria_stats -> None, the fixture default),
+    so without the fix the device would log the same PROGRESS percentage
+    forever. The control file survived, so re-adding is a safe RESUME (aria2
+    loads the real bitfield and re-verifies it, per --check-integrity)."""
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin",
+                       "size": 1000, "sha256": "abc"})
+    deps, emitted, _, aria, _, _, _, _ = make_deps(
+        cat, {"/stage/img1.bin": 500, "/stage/img1.bin.aria2": 40},
+        free=9_000_000_000)
+    assert iris_agent.run_once(CFG, deps, {}) == "downloading"
+    assert aria == [("/stage/img1.torrent", "/stage")]     # re-added to resume
+    assert any(m == "STAGING" and "lost track" in msg for m, msg in emitted)
+    assert all(m != "RECHECK" for m, _ in emitted)
+
+
+def test_untracked_partial_without_control_file_is_discarded_and_restarted():
+    """Board #70's aria2-source warning: without a control file to resume
+    FROM, aria2's own bt-seed-unverified option -- needed so a genuinely
+    finished download can be re-seeded without a full re-hash -- marks a
+    freshly re-added file complete WITHOUT EVER HASHING IT, which would
+    announce a TRUNCATED partial to the swarm as a finished seed. The fix
+    must not do that: discard the untrustworthy partial and restart clean."""
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin",
+                       "size": 1000, "sha256": "abc"})
+    removed = []
+    deps, emitted, _, aria, _, _, _, _ = make_deps(
+        cat, {"/stage/img1.bin": 500}, free=9_000_000_000, removed=removed)
+    assert iris_agent.run_once(CFG, deps, {}) == "downloading"
+    assert "/stage/img1.bin" in removed                     # untrustworthy, dropped
+    assert aria == [("/stage/img1.torrent", "/stage")]      # fresh add, not a resume
+    assert any(m == "RECHECK" and "no aria2 control file" in msg
+              for m, msg in emitted)
+    assert all("lost track" not in msg for m, msg in emitted if m == "STAGING")
 
 
 def test_aria_add_rpc_down_heartbeats_error_instead_of_crashing():
@@ -3978,6 +4047,10 @@ def test_legacy_state_without_torrent_identity_refetches_without_touching_the_do
     deps, emitted, _, aria, _, _, _, _ = make_deps(
         cat, {"/stage/img1.bin": 3, "/stage/img1.bin.aria2": 1,
               "/stage/img1.torrent": 300}, removed=removed)
+    # aria2 confirms it holds this download (board #70: presence alone no
+    # longer proves that) -- this test is about torrent-identity re-fetch,
+    # not the #70 resume gate, so the download is genuinely tracked.
+    deps = deps._replace(aria_stats=lambda p: {"gid": "g", "status": "active"})
     state = {}
     assert iris_agent.run_once(CFG, deps, state) == "downloading"
     assert removed == []
@@ -3994,6 +4067,10 @@ def test_torrent_is_not_refetched_while_its_identity_is_unchanged():
     deps, _, _, aria, _, _, _, _ = make_deps(
         cat, {"/stage/img1.bin": 3, "/stage/img1.bin.aria2": 1,
               "/stage/img1.torrent": 300})
+    # aria2 confirms it holds this download (board #70: presence alone no
+    # longer proves that) -- this test is about torrent-identity re-fetch,
+    # not the #70 resume gate, so the download is genuinely tracked.
+    deps = deps._replace(aria_stats=lambda p: {"gid": "g", "status": "active"})
     state = {"img1": {"torrent_id": "sha:abc"}}
     assert iris_agent.run_once(CFG, deps, state) == "downloading"
     assert cat.downloaded == [] and aria == []

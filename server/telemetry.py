@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 
 import audit
 import auth
+import bounded_pool
 import ipaddress
 import keyed_state
 import live_samples
@@ -716,7 +717,8 @@ class Telemetry:
         # tests/standalone -> the poll still runs, nothing is accumulated.
         self.peer_ledger = peer_ledger
         self._ledger_pruned_at = 0.0
-        self._counters = {"announces_total": 0}
+        self._counters = {"announces_total": 0, "announces_refused_total": 0,
+                          "announces_refused_expired_total": 0}
         self._lock = threading.Lock()
         self._stop = threading.Event()
         # When no registry is supplied, own one wired to our event hook — this
@@ -787,6 +789,21 @@ class Telemetry:
     def note_announce(self):
         with self._lock:
             self._counters["announces_total"] += 1
+
+    def note_announce_refused(self, expired=False):
+        """A /announce or /scrape credential was refused (IRIS-111): the
+        operator-visible half of the fix. Without this a rotated-out
+        credential expiring past SEEDER_PREV_TTL produces a 403 with no
+        counter anywhere -- iris_legacy_announce_participants then reads 0
+        identically whether the fleet fully migrated or every un-migrated
+        device just aged out and can no longer authenticate to be counted.
+        ``expired`` (see auth.AnnounceAuthError.expired) narrows that to
+        credentials that are KNOWN and simply timed out, as opposed to
+        garbage/unknown ones."""
+        with self._lock:
+            self._counters["announces_refused_total"] += 1
+            if expired:
+                self._counters["announces_refused_expired_total"] += 1
 
     # --- /metrics provider ---
     def metrics_text(self):
@@ -2442,6 +2459,19 @@ def parse_health_listeners(spec, default=None):
     return out
 
 
+class _MetricsServer(bounded_pool.BoundedThreadingMixin, ThreadingHTTPServer):
+    """ThreadingHTTPServer with a bounded pool of concurrently running
+    handler threads -- see bounded_pool.py. No TLS here (:9101 is a plain
+    monitoring/health surface, gated by IRIS_METRICS_HOST rather than a
+    cert) and no long-lived connections: every route answers one JSON/text
+    body and closes. Sized generously above any realistic scrape
+    concurrency; request_queue_size raised for the same reason as the other
+    listeners (a burst of health probes should queue, not RST)."""
+
+    request_queue_size = 128
+    max_concurrent_requests = 64
+
+
 def make_metrics_server(host, port, provider, swarm_provider=None, html=None,
                         health=None, swarm_public=False, listeners=None):
     """HTTP server. `/healthz` is always served (JSON; `health` is an optional
@@ -2534,4 +2564,4 @@ def make_metrics_server(host, port, provider, swarm_provider=None, html=None,
         def log_message(self, *args):
             pass
 
-    return ThreadingHTTPServer((host, port), Handler)
+    return _MetricsServer((host, port), Handler)

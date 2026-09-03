@@ -4,10 +4,8 @@
 
 """Pure-function tests for the device telemetry-report module (issue #13):
 toggle parsing, RTT/failure bookkeeping, link-tier classifier boundaries,
-peer participation observation (dedup + STATE_PEER_SET_CAP), report shape,
-trimming, pull-flag parsing and defer backoff."""
-import json
-
+peer participation observation (dedup + STATE_PEER_SET_CAP), pull-flag
+parsing and defer backoff."""
 import pytest
 
 import telemetry_report
@@ -163,99 +161,6 @@ def test_observe_peers_discards_legacy_byte_accumulator_state():
     telemetry_report.observe_peers(tele, [{"ip": "10.0.0.9"}])
     assert tele["peers"] == {"10.0.0.9": 1}
     assert "other" not in tele and "last_sample_ts" not in tele
-
-
-# ---- build_report(): exact shape per spec section 2 ----
-
-def test_build_report_exact_shape(monkeypatch):
-    monkeypatch.delenv("IRIS_RUNTIME_MODE", raising=False)
-    state = {
-        "link": {"rtt_ms": [10.0, 12.0, 20.0], "fail_streak": 0},
-        "img-1": {"copied": True,
-                  "tele": {"peers": {"10.0.0.7": 2, "10.0.0.8": 1},
-                           "total_bytes": 123457838, "elapsed_s": 300.52,
-                           "avg_bps": 4000000, "sha_ok": True}},
-    }
-    rep = telemetry_report.build_report({}, state, "img-1",
-                                        "staging-complete", 1783000000.7)
-    assert rep == {
-        "ts": 1783000000,
-        "image_id": "img-1",
-        "event": "staging-complete",
-        "transfer": {"total_bytes": 123457838, "elapsed_s": 300.5,
-                     "avg_bps": 4000000, "sha_ok": True,
-                     "stage_state": "ready"},
-        "link": {"tier": "good", "rtt_ms_median": 12, "rtt_samples": 3,
-                 "hb_failures": 0, "trimmed": False},
-        "peers": [{"ip": "10.0.0.7"}, {"ip": "10.0.0.8"}],
-        "peers_total": 2,
-        "agent": {"version": "unknown", "runtime_mode": "guestshell"},
-    }
-    json.dumps(rep)   # must be JSON-serializable as-is (POST body)
-    # build_report is a pure READ — state must be untouched
-    assert state["img-1"]["tele"]["peers"] == {"10.0.0.7": 2, "10.0.0.8": 1}
-    assert "trimmed" not in state["link"]
-
-
-def test_build_report_defaults_on_bare_state(monkeypatch):
-    monkeypatch.delenv("IRIS_RUNTIME_MODE", raising=False)
-    rep = telemetry_report.build_report({}, {}, "img-x", "pull", 5.9)
-    assert rep == {
-        "ts": 5, "image_id": "img-x", "event": "pull",
-        "transfer": {"total_bytes": 0, "elapsed_s": 0.0, "avg_bps": 0,
-                     "sha_ok": False, "stage_state": "staging"},
-        "link": {"tier": "good", "rtt_ms_median": 0, "rtt_samples": 0,
-                 "hb_failures": 0, "trimmed": False},
-        "peers": [],
-        "peers_total": 0,
-        "agent": {"version": "unknown", "runtime_mode": "guestshell"},
-    }
-
-
-def test_build_report_names_first_peer_cap_rows_counts_the_rest(monkeypatch):
-    monkeypatch.delenv("IRIS_RUNTIME_MODE", raising=False)
-    ips = ["10.0.%d.%d" % (i // 250, i % 250)
-           for i in range(telemetry_report.PEER_CAP + 7)]
-    state = {"img-1": {"copied": True,
-                       "tele": {"peers": {ip: 1 for ip in ips}}}}
-    rep = telemetry_report.build_report({}, state, "img-1",
-                                        "staging-complete", 100.0)
-    assert rep["peers"] == [{"ip": ip}
-                            for ip in ips[:telemetry_report.PEER_CAP]]
-    assert rep["peers_total"] == telemetry_report.PEER_CAP + 7
-
-
-def test_build_report_tolerates_legacy_state_shape(monkeypatch):
-    # a console pull can fire before any observe_peers call has reset legacy
-    # {ip: [rx, tx]} state: the keys-only read must not raise, and no byte
-    # fields may leak into the report
-    monkeypatch.delenv("IRIS_RUNTIME_MODE", raising=False)
-    state = {"img-1": {"tele": {"peers": {"10.0.0.1": [100, 0]},
-                                "other": [999, 1, 3]}}}
-    rep = telemetry_report.build_report({}, state, "img-1", "pull", 100.0)
-    assert rep["peers"] == [{"ip": "10.0.0.1"}]
-    assert rep["peers_total"] == 1
-
-
-def test_build_report_seeding_only_stage_state(monkeypatch):
-    monkeypatch.delenv("IRIS_RUNTIME_MODE", raising=False)
-    state = {"img-1": {"blocked_no_space": True, "tele": {}}}
-    rep = telemetry_report.build_report({}, state, "img-1",
-                                        "seeding-only", 60.0)
-    assert rep["transfer"]["stage_state"] == "flash_full_seeding_only"
-    assert rep["event"] == "seeding-only"
-
-
-def test_build_report_runtime_mode_env_then_conf(monkeypatch):
-    # Mirrors cli_ssh.select_cli: env IRIS_RUNTIME_MODE > conf runtime_mode
-    # > 'guestshell'. The IE-3400 IOx image bakes the env var in.
-    monkeypatch.setenv("IRIS_RUNTIME_MODE", "container")
-    rep = telemetry_report.build_report({}, {}, "i", "pull", 1.0)
-    assert rep["agent"]["runtime_mode"] == "container"
-    monkeypatch.delenv("IRIS_RUNTIME_MODE", raising=False)
-    rep = telemetry_report.build_report({"runtime_mode": "container"},
-                                        {}, "i", "pull", 1.0)
-    assert rep["agent"]["runtime_mode"] == "container"
 
 
 # ---- pull_requested(): garbage-tolerant heartbeat-response parsing ----

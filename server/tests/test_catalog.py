@@ -8,6 +8,8 @@ import http.client
 import json
 import os
 import socket
+import subprocess
+import sys
 import threading
 import time
 
@@ -1891,6 +1893,36 @@ def test_pull_directive_lifecycle_with_ttl(tmp_path):
     assert s.pending_report("dev-1", now + 601) is None
 
 
+def test_list_devices_reaps_expired_pull_directive_for_a_device_that_never_returns(tmp_path):
+    """A device that was issued a pull directive and then never heartbeats or
+    reports again used to leave its expired row in pull_requests.d/ forever
+    (pending_request() only reaps the QUERIED device's own row, and nothing
+    else ever queries a vanished device). list_devices() is already an
+    O(fleet) console operation, so it piggybacks the reclaim -- without
+    reintroducing a fleet-wide sweep on any per-device path."""
+    s = catalog.CatalogStore(str(tmp_path))
+    now = 1000.0
+    assert s.request_report("ghost", now) is True
+    assert s._pulls.get("ghost") is not None      # row exists before expiry
+
+    # ghost never heartbeats or reports again; time passes well past the TTL,
+    # and nothing ever queries "ghost" directly again.
+    later = now + catalog.CatalogStore.PULL_TTL + 1
+    s.list_devices(later)
+
+    assert s._pulls.get("ghost") is None          # reclaimed by the sweep
+
+
+def test_list_devices_leaves_unexpired_pull_directive_alone(tmp_path):
+    """The fleet-wide sweep in list_devices() must not clear a directive that
+    has not expired yet."""
+    s = catalog.CatalogStore(str(tmp_path))
+    now = 1000.0
+    assert s.request_report("dev-1", now) is True
+    s.list_devices(now + 1)
+    assert s._pulls.get("dev-1") is not None
+
+
 def test_record_telemetry_clears_pull_request(tmp_path):
     """An arriving report answers (or supersedes) the pending pull directive
     for THAT device only."""
@@ -1946,6 +1978,37 @@ def test_telemetry_rejects_wrong_device_token(tmp_path):
         status, _ = _post(port, "/v1/devices/device-b/telemetry", tok_b,
                           json.dumps(_report()).encode())
         assert status == 200
+    finally:
+        srv.shutdown()
+
+
+def test_policy_rejects_wrong_device_token(tmp_path):
+    """Device B's VALID catalog token must NOT read device A's policy —
+    'policy' must be in _guard's device-bound tuple, otherwise any enrolled
+    device could walk /v1/devices then /v1/devices/<id>/policy for every id
+    and read every other device's plan_id/transfer_id (#42)."""
+    sp = _secrets_path(tmp_path)
+    tok_a = _mint_catalog_token(sp, "device-a")
+    tok_b = _mint_catalog_token(sp, "device-b")
+    s = _store(tmp_path)
+    s.set_policy("device-a", approved_image_ids=["img1"])
+    srv = catalog.make_server("127.0.0.1", 0, s, sp)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+    try:
+        status, _, body = _req(port, "GET", "/v1/devices/device-a/policy",
+                               token=tok_b)
+        assert status == 401, "wrong-device token must be rejected"
+        assert b"plan_id" not in body and b"transfer_id" not in body
+        # the same token IS accepted for its own device
+        status, _, body = _req(port, "GET", "/v1/devices/device-b/policy",
+                               token=tok_b)
+        assert status == 200
+        # and device A's own token still works for device A
+        status, _, body = _req(port, "GET", "/v1/devices/device-a/policy",
+                               token=tok_a)
+        assert status == 200
+        assert b"plan_id" in body and b"transfer_id" in body
     finally:
         srv.shutdown()
 
@@ -3343,3 +3406,42 @@ def test_catalog_tls_handshake_is_not_on_the_accept_thread(tmp_path):
         idle.close()
     finally:
         srv.shutdown()
+
+
+_SERVER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def test_main_refuses_plaintext_without_opt_in_then_serves_with_it(tmp_path):
+    """IRIS-105: catalog.main() used to silently fall back to plain HTTP
+    whenever no certificate was found -- every route on this listener answers
+    a device bearer token, so a plaintext catalog serves them in the clear.
+    Now it fails CLOSED (exit 2, naming the opt-in) exactly like the console's
+    IRIS_GUI_ALLOW_PLAINTEXT contract, unless IRIS_CATALOG_ALLOW_PLAINTEXT=1
+    opts in explicitly; port 0 so no fixed port is ever bound."""
+    host = "127.0.0.1"
+    env = dict(os.environ)
+    env["IRIS_CATALOG_HOST"] = host
+    env["IRIS_CATALOG_PORT"] = "0"
+    env["IRIS_STATE"] = str(tmp_path / "state")
+    env["IRIS_SECRETS"] = str(tmp_path / "secrets.json")
+    env["IRIS_CERT"] = str(tmp_path / "nonexistent-cert.pem")
+    env.pop("IRIS_CATALOG_ALLOW_PLAINTEXT", None)
+    refused = subprocess.run([sys.executable, "catalog.py"], cwd=_SERVER_DIR,
+                             env=env, capture_output=True, timeout=30)
+    assert refused.returncode == 2
+    assert b"IRIS_CATALOG_ALLOW_PLAINTEXT=1" in refused.stderr
+
+    env["IRIS_CATALOG_ALLOW_PLAINTEXT"] = "1"
+    proc = subprocess.Popen([sys.executable, "catalog.py"], cwd=_SERVER_DIR,
+                            env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE)
+    try:
+        line = proc.stdout.readline()
+        assert b"catalog on http://" in line, (line, proc.stderr.read())
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=10)

@@ -8,7 +8,9 @@
 under the state dir, written atomically and re-read per request. Bearer-token
 auth on every endpoint. The server publishes images and each device's
 staging approval (the ordered set of images it may STAGE) but NEVER triggers
-install (spec §6). Stdlib only."""
+install (spec §6). main() refuses to start over plain HTTP unless
+IRIS_CATALOG_ALLOW_PLAINTEXT=1 opts in explicitly -- every route answers
+device bearer tokens. Stdlib only."""
 import gzip
 import hashlib
 import io
@@ -19,6 +21,7 @@ import os
 import re
 import secrets
 import ssl
+import sys
 import tempfile
 import threading
 import time
@@ -26,6 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import audit
 import auth
+import bounded_pool
 import bulkhash
 import credential_cache
 import keyed_state
@@ -151,12 +155,25 @@ def handler_timeout(env=None):
 # Bound on how long a TLS handshake may occupy its worker thread.
 _HANDSHAKE_TIMEOUT = 30
 
+# Opt-in to serve the catalog over plain HTTP when no certificate is
+# available. Same name pattern as gui_server's IRIS_GUI_ALLOW_PLAINTEXT, so
+# an operator learns one convention for every listener. Only main() consults
+# this -- make_server() itself still accepts certfile=None unconditionally,
+# which the test suite relies on to run a plain-HTTP server without opting
+# in globally.
+_PLAINTEXT_OPT_IN_ENV = "IRIS_CATALOG_ALLOW_PLAINTEXT"
 
-class _CatalogServer(ThreadingHTTPServer):
+
+def _plaintext_allowed():
+    return os.environ.get(_PLAINTEXT_OPT_IN_ENV, "") == "1"
+
+
+class _CatalogServer(bounded_pool.BoundedThreadingMixin, ThreadingHTTPServer):
     """ThreadingHTTPServer with a fleet-sized accept backlog that completes
-    the TLS handshake in the WORKER thread.
+    the TLS handshake in the WORKER thread, and a bounded pool of
+    concurrently running handler threads.
 
-    Two stdlib defaults are wrong for a device-facing listener:
+    Three stdlib defaults are wrong for a device-facing listener:
 
     * ``request_queue_size`` is 5. Every device in the fleet contacts this
       server on the same heartbeat cadence, so a rollout burst overflows the
@@ -167,12 +184,22 @@ class _CatalogServer(ThreadingHTTPServer):
       client that connects and never sends a ClientHello stalls every other
       device. Here accept() hands back the plain socket and the wrap happens
       per connection, bounded by _HANDSHAKE_TIMEOUT.
+    * ``ThreadingMixIn.process_request`` spawns one thread per connection
+      with no cap -- see bounded_pool.py for why that is unsafe and how the
+      mixin below bounds it without risking a deadlock on a long-lived
+      connection.
 
     Same mechanism as gui_server._ConsoleServer and artifact_server._Server.
     """
 
     request_queue_size = 128
     tls_context = None
+    # The catalog has no long-lived connections of its own (no SSE, no
+    # device-held streams) -- every request is a bounded JSON exchange or a
+    # small .torrent fetch. Sized to the fleet-sized accept backlog above so
+    # a burst that fills the kernel queue can still be drained rather than
+    # rejected outright.
+    max_concurrent_requests = 256
 
     def get_request(self):
         sock, addr = self.socket.accept()
@@ -900,9 +927,26 @@ class CatalogStore:
         image, and the reports are historical."""
         return self._devices.delete(device_id)
 
-    def list_devices(self):
+    def list_devices(self, now=None):
         """Every heartbeat record. O(fleet) by nature — the console's fleet
-        table, never a per-device request."""
+        table, never a per-device request.
+
+        Piggybacks reclaiming any pull directive left EXPIRED by a device
+        that never heartbeats or reports again (pending_request() only reaps
+        the queried device's own row, so such a device's directive would
+        otherwise sit in pull_requests.d/ until the device is purged from the
+        fleet). This call is already O(fleet), so sweeping the pull-directive
+        store here adds no new whole-fleet scan on any per-device path."""
+        now = time.time() if now is None else now
+
+        def reap(key, ent):
+            if not isinstance(ent, dict):
+                return keyed_state.DELETE if ent is not None else None
+            if now >= ent.get("expires_at", 0):
+                return keyed_state.DELETE
+            return None
+
+        self._pulls.sweep(reap)
         return list(self._devices.snapshot().values())
 
     def purge_device(self, device_id):
@@ -2360,13 +2404,19 @@ def make_server(host, port, store, secrets_path, certfile=None,
         def _guard(self, parts, token):
             """Route-aware guard.
 
-            Device-bound routes (heartbeat, telemetry): require the current
-            device catalog_token resolving to that device's principal.
-            token-refresh additionally accepts that same device's one previous
-            token for idempotent delivery recovery; it grants no other route.
+            Device-bound routes (heartbeat, telemetry, policy): require the
+            current device catalog_token resolving to that device's
+            principal. token-refresh additionally accepts that same device's
+            one previous token for idempotent delivery recovery; it grants no
+            other route.
 
-            Shared routes (images, torrents, devices-list, policy): require
-            any valid catalog-scoped record.
+            Shared routes (images, torrents, devices-list): require any valid
+            catalog-scoped record. Policy is device-bound rather than shared
+            because device_policy_view() carries per-transfer ids
+            (plan_id/transfer_id, spec §9) minted for THIS device's
+            assignment -- a shared route would let any enrolled device walk
+            /v1/devices then /v1/devices/<id>/policy for every id and read
+            every other device's plan/transfer ids.
 
             Returns ``(store_dict, index, auth_ctx)`` on success (auth_ctx is a
             typed ``auth.AuthContext`` for the resolved principal) or
@@ -2393,7 +2443,8 @@ def make_server(host, port, store, secrets_path, certfile=None,
             is_device_bound = (
                 len(parts) == 4
                 and parts[:2] == ["v1", "devices"]
-                and parts[3] in ("heartbeat", "token-refresh", "telemetry")
+                and parts[3] in ("heartbeat", "token-refresh", "telemetry",
+                                 "policy")
             )
 
             if is_device_bound:
@@ -2556,6 +2607,20 @@ def main():
     secrets_path = os.environ.get("IRIS_SECRETS", "/run/iris/secrets.json")
     cert = os.environ.get("IRIS_CERT", "/etc/iris/tls/cert.pem")
     certfile = cert if os.path.exists(cert) else None
+    if certfile is None and not _plaintext_allowed():
+        # The catalog answers device bearer tokens on every route; a
+        # plaintext listener puts every one of them on the wire in clear
+        # text. Same fail-closed contract as the console
+        # (gui_server.main / IRIS_GUI_ALLOW_PLAINTEXT): refuse to start
+        # rather than silently downgrade. The shipped docker-entrypoint.sh
+        # always provisions IRIS_CERT, so this is only reachable running
+        # catalog.py directly outside the supported deployment.
+        print("iris-catalog: no certificate found (IRIS_CERT=%s); refusing "
+              "to serve the catalog over plain HTTP -- it answers device "
+              "bearer tokens on every route. Set %s=1 to opt in "
+              "deliberately (loopback or an isolated lab network only)."
+              % (cert, _PLAINTEXT_OPT_IN_ENV), file=sys.stderr, flush=True)
+        sys.exit(2)
     live_table = live_samples.LiveTable()
     stream_settings = live_samples.StreamSettings(
         os.path.join(state_dir, "telemetry-settings.json"))

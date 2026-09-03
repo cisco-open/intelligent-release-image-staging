@@ -265,6 +265,13 @@ torrent from the catalog, and that request is authorised by the device's own
 catalog token, not by the announce credential being retired. Personalise device
 torrents during the overlap and nothing announces on a seeder token afterwards.
 
+**If a device is not re-personalised before the window closes**, its next
+announce is refused with a token-free 403 and no other symptom by default:
+the operator-visible signal is `iris_tracker_announces_refused_expired_total`
+(nonzero) alongside `iris_legacy_announce_participants` reading `0` — that
+combination is a locked-out, un-migrated fleet, not a migrated one. See
+[Observability: reading iris_legacy_announce_participants](observability.md#reading-iris_legacy_announce_participants).
+
 ## First-run admin claim
 
 Before an admin account exists, the console's normal login page accepts the
@@ -358,6 +365,19 @@ releases a quarantine.
 ## TLS and certificates
 
 The catalog and artifact server use HTTPS. The generated device installer installs the catalog certificate into the device trust path so the bootstrap and catalog calls can validate the server identity.
+
+The catalog and artifact server **fail closed to TLS**, the same contract as
+the console below. At start each resolves `IRIS_CERT`; if it names no usable
+certificate, the process exits with a message naming the path instead of
+serving plain HTTP. The catalog answers a device bearer token on every
+route, and the artifact server's staging URLs carry the only authorization
+on the capability-bearing enrollment files it serves — a silent plaintext
+fallback would put either one on the wire in clear text. Set
+`IRIS_CATALOG_ALLOW_PLAINTEXT=1` or `IRIS_ARTIFACTS_ALLOW_PLAINTEXT=1` to opt
+into a plaintext listener deliberately — loopback or an isolated lab network
+only. The shipped `docker-entrypoint.sh` always provisions `IRIS_CERT`, so
+this refusal is only reachable running `catalog.py` or `artifact_server.py`
+directly, outside the supported deployment.
 
 The console's own certificate and key, imported through Settings → TLS &
 trust, get the same careful handling: an encrypted private key is decrypted

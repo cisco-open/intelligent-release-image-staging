@@ -20,6 +20,7 @@ from urllib.parse import unquote_to_bytes, urlparse
 import auth
 import bencode
 import blocklist_reconciler as _reconciler
+import bounded_pool
 import credential_cache
 import peer_endpoints as _peer_endpoints
 import peer_enforcement as _peer_enforcement
@@ -46,17 +47,25 @@ def handler_timeout(env=None):
     return value if value > 0 else HANDLER_TIMEOUT
 
 
-class _TrackerServer(ThreadingHTTPServer):
-    """ThreadingHTTPServer with a fleet-sized accept backlog.
+class _TrackerServer(bounded_pool.BoundedThreadingMixin, ThreadingHTTPServer):
+    """ThreadingHTTPServer with a fleet-sized accept backlog and a bounded
+    pool of concurrently running handler threads.
 
     The stdlib default ``request_queue_size`` is 5. Every peer in the swarm
     re-announces on the same interval, so a rollout burst overflows the
     accept queue and the kernel answers with RSTs -- a peer then sees a
     connection reset instead of a slow answer, and drops out of the swarm.
     Matches gui_server._ConsoleServer and catalog._CatalogServer.
+
+    ``ThreadingMixIn.process_request`` spawns one thread per connection with
+    no cap -- see bounded_pool.py for why that is unsafe and how the mixin
+    bounds it without risking a deadlock on a long-lived connection.
     """
 
     request_queue_size = 128
+    # No long-lived connections here -- announce/scrape are bounded bencoded
+    # exchanges. Sized to the fleet-sized accept backlog above.
+    max_concurrent_requests = 256
 
 
 def _valid_ipv4(addr):
@@ -188,7 +197,7 @@ def _legacy_id(peer_ip, peer_port):
 def make_server(host, port, secrets_path, registry=None, on_announce=None,
                 policy_paths=None, endpoints_path=None, pending_queue=None,
                 record_endpoint=None, on_endpoint_failure=None,
-                on_endpoint_change=None):
+                on_endpoint_change=None, on_announce_refused=None):
     """Build the tracker HTTP server.
 
     Typed identity/policy integration (spec §6/§7):
@@ -206,6 +215,15 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
       changing the HTTP 200 or the policy filtering.
     * ``record_endpoint`` — injectable endpoint writer (defaults to
       ``peer_endpoints.record_endpoint``); used for failure-injection tests.
+    * ``on_announce_refused`` — called with one keyword, ``expired`` (bool),
+      whenever an /announce or /scrape credential is refused (IRIS-111): a
+      403 answers with no operator-visible signal otherwise, and
+      ``iris_legacy_announce_participants`` reads 0 identically whether the
+      fleet fully migrated or every un-migrated device just aged out of
+      SEEDER_PREV_TTL and can no longer authenticate to be counted.
+      ``expired=True`` means the presented credential resolved to a known,
+      non-revoked record that failed only because it timed out -- the
+      SEEDER_PREV_TTL overlap case this counter exists for.
     """
     registry = registry or PeerRegistry()
     # One stat-validated snapshot of the secret store and its strict announce
@@ -244,7 +262,9 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
                 return auth.resolve_announce_principal(
                     query, index, store, now, _grace,
                     legacy_id=_legacy_id(peer_ip, peer_port))
-            except auth.AnnounceAuthError:
+            except auth.AnnounceAuthError as exc:
+                if on_announce_refused is not None:
+                    on_announce_refused(expired=exc.expired)
                 return None
 
         def do_GET(self):
@@ -1072,7 +1092,8 @@ def main():
         policy_paths=policy_paths, endpoints_path=endpoints_path,
         pending_queue=reconciler._pending,
         on_endpoint_failure=reconciler.wake,
-        on_endpoint_change=reconciler.wake)
+        on_endpoint_change=reconciler.wake,
+        on_announce_refused=hub.note_announce_refused)
     reconciler.start()
     print("tracker on http://%s:%d/announce" % (host, port), flush=True)
     srv.serve_forever()

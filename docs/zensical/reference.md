@@ -88,6 +88,8 @@ Compose refuses to start without these; none has a default.
 | `IRIS_GUI_PUBLISH` | `8080` | Published host port for the console. The container always listens on 8080 internally. |
 | `IRIS_CONSOLE_URL` | unset | Overrides the console link on the port 9101 pointer page verbatim, for hosts publishing the console somewhere other than `https://<IRIS_HOST_IP>:8080/`. Read per request. |
 | `IRIS_GUI_ALLOW_PLAINTEXT` | unset | `1` lets the console serve plain HTTP when no usable certificate exists (`IRIS_GUI_CERT` / `IRIS_CERT`). Without it `iris-gui` refuses to start in that state. The session cookie loses its `Secure` attribute under the opt-in. Loopback or an isolated lab only — see [Security](security.md#tls-and-certificates). |
+| `IRIS_CATALOG_ALLOW_PLAINTEXT` | unset | `1` lets the catalog serve plain HTTP when `IRIS_CERT` names no usable certificate. Without it `catalog.py` refuses to start in that state — every route answers a device bearer token. Same convention as `IRIS_GUI_ALLOW_PLAINTEXT`. The shipped `docker-entrypoint.sh` always provisions `IRIS_CERT`, so this only matters running `catalog.py` directly. Loopback or an isolated lab only — see [Security](security.md#tls-and-certificates). |
+| `IRIS_ARTIFACTS_ALLOW_PLAINTEXT` | unset | `1` lets the artifact server serve plain HTTP when `IRIS_CERT` names no usable certificate. Without it `artifact_server.py` refuses to start in that state — staging URLs are the only authorization on the capability-bearing enrollment files it serves. Same convention as `IRIS_GUI_ALLOW_PLAINTEXT`. The shipped `docker-entrypoint.sh` always provisions `IRIS_CERT`, so this only matters running `artifact_server.py` directly. Loopback or an isolated lab only — see [Security](security.md#tls-and-certificates). |
 | `IRIS_VERSION` | unset | Build argument that bakes the release string the console's Settings page shows. Unset means the `VERSION` file in the image. Build-time only: it is not a container variable. |
 | `IRIS_GUI_ADMIN_PASSWORD` | unset (prompts) | Read by `iris-gui-admin` to set the console admin password non-interactively. Pass it on the one-shot command (`docker compose … run --rm -e IRIS_GUI_ADMIN_PASSWORD=… iris iris-gui-admin`); it is deliberately **not** in the Compose `environment:` block, so a long-running container never holds the password in its environment. |
 | `IRIS_SAMPLE_INTERVAL` | `15` (seconds) | Seeder/telemetry poll cadence. A transfer that completes inside one interval can be observed with no connected peer, so per-peer rates and the map's measured edges never appear — a 1 GB image at ~90 MB/s lands in about 15 seconds. Lower it to 2–5 on a fast fabric or for a live demo; the cost is more aria2 RPC calls. |
@@ -429,16 +431,15 @@ line; the newest 200 are kept. `/api/help`'s `deployment_id` comes from
 
 ### The device-facing catalog API is not in this table
 
-Everything above is the **console** API on port 8080. The catalog serves a
-separate, device-facing API on port 8443 — `GET /v1/images`,
-`/v1/images/<id>`, `/v1/torrents/<id>`, `/v1/devices`,
-`/v1/devices/<id>/policy`, and `POST /v1/devices/<id>/heartbeat`,
-`/telemetry`, `/token-refresh`. That is the agent protocol: it is
-authenticated per device with a catalog token, it is versioned and changed in
-lockstep with `device/agent/`, and it is not an integration surface. It is
-documented by behaviour on [Device agents](device-agents.md) and
-[Architecture](architecture.md) rather than route by route here, and nothing
-outside the agent should call it.
+Everything above is the **console** API on port 8080 — a browser session
+cookie plus CSRF on every state-changing route. The four surfaces below are
+not that: each is its own HTTP listener, authenticated (or not) on its own
+terms, and none of them carries a session cookie or a CSRF token. The catalog
+protocol specifically is versioned and changed in lockstep with
+`device/agent/`, and it is not an integration surface — it is documented by
+behaviour on [Device agents](device-agents.md) and
+[Architecture](architecture.md) as well as route-by-route immediately below,
+and nothing outside the agent should call it.
 
 ### Import skip reasons
 
@@ -459,6 +460,105 @@ dotfile, sidecar `.torrent`, or
 found under — a symlink cannot pull a file from outside the mount into the set.
 Each distinct tree is walked once, so pointing both roots at the same directory,
 or nesting one inside the other, yields each file exactly once.
+
+## Device catalog, tracker, telemetry, and artifact HTTP contracts
+
+### Device catalog API (port 8443)
+
+Every route requires `Authorization: Bearer <token>`; a missing bearer answers
+401 `{"error": "unauthorized"}` before any route is matched. Two auth scopes:
+
+* **Device-bound** (`heartbeat`, `telemetry`, `policy`, `token-refresh`): the
+  token must resolve to that path's own `<device_id>` under `catalog_token` —
+  or, on `token-refresh` only, the immediately preceding
+  `catalog_token_prev`, so a device that never saw the response to its own
+  rotation can recover it idempotently rather than being stranded. `policy`
+  is device-bound (not shared) because its response carries this device's own
+  minted `plan_id`/`transfer_id` pair — a shared route would let any enrolled
+  device walk `/v1/devices` then read every other device's plan/transfer ids
+  off its policy.
+* **Shared** (every other route): any currently valid catalog-scoped
+  credential — a device's own token, or the service (seeder) credential.
+
+| Route | Auth | Body / result |
+| --- | --- | --- |
+| `GET /v1/images` | Shared | `{images: [...]}` — the device-facing view of each catalog entry (no `source_dir`, no reconciler internals). |
+| `GET /v1/images/<id>` | Shared | Device-facing view of one image; 404 `{"error": "no such image"}`. |
+| `GET /v1/torrents/<id>` (also accepts `<id>.torrent`) | Shared | A device principal gets an in-memory torrent personalized with that device's own announce token, plus `Cache-Control: private, no-store` and `Vary: Authorization`; a service/other principal gets the canonical bytes unmodified. 404 no such torrent; 503 `{"error": "catalog not open for device personalization"}` before the `IRIS_REQUIRE_IDENTITY_GATE` checkpoint exists; 500 `{"error": "no announce credential for device"}` or `{"error": "torrent personalization failed"}` — fails closed rather than falling back to the shared seeder token, and never places a token or announce URL in the error body. |
+| `GET /v1/devices` | Shared | `{devices: [...]}` — the same heartbeat rows the console's device table reads. |
+| `GET /v1/devices/<id>/policy` | Device-bound | The device's own policy view — see [Policy schema](#policy-schema). |
+| `POST /v1/devices/<id>/heartbeat` | Device-bound | Body: the device's heartbeat JSON — see [Keyed per-device state](#keyed-per-device-state). 200 `{ok: true, stream_every, stream_pause, report_requested?, report_request_id?}`. |
+| `POST /v1/devices/<id>/telemetry` | Device-bound | Body: a v1 or v2 telemetry report. 400 `{"error": "bad json"}` or `{"error": "bad report"}` (a v2 report naming an image outside the device's currently approved set is a bad report). 200 `{ok: true}`. |
+| `POST /v1/devices/<id>/token-refresh` | Device-bound (current **or** previous token) | Rotates `catalog_token`. A request presenting the just-rotated previous token replays the same successor rather than rotating again, so a lost response can't strand the device. 401 unauthorized; 409 `{"error": "device revoked"}`; 500 `{"error": "durable persist failed: ..."}` when the encrypted secret store can't be written (nothing is committed in that case); 200 `{catalog_token, expires_at, announce_token?, rpc_secret?}` — the last two appear only when the device actually has one, never as an empty string that would overwrite the agent's working value. |
+
+Every POST additionally requires `Content-Length` (a chunked or length-less
+body is refused with 411), rejects a non-numeric or negative
+`Content-Length` with 400, and caps the body at 64 KiB — after gzip
+decompression, so a compressed bomb is still caught — with 413 over. Like
+every keyed-state store, a shard the catalog can't read fails the request
+closed with 503 `{"error": "state unavailable"}` rather than answering as if
+that device (or the whole store) were empty.
+
+### Tracker API (port 6969)
+
+BitTorrent-standard `GET /announce` and `GET /scrape`, bencoded responses
+(`Content-Type: text/plain`), authenticated by a **query-string** credential
+rather than a header: the dedicated `announce_token=` parameter, or the
+legacy BEP-style `key=` parameter for a previous/rotated-out token still
+inside its overlap window (see `IRIS_SEEDER_PREV_TTL`). A request with no
+valid credential of either kind gets a token-free 403 bencoded
+`{"failure reason": "missing or invalid token"}`; the token itself is never
+echoed in a log, audit entry, or error body.
+
+| Route | Body / result |
+| --- | --- |
+| `GET /announce` | Query: `info_hash` (20 raw bytes, percent-encoded), `announce_token` or `key`, `peer_id`, `port` (1-65535; an out-of-range value is treated as absent, so the request still answers 200 but registers no peer), `left`, `event`, `numwant` (default 50), `compact` (`1` for BEP23 compact peers), and an `ip` override honoured **only** for the service (origin seeder) principal and only when it names a private/CGNAT IPv4 address — containerized seeders whose socket source is loopback/bridge-local. 400 `{"failure reason": "info_hash must be 20 bytes"}` on a malformed hash (checked only after auth, so an unauthenticated caller learns nothing about the request shape). 200 bencoded `{interval, min interval, peers}`, where `peers` is BEP23 compact bytes or a list of `{ip, peer id, port}` dicts. The candidate set is further filtered by the peer-policy mutual-permit predicate whenever peer policy is configured — see [Peer policy](#peer-policy) and [Peer-policy operations and their backlog](operations.md#peer-policy-operations-and-their-backlog); a legacy credential announcing from an address a durable endpoint attributes to a quarantined or revoked device gets zero peers. |
+| `GET /scrape` | Query: `info_hash`, plus the same credential parameter as `/announce` (scrape only checks that the credential is valid — it discards the typed principal). 400 `{"failure reason": "scrape requires info_hash"}` / `{"failure reason": "info_hash must be 20 bytes"}`. 200 bencoded `{"files": {<raw info_hash bytes>: {complete, incomplete, downloaded}}}` (BEP48). |
+
+Every valid, port-bearing announce from a device or service principal durably
+records that principal's endpoint (`<state>/peer-endpoints.d/` — see [Keyed
+per-device state](#keyed-per-device-state)) before peer selection runs; a
+legacy principal's endpoint is never persisted. A durable-write failure never
+changes the HTTP 200 — the tuple is queued for retry and the tracker's own
+reconciler reports the degrade.
+
+### Telemetry listener (port 9101)
+
+Unauthenticated by design — the Prometheus/operator surface, gated by
+presence and posture rather than a session. GET-only; no CSRF. See
+[Telemetry gating rule](#telemetry-gating-rule) for exactly which environment
+variable controls which path.
+
+| Route | Result |
+| --- | --- |
+| `GET /metrics` | 200 `text/plain; version=0.0.4` Prometheus exposition when `IRIS_OBSERVABILITY` is enabled; 404 otherwise. |
+| `GET /healthz` | Always 200 — this path never signals failure by status code. `{"ok": true, "otlp_export"?: {...}, "listeners"?: {"<name>": "up"\|"down"}}`; the `listeners` block appears only when `IRIS_HEALTH_LISTENERS` names a probe set, and is informational here — `ok` stays `true` regardless of what it shows. |
+| `GET /readyz` | TCP-probes the `IRIS_HEALTH_LISTENERS` set (default: the tracker, catalog, artifact server and console listeners). 200 `{"ok": true}` when every probed listener answers, else 503 `{"ok": false, "listeners": {...}, "down": [...]}` naming the down ones. `IRIS_HEALTH_LISTENERS=off` (or nothing to probe) makes the path inert — always 200, nothing probed. This is the status-code probe the Compose `HEALTHCHECK` and the Kubernetes probes use; `/healthz` proves only that the `:9101` process itself is alive. |
+| `GET /swarm` | Loopback peers only unless `IRIS_SWARM_PUBLIC=1`: a non-loopback caller without it gets 403 `{"error": "swarm data is served through the authenticated console; set IRIS_SWARM_PUBLIC=1 to expose it here", "console": "<url>"}`. Otherwise 200 JSON `{"images": [{"peers": [...]}, ...]}` — byte-identical to what the session-gated `GET /api/swarm` proxies. |
+| `GET /swarmmap`, `GET /` | 200 `text/html` — the swarm map pointer page, when the listener was started with one. |
+| anything else | 404 `not found`. |
+
+### Artifact server (port 8000)
+
+Static-file GET/HEAD over the artifacts directory (`IRIS_ARTIFACTS_DIR`),
+authorized purely by the high-entropy, per-device staging filename in the
+URL — there is no token, session, or CSRF on this surface at all. Directory
+listing is disabled (any directory request answers 404, never an index), and
+a resolved path that escapes the artifacts root — including through a
+symlink — also answers 404 rather than serving the target.
+
+`GET` additionally enforces the `staging/` permission contract: a file under
+`staging/` must be mode `0600`-or-tighter before it is served — the server
+tightens it in place when this process owns the file, and refuses with 403
+`Staging file permissions are unsafe` when it does not own the file and the
+mode is loose. Files under `staging/` are swept off disk on a background
+timer an hour after they were staged, not synchronously on the request that
+fetches them — long enough to cover the whole onboarding retry window, not
+just the copy retries, so a slow install can still retry its fetch inside
+that hour without racing its own file's deletion. `HEAD` applies the exact
+same containment and `staging/` permission checks as `GET` before answering
+(headers only, no body) — it cannot disclose existence, size, or mtime for a
+path `GET` would have refused with 404/403.
 
 ## Catalog entry fields
 

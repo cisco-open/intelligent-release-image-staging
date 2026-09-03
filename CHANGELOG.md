@@ -11,6 +11,34 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+### Security
+- **`GET /v1/devices/<id>/policy` is now bound to the requesting device.**
+  It was a shared route — any enrolled device's catalog token could read any
+  other device's policy — and the response now carries a `plans` map with a
+  server-minted `plan_id`/`transfer_id` per assigned image, so a device (or
+  anyone holding one device's catalog token) could enumerate those ids for
+  the whole fleet by walking `/v1/devices` then `/v1/devices/<id>/policy` for
+  every id. The route joins heartbeat, token-refresh and telemetry in
+  `_guard`'s device-bound set: a device can now read only its own assignment
+  and its own plan ids.
+- **The catalog and artifact server now fail closed to plaintext, matching
+  the console.** Run directly (outside the shipped `docker-entrypoint.sh`,
+  which always provisions `IRIS_CERT`) with no usable certificate, `catalog.py`
+  and `artifact_server.py` used to silently serve plain HTTP — putting every
+  device bearer token, and every capability-bearing enrollment file the
+  artifact server serves, on the wire in clear text. Both now refuse to
+  start in that state unless `IRIS_CATALOG_ALLOW_PLAINTEXT=1` /
+  `IRIS_ARTIFACTS_ALLOW_PLAINTEXT=1` opts in explicitly — the same name
+  pattern as the console's `IRIS_GUI_ALLOW_PLAINTEXT`.
+- **`HEAD` requests against the artifact server now get the same
+  symlink-containment and `staging/` permission checks as `GET`.** `HEAD`
+  fell straight through to the stock handler and skipped both: a path
+  escaping the artifacts root through a symlink, or a foreign-owned,
+  loose-permission `staging/` credential file, answered 200 with headers
+  (`Content-Length`, `Last-Modified`, `Content-Type`) for a target a `GET`
+  would have refused with 404/403. No body ever crossed either way, but
+  existence and metadata did.
+
 ### Added
 - **The fleet and swarm console projections can be asked for a page.**
   `GET /api/devices` accepts `limit` (1–1000, clamped), `offset` and `q` — a
@@ -44,6 +72,53 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   [Observability → Metrics names](docs/zensical/observability.md#metrics-names-operator-contract).
 
 ### Fixed
+- **The tracker, catalog, console, artifact server and metrics listeners now
+  bound how many requests they handle at once.** `ThreadingHTTPServer` spawns
+  one OS thread per accepted connection with no cap, so a burst of slow
+  clients (or handlers blocked on a shared file lock) could accumulate
+  arbitrarily many threads and their stacks — a different failure from the
+  accept-backlog fix (`request_queue_size = 128`) already in place on the
+  fleet-facing listeners. Each listener now admits at most
+  `max_concurrent_requests` connections at a time (256 for the tracker,
+  catalog, artifact server and console; 64 for the metrics listener); a
+  burst beyond that degrades into queueing in the (already-enlarged) kernel
+  backlog rather than unbounded thread growth. Admission itself times out
+  (10s) rather than blocking forever, so a listener saturated by long-lived
+  connections — the console's onboard-log SSE streams, most notably — cannot
+  freeze the accept loop for every other client; see `server/bounded_pool.py`.
+- **An expired announce credential is now a counted, operator-visible
+  refusal, and `iris_legacy_announce_participants` no longer implies
+  migration on its own.** A rotated-out seeder announce token past
+  `IRIS_SEEDER_PREV_TTL` was refused with a token-free 403 and no counter
+  anywhere, so a fleet that missed the personalisation window read
+  identically to a fully migrated one: `iris_legacy_announce_participants`
+  requires a credential to still authenticate to be counted at all. The
+  tracker now counts every refused `/announce` or `/scrape` in
+  `iris_tracker_announces_refused_total`, with a separate
+  `iris_tracker_announces_refused_expired_total` bucket for a credential
+  that was found and valid-shaped but simply timed out; the legacy-
+  participants gauge's HELP text no longer asserts "0 = fully migrated" on
+  its own. See [Observability → Reading
+  iris_legacy_announce_participants](docs/zensical/observability.md#reading-iris_legacy_announce_participants).
+- **The console now surfaces a frozen peer-policy reconciler instead of
+  showing its last claim as current.** The tracker reconciler already
+  records a degraded pass with its exception type and keeps retrying, but if
+  even that write fails — or the tracker process itself is down —
+  `peer-enforcement.json` simply stops changing, and a console reading only
+  its last recorded `state` (possibly `enforced`) would show it as healthy
+  indefinitely. `GET /api/peer-policy` now derives `enforcement.stale` from
+  how long it has been since `last_reconciled_at` (never, or more than five
+  minutes), and the peer-policy badge shows `<state> (stale)` — regardless
+  of what that state is — with the last-reconciled time and `last_error` in
+  its tooltip.
+- **A pull directive for a device that never returns is no longer stranded
+  until the device is purged.** `pending_request()`'s per-device reap (see
+  below) only clears the row it was asked about, so a device issued a
+  console pull request and then never heartbeating or reporting again used
+  to leave one expired row in `pull_requests.d/` indefinitely — bounded and
+  harmless, but never reclaimed. `list_devices()` (the console's fleet
+  table, already an O(fleet) read) now sweeps expired pull directives as
+  part of that same pass, so no per-device path gains a fleet-wide scan.
 - **A device's heartbeat, policy poll, terminal report and tracker announce no
   longer rewrite or re-index the whole fleet.** Each of those per-device
   operations held one lock on a whole-fleet JSON document — `devices.json`,
@@ -1058,6 +1133,60 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   test with a stale-entry assertion (one entry had been re-pinned seven times
   by CSS work alone). Entries are now anchored on line content; the guard
   keeps its fail-loud property and an anchor that grows too broad still fails.
+- **A partial download stranded by a container restart now resumes instead of
+  stalling forever.** `_stage_image` used to re-add a torrent to aria2 only
+  when the staged file was ABSENT, so once the IOx/appmgr container — and
+  aria2c's in-memory session with it — was recreated (crash restart, redeploy,
+  upgrade), a present partial file and its `.aria2` control file kept the
+  device logging the same `PROGRESS` percentage forever; nothing ever re-added
+  the torrent. The guard is now keyed on whether the running aria2c itself
+  still knows about the download (`aria2.getPeers`/`tellStatus`, not file
+  presence), and re-adding checks for the `.aria2` control file first: without
+  it, aria2's own `--bt-seed-unverified` default would mark a re-added
+  TRUNCATED file complete without ever hashing it, so that case is discarded
+  and restarted clean instead of resumed. The same fix also clears a
+  COMPLETED file's `.aria2` sidecar that survived a SIGKILL before aria2's
+  next auto-save. Hardware-reproduced twice, including on a Cisco 8010 router.
+- **The peer-transfer hook retries once or twice when the only feeding peer
+  was a seeder.** `aria2.getPeers` came back empty (`"result":[]`) whenever a
+  download's sole source was already seeding, because the seeder has nothing
+  left to exchange with us the instant we finish and can disconnect before our
+  own RPC round trip is served — losing the exact per-peer byte measurement
+  for exactly the highest-value case, the first device of a wave fed only by
+  the origin. `peer-transfer-hook.sh` now re-asks up to twice, a beat apart,
+  before giving up; unaffected on the ordinary path (a non-empty first answer
+  is unchanged). Hardware-reproduced twice on two different base images.
+- **A plan boundary's carried terminal report is no longer destroyed by the
+  same tick's replan re-verify.** `adopt_plan` carries an armed-but-undelivered
+  terminal report across a genuine plan boundary so the previous transfer's
+  only completion evidence is not lost — but when that same tick's replan
+  re-verify SUCCEEDS, `_telemetry_tick` armed a fresh report for the new
+  transfer and popped the carried body before it was ever sent (the carry only
+  survived when the re-hash failed, by accident of control flow).
+  `_arm_terminal_report` now refuses to arm over a different transfer's
+  still-pending frozen report; the new transfer's own report is deferred by
+  one tick — behind the carried report's own send attempt, already due on the
+  same tick — rather than destroying evidence that was never delivered.
+- **`PARK-DEFERRED` no longer repeats forever for a record the catalog can
+  never name again.** A per-image record with no `root_file` (e.g. the bare
+  `{'download_started': True}` the `aria_add` call site leaves behind) whose
+  catalog entry is later dropped entirely can never be named by any future
+  tick either, so the park pass — correctly declining to retire an image whose
+  torrent might still be running — emitted `PARK-DEFERRED` on every tick for
+  the life of the agent. It now gives up after 10 ticks (`PARK-GIVEUP`),
+  retiring the bookkeeping record: nothing was ever named, so nothing was left
+  to stop or delete.
+- **A replan re-verify mismatch on XR no longer silently deletes an
+  operator-adopted root image.** On a `copy_in_place` platform (XR:
+  attest-in-place, the stage dir IS the target-FS root), the sha256-mismatch
+  branch of the replan re-verify short-circuit deleted the staged/root file
+  unconditionally, with only an `ERROR` line that never said the deleted file
+  was an operator-adopted placement — unlike every other agent-side delete of
+  that same file, which is guarded or announced. It now emits
+  `ROOTCOPY-REPLACED` first when the placement was adopted (or its origin is
+  unproven), mirroring the RECHECK republish path; the delete itself still
+  happens (a genuine content mismatch has no "convergence wins" argument for
+  silence), but the operator is told.
 
 ## [2026.09.01]
 

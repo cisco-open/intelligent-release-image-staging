@@ -46,6 +46,14 @@ _ROOT_COPY_MAX_ATTEMPTS = 4
 _ROOT_COPY_BACKOFF_BASE = 5 * 60
 _ROOT_COPY_BACKOFF_MAX = 60 * 60
 
+# Board #60: a park-pass record that has no root_file AND that the catalog no
+# longer answers for at all (e.g. the aria_add call site's bare
+# {'download_started': True}, once its image is deleted from the catalog) can
+# never be named by ANY future tick either — see _reconcile_set's PARK-DEFERRED
+# arm. Ten ticks (~10 minutes at the ordinary 60 s cadence) rides out a
+# transient catalog outage without spamming the log for the life of the agent.
+_PARK_DEFER_MAX_ATTEMPTS = 10
+
 # Sentinel deps.copy_to_root() returns instead of plain False when the running
 # IOS image could not be confirmed (the IOx SSH-to-self `show version` scrape
 # glitched) — as opposed to a genuine copy failure, or the refusal that fires
@@ -399,13 +407,43 @@ def _arm_terminal_report(state, img_id, tele, event, drop_frozen):
 
     `drop_frozen` discards an armed-but-unsent payload so the report re-freezes
     under the event/id being armed now. It is False for the seeding-only arm,
-    which never overwrites a body already frozen for this transfer."""
+    which never overwrites a body already frozen for this transfer.
+
+    REFUSES TO ARM OVER A DIFFERENT TRANSFER'S STILL-UNDELIVERED REPORT
+    (board #110). adopt_plan's plan-boundary carry (the "CARRY AN
+    ARMED-BUT-UNDELIVERED TERMINAL REPORT" block) hands a still-pending,
+    already-frozen report forward across the boundary specifically so it is
+    not lost — but 'event' is deliberately NOT part of that carry, so the very
+    same tick that crosses the boundary can also satisfy this function's own
+    'copied'/'seeding-only' arming condition for the NEW transfer, land here
+    with drop_frozen=True, and destroy the carried body before it was ever
+    sent. That happens on the ordinary SUCCESS path of a replan re-verify (see
+    test_replan_verify.py) — the mismatch sibling already avoids this only
+    because a failed re-hash returns before any arm is attempted at all.
+
+    Both repairs available have a real, disclosed cost (board #110's write-up):
+    keeping a small queue of frozen bodies is a state-shape change, and
+    deferring the new arm can leave a transfer's own completion unreported for
+    up to MAX_ATTEMPTS backoff ticks if the carried report's link tier is
+    'bad'. This picks the deferral: the carried report is already frozen and
+    due to be (re)tried by THIS SAME tick's pending-report pass a few lines
+    below, so the ordinary cost is one tick's delay, not the full backoff: the
+    old report goes first, and the moment it clears (delivered, or gives up
+    after MAX_ATTEMPTS) report_pending is False and this same call arms the
+    new transfer's report normally, on the very next tick. Nothing is lost
+    either way: the new transfer's 'event' is never set to a terminal value
+    here, so it keeps re-offering itself on every tick until it is actually
+    armed."""
+    new_tid = telemetry_report.ensure_transfer_id(state, img_id)
+    if (drop_frozen and tele.get("report_pending")
+            and tele.get("frozen_report") is not None
+            and tele.get("report_transfer_id") not in (None, new_tid)):
+        return
     tele["event"] = event
     tele["report_pending"] = True
     tele["report_attempts"] = 0
     tele["report_next_ts"] = 0.0
-    tele["report_transfer_id"] = telemetry_report.ensure_transfer_id(
-        state, img_id)
+    tele["report_transfer_id"] = new_tid
     if drop_frozen:
         tele.pop("frozen_report", None)
 
@@ -1056,6 +1094,30 @@ def _reconcile_set(deps, state, ids, stage_dir):
             # still occupies flash — permanently, with no way back short of
             # hand-editing the state file. Leave the record alone and the next
             # tick re-runs the park, once the catalog can name the file again.
+            #
+            # UNLESS nothing could EVER change that answer (board #60): `fname
+            # in keep` really is named, just legitimately protected by the
+            # assigned set — that can hold for as long as the set says so, and
+            # stays unbounded. `not fname`, though, means BOTH the record's own
+            # root_file is unset AND the catalog has nothing to offer for this
+            # id at all — no filename this agent could ever address a torrent
+            # or a stage file by, on THIS tick or any future one, unless the id
+            # somehow becomes nameable again (in which case it exits `stale`
+            # via the ordinary un-park path next time, not this one). Bounded
+            # instead of retried forever, and retiring the BOOKKEEPING record
+            # here touches no file and stops no torrent — there was never a
+            # name to touch or stop.
+            if not fname:
+                attempts = entry.get("park_defer_attempts", 0) + 1
+                entry["park_defer_attempts"] = attempts
+                if attempts >= _PARK_DEFER_MAX_ATTEMPTS:
+                    deps.emit("PARK-GIVEUP",
+                              "%s left the assignment set and was never "
+                              "nameable (no root_file, catalog cannot answer "
+                              "for it); giving up tracking it after %d ticks"
+                              % (key, attempts))
+                    del state[key]
+                    continue
             deps.emit("PARK-DEFERRED",
                       "%s left the assignment set but its staged file could "
                       "not be named this tick; park retried next tick" % key)
@@ -1134,6 +1196,10 @@ def _reconcile_set(deps, state, ids, stage_dir):
         # assumption this cycle can no longer back.
         entry.pop("origin", None)
         entry.pop("download_started", None)
+        # A real park happened (fname resolved this tick), so board #60's
+        # retry counter -- only ever incremented on the "could not be named"
+        # branch above -- has nothing left to count.
+        entry.pop("park_defer_attempts", None)
         if protected:
             detail = "torrent stopped, root copy left in place (adopted)"
         elif deps.copy_in_place:
@@ -1393,6 +1459,31 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
                     # match the catalog, whatever a previous transfer believed.
                     done_st["done"] = False
                     done_st["copied"] = False
+                    # Board #41: on a deps.copy_in_place platform (XR:
+                    # attest-in-place, stage dir IS the target-FS root) the
+                    # remove_stage() below is a ROOT delete, and it can be
+                    # deleting a file the OPERATOR placed there themselves —
+                    # origin "adopted", or missing/legacy origin — that IRIS
+                    # only ever attested, never wrote. Every OTHER agent-side
+                    # delete of that same file is guarded or announced: the
+                    # park pass calls _protect_adopted_root() and leaves an
+                    # adopted placement in place, and the RECHECK
+                    # "staged_ok and not content_ok" path a few lines below
+                    # overrides adoption but says ROOTCOPY-REPLACED first —
+                    # "the one thing owed to the operator is honesty: say so
+                    # before overriding it". This branch is reached from a
+                    # DIFFERENT direction (a second plan's re-verify, not a
+                    # RECHECK re-acquire) but ends at the exact same
+                    # unconditional delete, so it owes the operator the same
+                    # notice. Unlike RECHECK, this is a genuine content
+                    # MISMATCH, not a routine republish -- there is no
+                    # "convergence wins" argument for silence here.
+                    if deps.copy_in_place and done_st.get("origin") != "downloaded":
+                        deps.emit("ROOTCOPY-REPLACED",
+                                  "replacing operator-adopted %s: content "
+                                  "changed under image id %s (sha256 mismatch "
+                                  "under the new plan)"
+                                  % (image["filename"], img_id))
                     deps.remove_stage(stage)
                     return "bad-sha"
             # The observation phase stays 'steady' whatever the report does:
@@ -1861,10 +1952,19 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
                            hb, time.time())
             return "no-space"
 
-    # stage the torrent, then kick aria2c — but ONLY if the image file isn't there
-    # yet. aria2 writes the file as soon as it starts, so a present (partial) file
-    # means a download is already in progress; the 60 s EEM timer must NOT
-    # re-addTorrent it (that would duplicate/corrupt the download).
+    # stage the torrent, then kick aria2c — but ONLY if aria2 does not already
+    # know about a download for this file. It used to be gated on the file's
+    # mere PRESENCE (a present partial file means a download is already in
+    # progress; the 60 s EEM timer must NOT re-addTorrent it, which would
+    # duplicate/corrupt the download) — but on a container platform (IOx CAF,
+    # XR appmgr) the container, and aria2c's in-memory session with it, can be
+    # recreated (crash restart, redeploy, upgrade) while the mount keeps the
+    # partial file AND its `.aria2` control file untouched. A present file no
+    # longer proves anything is in progress in that case: nothing ever
+    # re-added the torrent, so the device logged the same PROGRESS percentage
+    # forever (board #70, hardware-reproduced on IOx and on a Cisco 8010's XR
+    # appmgr). The guard below is keyed on ARIA2'S OWN KNOWLEDGE of the file
+    # (deps.aria_stats), never on file presence alone.
     torrent = os.path.join(stage_dir, img_id + ".torrent")
     st = state.setdefault(img_id, {})
     torrent_id = _torrent_identity(image)
@@ -1909,7 +2009,41 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
                            stage_error="catalog torrent unavailable: %s" % e)
             return "torrent-unavailable"
         st["torrent_id"] = torrent_id
-    if have is None:
+    # ARIA2 MAY HAVE FORGOTTEN A PRESENT FILE (board #70). A present partial
+    # (or a size-matching file still marked 'downloading' below) no longer
+    # proves aria2 is actively fetching it — ask aria2 directly.
+    resume_untracked = False
+    if have is not None and deps.aria_stats(stage) is None:
+        if deps.file_size(stage + ".aria2") is None:
+            # No control file to resume FROM. A re-added download with no
+            # control file loads no real bitfield, and aria2's own
+            # bt-seed-unverified option — needed so a genuinely finished
+            # download can be re-seeded without a full re-hash — marks it
+            # complete WITHOUT EVER HASHING IT in exactly that situation
+            # (RequestGroup.cc's BitTorrent branch: no control file + file
+            # present -> markAllPiecesDone() -> onDownloadFinished(), before
+            # any integrity check runs). Re-adding here would announce a
+            # TRUNCATED file to the swarm as a finished seed. There is
+            # nothing left to trust about what actually landed without that
+            # bitfield, so discard it and restart the download clean instead
+            # — exactly like the RECHECK case above, just discovered later.
+            deps.emit("RECHECK",
+                      "%s partial staged file has no aria2 control file; "
+                      "discarding and restarting the download"
+                      % image["filename"])
+            deps.remove_stage(stage)
+            have = None
+        else:
+            # The control file survived, so re-adding loads the REAL bitfield
+            # and re-verifies it (the launcher's --check-integrity default) —
+            # the ordinary #66 resume case, just re-entered after aria2 itself
+            # lost track of the download (container/daemon restart). Also
+            # covers a COMPLETED file behind a stale .aria2 sidecar that
+            # survived a SIGKILL before aria2's next auto-save could clear it:
+            # the re-add loads that stale bitfield, the file is already all
+            # there, and the very next auto-save removes the control file.
+            resume_untracked = True
+    if have is None or resume_untracked:
         # clear any stale/phantom aria2 entry (e.g. a completed seed whose staged
         # file was deleted) so addTorrent actually re-downloads instead of being a
         # silent no-op on the duplicate info_hash.
@@ -1980,7 +2114,13 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
                            observation=rpc_obs,
                            stage_error="aria2c RPC unreachable: %s" % e)
             return "aria2-down"
-        deps.emit("STAGING", "downloading %s via private swarm" % image["filename"])
+        if resume_untracked:
+            deps.emit("STAGING",
+                      "%s aria2 lost track of an in-progress download "
+                      "(container/daemon restart); re-added to resume"
+                      % image["filename"])
+        else:
+            deps.emit("STAGING", "downloading %s via private swarm" % image["filename"])
     else:
         # one progress line per agent run (60s) — NOT a separate fast timer (the
         # old 10s IRIS-MONITOR raced and spammed). Computed from the on-disk size.

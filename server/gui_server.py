@@ -29,6 +29,7 @@ from urllib.parse import unquote, parse_qs, urlsplit
 
 import audit
 import audit_export
+import bounded_pool
 import bulkhash_refresh
 # aliased: `catalog` is the injected STORE everywhere below
 import catalog as catalog_mod
@@ -118,6 +119,19 @@ _MAX_CSV = 8 * 1024 * 1024  # 8 MiB — bulk devices.csv import (all-or-nothing,
 # browser on an operator network; bounded so a connection that never sends
 # a ClientHello gives its thread back.
 _HANDSHAKE_TIMEOUT = 30
+# How long peer-policy enforcement can go without a recorded reconcile pass
+# before the console calls it stale (IRIS-99). The tracker's own bounded
+# maintenance deadline (tracker.MAINTENANCE_INTERVAL_CAP, 60s) forces a pass
+# -- and a fresh peer-enforcement.json write, updating last_reconciled_at --
+# even when nothing changed, and a FAILED pass still writes a "degraded"
+# status with a fresh timestamp (tracker.TrackerReconciler._note_pass_failure).
+# So under any live reconciler, healthy or degraded, last_reconciled_at
+# should never lag more than ~60s. This is several multiples of that to
+# absorb scheduling jitter and a slow aria2 RPC without false-flagging, while
+# still catching a genuinely frozen reconciler (the tracker process down, or
+# even the degraded write itself failing) well before an operator would
+# otherwise notice a stale "enforced" claim reading as healthy.
+_PEER_POLICY_STALE_AFTER = 300.0
 # Explicit opt-in for serving the console over plain HTTP. Without it the
 # console refuses to start when no usable certificate exists: the session
 # cookie is Secure-only under TLS, and a plaintext console would otherwise
@@ -761,9 +775,10 @@ class ConsoleTLSError(RuntimeError):
     candidate files is usable, and plaintext was not opted into."""
 
 
-class _ConsoleServer(ThreadingHTTPServer):
+class _ConsoleServer(bounded_pool.BoundedThreadingMixin, ThreadingHTTPServer):
     """ThreadingHTTPServer that completes the TLS handshake in the WORKER
-    thread. Same mechanism (and reason) as artifact_server._Server: wrapping
+    thread and bounds the pool of concurrently running handler threads.
+    Same mechanism (and reason) as artifact_server._Server: wrapping
     the LISTENING socket makes socketserver perform the whole handshake
     inside accept() on the single serve_forever thread, so one client that
     connects and never sends a ClientHello (nc, a port scan, a TCP health
@@ -774,6 +789,13 @@ class _ConsoleServer(ThreadingHTTPServer):
 
     request_queue_size = 128
     tls_context = None
+    # The console holds long-lived SSE streams open for onboard-log tailing
+    # (Handler's text/event-stream route, below) -- up to
+    # IRIS_ONBOARD_CONCURRENCY (default 25) of them at once. Sized well above
+    # that plus ordinary multi-operator browsing/polling traffic, so
+    # bounded_pool's admission timeout is only ever reached under genuine
+    # overload, never by the SSE streams this console itself holds open.
+    max_concurrent_requests = 256
 
     def get_request(self):
         sock, addr = self.socket.accept()
@@ -830,6 +852,17 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                         if k in ("disconnected_peers", "removed_peers")
                         and isinstance(v, int) and not isinstance(v, bool)}
                        if isinstance(effect, dict) else None)
+        last_reconciled_at = (status.get("last_reconciled_at")
+            if isinstance(status.get("last_reconciled_at"), (int, float))
+            and not isinstance(status.get("last_reconciled_at"), bool) else None)
+        # IRIS-99: a frozen reconciler leaves last_reconciled_at (and
+        # whatever state/applied_revision it last wrote, possibly
+        # "enforced") sitting unchanged forever -- the console must say so
+        # explicitly rather than let an old "enforced" claim keep reading as
+        # current. No timestamp at all (missing/corrupt/never-run) is
+        # exactly as unproven as a stale one, so it is stale too.
+        stale = (last_reconciled_at is None
+                or (now_fn() - last_reconciled_at) > _PEER_POLICY_STALE_AFTER)
         enforcement = {
             "state": status.get("state") if status.get("state") in peer_enforcement.STATES else None,
             "desired_ip_count": status.get("desired_ip_count")
@@ -838,8 +871,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             "applied_revision": status.get("applied_revision")
                 if isinstance(status.get("applied_revision"), int)
                 and not isinstance(status.get("applied_revision"), bool) else None,
-            "last_reconciled_at": status.get("last_reconciled_at")
-                if isinstance(status.get("last_reconciled_at"), (int, float)) else None,
+            "last_reconciled_at": last_reconciled_at,
+            "stale": stale,
+            "stale_after_seconds": _PEER_POLICY_STALE_AFTER,
             "conflict_count": len(conflicts), "conflict_types": types,
             "last_effect": safe_effect,
             "last_error": status.get("last_error")

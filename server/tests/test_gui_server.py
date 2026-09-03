@@ -1219,6 +1219,61 @@ def test_peer_policy_get_and_durable_quarantine_operation(tmp_path):
         stop()
 
 
+def test_peer_policy_enforcement_stale_flag(tmp_path):
+    """IRIS-99: the tracker reconciler can freeze (its degraded-pass write
+    itself failing, or the process dying) with peer-enforcement.json's last
+    recorded state left at "enforced" -- looking healthy forever. The
+    console must say so via enforcement.stale rather than showing a frozen
+    claim as current, whether the frozen state is "enforced" or anything
+    else, and whether last_reconciled_at is old or altogether absent."""
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path)
+    app.set_admin("admin", "pw")
+    state = str(tmp_path / "state")
+    fleet = gui_fleet.FleetStore(state)
+    creds = gui_creds.CredentialStore(secrets_path)
+    cat = catalog_mod.CatalogStore(state)
+    now_box = {"t": 1_000_000.0}
+    srv = gui_server.make_server(
+        "127.0.0.1", 0, app, fleet=fleet, creds=creds, catalog=cat,
+        certfile=None, now_fn=lambda: now_box["t"])
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        cookie, _ = _auth("127.0.0.1", port)
+        headers = {"Cookie": cookie}
+
+        # No enforcement file at all -- never proven current -> stale.
+        status, _, raw = _req("127.0.0.1", port, "GET", "/api/peer-policy",
+                              headers=headers)
+        assert status == 200
+        e = json.loads(raw)["enforcement"]
+        assert e["last_reconciled_at"] is None
+        assert e["stale"] is True
+
+        # A fresh "enforced" pass, recorded at the current now_fn() time.
+        enforcement_path = os.path.join(cat.state_dir, "peer-enforcement.json")
+        peer_enforcement.write_status(enforcement_path, peer_enforcement.build_status(
+            "enforced", "sess-1", "hash-1", 1, 0, now_box["t"]))
+        status, _, raw = _req("127.0.0.1", port, "GET", "/api/peer-policy",
+                              headers=headers)
+        e = json.loads(raw)["enforcement"]
+        assert e["state"] == "enforced"
+        assert e["stale"] is False
+
+        # Time advances well past the staleness threshold with NO further
+        # reconcile pass (the frozen-reconciler scenario): the same
+        # "enforced" status must now read stale, not healthy.
+        now_box["t"] += gui_server._PEER_POLICY_STALE_AFTER + 1
+        status, _, raw = _req("127.0.0.1", port, "GET", "/api/peer-policy",
+                              headers=headers)
+        e = json.loads(raw)["enforcement"]
+        assert e["state"] == "enforced"      # the frozen claim is unchanged
+        assert e["stale"] is True            # but the console now flags it
+    finally:
+        srv.shutdown()
+
+
 def test_peer_policy_rejects_unknown_device_and_bad_csrf(tmp_path):
     host, port, (_, fleet, _, _), stop = _serve_full(tmp_path)
     try:

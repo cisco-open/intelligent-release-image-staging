@@ -129,8 +129,21 @@ def render(swarm, seeder, counters, reports_stored=0, transfers=None,
            "Total /announce requests handled since start")
     out.append("iris_tracker_announces_total %d"
                % _int(counters.get("announces_total", 0)))
-
-    # --- device telemetry reports (issue #13) ---
+    family("iris_tracker_announces_refused_total", "counter",
+           "Total /announce or /scrape requests refused for a missing, "
+           "invalid, ambiguous, revoked or expired credential since start "
+           "(IRIS-111) -- nonzero here means iris_legacy_announce_participants "
+           "reading 0 is not on its own evidence of a fully migrated fleet")
+    out.append("iris_tracker_announces_refused_total %d"
+               % _int(counters.get("announces_refused_total", 0)))
+    family("iris_tracker_announces_refused_expired_total", "counter",
+           "Subset of iris_tracker_announces_refused_total refused because "
+           "the presented credential was a KNOWN, non-revoked record that "
+           "simply timed out -- the SEEDER_PREV_TTL overlap-window case: a "
+           "device still on a rotated-out seeder token that missed the "
+           "personalisation window")
+    out.append("iris_tracker_announces_refused_expired_total %d"
+               % _int(counters.get("announces_refused_expired_total", 0)))
     family("iris_device_reports_stored", "gauge",
            "Device telemetry reports currently stored across all devices "
            "(ring-bounded server-side; no per-device labels)")
@@ -321,8 +334,13 @@ def render(swarm, seeder, counters, reports_stored=0, transfers=None,
         out.append("iris_telemetry_samples_rejected_total %d"
                    % _int(extras.get("samples_rejected_total")))
         family("iris_legacy_announce_participants", "gauge",
-               "Current legacy_unattributed announce participants (0 = fully "
-               "migrated)")
+               "Current legacy_unattributed announce participants. A "
+               "credential must still authenticate to be counted here, so "
+               "0 means EITHER fully migrated OR every un-migrated device "
+               "has aged past SEEDER_PREV_TTL and can no longer announce at "
+               "all -- cross-check "
+               "iris_tracker_announces_refused_expired_total (nonzero there "
+               "means the latter)")
         out.append("iris_legacy_announce_participants %d"
                    % _int(extras.get("legacy_announce_participants")))
     if lifecycle is not None:

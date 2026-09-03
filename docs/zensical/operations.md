@@ -178,6 +178,19 @@ full when the status file is written), the loop records `degraded` with the
 exception type in `last_error` where it can and retries on the next poll; it
 never stops.
 
+If even that degraded write fails — or the tracker process itself is
+down — `peer-enforcement.json` simply stops changing, and its last recorded
+state (possibly `enforced`) would otherwise sit there looking current
+indefinitely. The console's peer-policy badge (device inventory, Peer
+policy column) does not take a frozen state at face value: `GET
+/api/peer-policy` derives `enforcement.stale` from how long it has been
+since `last_reconciled_at` (never, or more than five minutes — several
+multiples of the reconciler's own 60-second maintenance deadline, to absorb
+scheduling jitter without false-flagging a healthy but quiet fleet) and the
+badge shows `<state> (stale)` regardless of what that state is, with the
+last-reconciled time and `last_error` in its tooltip. A stale badge means
+"go check the tracker process," not "policy is misconfigured."
+
 ## Retiring a device
 
 Deleting a device revokes its credentials first. The revoke is written durably

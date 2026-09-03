@@ -68,6 +68,24 @@ when any are present, because a quarantine action cannot reach them.
 A rotated-out seeder credential announces this way too: still valid, still
 serving, but unattributed until the peer moves to the current credential.
 
+### Reading `iris_legacy_announce_participants`
+
+`iris_legacy_announce_participants` only counts a `legacy` peer that is
+CURRENTLY authenticating: a credential must still pass the tracker's
+validity check to be counted at all. Past `IRIS_SEEDER_PREV_TTL` (the
+rotated-out overlap window) a device still on the old token can no longer
+authenticate, so it drops out of this gauge exactly like a fully migrated
+one would — `0` here means either "fully migrated" or "every un-migrated
+device just got locked out," and the gauge alone cannot tell you which.
+
+Cross-check `iris_tracker_announces_refused_total` and, specifically,
+`iris_tracker_announces_refused_expired_total`: the tracker counts every
+refused `/announce` or `/scrape`, with a separate bucket for a credential
+that was found and valid-shaped but simply timed out. A nonzero
+`..._refused_expired_total` alongside `iris_legacy_announce_participants 0`
+is the un-migrated-and-locked-out case; `0` on both is the genuinely
+migrated one.
+
 ## Event identity
 
 Telemetry reports carry their own identity. A v2 device report is minted with a

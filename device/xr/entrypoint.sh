@@ -23,7 +23,13 @@ umask 077
 # iris-work/ holds IRIS's own control files (conf, state) so they never
 # collide with operator-owned files at the harddisk root; images land
 # directly in $STAGE_DIR under their catalog filename, with aria2's .aria2
-# sidecar alongside (removed by aria2 on completion).
+# sidecar alongside. aria2 removes a torrent's .aria2 file when its download
+# GROUP STOPS, not when the transfer completes: with --seed-ratio=0.0 below
+# the group keeps seeding after completion, so the sidecar outlives it and
+# stays on disk for as long as this device seeds that image (until the next
+# aria2c restart, or a leecher run that ends the group with --seed-time).
+# Harmless -- the agent's stale-file sweep already handles .aria2 files, and
+# a stale sidecar next to a complete image is ignored on re-add.
 STAGE_DIR="${IRIS_STAGE_DIR:-/hostmount}"
 WORK_DIR="${IRIS_WORK_DIR:-$STAGE_DIR/iris-work}"
 # CONF defaults under WORK_DIR -- the PERSISTENT mount, same directory STATE

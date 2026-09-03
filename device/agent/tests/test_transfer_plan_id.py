@@ -563,6 +563,44 @@ def test_a_plan_for_an_unstageable_image_cannot_become_a_park_deferred_loop():
     assert _tele(state, "img1")["transfer_id"] == XFER_A
 
 
+def test_park_deferred_gives_up_on_a_record_the_catalog_can_never_name():
+    """Board #60. A record with an image-entry field but no root_file --
+    exactly what the aria_add call site leaves behind
+    (state[img_id]['download_started'] = True, nothing else) -- can never be
+    named once the catalog ALSO drops the id entirely: _image_filename has
+    neither a stored root_file nor a catalog answer to fall back on. The park
+    pass then correctly declines to flag it parked (flagging would retire an
+    image whose torrent might still be running) -- but with nothing able to
+    change that answer, PARK-DEFERRED would otherwise repeat on every 60 s
+    tick for as long as the agent ran. It must give up after a bound instead,
+    retiring the bookkeeping record (there is no file or torrent to touch --
+    nothing was ever named)."""
+    cat = PlanCatalog(["img1"], plans={"img1": _plan(PLAN_A, XFER_A)})
+    state = {"ghost": {"download_started": True}}
+    deps, rec = make_deps(cat, {})
+
+    for _ in range(iris_agent._PARK_DEFER_MAX_ATTEMPTS - 1):
+        assert iris_agent.run_once(CFG, deps, state) == "downloading"
+        assert "ghost" in state
+
+    assert (len(_emits(rec, "PARK-DEFERRED"))
+           == iris_agent._PARK_DEFER_MAX_ATTEMPTS - 1)
+    assert _emits(rec, "PARK-GIVEUP") == []
+    rec["emitted"].clear()
+
+    # The bound trips on the next tick: retired, not parked.
+    assert iris_agent.run_once(CFG, deps, state) == "downloading"
+    assert "ghost" not in state
+    assert _emits(rec, "PARK-GIVEUP")
+    assert _emits(rec, "PARK-DEFERRED") == []
+
+    # And it does not come back -- nothing is left to retire.
+    rec["emitted"].clear()
+    assert iris_agent.run_once(CFG, deps, state) == "downloading"
+    assert "ghost" not in state
+    assert _emits(rec, "PARK-GIVEUP") == []
+
+
 def test_a_plan_boundary_carries_an_armed_report_but_never_its_attestation():
     """Board #44's data-loss half.
 

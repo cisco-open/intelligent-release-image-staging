@@ -186,6 +186,13 @@ def _staged_under_plan_a():
 
 def test_a_new_plan_on_an_already_staged_image_rehashes_once_and_arms_a_terminal_report():
     cat, deps, rec, state, verifier, _sizes = _staged_under_plan_a()
+    # Plan A's own terminal report already reached a real device's delivery
+    # point by now (board #110: _arm_terminal_report refuses to arm a NEW
+    # transfer's report over a DIFFERENT one that is still pending, so a
+    # leftover undelivered plan-A report would otherwise defer this whole
+    # test's arm — the carry itself is pinned separately, by
+    # test_a_replan_success_does_not_destroy_the_previous_transfers_carried_report).
+    _tele(state)["report_pending"] = False
 
     # The operator unassigned and re-assigned: a SECOND plan for the same
     # (device, image), with a second transfer_id.
@@ -219,6 +226,10 @@ def test_the_replan_report_carries_the_new_transfer_id_not_the_old_one():
     any other id attests nothing about this plan. So the id on the frozen body
     is the load-bearing assertion, not the id sitting in the state bag."""
     cat, deps, rec, state, verifier, _sizes = _staged_under_plan_a()
+    # Plan A's own report already delivered (see the comment in the sibling
+    # test above) -- otherwise board #110's guard defers THIS transfer's arm
+    # behind it and there is no fresh frozen body to inspect yet.
+    _tele(state)["report_pending"] = False
 
     cat.plans = _plan(PLAN_B, TID_B)
     iris_agent.run_once(CFG, deps, state)
@@ -282,6 +293,100 @@ def test_a_replan_verify_mismatch_discards_the_stage_and_never_arms_a_report():
     assert rec["removed"] == [STAGE]
     assert _emits(rec, "ERROR")
     assert _emits(rec, "REPLAN-VERIFY") == []
+
+
+def test_a_replan_success_does_not_destroy_the_previous_transfers_carried_report():
+    """Board #110: the SUCCESS side of the same boundary must not lose the
+    previous transfer's completion evidence either.
+
+    A genuine plan boundary carries the still-undelivered TID_A report
+    forward (adopt_plan's "CARRY AN ARMED-BUT-UNDELIVERED TERMINAL REPORT"
+    block). The re-verify then SUCCEEDS on this same tick and the phase
+    becomes 'copied' -- exactly the branch that arms a fresh terminal report
+    -- and 'event' was deliberately NOT carried, so nothing used to stop that
+    arm from popping the carried TID_A body before it was ever sent. The
+    mismatch sibling above (test_a_replan_verify_mismatch_discards_the_stage_and_never_arms_a_report)
+    already pins that the carry survives when the re-hash FAILS; this pins
+    that it must also survive when the re-hash SUCCEEDS -- which used to fail
+    this exact way before _arm_terminal_report refused to drop a different,
+    still-pending transfer's frozen report."""
+    cat, deps, rec, state, verifier, _sizes = _staged_under_plan_a()
+    # Plan A's own report is still undelivered here on purpose (this IS the
+    # carry the fix protects) -- unlike the siblings above, which clear it to
+    # isolate what THEY are each pinning.
+
+    cat.plans = _plan(PLAN_B, TID_B)
+    assert iris_agent.run_once(CFG, deps, state) == "complete"
+
+    # The re-verify itself still ran and succeeded, exactly as before the fix.
+    assert verifier.calls == [(STAGE, cat.image["sha256"])]
+    tele = _tele(state)
+    assert tele["transfer_id"] == TID_B
+    assert tele["content_sha256_state"] == "verified"
+    assert state[IMG]["done"] and state[IMG]["copied"]
+
+    # But the PREVIOUS transfer's completion evidence, still undelivered, was
+    # NOT destroyed -- exactly what board #44's carry put there.
+    assert tele["frozen_report"]["transfer_id"] == TID_A
+    assert tele["report_transfer_id"] == TID_A
+    assert tele["report_pending"] is True
+    # The new transfer's OWN terminal report is deliberately DEFERRED, not
+    # lost: 'event' stays unset, so nothing here claims TID_B was ever
+    # reported before its evidence actually was.
+    assert tele.get("event") != "staging-complete"
+
+    # Once the carried TID_A report is actually delivered, arming resumes
+    # normally and TID_B gets its own report on the very next tick.
+    tele["report_pending"] = False
+    assert iris_agent.run_once(CFG, deps, state) == "complete"
+    tele = _tele(state)
+    assert tele["event"] == "staging-complete"
+    assert tele["report_transfer_id"] == TID_B
+    assert tele["frozen_report"]["transfer_id"] == TID_B
+
+
+def test_a_replan_verify_mismatch_on_xr_warns_before_deleting_an_adopted_root():
+    """Board #41. On a deps.copy_in_place platform (XR: attest-in-place, the
+    stage dir IS the target-FS root) the mismatch delete a few lines above is
+    a ROOT delete, and it can be deleting a file the OPERATOR placed there
+    themselves -- origin 'adopted', or missing/legacy origin -- that IRIS only
+    ever attested. Every OTHER agent-side delete of that same file is guarded
+    or announced (the park pass's _protect_adopted_root, and the RECHECK
+    'staged_ok and not content_ok' path's ROOTCOPY-REPLACED notice); this one
+    used to do neither -- the only trace was an ERROR line that never said the
+    deleted file was an operator-adopted root placement."""
+    cat, deps, rec, state, verifier, _sizes = _staged_under_plan_a()
+    deps = deps._replace(copy_in_place=True)
+    # Simulates a placement attest-in-place adopted rather than downloaded --
+    # exactly what _stage_image's own copy-success site would have recorded
+    # had this image been staged on XR to begin with.
+    state[IMG]["origin"] = "adopted"
+
+    verifier.ok = False                     # the staged file went bad
+    cat.plans = _plan(PLAN_B, TID_B)
+    assert iris_agent.run_once(CFG, deps, state) == "bad-sha"
+
+    assert rec["removed"] == [STAGE]        # the delete still happens -- convergence wins
+    replaced = [msg for m, msg in rec["emitted"] if m == "ROOTCOPY-REPLACED"]
+    assert replaced == [
+        "replacing operator-adopted %s: content changed under image id %s "
+        "(sha256 mismatch under the new plan)" % (cat.image["filename"], IMG)]
+
+
+def test_a_replan_verify_mismatch_on_xr_stays_silent_for_a_downloaded_root():
+    """The mirror case: a root THIS agent downloaded gets no adoption notice
+    on the same delete -- there is nothing to warn the operator about, exactly
+    like every other origin-gated delete path in this module."""
+    cat, deps, rec, state, verifier, _sizes = _staged_under_plan_a()
+    deps = deps._replace(copy_in_place=True)
+    state[IMG]["origin"] = "downloaded"
+
+    verifier.ok = False
+    cat.plans = _plan(PLAN_B, TID_B)
+    assert iris_agent.run_once(CFG, deps, state) == "bad-sha"
+
+    assert rec["removed"] == [STAGE]
+    assert all(m != "ROOTCOPY-REPLACED" for m, _ in rec["emitted"])
 
 
 def test_a_mismatch_does_not_rehash_again_on_the_following_tick():
@@ -385,6 +490,11 @@ def test_a_stale_replan_flag_is_dropped_when_the_staged_file_is_gone():
     multi-minute pass that can only agree with the first. The re-acquire
     fall-through drops it instead."""
     cat, deps, rec, state, verifier, sizes = _staged_under_plan_a()
+    # Plan A's own report already delivered (see the comment in
+    # test_a_new_plan_on_an_already_staged_image_rehashes_once_and_arms_a_terminal_report)
+    # -- this test is about the flag surviving a re-acquisition, not about the
+    # separate board #110 carry, which would otherwise defer tick 2's arm.
+    _tele(state)["report_pending"] = False
 
     # The staged file is gone while done/copied still read true — exactly what
     # a park leaves behind — and the operator's re-assignment mints plan B.

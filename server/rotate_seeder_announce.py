@@ -677,12 +677,6 @@ def _http_swarm_sender(url, timeout):
 # CLI (nonsecret only — no token/value argv or output, no revoke option)
 # ---------------------------------------------------------------------------
 
-# Non-routable fleet address space. MUST stay identical to tracker._OVERRIDE_NETS
-# (RFC1918 plus RFC 6598 carrier-grade NAT); a drift test asserts the two match.
-_FLEET_NETS = tuple(ipaddress.ip_network(n) for n in (
-    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"))
-
-
 def _tracker_announce_base(env):
     """Return the token-free HTTP announce base without ever echoing it."""
     value = env.get("IRIS_TRACKER_ANNOUNCE")
