@@ -283,6 +283,9 @@ _COMPOSE_UNAVAILABLE = {
     "IRIS_IMAGE_ROOT": "host path of the read-only image bind mount",
     # Build argument, not a runtime variable.
     "IRIS_VERSION": "docker build arg",
+    # Read by the IOS-XR appmgr container's own entrypoint on the device, not
+    # by the server: it never belongs in the server container's environment.
+    "IRIS_XR_SKIP_MOUNT_CHECK": "device-side XR entrypoint, test-only",
     # Passed on the one-shot `run --rm -e ...` so the long-lived container never
     # holds the admin password in its environment.
     "IRIS_GUI_ADMIN_PASSWORD": "one-shot iris-gui-admin only",
