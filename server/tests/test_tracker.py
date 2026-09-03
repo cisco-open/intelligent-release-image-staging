@@ -281,17 +281,21 @@ def test_make_server_without_telemetry_still_works(tmp_path):
 def test_announce_ip_override_is_handed_to_peers(tmp_path):
     # a containerized seeder announces with a CGNAT ip=; other peers must get
     # THAT address, not the announce's source address (127.0.0.1 here).
+    # The address MUST stay RFC1918/RFC6598: tracker._private_override accepts
+    # an ip= override only for that space, so an RFC 5737 documentation address
+    # here would be silently dropped and this test would prove nothing.
+    # 100.64.0.10 is shared address space, not a lab host.
     # Rewritten (IRIS-04-004): the override is honoured for the service
     # seeder principal only, so the seeder announces with its own token.
     srv, port, tok, seeder_tok = _serve_with_seeder(tmp_path)
     try:
         _get(port, "/announce?info_hash=%s&peer_id=seed&port=6881&left=0"
-             "&ip=100.90.168.20&key=%s" % (INFO_HASH, seeder_tok))
+             "&ip=100.64.0.10&key=%s" % (INFO_HASH, seeder_tok))
         status, body = _get(
             port, "/announce?info_hash=%s&peer_id=p2&port=6882&left=9&key=%s"
             % (INFO_HASH, tok))
         peers = bencode.decode(body)[b"peers"]
-        assert any(p[b"ip"] == b"100.90.168.20" and p[b"port"] == 6881
+        assert any(p[b"ip"] == b"100.64.0.10" and p[b"port"] == 6881
                    for p in peers)
     finally:
         srv.shutdown()

@@ -100,8 +100,9 @@ Compose refuses to start without these; none has a default.
 | `IRIS_DEVICE_ENABLE_ALWAYS` | unset (off) | Compatibility escape hatch: each agent process starts by sending `enable` plus its secret on IOS-XE SSH sessions, and drops the pair for the rest of that process once a session's own prompt shows the login was already privileged (`#`). Normally IRIS learns whether escalation is needed from the device prompt and sends neither line to already-privileged logins. |
 | `IRIS_ONBOARD_JOB_TIMEOUT` | `7200` seconds | Wall-clock deadline for one onboard/undeploy job, measured from the moment it starts **running** (never from when it was queued). A running job past the deadline is stopped like an operator abort. |
 | `IRIS_ONBOARD_REAP_GRACE` | `60` seconds | Grace between the `SIGTERM` sent to a deadline-expired installer's process group and the `SIGKILL` that follows. |
+| `IRIS_SEEDER_PREV_TTL` | `2592000` seconds (30 days) | How long a rotated-out seeder announce token keeps working, measured from the rotation that retired it — the overlap that lets a device which missed the rotation keep announcing while its torrent is re-personalised. Past it the tracker refuses the old token like any other expired credential, and the next rotation drops the record. Set it once, for the whole deployment: every process computes the deadline from this value, so a per-process override would make the same credential expire at different times. `0` means no overlap at all — the previous token is dead the moment it is rotated out — and a value that is not an integer raises at startup rather than falling back. See [Security](security.md#rotating-the-seeder-announce-credential). |
 | `IRIS_HTTP_TIMEOUT` | `30` seconds | Per-connection socket timeout for the tracker and catalog request handlers: a connection that stalls mid-request is closed instead of pinning a thread. A non-numeric or non-positive value falls back to the default. |
-| `IRIS_ENDPOINT_TTL` | `900` seconds | Freshness window for a device's durable peer endpoint in `peer-endpoints.json`. A missing, non-integer or non-positive value falls back to the default (a TTL of 0 would make every row stale and apply an empty blocklist under an `enforced` status). Endpoint rows for quarantined or revoked devices are retained regardless — see [Operations](operations.md#peer-policy-operations-and-their-backlog). |
+| `IRIS_ENDPOINT_TTL` | `900` seconds | Freshness window for a device's durable peer endpoint in the endpoint map (`peer-endpoints.d/`). A missing, non-integer or non-positive value falls back to the default (a TTL of 0 would make every row stale and apply an empty blocklist under an `enforced` status). Endpoint rows for quarantined or revoked devices are retained regardless — see [Operations](operations.md#peer-policy-operations-and-their-backlog). |
 | `IRIS_ENROLL_TTL` | `3600` seconds | Lifetime of the one-shot enrollment token minted into a per-device installer, overriding the standard catalog-token TTL for that first exchange only. |
 | `IRIS_HEALTH_LISTENERS` | `tracker:6969,catalog:8443,artifacts:8000,console:8080` | What `:9101/readyz` TCP-probes, as `name:port,name:port`. Blank keeps the default set; the literal `off` checks nothing, for a deployment that runs a subset of the services and does not want the missing ones reported down. |
 | `IRIS_AUDIT_RETENTION_DAYS` | `90` days | Audit entries older than this are dropped by timestamp on the next amortized prune. A non-integer or non-positive value falls back to the default. |
@@ -344,7 +345,7 @@ verification](operations.md#image-verification).
 
 | Route | Body / result |
 | --- | --- |
-| `GET /api/devices` | `{devices: [...], now}` — the inventory view plus the server clock, so the UI computes freshness server-clock-to-server-clock. |
+| `GET /api/devices` | `{devices: [...], now, total, offset, limit, revision}` — the inventory view plus the server clock, so the UI computes freshness server-clock-to-server-clock. `total` is the size of the whole (filtered) projection and `limit` is `null` unless a page was asked for, so a caller can always tell a page from the fleet. Optional `limit` (1…1000, clamped and echoed), `offset` (≥ 0) and `q` (case-insensitive substring over `device_id`, `device_ip`, `model` and `heartbeat_model` — the console's own search fields) page and filter it; a page is sorted by `device_id`, while the unpaged response keeps its long-standing store order. A malformed or non-positive `limit`/`offset` is a 400 rather than a silent default. `revision` is the fleet store revision behind the same read: a client walking pages compares it to tell a coherent walk from one that raced a fleet edit, and re-walks if it changed. Row order carries no meaning for the actions built on the projection — those are keyed by `device_id`. |
 | `POST /api/devices` | Creates or updates one inventory row; returns `{device: ...}`. |
 | `DELETE /api/devices/<id>` | Retires the device: revokes its credentials first, then clears peer-policy assignment, inventory row, and catalog state. `{deleted: <bool>, degraded: [...]}` — 200 when cleanup was complete, 207 when part of it failed (`degraded` names the areas), 500 `{deleted: false, error: "secret revoke failed"}` when the revoke could not be persisted, in which case nothing was changed. Endpoint rows are retained until they age out. See [Retiring a device](operations.md#retiring-a-device). |
 | `GET /api/devices/export-csv`, `GET /api/devices/example-csv` | The inventory as `devices.csv`, and a blank example. |
@@ -410,7 +411,7 @@ The backlog bound and what to do about each refusal are in
 | Route | Body / result |
 | --- | --- |
 | `GET /api/overview` | The dashboard rollup: image, device, and rollout state. |
-| `GET /api/swarm` | The telemetry `/swarm` JSON, fetched over loopback. Answers 200 with `{"peers": [], "error": ...}` when the telemetry listener is unreachable. |
+| `GET /api/swarm` | The telemetry `/swarm` JSON, fetched over loopback and passed through byte for byte. Answers 200 with `{"peers": [], "error": ...}` when the telemetry listener is unreachable. Optional `limit`/`offset` (same rules as `/api/devices`) return a page instead: participants are flattened across `images` in image order and only their `peers` arrays are sliced (every image entry survives, since the map's image selector is built from them), with `peers_total`, `peers_offset` and `peers_limit` added. A payload that is not the documented `{"images": [{"peers": [...]}]}` shape answers `{"peers": [], "error": "swarm data not paginatable"}` rather than being passed through whole to a caller that asked for a page. |
 | `GET /api/audit` | `{events: [...]}`; `category`, `limit` (max 500), `before_ts`, and `after_ts` query parameters. |
 | `GET /api/audit/histogram` | Per-bucket audit event counts for the activity strip. |
 | `GET /api/deploy-logs` | `{logs: [...]}` — metadata for the persisted per-job deployment logs (file, device, action, state, rc, finish time, size), newest first. `device_id` filters to one device; `after_ts` / `before_ts` (Unix seconds, inclusive at both ends) filter by finish time — the range the Deployment logs brush selects. |
@@ -491,15 +492,63 @@ before the entry was written — normally rolled back, but a crash can leave
 one) and the torrent of a `quarantined` image are skipped, so a restart never
 serves what the API says is absent or withheld.
 
+## Keyed per-device state
+
+Every per-device store the server keeps under `IRIS_STATE` — heartbeats,
+staging approval, telemetry reports, the seen-report-id ledger, transfer
+attestations, pending pull directives, and the tracker's durable peer-endpoint
+map — is **keyed** state: one row per device (or per principal), spread over
+256 shard files in a directory, rather than one whole-fleet JSON document.
+
+| Store | Directory |
+| --- | --- |
+| Heartbeats | `<state>/devices.d/` |
+| Staging approval | `<state>/policy.d/` |
+| Telemetry report rings | `<state>/telemetry.d/` |
+| Seen-report-id ledger | `<state>/report_ledger.d/` |
+| Transfer attestations | `<state>/transfer-attestations.d/` |
+| Pending pull directives | `<state>/pull_requests.d/` |
+| Durable peer endpoints | `<state>/peer-endpoints.d/` |
+
+A heartbeat, a policy read, a terminal report and a tracker announce lock,
+parse and rewrite only the shard their own device lands in. Before this, each
+of those operations held one lock on the whole document while it re-parsed and
+re-serialised every device in the fleet, so a single device's request cost grew
+with fleet size and unrelated devices serialised behind one writer.
+
+What has not changed: each shard is written atomically (a unique temp file in
+the same directory, then a rename), so a reader never sees a partial write; and
+a shard that exists but cannot be read or parsed **fails closed** — the request
+that needs it answers `503`, and no writer replaces its content — rather than
+reading as an empty store. The blast radius is narrower than it was: damage to
+one shard no longer takes out every device's state, only the devices in that
+shard and any whole-fleet listing.
+
+The whole-fleet documents from earlier releases (`devices.json`, `policy.json`,
+`telemetry.json`, `report_ledger.json`, `transfer-attestations.json`,
+`pull_requests.json`, `peer-endpoints.json`) are migrated into their shard
+directories the first time the server touches each store, and are then left in
+place renamed to `<name>.json.migrated`. There is nothing to run by hand, and
+nothing is deleted. A migration that cannot read its source document fails
+closed and leaves the document exactly where it is.
+
+Whole-fleet reads — the console's device and assignment tables, the telemetry
+sidecar's per-pass snapshots, the tracker's blocklist derivation, and a device
+purge — still read every row, which costs what the single document cost,
+because it is the same bytes in 256 pieces.
+
 ## Policy schema
 
-`policy.json` (`<state>/policy.json`) holds per-device staging approval — what
-IRIS is allowed to stage, never what it installs, activates, or reloads.
+The policy store (`<state>/policy.d/`) holds per-device staging approval —
+what IRIS is allowed to stage, never what it installs, activates, or reloads.
+It is **keyed** state: one row per device, spread over 256 shard files, so a
+device's policy read or write touches only its own shard. See
+[Keyed per-device state](#keyed-per-device-state) below.
 
 | Field | Meaning |
 | --- | --- |
 | `approved_image_ids` | Ordered list of catalog image ids, up to ten. The agent stages and verifies every id in the set, transferring them in parallel. Authoritative: a raw read of this file, or a stale write, is resolved from this key, never from `approved_image_id`. |
-| `approved_image_id` | The set's first element, or `null` when empty. Recomputed from `approved_image_ids` on every read and write — kept only so a reader that predates the ordered set (a raw `policy.json` parse, or an agent that has not yet upgraded) still sees a single assignment. |
+| `approved_image_id` | The set's first element, or `null` when empty. Recomputed from `approved_image_ids` on every read and write — kept only so a reader that predates the ordered set (a raw read of the stored row, or an agent that has not yet upgraded) still sees a single assignment. |
 | `plans` | Per-image transfer identity, keyed by image id: `plan_id` and `transfer_id` (both 32 lowercase hex), `planned_at` (epoch seconds) and `info_hash` (the torrent info hash of the image as the catalog held it at mint time, `null` when the catalog has no entry yet). Minted when an image **enters** the set and carried forward verbatim while it stays there, so a repeat Apply — including one that only adds or removes some other image, and the quarantine auto-unassign rewrite — never re-mints and never restarts an in-flight transfer's identity. Unassigning an image drops its entry and re-assigning it mints a new plan, which is what keeps two successive transfers of the same image to the same device distinct. A row written before this key existed simply has no `plans`, and gains one at its next Apply. |
 
 `POST /api/devices/<id>/assign` (see [Devices](#devices)) writes this file.
@@ -517,8 +566,8 @@ its own id, which is what makes the addition safe mid-rollout. The internal
 `get_policy()` contract is deliberately left at its two keys — the `plans` map
 exists only on the wire projection.
 
-The device's heartbeat (`devices.json`, `<state>/devices.json`) reports
-per-image staging progress against that set:
+The device's heartbeat (`<state>/devices.d/`) reports per-image staging
+progress against that set:
 
 | Field | Meaning |
 | --- | --- |
@@ -552,10 +601,12 @@ writes plan identity into `policy.json` and never touches this file.
 | --- | --- |
 | `plan_id`, `transfer_id`, `device_id`, `image_id`, `info_hash`, `planned_at` | Copied from the plan's `policy.json` row and refreshed from it on every pass. This file mints no identity of its own. |
 | `state` | `planned` at creation; `seeding` once both latches below are set; `cancelled` when the assignment is withdrawn before that. Both `seeding` and `cancelled` are terminal — a later unassign never un-seeds a transfer that already happened, and a cancelled plan can never be promoted. |
-| `checksum_verified_at` | First precondition, latched first-write-wins: the server-stamped `received_at` of the earliest terminal report (`staging-complete` or `seeding-only`) from that device carrying **this plan's own** `transfer_id` with `content_sha256.state == "verified"`. Both terminal events are reachable only after the agent hashed the fully downloaded file, so this single fact carries both "the content is complete on the device" and "its checksum verified". `null` until such a report arrives. |
+| `checksum_verified_at` | First precondition, latched first-write-wins: the server-stamped `received_at` of the earliest terminal report (`staging-complete` or `seeding-only`) from that device carrying **this plan's own** `transfer_id` with `content_sha256.state == "verified"`. Both terminal events are reachable only after the agent hashed the fully downloaded file, so this single fact carries both "the content is complete on the device" and "its checksum verified". `null` until such a report arrives. **It is an ingest instant, not the device's verification instant.** It says when the *server* learned the checksum had verified. The device reports no verification instant at all, so none is invented here; the gap between the two is made visible by `report_created_at` below rather than guessed away. The gap is not marginal: the agent arms a terminal report at completion but defers the whole send on a bad link, backing off to about sixteen minutes, so on exactly the constrained devices IRIS exists for this instant can sit that far behind the physical one. The fact is recorded durably at ingest in `transfer-attestations.json`, so it survives the report ring rotating past it. |
 | `tracker_seeder_at` | Second precondition, latched first-write-wins: when this tracker saw the device itself announce `left = 0` on the image's torrent under its own authenticated principal — the peer registry row's `completed_at`, falling back to `last_seen`, and finally to the pass's own instant. A device announcing on a legacy or shared seeder token proves no identity and can never satisfy this. `null` until then. **Never earlier than `planned_at`:** a peer row belongs to a peer, not to a plan, so unassigning and re-assigning an image the device is already seeding leaves a row carrying the *previous* transfer's `completed_at`. That instant is not this plan's evidence — the tracker did not watch this plan seed before it existed — so a candidate predating the plan is skipped and the next one down the chain stands in. |
-| `seeding_started_at` | `max(checksum_verified_at, tracker_seeder_at, planned_at)`: the instant the later of the two preconditions became true, floored at the plan's own creation so a planned→seeding duration can never render negative. Computed once, at promotion, before any record is built, and never recomputed — which is what makes a replay after a crash byte-identical. |
+| `seeding_started_at` | `max(checksum_verified_at, tracker_seeder_at, planned_at)`: the instant the later of the two preconditions became true, floored at the plan's own creation so a planned→seeding duration can never render negative. Computed once, at promotion, before any record is built, and never recomputed — which is what makes a replay after a crash byte-identical. A **recovered** promotion (below) uses `max(checksum_verified_at, planned_at)` instead. |
 | `observed_at` | The end of the attesting report's measurement window, on the **device's** clock. Carried for correlation only, and never subtracted from the server instants above: two clocks. |
+| `report_created_at` | When the attesting report was composed, on the **device's** clock. Read against `checksum_verified_at` it shows how long that report spent getting here — the delivery latency a planned→seeding duration would otherwise carry as if it were transfer time. Two clocks, so the difference is that latency *plus* whatever skew stands between them; it is a magnitude to look at, never an exact correction to subtract. `null` when the report carried no such field. |
+| `recovered_promotion` | Present and `true` only on a row that was promoted on the same pass that **rebuilt** it from a lost store. Absent otherwise — never `false`. See below. |
 | `updated_at` | When this row was last written. Drives retention and eviction order. |
 | `emitted` | The durable markers, `{"planned": <ts>, "seeding_started": <ts>}`, each key absent until the export queue has accepted that record. Written only after the queue accepts, never before — marking first would lose an event permanently the moment the queue refused it. |
 
@@ -599,19 +650,28 @@ off.
 | `iris.transfer.planned_at` | both | When the assignment minted the plan. Repeated on the `seeding_started` record on purpose, so planned→seeding duration is computable from that one record without joining back to a `planned` record a bounded queue may have dropped. |
 | `iris.transfer.seeding_started_at` | `seeding_started` | The latched promotion instant described above. |
 | `iris.transfer.checksum_verified_at`, `iris.transfer.tracker_seeder_at` | `seeding_started` | The two preconditions, exported separately so it is visible which one was the laggard: a device whose sha256 of a ~1.2 GB image runs minutes after aria2 first announced `left = 0` shows `tracker_seeder_at` well ahead of `checksum_verified_at`, and the reverse ordering means the swarm, not the device, was the wait. |
-| `iris.device.observed_at` | `seeding_started` | The attesting report's device-clock instant, as an epoch float — named exactly as `iris.device.transfer.report` names it. |
+| `iris.transfer.report_received_at` | `seeding_started` | The **same value** as `iris.transfer.checksum_verified_at`, under the name that says what it is: the server's ingest instant for the attesting report. The older name is kept because an exported attribute cannot be withdrawn; prefer this one when the distinction matters, and read it against `iris.device.report_created_at`. |
+| `iris.device.observed_at`, `iris.device.report_created_at` | `seeding_started` | The attesting report's two device-clock instants, as epoch floats — the end of its measurement window and when it was composed — named exactly as `iris.device.transfer.report` names them. Show them; never subtract either from a server instant as though the clocks agreed. |
+| `iris.transfer.recovered_promotion` | `seeding_started` | `true`, and present at all, only on a record whose row was rebuilt from a lost store. It says three things at once: this may be a *replay* of a record the backend already holds under this `event.id`; its `seeding_started_at` is `max(checksum_verified_at, planned_at)` and may be **earlier** than what that first record carried; and its `iris.transfer.tracker_seeder_at` is a post-loss re-announce, so recomputing `max()` over the three instants on this record will not reproduce its `seeding_started_at`. Absent — never `false` — on an ordinary promotion. |
 | `event.id` | both | `<plan_id>.<event>`, derived and never minted per emission, so a replay after a crash between the queue accepting a record and its marker landing carries an identical key the backend can dedupe. |
 | `iris.telemetry.schema.version` | both | `2`. A new record name is not a schema revision; nothing existing changed. |
 
-The four timestamp attributes are RFC3339 in UTC with **exactly** three
+The five timestamp attributes — `iris.transfer.planned_at`,
+`seeding_started_at`, `checksum_verified_at`, `report_received_at` and
+`tracker_seeder_at` — are RFC3339 in UTC with **exactly** three
 fractional digits and a literal `Z` (`2026-09-02T14:03:11.482Z`), which is what
 the Splunk extraction `%Y-%m-%dT%H:%M:%S.%N%Z` needs: a whole-second instant
 rendered without the fraction, or a `+00:00` offset in place of the `Z`, fails
 that pattern outright. An attribute whose source value is missing or uncoercible
 is omitted from the record entirely — an absent attribute means *not known*, and
 nothing here is defaulted. `timeUnixNano` is the record's **source** instant
-(`planned_at`, or `seeding_started_at`), not the emit instant and not an
-ingestion time; this is the opposite choice from `iris.device.transfer.report`,
+(`planned_at`, or `seeding_started_at`), never the emit instant. For `planned`
+that instant is the server's own decision. For `seeding_started` it is a server
+*observation*, and when the report was the later of the two preconditions that
+observation is the report's ingest instant — so `timeUnixNano` on a
+`seeding_started` record can be an ingestion time, and
+`iris.transfer.report_received_at` is there to say when. This is still the
+opposite choice from `iris.device.transfer.report`,
 which times off the server's `received_at` because the only thing the server
 knows for certain about a device report is when it arrived. Its trailing digits
 are an artefact of converting a float epoch to nanoseconds, not precision.
@@ -631,8 +691,8 @@ A `planned` record, exactly as exported:
     { "key": "event", "value": { "stringValue": "planned" } },
     { "key": "iris.transfer.id", "value": { "stringValue": "4b7e0c92d1a54f38a6c25e91b307fd6c" } },
     { "key": "iris.plan.id", "value": { "stringValue": "9f3c1a77b0d24e5188ac0b6f7d21e4a3" } },
-    { "key": "iris.device.id", "value": { "stringValue": "100.92.9.3" } },
-    { "key": "device.id", "value": { "stringValue": "100.92.9.3" } },
+    { "key": "iris.device.id", "value": { "stringValue": "203.0.113.3" } },
+    { "key": "device.id", "value": { "stringValue": "203.0.113.3" } },
     { "key": "iris.image.id", "value": { "stringValue": "cat9k_iosxe.26.01.01" } },
     { "key": "iris.torrent.info_hash", "value": { "stringValue": "3a9f1c0b8e7d6452af10cd3b92e5170864bd2fa1" } },
     { "key": "iris.transfer.planned_at", "value": { "stringValue": "2026-09-02T14:03:11.482Z" } },
@@ -659,15 +719,17 @@ the checksum, is the promotion instant:
     { "key": "event", "value": { "stringValue": "seeding_started" } },
     { "key": "iris.transfer.id", "value": { "stringValue": "4b7e0c92d1a54f38a6c25e91b307fd6c" } },
     { "key": "iris.plan.id", "value": { "stringValue": "9f3c1a77b0d24e5188ac0b6f7d21e4a3" } },
-    { "key": "iris.device.id", "value": { "stringValue": "100.92.9.3" } },
-    { "key": "device.id", "value": { "stringValue": "100.92.9.3" } },
+    { "key": "iris.device.id", "value": { "stringValue": "203.0.113.3" } },
+    { "key": "device.id", "value": { "stringValue": "203.0.113.3" } },
     { "key": "iris.image.id", "value": { "stringValue": "cat9k_iosxe.26.01.01" } },
     { "key": "iris.torrent.info_hash", "value": { "stringValue": "3a9f1c0b8e7d6452af10cd3b92e5170864bd2fa1" } },
     { "key": "iris.transfer.planned_at", "value": { "stringValue": "2026-09-02T14:03:11.482Z" } },
     { "key": "iris.transfer.seeding_started_at", "value": { "stringValue": "2026-09-02T14:27:24.118Z" } },
     { "key": "iris.transfer.checksum_verified_at", "value": { "stringValue": "2026-09-02T14:27:24.118Z" } },
+    { "key": "iris.transfer.report_received_at", "value": { "stringValue": "2026-09-02T14:27:24.118Z" } },
     { "key": "iris.transfer.tracker_seeder_at", "value": { "stringValue": "2026-09-02T14:22:57.905Z" } },
     { "key": "iris.device.observed_at", "value": { "doubleValue": 1788359241.7 } },
+    { "key": "iris.device.report_created_at", "value": { "doubleValue": 1788359244.1 } },
     { "key": "event.id", "value": { "stringValue": "9f3c1a77b0d24e5188ac0b6f7d21e4a3.seeding_started" } }
   ]
 }

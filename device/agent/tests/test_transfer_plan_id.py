@@ -571,8 +571,10 @@ def test_a_plan_boundary_carries_an_armed_report_but_never_its_attestation():
     server files it against the old plan. Nothing ever re-arms it once the
     image is done+copied (_stage_image takes the steady-state short-circuit),
     so dropping it at a plan boundary loses the old transfer's only completion
-    evidence outright. That happens fleet-wide on the first tick after an agent
-    upgrade, where every staged image crosses a boundary at once.
+    evidence outright. (The fleet-wide instance of that — every staged image
+    crossing a boundary on the first tick after an agent upgrade — is gone: an
+    upgraded bag is 'adopted', not a boundary. What remains is this one, a
+    genuine second plan for the same image.)
 
     What must NOT travel is the attestation: content_sha256_state 'verified'
     inherited across the boundary would claim this transfer hashed content it
@@ -625,3 +627,183 @@ def test_a_boundary_with_no_armed_report_carries_no_delivery_state():
     assert "frozen_report" not in tele
     assert "report_pending" not in tele
     assert "content_sha256_state" not in tele
+
+
+# ---- the first tick after an AGENT UPGRADE is not a plan boundary (#44) ----
+#
+# An agent upgraded onto an existing state file finds, for every image it
+# already staged, a device-minted tele['transfer_id'] and NO plan_id
+# (_STATE_SCHEMA is deliberately not bumped for these keys). Comparing plan_ids
+# there answered "different" for EVERY image on EVERY device although no
+# assignment had changed, which raised replan_verify fleet-wide — a full
+# SHA-256 of a ~1.2 GB staged file on every device inside one tick window,
+# under the agent's exclusive lock — and reset every telemetry bag, discarding
+# any armed-but-undelivered terminal report with it. Being NAMED by the server
+# for the first time is a rename of a transfer already in progress, not a new
+# transfer.
+
+def test_a_bag_with_no_plan_id_is_adopted_wholesale_intact():
+    """The unit contract. Every measurement in the bag was made on this same
+    acquisition and stays true of it — content_sha256_state included, which is
+    exactly the key a real boundary must destroy."""
+    device_tid = "9f" * 16                # what the previous agent minted
+    state = {"img1": {"done": True, "copied": True, "sha": "img1-sha",
+                      "tele": {"transfer_id": device_tid, "sample_seq": 12,
+                               "content_sha256_state": "verified",
+                               "started_ts": 1000.0, "done_ts": 1100.0,
+                               "report_sent_ts": 1150.0,
+                               "event": "staging-complete",
+                               "peers": {"10.0.0.9": 3}, "avg_bps": 5e6}}}
+
+    assert telemetry_report.adopt_plan(
+        state, "img1", PLAN_A, XFER_A) == "adopted"
+
+    tele = _tele(state)
+    # the server's identity is now in force...
+    assert tele["plan_id"] == PLAN_A
+    assert tele["transfer_id"] == XFER_A
+    # ...and NOTHING was reset. No re-hash is asked for.
+    assert "replan_verify" not in tele
+    assert tele["content_sha256_state"] == "verified"
+    assert tele["sample_seq"] == 12
+    assert tele["started_ts"] == 1000.0 and tele["done_ts"] == 1100.0
+    assert tele["event"] == "staging-complete"
+    assert tele["peers"] == {"10.0.0.9": 3}
+    # The one thing the rename records: the report the server already has
+    # names the OLD id, so the image still owes one under the new name (#30).
+    assert tele["report_transfer_id"] == device_tid
+
+
+def test_an_adopted_bag_is_idempotent_and_a_later_replan_is_still_a_boundary():
+    """Adoption writes the plan_id, so the tick after it answers 'same' and a
+    genuinely different plan is still recognised as the boundary it is."""
+    state = {"img1": {"done": True, "copied": True,
+                      "tele": {"transfer_id": "9f" * 16,
+                               "content_sha256_state": "verified"}}}
+    assert telemetry_report.adopt_plan(
+        state, "img1", PLAN_A, XFER_A) == "adopted"
+    assert telemetry_report.adopt_plan(state, "img1", PLAN_A, XFER_A) == "same"
+
+    assert telemetry_report.adopt_plan(state, "img1", PLAN_B, XFER_B) == "new"
+    tele = _tele(state)
+    assert tele["transfer_id"] == XFER_B
+    assert "content_sha256_state" not in tele     # a real boundary resets
+    assert tele["replan_verify"] is True
+
+
+def test_a_bag_with_a_plan_id_but_no_transfer_id_is_a_boundary():
+    """The park pass drops transfer_id and keeps plan_id, so 'no plan_id' is
+    the only shape that means 'upgraded state file'. A parked record coming
+    back into the set is a fresh acquisition and must reset."""
+    state = {"img1": {"done": True, "copied": True,
+                      "tele": {"plan_id": PLAN_A,
+                               "content_sha256_state": "verified"}}}
+    assert telemetry_report.adopt_plan(state, "img1", PLAN_A, XFER_A) == "new"
+    assert "content_sha256_state" not in _tele(state)
+
+
+def _staged_before_the_server_minted_plans():
+    """Drive an image to fully staged with NO plans in the policy body — the
+    state file an in-place agent upgrade inherits — and hand back the harness."""
+    cat = PlanCatalog(["img1"], plans=None)
+    sizes = {"/stage/img1.bin": IMG["size"]}
+    state = {}
+    deps, rec = make_deps(cat, sizes)
+    assert iris_agent.run_once(CFG, deps, state) == "complete"
+    assert state["img1"]["done"] and state["img1"]["copied"]
+    assert "plan_id" not in _tele(state)
+    return cat, sizes, state, rec
+
+
+def test_the_first_tick_after_an_upgrade_re_hashes_nothing():
+    """The stampede test. The server starts minting plans for assignments that
+    did not change; the device must do no hashing at all."""
+    cat, sizes, state, _rec = _staged_before_the_server_minted_plans()
+    device_tid = _tele(state)["transfer_id"]
+
+    cat.plans = {"img1": _plan(PLAN_A, XFER_A)}
+    deps, rec = make_deps(cat, sizes)
+    for _ in range(3):
+        assert iris_agent.run_once(CFG, deps, state) == "complete"
+
+    assert rec["verified"] == [], "an upgrade re-hashed the staged image"
+    assert "replan_verify" not in _tele(state)
+    assert _emits(rec, "REPLAN") == []          # no boundary was crossed
+    assert len(_emits(rec, "PLAN-ADOPTED")) == 1
+    # the server's identity is adopted, once
+    assert _tele(state)["transfer_id"] == XFER_A
+    assert _tele(state)["plan_id"] == PLAN_A
+    assert device_tid != XFER_A
+    # ...and the file is untouched: a rename is not a re-download.
+    assert rec["aria_added"] == []
+
+
+def test_the_first_tick_after_an_upgrade_keeps_a_pending_terminal_report():
+    """The data-loss half. A frozen, still-retrying report is the previous
+    transfer's only completion evidence; the wholesale reset destroyed it on
+    every device at once."""
+    cat = PlanCatalog(["img1"], plans=None)
+    cat.post_ok = False                   # the report stays armed and frozen
+    sizes = {"/stage/img1.bin": IMG["size"]}
+    state = {}
+    deps, _rec = make_deps(cat, sizes)
+    iris_agent.run_once(CFG, deps, state)
+    frozen = telemetry_report.frozen_report(state, "img1")
+    assert frozen is not None and _tele(state)["report_pending"] is True
+    device_tid = frozen["transfer_id"]
+
+    cat.plans = {"img1": _plan(PLAN_A, XFER_A)}
+    deps, _rec = make_deps(cat, sizes)
+    iris_agent.run_once(CFG, deps, state)
+
+    assert telemetry_report.frozen_report(state, "img1") is frozen
+    assert frozen["transfer_id"] == device_tid
+    assert _tele(state)["report_pending"] is True
+
+
+# ---- an already-staged image attests itself under a new identity (#30) ----
+
+def test_an_upgraded_device_reports_once_under_the_adopted_identity():
+    """The server matches a report to a plan by transfer_id alone, so a plan
+    whose image is ALREADY staged could never be promoted: the steady-state
+    short-circuit arms no report, and the only report the server holds names
+    the device-minted id. One terminal report, under the new name, settles it."""
+    cat, sizes, state, _rec = _staged_before_the_server_minted_plans()
+    sent_before = len(cat.telemetry)
+
+    cat.plans = {"img1": _plan(PLAN_A, XFER_A)}
+    deps, rec = make_deps(cat, sizes)
+    assert iris_agent.run_once(CFG, deps, state) == "complete"
+
+    posted = cat.telemetry[sent_before:]
+    assert len(posted) == 1
+    assert posted[0]["transfer_id"] == XFER_A
+    assert posted[0]["event"] == "staging-complete"
+    assert posted[0]["image_id"] == "img1"
+    # The attestation is the one the device actually measured on these bytes.
+    assert posted[0]["content_sha256"]["state"] == "verified"
+    assert rec["verified"] == []          # ...and it cost no re-hash
+
+    # EXACTLY once: the identity is unchanged from here, so later ticks arm
+    # nothing. A per-tick re-arm would be a report storm, fleet-wide.
+    for _ in range(3):
+        assert iris_agent.run_once(CFG, deps, state) == "complete"
+    assert len(cat.telemetry) == sent_before + 1
+
+
+def test_a_steady_device_with_no_new_identity_arms_nothing_on_upgrade():
+    """The anti-stampede rule stated directly. A state file written before
+    report_transfer_id existed reads as 'already reported' — the conservative
+    answer — so an agent upgrade with no server plans at all sends nothing
+    extra. Only a MEASURED difference between two identities arms a report."""
+    cat, sizes, state, _rec = _staged_before_the_server_minted_plans()
+    # ...as a PREVIOUS agent would have left it: the key did not exist yet.
+    assert _tele(state).pop("report_transfer_id") is not None
+    sent_before = len(cat.telemetry)
+
+    deps, rec = make_deps(cat, sizes)
+    for _ in range(3):
+        assert iris_agent.run_once(CFG, deps, state) == "complete"
+
+    assert len(cat.telemetry) == sent_before
+    assert rec["verified"] == []

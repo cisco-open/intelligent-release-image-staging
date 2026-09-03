@@ -74,18 +74,38 @@ def _policy(plans=((IMAGE, PLAN_A, XFER_A),), device_id=DEV,
 
 
 def _report(transfer_id=XFER_A, image_id=IMAGE, event="staging-complete",
-            state="verified", received_at=1300.0, window_end=1290.0):
-    """One v2 terminal report as the catalog stores it in telemetry.json."""
+            state="verified", received_at=1300.0, window_end=1290.0,
+            report_created_at=None):
+    """One v2 terminal report as the catalog stores it in telemetry.json.
+
+    ``report_created_at`` is the DEVICE's own clock for composing the report
+    and defaults just after the window end, the way a real agent writes it;
+    ``received_at`` is the SERVER's ingest clock and is deliberately a
+    different number, because the gap between them is the whole point of
+    exporting both."""
     return {"image_id": image_id,
             "transfer_id": transfer_id,
             "event": event,
             "content_sha256": {"algo": "sha256", "state": state},
             "window": {"start": window_end - 60.0, "end": window_end},
+            "report_created_at": (window_end + 1.0
+                                  if report_created_at is None
+                                  else report_created_at),
             "received_at": received_at}
 
 
 def _ring(*reports, **kwargs):
     return {kwargs.get("device_id", DEV): list(reports)}
+
+
+def _ledger(*reports, **kwargs):
+    """The catalog's durable attestation ledger for a device, built the way
+    CatalogStore._remember_attestation builds it -- through the one shared
+    rule, so a test cannot invent a ledger row the ingest path would not
+    write."""
+    rows = [transfer_lifecycle.attestation_from_report(rep)
+            for rep in reports]
+    return {kwargs.get("device_id", DEV): [r for r in rows if r is not None]}
 
 
 def _swarm(device_id=DEV, info_hash=IH, completed_at=1200.0, last_seen=1205.0,
@@ -108,10 +128,11 @@ def _images(image_id=IMAGE, info_hash=IH):
 
 
 def _observe(store, policy, reports=None, snapshot=None, images=None,
-             now=None):
+             now=None, attestations=None):
     """One tracker pass: the three pure functions, then the store."""
     live = transfer_lifecycle.live_plans_from_policy(policy)
-    verified = transfer_lifecycle.verified_facts(live, reports or {})
+    verified = transfer_lifecycle.verified_facts(live, reports or {},
+                                                 attestations or {})
     seeder = transfer_lifecycle.seeder_facts(live, snapshot or {},
                                              images or {}, now=now)
     return store.observe(live, verified, seeder, now=now)
@@ -367,6 +388,165 @@ def test_seeding_started_at_is_the_later_of_the_two_latches_floored_at_planned_a
     assert row["tracker_seeder_at"] == 5000.0
     assert row["seeding_started_at"] == 5000.0
     assert row["seeding_started_at"] - row["planned_at"] == 0.0
+
+
+def test_a_report_evicted_from_the_ring_still_promotes_from_the_ledger(
+        tmp_path):
+    """The catalog's report ring is FIVE entries per DEVICE, shared by every
+    image assigned to it and every report kind, while the tracker reads it at
+    most once per sample pass. A device finishing several images inside one
+    agent tick pushes the earliest terminal report out before any pass sees
+    it, and that fact used to be derivable from nowhere else: the plan latched
+    its seeder observation, never its checksum, and sat at `planned` with no
+    seeding_started ever emitted, forever.
+
+    The catalog records the attestation at INGEST, keyed per transfer, so it
+    outlives the ring. Here plan A's report has already rotated out behind
+    five later ones and only the ledger still carries it.
+    """
+    clock = Clock()
+    policy = _policy(plans=((IMAGE, PLAN_A, XFER_A),
+                            (OTHER_IMAGE, PLAN_B, XFER_B)))
+    evicted = _report(received_at=1300.0, window_end=1290.0)
+    later = [_report(transfer_id=XFER_B, image_id=OTHER_IMAGE,
+                     received_at=1300.0 + n, window_end=1290.0 + n)
+             for n in range(1, 6)]
+    ring = _ring(*later)                        # the five that survived
+    assert len(ring[DEV]) == 5
+
+    # Without the ledger the fact is gone: the ring no longer holds it.
+    ringonly = _store(tmp_path, clock, name="ring-only")
+    _observe(ringonly, policy, reports=ring, snapshot=_swarm(),
+             images=_images(), now=clock.now)
+    assert ringonly.get(PLAN_A)["checksum_verified_at"] is None
+    assert ringonly.get(PLAN_A)["state"] == "planned"
+    assert ringonly.stats()["plans_awaiting_report"] == 1
+
+    # With it, the plan promotes on the instant the catalog took the report
+    # in -- the same value the ring would have carried.
+    store = _store(tmp_path, clock, name="ledger")
+    _observe(store, policy, reports=ring, snapshot=_swarm(),
+             images=_images(), attestations=_ledger(evicted), now=clock.now)
+    row = store.get(PLAN_A)
+    assert row["checksum_verified_at"] == 1300.0
+    assert row["observed_at"] == 1290.0
+    assert row["state"] == "seeding"
+    assert store.stats()["plans_awaiting_report"] == 0
+
+
+def test_the_ring_and_the_ledger_are_folded_by_one_rule_earliest_wins(
+        tmp_path):
+    """Two sources, one binding. The ledger is read ALONGSIDE the ring, never
+    instead of it -- a state directory written before the ledger existed, or a
+    ledger write that failed after the ring write succeeded, must still
+    promote. Whichever source carries the earliest attesting instant is the
+    one latched, because the store latches first-write-wins and the value must
+    not depend on which source a given pass happened to see."""
+    clock = Clock()
+
+    ledger_first = _store(tmp_path, clock, name="ledger-first")
+    _observe(ledger_first, _policy(),
+             reports=_ring(_report(received_at=1700.0, window_end=1690.0)),
+             attestations=_ledger(_report(received_at=1300.0,
+                                          window_end=1290.0)),
+             snapshot=_swarm(), images=_images(), now=clock.now)
+    assert ledger_first.get(PLAN_A)["checksum_verified_at"] == 1300.0
+    assert ledger_first.get(PLAN_A)["observed_at"] == 1290.0
+
+    ring_first = _store(tmp_path, clock, name="ring-first")
+    _observe(ring_first, _policy(),
+             reports=_ring(_report(received_at=1300.0, window_end=1290.0)),
+             attestations=_ledger(_report(received_at=1700.0,
+                                          window_end=1690.0)),
+             snapshot=_swarm(), images=_images(), now=clock.now)
+    assert ring_first.get(PLAN_A)["checksum_verified_at"] == 1300.0
+
+    # An absent ledger is not an error: the ring alone still promotes.
+    no_ledger = _store(tmp_path, clock, name="no-ledger")
+    _observe(no_ledger, _policy(), reports=_ring(_report()),
+             snapshot=_swarm(), images=_images(), now=clock.now)
+    assert no_ledger.get(PLAN_A)["state"] == "seeding"
+
+
+def test_the_ledger_obeys_the_same_strict_binding_as_the_ring(tmp_path):
+    """The durable ledger is not a shortcut past the transfer-scoped binding.
+    A row for another transfer or another image attests nothing, and a row
+    whose ids or instant will not coerce is dropped rather than allowed to
+    promote a plan on a value nothing can subtract."""
+    clock = Clock()
+    store = _store(tmp_path, clock)
+    junk = {DEV: [{"transfer_id": XFER_B, "image_id": IMAGE,
+                   "received_at": 1300.0},        # another transfer
+                  {"transfer_id": XFER_A, "image_id": OTHER_IMAGE,
+                   "received_at": 1300.0},        # another image
+                  {"transfer_id": "not-hex", "image_id": IMAGE,
+                   "received_at": 1300.0},        # malformed id
+                  {"transfer_id": XFER_A, "image_id": IMAGE,
+                   "received_at": "soon"},        # uncoercible instant
+                  "not-a-dict"]}
+    _observe(store, _policy(), snapshot=_swarm(), images=_images(),
+             attestations=junk, now=clock.now)
+    assert store.get(PLAN_A)["checksum_verified_at"] is None
+    assert store.get(PLAN_A)["state"] == "planned"
+
+
+def test_a_non_attesting_report_yields_no_attestation(tmp_path):
+    """attestation_from_report is the ONE place the rule lives, and the ingest
+    path writes exactly what it returns. A pull snapshot is not a completion
+    claim, a mismatch is not a verification, and a report with no transfer id
+    binds to no plan."""
+    for rep in (_report(event="pull"),
+                _report(state="mismatch"),
+                _report(state="pending"),
+                _report(transfer_id="nope"),
+                {"event": "staging-complete"},
+                "not-a-dict"):
+        assert transfer_lifecycle.attestation_from_report(rep) is None, rep
+    fact = transfer_lifecycle.attestation_from_report(
+        _report(received_at=1300.0, window_end=1290.0,
+                report_created_at=1291.5))
+    assert fact == {"transfer_id": XFER_A, "image_id": IMAGE,
+                    "received_at": 1300.0, "observed_at": 1290.0,
+                    "report_created_at": 1291.5}
+    # seeding-only is terminal too: a flash-full transfer is complete and
+    # verified even though it never reached the flash root.
+    assert transfer_lifecycle.attestation_from_report(
+        _report(event="seeding-only")) is not None
+
+
+def test_the_devices_own_report_instant_is_latched_beside_the_ingest_instant(
+        tmp_path):
+    """checksum_verified_at is an INGEST instant -- when the SERVER took the
+    attesting report in, not when the device verified. The device reports no
+    verification instant, so none is invented; what is latched beside it is
+    the device's own report_created_at, on the device's clock, so the delivery
+    lag folded into a plan-to-seed duration is visible instead of silently
+    read as transfer time. The agent defers a whole report on a bad link with
+    a backoff reaching ~16 minutes, which is what that gap is here."""
+    clock = Clock()
+    store = _store(tmp_path, clock)
+    _observe(store, _policy(),
+             reports=_ring(_report(received_at=2260.0, window_end=1290.0,
+                                   report_created_at=1300.0)),
+             snapshot=_swarm(), images=_images(), now=clock.now)
+    row = store.get(PLAN_A)
+    assert row["checksum_verified_at"] == 2260.0    # server ingest
+    assert row["report_created_at"] == 1300.0       # device clock
+    assert row["observed_at"] == 1290.0             # device clock
+    # Latched together and first-write-wins, like every other fact here.
+    clock.tick()
+    _observe(store, _policy(),
+             reports=_ring(_report(received_at=3000.0, window_end=2900.0,
+                                   report_created_at=2910.0)),
+             snapshot=_swarm(), images=_images(), now=clock.now)
+    assert store.get(PLAN_A)["report_created_at"] == 1300.0
+    # A report that carried no device instant latches None, never a stand-in.
+    bare = _report(received_at=1300.0)
+    del bare["report_created_at"]
+    other = _store(tmp_path, clock, name="bare")
+    _observe(other, _policy(), reports=_ring(bare), snapshot=_swarm(),
+             images=_images(), now=clock.now)
+    assert other.get(PLAN_A)["report_created_at"] is None
 
 
 def test_the_seeder_fact_falls_back_from_completed_at_to_last_seen(tmp_path):

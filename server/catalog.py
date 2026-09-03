@@ -27,10 +27,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import audit
 import auth
 import bulkhash
+import credential_cache
+import keyed_state
 import live_samples
 import secretfs
 import secrets_store
 import torrent_personalize
+import transfer_lifecycle
 
 # A device may hold an ordered set of approved images at once (issue: multi-
 # image assignment); this bounds the set so policy.json rows and the console
@@ -679,6 +682,22 @@ def _sanitize_report(data):
     return report
 
 
+def _normalize_policy(rec):
+    """One raw policy row, normalised to ``{approved_image_id: first-or-None,
+    approved_image_ids: [..]}``. Shared by ``get_policy``,
+    ``device_policy_view`` and ``set_policy``'s compare-and-set so all three
+    read a row the same way from ONE keyed lookup."""
+    if not isinstance(rec, dict):
+        return {"approved_image_id": None, "approved_image_ids": []}
+    ids = rec.get("approved_image_ids")
+    if not isinstance(ids, list):
+        one = rec.get("approved_image_id")
+        ids = [one] if one else []
+    ids = [str(i) for i in ids if i]
+    return {"approved_image_id": ids[0] if ids else None,
+            "approved_image_ids": ids}
+
+
 class PolicyConflict(Exception):
     """A conditional set_policy() whose expectation no longer held.
 
@@ -727,6 +746,15 @@ class QuarantineStillMismatched(Exception):
 class CatalogStore:
     TELEMETRY_RING = 5      # newest reports kept per device (hard disk bound)
     SEEN_REPORT_IDS = 256   # durable per-device seen v2 report_id ledger bound
+    # Durable per-device transfer attestations kept, one slot per TRANSFER.
+    # Sized well clear of the real working set: a device may hold
+    # MAX_ASSIGNED_IMAGES (10) plans at once, so this is six full
+    # re-assignment generations, and the tracker consumes an attestation
+    # within one sample pass (15 s) of it being written. It is deliberately
+    # far larger than TELEMETRY_RING because the ring is shared by every image
+    # and every report KIND on the device while this ledger holds one row per
+    # transfer -- see _remember_attestation.
+    ATTESTATIONS = 64
     PULL_TTL = 600          # seconds a console pull directive stays pending
 
     def __init__(self, state_dir, audit_path=None, seeder_remove_fn=None,
@@ -747,6 +775,14 @@ class CatalogStore:
         # oldest purged FIFO) and is purged with the device.
         self.report_ledger_path = os.path.join(state_dir,
                                                 "report_ledger.json")
+        # Durable per-device transfer attestations: the fact that a terminal
+        # report bearing a given transfer_id arrived with a VERIFIED content
+        # sha256, and when the server took it in. Written at ingest and read
+        # by the tracker's transfer-lifecycle pass. It exists because the
+        # report ring above cannot be that pass's only source -- see
+        # _remember_attestation.
+        self.attestations_path = os.path.join(state_dir,
+                                              "transfer-attestations.json")
         # Cisco Bulk Hash reconciliation (KGV reconciler): the FULL last
         # verdict reconcile() produced for each image, keyed by image_id --
         # {state, feed_sha512, publish_date, deferral, checked_at, source}.
@@ -774,6 +810,31 @@ class CatalogStore:
         # canonical torrent back into the seeder (publish.resume_torrent_rpc
         # in main()). None (unwired) is a no-op, like seeder_remove_fn.
         self._seeder_add = seeder_add_fn
+        # --- keyed incremental durable state (see keyed_state) -------------
+        # Every per-device store above is one ROW per device in a bucketed
+        # shard directory (devices.d/ and friends), not one whole-fleet JSON
+        # document. A heartbeat, a policy read, a terminal report or a
+        # pull-directive check locks, parses and rewrites only the shard its
+        # own device lands in; each used to hold one global lock on the whole
+        # document while it re-parsed and re-serialised the entire fleet, so
+        # the per-device cost -- and the serialisation between unrelated
+        # devices -- grew with fleet size. A legacy whole-fleet document is
+        # migrated into shards on first use. The durability contract is
+        # unchanged: atomic temp+os.replace, allow_nan=False, and an existing
+        # but unreadable shard raises StateFileError rather than reading as
+        # empty or being overwritten by the next writer.
+        self._devices = self._keyed(self.devices_path)
+        self._policies = self._keyed(self.policy_path)
+        self._pulls = self._keyed(self.pull_path)
+        self._reports = self._keyed(self.telemetry_path)
+        self._report_ids = self._keyed(self.report_ledger_path)
+        self._attestations = self._keyed(self.attestations_path)
+
+    @staticmethod
+    def _keyed(path):
+        """A keyed store for the per-device state at *path*, carrying this
+        class's own fail-closed error type."""
+        return keyed_state.KeyedState(path, error=StateFileError)
 
     def _read(self, path):
         """One state file as a dict. A MISSING file is the empty store (first
@@ -822,50 +883,42 @@ class CatalogStore:
     # --- devices ---
     def record_heartbeat(self, device_id, data, now=None):
         now = time.time() if now is None else now
-        with secrets_store.store_lock(self.devices_path):
-            sw = self._read(self.devices_path)
-            rec = {"device_id": device_id, "last_seen": now}
-            rec.update(data)
-            sw[device_id] = rec
-            _atomic_write_json(self.devices_path, sw)
+        rec = {"device_id": device_id, "last_seen": now}
+        rec.update(data)
+        # One shard, one lock: a heartbeat no longer rewrites the fleet.
+        self._devices.put(device_id, rec)
 
     def get_device(self, device_id):
-        return self._read(self.devices_path).get(device_id)
+        return self._devices.get(device_id)
 
     def forget_device(self, device_id):
-        """Drop a device's stored heartbeat/staging record (devices.json).
+        """Drop a device's stored heartbeat/staging record.
         Called on a successful undeploy so the console stops reporting a wiped
         device as 'deployed' from its last live heartbeat. Returns True iff a
         record existed. The image ASSIGNMENT (policy) and telemetry history
         are intentionally left untouched — a re-onboard restages the same
         image, and the reports are historical."""
-        with secrets_store.store_lock(self.devices_path):
-            sw = self._read(self.devices_path)
-            existed = sw.pop(device_id, None) is not None
-            if existed:
-                _atomic_write_json(self.devices_path, sw)
-        return existed
+        return self._devices.delete(device_id)
 
     def list_devices(self):
-        return list(self._read(self.devices_path).values())
+        """Every heartbeat record. O(fleet) by nature — the console's fleet
+        table, never a per-device request."""
+        return list(self._devices.snapshot().values())
 
     def purge_device(self, device_id):
         """Remove ALL per-device catalog state: the heartbeat record, the
         image assignment (policy), the telemetry history, the seen-report-id
-        ledger, and any pending pull directive. Called when the console deletes
-        a device from the fleet — a device that is deleted and added back must
+        ledger, the durable transfer attestations, and any pending pull
+        directive. Called when the console deletes a device from the fleet — a device that is deleted and added back must
         come back unassigned, or a stale assignment would silently restage the
         old image. Contrast forget_device(), which drops only the heartbeat
         record on undeploy and deliberately keeps the assignment. Returns
         True iff any state existed."""
         existed = self.forget_device(device_id)
-        for path in (self.policy_path, self.telemetry_path, self.pull_path,
-                     self.report_ledger_path):
-            with secrets_store.store_lock(path):
-                data = self._read(path)
-                if data.pop(device_id, None) is not None:
-                    existed = True
-                    _atomic_write_json(path, data)
+        for state in (self._policies, self._reports, self._pulls,
+                      self._report_ids, self._attestations):
+            if state.delete(device_id):
+                existed = True
         return existed
 
     # --- policy (per-device staging approval) ---
@@ -948,15 +1001,18 @@ class CatalogStore:
                         raise ValueError("no such image")
                     if entry.get("quarantined"):
                         raise QuarantinedImage(iid, entry.get("hash_verification"))
-            with secrets_store.store_lock(self.policy_path):
-                # Inside the same lock the write takes: a check outside it
-                # would be a compare-and-set with a gap wide enough for the
-                # very race it exists to catch.
+            # The compare-and-set, the plan merge and the write all happen
+            # inside ONE call under the device row's own shard lock: a check
+            # outside it would be a compare-and-set with a gap wide enough for
+            # the very race it exists to catch. Cross-device serialisation is
+            # image_policy_lock's job (held above), so narrowing this lock from
+            # the whole fleet's policy document to one device's shard loses
+            # nothing.
+            def write_row(prev):
                 if expect_image_ids is not None:
-                    current = self.get_policy(device_id)["approved_image_ids"]
+                    current = _normalize_policy(prev)["approved_image_ids"]
                     if [str(i) for i in expect_image_ids] != current:
                         raise PolicyConflict(current)
-                pol = self._read(self.policy_path)
                 # --- transfer plans: minted here, and ONLY here ---
                 # A plan is the server's durable name for one intended
                 # transfer of one image to one device: a plan_id, the
@@ -993,9 +1049,8 @@ class CatalogStore:
                 # policy.json is an operator-editable file on disk, and a
                 # hand-edited or truncated plan row must be re-minted here
                 # rather than travel to the device and poison its reports.
-                prev = pol.get(device_id)
-                prev = prev if isinstance(prev, dict) else {}
-                prev_plans = prev.get("plans")
+                prev_row = prev if isinstance(prev, dict) else {}
+                prev_plans = prev_row.get("plans")
                 prev_plans = prev_plans if isinstance(prev_plans, dict) else {}
                 planned_at = time.time()
                 plans = {}
@@ -1023,10 +1078,11 @@ class CatalogStore:
                 # aggregation both read list_policies() directly, not through
                 # get_policy()'s normalisation) must keep seeing an assignment
                 # without themselves knowing about the plural key.
-                pol[device_id] = {"approved_image_id": ids[0] if ids else None,
-                                  "approved_image_ids": ids,
-                                  "plans": plans}
-                _atomic_write_json(self.policy_path, pol)
+                return {"approved_image_id": ids[0] if ids else None,
+                        "approved_image_ids": ids,
+                        "plans": plans}
+
+            self._policies.update(device_id, write_row)
 
     def get_policy(self, device_id):
         """The device's approvals, normalised: every historical row shape
@@ -1041,16 +1097,7 @@ class CatalogStore:
         authoritative: ``approved_image_id`` is recomputed here as its first
         element and never trusted from disk, so a raw edit or a stale write
         that leaves the two keys disagreeing can't desync what callers see."""
-        rec = self._read(self.policy_path).get(device_id)
-        if not isinstance(rec, dict):
-            return {"approved_image_id": None, "approved_image_ids": []}
-        ids = rec.get("approved_image_ids")
-        if not isinstance(ids, list):
-            one = rec.get("approved_image_id")
-            ids = [one] if one else []
-        ids = [str(i) for i in ids if i]
-        return {"approved_image_id": ids[0] if ids else None,
-                "approved_image_ids": ids}
+        return _normalize_policy(self._policies.get(device_id))
 
     def device_policy_view(self, device_id):
         """The WIRE projection of a device's policy: what GET
@@ -1073,8 +1120,10 @@ class CatalogStore:
         unassigned -- is omitted rather than sent through: the agent's
         adoption path rejects a malformed id anyway, and a transfer_id that
         fails _HEX32 would fail the device's whole report on the way back."""
-        view = self.get_policy(device_id)
-        rec = self._read(self.policy_path).get(device_id)
+        # ONE keyed read for both the normalised view and the plans map (it
+        # used to be two whole-fleet parses of policy.json per device poll).
+        rec = self._policies.get(device_id)
+        view = _normalize_policy(rec)
         rows = rec.get("plans") if isinstance(rec, dict) else None
         rows = rows if isinstance(rows, dict) else {}
         plans = {}
@@ -1093,7 +1142,9 @@ class CatalogStore:
         return view
 
     def list_policies(self):
-        return self._read(self.policy_path)
+        """Every device's raw policy row. O(fleet) by nature — console tables
+        and the quarantine auto-unassign sweep, never a per-device request."""
+        return self._policies.snapshot()
 
     # --- Cisco Bulk Hash reconciliation: verdict storage + quarantine ---
     # (KGV reconciler). apply_hash_verification() is the only writer of
@@ -1543,26 +1594,38 @@ class CatalogStore:
         else:
             report.setdefault("_event_id", secrets.token_hex(16))
             rid = None
-        with secrets_store.store_lock(self.telemetry_path):
-            tel = self._read(self.telemetry_path)
-            ring = tel.get(device_id)
+        outcome = {}
+
+        def append(ring):
             ring = ring if isinstance(ring, list) else []
             duplicate = rid is not None and (
                 any(isinstance(r, dict) and r.get("report_id") == rid
                     for r in ring)
                 or self._report_id_seen(device_id, rid))
-            if not duplicate:
-                ring.append(report)
-                tel[device_id] = ring[-self.TELEMETRY_RING:]
-                _atomic_write_json(self.telemetry_path, tel)
-                if rid is not None:
-                    # Record the id in the durable bounded ledger AFTER the ring
-                    # write. A crash between the two only means the ring still
-                    # remembers this id (it is the newest), so a retry before
-                    # the ledger catches up still dedupes on the ring — no
-                    # double count, and the ledger makes it durable past
-                    # eviction.
-                    self._remember_report_id(device_id, rid)
+            outcome["duplicate"] = duplicate
+            if duplicate:
+                return None             # dedupe no-op: the shard is untouched
+            return (ring + [report])[-self.TELEMETRY_RING:]
+
+        # One device's ring in one shard, under that shard's lock: a report no
+        # longer parses and rewrites every device's ring to append to one.
+        self._reports.update(device_id, append)
+        duplicate = outcome["duplicate"]
+        if not duplicate and rid is not None:
+            # Record the id in the durable bounded ledger AFTER the ring
+            # write. A crash between the two only means the ring still
+            # remembers this id (it is the newest), so a retry before
+            # the ledger catches up still dedupes on the ring — no
+            # double count, and the ledger makes it durable past
+            # eviction.
+            self._remember_report_id(device_id, rid)
+        # AFTER the ring write, and deliberately NOT gated on `duplicate`.
+        # The write is idempotent (first-write-wins per transfer_id), and a
+        # crash between the ring write and this one leaves a retry -- itself a
+        # ring dedupe no-op -- as the only thing that can still record the
+        # attestation. Recording it there costs at worst a slightly later
+        # ingest instant; skipping it costs the plan its promotion forever.
+        self._remember_attestation(device_id, report)
         if is_v2:
             # Match-gated (spec §10.2b): only a pull report whose
             # report_request_id equals the stored request clears it. A v2
@@ -1580,59 +1643,118 @@ class CatalogStore:
             self.clear_report_request(device_id)
 
     def get_telemetry(self, device_id):
-        reports = self._read(self.telemetry_path).get(device_id, [])
+        reports = self._reports.get(device_id)
         return reports if isinstance(reports, list) else []
 
     def _report_id_seen(self, device_id, rid):
         """True iff *rid* is in the device's durable seen-report-id ledger.
         Read fresh (small bounded file); tolerant of a missing/garbage file."""
-        led = self._read(self.report_ledger_path).get(device_id)
+        led = self._report_ids.get(device_id)
         return isinstance(led, list) and rid in led
 
     def _remember_report_id(self, device_id, rid):
         """Append *rid* to the device's durable seen-report-id ledger, bounded
         FIFO at SEEN_REPORT_IDS (oldest purged). Idempotent: an id already
         present is not re-appended, so the ledger never grows on retries."""
-        with secrets_store.store_lock(self.report_ledger_path):
-            led = self._read(self.report_ledger_path)
-            seen = led.get(device_id)
+        def remember(seen):
             seen = seen if isinstance(seen, list) else []
             if rid in seen:
-                return
-            seen.append(rid)
-            led[device_id] = seen[-self.SEEN_REPORT_IDS:]
-            _atomic_write_json(self.report_ledger_path, led)
+                return None             # already durable; no write
+            return (seen + [rid])[-self.SEEN_REPORT_IDS:]
+
+        self._report_ids.update(device_id, remember)
+
+    def get_transfer_attestations(self):
+        """The whole durable attestation ledger, ``{device_id: [row, ...]}``.
+
+        The tracker reads the FILE directly on its sample pass (it runs in a
+        different process); this accessor is for callers that already hold a
+        store, and for the tests that pin the ledger's shape."""
+        return self._attestations.snapshot()
+
+    def _remember_attestation(self, device_id, report):
+        """Record that *report* attested completed, VERIFIED content.
+
+        WHY A SECOND STORE AND NOT JUST THE RING. The tracker's
+        transfer-lifecycle pass promotes a plan only on a terminal report
+        bearing that plan's own transfer_id, and it re-derives that fact by
+        reading telemetry.json at most once per sample pass. That ring keeps
+        TELEMETRY_RING (5) reports PER DEVICE, shared by every image assigned
+        to it and by every report kind. A device finishing several images
+        inside one 60 s agent tick -- ten are assignable, and a flash-tight
+        device posts a `seeding-only` report and then a `staging-complete`
+        upgrade for each -- pushes the earliest terminal report out of the ring
+        before any pass sees it. That fact is then NOT DERIVABLE FROM ANYWHERE:
+        the plan latches its seeder observation, never its checksum, and sits
+        at `planned` with no seeding_started ever emitted, for good. The same
+        loss hits any report that lands while the tracker is restarting.
+
+        So the fact is recorded HERE, at ingest, where it is known for certain,
+        keyed by transfer so that one row per plan holds one slot however much
+        other traffic the device posts. Bounded FIFO at ATTESTATIONS per
+        device and purged with the device, like the report-id ledger beside it.
+
+        FIRST-WRITE-WINS per transfer_id: the tracker latches the EARLIEST
+        attesting instant, so a retry or a `staging-complete` upgrade of an
+        already-attested `seeding-only` transfer must not move the value.
+
+        Not every report attests -- transfer_lifecycle.attestation_from_report
+        owns that rule, and owning it in ONE place is what keeps this write and
+        the tracker's read of the ring from drifting apart about what counts.
+        """
+        fact = transfer_lifecycle.attestation_from_report(report)
+        if fact is None:
+            return
+        def remember(rows):
+            rows = [r for r in rows if isinstance(r, dict)] \
+                if isinstance(rows, list) else []
+            if any(r.get("transfer_id") == fact["transfer_id"] for r in rows):
+                return None             # first-write-wins; no write
+            return (rows + [fact])[-self.ATTESTATIONS:]
+
+        self._attestations.update(device_id, remember)
 
     # --- pull directives (console-requested fresh reports) ---
     def request_report(self, device_id, now):
         """Flag *device_id* for a fresh report with a random 32-hex
         ``request_id`` (spec §10.2b). Returns False when a non-expired directive
         is already pending (one per device)."""
-        with secrets_store.store_lock(self.pull_path):
-            pr = self._read(self.pull_path)
-            ent = pr.get(device_id)
+        refused = []
+
+        def arm(ent):
             if isinstance(ent, dict) and now < ent.get("expires_at", 0):
-                return False
-            pr[device_id] = {"request_id": secrets.token_hex(16),
-                             "requested_at": now,
-                             "expires_at": now + self.PULL_TTL}
-            _atomic_write_json(self.pull_path, pr)
-            return True
+                refused.append(True)
+                return None             # already pending; no write
+            return {"request_id": secrets.token_hex(16),
+                    "requested_at": now,
+                    "expires_at": now + self.PULL_TTL}
+
+        self._pulls.update(device_id, arm)
+        return not refused
 
     def pending_request(self, device_id, now):
         """The full non-expired pull directive dict for *device_id* (carrying
-        ``request_id``), or None. Reaps expired entries lazily."""
-        with secrets_store.store_lock(self.pull_path):
-            pr = self._read(self.pull_path)
-            expired = [d for d, ent in pr.items()
-                       if not isinstance(ent, dict)
-                       or now >= ent.get("expires_at", 0)]
-            for d in expired:
-                del pr[d]
-            if expired:
-                _atomic_write_json(self.pull_path, pr)
-            ent = pr.get(device_id)
-            return dict(ent) if isinstance(ent, dict) else None
+        ``request_id``), or None.
+
+        Reaps THIS DEVICE's expired directive lazily. It used to reap the
+        whole fleet's, which meant every heartbeat parsed — and, whenever any
+        directive anywhere had lapsed, rewrote — the entire pull document.
+        Another device's lapsed directive is reclaimed on that device's own
+        next heartbeat or pull, or when it is purged from the fleet; it is a
+        bounded, single, expired row that no reader ever honours, because
+        every read applies the same expiry test."""
+        found = []
+
+        def reap(ent):
+            if not isinstance(ent, dict):
+                return keyed_state.DELETE if ent is not None else None
+            if now >= ent.get("expires_at", 0):
+                return keyed_state.DELETE
+            found.append(dict(ent))
+            return None                 # still pending: no write
+
+        self._pulls.update(device_id, reap)
+        return found[0] if found else None
 
     def pending_report(self, device_id, now):
         """Heartbeat directive for *device_id*: a dict
@@ -1653,16 +1775,15 @@ class CatalogStore:
         newer request. A ``None`` request id (v2 completion/seeding) or the
         default sentinel (v1 legacy bridge / explicit clear) clears
         unconditionally."""
-        with secrets_store.store_lock(self.pull_path):
-            pr = self._read(self.pull_path)
-            ent = pr.get(device_id)
+        def clear(ent):
             if not isinstance(ent, dict):
-                return
+                return None
             if request_id not in ("__unset__", None) \
                     and ent.get("request_id") != request_id:
-                return          # mismatched id: do not clear a newer request
-            del pr[device_id]
-            _atomic_write_json(self.pull_path, pr)
+                return None     # mismatched id: do not clear a newer request
+            return keyed_state.DELETE
+
+        self._pulls.update(device_id, clear)
 
 
 def _id_list(value, cap=16):
@@ -1772,6 +1893,14 @@ class Catalog:
                  deployment_open=True, deployment_checkpoint=None):
         self.store = store
         self.secrets_path = secrets_path
+        # One stat-validated snapshot of the secret store and its strict
+        # authorization index, shared by every request. Each request used to
+        # re-parse the whole store and rebuild a fleet-wide reverse index to
+        # resolve ONE credential; the snapshot rebuilds only when the store
+        # file's stat identity changes, which every mint/rotate/revoke causes
+        # (they all os.replace the file), in this process or in a CLI beside
+        # it. See credential_cache.
+        self.credentials = credential_cache.CredentialResolver(secrets_path)
         self.live_table = live_table
         self.stream_settings = stream_settings
         self.audit_path = (audit_path
@@ -1800,10 +1929,14 @@ class Catalog:
                      or os.path.isfile(self.deployment_checkpoint)))
 
     def _load_store(self):
-        """Load the secrets store fresh from disk; return (store_dict, index)."""
-        store_dict = secrets_store.load(self.secrets_path)
-        index = secrets_store.build_index(store_dict)
-        return store_dict, index
+        """The secret store and the STRICT catalog authorization index, from
+        one cached snapshot (spec §6: only the strict index authorizes).
+
+        The returned store dict and index are SHARED and read-only. Every
+        mutation path re-reads the store under ``secrets_store.store_lock``
+        with its own ``secrets_store.load`` — see ``_handle_token_refresh``."""
+        return self.credentials.view(
+            "catalog", secrets_store.build_catalog_auth_index)
 
     def _announce_base_url(self):
         """Return the tracker announce base URL (no query), or None.
@@ -2239,17 +2372,22 @@ def make_server(host, port, store, secrets_path, certfile=None,
             typed ``auth.AuthContext`` for the resolved principal) or
             ``(None, None, None)`` on auth failure. Every authorization decision
             is made through the STRICT catalog auth index (spec §6): the broad
-            ``secrets_store.build_index`` never authorizes (it is loaded here
-            only as route_post compatibility data).
+            ``secrets_store.build_index`` never authorizes, and is no longer
+            built at all — it was rebuilt across the whole fleet on every
+            request and its only consumer, token-refresh, discards it and
+            re-reads the store under the store lock.
             """
-            store_dict, index = cat._load_store()
-            now = time.time()
             try:
-                strict = secrets_store.build_catalog_auth_index(store_dict)
+                store_dict, strict = cat._load_store()
             except secrets_store.DuplicateCredentialError:
                 # Hard config error: duplicate catalog credential ownership.
                 # Fail closed for every request; never a silent overwrite.
                 return None, None, None
+            # route_post compatibility slot only: the broad reverse index is
+            # never an authorization surface, and token-refresh (its only
+            # consumer's only route) re-reads the store under the store lock.
+            index = None
+            now = time.time()
 
             # Determine if this is a device-bound route
             is_device_bound = (

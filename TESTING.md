@@ -23,18 +23,23 @@ host provisioning and no running IRIS stack.
 
 ### Opt-in host-integration tests
 
-A few bats tests are not hermetic by nature: they run a real `docker build`,
-which needs a reachable Docker daemon, pulls the pinned base image and takes
-minutes. They are skipped by default so that a clean checkout is green, and run
-only when you ask for them:
+A few tests are not hermetic by nature: they run a real `docker build`, which
+needs a reachable Docker daemon, pulls the pinned base image and takes minutes,
+or they reach the network. They are skipped by default so that a clean checkout
+is green, and run only when you ask for them:
 
 ```
 IRIS_TEST_HOST_INTEGRATION=1 bats device/xr/tests/test_xr_image.bats
+IRIS_TEST_HOST_INTEGRATION=1 python3 -m pytest server/tests/test_aria2c_build_pins.py
 ```
 
-Today that covers the two image-build tests in `device/xr/tests/test_xr_image.bats`.
-Everything else runs unconditionally. Use the same variable if you add a test
-that cannot avoid depending on the machine it runs on.
+Today that covers the two image-build tests in `device/xr/tests/test_xr_image.bats`
+and the pin-resolution test in `server/tests/test_aria2c_build_pins.py`, which
+asks the live Alpine package index whether the pins in the published aria2c
+build scripts still exist — an Alpine security bump withdraws the version we
+pinned, and nothing hermetic can see that. Everything else runs
+unconditionally. Use the same variable if you add a test that cannot avoid
+depending on the machine it runs on.
 
 `PyYAML` is not optional: the Kubernetes manifest and docker-compose tests
 parse the shipped YAML to assert security properties, and they fail rather than

@@ -195,3 +195,53 @@ _make_release_fixture() {
   [ "$status" -eq 0 ]
   [ "$(cat "$FIX/release/iris.tgz.sha256")" = "$first" ]
 }
+
+# ── credential scrub + leak safety net (driven through the real script) ───────
+# The scrub filter historically covered *.sh / *.conf* / *.example only, so a
+# username or password in a .py or .md shipped un-redacted, and the safety net
+# grepped for SCRUB_PASS alone, so a leaked operator login was never caught.
+# Both tests below run tools/make-release.sh itself over the fixture tree --
+# reverting either fix in the script must turn them red.
+
+@test "release scrub redacts SCRUB_USER and SCRUB_PASS in every shipped text type" {
+  command -v perl >/dev/null || skip "perl not available"
+  _make_release_fixture
+  # Plant the credentials in tracked files of the types the old *.sh-only
+  # filter skipped, plus one *.sh as a control.
+  echo "# operator testuser_secret / testpass_secret" >> "$FIX/server/tracker.py"
+  echo "log in as testuser_secret with testpass_secret" >> "$FIX/docs/zensical/index.md"
+  echo "HOST_USER=testuser_secret HOST_PASS=testpass_secret" >> "$FIX/tools/get-aria2c.sh"
+
+  # A miss anywhere is fatal on its own: the leak net refuses to package, so a
+  # zero exit already proves every planted secret was rewritten.
+  run env SCRUB_PASS=testpass_secret SCRUB_USER=testuser_secret \
+    bash "$FIX/tools/make-release.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
+  for shipped in server/tracker.py docs/zensical/index.md tools/get-aria2c.sh; do
+    run grep -F testuser_secret "$FIX/release/iris/$shipped"
+    [ "$status" -ne 0 ] || return 1
+    run grep -F testpass_secret "$FIX/release/iris/$shipped"
+    [ "$status" -ne 0 ] || return 1
+  done
+  # ...and the replacements really landed, rather than the files vanishing.
+  run grep -F admin "$FIX/release/iris/server/tracker.py"
+  [ "$status" -eq 0 ] || return 1
+  run grep -F changeme "$FIX/release/iris/docs/zensical/index.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "release aborts when a scrub secret survives into the tree, SCRUB_USER included" {
+  command -v perl >/dev/null || skip "perl not available"
+  _make_release_fixture
+  # The username rewrite is word-anchored, so an occurrence glued to another
+  # word survives it. The safety net greps for the raw substring and must
+  # refuse to package -- and it must check SCRUB_USER, not SCRUB_PASS alone.
+  echo "ssh testuser_secretadmin@host" >> "$FIX/server/tracker.py"
+
+  run env SCRUB_PASS= SCRUB_USER=testuser_secret bash "$FIX/tools/make-release.sh"
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"scrub secret found in the release tree"* ]] || return 1
+  # nothing was published
+  [ ! -e "$FIX/release/iris.tgz" ]
+}

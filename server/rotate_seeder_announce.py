@@ -11,9 +11,10 @@ This is the ONLY supported way to rotate the seeder announce credential
 
 1. Write a nonsecret recovery manifest FIRST (paths, digests, GIDs, phase — no
    URLs, no tokens).
-2. ``rotate_announce`` under the store lock: keep the current record as a valid
-   non-expiring *previous* and mint a fresh current. Durable persist happens
-   BEFORE any canonical torrent mutation (via the injected ``persist``).
+2. ``rotate_announce`` under the store lock: retire previous records that are
+   revoked or past ``secrets_store.SEEDER_PREV_TTL``, keep the current record as
+   a *previous* valid for that bounded window, and mint a fresh current. Durable
+   persist happens BEFORE any canonical torrent mutation (via ``persist``).
 3. For each seeder torrent, prepare a raw-span-verified canonical replacement
    whose outer announce carries ``announce_token=<current>`` and whose ``info``
    byte span is SHA-1 identical to the old canonical (via torrent_personalize).
@@ -127,19 +128,29 @@ def _atomic_write_json(path, obj):
 
 def rotate_announce(store, now):
     """Prepend the current seeder announce record into ``announce_token_previous``
-    (stamped ``rotated_at`` + fresh nonsecret ``record_id``), then mint a fresh
-    current ``announce_token``. Returns the new current value.
+    (stamped ``rotated_at``, a fresh nonsecret ``record_id`` and an
+    ``expires_at`` of ``now + secrets_store.SEEDER_PREV_TTL``), then mint a
+    fresh current ``announce_token``. Returns the new current value.
+
+    Every pass first RETIRES previous records that are revoked or past their
+    expiry: the overlap is a bounded recovery window for a device that did not
+    receive the new token, not a second permanent credential, and no shipped
+    command retires one by hand.
 
     Refuses (RotationError) any rotation that would leave more than
     ``SEEDER_PREV_CAP`` still-valid previous records — the operator must revoke
-    an old previous (P1) first, so a credential a device still relies on is
-    never silently dropped."""
+    an old previous (P1) first, or wait for it to expire, so a credential a
+    device still relies on is never silently dropped."""
     seeder = store.setdefault("seeder", {})
     prev = seeder.get("announce_token_previous")
     if not isinstance(prev, list):
         prev = []
-    # Count still-valid (non-revoked) previous records.
-    valid_prev = [r for r in prev if not r.get("revoked")]
+    seeder["announce_token_previous"] = prev
+    # Retire first, then count: the cap bounds LIVE credentials, so an expired
+    # previous never blocks a rotation it has no business blocking.
+    secrets_store.retire_expired_previous(store, now)
+    prev = seeder["announce_token_previous"]
+    valid_prev = [r for r in prev if secrets_store.valid(r, now, 0)]
     if len(valid_prev) >= SEEDER_PREV_CAP:
         raise RotationError(
             "cannot rotate: %d valid previous credentials already exist "
@@ -150,6 +161,10 @@ def rotate_announce(store, now):
         record = dict(current)
         record["rotated_at"] = int(now)
         record["record_id"] = secrets.token_hex(8)
+        record.setdefault("revoked", False)
+        # Bounded from here: the retired credential is not a permanent key.
+        record["expires_at"] = max(
+            1, int(now) + secrets_store.SEEDER_PREV_TTL)
         prev.insert(0, record)
     seeder["announce_token_previous"] = prev
 

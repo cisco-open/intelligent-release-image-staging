@@ -5,7 +5,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 setup() {
-  export DEVICE_IP=100.92.9.3 DEVICE_USER=u DEVICE_PASS=p VLAN=666
+  export DEVICE_IP=203.0.113.3 DEVICE_USER=u DEVICE_PASS=p VLAN=666
   UNINSTALL="$BATS_TEST_DIRNAME/../device-uninstall.sh"
 }
 

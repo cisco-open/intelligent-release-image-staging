@@ -36,7 +36,7 @@
 # under harddisk: -- NEVER 'run' (see the teardown-speed composite section
 # below: 'run <cmd>' executes but never yields the piped -tt session's prompt
 # back, hanging every line typed after it in the same login; deterministic on
-# 8010-R4/100.90.170.84, intermittent on 8010-R1 -- same signature). 'delete
+# 8010-R4/203.0.113.84, intermittent on 8010-R1 -- same signature). 'delete
 # /noprompt' returns cleanly in seconds and evaluates harddisk: globs, both
 # hardware-proven (progress.md 8010-R4 probe matrix, 2026-08-31). 'delete'
 # WITHOUT /noprompt hangs on its own [confirm] prompt (a piped newline never
@@ -525,7 +525,7 @@ SETUP_RC=$?
 # captured text happens to be empty.
 #
 # Fix-wave ordering fix (live-reproduced twice, progress.md L2 RUN 1/2,
-# 100.90.170.84, 2026-08-31): the [1/5] step line below used to print
+# 203.0.113.84, 2026-08-31): the [1/5] step line below used to print
 # BEFORE this rc check, unconditionally, right after the step's own
 # announcement -- a dead transport (rc 124 at the session bound) still let
 # that line reach stdout first, and its wording ("no appmgr application

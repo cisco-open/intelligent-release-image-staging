@@ -609,7 +609,7 @@ def test_default_xr_preflight_passes_a_clean_router(monkeypatch):
                        sources="No entries found\n", seen=seen)
     dev = {"device_id": "8010-R1"}
     evidence = gui_onboard._default_xr_preflight(
-        dev, {"DEVICE_IP": "100.90.170.81"}, {}, "/repo")
+        dev, {"DEVICE_IP": "203.0.113.81"}, {}, "/repo")
     assert evidence == {"status": "passed", "detected_model": "8000"}
     assert dev["os_family"] == "xr"
     # driven over the XR transport, not the IOS-XE one
@@ -681,7 +681,7 @@ def test_default_xr_preflight_raises_when_the_transport_fails(monkeypatch):
 
 
 def _xr_svc(run_fn, **kw):
-    fleet = _Fleet({"d1": {"device_id": "d1", "device_ip": "100.90.170.81",
+    fleet = _Fleet({"d1": {"device_id": "d1", "device_ip": "203.0.113.81",
                            "vlan": "666", "svi_ip": "10.0.0.2",
                            "svi_mask": "255.255.255.252",
                            "guest_ip": "10.0.0.3", "model": "8010",
@@ -717,7 +717,7 @@ def test_xr_onboard_runs_the_xr_recipe_with_the_env_it_documents(tmp_path):
     assert job["state"] == "done", job["lines"]
     assert seen["path"].endswith("device/xr-install.sh")
     env = seen["env"]
-    assert env["DEVICE_IP"] == "100.90.170.81"
+    assert env["DEVICE_IP"] == "203.0.113.81"
     assert env["DEVICE_ID"] == "d1"
     assert env["CATALOG_TOKEN"] == "TOK-d1"
     assert env["CATALOG_URL"] == "https://10.9.9.9:8443"
@@ -747,7 +747,7 @@ def test_xr_onboard_refuses_when_the_preflight_refuses(tmp_path):
 
     def refuse(dev, env, resolved):
         dev["os_family"] = "xe"
-        raise ValueError("100.90.170.81 reports IOS-XE, not IOS-XR")
+        raise ValueError("203.0.113.81 reports IOS-XE, not IOS-XR")
 
     svc = _xr_svc(fake_run, artifacts_dir=str(tmp_path),
                   xr_preflight_fn=refuse)
@@ -1650,6 +1650,115 @@ def test_default_iox_preflight_raises_when_identity_unparseable(monkeypatch):
     with pytest.raises(ValueError, match="processor board ID"):
         gui_onboard._default_iox_preflight(
             {}, {"DEVICE_IP": "192.0.2.30"}, {}, "/repo")
+
+
+# --- IOx preflight: a half-finished onboard is resumable (scrubber #78) ----
+# A first install of a NEW package version can outrun the installer's activate
+# budget while the IOx runtime is still loading the package's docker layers.
+# That left the app DEPLOYED and the app-hosting stanza (plus the trustpoint
+# the installer pastes in [4/9]) on the device, and preflight then refused
+# EVERY retry -- the operator had to undeploy by hand before the console would
+# try again. An app that is installed but never started serves nothing, and
+# device/iox/install.sh's step [1/9] tears down whatever it finds, so that is a
+# resumable retry, not a collision.
+
+def _iox_preflight_stub(monkeypatch, running="hostname sw1\n",
+                        apps="No App found\n"):
+    def run(_argv, input=None, **_kwargs):
+        return SimpleNamespace(returncode=0, stdout=(
+            "__IRIS_PREFLIGHT_VERSION__\n" + _iox_show_version() +
+            "\n__IRIS_PREFLIGHT_RUNNING__\n" + running +
+            "\n__IRIS_PREFLIGHT_APPS__\n" + apps))
+    monkeypatch.setattr(gui_onboard.subprocess, "run", run)
+
+
+# exactly what device/iox/install.sh leaves behind when the activate wait times
+# out: its trustpoint from [4/9] and its app-hosting stanza from [7/9]
+_IOX_FAILED_ONBOARD = ("hostname sw1\n"
+                       "crypto pki trustpoint IRIS\n"
+                       " enrollment terminal\n"
+                       "ip http client secure-trustpoint IRIS\n"
+                       "app-hosting appid iris\n"
+                       " app-vnic AppGigabitEthernet trunk\n")
+
+
+def _iox_app_list(state):
+    return ("App id                                   State\n"
+            "---------------------------------------------------------\n"
+            "iris                                     %s\n" % state)
+
+
+@pytest.mark.parametrize("state", ["DEPLOYED", "ACTIVATED"])
+def test_default_iox_preflight_resumes_an_installed_but_unstarted_app(
+        monkeypatch, state):
+    _iox_preflight_stub(monkeypatch, running=_IOX_FAILED_ONBOARD,
+                        apps=_iox_app_list(state))
+    evidence = gui_onboard._default_iox_preflight(
+        {}, {"DEVICE_IP": "192.0.2.30"}, {}, "/repo")
+    assert evidence["status"] == "passed"
+    # recorded on the deployment record, so the retry is visible as a retry
+    assert evidence["resumable_app_state"] == state
+    assert evidence["device_identity"] == "9ABC123"
+
+
+def test_default_iox_preflight_still_refuses_a_running_app(monkeypatch):
+    """A RUNNING app is a live deployment, not a failed onboard: still refuse
+    rather than let a re-onboard tear a working agent down by surprise."""
+    _iox_preflight_stub(monkeypatch, running=_IOX_FAILED_ONBOARD,
+                        apps=_iox_app_list("RUNNING"))
+    with pytest.raises(ValueError,
+                       match="the iris app-hosting config already exists"):
+        gui_onboard._default_iox_preflight(
+            {}, {"DEVICE_IP": "192.0.2.30"}, {}, "/repo")
+
+
+def test_default_iox_preflight_refuses_a_stanza_with_no_installed_app(
+        monkeypatch):
+    """Fail closed on anything the app list does not explicitly report as
+    installed-but-unstarted -- an unlisted app is not evidence of a failed
+    onboard, and the installer already removes its own stanza when the
+    install itself fails."""
+    _iox_preflight_stub(monkeypatch, running=_IOX_FAILED_ONBOARD,
+                        apps="No App found\n")
+    with pytest.raises(ValueError, match="already exists"):
+        gui_onboard._default_iox_preflight(
+            {}, {"DEVICE_IP": "192.0.2.30"}, {}, "/repo")
+
+
+def test_default_iox_preflight_resume_does_not_waive_guest_shell_artifacts(
+        monkeypatch):
+    """The waiver covers only what device/iox/install.sh re-creates itself.
+    An EEM applet belongs to the Guest Shell recipe, which this installer
+    neither owns nor replaces."""
+    _iox_preflight_stub(
+        monkeypatch,
+        running=_IOX_FAILED_ONBOARD + "event manager applet IRIS-AGENT authorization bypass\n",
+        apps=_iox_app_list("DEPLOYED"))
+    with pytest.raises(ValueError, match="an IRIS EEM applet already exists"):
+        gui_onboard._default_iox_preflight(
+            {}, {"DEVICE_IP": "192.0.2.30"}, {}, "/repo")
+
+
+def test_default_iox_preflight_refuses_iris_trustpoint_without_an_app(
+        monkeypatch):
+    """No app-hosting stanza means no resumable IOx deployment, so the
+    IRIS-named leftovers are somebody else's and still refuse."""
+    _iox_preflight_stub(monkeypatch,
+                        running="hostname sw1\ncrypto pki trustpoint IRIS\n",
+                        apps="No App found\n")
+    with pytest.raises(ValueError,
+                       match="crypto pki trustpoint IRIS already exists"):
+        gui_onboard._default_iox_preflight(
+            {}, {"DEVICE_IP": "192.0.2.30"}, {}, "/repo")
+
+
+def test_iox_app_state_ignores_an_app_whose_name_merely_contains_ours():
+    apps = ("App id                                   State\n"
+            "irisprobe                                RUNNING\n")
+    assert gui_onboard._iox_app_state(apps, "iris") == ""
+    assert gui_onboard._iox_app_state(
+        apps + "iris                                     DEPLOYED\n",
+        "iris") == "DEPLOYED"
 
 
 def test_apply_iox_preflight_binds_identity_and_model():
@@ -2697,7 +2806,7 @@ def test_a_job_past_the_deadline_stops_blocking_the_device():
     """A recipe whose output pipe never EOFs hangs forever. The job then never
     becomes terminal, is never evicted, and the busy guard refuses BOTH a
     re-onboard and an undeploy for that device -- permanently. That is how
-    100.90.168.116 was stranded: onboard_start with no onboard_finished, no log,
+    192.0.2.116 was stranded: onboard_start with no onboard_finished, no log,
     and a device already carrying a live Guest Shell.
 
     Past the deadline the job must be marked failed so the device frees up.
@@ -3196,6 +3305,56 @@ def test_a_queued_job_past_the_deadline_is_not_overdue():
     assert svc._reap_overdue(1000.0 + gui_onboard._JOB_DEADLINE + 1) == []
     assert svc.reap_overdue_jobs() == []
     assert svc._jobs[jid]["state"] == "queued"
+
+
+def test_escalation_advances_with_no_idle_worker_and_no_operator_action(monkeypatch):
+    """One wedged job on a pool of one: every worker is blocked inside the
+    installer, so no idle-worker queue timeout is left to call the reaper, and
+    an unattended console makes no further start(). The escalation therefore
+    never advanced -- the installer kept running and the device stayed busy
+    until an operator clicked something. A maintenance thread now drives it.
+
+    Nothing in this test calls reap_overdue_jobs(), start(), or any other
+    service method between the submission and the terminal state."""
+    monkeypatch.setattr(gui_onboard, "_MAINTENANCE_INTERVAL", 0.02)
+    proc = _BlockedProc(release_on_term=False, release_on_kill=False)
+    run_fn, started = _blocked_runner(proc, rc=137)
+    clock = {"t": 1000.0}
+    svc = _multi_svc(1, run_fn, max_concurrent=1, now_fn=lambda: clock["t"])
+    try:
+        j1 = svc.start("d1")
+        assert started.wait(5)
+        assert len(svc._workers) == 1   # the only worker is inside run_fn
+
+        clock["t"] = 1000.0 + gui_onboard._JOB_DEADLINE + 5
+        assert _wait_for(lambda: proc.signals == ["TERM"], timeout=5), \
+            "the deadline passed and nothing signalled the installer"
+        clock["t"] += gui_onboard._REAP_GRACE + 1
+        assert _wait_for(lambda: proc.signals == ["TERM", "KILL"], timeout=5), \
+            "SIGTERM was ignored and nothing escalated to SIGKILL"
+        clock["t"] += gui_onboard._REAP_GRACE + 1
+        job = _wait(svc, j1, timeout=5)
+        assert job["state"] == "error" and job["returncode"] == -1
+        # ... and the busy guard is open again: the device is usable
+        assert svc.start("d1") != j1
+    finally:
+        proc.release.set()
+        svc.stop_maintenance()
+
+
+def test_maintenance_thread_retires_itself_when_no_job_is_left(monkeypatch):
+    """It is one timed wait per tick, not a busy loop, and a service that is
+    not onboarding anything carries no extra thread at all."""
+    monkeypatch.setattr(gui_onboard, "_MAINTENANCE_INTERVAL", 0.02)
+    svc = _multi_svc(1, lambda p, e, on: 0)
+    assert svc._maintenance is None          # never started before a job
+    try:
+        assert _wait(svc, svc.start("d1"))["state"] == "done"
+        monkeypatch.setattr(gui_onboard, "_JOB_TTL", 0)   # let it be evicted
+        assert _wait_for(lambda: svc._maintenance is None, timeout=5), \
+            "the maintenance thread outlived the last job"
+    finally:
+        svc.stop_maintenance()
 
 
 # ---------------------------------------------------------------------------

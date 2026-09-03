@@ -20,7 +20,7 @@ DEV1 = Principal("device", "iris8kv-1")
 DEV2 = Principal("device", "iris8kv-2")
 DEV_SEEDER = Principal("device", "seeder")
 SVC = Principal("service", "seeder")
-LEGACY = Principal("legacy", "100.92.100.77:6881")
+LEGACY = Principal("legacy", "198.51.100.77:6881")
 
 
 def _base():

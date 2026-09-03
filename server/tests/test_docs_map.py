@@ -197,10 +197,13 @@ def test_docs_state_announce_credential_travels_over_http():
     _require("security.md", ["cleartext"])
 
 
-def test_docs_state_no_day1_revoke_or_migration():
-    """Both credentials stay valid. There is no shipped revoke command and no
-    automated migration on day one."""
-    _require("security.md", ["no shipped command"])
+def test_docs_state_previous_announce_token_is_bounded():
+    # Was test_docs_state_no_day1_revoke_or_migration, which required the docs
+    # to say both credentials stay valid indefinitely -- the defect itself.
+    """Both credentials stay valid for a bounded overlap, after which the old
+    one expires on its own. There is still no shipped revoke command, so the
+    docs must not tell an operator to retire one by hand."""
+    _require("security.md", ["no shipped command", "bounded overlap"])
 
 
 def test_docs_state_stage_only_invariant():

@@ -40,6 +40,15 @@ _JOB_DEADLINE = int(os.environ.get("IRIS_ONBOARD_JOB_TIMEOUT") or 7200)
 # child normally exits within seconds of SIGTERM; the grace only matters for a
 # process that ignores it.
 _REAP_GRACE = int(os.environ.get("IRIS_ONBOARD_REAP_GRACE") or 60)
+# How often the maintenance thread wakes on its own. The worker pool's idle
+# wakeups already drive TTL eviction and the reaper, but only while SOME worker
+# is idle: with every worker blocked on a wedged installer -- the single-job
+# case on a pool of one -- no wakeup is left, and the SIGTERM -> SIGKILL ->
+# marked-failed escalation stalled until an operator clicked something. One
+# daemon thread doing one timed wait per tick is that missing wakeup. Not an
+# operator knob: it only bounds how late an escalation step is, and the steps
+# themselves are paced by _JOB_DEADLINE and _REAP_GRACE.
+_MAINTENANCE_INTERVAL = 30
 _TERMINAL = ("done", "error", "cancelled")
 _DEFAULT_CONCURRENCY = 25  # simultaneous installer runs (env IRIS_ONBOARD_CONCURRENCY)
 # A fleet action may legitimately be large, but a request storm must not retain
@@ -479,12 +488,45 @@ _IRIS_NAMED_COLLISIONS = (
 )
 
 
-def _check_iris_named_collisions(running, extra=()):
+def _check_iris_named_collisions(running, extra=(), waive=()):
     """Raise on any IRIS-named artifact still present. ``extra`` carries the
-    platform's own app-hosting stanza, which differs per platform."""
+    platform's own app-hosting stanza, which differs per platform. ``waive``
+    holds descriptions the caller has established this deployment re-creates
+    itself (see _default_iox_preflight's resumable retry) -- everything else
+    is still a collision."""
     for pattern, description in tuple(extra) + _IRIS_NAMED_COLLISIONS:
+        if description in waive:
+            continue
         if re.search(pattern, running):
             raise ValueError("%s already exists" % description)
+
+
+# States an IOx app can hold WITHOUT serving anything: it is installed but was
+# never started, so it is a half-finished onboard, not a live deployment.
+# device/iox/install.sh's own step [1/9] stops/deactivates/uninstalls whatever
+# it finds, so a retry over one of these is exactly the documented idempotent
+# re-install (scrubber #78: a first install of a new package that outran the
+# activate budget left the app DEPLOYED, and preflight then refused every
+# retry until the operator undeployed by hand).
+_IOX_RESUMABLE_APP_STATES = ("DEPLOYED", "ACTIVATED")
+
+# The IRIS-named artifacts device/iox/install.sh re-establishes on every run:
+# step [4/9] pastes `no crypto pki trustpoint IRIS` before re-adding the
+# trustpoint and re-binding the HTTP client to it. Those are the only
+# collisions a resumable retry may walk over -- an EEM applet or a logging
+# discriminator belongs to the Guest Shell recipe, which this installer does
+# not own or replace, so those still refuse.
+_IOX_RETRY_REINSTATED = ("crypto pki trustpoint IRIS",
+                         "the IRIS HTTP client trustpoint binding")
+
+
+def _iox_app_state(apps, appid):
+    """The app's state from `show app-hosting list`, upper-cased; '' when the
+    table does not list it. Rows START with the name, so anchor there: it is
+    what keeps an operator app whose name merely CONTAINS ours from being read
+    as this one."""
+    match = re.search(r"(?im)^[ \t]*%s[ \t]+(\S+)" % re.escape(appid), apps)
+    return match.group(1).upper() if match else ""
 
 
 def _probe_sections(runner, env, commands, label):
@@ -734,7 +776,11 @@ def _default_iox_preflight(dev, env, resolved, repo_root):
     It used to resolve identity and nothing else, which is why a device still
     carrying IRIS config was refused as a router and accepted as IOx. Raises
     ValueError (fail-closed) on an unparseable identity; never proceeds with
-    an empty value."""
+    an empty value.
+
+    An IRIS app that is DEPLOYED or ACTIVATED but never started is treated as
+    a resumable retry rather than a collision -- see the note at
+    _IOX_RESUMABLE_APP_STATES."""
     runner = os.path.join(repo_root, "lab", "device-run.sh")
     appid = str((resolved or {}).get("iox_appid") or "iris")
     sections = _probe_sections(runner, env, (
@@ -755,10 +801,25 @@ def _default_iox_preflight(dev, env, resolved, repo_root):
     model, device_identity = _parse_show_version(sections["version"])
     if not device_identity:
         raise ValueError("could not determine the device's processor board ID")
-    _check_iris_named_collisions(sections["running"], extra=(
-        (r"(?m)^app-hosting appid %s\s*$" % re.escape(appid),
-         "the %s app-hosting config" % appid),))
+    # A leftover app-hosting stanza is a collision ONLY while the app is
+    # actually running. An app that is installed but never started is the
+    # residue of an onboard that failed after [7/9] -- refusing it made the
+    # console's own retry impossible and forced a manual undeploy, while the
+    # installer it guards is explicitly idempotent. Anything else IRIS-named
+    # (and an app that IS running) still refuses.
+    appid_stanza = r"(?m)^app-hosting appid %s\s*$" % re.escape(appid)
+    app_state = _iox_app_state(sections["apps"], appid)
+    resumable = (re.search(appid_stanza, sections["running"]) is not None
+                 and app_state in _IOX_RESUMABLE_APP_STATES)
+    if resumable:
+        _check_iris_named_collisions(sections["running"],
+                                     waive=_IOX_RETRY_REINSTATED)
+    else:
+        _check_iris_named_collisions(sections["running"], extra=(
+            (appid_stanza, "the %s app-hosting config" % appid),))
     evidence = {"status": "passed", "device_identity": device_identity}
+    if resumable:
+        evidence["resumable_app_state"] = app_state
     if model:
         evidence["detected_model"] = model
     return evidence
@@ -962,14 +1023,19 @@ class OnboardService:
         except (TypeError, ValueError):
             self._run_supports_proc = False
         self._lock = threading.Lock()
+        # The autonomous escalation driver: started on the first submission,
+        # and it retires itself once no job is left (see _maintenance_loop).
+        self._maintenance = None
+        self._maintenance_stop = threading.Event()
 
     def _worker_loop(self):
         while True:
             try:
                 work = self._work_queue.get(timeout=60)
             except queue.Empty:
-                # TTL cleanup does not depend on another submission; idle pool
-                # wakeups provide periodic maintenance without another thread.
+                # TTL cleanup does not depend on another submission: an idle
+                # worker drives it for free. The maintenance thread covers the
+                # case where NO worker is idle to wake up.
                 with self._lock:
                     self._evict_old(self._now())
                 # The reaper's SIGTERM -> SIGKILL escalation must advance even
@@ -991,6 +1057,60 @@ class OnboardService:
             worker = threading.Thread(target=self._worker_loop, daemon=True)
             self._workers.append(worker)
             worker.start()
+
+    def _ensure_maintenance(self):
+        """Start the single maintenance thread if it is not already running.
+
+        reap_overdue_jobs() only advances when something calls it, and the two
+        existing callers are start() and an IDLE worker's queue timeout. Both
+        can be absent for hours: one wedged job on a pool of one (or a full
+        pool of wedged installers) leaves no idle worker, and an unattended
+        console makes no start() call -- so the escalation stalled and the
+        device stayed busy until an operator clicked something. This thread is
+        the missing driver. It signals nothing itself; it just calls the same
+        reaper on a timer. Caller must hold self._lock."""
+        if self._maintenance is not None:
+            return
+        self._maintenance_stop.clear()
+        t = threading.Thread(target=self._maintenance_loop, daemon=True,
+                             name="iris-onboard-maintenance")
+        self._maintenance = t
+        t.start()
+
+    def _maintenance_loop(self):
+        """Tick TTL eviction and the reaper until no job is left.
+
+        A timed Event wait, never a busy loop, and the thread retires itself
+        the moment the job table is empty -- so a server that is not onboarding
+        anything carries no extra thread. The exit decision and the attribute
+        clear happen in ONE critical section, and start() registers its job
+        before calling _ensure_maintenance() under the same lock, so a
+        submission can never race with a retiring thread and be left with no
+        driver."""
+        while not self._maintenance_stop.wait(max(0.01, _MAINTENANCE_INTERVAL)):
+            try:
+                with self._lock:
+                    self._evict_old(self._now())
+                    if not self._jobs:
+                        self._maintenance = None
+                        return
+            except Exception:
+                pass
+            try:
+                self.reap_overdue_jobs()
+            except Exception:
+                pass
+        with self._lock:
+            if self._maintenance is threading.current_thread():
+                self._maintenance = None
+
+    def stop_maintenance(self):
+        """Stop the maintenance thread (process shutdown, and tests)."""
+        self._maintenance_stop.set()
+        with self._lock:
+            t = self._maintenance
+        if t is not None:
+            t.join(timeout=5)
 
     def _build_env(self, device_id, mint=True, resolved=None, env_extra=None):
         dev = self.fleet.get_device(device_id)
@@ -1513,6 +1633,10 @@ class OnboardService:
             raise ValueError("onboarding queue is full")
         with self._lock:
             self._ensure_workers()
+            # Under the same lock, and after the job is in self._jobs: the
+            # reaper now advances on a timer even if this job wedges every
+            # worker and nobody ever clicks again.
+            self._ensure_maintenance()
         return job_id
 
     def _append(self, job_id, line):

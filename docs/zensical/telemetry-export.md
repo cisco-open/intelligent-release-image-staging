@@ -126,8 +126,12 @@ correlation ids, both 32 lowercase hex), `iris.device.id` **and** `device.id`
 coalesce), `iris.image.id`, `iris.torrent.info_hash`, and
 `iris.transfer.planned_at`. The `seeding_started` event adds
 `iris.transfer.seeding_started_at` together with the two observations behind
-it, `iris.transfer.checksum_verified_at` and `iris.transfer.tracker_seeder_at`,
-plus the device's own clock as `iris.device.observed_at`. Group on
+it, `iris.transfer.checksum_verified_at` (the same instant also ships under the
+name that says what it is, `iris.transfer.report_received_at`) and
+`iris.transfer.tracker_seeder_at`, plus the device's own clock as
+`iris.device.observed_at` and `iris.device.report_created_at`, and — only on a
+promotion that rebuilt a lost store row — `iris.transfer.recovered_promotion`.
+Group on
 `iris.plan.id`: it is stable across both events of one plan and distinct across
 two plans for the same device and image. The full contract — what
 `seeding_started` proves, the exactly-once delivery guarantee, and what a
@@ -141,7 +145,8 @@ missing `seeding_started` means during an agent rollout — is in
 !!! note "The lifecycle timestamps are strings already, and need no coercion"
     Do not carry the caveat above over to `iris.transfer.lifecycle`.
     `iris.transfer.planned_at`, `iris.transfer.seeding_started_at`,
-    `iris.transfer.checksum_verified_at` and
+    `iris.transfer.checksum_verified_at`,
+    `iris.transfer.report_received_at` and
     `iris.transfer.tracker_seeder_at` are **RFC 3339 string attributes by
     construction** — UTC, exactly three fractional digits, a literal trailing
     `Z` (`2026-09-02T12:43:11.482Z`, Splunk pattern
@@ -151,12 +156,16 @@ missing `seeding_started` means during an agent rollout — is in
     The lifecycle records also time differently from the device report
     records. `timeUnixNano` on a lifecycle record is the **source event
     time** — the instant the plan was minted, or the instant the last seeding
-    precondition became true — never the emit or ingest time. The device report records
-    carry server **ingest** time in `timeUnixNano` and put the device's own
-    clock in `iris.device.observed_at`; the lifecycle records carry that
-    attribute too, on `seeding_started`, with the same meaning and the same
-    float-epoch shape. It is a second clock: never subtract it from the RFC
-    3339 server instants.
+    precondition became true — never the emit time. Where the device report
+    records carry server **ingest** time in `timeUnixNano` unconditionally, a
+    lifecycle record carries a server *observation*; and when the attesting
+    report was the later precondition, that observation is the report's own
+    ingest instant, which `iris.transfer.report_received_at` names. Both
+    record kinds put the device's own clock in `iris.device.observed_at`, and
+    the lifecycle records add `iris.device.report_created_at` beside it. Those
+    are a second clock: never subtract either from the RFC 3339 server
+    instants — read them against `iris.transfer.report_received_at` to see how
+    much report-delivery latency a plan-to-seed duration is carrying.
 
 ## Turning export on
 

@@ -18,7 +18,7 @@
 #      build.yaml (name iris-xr, release ThinXR_7.3.15).
 #   4. run its ./appmgr_build.
 #   5. BEWARE: that tool prints "Done building" EVEN ON FAILURE -- a lab
-#      incident on 100.90.168.20 lost time to trusting it. This script does
+#      incident on 192.0.2.10 lost time to trusting it. This script does
 #      NOT trust the message or the exit code: it verifies an RPM actually
 #      landed under RPMS/ and fails honestly, with the tool's own log tail,
 #      when it did not. RPMS/ is cleared before every run so a stale RPM
@@ -341,7 +341,7 @@ echo ">> running $APPMGR_BUILD_CMD -b build.yaml in $APPMGR_BUILD_DIR"
 cat "$LOG"
 
 # xr-appmgr-build prints "Done building" EVEN ON FAILURE (lab-confirmed on
-# 100.90.168.20) -- neither that message nor a zero exit code above is
+# 192.0.2.10) -- neither that message nor a zero exit code above is
 # treated as success. The only trustworthy signal is an RPM actually
 # sitting in RPMS/.
 RPM_FILE="$(find "$APPMGR_BUILD_DIR/RPMS" -type f -name '*.rpm' 2>/dev/null | sort | tail -n1)"
@@ -349,7 +349,7 @@ if [ -z "$RPM_FILE" ] || [ ! -f "$RPM_FILE" ]; then
   cat >&2 <<EOF
 !! xr-appmgr-build did not produce an RPM.
    Its "Done building" message and exit code are not proof of success (it
-   prints that even on failure -- confirmed on 100.90.168.20). No file
+   prints that even on failure -- confirmed on 192.0.2.10). No file
    matched $APPMGR_BUILD_DIR/RPMS/*.rpm after the run. Last 40 lines of its
    output:
 EOF

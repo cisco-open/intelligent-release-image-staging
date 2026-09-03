@@ -6,7 +6,12 @@
 # image contains the device installers and lab transport used by console-driven
 # onboarding; no checkout bind mounts are required at runtime.
 #
-#   docker build --platform linux/amd64 -f server/Dockerfile -t iris:latest .
+#   docker build --pull --platform linux/amd64 -f server/Dockerfile -t iris:latest .
+#
+# --pull is part of the command, not an optimisation: the base below is a
+# floating tag, so without it the build reuses whatever the host cached and
+# silently ships an out-of-date base (issue #13). tools/start-compose-server.sh
+# passes it for the same reason.
 #
 # The alpha server image is intentionally amd64: the static aria2c copied into
 # the Guest Shell bundle must match the x86_64 Catalyst platforms it serves.

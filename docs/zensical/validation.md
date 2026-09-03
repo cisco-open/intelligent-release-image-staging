@@ -28,17 +28,24 @@ them.
 
 ### Opt-in host-integration tests
 
-A few Bats tests cannot be hermetic — they run a real `docker build`, which
-needs a reachable Docker daemon, pulls the pinned base image and takes minutes.
-They are skipped by default and run only when you set `IRIS_TEST_HOST_INTEGRATION=1`:
+A few tests cannot be hermetic — they run a real `docker build`, which needs a
+reachable Docker daemon, pulls the pinned base image and takes minutes, or they
+reach the network. They are skipped by default and run only when you set
+`IRIS_TEST_HOST_INTEGRATION=1`:
 
 ```bash
 IRIS_TEST_HOST_INTEGRATION=1 bats device/xr/tests/test_xr_image.bats
+IRIS_TEST_HOST_INTEGRATION=1 python3 -m pytest server/tests/test_aria2c_build_pins.py
 ```
 
 Today that covers the two image-build tests in
-`device/xr/tests/test_xr_image.bats`. Run them before cutting a release or
-after changing `device/xr/Dockerfile`.
+`device/xr/tests/test_xr_image.bats` — run them before cutting a release or
+after changing `device/xr/Dockerfile` — and the pin-resolution test in
+`server/tests/test_aria2c_build_pins.py`, which asks the live Alpine package
+index whether the pins in the published aria2c build scripts still exist. Run
+that one before a release too: an Alpine security bump withdraws the exact
+version we pinned, which no hermetic test can notice, and it leaves the
+corresponding source we publish unbuildable.
 
 ## Documentation build
 

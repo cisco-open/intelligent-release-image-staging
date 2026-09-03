@@ -20,6 +20,7 @@ from urllib.parse import unquote_to_bytes, urlparse
 import auth
 import bencode
 import blocklist_reconciler as _reconciler
+import credential_cache
 import peer_endpoints as _peer_endpoints
 import peer_enforcement as _peer_enforcement
 import peer_policy as _peer_policy
@@ -207,6 +208,12 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
       ``peer_endpoints.record_endpoint``); used for failure-injection tests.
     """
     registry = registry or PeerRegistry()
+    # One stat-validated snapshot of the secret store and its strict announce
+    # index, shared by every announce. Every announce used to re-parse the
+    # whole store and rebuild a fleet-wide index to resolve one credential;
+    # the snapshot rebuilds only when the store file changes on disk, which
+    # every mint/rotate/revoke causes. See credential_cache.
+    _credentials = credential_cache.CredentialResolver(secrets_path)
     _grace = int(os.environ.get("IRIS_TOKEN_SKEW_GRACE", "300"))
     _record_endpoint = record_endpoint or _peer_endpoints.record_endpoint
 
@@ -243,9 +250,9 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
         def do_GET(self):
             parsed = urlparse(self.path)
             query = parsed.query
-            store = secrets_store.load(secrets_path)
             try:
-                index = secrets_store.build_announce_index(store)
+                store, index = _credentials.view(
+                    "announce", secrets_store.build_announce_index)
             except secrets_store.DuplicateCredentialError:
                 # A hard configuration error (two records share a value) is a
                 # token-free 403 — never a silent overwrite (spec §6).
@@ -369,7 +376,11 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
             # A legacy credential (a previous seeder announce token, which
             # every device that ever received a torrent carrying it still
             # holds) has no ACL slot, so a quarantined device could otherwise
-            # reclassify itself out of quarantine by announcing with it. The
+            # reclassify itself out of quarantine by announcing with it. A
+            # previous token now expires on its own (secrets_store's
+            # SEEDER_PREV_TTL, enforced by the same `valid` check as any other
+            # credential), which is the real boundary; this address rule is the
+            # hint that holds inside the overlap window. The
             # credential stays the identity; the address is only a DENY
             # hint: a legacy requester or candidate at an address a durable
             # endpoint attributes to a denied/revoked device is treated as
@@ -636,7 +647,9 @@ class TrackerReconciler:
 
     def _current_poll_keys(self):
         return (_stat_key(self._policy_paths[0]),
-                _stat_key(self._endpoints_path))
+                # The durable endpoint map is a keyed shard directory, not one
+                # document, so its change key is the directory's.
+                _peer_endpoints.change_key(self._endpoints_path))
 
     def _poll_should_run(self, waked):
         """Decide whether this loop iteration should reconcile.

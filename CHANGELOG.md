@@ -12,6 +12,21 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 ## [Unreleased]
 
 ### Added
+- **The fleet and swarm console projections can be asked for a page.**
+  `GET /api/devices` accepts `limit` (1–1000, clamped), `offset` and `q` — a
+  case-insensitive substring over the same four fields the console's own
+  search box covers — and `GET /api/swarm` accepts `limit`/`offset` over the
+  participant list flattened across images. Paging is opt-in: with no
+  parameters both routes return the complete projection they always have, and
+  `/api/swarm` still passes the hub's bytes through untouched. Every
+  `/api/devices` response now states `total` and the fleet-store `revision`
+  behind the same read, so a caller can always tell a page from the fleet and
+  can tell a coherent page walk from one that raced a fleet edit; a malformed
+  or non-positive `limit`/`offset` is a 400 rather than a quietly different
+  page. At 10,000 devices a 200-row page answers in 128 ms and 0.12 MiB
+  against 280 ms and 5.99 MiB for the whole fleet, on the same host and run.
+  See
+  [Reference → Devices](docs/zensical/reference.md).
 - **The transfer-lifecycle store's bounds are now numbers an operator can
   read.** The durable plan store counts every row and record its two bounds
   (`MAX_PLANS`, a week of retention) cost, but nothing read those counters, so
@@ -29,6 +44,206 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   [Observability → Metrics names](docs/zensical/observability.md#metrics-names-operator-contract).
 
 ### Fixed
+- **A device's heartbeat, policy poll, terminal report and tracker announce no
+  longer rewrite or re-index the whole fleet.** Each of those per-device
+  operations held one lock on a whole-fleet JSON document — `devices.json`,
+  `policy.json`, `pull_requests.json`, `telemetry.json`, `report_ledger.json`,
+  `transfer-attestations.json`, `peer-endpoints.json` — while it re-parsed and
+  re-serialised every device in it to touch one row, and every request also
+  re-loaded the credential store and rebuilt a fleet-wide reverse index to
+  resolve a single token. Cost grew with fleet size on exactly the operations
+  a rollout repeats per device, and unrelated devices serialised behind one
+  writer. All of that state is now **keyed**: one row per device (or
+  principal) in a 256-shard directory (`devices.d/`, `policy.d/`, …), and the
+  authorization index comes from one snapshot of the credential store that is
+  rebuilt only when the store file itself changes. On this host, at 10,000
+  devices, the median cost of one operation drops from 245.9 ms to 1.4 ms
+  (tracker announce), 192.1 ms to 1.2 ms (heartbeat), 77.4 ms to 0.15 ms
+  (policy GET), 641.7 ms to 3.4 ms (terminal report), and 58.5 ms to 0.004 ms
+  (credential resolution, now flat in fleet size). Atomic writes, the
+  fail-closed refusal to read or overwrite damaged state, and the retention of
+  a quarantined or revoked device's endpoint row past its TTL are all
+  unchanged; damage to one shard now costs only the devices in it rather than
+  the fleet. Existing whole-fleet documents are migrated into shards on first
+  use and left in place renamed `<name>.json.migrated` — no operator step. See
+  [Reference → Keyed per-device
+  state](docs/zensical/reference.md#keyed-per-device-state).
+- **The tracker's endpoint map no longer evicts a live device at full fleet
+  size.** Its capacity was 10,000 — the same number as the supported device
+  count — but the map also holds the `service:seeder` principal, so a full
+  fleet needed 10,001 slots and every announce past that evicted the
+  least-recently-updated principal, churning the LRU on the rollout critical
+  path. Capacity is now defined as the supported device count plus headroom
+  for service principals, and the bound is applied by the reconciler's
+  maintenance pass rather than by each announce.
+- **An open Monitoring tab no longer re-reads the whole audit trail every ten
+  seconds, or make device token refresh wait behind it.** The activity
+  histogram, the event page and the amortized prune each re-parsed every line
+  in `audit.jsonl` on every call: at the module's own 50,000-event cap that
+  measured 255 ms for a histogram, 232 ms for a deep page, and 260 ms for a
+  prune that dropped nothing — and the prune paid it while holding the
+  cross-process audit lock that device credential rotation also takes. The
+  reader now keeps an in-process, append-incremental index of the file
+  (offset, length, timestamp and category per line), so a poll costs only the
+  bytes appended since the last one and parses only the rows it actually
+  returns: 6.7 ms, 6.0 ms and 5.7 ms for the same three calls, back to back on
+  the same host. Building the index costs one full pass (354 ms at the cap),
+  paid on the first read after a restart or a prune. The index is a cache, never a second
+  definition of a result — it is rebuilt whenever the file is not a strict
+  extension of what was indexed (a prune's atomic replace always lands on a
+  new inode), and the original streaming scan remains the fallback and the
+  reference the tests check every answer against.
+- **A transfer that resumes after a crash now re-reads what is already on
+  flash.** All three device launchers started `aria2c` without
+  `--check-integrity`, so on a resume aria2 trusted the piece map recorded in
+  its `.aria2` control file and never re-hashed a piece already on disk. A
+  piece corrupted in place — bit-rot, a torn write during a power loss —
+  therefore survived the resume: the torrent reported complete and the staged
+  image carried the wrong SHA-256. IRIS's whole-image hash still caught it, but
+  only after the entire remaining transfer, and the repair was then a full
+  re-stage instead of one 1 MiB piece. The read-back costs nothing on the paths
+  that are not a resume: with nothing on disk yet every piece is dismissed
+  without I/O, and a completed file being re-added to seed is skipped outright
+  by `--bt-seed-unverified`, so a device seeding its staged images does not
+  re-hash them at launch.
+- **A busy `aria2c` is no longer mistaken for a dead one and killed.** The
+  supervisor's health check was a single 3-second RPC probe, and any overrun
+  read as "dead". An `aria2c` built without c-ares resolves tracker hostnames
+  with a blocking `getaddrinfo()` on its event-loop thread, so one announce
+  against a slow or unresponsive resolver freezes the whole daemon — RPC
+  replies included — for as long as the resolver takes (5 seconds measured).
+  That stall got a healthy daemon killed and relaunched, twice in five minutes
+  in the measured run, dropping its in-flight download each time. The probe now
+  asks the two questions separately: a refused connection means nothing is
+  listening and still relaunches at once, while a late answer is only a
+  suspicion and is confirmed by a second probe before anything is killed, with
+  the wait bounded well above the worst resolver stall rather than below it.
+  The Guest Shell launcher's own "already up?" probe, which was unbounded and
+  could hang the launcher outright, now follows the same rule.
+- **A stuck onboarding job now clears itself on an unattended console.** The
+  reaper that escalates an overdue installer (`SIGTERM` -> `SIGKILL` -> mark the
+  job failed) only ran when an operator submitted something or when an idle
+  worker's queue wait timed out. One wedged job on a pool of one — or a full
+  pool of wedged installers — left neither: the escalation stopped after its
+  first step, the installer kept running, and the device stayed "busy",
+  refusing the opposite action, until somebody clicked. A single daemon thread
+  now drives the same reaper on a timer while any job exists, and retires
+  itself when none is left.
+- **A rotated-out seeder announce token is no longer valid forever.** Rotation
+  kept the previous credential "non-expiring until explicit revoke", but no
+  shipped command revokes one, so the previous token of every rotation stayed
+  usable indefinitely — and every device that ever received a torrent carrying
+  it still holds it. A retired token now expires 30 days after the rotation
+  that replaced it (`IRIS_SEEDER_PREV_TTL`), enforced by the same validity
+  check as any other credential, and the next rotation drops the record instead
+  of counting it against the two-previous cap. A store written before this
+  release gets the same window applied from its own recorded rotation time.
+  Both credentials stay valid throughout the overlap, and a device that missed
+  the rotation recovers by re-fetching a personalised torrent from the catalog
+  — authorised by its catalog token, never by the announce credential being
+  retired.
+- **A burst of completions no longer strands a plan at `planned` for good.**
+  The proof that a device holds verified content is a terminal report, and the
+  tracker used to re-derive that fact by re-reading the per-device report ring
+  once per sample pass. That ring keeps five reports per *device*, shared by
+  every image assigned to it and every report kind. A device finishing several
+  images inside one agent tick — ten are assignable, and a flash-tight device
+  posts a `seeding-only` report and then a `staging-complete` upgrade for each
+  — pushed the earliest terminal report out before any pass had seen it, and
+  the fact was then derivable from nowhere: that plan latched its seeder
+  observation, never its checksum, and sat at `planned` with no
+  `seeding_started` ever emitted, silently and permanently. The same loss hit
+  any report that landed while the tracker was restarting. The attestation is
+  now recorded where it is known for certain — at ingest, into
+  `<state>/transfer-attestations.json`, one row per transfer rather than per
+  report — and the promotion pass reads it alongside the ring, so it survives
+  the ring rotating past it. Existing state directories need no migration: the
+  ring is still read, and a plan whose report has already been lost promotes as
+  soon as the device posts another terminal report for it.
+- **`iris.transfer.checksum_verified_at` no longer reads as the moment the
+  device verified.** It is, and always was, the instant the *server* took the
+  attesting report in. The device reports no verification instant at all, and
+  its clock is not the server's, so IRIS does not back-date a guess — instead
+  the same value now also ships as `iris.transfer.report_received_at`, the name
+  that says what it is, and the report's own device-clock instant ships beside
+  it as `iris.device.report_created_at`. The difference between them is the
+  report-delivery latency folded into every plan-to-seed duration, and it is
+  not marginal: the agent arms its terminal report at completion but defers the
+  whole send on a `bad` link tier, backing off to about sixteen minutes, so on
+  exactly the constrained devices IRIS exists for a `seconds_to_seed` could be
+  inflated by that much with nothing on the record to show it. Both older
+  attributes keep shipping unchanged — an exported attribute cannot be
+  withdrawn — and the documentation that told operators `timeUnixNano` is
+  "never an ingestion time" has been corrected for the `seeding_started` event.
+- **A recovered lifecycle replay now says on the record that it is one.** A
+  plan row rebuilt from a lost state file takes its promotion instant from the
+  two durable facts alone, because the third — this tracker's own sight of the
+  device announcing — lives in memory and cannot survive the loss. That much
+  already made every replay agree with every other. What it could not do is
+  reproduce an *original* instant that came from the announce, so a backend
+  keeping first-write could hold two disagreeing values under one `event.id`
+  with nothing to attribute the difference to. The pre-loss instant is
+  genuinely unrecoverable, so it is marked rather than invented:
+  `iris.transfer.recovered_promotion` now rides such a record, saying that its
+  `seeding_started_at` is a reproducible lower bound, that the
+  `tracker_seeder_at` beside it is a post-loss re-announce rather than the
+  original observation, and which of two values is the replay. Absent — never
+  `false` — on an ordinary promotion.
+- **An agent upgrade no longer makes the whole fleet re-hash its staged
+  images.** A device that had already staged its image carried a transfer id it
+  minted itself and no plan id, so the first tick after the server started
+  minting plans read every image as a new plan: every device in the fleet began
+  a full SHA-256 of a ~1.2 GB flash file inside roughly one 60-second window,
+  holding the agent lock — and therefore its heartbeats and telemetry — for the
+  minutes that takes, on switches whose CPU is forwarding production traffic.
+  The same reset also discarded any completion report that was still waiting to
+  be delivered. Being named by the server for the first time is now treated as
+  what it is — a rename of a transfer already in progress — so the tick records
+  the plan and the server's transfer id and changes nothing else: no re-hash, no
+  re-download, no lost report. Only a move from one known plan to a different
+  one is still a boundary.
+- **An image that was already staged when it was assigned now reports that it
+  is done.** The device short-circuits on an image it has already staged and
+  placed, and a completion report was armed only by the download path — so when
+  a newly identified transfer landed on content that was already there, no
+  report ever named that transfer and the console showed the assignment stuck
+  short of complete while the bytes sat finished on the device. Such an image
+  now sends exactly one completion report under its current identity, without
+  re-hashing anything. The trigger is a measured change of identity, not a
+  schedule: a device whose transfer identity did not change sends nothing
+  extra, so this cannot turn into a fleet-wide burst.
+- **A report can no longer carry a checksum verdict from a transfer that is
+  over.** `content_sha256` is the device's own statement that it hashed the
+  staged file and it matched the catalog. That verdict was stored per image
+  rather than per transfer, so it outlived the transfer that measured it: after
+  an image was unassigned (which deletes the staged copy) and assigned again,
+  every report sent while the replacement was still downloading claimed
+  `verified` for a transfer that had hashed nothing at all. The verdict is now
+  dropped wherever the bytes it describes are — an image leaving the assignment
+  set, a staged file that went missing, catalog content that changed underneath
+  it — and reports say `not_checked` until the file has actually been hashed
+  again. Nothing extra is hashed to say so: a staged file that is still
+  complete is re-hashed by the same tick that noticed. A failed verify also
+  lowers the image's `done` flag, which used to be left set beside the
+  mismatch it contradicts.
+- **The first IOx onboard of a new package version no longer fails, and a
+  failed one is now retryable.** `device/iox/install.sh` gave the app 90
+  seconds to reach `ACTIVATED`. That is shorter than the time an IE-3400 needs
+  to load a package's docker layers into the IOx image cache the first time it
+  sees them, so onboarding a *new* image version reported failure while the
+  activation actually completed a minute or two later — and because the failed
+  run left the app-hosting config behind, the console's retry was refused by
+  preflight ("the iris app-hosting config already exists") until the operator
+  undeployed by hand. The install, activate and start waits now default to 300
+  seconds each, matching `device/xr-install.sh`'s `ACTIVATE_TIMEOUT`, and are
+  overridable per device (`INSTALL_TIMEOUT`, `ACTIVATE_TIMEOUT`,
+  `START_TIMEOUT`, `STATE_POLL`). A wait that does time out now prints the
+  device's full, unfiltered reply and the last state it observed instead of
+  swallowing them. The console preflight treats an IRIS app that is `DEPLOYED`
+  or `ACTIVATED` but never started as a resumable retry — it serves nothing,
+  and the installer tears down whatever it finds — while a `RUNNING` app, and
+  every IRIS artifact the IOx installer does not re-create itself, still
+  refuse.
 - **The aria2c build scripts ship in the repository.** IRIS redistributes a
   patched `aria2c`, which is GPLv2, and that licence asks for the source *and*
   the scripts used to control its compilation. The source and patches were
@@ -39,6 +254,27 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   duplicated there: the build reads it from `tools/aria2c-patches/`, which
   stays its only home, and a test asserts no patch copy appears beside the
   scripts.
+- **The published aria2c build can be rebuilt again.** Those scripts pinned
+  `openssl-dev`/`openssl-libs-static` to `3.5.7-r0`, and Alpine v3.24 has since
+  replaced that package with `3.5.8-r0`. An Alpine branch indexes only the
+  newest release of each package, so the pin was withdrawn out from under the
+  build and `apk add` refused the whole set — corresponding source that cannot
+  be built is not corresponding source. Both pins are bumped to `3.5.8-r0`,
+  which is the only change: every other pin still resolves, and the base image
+  is still pinned by digest. Nothing floats, and a withdrawn pin still fails
+  the build rather than drifting. A binary rebuilt on the newer OpenSSL will
+  not reproduce the bytes in `tools/aria2c.sha256`, which pins the artifact
+  IRIS ships rather than the recipe; the handed-in binary and its fail-closed
+  check are unchanged. A test resolves every pin against the live Alpine index
+  so the next withdrawal is caught here rather than by a recipient.
+- **Every documented image build refreshes its base.** The build scripts
+  gained `--pull` earlier in this cycle, but the commands the docs hand an
+  operator to paste — in `server/Dockerfile`'s own header and in
+  `DEVELOPMENT.md` — still did not, so building the server image the
+  documented way reused whatever `python:3.12-slim-trixie` the host had
+  cached and silently shipped a base missing Debian security updates. Both
+  now pass `--pull`, and a test holds every build script and every documented
+  build command to it.
 - **Install-mode flash reclaim no longer spends its one attempt on a refusal.**
   A device that already holds the install lock answers `install remove
   inactive` with "cannot start new install operation" and does nothing, and
@@ -2783,7 +3019,7 @@ IE-3400 (undeploy → re-onboard round-trip).
   enable`, and the staged image on `sdflash:` in place. `OnboardService`
   routes undeploy to the right teardown script by platform (mirroring the
   install recipes), so the earlier "IOx not supported" refusal is gone.
-  Lab-validated on the IE-3400 (100.90.168.99).
+  Lab-validated on the IE-3400 (192.0.2.99).
 
 ### Changed
 - **Swarm-map per-peer table is clearer about direction**: columns are now
@@ -2805,14 +3041,14 @@ IE-3400 (undeploy → re-onboard round-trip).
   (`CatalogStore.forget_device`, wired into `OnboardService` via an injected
   `clear_state_fn`), so the row falls back to **not enrolled**. The image
   ASSIGNMENT and telemetry history are intentionally kept (a re-onboard
-  restages the same image). Lab-validated: 100.92.9.3/.131 flipped from
+  restages the same image). Lab-validated: 203.0.113.3/.131 flipped from
   "deployed" to "not enrolled" after an (idempotent) re-undeploy.
 
 ## [2026.07.04.1]
 
 The console-feedback release — undeploy from the UI, honest deployment
 status, and the guest-share bind-ordering fix that made fresh onboards
-actually deliver. Lab-validated on 100.92.9.3 + 100.92.9.131 (full
+actually deliver. Lab-validated on 203.0.113.3 + 203.0.113.131 (full
 undeploy → re-onboard cycle through the console).
 
 ### Added
@@ -2825,7 +3061,7 @@ undeploy → re-onboard cycle through the console).
   `file prompt quiet`, the AppGig trunk and any flash-root image in place.
   Guest Shell devices only for now (IOx boxes are refused with a clear error).
   A device busy with the opposite action returns 409 — onboard and undeploy
-  can never race each other on one box. Lab-validated on 100.92.9.3/.131.
+  can never race each other on one box. Lab-validated on 203.0.113.3/.131.
 - **Queue position**: queued batch rows show "#N in line" (global pool order).
 - **Deployed indicator**: the devices table now shows a green **deployed**
   badge when the assigned image is staged and verified (`ready` +
@@ -2848,7 +3084,7 @@ undeploy → re-onboard cycle through the console).
 
 ## [2026.07.04]
 
-The parallel onboarding release — lab-validated on 100.92.9.3 + 100.92.9.131
+The parallel onboarding release — lab-validated on 203.0.113.3 + 203.0.113.131
 (both undeployed to clean state, then re-onboarded concurrently through the
 console batch panel).
 
@@ -3153,7 +3389,7 @@ an **SSH-to-self** transport (`device/agent/cli_ssh.py`) in container mode while
 leaving the C9300 Guest Shell path byte-identical. `emit()` is now best-effort
 (`_emit_impl`) so a transient transport failure never aborts a tick. The build
 context + reproducible packaging live in `device/iox/`. Validated on hardware
-(`100.90.168.99`): container RUNNING/healthy, token-refresh + heartbeat over the
+(`192.0.2.99`): container RUNNING/healthy, token-refresh + heartbeat over the
 catalog, model/version/free read over SSH-to-self, image downloaded over the
 swarm — the IE-3400 appears on the swarm map as `IE-3400-8T2S`. The agent stages the
 image to `sdflash:` (IE3x00 analog of the C9300's `flash:`): a repeatable installer

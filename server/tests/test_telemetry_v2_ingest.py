@@ -35,7 +35,7 @@ def _obs(**over):
                  "receive_bps": 11534336, "send_bps": 262144,
                  "connections": 5},
         "peer_connections": [
-            {"ip": "100.92.100.14", "send_bps": 131072, "receive_bps": 0}],
+            {"ip": "198.51.100.14", "send_bps": 131072, "receive_bps": 0}],
     }
     env.update(over)
     return env
@@ -56,7 +56,7 @@ class TestSanitizeObservation:
         assert clean["sampling_class"] == "good"
         assert clean["aria"]["connections"] == 5
         assert clean["peer_connections"] == [
-            {"ip": "100.92.100.14", "send_bps": 131072, "receive_bps": 0}]
+            {"ip": "198.51.100.14", "send_bps": 131072, "receive_bps": 0}]
 
     def test_state_only_paused_has_no_transfer_fields(self):
         env = {"v": 2, "obs_state": "paused", "observed_at": 1.0,
@@ -470,10 +470,8 @@ class TestV2DuplicateClearsInterruptedPull:
             _v2_report(event="pull", report_request_id=rrid))
         s.record_telemetry("dev-1", rep)
         # pretend the clear was interrupted: forcibly re-add the same directive
-        import json as _json
-        with open(s.pull_path, "w") as f:
-            _json.dump({"dev-1": {"request_id": rrid, "requested_at": now,
-                                  "expires_at": now + s.PULL_TTL}}, f)
+        s._pulls.put("dev-1", {"request_id": rrid, "requested_at": now,
+                               "expires_at": now + s.PULL_TTL})
         assert s.pending_request("dev-1", now) is not None
         # duplicate delivery: storage no-op, but the pending pull it matches
         # must now be cleared.
@@ -520,25 +518,22 @@ class TestV2SeenReportLedger:
         assert s2.get_telemetry("dev-1") == before   # still deduped post-restart
 
     def test_ledger_bounded_per_device(self, tmp_path):
-        import json as _json
+        # The ledger is keyed per device now, so the bound is read off the
+        # device's own row rather than out of a whole-fleet document.
         s = catalog.CatalogStore(str(tmp_path))
         cap = catalog.CatalogStore.SEEN_REPORT_IDS
         self._store_n(s, "dev-1", cap + 20)
-        with open(s.report_ledger_path) as f:
-            led = _json.load(f)
-        assert len(led["dev-1"]) == cap          # deterministic bound
+        led = s._report_ids.get("dev-1")
+        assert len(led) == cap                   # deterministic bound
         # the newest ids are retained; the oldest were purged
-        assert ("%032x" % (cap + 20 - 1)) in led["dev-1"]
-        assert ("%032x" % 0) not in led["dev-1"]
+        assert ("%032x" % (cap + 20 - 1)) in led
+        assert ("%032x" % 0) not in led
 
     def test_purge_device_clears_ledger(self, tmp_path):
-        import json as _json
         s = catalog.CatalogStore(str(tmp_path))
         self._store_n(s, "dev-1", 3)
         s.purge_device("dev-1")
-        with open(s.report_ledger_path) as f:
-            led = _json.load(f)
-        assert "dev-1" not in led
+        assert s._report_ids.get("dev-1") is None
 
 
 # ---------------------------------------------------------------------------

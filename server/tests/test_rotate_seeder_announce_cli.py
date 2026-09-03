@@ -190,7 +190,9 @@ def test_announce_base_accepts_any_routable_ipv4():
     """Fleets are not always on RFC1918/RFC6598. The old check used
     ipaddress.is_private, which refused 100.64.0.0/10 (the lab) and every public
     address, so those deployments could never rotate a seeder credential."""
-    for host in ("100.90.168.20", "10.1.2.3", "192.168.5.4", "203.0.113.9",
+    # 100.64.0.1 is RFC 6598 shared address space -- the range the old check
+    # refused -- and is deliberately NOT a lab host: the point is the range.
+    for host in ("100.64.0.1", "10.1.2.3", "192.168.5.4", "203.0.113.9",
                  "8.8.8.8"):
         assert rot._tracker_announce_base({"IRIS_HOST_IP": host}) == \
             "http://%s:6969/announce" % host

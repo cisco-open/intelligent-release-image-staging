@@ -90,6 +90,29 @@ IOx. The installer also checks `ip routing` on a device using the routed managem
 and warns — without blocking — on a device clock old enough to break TLS
 certificate validation.
 
+### First install of a new package version
+
+The first time a device sees a given package, the IOx runtime has to load its
+docker layers into the image cache before the app can activate; a
+byte-identical package the box has run before activates in seconds because
+those layers are already cached. The installer's lifecycle waits are sized for
+that cold case: `INSTALL_TIMEOUT`, `ACTIVATE_TIMEOUT` and `START_TIMEOUT`
+default to 300 seconds each (`STATE_POLL`, the poll interval, to 5), the same
+budget `device/xr-install.sh` uses. They are flat rather than scaled by package
+size — each wait returns as soon as the state is reached, so a generous ceiling
+costs a healthy install nothing — and every one of them is an environment
+override for a device that needs longer. A wait that does run out prints the
+device's full, unfiltered reply to the `app-hosting` command and the last state
+it observed.
+
+An onboard that fails at activation leaves the app-hosting configuration in
+place, because the activation may still be in flight. That is deliberate and
+does **not** need an undeploy or a forced teardown: re-run the installer, or
+press Onboard again in the console. Console preflight treats an IRIS app that
+is `DEPLOYED` or `ACTIVATED` but never started as a resumable retry (it serves
+nothing, and the installer's own step [1/9] tears down whatever it finds),
+while an app that is `RUNNING` is a live deployment and still refuses.
+
 ## Build modes
 
 ```bash

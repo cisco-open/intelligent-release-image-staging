@@ -197,7 +197,7 @@ setup() {
   # is the same ownership proof the VPG itself carries.
   _router_uninstall_stub_setup
   FAKE_RUNNING_IRIS_VPG=yes FAKE_RUNNING_NAT=yes _router_uninstall_run_live_forced
-  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no ip nat inside source static tcp 100.90.171.2 6881 interface GigabitEthernet1 6881")" -ge 1 ]
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no ip nat inside source static tcp 192.168.254.10 6881 interface GigabitEthernet1 6881")" -ge 1 ]
 }
 
 @test "force teardown leaves a static NAT mapping outside any IRIS subnet alone" {
@@ -205,7 +205,7 @@ setup() {
   # it is the operator's, and must survive.
   _router_uninstall_stub_setup
   FAKE_RUNNING_NAT=yes _router_uninstall_run_live_forced
-  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no ip nat inside source static tcp 100.90.171.2")" -eq 0 ]
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no ip nat inside source static tcp 192.168.254.10")" -eq 0 ]
 }
 
 @test "force teardown on a clean router removes no network config at all" {
@@ -312,7 +312,7 @@ case "$cmds" in
     fi ;;
 esac
 case "$cmds" in
-  *"no ip nat inside source static tcp 100.90.171.2 6881"*) touch "$FAKE_STATE_DIR/static_removed" ;;
+  *"no ip nat inside source static tcp 192.168.254.10 6881"*) touch "$FAKE_STATE_DIR/static_removed" ;;
 esac
 case "$cmds" in
   *"no interface VirtualPortGroup7"*) touch "$FAKE_STATE_DIR/vpg7_removed" ;;
@@ -342,7 +342,7 @@ case "$cmds" in
         if [ "${FAKE_RUNNING_IRIS_VPG:-no}" = "yes" ] && [ ! -e "$FAKE_STATE_DIR/vpg7_removed" ]; then
           echo "interface VirtualPortGroup7"
           echo " description IRIS Guest Shell VPG"
-          echo " ip address 100.90.171.1 255.255.255.252"
+          echo " ip address 192.168.254.9 255.255.255.252"
           echo "!"
         fi
         # What router-install.sh leaves on EVERY router it onboards and only
@@ -358,7 +358,7 @@ case "$cmds" in
         if [ "${FAKE_RUNNING_NAT:-no}" = "yes" ]; then
           [ -e "$FAKE_STATE_DIR/acl5_removed" ] || echo "ip access-list standard IRIS-NAT-5"
           [ -e "$FAKE_STATE_DIR/overload5_removed" ] || echo "ip nat inside source list IRIS-NAT-5 interface GigabitEthernet1 overload"
-          [ -e "$FAKE_STATE_DIR/static_removed" ] || echo "ip nat inside source static tcp 100.90.171.2 6881 interface GigabitEthernet1 6881"
+          [ -e "$FAKE_STATE_DIR/static_removed" ] || echo "ip nat inside source static tcp 192.168.254.10 6881 interface GigabitEthernet1 6881"
         fi
         echo "!"
         echo "end"
@@ -398,13 +398,13 @@ case "$cmds" in
     if [ "${FAKE_RUNNING_IRIS_VPG:-no}" = "yes" ] && [ ! -e "$FAKE_STATE_DIR/vpg7_removed" ]; then
       echo "interface VirtualPortGroup7"
       echo " description IRIS Guest Shell VPG"
-      echo " ip address 100.90.171.1 255.255.255.252"
+      echo " ip address 192.168.254.9 255.255.255.252"
       echo "!"
     fi
     if [ "${FAKE_RUNNING_NAT:-no}" = "yes" ]; then
       [ -e "$FAKE_STATE_DIR/acl5_removed" ] || echo "ip access-list standard IRIS-NAT-5"
       [ -e "$FAKE_STATE_DIR/overload5_removed" ] || echo "ip nat inside source list IRIS-NAT-5 interface GigabitEthernet1 overload"
-      [ -e "$FAKE_STATE_DIR/static_removed" ] || echo "ip nat inside source static tcp 100.90.171.2 6881 interface GigabitEthernet1 6881"
+      [ -e "$FAKE_STATE_DIR/static_removed" ] || echo "ip nat inside source static tcp 192.168.254.10 6881 interface GigabitEthernet1 6881"
     fi
     natcheck_reply
     ;;
@@ -630,10 +630,10 @@ PY2
   _router_uninstall_stub_setup
   MANAGEMENT_TYPE=router-nat NAT_INTERFACE=GigabitEthernet1 APP_IP=10.8.0.2 \
     FAKE_RUNNING_IRIS_VPG=yes FAKE_RUNNING_NAT=yes \
-    FAKE_NAT_TRANSLATIONS="$(printf 'tcp 203.0.113.9:6881 100.90.171.2:6881 198.51.100.7:40001 198.51.100.7:40001\ntcp 203.0.113.9:5000 192.168.254.2:5000 198.51.100.8:443 198.51.100.8:443')" \
+    FAKE_NAT_TRANSLATIONS="$(printf 'tcp 203.0.113.9:6881 192.168.254.10:6881 198.51.100.7:40001 198.51.100.7:40001\ntcp 203.0.113.9:5000 192.168.254.2:5000 198.51.100.8:443 198.51.100.8:443')" \
     run _router_uninstall_run_live_forced
   [ "$status" -eq 0 ] || return 1
-  grep -q "clear ip nat translation inside 203.0.113.9 100.90.171.2 forced" "$FAKE_STATE_DIR/cleared" || return 1
+  grep -q "clear ip nat translation inside 203.0.113.9 192.168.254.10 forced" "$FAKE_STATE_DIR/cleared" || return 1
   ! grep -q "192.168.254.2" "$FAKE_STATE_DIR/cleared" || return 1
   # cleared BEFORE the first overload no-form
   first_clear="$(grep -n 'clear ip nat translation inside 203.0.113.9' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"

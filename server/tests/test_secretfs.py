@@ -92,7 +92,7 @@ def test_encrypt_from_persistent_copy_is_ciphertext(tmp_path, fake_age):
 def test_round_trip(tmp_path, fake_age):
     orig = tmp_path / "run" / "secrets.json"
     orig.parent.mkdir()
-    orig.write_text("{\"devices\": {\"100.92.9.3\": {}}}\n")
+    orig.write_text("{\"devices\": {\"203.0.113.3\": {}}}\n")
     enc = tmp_path / "secrets.json.age"
     key = tmp_path / "key"
     key.write_text("AGE-SECRET-KEY-FAKE\n")

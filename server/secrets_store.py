@@ -56,6 +56,22 @@ SECRET_TYPES = {
 # silently dropped.
 SEEDER_PREV_CAP = 2
 
+# How long a rotated-out seeder announce token stays usable, measured from the
+# rotation that retired it (env IRIS_SEEDER_PREV_TTL; 30 days by default).
+#
+# A previous record used to be kept non-expiring "until explicit revoke", but no
+# shipped command revokes one, so the previous credential of every rotation
+# stayed valid forever -- and every device that ever received a torrent carrying
+# it still holds it. The overlap exists to recover a device that did not receive
+# the new token; it is not a permanent second key. Thirty days is far longer
+# than any real rollout window and longer than the catalog-token lifetime a
+# device must refresh anyway, and both credentials are valid throughout it, so
+# nothing can be locked out inside the window: a device that missed the rotation
+# keeps announcing on the old token, and its migration path -- re-fetching a
+# personalized torrent from the catalog -- is authorized by its catalog token,
+# never by the announce credential being retired.
+SEEDER_PREV_TTL = int(os.environ.get("IRIS_SEEDER_PREV_TTL") or 2592000)
+
 # ---------------------------------------------------------------------------
 # Load / save
 # ---------------------------------------------------------------------------
@@ -98,17 +114,63 @@ def load(path):
 
 
 def _prune_previous_on_load(store):
-    """Drop revoked seeder announce previous records so the list stays clean.
+    """Drop revoked seeder announce previous records, and make sure every
+    retained one carries an explicit expiry.
 
-    Non-revoked previous records are retained regardless of age (they never
-    auto-expire; a time-expiring previous could strand an un-migrated device
-    mid-overlap — spec §6).
+    Stamping on load, from a value already in the record, is what makes the
+    bound real: an older store's non-expiring previous becomes enforceable at
+    the first read, without waiting for a writer, and every reader computes the
+    SAME deadline (it is anchored to the record's own rotation stamp, never to
+    "now") — so the window cannot roll forward one load at a time. Expired
+    records are left in place here and dropped by the next rotation pass, so an
+    operator can still see what was retired and when.
     """
     seeder = store.get("seeder", {})
     prev = seeder.get("announce_token_previous")
     if isinstance(prev, list):
+        for rec in prev:
+            if isinstance(rec, dict):
+                _stamp_previous_expiry(rec)
         seeder["announce_token_previous"] = [
             r for r in prev if not r.get("revoked")]
+
+
+def _stamp_previous_expiry(record):
+    """Give a seeder announce previous record an explicit ``expires_at``.
+
+    Anchored to the rotation that retired it (``rotated_at``, falling back to
+    ``created_at``), so the deadline is stable across processes and reloads. A
+    record carrying neither stamp cannot have a window computed and is therefore
+    already expired (anchor 0) rather than honoured indefinitely.
+    """
+    if record.get("expires_at"):
+        return
+    anchor = record.get("rotated_at") or record.get("created_at")
+    try:
+        # Never 0: that is `valid`'s "never expires" sentinel, so a zero anchor
+        # with a zero TTL would resurrect exactly what this bound removes.
+        record["expires_at"] = max(1, int(anchor) + SEEDER_PREV_TTL)
+    except (TypeError, ValueError):
+        record["expires_at"] = 1   # no anchor: an epoch long past, never valid
+
+
+def retire_expired_previous(store, now):
+    """Drop seeder announce previous records that are revoked or past expiry.
+
+    Returns the number dropped. Called at the top of every rotation pass: the
+    retirement is what bounds the credential, and doing it here keeps
+    SEEDER_PREV_CAP counting live credentials rather than dead ones.
+    """
+    seeder = store.get("seeder", {})
+    prev = seeder.get("announce_token_previous")
+    if not isinstance(prev, list):
+        return 0
+    for rec in prev:
+        if isinstance(rec, dict):
+            _stamp_previous_expiry(rec)
+    kept = [r for r in prev if isinstance(r, dict) and valid(r, now, 0)]
+    seeder["announce_token_previous"] = kept
+    return len(prev) - len(kept)
 
 
 def save(store, path):
@@ -448,16 +510,24 @@ def rotate_announce(store, now):
 
     Prepends the current ``seeder.announce_token`` record into
     ``seeder.announce_token_previous`` (newest-first), stamped with
-    ``rotated_at`` and a fresh nonsecret ``record_id`` (token_hex(8), 16 hex
-    chars), then mints a fresh current announce token. Returns the new value.
+    ``rotated_at``, a fresh nonsecret ``record_id`` (token_hex(8), 16 hex
+    chars) and an ``expires_at`` of ``now + SEEDER_PREV_TTL``, then mints a
+    fresh current announce token. Returns the new value.
+
+    Every pass first RETIRES previous records that are revoked or past their
+    expiry, so the overlap is a bounded recovery window rather than a permanent
+    second key: nothing here needs an operator to remember a manual revoke.
 
     Refuses (raises) any rotation that would evict a still-valid previous
-    beyond ``SEEDER_PREV_CAP`` — the operator must revoke an old previous first,
-    so a credential a device still relies on is never silently dropped.
+    beyond ``SEEDER_PREV_CAP`` — the operator must revoke an old previous first
+    (or wait for it to expire), so a credential a device still relies on is
+    never silently dropped.
     """
     seeder = store.setdefault("seeder", {})
-    prev_list = seeder.setdefault("announce_token_previous", [])
-    valid_prev = [r for r in prev_list if not r.get("revoked")]
+    seeder.setdefault("announce_token_previous", [])
+    retire_expired_previous(store, now)
+    prev_list = seeder["announce_token_previous"]
+    valid_prev = [r for r in prev_list if valid(r, now, 0)]
     if len(valid_prev) >= SEEDER_PREV_CAP:
         raise ValueError(
             "rotate_announce refused: %d valid previous records already at "
@@ -469,7 +539,9 @@ def rotate_announce(store, now):
         archived["rotated_at"] = int(now)
         archived["record_id"] = secrets.token_hex(8)
         archived.setdefault("revoked", False)
-        archived["expires_at"] = 0   # non-expiring until explicit revoke
+        # The recovery overlap is bounded from HERE, not open-ended: the
+        # current token is minted non-expiring, its retired predecessor is not.
+        archived["expires_at"] = max(1, int(now) + SEEDER_PREV_TTL)
         prev_list.insert(0, archived)
     return mint(store, "seeder", "announce_token", now)
 

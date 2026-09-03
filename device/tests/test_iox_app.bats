@@ -68,7 +68,7 @@ _appid_block_output() {
   run _appid_block_output "10.20.30.40" "iosadmin"
   [ "$status" -eq 0 ]
   [[ "$output" == *"-e IRIS_DEVICE_SSH_HOST=10.20.30.40"* ]]
-  [[ "$output" != *"100.92.100.253"* ]]
+  [[ "$output" != *"198.51.100.253"* ]]
 }
 
 @test "install.sh passes the selected IOS target filesystem to the app" {

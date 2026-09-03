@@ -12,10 +12,13 @@
 # resolve it as a hostname. Measured 2026-09-01 on identical sessions, with no
 # DNS configuration difference between the two boxes:
 #
-#     100.90.168.114   3.06 s clean / 3.19 s with the pair   (+0.13 s)
-#     100.90.170.101   3.41 s clean / 51.79 s with the pair   (+48.4 s)
+#     192.0.2.114     3.06 s clean / 3.19 s with the pair   (+0.13 s)
+#     203.0.113.101   3.41 s clean / 51.79 s with the pair   (+48.4 s)
 #
-# The .168 segment is merely lucky -- something there answers the default
+# (RFC 5737 documentation stand-ins for the two lab segments; only the split
+# between them matters.)
+#
+# The first segment is merely lucky -- something there answers the default
 # 255.255.255.255 broadcast. So the contract is the DEFAULT: send neither line,
 # and escalate only for a device that has shown it runs us at user EXEC, where
 # `enable` really does raise the prompt the secret then answers.

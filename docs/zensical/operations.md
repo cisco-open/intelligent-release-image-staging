@@ -131,7 +131,7 @@ The same route separates its other refusals, and they mean different things:
 ## Endpoint writes that fail
 
 An authenticated announce from an attributable principal records the peer's
-address in `peer-endpoints.json` under `IRIS_STATE`, aged out by
+address in the durable endpoint map under `IRIS_STATE`, aged out by
 `IRIS_ENDPOINT_TTL` (seconds; a non-positive or non-numeric value falls back
 to the 900 s default rather than disabling enforcement). The address recorded
 for a **device** is always the announce's socket source; the BEP3 `ip=`
@@ -147,9 +147,25 @@ TTL: the seeder block for a device that has stopped announcing stays in place
 until the device is un-quarantined or re-onboarded (which clears its rows), not
 merely until the TTL lapses.
 
-A corrupt or unreadable `peer-endpoints.json` — unparseable JSON, a wrong
-schema, or a malformed endpoint row — is treated as fail-closed rather than
-empty: the reconcile pass stops before deriving or applying anything, existing
+### How the map is stored
+
+The map is **keyed** state: `peer-endpoints.d/` holds one row per principal,
+spread over 256 shard files, rather than one `peer-endpoints.json` document.
+An announce locks, parses and rewrites only the shard its own principal lands
+in, so the cost of a device's announce does not grow with the size of the
+fleet and unrelated devices no longer serialise behind one writer. Each shard
+is written atomically (temp file + rename). An existing `peer-endpoints.json`
+from an earlier release is migrated into the shards the first time the tracker
+touches the map and is left behind, renamed to `peer-endpoints.json.migrated`,
+for reference; nothing has to be done by hand.
+
+The capacity of the map is the supported fleet size **plus** headroom for
+service principals, so a full fleet of devices and the `service:seeder`
+principal all fit without evicting anything. The capacity bound is applied by
+the reconciler's maintenance pass, not by each announce.
+
+A corrupt or unreadable shard — unparseable JSON, a wrong schema, or a
+malformed endpoint row — is treated as fail-closed rather than empty: the reconcile pass stops before deriving or applying anything, existing
 blocks stay in place, and the recorded state is forced to `fail_closed`. Peer
 discovery for device and service principals continues (the announce still
 returns its peer list; the endpoint it could not write waits in the retry
@@ -509,6 +525,16 @@ quarantined there is nothing active to rotate and the command refuses.
 Each replacement rewrites only the outer announce and keeps the `info` byte span
 identical, so info hashes do not move. Credential values are never accepted on
 the command line and never printed.
+
+The rotated-out credential stays valid for a bounded overlap — 30 days from the
+rotation, `IRIS_SEEDER_PREV_TTL` — so a device that has not yet received a
+re-personalised torrent keeps announcing meanwhile. Nothing has to be retired by
+hand: the old token expires on its own, and the next rotation drops the record.
+Two still-valid previous records are the cap, and a rotation that would exceed
+it is refused, so run no more than two rotations inside one window unless you
+have already personalised the fleet's torrents. Expiry cannot lock a device out:
+the way it picks up the current credential is a fresh personalised torrent from
+the catalog, and that request is authorised by the device's catalog token.
 
 **The rotation is only reported complete when the tracker independently proves
 the new identity is serving.** After every canonical torrent is re-added, the

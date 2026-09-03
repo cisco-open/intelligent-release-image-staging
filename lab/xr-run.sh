@@ -233,7 +233,7 @@ run_bounded_ssh() {
       # This router does not only send the `\r\n` terminator a pty is
       # expected to produce: it also emits a bare CR at the START of an
       # output line -- an `\n\r` sequence, a column reset before printing --
-      # measured byte-exact on 8010-R4 (100.90.170.84) 2026-08-31. The old
+      # measured byte-exact on 8010-R4 (203.0.113.84) 2026-08-31. The old
       # `s/\r$//` anchored form left every one of those leading CRs in place,
       # and a leading CR silently defeats every `^`-anchored parser
       # downstream: device/xr-uninstall.sh:s [5/5] emptiness check drops the

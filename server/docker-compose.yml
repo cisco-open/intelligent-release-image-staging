@@ -157,6 +157,9 @@ services:
       IRIS_ENROLL_TTL: "${IRIS_ENROLL_TTL:-3600}"
       IRIS_ONBOARD_JOB_TIMEOUT: "${IRIS_ONBOARD_JOB_TIMEOUT:-}"
       IRIS_ONBOARD_REAP_GRACE: "${IRIS_ONBOARD_REAP_GRACE:-}"
+      # Seeder announce-token overlap (secrets_store.SEEDER_PREV_TTL). One
+      # value for every process: the deadline is computed from it, not stored.
+      IRIS_SEEDER_PREV_TTL: "${IRIS_SEEDER_PREV_TTL:-}"
       IRIS_XR_SESSION_TIMEOUT: "${IRIS_XR_SESSION_TIMEOUT:-}"
       IRIS_DEVICE_ENABLE_ALWAYS: "${IRIS_DEVICE_ENABLE_ALWAYS:-}"
       # Device/stage-host SSH host identity (lab/iris-ssh-policy.sh): pin one

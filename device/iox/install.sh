@@ -27,6 +27,9 @@
 #   CATALOG_URL=https://STAGE_HOST:8443  APP_INTF=AppGigabitEthernet1/1
 #   GW_IP=$SVI_IP  CPU=400  MEM=768  DISK=2048  PKG=iris-arm64.tar  PKG_FS=flash:
 #   DEVICE_SSH_USER=dnac  TARGET_FS=sdflash:  IRIS_TELEMETRY=on
+#   INSTALL_TIMEOUT=300  ACTIVATE_TIMEOUT=300  START_TIMEOUT=300  STATE_POLL=5
+#     (seconds; the app-hosting lifecycle polls -- see the note by their
+#     defaults below)
 set -euo pipefail
 
 DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
@@ -81,6 +84,36 @@ DEVICE_SSH_USER="${DEVICE_SSH_USER:-dnac}"
 TARGET_FS="${TARGET_FS:-sdflash:}"
 IRIS_TELEMETRY="${IRIS_TELEMETRY:-on}"
 IRIS_TELEMETRY_STREAM="${IRIS_TELEMETRY_STREAM:-off}"
+# App-hosting lifecycle poll budgets, in seconds. The FIRST install of a new
+# package version is far slower than a repeat install of the same one: the IOx
+# runtime has to load the package's docker layers into its image cache before
+# the app can activate, and a byte-identical package the box has run before
+# activates in seconds because those layers are already cached. The old flat
+# 90 s activate budget was shorter than that first-time load on an IE-3400, so
+# a first install reported failure while the activation actually completed a
+# minute or two later -- and the failed run left the app-hosting config behind,
+# so the console's retry was refused by preflight. Same idiom and same 300 s
+# default as device/xr-install.sh's ACTIVATE_TIMEOUT.
+#
+# Deliberately FLAT, not scaled by package size: every wait below returns as
+# soon as the state is reached, so a generous ceiling costs a successful
+# install nothing and only lengthens the already-failing case, while a
+# size-derived budget would add a second failure mode (no size available, or a
+# size read from an advisory HEAD that is allowed to fail) to a knob that only
+# needs a ceiling. Override any of them per-device instead.
+INSTALL_TIMEOUT="${INSTALL_TIMEOUT:-300}"
+ACTIVATE_TIMEOUT="${ACTIVATE_TIMEOUT:-300}"
+START_TIMEOUT="${START_TIMEOUT:-300}"
+STATE_POLL="${STATE_POLL:-5}"
+for _budget in INSTALL_TIMEOUT ACTIVATE_TIMEOUT START_TIMEOUT STATE_POLL; do
+  _value="${!_budget}"
+  case "$_value" in
+    ''|*[!0-9]*) echo "ERROR: $_budget must be a whole number of seconds" >&2; exit 2 ;;
+  esac
+  [ "$_value" -gt 0 ] \
+    || { echo "ERROR: $_budget must be greater than zero" >&2; exit 2; }
+done
+unset _budget _value
 [[ "$TARGET_FS" =~ ^[A-Za-z][A-Za-z0-9_-]*:$ ]] \
   || { echo "ERROR: TARGET_FS must be an IOS filesystem prefix such as sdflash:" >&2; exit 2; }
 
@@ -265,10 +298,12 @@ app_state() {
     | awk -v a="$APPID" '$1==a{print $2}'
 }
 
+LAST_APP_STATE=""
 wait_state() {  # $1=target state, $2=timeout_s
   local t=0 s
   while [ "$t" -lt "$2" ]; do
-    sleep 5; t=$((t + 5)); s="$(app_state)"
+    sleep "$STATE_POLL"; t=$((t + STATE_POLL)); s="$(app_state)"
+    LAST_APP_STATE="$s"
     if [ -n "$s" ]; then
       echo "    [$t s] $APPID state: $s"
     else
@@ -423,8 +458,11 @@ install_out="$(printf 'app-hosting install appid %s package %s%s\n' "$APPID" "$P
 # RUN redacts device secrets. Print only the IOS lifecycle response, not the
 # interactive SSH prompt/command echo that surrounds it.
 printf '%s\n' "$install_out" | grep -E 'Installing package|Failed to install|%IOX|%APP' || true
-wait_state DEPLOYED 120 || {
-  echo "  ERROR: app installation did not reach DEPLOYED within 120 seconds." >&2
+wait_state DEPLOYED "$INSTALL_TIMEOUT" || {
+  echo "  ERROR: app installation did not reach DEPLOYED within $INSTALL_TIMEOUT seconds." >&2
+  echo "         Last observed state: ${LAST_APP_STATE:-none reported}" >&2
+  echo "         Full IOS response to 'app-hosting install appid $APPID':" >&2
+  printf '%s\n' "$install_out" >&2
   echo "         The partial app-hosting configuration has been removed; IOx/VLAN/trust setup remains for retry." >&2
   clear_partial_app_config
   exit 1
@@ -432,14 +470,29 @@ wait_state DEPLOYED 120 || {
 sleep 8                                       # let the install op fully settle
 activate_out="$(printf 'app-hosting activate appid %s\n' "$APPID" | RUN 2>&1 || true)"
 printf '%s\n' "$activate_out" | grep -E 'Activating|Failed to activate|%IOX|%APP' || true
-wait_state ACTIVATED 90 || {
-  echo "  ERROR: app activation did not reach ACTIVATED within 90 seconds." >&2
+wait_state ACTIVATED "$ACTIVATE_TIMEOUT" || {
+  echo "  ERROR: app activation did not reach ACTIVATED within $ACTIVATE_TIMEOUT seconds." >&2
+  echo "         Last observed state: ${LAST_APP_STATE:-none reported}" >&2
+  # UNFILTERED: the grep above keeps the success path readable, but when the
+  # wait fails the swallowed lines are the whole diagnosis (device-run.sh has
+  # already redacted the device secrets it knows).
+  echo "         Full IOS response to 'app-hosting activate appid $APPID':" >&2
+  printf '%s\n' "$activate_out" >&2
+  echo "         The app-hosting configuration is LEFT IN PLACE: the activation may still be" >&2
+  echo "         in flight while the IOx runtime loads this package's layers into its image" >&2
+  echo "         cache. Check 'show app-hosting list', then simply re-run this installer --" >&2
+  echo "         it tears the app down and redeploys, and the console preflight treats a" >&2
+  echo "         DEPLOYED/ACTIVATED (never started) app as a resumable retry rather than a" >&2
+  echo "         collision. The second attempt finds the layers cached and is much faster." >&2
   exit 1
 }
 start_out="$(printf 'app-hosting start appid %s\n' "$APPID" | RUN 2>&1 || true)"
 printf '%s\n' "$start_out" | grep -E 'Starting|Failed to start|%IOX|%APP' || true
-wait_state RUNNING 90 || {
-  echo "  ERROR: app start did not reach RUNNING within 90 seconds." >&2
+wait_state RUNNING "$START_TIMEOUT" || {
+  echo "  ERROR: app start did not reach RUNNING within $START_TIMEOUT seconds." >&2
+  echo "         Last observed state: ${LAST_APP_STATE:-none reported}" >&2
+  echo "         Full IOS response to 'app-hosting start appid $APPID':" >&2
+  printf '%s\n' "$start_out" >&2
   exit 1
 }
 

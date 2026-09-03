@@ -140,11 +140,11 @@ there.
 ### Confirming it worked
 
 Assignment only gates staging, not presence: an unassigned device still
-heartbeats so it registers in `devices.json`, the Swarm Map, and telemetry
-posture. The agent's first successful heartbeat is therefore the signal that
-installation succeeded — that is what makes a device appear in the Console
-device table and Swarm Map (see [Web Console](console.md)). Nothing before
-that point is visible outside device-side logs.
+heartbeats so it registers in the fleet's heartbeat store, the Swarm Map,
+and telemetry posture. The agent's first successful heartbeat is therefore
+the signal that installation succeeded — that is what makes a device appear
+in the Console device table and Swarm Map (see [Web Console](console.md)).
+Nothing before that point is visible outside device-side logs.
 
 Immediately after first boot, aria2c may still be running with the empty RPC
 secret deliberately shipped by the installer while the agent has just fetched
@@ -183,7 +183,37 @@ stopped is sent TERM, then KILL after five seconds, reaped, and relaunched
 within a tick — the earlier `pkill`-based loop could not replace a daemon
 that ignored TERM, and its relaunch failed to bind the RPC port every tick
 while the log claimed success. The same path runs on container stop, so an
-interrupted download keeps its `.aria2` checkpoint for resume.
+interrupted download keeps its `.aria2` checkpoint for resume, and the
+launchers pass `--check-integrity` so that a resume re-hashes the bytes that
+checkpoint claims are already on flash: a piece corrupted in place — bit-rot,
+a torn write during a power loss — is dropped and re-fetched instead of being
+carried into a "complete" image with the wrong SHA-256. It costs nothing on
+the other paths. A fresh download has nothing on disk to read, and a completed
+file being re-added to seed is skipped by `--bt-seed-unverified`, so a device
+seeding its staged images does not re-hash them at launch.
+
+### Failure mode: a busy aria2c read as a dead one
+
+The health probe above has to answer two different questions, and for a while
+it conflated them into one three-second request. An aria2c built without
+c-ares resolves tracker hostnames with a blocking `getaddrinfo()` on its
+event-loop thread, so a single announce against a slow or unresponsive
+resolver freezes the whole daemon — RPC replies included — for as long as the
+resolver takes (measured at five seconds against a blackholed forwarder).
+Every such stall that overlapped a supervisor tick read as "dead", and a
+perfectly healthy daemon was killed and relaunched, losing its in-flight
+download.
+
+The probe now separates the two questions. *Is anything bound to the RPC
+port?* is decided by the connection: on loopback a daemon that is gone refuses
+it instantly, and that is still a verdict — the relaunch stays immediate, as
+the 2026-08-20 incident requires. *Did it answer?* is bounded well above the
+worst resolver stall, and a late answer is treated as a suspicion rather than
+a verdict: a second probe has to fail too before anything is killed. A stalled
+daemon passes that second probe once the resolver gives up; a wedged one does
+not. The documented deployment (`IRIS_HOST_IP` as an IP literal) never
+resolves a tracker hostname at all, so this only bites a deployment whose
+announce URL carries a name.
 
 ## Agent loop
 

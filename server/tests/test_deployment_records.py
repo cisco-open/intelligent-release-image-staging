@@ -287,7 +287,7 @@ def test_an_applying_record_authorizes_teardown(tmp_path):
     never read, and never would be: the device could not be undeployed (no
     readable record), could not be adopted (routers never can) and could not be
     re-onboarded (preflight refuses the live Guest Shell). That is exactly how
-    100.90.168.116 was stranded in the lab.
+    192.0.2.116 was stranded in the lab.
     """
     store = deployment_records.DeploymentRecordStore(str(tmp_path))
     store.create(_record(record_id="r-applying", device_id="dev-1"))

@@ -50,7 +50,9 @@ mutates the running/booted software state of a device.
 
 The seed-server Dockerfile uses the repository root as its build context so the
 image can carry the device installers and console onboarding helper. Build it
-directly with `docker build --platform linux/amd64 -f server/Dockerfile .`.
+directly with `docker build --pull --platform linux/amd64 -f server/Dockerfile .`.
+Keep the `--pull`: the base is a floating tag, so a build without it starts
+from whatever base image the host happens to have cached.
 
 ### Running a dev checkout beside a live deployment
 

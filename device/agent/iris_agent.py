@@ -386,6 +386,30 @@ def _send_pull_report(cfg, deps, state, img_id, request_id, now):
     return _send_report(cfg, deps, state, img_id, frozen)
 
 
+def _arm_terminal_report(state, img_id, tele, event, drop_frozen):
+    """Arm ONE terminal v2 report for this image and record WHICH TRANSFER it
+    speaks for.
+
+    report_transfer_id is the whole of the bookkeeping: the server matches a
+    report to a plan by transfer_id alone, so "the last terminal report was
+    armed under id X" is the only fact that can answer "does the server have
+    completion evidence for the transfer this image is on RIGHT NOW". It is
+    read back in exactly one place — the identity branch below — and it is
+    carried across a plan boundary with the frozen body it describes.
+
+    `drop_frozen` discards an armed-but-unsent payload so the report re-freezes
+    under the event/id being armed now. It is False for the seeding-only arm,
+    which never overwrites a body already frozen for this transfer."""
+    tele["event"] = event
+    tele["report_pending"] = True
+    tele["report_attempts"] = 0
+    tele["report_next_ts"] = 0.0
+    tele["report_transfer_id"] = telemetry_report.ensure_transfer_id(
+        state, img_id)
+    if drop_frozen:
+        tele.pop("frozen_report", None)
+
+
 def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now,
                     peers=None):
     """Per-tick telemetry glue (issue #13). phase is which run_once path is
@@ -468,18 +492,47 @@ def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now,
         # cleared on a later tick).
         if phase == "copied" and st.get("copied") \
                 and tele.get("event") != "staging-complete":
-            tele["event"] = "staging-complete"
-            tele["report_pending"] = True
-            tele["report_attempts"] = 0
-            tele["report_next_ts"] = 0.0
             # Discard any armed-but-unsent seeding-only frozen payload so the
             # report re-freezes with the upgraded staging-complete event/id.
-            tele.pop("frozen_report", None)
+            _arm_terminal_report(state, img_id, tele, "staging-complete",
+                                 drop_frozen=True)
         elif phase == "seeding-only" and not tele.get("event"):
-            tele["event"] = "seeding-only"
-            tele["report_pending"] = True
-            tele["report_attempts"] = 0
-            tele["report_next_ts"] = 0.0
+            _arm_terminal_report(state, img_id, tele, "seeding-only",
+                                 drop_frozen=False)
+        else:
+            # AN ALREADY-STAGED IMAGE ATTESTS ITSELF ONCE UNDER A NEW TRANSFER
+            # IDENTITY (board #30). The two arms above are the only ones that
+            # ever fire, and both are reachable only from the download path's
+            # completion tick. An image that is ALREADY done AND copied when a
+            # new identity lands on it takes the steady-state short-circuit
+            # instead, so the server was left holding a plan it could never
+            # promote: no report anywhere names that transfer, while the bytes
+            # it is waiting for sit finished on the device.
+            #
+            # The trigger is a MEASURED difference, not a schedule: a terminal
+            # report was armed under one id and the image is now on another.
+            # That is why it cannot stampede. An absent report_transfer_id
+            # (every state file written before this key existed) is read as
+            # "already reported", the conservative answer — so the first tick
+            # after an agent upgrade arms nothing for a steady device, and the
+            # only devices that arm here are the ones whose identity genuinely
+            # changed under an already-staged image. Even those send one small
+            # POST, jittered, never a hash.
+            #
+            # A report still PENDING is left strictly alone: its frozen body is
+            # a finished statement about whichever transfer it names, and
+            # re-arming would destroy it. Once it is delivered this branch is
+            # reached again on a later tick and the new identity gets its own.
+            tid = telemetry_report.ensure_transfer_id(state, img_id)
+            reported = tele.get("report_transfer_id")
+            if (st.get("done") and st.get("copied")
+                    and not tele.get("report_pending")
+                    and reported is not None and reported != tid):
+                _arm_terminal_report(state, img_id, tele, "staging-complete",
+                                     drop_frozen=True)
+                deps.emit("TELEMETRY",
+                          "%s re-attesting staged image under transfer %s"
+                          % (img_id, tid))
         # GUI pull: fresh report THIS tick, independent of the pending
         # report's backoff. On a steady tick the pull re-sends the COMPLETED
         # transfer's observed peer set FROZEN — deliberately NO fresh sample
@@ -1263,10 +1316,23 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
     # plan_id is stored and NEVER echoed back: the server owns the
     # transfer_id -> plan_id mapping, so no report or heartbeat field is added
     # and the ingest whitelist needs no change.
+    #
+    # 'adopted' is the UPGRADE case and is deliberately quiet about work: a
+    # transfer this agent had already named itself (a state file written before
+    # plans existed) is simply being named by the server for the first time. No
+    # boundary was crossed, so nothing is reset and nothing is re-hashed — see
+    # adopt_plan, board #44.
     if isinstance(plan_row, dict):
-        if telemetry_report.adopt_plan(state, img_id, plan_row.get("plan_id"),
-                                       plan_row.get("transfer_id")) == "new":
+        adoption = telemetry_report.adopt_plan(
+            state, img_id, plan_row.get("plan_id"),
+            plan_row.get("transfer_id"))
+        if adoption == "new":
             deps.emit("REPLAN", "%s adopted plan %s"
+                      % (img_id, plan_row.get("plan_id")))
+        elif adoption == "adopted":
+            deps.emit("PLAN-ADOPTED",
+                      "%s now named by plan %s; the transfer already in "
+                      "progress keeps its measurements (nothing re-verified)"
                       % (img_id, plan_row.get("plan_id")))
 
     # steady state: image done + copied -> just heartbeat. Do NOT re-hash the
@@ -1414,6 +1480,23 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
         # copy that is missing or the wrong size.
         done_st["done"] = staged_ok       # keep 'done' only for a root-only loss
         done_st["copied"] = bool(root_ok and content_ok)
+        # DROP THE VERIFY VERDICT WITH THE BYTES IT DESCRIBED (board #28).
+        # content_sha256_state is "this transfer hashed THESE bytes and they
+        # matched". Reaching this line means the record's own cheap self-check
+        # just failed — the staged file is gone, the catalog content moved
+        # under it, or the root copy vanished — so the verdict is no longer
+        # backed by anything this tick can see, and the re-acquisition below
+        # deliberately KEEPS the image id and its stored transfer_id (a
+        # changed-content / local-loss boundary reuses it). Left in the bag it
+        # is read verbatim into every report built while the replacement is
+        # still downloading, attesting content that is not on the device.
+        #
+        # Nothing measured is lost and nothing extra is hashed: when the staged
+        # file really is complete, the download path a few lines below hashes
+        # it on THIS SAME TICK and records a real verdict again; when it is
+        # not, there is nothing to hash and absence — read back as
+        # 'not_checked' — is the honest answer.
+        (done_st.get("tele") or {}).pop("content_sha256_state", None)
 
     # Legacy bookkeeping: the old agent's one-image world had a single
     # top-level "current image" pointer, and readers of the state file (plus
@@ -1726,6 +1809,14 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
         # Durability follows the report; re-derived idempotently after a crash.
         state.setdefault(img_id, {}).setdefault("tele", {})[
             "content_sha256_state"] = "mismatch"
+        # ...and lower 'done' with it (board #28). 'done' means "content
+        # verified against the catalog", and this transfer just proved the
+        # opposite about the only bytes it had — reaching this line at all
+        # means a PREVIOUS cycle's True is still sitting there (the file is
+        # deleted on the next line, so nothing on disk backs it). Left set, the
+        # record reads done=True beside content_sha256_state='mismatch', two
+        # statements about the same content that cannot both be true.
+        state[img_id]["done"] = False
         deps.remove_stage(stage)          # drop the bad file so the next tick re-downloads
         # ...and the torrent it came from. Bytes that hash wrong are exactly
         # what a stale torrent delivers (a same-id republish regenerates it),

@@ -321,6 +321,12 @@ has no other way to clear an agent with no deployment record — it cannot be ad
 its preflight refuses to re-onboard over an already-enabled Guest Shell.
 Recorded in Audit as `undeploy_forced`.
 
+An IOx onboard that failed while the app was activating is also **not** a case
+for Force. It leaves the app installed but never started, which preflight reads
+as a resumable retry: press Onboard again and the second attempt finds the
+package's layers already cached. See
+[First install of a new package version](iox.md#first-install-of-a-new-package-version).
+
 One refusal is **not** a case for Force or for adopt: an Undeploy that answers
 `503` naming an unreadable `deployment_records.json`. The records exist and
 cannot be parsed, so nothing yet knows whether IRIS deployed this device.

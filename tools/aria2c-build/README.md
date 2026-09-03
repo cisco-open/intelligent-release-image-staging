@@ -52,6 +52,24 @@ git -C vendor/aria2-next checkout v2.5.6
 refuses any patch that does not apply cleanly to it, so a build either
 corresponds to the published patches or it fails.
 
+### When a pin has been withdrawn
+
+`Dockerfile` pins the base image by digest and every Alpine package by exact
+version, so a rebuild either resolves the same inputs or fails. It can fail:
+an Alpine release branch indexes only the newest `-rN` of each package, so a
+security bump withdraws the version we pinned and `apk add` refuses the set:
+
+```
+ERROR: unable to select packages:
+  openssl-dev-3.5.8-r0: breaks: world[openssl-dev=3.5.7-r0]
+```
+
+That is the pinning working, not a bug to route around. Bump the withdrawn pin
+to the version the branch now carries — deliberately, in the file, keeping the
+`=version` — and note that the rebuilt binary then links the newer library and
+will not reproduce the shipped bytes. Never replace a pin with a floating
+package name to make the error go away.
+
 **Your binary will not match `tools/aria2c.sha256`,** and that is expected: a
 different toolchain, musl version or flag set produces different bytes. The
 checksum pins the exact artifact IRIS ships, not the recipe. If you adopt a

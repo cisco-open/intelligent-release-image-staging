@@ -19,6 +19,7 @@ import threading
 import time
 
 import auth
+import keyed_state
 import peer_endpoints
 import peer_policy
 import peer_enforcement
@@ -97,6 +98,22 @@ def _make_reconciler(tmp_path, aria, clock=None, active_provider=None,
     return rec, p, audit_calls
 
 
+def _endpoint_principals(path):
+    """The durable endpoint map's rows. It is keyed shards now, so the
+    whole-document view these assertions want is reconstructed here."""
+    return peer_endpoints._state(path).snapshot()
+
+
+def _plant_endpoint_shard(path, key, body):
+    """Write *body* (raw text) as the shard file that holds *key*, standing in
+    for the corrupt/hand-edited whole document these tests used to write."""
+    d = keyed_state.shard_dir(path)
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "%02x.json" % keyed_state.bucket_of(key)),
+              "w") as f:
+        f.write(body)
+
+
 def _quarantine(policy, lkg, device_id, now):
     def mutate(doc):
         doc["assignments"][device_id] = peer_policy.RESERVED_QUARANTINE
@@ -143,8 +160,7 @@ def test_corrupt_endpoints_retain_blocklist_and_report_fail_closed(tmp_path):
                                    "10.0.0.9", 6881, 1000.0)
     rec.run_once()
     assert aria.calls == [["10.0.0.9"]]
-    with open(p["endpoints"], "w") as f:
-        f.write("{ corrupt")
+    _plant_endpoint_shard(p["endpoints"], "device:bad", "{ corrupt")
     status = rec.run_once()
     assert aria.calls == [["10.0.0.9"]]
     assert status["state"] == "fail_closed"
@@ -518,7 +534,7 @@ def test_idle_bare_poll_does_not_run_reconcile(tmp_path):
     # Simulate a converged loop: seed poll keys and a far-future maintenance
     # deadline so only a genuine change would justify running.
     rec._poll_keys = (tracker._stat_key(p["policy"]),
-                      tracker._stat_key(p["endpoints"]))
+                      peer_endpoints.change_key(p["endpoints"]))
     rec._next_maintenance = 1_000_000.0
 
     # Ten consecutive idle bare polls (waked=False) with nothing changed.
@@ -536,7 +552,7 @@ def test_external_file_change_still_runs_on_bare_poll(tmp_path):
     rec, p, _ = _make_reconciler(tmp_path, aria, clock=Clock(1000.0))
     rec.run_once()
     rec._poll_keys = (tracker._stat_key(p["policy"]),
-                      tracker._stat_key(p["endpoints"]))
+                      peer_endpoints.change_key(p["endpoints"]))
     rec._next_maintenance = 1_000_000.0
     # Another process writes a quarantine + endpoint.
     _quarantine(p["policy"], p["lkg"], "bad", 1000.0)
@@ -554,7 +570,7 @@ def test_pending_work_still_runs_on_bare_poll(tmp_path):
                                  pending=pending)
     rec.run_once()
     rec._poll_keys = (tracker._stat_key(p["policy"]),
-                      tracker._stat_key(p["endpoints"]))
+                      peer_endpoints.change_key(p["endpoints"]))
     rec._next_maintenance = 1_000_000.0
     pending.enqueue(_dev("bad"), "10.0.0.9", 6881, 1000.0)
     assert rec._poll_should_run(waked=False) is True
@@ -570,7 +586,7 @@ def test_rpc_recovery_still_runs_on_bare_poll(tmp_path):
                                    "10.0.0.9", 6881, 1000.0)
     rec.run_once()   # RPC down -> unhealthy
     rec._poll_keys = (tracker._stat_key(p["policy"]),
-                      tracker._stat_key(p["endpoints"]))
+                      peer_endpoints.change_key(p["endpoints"]))
     rec._next_maintenance = 1_000_000.0
     # Nothing changed on disk, no wake, but unhealthy RPC -> must still run.
     assert rec._poll_should_run(waked=False) is True
@@ -582,7 +598,7 @@ def test_wake_always_runs_even_when_idle(tmp_path):
     rec, p, _ = _make_reconciler(tmp_path, aria, clock=Clock(1000.0))
     rec.run_once()
     rec._poll_keys = (tracker._stat_key(p["policy"]),
-                      tracker._stat_key(p["endpoints"]))
+                      peer_endpoints.change_key(p["endpoints"]))
     rec._next_maintenance = 1_000_000.0
     assert rec._poll_should_run(waked=True) is True
 
@@ -609,7 +625,7 @@ def test_reached_maintenance_deadline_runs_on_bare_poll(tmp_path):
     rec, p, _ = _make_reconciler(tmp_path, aria, clock=clock)
     rec.run_once()
     rec._poll_keys = (tracker._stat_key(p["policy"]),
-                      tracker._stat_key(p["endpoints"]))
+                      peer_endpoints.change_key(p["endpoints"]))
     # Advance time past the maintenance deadline.
     clock.t = rec._next_maintenance + 1.0
     assert rec._poll_should_run(waked=False) is True
@@ -645,8 +661,7 @@ def test_retry_pending_preserves_original_observed_at(tmp_path):
     clock.t = 1500.0
     rec.run_once()
     assert len(pending) == 0
-    doc = json.loads(open(p["endpoints"]).read())
-    ep = doc["principals"]["device:bad"]["endpoints"][0]
+    ep = _endpoint_principals(p["endpoints"])["device:bad"]["endpoints"][0]
     # observed_at must be the original t0, not the retry pass time (1500.0).
     assert ep["observed_at"] == 1000.0
 
@@ -882,10 +897,9 @@ def test_entry_level_corrupt_endpoint_file_is_fail_closed_not_a_crash(tmp_path):
     for row in ({"port": 6881, "observed_at": 1000.0},
                 {"ipv4": "10.0.0.1", "port": 6881, "observed_at": "now"},
                 {"ipv4": "fe80::1", "port": 6881, "observed_at": 1000.0}):
-        with open(p["endpoints"], "w") as f:
-            json.dump({"schema": 1, "updated_at": 0.0, "principals": {
-                "device:x": {"principal_type": "device", "principal_id": "x",
-                             "updated_at": 0.0, "endpoints": [row]}}}, f)
+        _plant_endpoint_shard(p["endpoints"], "device:x", json.dumps(
+            {"device:x": {"principal_type": "device", "principal_id": "x",
+                          "updated_at": 0.0, "endpoints": [row]}}))
         status = rec.run_once()
         assert status["state"] == "fail_closed"
         assert status["last_error"] == "EndpointStoreError"
@@ -912,8 +926,7 @@ def test_quarantined_device_block_survives_endpoint_ttl(tmp_path):
     assert status["desired_ip_count"] == 1
     assert aria.calls[-1] == ["10.0.0.9"]
     # The permitted device's expired row was pruned; the denied one was kept.
-    with open(p["endpoints"]) as f:
-        assert list(json.load(f)["principals"]) == ["device:bad"]
+    assert list(_endpoint_principals(p["endpoints"])) == ["device:bad"]
 
 
 def test_revoked_device_block_survives_endpoint_ttl(tmp_path):
@@ -962,13 +975,11 @@ def test_maintenance_pass_prunes_expired_rows_but_wake_pass_does_not(tmp_path):
     clock.t = 1000.0 + peer_endpoints.endpoint_ttl() + 1
     # Wake-driven pass (deadline still in the future): read only.
     rec._next_maintenance = clock.t + 30
-    before = os.stat(p["endpoints"]).st_mtime_ns
+    before = keyed_state.change_key(p["endpoints"])
     rec.run_once()
-    assert os.stat(p["endpoints"]).st_mtime_ns == before
-    with open(p["endpoints"]) as f:
-        assert "device:a" in json.load(f)["principals"]
-    # Maintenance-driven pass: the expired row leaves the file.
+    assert keyed_state.change_key(p["endpoints"]) == before
+    assert "device:a" in _endpoint_principals(p["endpoints"])
+    # Maintenance-driven pass: the expired row leaves the store.
     rec._next_maintenance = clock.t - 1
     rec.run_once()
-    with open(p["endpoints"]) as f:
-        assert json.load(f)["principals"] == {}
+    assert _endpoint_principals(p["endpoints"]) == {}

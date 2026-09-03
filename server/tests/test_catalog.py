@@ -14,6 +14,7 @@ import time
 import pytest
 
 import catalog
+import keyed_state
 import secrets_store
 
 
@@ -58,10 +59,12 @@ def _store_with_images(tmp_path, ids):
 
 
 def _write_policy_json(store, rows):
-    """Write *rows* (device_id -> raw policy record) straight to
-    policy.json, bypassing set_policy -- stands in for a row written by a
-    previous release."""
-    catalog._atomic_write_json(store.policy_path, rows)
+    """Write *rows* (device_id -> raw policy record) straight into the keyed
+    policy store, bypassing set_policy -- stands in for a row written by a
+    previous release. Policy is keyed per device now, so this writes rows,
+    not a whole-fleet document."""
+    for device_id, row in rows.items():
+        store._policies.put(device_id, row)
 
 
 # ---------------------------------------------------------------------------
@@ -269,17 +272,17 @@ def test_heartbeat_stores_target_fs(tmp_path):
 def test_route_post_records_model_and_source_ip(tmp_path):
     """A heartbeat over the real HTTP path (exercising _guard's device-bound
     auth) records the device-supplied model and the source IP."""
-    srv, port = _serve(tmp_path, "tok", device_id="100.92.9.3")
+    srv, port = _serve(tmp_path, "tok", device_id="203.0.113.3")
     try:
         status, _, _ = _req(
-            port, "POST", "/v1/devices/100.92.9.3/heartbeat", token="tok",
+            port, "POST", "/v1/devices/203.0.113.3/heartbeat", token="tok",
             body=json.dumps({"current_image_id": "img1", "free_flash_bytes": 9,
                              "version": "26.01.01",
                              "model": "C9300-48UXM"}))
         assert status == 200
     finally:
         srv.shutdown()
-    rec = catalog.CatalogStore(str(tmp_path)).get_device("100.92.9.3")
+    rec = catalog.CatalogStore(str(tmp_path)).get_device("203.0.113.3")
     assert rec["model"] == "C9300-48UXM"
     # swarm_ip is the real connection's source address (127.0.0.1 in-test),
     # captured by the handler, not a value the test fabricated past the guard.
@@ -1751,6 +1754,91 @@ def test_record_telemetry_ring_keeps_newest_five(tmp_path):
     assert s.get_telemetry("ghost") == []
 
 
+def test_a_verified_terminal_report_is_attested_past_ring_eviction(tmp_path):
+    """The ring is five deep PER DEVICE, shared by every image assigned to it
+    and every report kind, and the tracker reads it at most once per sample
+    pass. A device finishing several images inside one agent tick pushes the
+    earliest terminal report out before any pass sees it, and the plan it
+    attested then has no derivable checksum precondition anywhere: it sits at
+    `planned` and never emits seeding_started.
+
+    The fact is therefore recorded at INGEST into a durable per-device ledger
+    keyed by transfer, which outlives the ring by design.
+    """
+    s = catalog.CatalogStore(str(tmp_path))
+    first = _v2(report_id="a" * 32, transfer_id="1" * 32, image_id="img-a")
+    s.record_telemetry("dev-1", first)
+    for n in range(6):
+        s.record_telemetry("dev-1", _v2(report_id="%032x" % n,
+                                        transfer_id="%032x" % (n + 100),
+                                        image_id="img-%d" % n))
+
+    ring = s.get_telemetry("dev-1")
+    assert len(ring) == catalog.CatalogStore.TELEMETRY_RING
+    assert not any(r["transfer_id"] == "1" * 32 for r in ring)   # evicted
+
+    rows = s.get_transfer_attestations()["dev-1"]
+    kept = [r for r in rows if r["transfer_id"] == "1" * 32]
+    assert len(kept) == 1
+    assert kept[0]["image_id"] == "img-a"
+    assert kept[0]["observed_at"] == 90.0            # window.end, device clock
+    assert kept[0]["report_created_at"] == 100.0     # device clock
+    assert kept[0]["received_at"] > 0                # server ingest clock
+    # Read back through a second store object: it is on disk, not in memory.
+    assert catalog.CatalogStore(str(tmp_path)).get_transfer_attestations() \
+        == s.get_transfer_attestations()
+
+
+def test_an_attestation_is_first_write_wins_and_bounded_per_device(tmp_path):
+    """The tracker latches the EARLIEST attesting instant, so a retry, or the
+    `staging-complete` upgrade of an already-attested `seeding-only`
+    transfer, must not move the recorded value. One slot per transfer, bounded
+    FIFO like the report-id ledger beside it."""
+    s = catalog.CatalogStore(str(tmp_path))
+    s.record_telemetry("dev-1", _v2(report_id="a" * 32, transfer_id="1" * 32,
+                                    event="seeding-only"))
+    first = s.get_transfer_attestations()["dev-1"][0]["received_at"]
+    s.record_telemetry("dev-1", _v2(report_id="b" * 32, transfer_id="1" * 32,
+                                    event="staging-complete"))
+    rows = s.get_transfer_attestations()["dev-1"]
+    assert len(rows) == 1
+    assert rows[0]["received_at"] == first
+
+    cap = catalog.CatalogStore.ATTESTATIONS
+    for n in range(cap + 3):
+        s.record_telemetry("dev-1", _v2(report_id="%032x" % (n + 500),
+                                        transfer_id="%032x" % (n + 500)))
+    rows = s.get_transfer_attestations()["dev-1"]
+    assert len(rows) == cap
+    assert not any(r["transfer_id"] == "1" * 32 for r in rows)   # oldest first
+
+
+def test_a_report_that_attests_nothing_leaves_no_attestation(tmp_path):
+    """Only a terminal report with a VERIFIED content sha256 and a well-formed
+    transfer id attests. A pull snapshot is not a completion claim, a mismatch
+    is not a verification, and a v1 report carries no transfer id to bind."""
+    s = catalog.CatalogStore(str(tmp_path))
+    s.record_telemetry("dev-1", _v2(report_id="a" * 32, event="pull",
+                                    report_request_id="c" * 32))
+    s.record_telemetry("dev-1", _v2(report_id="b" * 32,
+                                    content_sha256={"state": "mismatch"}))
+    s.record_telemetry("dev-1", _v2(report_id="c" * 32, transfer_id="short"))
+    s.record_telemetry("dev-1", _report())          # v1: no transfer id
+    assert s.get_transfer_attestations() == {}
+
+
+def test_purge_device_takes_the_attestations_with_it(tmp_path):
+    """A device deleted and added back must not inherit an attestation for a
+    transfer that happened on the old one -- the same rule that empties every
+    other per-device store."""
+    s = catalog.CatalogStore(str(tmp_path))
+    s.record_telemetry("dev-1", _v2(report_id="a" * 32))
+    s.record_telemetry("dev-2", _v2(report_id="b" * 32))
+    assert set(s.get_transfer_attestations()) == {"dev-1", "dev-2"}
+    assert s.purge_device("dev-1") is True
+    assert set(s.get_transfer_attestations()) == {"dev-2"}
+
+
 def test_concurrent_record_telemetry_loses_no_reports(tmp_path):
     """N threads recording one report each for a DIFFERENT device against one
     CatalogStore must leave every report on disk and telemetry.json valid —
@@ -1794,9 +1882,8 @@ def test_pull_directive_lifecycle_with_ttl(tmp_path):
     assert s.request_report("dev-1", now + 10) is False
     # TTL expiry: at now + PULL_TTL the directive is expired...
     assert s.pending_report("dev-1", now + 600) is None
-    # ...and was lazily deleted from pull_requests.json
-    with open(str(tmp_path / "pull_requests.json")) as f:
-        assert "dev-1" not in json.load(f)
+    # ...and was lazily deleted from the device's keyed pull row
+    assert s._pulls.get("dev-1") is None
     # a new request after expiry succeeds
     assert s.request_report("dev-1", now + 600) is True
     # explicit clear
@@ -2319,14 +2406,14 @@ def test_peer_transfer_records_total_includes_the_origin_and_says_so():
     telemetry.classify_peer_transfer_records's job, off the authenticated
     service:seeder principal -- the sanitizer stores the measurement as made
     and adds no attribution of its own."""
-    rows = [{"ip": "100.90.168.20", "session_bytes_from_peer": 7110,
+    rows = [{"ip": "192.0.2.10", "session_bytes_from_peer": 7110,
              "session_bytes_to_peer": 0, "has_complete_file": True},
             {"ip": "10.0.0.7", "session_bytes_from_peer": 2890,
              "session_bytes_to_peer": 0, "has_complete_file": True}]
     block = catalog._sanitize_report(
         _v2(peer_transfer_records=_transfer_records(rows=rows)))["peer_transfer_records"]
     assert block["bytes_from_all_senders_total"] == 10000
-    assert {r["ip"] for r in block["rows"]} == {"100.90.168.20", "10.0.0.7"}
+    assert {r["ip"] for r in block["rows"]} == {"192.0.2.10", "10.0.0.7"}
     # has_complete_file is aria2's isSeeder(): "holds the whole file", true for
     # both rows here. It never marks the origin, and nothing stored claims it
     # does -- no origin/peer key is invented at ingest.
@@ -2903,29 +2990,38 @@ def test_a_legacy_row_with_no_plans_key_reads_back_and_gains_plans_on_the_next_a
 
 # --- IRIS-02-001: a corrupt/unreadable state file fails closed -------------
 
-def test_corrupt_policy_json_is_not_read_as_empty_and_is_never_rewritten(tmp_path):
-    """Reviewer probe P1: a trailing comma in policy.json used to make every
-    device's policy read as the empty set (a fleet-wide unassign the agent
-    acts on) and the next set_policy rewrote the file with a single row,
-    losing every other assignment and its plan ids for good."""
+def test_corrupt_policy_state_is_not_read_as_empty_and_is_never_rewritten(tmp_path):
+    """Reviewer probe P1: a trailing comma in the policy state used to make
+    every device's policy read as the empty set (a fleet-wide unassign the
+    agent acts on) and the next set_policy rewrote the file with a single row,
+    losing every other assignment and its plan ids for good.
+
+    Policy is keyed per device now, so the corruption is injected into the
+    shard that actually holds dev-2 -- and the blast radius is narrower on
+    purpose: a device in another shard keeps working, while every read or
+    write that must touch the damaged shard still fails closed and never
+    overwrites it."""
     s = _store_with_images(tmp_path, ["img-a", "img-b"])
     s.set_policy("dev-1", approved_image_ids=["img-a"])
     s.set_policy("dev-2", approved_image_ids=["img-b"])
-    good = open(s.policy_path).read()
-    with open(s.policy_path, "w") as f:
+    shard = os.path.join(keyed_state.shard_dir(s.policy_path),
+                         "%02x.json" % keyed_state.bucket_of("dev-2"))
+    good = open(shard).read()
+    with open(shard, "w") as f:
         f.write(good.rstrip().rstrip("}") + ",}\n")
-    corrupt = open(s.policy_path).read()
+    corrupt = open(shard).read()
     for call in (lambda: s.get_policy("dev-2"),
                  lambda: s.device_policy_view("dev-2"),
                  lambda: s.list_policies(),
-                 lambda: s.set_policy("dev-1", approved_image_ids=["img-a"])):
+                 lambda: s.set_policy("dev-2", approved_image_ids=["img-b"])):
         with pytest.raises(catalog.StateFileError):
             call()
-    assert open(s.policy_path).read() == corrupt      # untouched
+    assert open(shard).read() == corrupt      # untouched
     # Repairing the file restores everything that was there.
-    with open(s.policy_path, "w") as f:
+    with open(shard, "w") as f:
         f.write(good)
     assert s.get_policy("dev-2")["approved_image_ids"] == ["img-b"]
+    assert s.get_policy("dev-1")["approved_image_ids"] == ["img-a"]
 
 
 def test_missing_state_file_is_still_the_empty_store(tmp_path):
@@ -3055,7 +3151,8 @@ def test_heartbeat_fields_are_typed_and_capped(tmp_path):
     assert rec["telemetry_enabled"] is None
     assert rec["staged_image_ids"] is None       # not an image id shape
     assert rec["errored_image_ids"] is None      # rejected wholesale
-    assert "NaN" not in open(os.path.join(str(tmp_path), "devices.json")).read()
+    assert "NaN" not in json.dumps(
+        keyed_state.read_all(os.path.join(str(tmp_path), "devices.json")))
 
 
 def test_heartbeat_well_typed_fields_round_trip_unchanged(tmp_path):

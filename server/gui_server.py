@@ -286,6 +286,87 @@ def _default_swarm_fetch():
         return r.read()
 
 
+# ---- paginated read projections (fleet + swarm) ---------------------------
+# The console polls these while a view is visible, and at fleet scale the
+# whole-snapshot response is most of what the poll costs: 10,000 merged
+# device rows are ~6 MiB of JSON to encode, ship and re-render every 10 s.
+# Paging is OPT-IN -- no limit/offset means the caller gets the complete
+# projection it has always got, because a console that quietly rendered the
+# first page of a fleet as if it were the fleet is a worse failure than a
+# slow page.  Every response carries the totals a caller needs to know which
+# of the two it is holding.
+MAX_PAGE_LIMIT = 1000
+
+
+def _page_params(qs):
+    """(limit, offset) from a parsed query string; raises ValueError with an
+    operator-readable message on anything that is not a usable page.
+
+    Absent limit means "no page, the whole projection"; a limit above
+    MAX_PAGE_LIMIT is clamped (and echoed back, so the caller can see the
+    page it actually got).  A malformed or non-positive value is REJECTED
+    rather than defaulted: quietly serving a different page than the one
+    asked for is how a client ends up believing it has walked a fleet it
+    has not."""
+    def _one(name):
+        raw = qs.get(name)
+        return raw[0] if raw else None
+
+    limit = _one("limit")
+    if limit is not None:
+        try:
+            limit = int(limit)
+        except ValueError:
+            raise ValueError("limit must be an integer")
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        limit = min(limit, MAX_PAGE_LIMIT)
+
+    offset = _one("offset")
+    if offset is None:
+        offset = 0
+    else:
+        try:
+            offset = int(offset)
+        except ValueError:
+            raise ValueError("offset must be an integer")
+        if offset < 0:
+            raise ValueError("offset must not be negative")
+    return limit, offset
+
+
+def _swarm_page(body, limit, offset):
+    """A page of the hub's swarm snapshot, flattening peers across images in
+    image order.  The image entries themselves are all preserved (the map's
+    image selector is built from them); only their peer lists are sliced.
+
+    A payload that is not the documented {"images": [{"peers": [...]}]}
+    shape cannot be paged, and is reported as such rather than passed
+    through whole -- a caller that asked for 100 peers must never be handed
+    all of them believing it got a page."""
+    try:
+        data = json.loads(body)
+    except (TypeError, ValueError):
+        return {"peers": [], "error": "swarm data unavailable"}
+    if not isinstance(data, dict) or not isinstance(data.get("images"), list):
+        return {"peers": [], "error": "swarm data not paginatable"}
+
+    end = None if limit is None else offset + limit
+    images, seen = [], 0
+    for image in data["images"]:
+        if not isinstance(image, dict):
+            continue
+        peers = image.get("peers")
+        peers = peers if isinstance(peers, list) else []
+        lo = max(0, offset - seen)
+        hi = len(peers) if end is None else max(0, min(len(peers), end - seen))
+        images.append(dict(image, peers=peers[lo:hi] if lo < hi else []))
+        seen += len(peers)
+
+    return dict(data, images=images, peers_total=seen,
+                peers_offset=offset, peers_limit=limit)
+
+
 # ---- persisted deploy logs (written by OnboardService._persist_log) -------
 # Filename: <finished_at>-<sanitized device>-<action>-<jobid>.log; first line
 # is a "# job=... device=<raw id> ..." header. The header is authoritative
@@ -1369,10 +1450,23 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             if path == "/api/devices":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
+                qs = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                try:
+                    limit, offset = _page_params(qs)
+                except ValueError as exc:
+                    self._json(400, {"error": str(exc)}); return
+                q = (qs.get("q") or [None])[0]
+                if q is not None:
+                    q = q.strip().lower() or None
+                rows, total, revision = self._device_page(limit, offset, q)
                 # "now" rides along so last_seen freshness is computed
-                # server-clock-to-server-clock in the UI (skewed lab VMs)
-                self._json(200, {"devices": self._device_view(),
-                                  "now": int(time.time())}); return
+                # server-clock-to-server-clock in the UI (skewed lab VMs).
+                # total/revision ride along on EVERY response, paged or not:
+                # a client that never pages still needs to be able to tell
+                # that what it holds is the whole fleet.
+                self._json(200, {"devices": rows, "now": int(time.time()),
+                                 "total": total, "offset": offset,
+                                 "limit": limit, "revision": revision}); return
             if path == "/api/install-options":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
@@ -1548,9 +1642,20 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             if path == "/api/swarm":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
+                qs = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                try:
+                    limit, offset = _page_params(qs)
+                except ValueError as exc:
+                    self._json(400, {"error": str(exc)}); return
                 try:
                     body = (swarm_fetch or _default_swarm_fetch)()
-                    self._send(200, "application/json", body)
+                    if limit is None and not offset:
+                        # Unpaged: byte-for-byte passthrough of the hub's own
+                        # JSON, exactly as before — the swarm map filters and
+                        # sorts the whole participant set client-side.
+                        self._send(200, "application/json", body)
+                    else:
+                        self._json(200, _swarm_page(body, limit, offset))
                 except Exception:
                     self._json(200, {"peers": [], "error": "swarm data unavailable"})
                 return
@@ -1643,7 +1748,33 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             self._serve_static(path)
 
         def _device_view(self):
-            devs = fleet.list_devices() if fleet else []
+            """The WHOLE merged fleet, in store order — what /api/overview's
+            aggregates and the unpaginated /api/devices are defined by."""
+            return self._device_page()[0]
+
+        def _device_page(self, limit=None, offset=0, q=None):
+            """(rows, total, revision) for the merged device projection.
+
+            *limit*/*offset* page it and *q* filters it (see _row_matches_q);
+            with all three at their defaults this is the full fleet in store
+            order, byte for byte what the console has always received.
+
+            The page and the revision stamping it come from ONE fleet read
+            (FleetStore.snapshot), so a client walking pages can tell a
+            coherent walk from one that raced a fleet edit by comparing the
+            revision it gets back — the pages themselves carry no cursor,
+            and the actions built on them are keyed by device_id, never by
+            row position.
+
+            Paging sorts by device_id first: store order is insertion order,
+            which is stable to read but says nothing an operator could use to
+            reason about "the next 200". Sorting is deliberately NOT applied
+            to the unpaginated call, whose order is long-established.
+            """
+            revision, devs = fleet.snapshot() if fleet else (0, [])
+            paging = limit is not None or offset or q is not None
+            if paging:
+                devs.sort(key=lambda d: str(d.get("device_id") or ""))
             hb = {d.get("device_id"): d for d in (catalog.list_devices()
                                                   if catalog else [])}
             # each device's latest onboard/undeploy job, so the UI can show
@@ -1653,43 +1784,78 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             # one policy.json read for the whole table — get_policy() re-parses
             # the file per call, which multiplies badly on the polled endpoints
             policies = catalog.list_policies() if catalog else {}
-            out = []
+
+            if q is None:
+                # Nothing to count that the inventory does not already know,
+                # so merge ONLY the rows this page returns: at fleet scale
+                # the merge and the JSON encoding of the rows nobody asked
+                # for are most of what the response costs.
+                total = len(devs)
+                window = devs[offset:] if limit is None else \
+                    devs[offset:offset + limit]
+                return ([self._merge_device_row(d, policies, hb, jobs)
+                         for d in window], total, revision)
+
+            # A filter reaches merged fields (heartbeat_model), so every row
+            # is merged to be counted; only the window is retained.
+            rows, total = [], 0
             for d in devs:
-                did = d.get("device_id")
-                pol = policies.get(did, {})
-                h = hb.get(did, {})
-                row = dict(d)
-                row["assigned_image_id"] = pol.get("approved_image_id")
-                row["assigned_image_ids"] = pol.get("approved_image_ids")
-                row["last_seen"] = h.get("last_seen")
-                row["stage_state"] = h.get("stage_state")
-                row["stage_error"] = h.get("stage_error")
-                row["current_image_id"] = h.get("current_image_id")
-                # the ordered set of images the agent reports as staged
-                # (Task 3); absent from an agent that predates the field, in
-                # which case rollout falls back to current_image_id/stage_state
-                row["staged_image_ids"] = h.get("staged_image_ids")
-                # which assigned images hit a terminal per-image failure on
-                # the agent's last tick; absent from an agent that predates
-                # the field, in which case staging falls back to guessing
-                # from the single aggregate stage_state (_row_is_staging)
-                row["errored_image_ids"] = h.get("errored_image_ids")
-                row["heartbeat_model"] = h.get("model")
-                # the "copying to <fs>" badge needs the heartbeat's target FS
-                row["target_fs"] = h.get("target_fs")
-                # telemetry posture as the DEVICE reports it, not as the last
-                # onboard requested: True/False from the agent, None when the
-                # agent predates the flag (tri-state — unknown is not "off").
-                row["telemetry_enabled"] = h.get("telemetry_enabled")
-                row["telemetry_stream_enabled"] = h.get(
-                    "telemetry_stream_enabled")
-                j = jobs.get(did)
-                if j:
-                    row["onboard_action"] = j["action"]
-                    row["onboard_state"] = j["state"]
-                    row["onboard_finished_at"] = j["finished_at"]
-                out.append(row)
-            return out
+                row = self._merge_device_row(d, policies, hb, jobs)
+                if not self._row_matches_q(row, q):
+                    continue
+                total += 1
+                if total > offset and (limit is None or len(rows) < limit):
+                    rows.append(row)
+            return rows, total, revision
+
+        @staticmethod
+        def _row_matches_q(row, q):
+            """Case-insensitive substring over the same four fields the
+            console's own search box covers (app.js deviceMatchesFilters), so
+            a server-side filter and the client-side one cannot disagree
+            about what "matches" means."""
+            hay = " ".join(str(row.get(k) or "") for k in
+                           ("device_id", "device_ip", "model",
+                            "heartbeat_model")).lower()
+            return q in hay
+
+        @staticmethod
+        def _merge_device_row(d, policies, hb, jobs):
+            """One inventory record joined with policy, heartbeat and job."""
+            did = d.get("device_id")
+            pol = policies.get(did, {})
+            h = hb.get(did, {})
+            row = dict(d)
+            row["assigned_image_id"] = pol.get("approved_image_id")
+            row["assigned_image_ids"] = pol.get("approved_image_ids")
+            row["last_seen"] = h.get("last_seen")
+            row["stage_state"] = h.get("stage_state")
+            row["stage_error"] = h.get("stage_error")
+            row["current_image_id"] = h.get("current_image_id")
+            # the ordered set of images the agent reports as staged
+            # (Task 3); absent from an agent that predates the field, in
+            # which case rollout falls back to current_image_id/stage_state
+            row["staged_image_ids"] = h.get("staged_image_ids")
+            # which assigned images hit a terminal per-image failure on
+            # the agent's last tick; absent from an agent that predates
+            # the field, in which case staging falls back to guessing
+            # from the single aggregate stage_state (_row_is_staging)
+            row["errored_image_ids"] = h.get("errored_image_ids")
+            row["heartbeat_model"] = h.get("model")
+            # the "copying to <fs>" badge needs the heartbeat's target FS
+            row["target_fs"] = h.get("target_fs")
+            # telemetry posture as the DEVICE reports it, not as the last
+            # onboard requested: True/False from the agent, None when the
+            # agent predates the flag (tri-state — unknown is not "off").
+            row["telemetry_enabled"] = h.get("telemetry_enabled")
+            row["telemetry_stream_enabled"] = h.get(
+                "telemetry_stream_enabled")
+            j = jobs.get(did)
+            if j:
+                row["onboard_action"] = j["action"]
+                row["onboard_state"] = j["state"]
+                row["onboard_finished_at"] = j["finished_at"]
+            return row
 
         @staticmethod
         def _audit_image_names(cat, ids):

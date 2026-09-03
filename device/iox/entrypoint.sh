@@ -200,11 +200,32 @@ start_aria2c() {
   # as to a terminal, for as long as anything is downloading OR seeding, and a
   # staged device seeds indefinitely -- that would flood the app log. The
   # aria2c options themselves are unchanged.
+  # --check-integrity=true is a RESUME guard. Without it aria2 trusts the piece
+  # map recorded in the .aria2 control file, so a completed piece that rotted
+  # on flash (bit-rot, a torn write during a power loss) survives the resume:
+  # the torrent reports complete and the staged image carries the wrong
+  # SHA-256. The agent's whole-image hash still catches that, but only after
+  # the whole remaining transfer, and the repair is then a full re-stage
+  # instead of one 1 MiB piece.
+  #
+  # It sits on the launch line rather than being plumbed per download because
+  # in aria2's own code (RequestGroup.cc, createInitialCommand for BitTorrent)
+  # the launch flag ALREADY costs nothing on the two paths that are not a
+  # resume:
+  #   * nothing on disk yet -- every piece read returns 0 bytes, throws, and
+  #     the piece is marked missing at once; no I/O, no hashing.
+  #   * a COMPLETED file being re-added to seed -- --bt-seed-unverified=true
+  #     above marks every piece done, and aria2 then takes the
+  #     onDownloadFinished branch, skipping validation entirely. A device
+  #     seeding ten staged images does not re-hash them on a relaunch.
+  # So the read-back is paid exactly where the corruption can hide: over the
+  # bytes an interrupted transfer already put on flash.
   "$ARIA2" \
     --enable-rpc=true --rpc-listen-all=false \
     --rpc-listen-port="$RPC_PORT" --rpc-secret="$secret" \
     --enable-dht=false --enable-peer-exchange=false --bt-enable-lpd=false \
     --bt-max-peers="$MAX_PEERS" --bt-seed-unverified=true --seed-ratio=0.0 \
+    --check-integrity=true \
     --max-concurrent-downloads="${IRIS_MAX_CONCURRENT:-100}" \
     "$@" \
     --file-allocation=none --dir="$STAGE_DIR" \
@@ -218,14 +239,66 @@ start_aria2c() {
   echo "IRIS-ENTRYPOINT: aria2c (re)started on :$RPC_PORT (pid $ARIA2_PID)"
 }
 
+# Health-probe bounds, in seconds. They are two different questions and the
+# split is the whole point of this probe:
+#   * --connect-timeout answers "is anything bound to the RPC port". On
+#     loopback that is decided instantly -- a daemon that is gone gets the
+#     connection REFUSED (curl exit 7), a daemon that is merely busy still
+#     owns its listen socket, so the kernel completes the connection for it.
+#   * --max-time bounds the wait for the ANSWER, and must sit well above the
+#     longest stall a HEALTHY aria2c can have. Built without c-ares, aria2c
+#     resolves tracker hostnames with a blocking getaddrinfo() on its
+#     event-loop thread: one announce against a slow or unresponsive resolver
+#     freezes the entire daemon -- RPC replies included -- for as long as the
+#     resolver takes. Measured at 5.03 s (a blackholed forwarder), and the
+#     glibc default of 5 s x 2 attempts is the ceiling to design for.
+RPC_CONNECT_TIMEOUT=2
+RPC_HEALTH_TIMEOUT=10
+
+rpc_probe() {
+  # One probe; the caller reads curl's own exit status (0 answered, 7 nothing
+  # listening, 28 connected but no answer inside the bound, anything else a
+  # transport failure mid-request). Run as a tracked background child and
+  # waited on, for the same reason the tick's sleep is: a POSIX shell defers
+  # traps while a FOREGROUND command runs, and PID 1 must never make the
+  # container wait out a probe before it can act on TERM.
+  curl -s --connect-timeout "$RPC_CONNECT_TIMEOUT" --max-time "$RPC_HEALTH_TIMEOUT" \
+    "http://127.0.0.1:$RPC_PORT/jsonrpc" \
+    -d '{"jsonrpc":"2.0","id":"h","method":"aria2.getVersion","params":["token:'"$1"'"]}' \
+    >/dev/null 2>&1 &
+  _probe_pid=$!
+  _probe_rc=0
+  wait "$_probe_pid" || _probe_rc=$?
+  return "$_probe_rc"
+}
+
 rpc_healthy() {
   # Liveness is not health: an aria2c that is running but not answering RPC
   # blocks its own relaunch, and the agent then fails every tick on
   # ECONNREFUSED without ever heartbeating (field incident 2026-08-20, Guest
   # Shell; this supervisor had the identical condition). Ask the RPC itself.
-  curl -s --max-time 3 "http://127.0.0.1:$RPC_PORT/jsonrpc" \
-    -d '{"jsonrpc":"2.0","id":"h","method":"aria2.getVersion","params":["token:'"$1"'"]}' \
-    >/dev/null 2>&1
+  #
+  # But a SLOW answer is not a dead daemon, and one curl with a 3 s bound
+  # could not tell those apart: any overrun read as "kill it", so a daemon
+  # stalled in getaddrinfo (see the bounds above) was killed and relaunched
+  # while perfectly healthy -- twice in 300 s under one measured DNS stall,
+  # its in-flight download dropped from the daemon each time. Two things
+  # separate busy from dead here:
+  #   * WHERE the probe failed. Connection refused means nothing is listening;
+  #     that is a verdict on its own and must relaunch AT ONCE, because
+  #     waiting there is exactly the 2026-08-20 deadlock. Any other failure
+  #     only says the answer was late, which is a suspicion, not a verdict.
+  #   * A SECOND probe. A resolver stall ends when the resolver gives up, so
+  #     the retry gets through; a genuinely wedged daemon fails it too.
+  _rc=0
+  rpc_probe "$1" || _rc=$?
+  case "$_rc" in
+    0) return 0 ;;
+    7) return 1 ;;
+  esac
+  # Any verdict this function returns is a plain healthy/unhealthy, never
+  # curl's own status: the supervisor loop asks a yes/no question.
+  rpc_probe "$1" || return 1
 }
 
 AGENT_PID=""

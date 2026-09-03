@@ -12,7 +12,7 @@ All tests inject a fake transcript runner -- no real SSH."""
 import cli_ssh
 
 
-# A real raw transcript captured from the IE-3400 (100.90.168.99) over SSH with
+# A real raw transcript captured from the IE-3400 (192.0.2.99) over SSH with
 # `-tt`, from BEFORE the transport stopped sending `enable` unconditionally.
 # The login lands at priv-15 (prompt `3400-1#`), so the enable password line
 # ran as a bogus exec command and emitted a `% Bad IP address ...` noise line
@@ -104,7 +104,7 @@ def test_sshcli_execute_uses_runner_and_extracts():
         captured["script"] = script
         return IE3400_FS_TRANSCRIPT
 
-    cli = cli_ssh.SSHCli(host="100.92.100.253", user="dnac",
+    cli = cli_ssh.SSHCli(host="198.51.100.253", user="dnac",
                          password="pw", enable="en", runner=fake_runner)
     out = cli.execute("show file systems")
     assert out.splitlines()[0] == "File Systems:"
@@ -198,7 +198,7 @@ def test_select_cli_defaults_to_guestshell():
 
 def test_select_cli_container_mode_builds_ssh_transport():
     cfg = {
-        "device_ssh_host": "100.92.100.253",
+        "device_ssh_host": "198.51.100.253",
         "device_ssh_user": "dnac",
         "device_ssh_pass": "REDACTED-PW",
     }
@@ -212,7 +212,7 @@ def test_select_cli_container_mode_builds_ssh_transport():
     # bound to a live SSHCli instance's methods
     assert execute.__self__.__class__ is cli_ssh.SSHCli
     assert configure.__self__ is execute.__self__
-    assert execute.__self__.host == "100.92.100.253"
+    assert execute.__self__.host == "198.51.100.253"
 
 
 def test_select_cli_container_mode_via_conf_key():
@@ -269,11 +269,11 @@ def test_sshcli_put_scps_local_file_to_device():
         seen["local"] = local
         seen["target"] = target
 
-    cli = cli_ssh.SSHCli(host="100.92.100.253", user="dnac",
+    cli = cli_ssh.SSHCli(host="198.51.100.253", user="dnac",
                          password="pw", scp_runner=fake_scp)
     cli.put("/data/iris/x.bin", "sdflash:guest-share/iris/x.bin")
     assert seen["local"] == "/data/iris/x.bin"
-    assert seen["target"] == "dnac@100.92.100.253:sdflash:guest-share/iris/x.bin"
+    assert seen["target"] == "dnac@198.51.100.253:sdflash:guest-share/iris/x.bin"
 
 
 def test_sshcli_put_raises_on_scp_failure():
@@ -312,7 +312,7 @@ def test_hostkey_options_default_is_legacy_no_verify():
 
 def test_hostkey_options_pins_when_known_hosts_exists(tmp_path):
     kh = tmp_path / "known_hosts"
-    kh.write_text("[100.92.100.253]:22 ssh-rsa AAAAB3NzaC1yc2E fake\n")
+    kh.write_text("[198.51.100.253]:22 ssh-rsa AAAAB3NzaC1yc2E fake\n")
     cli = cli_ssh.SSHCli(host="h", user="u", password="p",
                          known_hosts=str(kh))
     assert cli._hostkey_options() == [

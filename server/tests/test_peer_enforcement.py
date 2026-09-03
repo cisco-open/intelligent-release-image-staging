@@ -40,7 +40,7 @@ class TestEnforcedWrite:
             desired_ip_count=3, now=1755743185.0,
             last_operation_exported_revision=7,
             conflicts=[{
-                "ipv4": "100.90.168.20", "reason": "shared_permit_deny",
+                "ipv4": "192.0.2.10", "reason": "shared_permit_deny",
                 "permitted_principal_type": "service",
                 "permitted_principal_id": "seeder",
                 "denied_principal_type": "device",

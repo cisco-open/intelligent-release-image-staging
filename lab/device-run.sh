@@ -39,10 +39,13 @@ DEVICE_ENABLE="${DEVICE_ENABLE:-$DEVICE_PASS}"
 # black-holes instead of failing fast it blocks for ~45 s. Measured 2026-09-01
 # on the lab fleet, identical sessions, no config difference between the boxes:
 #
-#     100.90.168.114   3.06 s clean / 3.19 s with the pair   (+0.13 s)
-#     100.90.170.101   3.41 s clean / 51.79 s with the pair   (+48.4 s)
+#     192.0.2.114     3.06 s clean / 3.19 s with the pair   (+0.13 s)
+#     203.0.113.101   3.41 s clean / 51.79 s with the pair   (+48.4 s)
 #
-# The .168 segment is fast only because something there answers the default
+# (Addresses here and below are RFC 5737 documentation stand-ins for the two
+# lab segments; only the split between them matters.)
+#
+# The first segment is fast only because something there answers the default
 # 255.255.255.255 broadcast; NEITHER box has `no ip domain lookup`, and adding
 # it would only hide this. So the fix is to stop typing the wrong line.
 #

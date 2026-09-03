@@ -1125,10 +1125,10 @@ def test_swarmmap_task26_accessibility_polling_and_empty_states():
 def test_swarm_snapshot_includes_host_under_server_source(monkeypatch):
     # The origin host lives on the canonical `server` source object (spec §10.3):
     # the seeder is the central hub, not a peer node. From IRIS_HOST_IP.
-    monkeypatch.setenv("IRIS_HOST_IP", "100.90.168.20")
+    monkeypatch.setenv("IRIS_HOST_IP", "192.0.2.10")
     hub = telemetry.Telemetry(PeerRegistry())
     snap = hub.swarm_snapshot()
-    assert snap["server"]["host"] == "100.90.168.20"
+    assert snap["server"]["host"] == "192.0.2.10"
     # no legacy top-level flat host / seeder objects
     assert "host" not in snap
     assert "seeder" not in snap
@@ -1177,7 +1177,7 @@ def test_read_reports_garbage_returns_empty(tmp_path):
 
 
 def test_read_reports_parses_valid_ring(tmp_path):
-    data = {"100.92.9.3": [{"ts": 1, "event": "pull", "received_at": 2.0}]}
+    data = {"203.0.113.3": [{"ts": 1, "event": "pull", "received_at": 2.0}]}
     (tmp_path / "telemetry.json").write_text(json.dumps(data))
     assert telemetry._read_reports(str(tmp_path)) == data
 
@@ -1397,10 +1397,10 @@ def test_metrics_text_reports_stored_zero_when_unwired():
 
 
 def test_moved_page_links_to_console(monkeypatch):
-    monkeypatch.setenv("IRIS_HOST_IP", "100.90.168.20")
+    monkeypatch.setenv("IRIS_HOST_IP", "192.0.2.10")
     page = telemetry.moved_page()
     assert isinstance(page, bytes)
-    assert b"https://100.90.168.20:8080/" in page
+    assert b"https://192.0.2.10:8080/" in page
     assert b"intelligent-release-image-staging Console" in page
 
 
@@ -1408,17 +1408,17 @@ def test_moved_page_honors_console_url_override(monkeypatch):
     # Shared hosts may publish the console on a non-default port (e.g. 8480
     # when :8080 is already taken) — IRIS_CONSOLE_URL, when non-empty, wins
     # verbatim over the IRIS_HOST_IP-derived default.
-    monkeypatch.setenv("IRIS_HOST_IP", "100.90.168.20")
-    monkeypatch.setenv("IRIS_CONSOLE_URL", "https://100.90.168.20:8480/")
+    monkeypatch.setenv("IRIS_HOST_IP", "192.0.2.10")
+    monkeypatch.setenv("IRIS_CONSOLE_URL", "https://192.0.2.10:8480/")
     page = telemetry.moved_page()
     assert isinstance(page, bytes)
-    assert b"https://100.90.168.20:8480/" in page
+    assert b"https://192.0.2.10:8480/" in page
     assert b"intelligent-release-image-staging Console" in page
     assert b":8080" not in page
 
 
 def test_metrics_server_serves_moved_page_at_swarmmap_and_root(monkeypatch):
-    monkeypatch.setenv("IRIS_HOST_IP", "100.90.168.20")
+    monkeypatch.setenv("IRIS_HOST_IP", "192.0.2.10")
     srv = telemetry.make_metrics_server("127.0.0.1", 0, lambda: "",
                                         swarm_provider=lambda: {"images": []},
                                         html=telemetry.moved_page)
@@ -1427,7 +1427,7 @@ def test_metrics_server_serves_moved_page_at_swarmmap_and_root(monkeypatch):
         for path in ("/swarmmap", "/"):
             status, body = _get(srv.server_address[1], path)
             assert status == 200, path
-            assert b"https://100.90.168.20:8080/" in body, path
+            assert b"https://192.0.2.10:8080/" in body, path
         # JSON + health surfaces untouched; /metrics still provider-gated
         assert _get(srv.server_address[1], "/swarm")[0] == 200
         assert _get(srv.server_address[1], "/healthz")[0] == 200
@@ -1601,7 +1601,7 @@ class TestSwarmSampleEnrichment:
 
 class TestPeerPolicyEnforcementFacts:
     def _hub(self, policy=None, enforcement=None, principal_id="iris8kv-1",
-             ip="100.92.100.14"):
+             ip="198.51.100.14"):
         import auth
         hub = telemetry.Telemetry(
             PeerRegistry(),
@@ -1697,7 +1697,7 @@ class TestPeerPolicyEnforcementFacts:
         hub = telemetry.Telemetry(
             PeerRegistry(), policy_info=lambda: policy,
             enforcement_info=lambda: {"state": "enforced", "conflicts": []})
-        hub._registry.announce("abc", "p1", "100.92.100.31", 6881, left=5,
+        hub._registry.announce("abc", "p1", "198.51.100.31", 6881, left=5,
                                now=0, principal=auth.Principal("legacy", ""))
         row = hub.swarm_snapshot(now=0)["images"][0]["peers"][0]
         assert "peer_policy" not in row
@@ -1708,21 +1708,21 @@ class TestPeerPolicyEnforcementFacts:
         # peer rings (represented under `server`), not a peer node.
         import auth
         hub = telemetry.Telemetry(PeerRegistry())
-        hub._registry.announce("abc", "seed", "100.90.168.20", 6881, left=0,
+        hub._registry.announce("abc", "seed", "192.0.2.10", 6881, left=0,
                                now=0,
                                principal=auth.Principal("service", "seeder"))
-        hub._registry.announce("abc", "dev", "100.92.100.14", 6881, left=5,
+        hub._registry.announce("abc", "dev", "198.51.100.14", 6881, left=5,
                                now=0,
                                principal=auth.Principal("device", "d1"))
         peers = hub.swarm_snapshot(now=0)["images"][0]["peers"]
-        assert [p["ip"] for p in peers] == ["100.92.100.14"]
+        assert [p["ip"] for p in peers] == ["198.51.100.14"]
 
     def test_device_named_seeder_stays_a_device_peer(self):
         # A device literally named `seeder` (device:seeder) is NOT the service
         # seeder and remains a device peer row.
         import auth
         hub = telemetry.Telemetry(PeerRegistry())
-        hub._registry.announce("abc", "p1", "100.92.100.14", 6881, left=5,
+        hub._registry.announce("abc", "p1", "198.51.100.14", 6881, left=5,
                                now=0,
                                principal=auth.Principal("device", "seeder"))
         peers = hub.swarm_snapshot(now=0)["images"][0]["peers"]
@@ -2298,14 +2298,14 @@ def test_peer_rate_record_carries_the_measured_edge():
     rate, plus an image id so a dashboard can filter by rollout."""
     import otlp
     rec = otlp.build_peer_rate_record({
-        "principal": "device:100.90.168.114", "info_hash": "abc",
-        "image_id": "cat9k_iosxe.26.01.01", "ip": "100.92.100.2", "port": 6881,
+        "principal": "device:192.0.2.114", "info_hash": "abc",
+        "image_id": "cat9k_iosxe.26.01.01", "ip": "198.51.100.2", "port": 6881,
         "send_bps": 8_000_000, "left": 512, "role": "leecher",
         "ts": 1787000000.0, "event_id": "e1"})
     attrs = {a["key"]: list(a["value"].values())[0] for a in rec["attributes"]}
     assert rec["eventName"] == "iris.swarm.peer_rate"
-    assert attrs["iris.principal"] == "device:100.90.168.114"
-    assert attrs["network.peer.address"] == "100.92.100.2"
+    assert attrs["iris.principal"] == "device:192.0.2.114"
+    assert attrs["network.peer.address"] == "198.51.100.2"
     assert attrs["iris.image.id"] == "cat9k_iosxe.26.01.01"
     assert int(attrs["iris.transfer.peer_send_bps"]) == 8_000_000
     assert int(attrs["iris.torrent.left"]) == 512
@@ -2641,7 +2641,7 @@ def test_unknown_aria2_session_does_not_rebank_totals(tmp_path):
 # as ~100%.
 # ---------------------------------------------------------------------------
 
-_ORIGIN_IP = "100.90.168.20"
+_ORIGIN_IP = "192.0.2.10"
 
 
 def _transfer_record_row(ip, got, **extra):
@@ -2950,7 +2950,7 @@ def _lc_policy(plan_id, transfer_id, device_id=_LC_DEVICE, image_id=_LC_IMAGE,
 
 def _lc_report(transfer_id, received_at=1200.0, image_id=_LC_IMAGE,
                event="staging-complete", sha_state="verified",
-               window_end=None, report_id=None):
+               window_end=None, report_id=None, report_created_at=None):
     """One stored v2 terminal report in the shape the catalog's telemetry.json
     ring holds. `received_at` is the SERVER clock stamp -- the instant the
     checksum attestation reached this container -- which is what the store
@@ -2964,10 +2964,13 @@ def _lc_report(transfer_id, received_at=1200.0, image_id=_LC_IMAGE,
               "received_at": received_at}
     if window_end is not None:
         report["window"] = {"end": window_end}
+    if report_created_at is not None:
+        report["report_created_at"] = report_created_at
     return report
 
 
-def _lc_hub(tmp_path, policy, reports=None, images=None, exporting=True):
+def _lc_hub(tmp_path, policy, reports=None, images=None, exporting=True,
+            attestations=None):
     """A tracker hub wired exactly as from_env() wires the real one: a real
     PeerRegistry, a real TransferLifecycle over a real state dir, and the two
     plain-data callables. Returns (hub, store) so a test can assert both what
@@ -2978,7 +2981,9 @@ def _lc_hub(tmp_path, policy, reports=None, images=None, exporting=True):
         reports_info=lambda: reports if reports is not None else {},
         images_info=lambda: images if images is not None else _LC_IMAGES,
         assignments_info=lambda: policy,
-        transfer_lifecycle=store)
+        transfer_lifecycle=store,
+        attestations_info=lambda: (attestations
+                                   if attestations is not None else {}))
     if exporting:
         hub.exporter = _EXPORT_ON
     return hub, store
@@ -3081,6 +3086,127 @@ def test_seeding_started_reaches_the_log_queue_when_all_three_preconditions_hold
     # The device's own clock, kept as a float epoch and never subtracted from
     # the server instants above.
     assert attrs["iris.device.observed_at"]["doubleValue"] == 1190.0
+
+
+def test_a_report_gone_from_the_ring_still_promotes_from_the_attestations(
+        tmp_path):
+    """The catalog's report ring holds five entries PER DEVICE, shared by every
+    image assigned to it and every report kind, while this pass reads it at
+    most once per sample interval. A device finishing several images inside one
+    agent tick evicts the earliest terminal report before any pass sees it, and
+    the plan it attested then has no derivable checksum precondition at all --
+    it latches its seeder fact, sits at `planned`, and never emits
+    seeding_started.
+
+    The catalog records the attestation at ingest into its own durable ledger,
+    and this pass reads it ALONGSIDE the ring. Asserted end to end off the log
+    queue: a wiring that never reaches verified_facts would leave the record
+    unqueued however green the pure-function test is.
+    """
+    plan, transfer = _lc_id(1), _lc_id(2)
+    # The ring has rotated on to other transfers on this same device.
+    ring = {_LC_DEVICE: [_lc_report(_lc_id(50 + n), received_at=1210.0 + n,
+                                    image_id="other-%d" % n)
+                         for n in range(5)]}
+    attestations = {_LC_DEVICE: [{"transfer_id": transfer,
+                                  "image_id": _LC_IMAGE,
+                                  "received_at": 1200.0,
+                                  "observed_at": 1190.0,
+                                  "report_created_at": 1192.0}]}
+
+    stranded, _ = _lc_hub(tmp_path / "ring-only", _lc_policy(plan, transfer),
+                          reports=ring)
+    _lc_announce(stranded, now=1150.0)
+    stranded.sample(now=1150.0)
+    assert _lc_events(stranded) == [("planned", plan)]
+
+    hub, store = _lc_hub(tmp_path / "ledger", _lc_policy(plan, transfer),
+                         reports=ring, attestations=attestations)
+    _lc_announce(hub, now=1150.0)
+    hub.sample(now=1150.0)
+
+    assert _lc_events(hub) == [("planned", plan), ("seeding_started", plan)]
+    assert store.get(plan)["checksum_verified_at"] == 1200.0
+    assert store.get(plan)["seeding_started_at"] == 1200.0
+    # An unreadable ledger costs the ledger's facts and nothing else.
+    def boom():
+        raise RuntimeError("no ledger")
+    broken, _ = _lc_hub(tmp_path / "broken", _lc_policy(plan, transfer),
+                        reports=ring)
+    broken._attestations_info = boom
+    _lc_announce(broken, now=1150.0)
+    broken.sample(now=1150.0)
+    assert _lc_events(broken) == [("planned", plan)]
+
+
+def test_the_seeding_record_names_the_ingest_instant_and_the_devices_own(
+        tmp_path):
+    """checksum_verified_at is an INGEST instant: the moment the SERVER took
+    the attesting report in, not the moment the device verified. The device
+    reports no verification instant, so none is invented -- the same value
+    ships again under the honest name, and the device's own report_created_at
+    rides beside it so the delivery lag folded into planned->seeding is
+    visible rather than read as transfer time. Here the report was composed on
+    the device at 1192 and did not arrive until 1200: eight of those seconds
+    are delivery, not transfer."""
+    plan, transfer = _lc_id(1), _lc_id(2)
+    reports = {_LC_DEVICE: [_lc_report(transfer, received_at=1200.0,
+                                       window_end=1190.0,
+                                       report_created_at=1192.0)]}
+    hub, store = _lc_hub(tmp_path, _lc_policy(plan, transfer), reports=reports)
+    _lc_announce(hub, now=1150.0)
+
+    hub.sample(now=1150.0)
+
+    assert store.get(plan)["report_created_at"] == 1192.0
+    attrs = _lc_attrs(_lc_records(hub)[1])
+    assert attrs["iris.transfer.report_received_at"]["stringValue"] \
+        == attrs["iris.transfer.checksum_verified_at"]["stringValue"]
+    assert attrs["iris.device.report_created_at"]["doubleValue"] == 1192.0
+    assert attrs["iris.device.observed_at"]["doubleValue"] == 1190.0
+
+
+def test_a_recovered_promotion_reaches_the_wire_carrying_its_own_flag(
+        tmp_path):
+    """A store lost between two passes is REBUILT, and a row promoted on that
+    pass takes its instant from the durable pair alone -- no rebuild can
+    reproduce a tracker_seeder_at, because the peer registry is in memory. The
+    replay therefore carries a possibly EARLIER instant under an IDENTICAL
+    event.id, and the tracker_seeder_at riding with it is a post-loss
+    re-announce rather than the original observation, so max() over the three
+    exported instants does not reproduce seeding_started_at.
+
+    That residue cannot be removed -- the pre-loss instant is genuinely
+    unknown after the loss -- so it is made LEGIBLE instead: the record says
+    it is a recovery, which is the only thing that lets a backend attribute
+    two disagreeing values under one id to a rebuild rather than to a bug.
+    """
+    plan, transfer = _lc_id(1), _lc_id(2)
+    # The announce is the LATER fact, so the first promotion times off it.
+    reports = {_LC_DEVICE: [_lc_report(transfer, received_at=1200.0)]}
+    hub, store = _lc_hub(tmp_path, _lc_policy(plan, transfer), reports=reports)
+    _lc_announce(hub, now=1400.0, peer_id="p1")
+    hub.sample(now=1400.0)
+    first = _lc_attrs(_lc_records(hub)[1])
+    assert first["iris.transfer.seeding_started_at"]["stringValue"] \
+        == "1970-01-01T00:23:20.000Z"       # 1400, the announce
+    assert "iris.transfer.recovered_promotion" not in first
+
+    with open(store.path, "w") as stream:
+        stream.write("{ not json")          # the store is lost
+    rebuilt, store2 = _lc_hub(tmp_path, _lc_policy(plan, transfer),
+                              reports=reports)
+    _lc_announce(rebuilt, now=9000.0, peer_id="p2")
+    rebuilt.sample(now=9000.0)
+
+    replay = _lc_attrs(_lc_records(rebuilt)[1])
+    assert replay["event.id"] == first["event.id"]      # the same event
+    assert replay["iris.transfer.recovered_promotion"] == {"boolValue": True}
+    # The durable pair only: earlier than the original, and reproducible.
+    assert replay["iris.transfer.seeding_started_at"]["stringValue"] \
+        == "1970-01-01T00:20:00.000Z"       # 1200, the report
+    assert store2.get(plan)["recovered_promotion"] is True
+    assert store2.stats()["plans_promoted_recovered"] == 1
 
 
 def test_planned_is_emitted_before_seeding_started_for_the_same_plan(tmp_path):

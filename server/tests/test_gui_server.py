@@ -1953,9 +1953,12 @@ def test_device_view_mixed_policy_defaults(tmp_path):
 
 
 def test_policy_read_once_per_request(tmp_path):
-    """policy.json is parsed exactly once per /api/devices or /api/overview
+    """The policy store is read exactly once per /api/devices or /api/overview
     request, regardless of fleet size — the console polls both endpoints, so
-    a per-device get_policy() re-read would grow linearly with the fleet."""
+    a per-device get_policy() re-read would grow linearly with the fleet.
+
+    Policy is keyed per device now, so the one read is the whole-fleet
+    ``list_policies()`` snapshot rather than one parse of ``policy.json``."""
     host, port, deps, stop = _serve_full(tmp_path)
     _app, fleet, _creds, cat = deps
     try:
@@ -1968,14 +1971,13 @@ def test_policy_read_once_per_request(tmp_path):
         cat.set_policy("d0", approved_image_id="img1")
 
         reads = {"policy": 0}
-        orig_read = cat._read
+        orig_list = cat.list_policies
 
-        def counting_read(path):
-            if path == cat.policy_path:
-                reads["policy"] += 1
-            return orig_read(path)
+        def counting_read():
+            reads["policy"] += 1
+            return orig_list()
 
-        cat._read = counting_read
+        cat.list_policies = counting_read
         st, _, _ = _req(host, port, "GET", "/api/devices",
                         headers={"Cookie": ck})
         assert st == 200
@@ -9836,5 +9838,231 @@ def test_corrupt_catalog_state_fails_closed_with_503(tmp_path):
         assert st == 503 and b"state unavailable" in b
         with open(str(tmp_path / "state" / "policy.json")) as f:
             assert f.read() == "{ truncated"      # nothing written over it
+    finally:
+        stop()
+
+
+# --- paginated read projections (#57) --------------------------------------
+# /api/devices and /api/swarm can be asked for a PAGE. Paging is opt-in and
+# every response says how much there is in total, so no caller can mistake a
+# page for the fleet.
+
+def _fleet_of(fleet, n):
+    for i in range(n):
+        fleet.upsert({"device_id": "dev-%02d" % i,
+                      "device_ip": "10.0.0.%d" % (i + 1),
+                      "management_type": "inband", "inband_vlan": "120",
+                      "app_ip": "10.9.0.2", "app_mask": "255.255.255.252",
+                      "app_gateway": "10.9.0.1", "platform": "guestshell",
+                      "model": "C9300" if i % 2 else "C9500"})
+
+
+def test_devices_unpaged_response_carries_totals(tmp_path):
+    """The whole-fleet call is unchanged in content and now states its own
+    size: a client that never pages can still prove what it holds is
+    complete (len(devices) == total), which is what stops a page from ever
+    being mistaken for the fleet."""
+    host, port, stores, stop = _serve_full(tmp_path)
+    fleet = stores[1]
+    try:
+        _fleet_of(fleet, 5)
+        ck, _ = _login(host, port)
+        st, _, b = _req(host, port, "GET", "/api/devices",
+                        headers={"Cookie": ck})
+        body = json.loads(b)
+        assert st == 200
+        assert len(body["devices"]) == body["total"] == 5
+        assert body["offset"] == 0 and body["limit"] is None
+        assert body["revision"] == fleet.revision()
+    finally:
+        stop()
+
+
+def test_devices_pages_cover_the_fleet_exactly_once(tmp_path):
+    """Sequential pages of a stable fleet reconstruct it with no gap and no
+    repeat, and every page reports the same total and revision."""
+    host, port, stores, stop = _serve_full(tmp_path)
+    try:
+        _fleet_of(stores[1], 5)
+        ck, _ = _login(host, port)
+        seen, revisions = [], set()
+        for offset in (0, 2, 4, 6):
+            st, _, b = _req(host, port, "GET",
+                            "/api/devices?limit=2&offset=%d" % offset,
+                            headers={"Cookie": ck})
+            body = json.loads(b)
+            assert st == 200 and body["total"] == 5
+            assert body["offset"] == offset and body["limit"] == 2
+            revisions.add(body["revision"])
+            seen += [d["device_id"] for d in body["devices"]]
+        assert seen == ["dev-%02d" % i for i in range(5)]   # sorted, no dupes
+        assert len(revisions) == 1
+    finally:
+        stop()
+
+
+def test_devices_page_keeps_the_merged_projection(tmp_path):
+    """A page is the same row shape as the full projection -- policy and
+    heartbeat merged in -- not a thinner record."""
+    host, port, stores, stop = _serve_full(tmp_path)
+    _, fleet, _, cat = stores
+    try:
+        _fleet_of(fleet, 3)
+        cat.set_policy("dev-01", "img1")
+        ck, _ = _login(host, port)
+        st, _, b = _req(host, port, "GET", "/api/devices?limit=1&offset=1",
+                        headers={"Cookie": ck})
+        row = json.loads(b)["devices"][0]
+        assert row["device_id"] == "dev-01"
+        assert row["assigned_image_id"] == "img1"
+        assert "last_seen" in row and "stage_state" in row
+    finally:
+        stop()
+
+
+def test_devices_page_params_are_rejected_not_defaulted(tmp_path):
+    """Serving a different page than the one asked for is how a client comes
+    to believe it walked a fleet it never walked, so an unusable limit or
+    offset is a 400."""
+    host, port, stores, stop = _serve_full(tmp_path)
+    try:
+        _fleet_of(stores[1], 3)
+        ck, _ = _login(host, port)
+        for qs in ("limit=0", "limit=-1", "limit=abc", "offset=-1",
+                   "offset=abc", "limit=2&offset=x"):
+            st, _, b = _req(host, port, "GET", "/api/devices?" + qs,
+                            headers={"Cookie": ck})
+            assert st == 400, qs
+            assert json.loads(b)["error"]
+    finally:
+        stop()
+
+
+def test_devices_limit_is_clamped_and_echoed(tmp_path):
+    host, port, stores, stop = _serve_full(tmp_path)
+    try:
+        _fleet_of(stores[1], 3)
+        ck, _ = _login(host, port)
+        st, _, b = _req(host, port, "GET", "/api/devices?limit=999999",
+                        headers={"Cookie": ck})
+        body = json.loads(b)
+        assert st == 200 and body["limit"] == gui_server.MAX_PAGE_LIMIT
+        assert body["total"] == 3 and len(body["devices"]) == 3
+    finally:
+        stop()
+
+
+def test_devices_filter_counts_matches_not_the_page(tmp_path):
+    """q filters server-side over the same fields the console's search box
+    covers; total is the number of MATCHES, so a filtered page is still
+    self-describing."""
+    host, port, stores, stop = _serve_full(tmp_path)
+    try:
+        _fleet_of(stores[1], 6)
+        ck, _ = _login(host, port)
+        st, _, b = _req(host, port, "GET", "/api/devices?q=c9500&limit=2",
+                        headers={"Cookie": ck})
+        body = json.loads(b)
+        assert st == 200 and body["total"] == 3 and len(body["devices"]) == 2
+        assert all(d["model"] == "C9500" for d in body["devices"])
+        st, _, b = _req(host, port, "GET", "/api/devices?q=10.0.0.4",
+                        headers={"Cookie": ck})
+        body = json.loads(b)
+        assert [d["device_id"] for d in body["devices"]] == ["dev-03"]
+        st, _, b = _req(host, port, "GET", "/api/devices?q=dev-0",
+                        headers={"Cookie": ck})
+        assert json.loads(b)["total"] == 6
+    finally:
+        stop()
+
+
+def test_devices_offset_past_the_end_is_an_empty_page_not_an_error(tmp_path):
+    host, port, stores, stop = _serve_full(tmp_path)
+    try:
+        _fleet_of(stores[1], 2)
+        ck, _ = _login(host, port)
+        st, _, b = _req(host, port, "GET", "/api/devices?limit=5&offset=99",
+                        headers={"Cookie": ck})
+        body = json.loads(b)
+        assert st == 200 and body["devices"] == [] and body["total"] == 2
+    finally:
+        stop()
+
+
+_SWARM_BODY = json.dumps({
+    "server": {"rpc_up": True},
+    "images": [
+        {"image": "a.bin", "info_hash": "aa", "peers": [{"ip": "1.1.1.%d" % i}
+                                                        for i in range(3)]},
+        {"image": "b.bin", "info_hash": "bb", "peers": [{"ip": "2.2.2.%d" % i}
+                                                        for i in range(2)]},
+    ]}).encode()
+
+
+def _serve_swarm(tmp_path, body=_SWARM_BODY):
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path)
+    app.set_admin("admin", "pw")
+    srv = gui_server.make_server("127.0.0.1", 0, app, certfile=None,
+                                 swarm_fetch=lambda: body)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return "127.0.0.1", srv.server_address[1], srv.shutdown
+
+
+def test_swarm_unpaged_is_byte_for_byte_passthrough(tmp_path):
+    host, port, stop = _serve_swarm(tmp_path)
+    try:
+        ck, _ = _login(host, port)
+        st, _, b = _req(host, port, "GET", "/api/swarm", headers={"Cookie": ck})
+        assert st == 200 and b == _SWARM_BODY
+    finally:
+        stop()
+
+
+def test_swarm_page_slices_peers_across_images(tmp_path):
+    """Peers flatten across images in image order; the image entries all
+    survive (the map builds its selector from them) with only their peer
+    lists sliced, and peers_total states the real size."""
+    host, port, stop = _serve_swarm(tmp_path)
+    try:
+        ck, _ = _login(host, port)
+        seen = []
+        for offset in (0, 2, 4):
+            st, _, b = _req(host, port, "GET",
+                            "/api/swarm?limit=2&offset=%d" % offset,
+                            headers={"Cookie": ck})
+            body = json.loads(b)
+            assert st == 200 and body["peers_total"] == 5
+            assert body["peers_limit"] == 2 and body["peers_offset"] == offset
+            assert [i["info_hash"] for i in body["images"]] == ["aa", "bb"]
+            assert body["server"] == {"rpc_up": True}
+            for image in body["images"]:
+                seen += [p["ip"] for p in image["peers"]]
+        assert seen == ["1.1.1.0", "1.1.1.1", "1.1.1.2", "2.2.2.0", "2.2.2.1"]
+    finally:
+        stop()
+
+
+def test_swarm_page_reports_an_unpaginatable_payload(tmp_path):
+    """A hub payload that is not the documented shape must never be passed
+    through WHOLE to a caller that asked for a page."""
+    host, port, stop = _serve_swarm(tmp_path, body=b'{"peers": [1, 2, 3]}')
+    try:
+        ck, _ = _login(host, port)
+        st, _, b = _req(host, port, "GET", "/api/swarm?limit=1",
+                        headers={"Cookie": ck})
+        assert st == 200
+        assert json.loads(b)["error"] == "swarm data not paginatable"
+    finally:
+        stop()
+
+
+def test_swarm_page_params_are_rejected_not_defaulted(tmp_path):
+    host, port, stop = _serve_swarm(tmp_path)
+    try:
+        ck, _ = _login(host, port)
+        st, _, _ = _req(host, port, "GET", "/api/swarm?limit=0",
+                        headers={"Cookie": ck})
+        assert st == 400
     finally:
         stop()

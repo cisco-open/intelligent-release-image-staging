@@ -315,6 +315,17 @@ class FleetStore:
     def list_devices(self):
         return list(self._read()["devices"].values())
 
+    def snapshot(self):
+        """(revision, [record, ...]) from ONE read of the store.
+
+        The paginated console projection needs both halves of the same read:
+        stamping a page with a revision fetched by a second read could label
+        rows from state A with the version of state B, which is exactly the
+        thing a caller walking pages compares to decide its walk is still
+        coherent."""
+        data = self._read()
+        return data["revision"], list(data["devices"].values())
+
     def get_device(self, device_id):
         return self._read()["devices"].get(device_id)
 

@@ -108,9 +108,9 @@ CFG="$DIR/eem-iris-copyroot.cfg"
   # device-install.sh is documented to mirror this file; compare the applet
   # block structurally (non-comment lines) against a routed dry-run.
   ref="$(grep -v '^!' "$DIR/eem-iris-agent.cfg" | sed '/^[[:space:]]*$/d')"
-  run env DEVICE_IP=100.92.9.3 VLAN=666 SVI_IP=100.92.9.125 SVI_MASK=255.255.255.252 \
-    GUEST_IP=100.92.9.126 CATALOG_URL=https://100.90.168.20:8443 CATALOG_TOKEN=deadbeef \
-    DEVICE_ID=100.92.9.3 STAGE_HOST=100.90.168.20 bash "$DIR/device-install.sh" --dry-run
+  run env DEVICE_IP=203.0.113.3 VLAN=666 SVI_IP=203.0.113.125 SVI_MASK=255.255.255.252 \
+    GUEST_IP=203.0.113.126 CATALOG_URL=https://192.0.2.10:8443 CATALOG_TOKEN=deadbeef \
+    DEVICE_ID=203.0.113.3 STAGE_HOST=192.0.2.10 bash "$DIR/device-install.sh" --dry-run
   [ "$status" -eq 0 ] || return 1
   installed="$(printf '%s\n' "$output" | sed -n '/^event manager applet IRIS-AGENT/,/^!/p' | sed '/^!/d')"
   [ "$ref" = "$installed" ]

@@ -40,7 +40,7 @@ def _quarantine_doc(*device_ids):
 
 
 SEEDER = Principal("service", "seeder")
-SEEDER_IP = "100.90.168.20"
+SEEDER_IP = "192.0.2.10"
 
 
 # --------------------------------------------------------------------------
@@ -51,28 +51,28 @@ class TestValidMode:
     def test_denies_quarantined_device_from_durable_endpoint(self):
         doc = _quarantine_doc("iris8kv-3")
         durable = _endpoints(
-            ("device:iris8kv-3", "device", "iris8kv-3", "100.92.100.16"))
+            ("device:iris8kv-3", "device", "iris8kv-3", "198.51.100.16"))
         result = br.derive_denied_set(
             _pr(doc), durable_endpoints=durable, pending_endpoints={},
             active_participants=[], revoked_principals=set(),
             protected_seeder_ip=SEEDER_IP)
-        assert result.denied_ips == ["100.92.100.16"]
+        assert result.denied_ips == ["198.51.100.16"]
         assert result.fail_closed is False
 
     def test_includes_pending_endpoint(self):
         doc = _quarantine_doc("iris8kv-3")
         pending = _endpoints(
-            ("device:iris8kv-3", "device", "iris8kv-3", "100.92.100.99"))
+            ("device:iris8kv-3", "device", "iris8kv-3", "198.51.100.99"))
         result = br.derive_denied_set(
             _pr(doc), durable_endpoints={}, pending_endpoints=pending,
             active_participants=[], revoked_principals=set(),
             protected_seeder_ip=SEEDER_IP)
-        assert result.denied_ips == ["100.92.100.99"]
+        assert result.denied_ips == ["198.51.100.99"]
 
     def test_permitted_device_not_denied(self):
         doc = peer_policy.base_document()  # no assignment -> implicit permit
         durable = _endpoints(
-            ("device:iris8kv-3", "device", "iris8kv-3", "100.92.100.16"))
+            ("device:iris8kv-3", "device", "iris8kv-3", "198.51.100.16"))
         result = br.derive_denied_set(
             _pr(doc), durable_endpoints=durable, pending_endpoints={},
             active_participants=[], revoked_principals=set(),
@@ -82,12 +82,12 @@ class TestValidMode:
     def test_revoked_principal_derived_denied_regardless_of_policy(self):
         doc = peer_policy.base_document()  # policy would permit
         durable = _endpoints(
-            ("device:iris8kv-3", "device", "iris8kv-3", "100.92.100.16"))
+            ("device:iris8kv-3", "device", "iris8kv-3", "198.51.100.16"))
         result = br.derive_denied_set(
             _pr(doc), durable_endpoints=durable, pending_endpoints={},
             active_participants=[], revoked_principals={"device:iris8kv-3"},
             protected_seeder_ip=SEEDER_IP)
-        assert result.denied_ips == ["100.92.100.16"]
+        assert result.denied_ips == ["198.51.100.16"]
 
     def test_protected_seeder_never_blocked(self):
         # Even if the seeder somehow lands in a deny rule, its address is
@@ -106,16 +106,16 @@ class TestValidMode:
         doc = _quarantine_doc("iris8kv-3")  # deny device 3
         # permitted device 4 shares the same IP as denied device 3
         durable = _endpoints(
-            ("device:iris8kv-3", "device", "iris8kv-3", "100.92.100.50"),
-            ("device:iris8kv-4", "device", "iris8kv-4", "100.92.100.50"))
+            ("device:iris8kv-3", "device", "iris8kv-3", "198.51.100.50"),
+            ("device:iris8kv-4", "device", "iris8kv-4", "198.51.100.50"))
         result = br.derive_denied_set(
             _pr(doc), durable_endpoints=durable, pending_endpoints={},
             active_participants=[], revoked_principals=set(),
             protected_seeder_ip=SEEDER_IP)
-        assert "100.92.100.50" not in result.denied_ips
+        assert "198.51.100.50" not in result.denied_ips
         assert len(result.conflicts) == 1
         c = result.conflicts[0]
-        assert c["ipv4"] == "100.92.100.50"
+        assert c["ipv4"] == "198.51.100.50"
         assert c["reason"] == "shared_permit_deny"
         assert c["global_block_applied"] is False
 
@@ -131,13 +131,13 @@ class TestValidMode:
     def test_denied_ips_sorted_and_deduped(self):
         doc = _quarantine_doc("iris8kv-3", "iris8kv-4")
         durable = _endpoints(
-            ("device:iris8kv-3", "device", "iris8kv-3", "100.92.100.60"),
-            ("device:iris8kv-4", "device", "iris8kv-4", "100.92.100.20"))
+            ("device:iris8kv-3", "device", "iris8kv-3", "198.51.100.60"),
+            ("device:iris8kv-4", "device", "iris8kv-4", "198.51.100.20"))
         result = br.derive_denied_set(
             _pr(doc), durable_endpoints=durable, pending_endpoints={},
             active_participants=[], revoked_principals=set(),
             protected_seeder_ip=SEEDER_IP)
-        assert result.denied_ips == ["100.92.100.20", "100.92.100.60"]
+        assert result.denied_ips == ["198.51.100.20", "198.51.100.60"]
 
 
 # --------------------------------------------------------------------------
@@ -149,14 +149,14 @@ class TestFailClosedMode:
         pr = _pr(peer_policy._fail_closed_document(), degraded=True,
                  fail_closed=True)
         durable = _endpoints(
-            ("device:iris8kv-3", "device", "iris8kv-3", "100.92.100.16"),
+            ("device:iris8kv-3", "device", "iris8kv-3", "198.51.100.16"),
             ("service:seeder", "service", "seeder", SEEDER_IP))
         result = br.derive_denied_set(
             pr, durable_endpoints=durable, pending_endpoints={},
             active_participants=[], revoked_principals=set(),
             protected_seeder_ip=SEEDER_IP)
         assert result.fail_closed is True
-        assert "100.92.100.16" in result.denied_ips
+        assert "198.51.100.16" in result.denied_ips
         # service seeder excluded
         assert SEEDER_IP not in result.denied_ips
 
@@ -164,15 +164,15 @@ class TestFailClosedMode:
         pr = _pr(peer_policy._fail_closed_document(), degraded=True,
                  fail_closed=True)
         pending = _endpoints(
-            ("device:iris8kv-9", "device", "iris8kv-9", "100.92.100.40"))
+            ("device:iris8kv-9", "device", "iris8kv-9", "198.51.100.40"))
         active = [{"principal_type": "legacy", "principal_id": "x",
-                   "ipv4": "100.92.100.77"}]
+                   "ipv4": "198.51.100.77"}]
         result = br.derive_denied_set(
             pr, durable_endpoints={}, pending_endpoints=pending,
             active_participants=active, revoked_principals=set(),
             protected_seeder_ip=SEEDER_IP)
-        assert "100.92.100.40" in result.denied_ips
-        assert "100.92.100.77" in result.denied_ips  # legacy included
+        assert "198.51.100.40" in result.denied_ips
+        assert "198.51.100.77" in result.denied_ips  # legacy included
 
     def test_emergency_excludes_active_service_seeder(self):
         pr = _pr(peer_policy._fail_closed_document(), degraded=True,

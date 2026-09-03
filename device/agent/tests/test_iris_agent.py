@@ -3130,10 +3130,10 @@ def test_copy_to_root_impl_uses_injected_copy_source():
     iris_agent._copy_to_root_impl(
         "img1.bin", "sdflash:", cli_cfg, cli_exec, emit,
         reverify_fn=lambda fname, prefix, c, e, expected_size=None: True,
-        copy_source=lambda f, p: "http://100.92.100.254:8090/%s" % f)
+        copy_source=lambda f, p: "http://198.51.100.254:8090/%s" % f)
     body = "\n".join(configured[0])
     assert "delete /force sdflash:img1.bin" in body
-    assert "copy http://100.92.100.254:8090/img1.bin sdflash:img1.bin" in body
+    assert "copy http://198.51.100.254:8090/img1.bin sdflash:img1.bin" in body
     assert "guest-share/iris/img1.bin" not in body   # default source NOT used
 
 

@@ -26,7 +26,7 @@
 # failure was detected -- fixed by moving them into session 2's builder).
 #
 # Run-free fix wave (agentinfo/specs/2026-08-31-xr-teardown-speed.md, live
-# hardware probe on 8010-R4/100.90.170.84, 2026-08-31): every 'run <cmd>'
+# hardware probe on 8010-R4/203.0.113.84, 2026-08-31): every 'run <cmd>'
 # line is GONE. 'run' EXECUTES its command but NEVER yields the piped -tt
 # session's prompt back, hanging every line typed after it in the same login
 # (deterministic on this box; the same signature as 8010-R1's intermittent
@@ -155,7 +155,7 @@ setup() {
 }
 
 # Run-free fix wave (agentinfo/specs/2026-08-31-xr-teardown-speed.md, live
-# hardware probe on 8010-R4/100.90.170.84, 2026-08-31): 'run <cmd>' executes
+# hardware probe on 8010-R4/203.0.113.84, 2026-08-31): 'run <cmd>' executes
 # but NEVER yields the piped -tt session's prompt back, hanging every line
 # typed after it in the same login (deterministic on this box). No composed
 # stream may contain a bare XR 'run' command line ever again -- pinned here
@@ -868,7 +868,7 @@ _xr_call_body() {
 }
 
 # Fix-wave ordering pin (live-reproduced twice, progress.md L2 RUN 1/2,
-# 100.90.170.84, 2026-08-31): a simulated rc-124 (session-bound timeout)
+# 203.0.113.84, 2026-08-31): a simulated rc-124 (session-bound timeout)
 # session 1 transcript must yield NO "[1/5] ... no appmgr application" line
 # at all. Before the fix, that line printed unconditionally before the rc
 # check below it, so a dead transport still let it reach stdout -- reading,

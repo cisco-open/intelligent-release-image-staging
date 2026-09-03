@@ -143,9 +143,11 @@ a device row, and cannot be quarantined individually. Because every device that
 ever received a torrent carrying a previous seeder token still holds it, the
 tracker treats a legacy announce from an address that a durable endpoint
 attributes to a quarantined or revoked device as that device: it receives no
-peers and is handed to nobody. Retire previous seeder tokens once every device
-torrent has been personalised; that retirement, not the address hint, is the
-real boundary.
+peers and is handed to nobody. The real boundary is the credential's own expiry
+— a previous seeder token is retired automatically 30 days after the rotation
+that replaced it (see [Rotating the seeder announce
+credential](#rotating-the-seeder-announce-credential)) — and the address rule is
+the hint that holds inside that window.
 
 **Duplicate credential ownership** fails closed. The announce and catalog
 authorization indexes are built strictly: if two records share a credential
@@ -238,14 +240,30 @@ where it is backed up. The console API is the boundary — it rebuilds the paylo
 field and reduces conflicts to a count and the reason names, so no address
 crosses into a browser.
 
-### Announce credentials are not revoked on rotation
+### Rotating the seeder announce credential
 
-Rotating the seeder announce credential keeps the previous credential valid.
-Rotation does not revoke it, at most two valid previous records are allowed, and
-a rotation that would exceed that is refused. Revoking a previous record is
-library-level support in this release: **no shipped command** performs it, and
-there is no automated migration. Old and new credentials are both valid, and
-retiring one is a separate operator decision.
+Rotating the seeder announce credential keeps the previous credential valid for
+a bounded overlap: **30 days** from the rotation that retired it
+(`IRIS_SEEDER_PREV_TTL`). That window exists to recover a device that did not
+receive the new token — both credentials are valid throughout it, and a device
+that missed the rotation keeps announcing on the old one meanwhile. It is not a
+second permanent key: past the window the tracker refuses the old token like any
+other expired credential, and the next rotation drops the record.
+
+Nothing here waits on an operator. Rotation does not *revoke* the previous
+record: revoking one early is still library-level support, and
+**no shipped command** performs it. It no longer has to — the expiry is stamped
+at rotation time, is enforced from the first read of the store afterwards, and a
+store written before this release has the same window applied from its own
+recorded rotation time. At most two still-valid previous records are allowed and a
+rotation that would exceed that is refused; an expired one no longer counts, so
+it never blocks a rotation.
+
+A device cannot be locked out inside the window, and expiry never strands one:
+the way a device receives the current announce token is a freshly personalised
+torrent from the catalog, and that request is authorised by the device's own
+catalog token, not by the announce credential being retired. Personalise device
+torrents during the overlap and nothing announces on a seeder token afterwards.
 
 ## First-run admin claim
 

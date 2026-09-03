@@ -9,7 +9,7 @@
 # 2). The real ios-xr/xr-appmgr-build tool needs network + rpmbuild and is
 # not available here, so behavioral coverage stubs it (and docker, and git)
 # on PATH. The critical property under test throughout: xr-appmgr-build
-# prints "Done building" EVEN ON FAILURE (lab-confirmed on 100.90.168.20),
+# prints "Done building" EVEN ON FAILURE (lab-confirmed on 192.0.2.10),
 # so this script must verify the RPM landed on disk and never trust the
 # tool's own exit code or message.
 

@@ -5,11 +5,21 @@
 """Durable typed principal->endpoint map (spec 6 / 10.5) plus the tracker-owned
 bounded latest-per-principal pending retry queue (spec 7 failure posture).
 
-Ownership (spec 0): the tracker writes ``peer-endpoints.json`` on a successful
+Ownership (spec 0): the tracker writes the durable endpoint map on a successful
 authenticated announce from an **attributable** principal (device / service); a
-``legacy`` principal writes no endpoint. Every write is a full read-modify-write
-serialized by a per-file advisory ``fcntl.flock`` (same discipline as
-``secrets_store``); there is no process-local persistence lock.
+``legacy`` principal writes no endpoint.
+
+The map is KEYED INCREMENTAL state (:mod:`keyed_state`): it lives in
+``peer-endpoints.d/`` as bucketed shards, one row per principal, and an
+announce locks, parses and rewrites only the shard its principal lands in.
+It used to be one ``peer-endpoints.json`` document that every announce
+re-parsed, re-validated, re-serialised and replaced under a single global
+lock, so the tracker's critical path cost O(fleet) per announce and every
+announce in the fleet serialised behind one writer. A legacy
+``peer-endpoints.json`` is migrated into the shards on first use (see
+:mod:`keyed_state`); the durability contract is unchanged — atomic
+temp+``os.replace`` per shard, and a shard that exists but cannot be read
+fails closed as :class:`EndpointStoreError` rather than being overwritten.
 
 Retention (spec 7 retirement): endpoints age out of the fresh view, and are
 pruned from disk by the tracker's maintenance pass, once older than
@@ -25,18 +35,29 @@ Principals are accepted structurally (any object exposing ``.type``/``.id``) so
 this module stays decoupled from the identity lane's ``auth.Principal``;
 integration later passes the real ``auth.Principal`` unchanged.
 """
-import contextlib
-import fcntl
 import ipaddress
-import json
 import math
 import os
-import tempfile
 import threading
+
+import keyed_state
 
 ENDPOINT_CAP = 4              # endpoints per principal, newest-first
 ENDPOINT_TTL = 900           # seconds; default, overridable via env
-MAX_PRINCIPALS = 10000       # durable-map and pending-queue LRU cap
+
+# Supported fleet size. This is the DEVICE count IRIS is sized for, and it is
+# deliberately not the store's capacity: at a full fleet the map also holds the
+# ``service:seeder`` principal (and any future service principal), so a
+# capacity equal to the device count would start evicting live device rows --
+# and churn the LRU -- at exactly the fleet size the product claims to support.
+SUPPORTED_DEVICES = 10000
+# Headroom for non-device principals above the supported device count. Only a
+# handful of service principals exist today (``service:seeder``); the slack is
+# for principals added later, so raising the fleet size never silently
+# re-introduces the boundary bug.
+SERVICE_PRINCIPAL_HEADROOM = 256
+# Durable-map and pending-queue capacity.
+MAX_PRINCIPALS = SUPPORTED_DEVICES + SERVICE_PRINCIPAL_HEADROOM
 
 _SCHEMA = 1
 
@@ -72,80 +93,74 @@ def _attributable(principal):
 
 
 # ---------------------------------------------------------------------------
-# Atomic, flocked read-modify-write
+# Keyed incremental durable state
 # ---------------------------------------------------------------------------
 
-def _atomic_write_json(path, obj):
-    d = os.path.dirname(path) or "."
-    fd, tmp = tempfile.mkstemp(dir=d, prefix=".peer-endpoints-", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(obj, f, sort_keys=True)
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.remove(tmp)
+def _validate_entry(key, entry):
+    """Structural validation of ONE principal row, applied to every row read
+    out of a shard. A row the reconciler would otherwise trip over (KeyError
+    on a missing ipv4, TypeError on a string observed_at, AddressValueError on
+    a non-IPv4 rule) is store corruption and takes the same fail-closed path
+    as bad JSON."""
+    if not isinstance(key, str) or not isinstance(entry, dict):
+        raise ValueError("bad principal")
+    if not isinstance(entry.get("endpoints"), list):
+        raise ValueError("bad endpoints")
+    if not isinstance(entry.get("principal_type"), str) \
+            or not isinstance(entry.get("principal_id"), str):
+        raise ValueError("bad principal identity")
+    for ep in entry["endpoints"]:
+        if not isinstance(ep, dict):
+            raise ValueError("bad endpoint")
+        try:
+            ipaddress.IPv4Address(ep.get("ipv4"))
+        except (ipaddress.AddressValueError, ValueError, TypeError):
+            raise ValueError("bad endpoint ipv4")
+        port = ep.get("port")
+        if isinstance(port, bool) or not isinstance(port, int) \
+                or not 1 <= port <= 65535:
+            raise ValueError("bad endpoint port")
+        observed = ep.get("observed_at")
+        if isinstance(observed, bool) \
+                or not isinstance(observed, (int, float)) \
+                or not math.isfinite(observed):
+            raise ValueError("bad endpoint observed_at")
 
 
-@contextlib.contextmanager
-def _lock(path):
-    lock_path = path + ".lock"
-    d = os.path.dirname(lock_path) or "."
-    os.makedirs(d, exist_ok=True)
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
+def _legacy_principals(doc):
+    """The ``principals`` map out of a legacy whole-document
+    ``peer-endpoints.json``, for the one-time migration into shards. A
+    document that is not the expected schema is corruption, not an empty
+    store: it fails closed and is left on disk untouched."""
+    if not isinstance(doc, dict) or doc.get("schema") != _SCHEMA:
+        raise EndpointStoreError("endpoint store is corrupt")
+    principals = doc.get("principals")
+    if not isinstance(principals, dict):
+        raise EndpointStoreError("endpoint store is corrupt")
+    return principals
 
 
-def _load(path):
-    try:
-        with open(path) as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        return {"schema": _SCHEMA, "updated_at": 0.0, "principals": {}}
-    except (OSError, ValueError) as exc:
-        raise EndpointStoreError("endpoint store is unreadable") from exc
-    try:
-        if not isinstance(data, dict) or data.get("schema") != _SCHEMA:
-            raise ValueError("bad document")
-        principals = data.get("principals")
-        if not isinstance(principals, dict):
-            raise ValueError("bad principals")
-        for key, entry in principals.items():
-            if not isinstance(key, str) or not isinstance(entry, dict):
-                raise ValueError("bad principal")
-            if not isinstance(entry.get("endpoints"), list):
-                raise ValueError("bad endpoints")
-            if not isinstance(entry.get("principal_type"), str) \
-                    or not isinstance(entry.get("principal_id"), str):
-                raise ValueError("bad principal identity")
-            # Entry-level validation: a row the reconciler would otherwise
-            # trip over (KeyError on a missing ipv4, TypeError on a string
-            # observed_at, AddressValueError on a non-IPv4 rule) is store
-            # corruption and takes the same fail-closed path as bad JSON.
-            for ep in entry["endpoints"]:
-                if not isinstance(ep, dict):
-                    raise ValueError("bad endpoint")
-                try:
-                    ipaddress.IPv4Address(ep.get("ipv4"))
-                except (ipaddress.AddressValueError, ValueError, TypeError):
-                    raise ValueError("bad endpoint ipv4")
-                port = ep.get("port")
-                if isinstance(port, bool) or not isinstance(port, int) \
-                        or not 1 <= port <= 65535:
-                    raise ValueError("bad endpoint port")
-                observed = ep.get("observed_at")
-                if isinstance(observed, bool) \
-                        or not isinstance(observed, (int, float)) \
-                        or not math.isfinite(observed):
-                    raise ValueError("bad endpoint observed_at")
-        return data
-    except ValueError as exc:
-        raise EndpointStoreError("endpoint store is corrupt") from exc
+_STATES = {}
+_STATES_LOCK = threading.Lock()
+
+
+def _state(path):
+    """The :class:`keyed_state.KeyedState` for *path*, memoised per path so a
+    process pays the legacy-migration check once rather than per announce."""
+    with _STATES_LOCK:
+        state = _STATES.get(path)
+        if state is None:
+            state = keyed_state.KeyedState(
+                path, error=EndpointStoreError, validate=_validate_entry,
+                legacy_extract=_legacy_principals, indent=None)
+            _STATES[path] = state
+        return state
+
+
+def change_key(path):
+    """Cheap change-detection key for the durable map (see
+    :func:`keyed_state.change_key`), for the reconciler's dead-poll gate."""
+    return keyed_state.change_key(path)
 
 
 def _endpoint(ipv4, port, now):
@@ -167,10 +182,8 @@ def record_endpoint(path, principal, ipv4, port, now):
     if not _attributable(principal):
         return False
     key = principal_key(principal)
-    with _lock(path):
-        doc = _load(path)
-        principals = doc["principals"]
-        entry = principals.get(key)
+
+    def mutate(entry):
         if entry is None:
             entry = {"principal_type": principal.type,
                      "principal_id": principal.id,
@@ -179,33 +192,36 @@ def record_endpoint(path, principal, ipv4, port, now):
         eps.insert(0, _endpoint(ipv4, port, now))
         entry["endpoints"] = eps[:ENDPOINT_CAP]
         entry["updated_at"] = float(now)
-        principals[key] = entry
-        _enforce_principal_cap(principals, keep=key)
-        doc["updated_at"] = float(now)
-        _atomic_write_json(path, doc)
+        return entry
+
+    _state(path).update(key, mutate)
     return True
 
 
-def _enforce_principal_cap(principals, keep):
-    while len(principals) > MAX_PRINCIPALS:
-        victim = min(
-            (k for k in principals if k != keep),
-            key=lambda k: principals[k].get("updated_at", 0.0),
-            default=None)
-        if victim is None:
-            break
-        del principals[victim]
+def _enforce_principal_cap(state, rows):
+    """Trim the map back to :data:`MAX_PRINCIPALS`, evicting the
+    least-recently-updated principals.
+
+    This runs in :func:`prune` -- the tracker's periodic maintenance pass --
+    and no longer on the announce path: an announce touches only its own
+    principal's shard and so cannot see (or afford to count) the whole map.
+    The bound is still real, because the pass runs at least every
+    ``min(endpoint_ttl(), MAINTENANCE_INTERVAL_CAP)`` seconds and the number
+    of principals that can ever appear is bounded by the number of minted
+    credentials -- an announce cannot invent an identity. *rows* is the
+    ``{key: updated_at}`` the sweep already collected, so enforcing the cap
+    costs no extra scan."""
+    if len(rows) <= MAX_PRINCIPALS:
+        return
+    victims = sorted(rows, key=lambda k: rows[k])[:len(rows) - MAX_PRINCIPALS]
+    for key in victims:
+        state.delete(key)
 
 
 def clear_principal(path, principal):
     """Remove **all** rows for ``principal`` (re-onboard clear, spec 7 item 4).
     This is the only identity-targeted removal; there is no remove-on-revoke."""
-    key = principal_key(principal)
-    with _lock(path):
-        doc = _load(path)
-        if key in doc["principals"]:
-            del doc["principals"][key]
-            _atomic_write_json(path, doc)
+    _state(path).delete(principal_key(principal))
 
 
 def _is_fresh(entry, ep, now, ttl, keep):
@@ -225,26 +241,27 @@ def _is_fresh(entry, ep, now, ttl, keep):
 
 def prune(path, now, keep=None):
     """Drop endpoints older than the effective TTL; remove principals left with
-    no fresh endpoints (spec 6 prune). Called by the tracker's maintenance
-    pass. Rows claimed by ``keep`` (see :func:`fresh_endpoints`) survive."""
+    no fresh endpoints (spec 6 prune), then enforce :data:`MAX_PRINCIPALS`.
+    Called by the tracker's maintenance pass. Rows claimed by ``keep`` (see
+    :func:`fresh_endpoints`) survive the TTL. The sweep takes one shard lock
+    at a time, so pruning never blocks the whole fleet's announces at once."""
     ttl = endpoint_ttl()
-    with _lock(path):
-        doc = _load(path)
-        principals = doc["principals"]
-        changed = False
-        for key in list(principals):
-            entry = principals[key]
-            fresh = [e for e in entry["endpoints"]
-                     if _is_fresh(entry, e, now, ttl, keep)]
-            if len(fresh) != len(entry["endpoints"]):
-                changed = True
-            if fresh:
-                entry["endpoints"] = fresh
-            else:
-                del principals[key]
-                changed = True
-        if changed:
-            _atomic_write_json(path, doc)
+    state = _state(path)
+    updated_at = {}
+
+    def visit(key, entry):
+        fresh = [e for e in entry["endpoints"]
+                 if _is_fresh(entry, e, now, ttl, keep)]
+        if not fresh:
+            return keyed_state.DELETE
+        updated_at[key] = entry.get("updated_at", 0.0)
+        if len(fresh) == len(entry["endpoints"]):
+            return None         # unchanged: leave the shard alone
+        entry["endpoints"] = fresh
+        return entry
+
+    state.sweep(visit)
+    _enforce_principal_cap(state, updated_at)
 
 
 def fresh_endpoints(path, now, keep=None):
@@ -255,9 +272,8 @@ def fresh_endpoints(path, now, keep=None):
     file -> ``{}``. Does not mutate the durable file (a pure snapshot for
     derivation)."""
     ttl = endpoint_ttl()
-    doc = _load(path)
     out = {}
-    for key, entry in doc["principals"].items():
+    for key, entry in _state(path).snapshot().items():
         fresh = [e for e in entry["endpoints"]
                  if _is_fresh(entry, e, now, ttl, keep)]
         if fresh:

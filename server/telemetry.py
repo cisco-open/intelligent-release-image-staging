@@ -25,6 +25,7 @@ from urllib.parse import urlparse
 import audit
 import auth
 import ipaddress
+import keyed_state
 import live_samples
 import metrics
 import otlp
@@ -578,7 +579,8 @@ class Telemetry:
                  device_metrics=False, dest_settings=None,
                  env_endpoint="", env_enabled=False, headers=None,
                  policy_info=None, enforcement_info=None, peer_ledger=None,
-                 assignments_info=None, transfer_lifecycle=None):
+                 assignments_info=None, transfer_lifecycle=None,
+                 attestations_info=None):
         self.exporter = exporter
         self._seen_report_event_ids = set()
         # event.id -> (plan_id, event, transfer_id) for every lifecycle record
@@ -691,6 +693,13 @@ class Telemetry:
         # existed: no store touched, no records queued.
         self._assignments_info = assignments_info
         self.transfer_lifecycle = transfer_lifecycle
+        # The catalog's durable per-device transfer attestations. Read
+        # alongside the report ring, never instead of it: the ring is capped
+        # at five entries shared by every image on a device, so a terminal
+        # report can rotate out of it between two sample passes and the
+        # checksum precondition would then be unrecoverable. See
+        # transfer_lifecycle.verified_facts.
+        self._attestations_info = attestations_info
         # Per-process report ids already queued. Bound this set to the current
         # stored ring universe on every scan: a new hub deliberately replays the
         # ring at-least-once, while equal received_at values never shadow one
@@ -1185,7 +1194,13 @@ class Telemetry:
             snapshot = self._registry.snapshot(now=now)
         except Exception:
             snapshot = {}
-        verified = _transfer_lifecycle.verified_facts(live, reports)
+        try:
+            attestations = (self._attestations_info() or {}) \
+                if self._attestations_info is not None else {}
+        except Exception:
+            attestations = {}
+        verified = _transfer_lifecycle.verified_facts(live, reports,
+                                                      attestations)
         seeder = _transfer_lifecycle.seeder_facts(live, snapshot, images)
         store.observe(live, verified, seeder, now)
 
@@ -1741,6 +1756,12 @@ def from_env(env=None):
     state_dir = env.get("IRIS_STATE", "/var/lib/iris")
     device_info = lambda: _read_devices(state_dir)
     reports_info = lambda: _read_reports(state_dir)
+    # The catalog's durable per-device transfer attestations, written at
+    # ingest. The report ring alone cannot carry the checksum precondition:
+    # it holds five entries per DEVICE, shared by every image and report kind,
+    # so a burst of completions evicts a terminal report before the tracker's
+    # next pass reads it.
+    attestations_info = lambda: _read_attestations(state_dir)
     live_info = lambda: _read_live_samples(state_dir)
     images_info = lambda: _read_images(state_dir)
     # The catalog's assignment file, carrying the plan ids minted by
@@ -1784,7 +1805,8 @@ def from_env(env=None):
                     enforcement_info=enforcement_info,
                     peer_ledger=ledger,
                     assignments_info=assignments_info,
-                    transfer_lifecycle=lifecycle)
+                    transfer_lifecycle=lifecycle,
+                    attestations_info=attestations_info)
     # Build the initial exporters NOW (not on the first pass) so swarm events
     # from the announce path are captured from process start, exactly as the
     # construction-time exporters were before the destination became editable.
@@ -1793,13 +1815,14 @@ def from_env(env=None):
 
 
 def _read_devices(state_dir):
-    """The catalog's devices.json ({device_id: heartbeat record}) or {} if it
-    isn't there yet / unreadable. Read fresh each call (cheap JSON file)."""
-    try:
-        with open(os.path.join(state_dir, "devices.json")) as f:
-            return json.load(f)
-    except Exception:
-        return {}
+    """The catalog's heartbeat records ({device_id: record}) or {} if they
+    aren't there yet / are unreadable. Read fresh each call.
+
+    The catalog writes this as KEYED state (``devices.d/``, see
+    keyed_state.read_all), one row per device rather than one whole-fleet
+    document; read_all also still reads a legacy ``devices.json`` that has not
+    been migrated yet, so this reader spans both."""
+    return keyed_state.read_all(os.path.join(state_dir, "devices.json"))
 
 
 def _read_assignments(state_dir):
@@ -1812,12 +1835,15 @@ def _read_assignments(state_dir):
     subsystem. Returning {} on an unreadable file is safe here only because the
     lifecycle store reopens a plan that reappears: no id lives in this
     process, so a transient read failure costs one pass, never an identity."""
-    try:
-        with open(os.path.join(state_dir, "policy.json")) as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+    return keyed_state.read_all(os.path.join(state_dir, "policy.json"))
+
+
+def _read_attestations(state_dir):
+    """The catalog's transfer-attestations.json ({device_id: [attestation,
+    ...]}) or {} if it isn't there yet / unreadable / not a dict. Read fresh
+    each call (small, bounded file). Telemetry never breaks on bad input."""
+    return keyed_state.read_all(
+        os.path.join(state_dir, "transfer-attestations.json"))
 
 
 def _read_reports(state_dir):
@@ -1825,12 +1851,7 @@ def _read_reports(state_dir):
     reports]}) or {} if it isn't there yet / unreadable / not a dict. Read
     fresh each call (small, ring-bounded file — 5 reports x <=16 KB per
     device). Telemetry never breaks on bad input."""
-    try:
-        with open(os.path.join(state_dir, "telemetry.json")) as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+    return keyed_state.read_all(os.path.join(state_dir, "telemetry.json"))
 
 
 def _peer_row(p, total, up_now, devices_by_id, report_by_device,

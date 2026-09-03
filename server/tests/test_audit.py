@@ -568,3 +568,166 @@ def test_bounding_knobs_honor_positive_values(monkeypatch):
     monkeypatch.setenv("IRIS_AUDIT_RETENTION_DAYS", "3")
     assert audit._max_events() == 7
     assert audit._retention_seconds() == 3 * 86400
+
+
+# --- read-path index (IRIS-19-001 / #95) -----------------------------------
+# The console's Monitoring tab polls histogram() + read_events() every 10 s,
+# and append_event() prunes every PRUNE_EVERY appends while holding the
+# cross-process audit flock that device token refresh also takes. All three
+# used to re-read and re-JSON-parse the whole trail. These pin the property
+# that made that expensive -- lines parsed per call -- not a wall-clock time.
+
+class _CountingJson(object):
+    """Stand-in for the json module that counts loads() calls."""
+
+    def __init__(self):
+        self.loads_calls = 0
+
+    def loads(self, raw):
+        self.loads_calls += 1
+        return json.loads(raw)
+
+    def dumps(self, obj):
+        return json.dumps(obj)
+
+
+def _fill(path, n, ts0=1_700_000_000, category="token"):
+    for i in range(n):
+        audit.append_event(path, "mint", "dev-%d" % i, ts=ts0 + i,
+                           category=category)
+
+
+def test_polls_do_not_reparse_the_whole_trail(tmp_path, monkeypatch):
+    """A repeated poll parses only what it returns: histogram() parses
+    nothing (it bins the index), a page parses at most its own rows, and a
+    no-op prune() parses nothing. Before the index each of these re-parsed
+    every line in the file on every call."""
+    p = str(tmp_path / "audit.jsonl")
+    # Recent timestamps: 400 appends cross PRUNE_EVERY, and the amortized
+    # prune those trigger uses the REAL clock for its retention cutoff.
+    ts0 = int(time.time()) - 500
+    _fill(p, 400, ts0=ts0)
+    audit.histogram(p, ts0, ts0 + 400, 10)          # build the index once
+
+    counter = _CountingJson()
+    monkeypatch.setattr(audit, "json", counter)
+
+    audit.histogram(p, ts0, ts0 + 400, 10)
+    assert counter.loads_calls == 0
+
+    counter.loads_calls = 0
+    page = audit.read_events(p, limit=5)
+    assert len(page) == 5
+    assert counter.loads_calls == 5
+
+    counter.loads_calls = 0
+    deep = audit.read_events(p, limit=5, before_ts=ts0 + 20)
+    assert [e["device_id"] for e in deep] == ["dev-%d" % i
+                                              for i in range(19, 14, -1)]
+    assert counter.loads_calls == 5
+
+    counter.loads_calls = 0
+    assert audit.prune(p, now=ts0 + 400) == 0       # nothing aged out
+    assert counter.loads_calls == 0
+
+
+def test_appends_between_polls_cost_only_the_new_lines(tmp_path, monkeypatch):
+    """The index is incremental: a poll after N new events parses those N
+    (via append_event's own dumps-free path) and nothing else."""
+    p = str(tmp_path / "audit.jsonl")
+    ts0 = int(time.time()) - 100
+    _fill(p, 50, ts0=ts0)
+    audit.histogram(p, ts0, ts0 + 100, 5)
+
+    for i in range(50, 53):
+        audit.append_event(p, "mint", "dev-%d" % i, ts=ts0 + i)
+    counter = _CountingJson()
+    monkeypatch.setattr(audit, "json", counter)
+    buckets = audit.histogram(p, ts0, ts0 + 100, 1)
+    assert buckets[0]["count"] == 53
+    assert counter.loads_calls == 3                 # only the three new lines
+
+
+def test_index_rebuilds_after_a_prune_rewrites_the_file(tmp_path, monkeypatch):
+    """prune() replaces the file (new inode), so the next read must not
+    answer from the index built against the old one."""
+    monkeypatch.setattr(audit, "AUDIT_MAX_EVENTS", 5)
+    p = str(tmp_path / "audit.jsonl")
+    ts0 = 1_700_000_000
+    _fill(p, 9)
+    assert len(audit.read_events(p, limit=None)) == 9
+    assert audit.prune(p, now=ts0 + 9) == 4
+    ids = [e["device_id"] for e in audit.read_events(p, limit=None)]
+    assert ids == ["dev-%d" % i for i in range(8, 3, -1)]
+    assert audit.histogram(p, ts0, ts0 + 100, 1)[0]["count"] == 5
+
+
+def test_index_is_not_fooled_by_an_in_place_rewrite(tmp_path):
+    """Same inode, same length, different content: the index must notice and
+    rebuild rather than treat it as an append."""
+    p = str(tmp_path / "audit.jsonl")
+    ts0 = 1_700_000_000
+    line = json.dumps({"ts": ts0, "event": "mint", "device_id": "dev-a"})
+    with open(p, "w") as f:
+        f.write(line + "\n")
+    assert audit.read_events(p)[0]["device_id"] == "dev-a"
+    replacement = json.dumps({"ts": ts0, "event": "mint", "device_id": "dev-b"})
+    assert len(replacement) == len(line)
+    with open(p, "r+") as f:
+        f.write(replacement + "\n")
+    assert audit.read_events(p)[0]["device_id"] == "dev-b"
+
+
+def test_torn_tail_is_skipped_by_readers_and_dropped_by_prune(tmp_path):
+    """A crashed writer leaves an unterminated final line. Readers skip it;
+    prune() still drops it -- the index counts it as garbage rather than
+    reporting "nothing to do" from its own complete-lines-only view."""
+    p = str(tmp_path / "audit.jsonl")
+    ts0 = 1_700_000_000
+    _fill(p, 3)
+    with open(p, "a") as f:
+        f.write('{"ts": 1700000')               # torn, no newline
+    assert [e["device_id"] for e in audit.read_events(p)] == \
+        ["dev-2", "dev-1", "dev-0"]
+    assert audit.histogram(p, ts0, ts0 + 10, 1)[0]["count"] == 3
+    assert audit.prune(p, now=ts0 + 3) == 1     # the torn line, and only it
+    assert len(audit.read_events(p, limit=None)) == 3
+
+
+def test_indexed_reads_match_the_streaming_fallback(tmp_path, monkeypatch):
+    """The index is an accelerator, never a second definition of the result.
+    Every query answered from it must equal the same query answered by the
+    streaming scan the module falls back to when indexing is unavailable
+    (forced here by shrinking the entry ceiling to zero)."""
+    p = str(tmp_path / "audit.jsonl")
+    ts0 = 1_700_000_000
+    rows = [
+        {"ts": ts0 + 1, "event": "mint", "category": "token"},
+        "{not json at all",
+        "",
+        "[1, 2, 3]",
+        {"ts": "not-a-number", "event": "weird", "category": "auth"},
+        {"event": "no-ts-at-all", "category": "token"},
+        {"ts": ts0 + 2, "event": "login", "category": "auth"},
+        {"ts": True, "event": "bool-ts", "category": "auth"},
+        {"ts": ts0 + 3, "event": "x", "category": "device", "detail": "ünï ✓"},
+        {"ts": ts0 + 9, "event": "y"},
+    ]
+    with open(p, "w") as f:
+        for row in rows:
+            f.write((json.dumps(row) if isinstance(row, dict) else row) + "\n")
+
+    queries = [dict(limit=lim, before_ts=bt, after_ts=at, category=cat)
+               for lim in (None, 0, 1, 3, 100)
+               for bt in (None, ts0 + 3, ts0 + 100)
+               for at in (None, ts0 + 2)
+               for cat in (None, "token", "auth")]
+    indexed_reads = [audit.read_events(p, **q) for q in queries]
+    windows = [(ts0, ts0 + 10, 1), (ts0, ts0 + 10, 5), (ts0 + 2, ts0 + 4, 3)]
+    indexed_hists = [audit.histogram(p, s, u, b, category=c)
+                     for (s, u, b) in windows for c in (None, "auth")]
+
+    monkeypatch.setattr(audit, "INDEX_MAX_ENTRIES", 0)   # force the fallback
+    assert [audit.read_events(p, **q) for q in queries] == indexed_reads
+    assert [audit.histogram(p, s, u, b, category=c)
+            for (s, u, b) in windows for c in (None, "auth")] == indexed_hists

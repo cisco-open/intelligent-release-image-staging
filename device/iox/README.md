@@ -50,7 +50,7 @@ time via numbered app-hosting Docker `run-opts -e` entries, never baked in:
 | env | conf key | notes |
 |---|---|---|
 | `IRIS_CATALOG_TOKEN` | `catalog_token` | **secret** — `iris-mint-enrollment <device_id>` on the server |
-| `IRIS_DEVICE_ID` | `device_id` | the device's mgmt IP (convention), e.g. `100.90.168.99` |
+| `IRIS_DEVICE_ID` | `device_id` | the device's mgmt IP (convention), e.g. `192.0.2.99` |
 | `IRIS_DEVICE_SSH_PASS` | `device_ssh_pass` | **secret** — login for SSH-to-self |
 | `IRIS_DEVICE_SSH_HOST` | `device_ssh_host` | required IOS SVI for SSH-to-self |
 | `IRIS_DEVICE_SSH_USER` | `device_ssh_user` | required scoped IOS user |

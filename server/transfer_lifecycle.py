@@ -37,7 +37,12 @@ each latched independently and durably at the FIRST observation:
     ``"verified"``. Both terminal events are structurally reachable only after
     the agent hashed the fully-downloaded staged file, so this one fact
     carries both "the content is complete locally" and "the checksum
-    verified".
+    verified". Its value is the SERVER'S INGEST instant for that report, not
+    the device's verification instant -- the device reports no such instant,
+    and inventing one across two clocks is not on offer. Everything that
+    exports it says so, and the device's own ``report_created_at`` rides
+    beside it so the ingest lag is visible rather than silently folded into
+    the plan-to-seed duration. See :func:`verified_facts`.
   * ``tracker_seeder_at`` -- this tracker saw the device itself announce
     ``left=0`` on the image's torrent, authenticated by the personalised
     announce token that resolves to ``Principal("device", <device_id>)``.
@@ -163,9 +168,12 @@ stated here rather than glossed:
   * a store file deleted between two processes is indistinguishable from a
     first-ever start, so its rebuild uses the ordinary rule;
   * if the earliest attesting report has ROTATED out of the catalog's bounded
-    ring since the row was lost, the rebuild latches the next-earliest
-    report's instant instead (or, with no attesting report left, cannot
-    promote at all and stays silent).
+    ring since the row was lost, the rebuild latches the instant the catalog's
+    per-device ATTESTATION LEDGER kept for that transfer -- the same value,
+    which is exactly why that ledger exists (see :func:`verified_facts`). Only
+    once the ledger has aged the transfer out too does the rebuild fall back
+    to the next-earliest report in the ring, or, with nothing left attesting,
+    fail to promote at all and stay silent.
 
 All three live outside this store, which is why the contract is a stable
 ``event.id`` with a replay-stable value -- not byte-identity in every
@@ -371,20 +379,26 @@ def live_plans_from_policy(doc):
     return out
 
 
-def verified_facts(live, reports):
-    """Preconditions 1+2 per plan, from the durable v2 report rings.
+def attestation_from_report(report):
+    """The durable attestation a stored v2 report carries, or None.
 
-    *reports* is telemetry.json as the catalog stores it -- ``{device_id:
-    [report, ...]}``. A report attests a plan when ALL of:
+    THE ONE PLACE the "this report attests completed, verified content" rule
+    lives. The catalog calls it at INGEST to write the fact into its durable
+    per-device attestation ledger, and :func:`verified_facts` calls it again
+    when reading the report ring, so the two paths can never drift into
+    disagreeing about what counts as an attestation.
 
-      * ``rep["image_id"]`` is the plan's image;
-      * ``rep["transfer_id"]`` is the plan's transfer id -- the STRICT
-        transfer-scoped binding. A report bearing any other id attests
-        nothing here, deliberately: promoting on it would mean publishing a
-        seeding event on the strength of a checksum computed for a different
-        transfer;
-      * ``rep["event"]`` is a terminal event, never ``"pull"``;
-      * ``rep["content_sha256"]["state"] == "verified"``.
+    A report attests when ALL of:
+
+      * ``report["event"]`` is a terminal event, never ``"pull"`` -- a pull is
+        a console-requested snapshot, not a completion claim;
+      * ``report["content_sha256"]["state"] == "verified"``;
+      * ``report["transfer_id"]`` is a well-formed 32-hex transfer id and
+        ``report["image_id"]`` a non-empty image id -- without both there is
+        no binding to check a plan against;
+      * ``report["received_at"]`` is a usable epoch. The ring stamps it on the
+        server clock at write time; a row without one predates that or was
+        hand-edited, and there is no defensible instant to record for it.
 
     ``stage_state`` is deliberately NOT consulted: that describes the copy to
     the flash root, and a legitimate flash-full ``seeding-only`` transfer is
@@ -393,50 +407,145 @@ def verified_facts(live, reports):
     the agent returns it as the constant ``"not_run"`` and it carries no
     signal.
 
+    Returns ``{"transfer_id", "image_id", "received_at", "observed_at",
+    "report_created_at"}``. The last two are DEVICE-clock instants off the
+    report itself and are ``None`` when the report did not carry them; only
+    ``received_at`` is on the server's clock. Keeping all three is what lets
+    the exported record name the ingest instant for what it is instead of
+    passing it off as the moment the device verified -- see
+    :func:`verified_facts`.
+    """
+    if not isinstance(report, dict):
+        return None
+    if report.get("event") not in _TERMINAL_REPORT_EVENTS:
+        return None
+    csha = report.get("content_sha256")
+    if not isinstance(csha, dict) or csha.get("state") != "verified":
+        return None
+    transfer_id = _hex32(report.get("transfer_id"))
+    image_id = report.get("image_id")
+    received_at = _ts(report.get("received_at"))
+    if transfer_id is None or received_at is None:
+        return None
+    if not isinstance(image_id, str) or not image_id:
+        return None
+    window = report.get("window")
+    return {"transfer_id": transfer_id,
+            "image_id": image_id,
+            "received_at": received_at,
+            "observed_at": (_ts(window.get("end"))
+                            if isinstance(window, dict) else None),
+            "report_created_at": _ts(report.get("report_created_at"))}
+
+
+def verified_facts(live, reports, attestations=None):
+    """Preconditions 1+2 per plan, from the catalog's durable report facts.
+
+    TWO SOURCES, ONE RULE. *reports* is telemetry.json as the catalog stores
+    it -- ``{device_id: [report, ...]}`` -- and *attestations* is the catalog's
+    per-device attestation ledger, ``{device_id: [attestation, ...]}``, written
+    at ingest by :func:`attestation_from_report`. Both are walked, both are
+    folded by the same strict binding, and the earliest instant wins.
+
+    THE LEDGER IS NOT A CACHE OF THE RING; IT IS WHAT SURVIVES IT. The report
+    ring is capped at five entries PER DEVICE, shared by every image on that
+    device and by every report kind, while this function runs at most once per
+    tracker sample pass. A device finishing several images inside one agent
+    tick -- ten are assignable, and a flash-tight device posts a
+    ``seeding-only`` report and then a ``staging-complete`` upgrade for each --
+    pushes the earliest terminal report out of the ring before any pass sees
+    it. Re-deriving the fact from the ring alone then fails FOREVER: the plan
+    latches its seeder fact, never its checksum, and sits at ``planned`` with
+    no ``seeding_started`` ever emitted. The ledger is keyed per transfer, so
+    one report per plan holds one slot however much other traffic the device
+    posts, and it outlives the ring by design. The ring is still read because
+    it costs nothing and covers a state directory written before the ledger
+    existed, or a ledger write that failed while the ring write succeeded.
+
+    A report or ledger row attests a plan when it is an attestation at all
+    (see :func:`attestation_from_report`) AND:
+
+      * its ``image_id`` is the plan's image;
+      * its ``transfer_id`` is the plan's transfer id -- the STRICT
+        transfer-scoped binding. A report bearing any other id attests
+        nothing here, deliberately: promoting on it would mean publishing a
+        seeding event on the strength of a checksum computed for a different
+        transfer.
+
     Returns ``{plan_id: {"checksum_verified_at": <float>, "observed_at":
-    <float|None>}}``. ``checksum_verified_at`` is the server-stamped
-    ``received_at`` of the EARLIEST attesting report in the ring, and
-    ``observed_at`` the end of that same report's measurement window. Earliest
-    rather than latest because the store latches first-write-wins: picking the
-    earliest makes the value the caller latches independent of how much of the
-    ring it happens to be looking at on any given pass.
+    <float|None>, "report_created_at": <float|None>}}``.
+
+    ``checksum_verified_at`` IS AN INGEST INSTANT and is named that way
+    wherever it is exported: it is the server-stamped ``received_at`` of the
+    EARLIEST attesting report, i.e. the first moment the SERVER knew the
+    checksum had verified, not the moment the DEVICE verified it. The device
+    reports no verification instant at all, and the two clocks are different
+    clocks, so no back-dated guess is made here -- the gap is instead made
+    visible by carrying the device's own ``report_created_at`` alongside it.
+    On a bad link the agent defers the whole send with a backoff that reaches
+    ~16 minutes, so that gap is not marginal. Earliest rather than latest
+    because the store latches first-write-wins: picking the earliest makes the
+    value the caller latches independent of how much of the ring or ledger it
+    happens to be looking at on any given pass.
     """
     wanted = {}
     for plan_id, plan in (live or {}).items():
         wanted[(plan["device_id"], plan["transfer_id"], plan["image_id"])] = \
             plan_id
     out = {}
+
+    def fold(device_id, fact):
+        plan_id = wanted.get((str(device_id), fact["transfer_id"],
+                              fact["image_id"]))
+        if plan_id is None:
+            return
+        previous = out.get(plan_id)
+        if previous is not None \
+                and previous["checksum_verified_at"] <= fact["received_at"]:
+            return
+        out[plan_id] = {"checksum_verified_at": fact["received_at"],
+                        "observed_at": fact["observed_at"],
+                        "report_created_at": fact["report_created_at"]}
+
     for device_id, ring in (reports or {}).items():
         if not isinstance(ring, list):
             continue
         for rep in ring:
-            if not isinstance(rep, dict):
-                continue
-            if rep.get("event") not in _TERMINAL_REPORT_EVENTS:
-                continue
-            csha = rep.get("content_sha256")
-            if not isinstance(csha, dict) or csha.get("state") != "verified":
-                continue
-            plan_id = wanted.get((str(device_id), rep.get("transfer_id"),
-                                  rep.get("image_id")))
-            if plan_id is None:
-                continue
-            received_at = _ts(rep.get("received_at"))
-            if received_at is None:
-                # The ring stamps received_at on the server clock at write
-                # time; a row without one predates that or was hand-edited,
-                # and there is no defensible instant to latch for it.
-                continue
-            previous = out.get(plan_id)
-            if previous is not None \
-                    and previous["checksum_verified_at"] <= received_at:
-                continue
-            window = rep.get("window")
-            observed_at = _ts(window.get("end")) if isinstance(window, dict) \
-                else None
-            out[plan_id] = {"checksum_verified_at": received_at,
-                            "observed_at": observed_at}
+            fact = attestation_from_report(rep)
+            if fact is not None:
+                fold(device_id, fact)
+    for device_id, rows in (attestations or {}).items():
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            fact = _stored_attestation(row)
+            if fact is not None:
+                fold(device_id, fact)
     return out
+
+
+def _stored_attestation(row):
+    """One ledger row, re-validated, or None.
+
+    The ledger is a JSON file on disk like every other store here, so it is
+    read with the same suspicion as the report ring: a row whose ids or
+    instant will not coerce is dropped rather than allowed to promote a plan
+    on a value nothing can subtract.
+    """
+    if not isinstance(row, dict):
+        return None
+    transfer_id = _hex32(row.get("transfer_id"))
+    image_id = row.get("image_id")
+    received_at = _ts(row.get("received_at"))
+    if transfer_id is None or received_at is None:
+        return None
+    if not isinstance(image_id, str) or not image_id:
+        return None
+    return {"transfer_id": transfer_id,
+            "image_id": image_id,
+            "received_at": received_at,
+            "observed_at": _ts(row.get("observed_at")),
+            "report_created_at": _ts(row.get("report_created_at"))}
 
 
 def seeder_facts(live, snapshot, images, now=None):
@@ -532,8 +641,8 @@ class TransferLifecycle:
         {"plan_id", "transfer_id", "device_id", "image_id", "info_hash",
          "planned_at", "state": "planned"|"seeding"|"cancelled",
          "checksum_verified_at", "tracker_seeder_at", "seeding_started_at",
-         "observed_at", "updated_at", "emitted": {}, "delivered": {},
-         ["recovered_promotion": True]}
+         "observed_at", "report_created_at", "updated_at",
+         "emitted": {}, "delivered": {}, ["recovered_promotion": True]}
     """
 
     def __init__(self, state_dir, now_fn=time.time):
@@ -770,6 +879,8 @@ class TransferLifecycle:
                     if at is not None:
                         row["checksum_verified_at"] = at
                         row["observed_at"] = _ts(fact.get("observed_at"))
+                        row["report_created_at"] = _ts(
+                            fact.get("report_created_at"))
                         row["updated_at"] = now
                         dirty = True
 
@@ -848,6 +959,7 @@ class TransferLifecycle:
                 "tracker_seeder_at": None,
                 "seeding_started_at": None,
                 "observed_at": None,
+                "report_created_at": None,
                 "updated_at": now,
                 "emitted": {},
                 "delivered": {}}

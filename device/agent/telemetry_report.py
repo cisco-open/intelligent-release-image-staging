@@ -18,7 +18,11 @@ keys: a bump clears 'copied' flags and forces a fleet-wide ~1.2 GB re-copy):
       = observation order, capped at STATE_PEER_SET_CAP), 'started_ts',
       'done_ts', 'total_bytes', 'elapsed_s', 'avg_bps', 'sha_ok',
       'report_pending', 'report_attempts', 'report_next_ts',
-      'report_sent_ts', 'event'}
+      'report_sent_ts', 'report_transfer_id', 'event'}
+('report_transfer_id' is the transfer identity the last terminal report was
+ARMED under — the one comparison that tells an already-staged image the server
+has no completion evidence under its CURRENT identity; see adopt_plan's rename
+case and iris_agent._telemetry_tick.)
 ('other' and 'last_sample_ts' are legacy byte-integration keys — new code
 removes them on sight; see observe_peers.)
 
@@ -130,7 +134,8 @@ def ensure_transfer_id(state, img_id):
     one on the first observation of an image with no stored transfer (spec §2).
     Stable across ticks for the same cycle. The image-change boundary needs no
     call here: an image that leaves the assignment set is parked, and the park
-    pass calls clear_transfer() on it (dropping transfer_id + sample_seq), so
+    pass calls clear_transfer() on it (dropping transfer_id, sample_seq and the
+    content-hash verdict that described the transfer they identified), so
     the next acquisition of that id mints fresh — an A->B->A sequence yields
     three distinct ids. P1
     boundaries (changed hash / local loss) keep the same image id and its stored
@@ -150,8 +155,8 @@ def ensure_transfer_id(state, img_id):
 
 
 def clear_transfer(state, img_id):
-    """Drop only the transfer identity + sequence for an image, leaving the rest
-    of its state intact.
+    """Drop the transfer identity + sequence + the content-hash verdict for an
+    image, leaving the rest of its state intact.
 
     This IS the production acquisition-cycle boundary, and there is exactly
     one caller of it: iris_agent's park pass (_reconcile_set), which runs when
@@ -163,17 +168,34 @@ def clear_transfer(state, img_id):
     cycle (state.pop(prev), from the single-image agent) no longer happens and
     this narrower clear owns the boundary. The pure v2 unit tests
     (test_telemetry_v2) call it directly to simulate that boundary in
-    isolation."""
+    isolation.
+
+    WHY THE VERIFY VERDICT GOES WITH THE IDENTITY (board #28).
+    content_sha256_state is scoped to the TRANSFER, not to the image id: it is
+    "this transfer hashed these bytes and they matched". Left behind here it
+    outlived the transfer it described — park deletes the stage copy, the image
+    comes back into the set, a FRESH transfer_id is minted and aria2 re-downloads
+    from zero, and every report built while those bytes were still in flight
+    shipped content_sha256={'state':'verified'} for a transfer in which
+    sha256_matches() had not run at all. The honest replacement is the ABSENCE
+    of a verdict, which content_sha256_state() reads back as 'not_checked' —
+    never a fresh verdict invented here (this module has no filesystem access
+    and measures nothing), and never the stale one kept "because it was probably
+    still true". The download path re-records 'verified' at its own decision
+    point the moment it has actually hashed the new bytes."""
     tele = (state.get(img_id) or {}).get("tele")
     if isinstance(tele, dict):
         tele.pop("transfer_id", None)
         tele.pop("sample_seq", None)
+        tele.pop("content_sha256_state", None)
 
 
 def adopt_plan(state, img_id, plan_id, transfer_id):
     """Adopt the SERVER-MINTED plan for `img_id` from the policy body. Returns
-    None (nothing adopted), 'same' (already on this plan), or 'new' (a plan
-    boundary was crossed and the image's telemetry bag was reset).
+    None (nothing adopted), 'same' (already on this plan), 'adopted' (a transfer
+    that was already running under a device-minted id is now named by the
+    server — nothing is reset), or 'new' (a plan boundary was crossed and the
+    image's telemetry bag was reset).
 
     WHY THE SERVER MINTS AND THE DEVICE ADOPTS. Two facts the device cannot
     know made a device-minted transfer_id unable to answer "when was this
@@ -212,6 +234,38 @@ def adopt_plan(state, img_id, plan_id, transfer_id):
     transfer in flight once a minute. Equality of BOTH ids is the test: an
     identical plan_id with a different transfer_id is a server that re-minted,
     and that is a real boundary.
+
+    WHY A BAG WITH NO plan_id AT ALL IS 'adopted', NOT A BOUNDARY (board #44).
+    An agent upgraded onto an existing state file finds, for every image it
+    already staged, tele['transfer_id'] (device-minted) and NO plan_id —
+    _STATE_SCHEMA is deliberately not bumped for these keys, so the old bag is
+    read as-is. Comparing plan_ids there answers "different" for EVERY image on
+    EVERY device although no assignment changed, and the first tick after the
+    upgrade then paid the full price of a boundary twice over: replan_verify
+    was raised on every already-staged image, so the whole fleet started a
+    ~1.2 GB SHA-256 of its staged file inside roughly one EEM tick window,
+    holding the agent's exclusive lock (and therefore its heartbeats) for the
+    minutes that takes, on switches whose CPU is forwarding production traffic;
+    and the wholesale reset below discarded every armed-but-undelivered
+    terminal report in the fleet at the same instant.
+
+    Nothing about that upgrade is a transfer boundary: the same bytes, acquired
+    in the same acquisition cycle, are simply being NAMED by the server for the
+    first time. So this case writes plan_id, takes the server's transfer_id in
+    place of the device-minted one, and touches NOTHING else — no reset, no
+    replan_verify, no re-hash. Every measurement in the bag was made on this
+    same acquisition and stays true of it, content_sha256_state included: it is
+    a rename of a running transfer, not evidence borrowed from a previous one.
+    Only a change from one KNOWN plan_id to a different one (or a re-mint under
+    the same plan_id) is a real boundary.
+
+    The one thing the rename owes the server is a terminal report under the new
+    name: the report already delivered named the device-minted id, and the
+    server matches reports to plans by transfer_id alone. So the id the last
+    terminal report was armed under is preserved in `report_transfer_id`, which
+    is what _telemetry_tick compares against to attest an already-staged image
+    exactly ONCE under its new identity (board #30) — one small POST, jittered,
+    instead of a fleet-wide re-hash.
 
     WHY 'new' REPLACES THE BAG WHOLESALE rather than popping keys. Everything in
     tele — sample_seq, frozen_report, event, report_pending/attempts/next_ts/
@@ -259,6 +313,25 @@ def adopt_plan(state, img_id, plan_id, transfer_id):
     if isinstance(tele, dict) and tele.get("plan_id") == plan_id \
             and tele.get("transfer_id") == transfer_id:
         return "same"
+    if isinstance(tele, dict) and tele.get("transfer_id") \
+            and "plan_id" not in tele:
+        # RENAME, NOT A BOUNDARY (board #44) — see the docstring. A running
+        # transfer the device named itself is being named by the server for the
+        # first time; nothing about the bytes, the measurements or the verify
+        # verdict changed, so nothing is reset and no re-hash is asked for.
+        old_tid = tele["transfer_id"]
+        if old_tid != transfer_id and "report_transfer_id" not in tele and (
+                tele.get("report_sent_ts") is not None
+                or tele.get("report_pending")
+                or tele.get("frozen_report") is not None):
+            # A terminal report for this transfer exists (delivered, or frozen
+            # and still being retried) and it names the OLD id. Recording that
+            # is what lets _telemetry_tick notice the server has no report
+            # under the new name and arm exactly one.
+            tele["report_transfer_id"] = old_tid
+        tele["plan_id"] = plan_id
+        tele["transfer_id"] = transfer_id
+        return "adopted"
     fresh = {"plan_id": plan_id, "transfer_id": transfer_id}
     if rec is not None and rec.get("done") and rec.get("copied"):
         fresh["replan_verify"] = True
@@ -273,20 +346,24 @@ def adopt_plan(state, img_id, plan_id, transfer_id):
     # ever re-arms it -- the image is already done+copied, so _stage_image
     # takes the steady-state short-circuit and never rebuilds a report for a
     # transfer that has finished. That is a silent data loss on every plan
-    # boundary, and fleet-wide on the first tick after an agent upgrade, where
-    # every staged image crosses a boundary at once (no stored plan_id).
+    # boundary. (It used to be fleet-wide on the first tick after an agent
+    # upgrade too, where every staged image crossed a boundary at once for
+    # want of a stored plan_id; that case is now 'adopted' above and resets
+    # nothing at all.)
     #
     # Only the DELIVERY MACHINERY travels: what the retry loop at
-    # iris_agent.py:525-543 needs to finish sending the frozen body, plus
-    # avg_bps, which it reads to classify the link tier (a property of the
-    # link, not of the transfer). Deliberately NOT carried: sample_seq (the
+    # iris_agent.py:525-543 needs to finish sending the frozen body, the id
+    # that body names (report_transfer_id, so the new transfer can still see
+    # that no report speaks for IT), plus avg_bps, which it reads to classify
+    # the link tier (a property of the link, not of the transfer).
+    # Deliberately NOT carried: sample_seq (the
     # new transfer starts its own sequence), event, peers, peer_transfer_records
     # and the byte/timing measurements -- and above all content_sha256_state,
     # which is the whole point of the reset: a 'verified' inherited from the
     # previous transfer would attest content this transfer never hashed.
     if isinstance(tele, dict) and tele.get("report_pending"):
         for k in ("frozen_report", "report_pending", "report_attempts",
-                  "report_next_ts", "avg_bps"):
+                  "report_next_ts", "report_transfer_id", "avg_bps"):
             if k in tele:
                 fresh[k] = tele[k]
     state.setdefault(img_id, {})["tele"] = fresh

@@ -418,6 +418,22 @@ def build_transfer_lifecycle_record(row, event):
     a coalesce. An attribute cannot be withdrawn additively, so this is a
     permanent commitment, made knowingly.
 
+    WHAT IS AN INGEST INSTANT SAYS SO. ``iris.transfer.checksum_verified_at``
+    is the server's ``received_at`` for the attesting report, so the same value
+    also ships as ``iris.transfer.report_received_at`` -- the honest name. The
+    device reports no verification instant at all, so nothing is back-dated to
+    stand in for one; what ships instead is the device's own
+    ``report_created_at``, beside its ``observed_at``, on the device's clock,
+    so an operator can see how much delivery latency a plan-to-seed duration
+    is carrying rather than reading it as transfer time.
+
+    ``iris.transfer.recovered_promotion`` rides only when the row was promoted
+    on a pass that REBUILT it from a lost store. Such a record's
+    ``seeding_started_at`` is the durable pair alone, which may be earlier than
+    what an earlier emission under the identical ``event.id`` carried; the flag
+    is what lets a backend attribute that difference instead of silently
+    holding two values.
+
     Garbage-tolerant throughout: a non-dict row reads as empty, every
     uncoercible timestamp drops its own attribute pair (see
     ``_rfc3339_millis``), and ``_ts_nano`` yields ``"0"`` rather than raising.
@@ -459,22 +475,59 @@ def build_transfer_lifecycle_record(row, event):
             # facts, latched once by the store and never recomputed.
             ("iris.transfer.checksum_verified_at",
              _rfc3339_millis(row.get("checksum_verified_at"))),
+            # THE SAME INSTANT, UNDER THE NAME THAT SAYS WHAT IT IS. The
+            # value above is the server's INGEST of the attesting report --
+            # the first moment the server knew the checksum had verified --
+            # not the moment the device verified it. The device reports no
+            # verification instant, so nothing here back-dates a guess; the
+            # inflation is instead made legible. It is not marginal: the agent
+            # arms the terminal report at completion but defers the whole send
+            # on a bad link, backing off to ~16 minutes, so on exactly the
+            # constrained devices IRIS exists for the ingest instant can sit
+            # that far behind the physical one. `checksum_verified_at` keeps
+            # shipping because an exported attribute cannot be withdrawn.
+            ("iris.transfer.report_received_at",
+             _rfc3339_millis(row.get("checksum_verified_at"))),
             ("iris.transfer.tracker_seeder_at",
              _rfc3339_millis(row.get("tracker_seeder_at"))),
         ])
     attrs = [_attr(k, v) for k, v in pairs if v is not None]
     if seeding:
-        # The DEVICE's own clock for the attesting report, kept as a float
-        # epoch and named exactly as ``_build_v2_report_record`` names it, so
-        # the two records answer "what did the device think the time was" the
-        # same way. It is a second clock and is never subtracted from the
-        # server instants above.
-        observed = row.get("observed_at")
-        try:
-            if observed is not None:
-                attrs.append(_attr("iris.device.observed_at", float(observed)))
-        except (TypeError, ValueError):
-            pass
+        # The DEVICE's own clocks for the attesting report, kept as float
+        # epochs and named exactly as ``_build_v2_report_record`` names them,
+        # so the two records answer "what did the device think the time was"
+        # the same way: the end of its measurement window, and the instant it
+        # composed the report. The second is the closest thing to "when the
+        # device verified" that the device actually reports, and read against
+        # ``iris.transfer.report_received_at`` it shows how long that report
+        # spent getting here -- the whole magnitude of a plan-to-seed duration
+        # inflated by delivery backoff. These are a SECOND CLOCK: the
+        # difference is that latency PLUS whatever skew stands between them,
+        # and neither is ever subtracted from a server instant above as though
+        # it were exact. Each is absent when the report carried none.
+        for key, field in (("iris.device.observed_at", "observed_at"),
+                           ("iris.device.report_created_at",
+                            "report_created_at")):
+            value = row.get(field)
+            try:
+                if value is not None:
+                    attrs.append(_attr(key, float(value)))
+            except (TypeError, ValueError):
+                pass
+        if row.get("recovered_promotion") is True:
+            # This record REBUILT a lost store row, so its
+            # seeding_started_at is max(checksum_verified_at, planned_at) --
+            # the durable pair only. The original emission under this same
+            # event.id may have carried a LATER instant taken from
+            # tracker_seeder_at, and no rebuild can reproduce it: the peer
+            # registry is in memory. The flag is how a backend tells the
+            # replay from the original instead of holding two disagreeing
+            # values with nothing to attribute the difference to; it also
+            # says that tracker_seeder_at on THIS record is a post-loss
+            # re-announce, so recomputing max() over the three attributes
+            # here will not reproduce seeding_started_at. Absent -- never
+            # false -- on an ordinary promotion.
+            attrs.append(_attr("iris.transfer.recovered_promotion", True))
     return _record(_LIFECYCLE_NAME, _ts_nano(at), attrs,
                    event_id="%s.%s" % (row.get("plan_id"), event),
                    body="transfer lifecycle %s" % event)
