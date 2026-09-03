@@ -32,11 +32,14 @@ command-line / RPC interface and remains under its own license:
                communicated with only over its JSON-RPC interface and command
                line, as a separate independent program.
 
-               Corresponding source (GPLv2 §3): the upstream fork
+               Corresponding source (GPLv2 §3), complete and in this
+               repository — nothing has to be requested: the upstream fork
                https://github.com/AnInsomniacy/aria2-next at commit
-               d4971f0e12322e2ffcdb1721911b7d5c6206d0e5, plus the patches in
-               tools/aria2c-patches/, applied in numeric order — see the
-               README in that directory for the build description.
+               d4971f0e12322e2ffcdb1721911b7d5c6206d0e5; the patches in
+               tools/aria2c-patches/, applied in numeric order; and the
+               scripts used to control compilation in tools/aria2c-build/
+               (Dockerfile + build.sh). The README in each directory
+               explains how to rebuild.
 
   * mktorrent — GNU General Public License, version 2 (GPLv2).
                Installed as a system package and invoked as a subprocess to

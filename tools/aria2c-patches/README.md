@@ -17,7 +17,8 @@ verified against `tools/aria2c.sha256`; see `tools/get-aria2c.sh`.
 1. **Upstream fork** — <https://github.com/AnInsomniacy/aria2-next> at commit
    `d4971f0e12322e2ffcdb1721911b7d5c6206d0e5`.
 2. **The four patches in this directory**, applied in numeric order.
-3. **The build scripts** — see *Build* below.
+3. **The build scripts** — [`tools/aria2c-build/`](../aria2c-build/README.md),
+   published in this repository.
 
 ## Applying the patches
 
@@ -44,11 +45,16 @@ Which patches matter to IRIS:
 
 ## Build
 
-The binaries are produced by a separate project, **`aria2-next-static`**, which
-owns the source pin, the patch set, the toolchain and the build flags; this
-repository is purely the consumer, so that the patch set has exactly one home
-and cannot drift between two copies. `tools/get-aria2c.sh` looks for its output
-at `../aria2-next-static/out/<arch>/aria2c` by default.
+The build scripts are [`tools/aria2c-build/`](../aria2c-build/README.md) in this
+repository: a pinned Alpine `Dockerfile` and the `build.sh` that drives it.
+They read the patch set from *this* directory, so it still has exactly one home
+and cannot drift between two copies.
+
+IRIS itself neither runs them nor builds `aria2c` in any normal flow — the
+binary is handed in and verified. `tools/get-aria2c.sh` looks for a produced
+binary at `../aria2-next-static/out/<arch>/aria2c` by default, which is simply
+where the maintainers' own build tree happens to sit; `ARIA2C_DELIVERABLE`
+points it anywhere else.
 
 What is fixed about the deliverable:
 
@@ -86,10 +92,11 @@ CMake to prefer `.a` archives before the feature checks run. A build without
 that step links dynamically against the host's OpenSSL and is not the
 deliverable described here.
 
-Requesting the build scripts: the `aria2-next-static` build scripts are part of
-the corresponding source for these binaries. Ask any maintainer listed in
-[`MAINTAINERS.md`](../../MAINTAINERS.md), or write to
-<oss-security@cisco.com>, and they will be provided.
+The build scripts are published in
+[`../aria2c-build/`](../aria2c-build/README.md) — the `Dockerfile` and
+`build.sh` that produce the binaries. Nothing has to be requested: source,
+patches and compilation scripts all ship in this repository, which is what
+GPLv2 section 3 asks for.
 
 ## Licensing of the patches themselves
 

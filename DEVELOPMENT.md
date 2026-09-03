@@ -42,7 +42,7 @@ mutates the running/booted software state of a device.
    handed-in binary whose sha256 is the one recorded there.
 
    Building your own from the corresponding source
-   (`tools/aria2c-patches/README.md`) will **not** reproduce those bytes — a
+   (`tools/aria2c-patches/README.md` and `tools/aria2c-build/`) will **not** reproduce those bytes — a
    different toolchain or flag set produces a different binary — so
    `get-aria2c.sh` will refuse it. Building one is adopting your own client,
    which means updating `tools/aria2c.sha256` to its sha256 on purpose, and

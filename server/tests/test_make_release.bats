@@ -19,6 +19,21 @@
   grep -q 'tools/aria2c-patches/' "$BATS_TEST_DIRNAME/../../NOTICE"
 }
 
+@test "release assembler ships the aria2c build scripts NOTICE promises" {
+  # GPLv2 section 3 wants the scripts used to control compilation, not only
+  # the source, and NOTICE now states they ship in this repository rather
+  # than being available on request. A release that drops them would make
+  # that statement false, which is worse than the old written offer.
+  script="$BATS_TEST_DIRNAME/../../tools/make-release.sh"
+  grep -q 'aria2c-build' "$script"
+  grep -q 'tools/aria2c-build/' "$BATS_TEST_DIRNAME/../../NOTICE"
+  [ -f "$BATS_TEST_DIRNAME/../../tools/aria2c-build/Dockerfile" ]
+  [ -f "$BATS_TEST_DIRNAME/../../tools/aria2c-build/build.sh" ]
+  # the patch set must NOT be duplicated into the build directory
+  run bash -c 'ls "$1"/tools/aria2c-build/*.patch 2>/dev/null' _ "$BATS_TEST_DIRNAME/../.."
+  [ "$status" -ne 0 ]
+}
+
 @test "release archive carries linked docs and every current device package builder" {
   repo="$BATS_TEST_DIRNAME/../.."
   # The assembler ships TRACKED files only and refuses when an allowlisted

@@ -29,6 +29,16 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   [Observability → Metrics names](docs/zensical/observability.md#metrics-names-operator-contract).
 
 ### Fixed
+- **The aria2c build scripts ship in the repository.** IRIS redistributes a
+  patched `aria2c`, which is GPLv2, and that licence asks for the source *and*
+  the scripts used to control its compilation. The source and patches were
+  already here; the scripts were not, and `NOTICE` offered them on request
+  instead. `tools/aria2c-build/` now carries the pinned builder `Dockerfile`
+  and `build.sh`, the release tarball ships them, and the written offer is
+  gone — there is nothing left to request. The patch set is deliberately *not*
+  duplicated there: the build reads it from `tools/aria2c-patches/`, which
+  stays its only home, and a test asserts no patch copy appears beside the
+  scripts.
 - **Install-mode flash reclaim no longer spends its one attempt on a refusal.**
   A device that already holds the install lock answers `install remove
   inactive` with "cannot start new install operation" and does nothing, and

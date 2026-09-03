@@ -59,15 +59,17 @@ SHIP=(
   # device (agent + launcher + installer + EEM refs + IOx/XR packaging + tests)
   device
   # tools: the operator helpers, plus the corresponding source for the
-  # handed-in (GPL) aria2c binary -- NOTICE and the checksum manifest both
-  # point at tools/aria2c-patches/, so the release must carry it.
+  # handed-in (GPL) aria2c binary. GPLv2 section 3 wants the source AND the
+  # scripts used to control compilation, and NOTICE now says both ship here,
+  # so the release must carry aria2c-patches/ AND aria2c-build/ -- shipping
+  # the notice without them would make the notice false.
   tools/get-aria2c.sh tools/aria2c.sha256 tools/make-torrent.sh
   tools/make-agent-bundle.sh tools/gen-device-installers.sh
   tools/apply-assignments.sh tools/get-ioxclient.sh
   tools/stage-iox-package.sh tools/provision-iox-packages.sh
   tools/build-xr-package.sh tools/check-package-freshness.sh
   tools/start-compose-server.sh tools/make-release.sh
-  tools/aria2c-patches
+  tools/aria2c-patches tools/aria2c-build
   # The IOS-XE and IOS-XR transports the install/undeploy recipes call, and
   # the SSH host-key policy they (and the installers) source.
   lab/device-run.sh lab/xr-run.sh lab/iris-ssh-policy.sh
