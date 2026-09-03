@@ -45,6 +45,23 @@ then renamed to ``<name>.json.migrated`` — renamed, not deleted, so an
 operator can always see what was converted. A row that already exists in a
 shard WINS over the legacy copy: shard rows are by definition newer than the
 document that is being retired.
+
+**Rollback guard.** A rename-away is not the end of the story: code from
+before this migration reads a MISSING legacy document (``devices.json`` and
+friends) as an EMPTY store, not as an error. Roll that older code back onto a
+migrated data directory and it would start clean and silently present a fleet
+with no devices, no policy and no telemetry — the real data sitting one
+rename away under ``<name>.json.migrated``, discoverable only if the operator
+already knows to look. So migration leaves a placeholder file at the retired
+legacy path: deliberately not valid JSON, so any reader built to fail closed
+on an unparseable state file (the pre-#51/#52/#53/#56/#58
+``CatalogStore._read`` and ``peer_endpoints._load``, both of which treat a
+*missing* file as ``{}`` but an *existing-and-unreadable* one as corruption)
+trips that same fail-closed path instead of reading an empty store. The
+placeholder carries the recovery instructions in the clear, so ``cat``-ing
+the file the error points at is enough to find them. See
+``docs/zensical/operations.md`` ("Rollback after the shard migration") for
+the full procedure.
 """
 import contextlib
 import fcntl
@@ -193,10 +210,21 @@ class KeyedState:
         """Fold a legacy whole-fleet document into shards, once."""
         if self._migrated:
             return
+        migrated_path = self.legacy_path + ".migrated"
+        if os.path.exists(migrated_path):
+            # Already migrated (this process or another, this run or an
+            # earlier one). ``self.legacy_path`` may still exist -- as the
+            # rollback guard left by _leave_rollback_guard() below -- but it
+            # is retired and must never be read as the source of truth again.
+            self._migrated = True
+            return
         if not os.path.exists(self.legacy_path):
             self._migrated = True
             return
         with file_lock(self.legacy_path):
+            if os.path.exists(migrated_path):
+                self._migrated = True
+                return
             if not os.path.exists(self.legacy_path):
                 self._migrated = True
                 return
@@ -234,8 +262,63 @@ class KeyedState:
                     merged = dict(incoming)
                     merged.update(current)
                     self._write_shard(bucket, merged)
-            os.replace(self.legacy_path, self.legacy_path + ".migrated")
+            os.replace(self.legacy_path, migrated_path)
+            self._leave_rollback_guard(migrated_path)
             self._migrated = True
+
+    def _leave_rollback_guard(self, migrated_path):
+        """Leave a placeholder at the just-retired ``self.legacy_path`` so
+        that OLDER (pre-migration) code, which reads a MISSING legacy
+        document as an empty store, instead finds a file that EXISTS but is
+        deliberately not valid state, and fails closed on it exactly as it
+        already does for a corrupt file. See the module docstring
+        ("Rollback guard") for why this is possible without touching that
+        old code.
+
+        Best-effort: the migration above already committed (the rename
+        happened, the shards hold every row); a failure here (read-only
+        filesystem, out of space) must not undo that or raise out of an
+        otherwise-successful migration. It only narrows what the guard
+        covers, which callers cannot observe from here anyway.
+        """
+        text = (
+            "This file is deliberately not valid JSON.\n"
+            "\n"
+            "IRIS migrated this state store to per-device shards under\n"
+            "%s/. The original whole-fleet document was renamed, not\n"
+            "deleted, and is intact at:\n"
+            "\n"
+            "    %s\n"
+            "\n"
+            "You are seeing this placeholder because something tried to\n"
+            "read %s directly -- most likely code from before the shard\n"
+            "migration. That old code treats a MISSING file as an empty\n"
+            "fleet, so this file exists to make it fail loudly instead of\n"
+            "silently reporting no devices, no policy and no telemetry.\n"
+            "\n"
+            "If you are rolling back to that older code, restore the\n"
+            "original document first:\n"
+            "\n"
+            "    mv %s %s\n"
+            "\n"
+            "See docs/zensical/operations.md, \"Rollback after the shard\n"
+            "migration\", for the full recovery procedure.\n"
+            % (self.dir, migrated_path, self.legacy_path,
+               migrated_path, self.legacy_path)
+        )
+        try:
+            d = os.path.dirname(self.legacy_path) or "."
+            fd, tmp = tempfile.mkstemp(dir=d, prefix=".rollback-guard-",
+                                       suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w") as f:
+                    f.write(text)
+                os.replace(tmp, self.legacy_path)
+            finally:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+        except OSError:
+            pass
 
     # -- keyed operations (one shard each) ---------------------------------
 

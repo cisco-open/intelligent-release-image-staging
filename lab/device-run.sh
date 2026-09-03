@@ -30,6 +30,32 @@ LAB_DIR="$(cd "$(dirname "$0")" && pwd)"
 iris_ssh_policy "$HOST" || exit 1
 
 CMDS="$(cat)"
+
+# Refuse the interactive install-subsystem commands. They print a file list
+# and wait on a "[y/n]" prompt, and this transport cannot answer one: commands
+# arrive on stdin ahead of the prompt, so the reply lands nowhere, the session
+# tears down while the operation is still open, and the switch then refuses
+# every later attempt with "cannot start new install operation, some operation
+# is already running" -- with NO entry in `show install log` to explain it.
+# Recovery is a reload. stk03-fiab2 sat wedged that way from 2026-08-28 until
+# 2026-09-03, and the signature reproduced on the next scripted attempt.
+#
+# IRIS itself never does this: device/agent/iris_agent.py's reclaim() drives
+# `install remove inactive` from an EEM applet with `pattern "[y/n]"` and a
+# following "y", precisely because a raw prompt cannot be answered from here.
+# Use that idiom, or a real terminal, and read `show install ...` instead when
+# you only need to look.
+if printf '%s' "$CMDS" | grep -qiE '^[[:space:]]*(do[[:space:]]+)?install[[:space:]]+(remove|add|activate|deactivate|commit|abort|rollback)\b'; then
+  echo "device-run.sh: refusing an interactive install-subsystem command." >&2
+  echo "  This transport feeds stdin ahead of the [y/n] prompt, so the answer" >&2
+  echo "  is lost and the session drops holding the install lock. The switch" >&2
+  echo "  then refuses every later install operation until it is reloaded." >&2
+  echo "  Read-only 'show install ...' commands are fine and are not blocked." >&2
+  echo "  To actually run one, drive it from an EEM applet with" >&2
+  echo "  pattern \"[y/n]\" (see reclaim() in device/agent/iris_agent.py)," >&2
+  echo "  or run it at a real terminal." >&2
+  exit 2
+fi
 DEVICE_ENABLE="${DEVICE_ENABLE:-$DEVICE_PASS}"
 
 # Never write a line into an IOS session that is not a valid command in the

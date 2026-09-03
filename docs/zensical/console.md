@@ -244,25 +244,59 @@ onboard again.
 
 ## Bulk device actions
 
-The Devices toolbar acts on every checked row, so a CSV import can be finished
-without touching each device.
+The Devices toolbar acts on the current *selection*, so a CSV import can be
+finished without touching each device.
 
-Above it, the filter bar narrows what is rendered — free text across device, IP
-and model, plus management type, **Agent install**, credential, telemetry, peer policy
-and status. Only matching rows are drawn, so filtering and then **select all**
-is how you act on a subset instead of hand-picking rows out of the whole fleet.
-The **Status** choices are generated from the same derivation the Status column
-renders, so every state a row can show can be filtered for. Each dropdown
-choice shows the same sentence-case label the column renders: `Onboarding`,
-`Undeploying`, `Waiting for heartbeat`, `Onboard failed`, `Undeploy failed`,
-`Staged`, `Placement failed`, `Image(s) failed`, `Copying to IOS storage`,
-`Staging (other)`, `Enrolled`, `Not enrolled`, and `Offline (no recent
-heartbeat)` — but its `<option>` value, and the wire status the cell itself
-carries, is the lowercase/kebab form underneath: `onboarding`, `undeploying`,
+Above it, the filter bar narrows what the table shows — free text across
+device, IP and model, plus management type, **Agent install**, credential,
+telemetry, peer policy and status. Filtering happens on the server, not just
+in the browser: every one of these controls (and the free-text search) is
+applied by the same `GET /api/devices` request the table polls, so the count
+next to the filter bar and the rows on screen can never disagree about what
+"matches" means, no matter how large the fleet is. The **Status** choices are
+generated from the same derivation the Status column renders, so every state
+a row can show can be filtered for. Each dropdown choice shows the same
+sentence-case label the column renders: `Onboarding`, `Undeploying`, `Waiting
+for heartbeat`, `Onboard failed`, `Undeploy failed`, `Staged`, `Placement
+failed`, `Image(s) failed`, `Copying to IOS storage`, `Staging (other)`,
+`Enrolled`, `Not enrolled`, and `Offline (no recent heartbeat)` — but its
+`<option>` value, and the wire status the cell itself carries, is the
+lowercase/kebab form underneath: `onboarding`, `undeploying`,
 `waiting-heartbeat`, `onboard-failed`, `undeploy-failed`, `deployed`,
 `placement-failed`, `image-failed`, `copying`, `staging`, `enrolled`,
 `not-enrolled`, and `offline` — the last being a modifier, since a device
 filtered on `deployed` (rendered `Staged`) can still have gone quiet.
+
+### Paging and selection at fleet scale
+
+A fleet larger than 200 devices (after filtering) pages: the table shows 200
+rows at a time with **Previous**/**Next** controls and a "Page *X* of *Y*"
+readout next to the results count, instead of re-fetching and re-rendering
+every device on every 10-second poll. This is deliberately the *last* piece
+of this design, not the first — a table that silently showed a page as if it
+were the whole fleet, or a **select all** that silently meant "this page,"
+would be worse than a slow table, so two things had to be true first:
+
+- Every filter above is enforced **server-side**, so a page can never hold
+  rows the filter bar disagrees with.
+- Selection is tracked by **device ID**, not by which checkboxes happen to be
+  rendered. Checking rows on page 1, turning to page 2, and checking more
+  there keeps every earlier check — the selection count in the bulk bar
+  always reflects everything you have checked across every page, filter
+  change, and 10-second poll, not just what is currently on screen.
+
+The header checkbox (above the **Device** column) only ever selects or
+clears the page currently on screen — with paging, it cannot mean anything
+else, and its accessible name says "on this page" to make that explicit.
+Once every row on a page is checked, the bulk bar offers **Select all *N*
+matching devices**, naming the server's own count for the active filter. That
+control performs a real walk of every remaining page under the current
+filter and adds each device's ID to the selection; it is never a shortcut
+that quietly re-checks the header box. Once every matching device really is
+selected, the bar says so plainly ("All *N* matching devices selected")
+rather than leaving you to infer it from a checkbox state. Clearing the
+selection (**Cancel**) always clears the full cross-page set, not just the
+rows in view.
 
 | Control | What it does | Confirms first |
 | --- | --- | --- |

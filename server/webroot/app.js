@@ -92,12 +92,31 @@
   // asked for). Tri-state: an agent that predates the flag reports nothing,
   // which is "unknown" — never shown as "off", since off is a real choice.
   // ---- Devices: column filters -------------------------------------------
-  // Every bulk action operates on the checked rows, and only FILTERED rows are
-  // rendered, so filtering then "select all" is how an operator acts on a
-  // subset without hand-picking. Filter state lives in the DOM controls, not
-  // in the row data, so the periodic re-render never clears it.
+  // Every bulk action operates on an explicit id SET (SELECTED, below), and
+  // the table renders only what the server just said matches -- filtering
+  // then "select all" is how an operator acts on a subset without hand-
+  // picking. Filter state lives in the DOM controls, not in the row data,
+  // so the periodic re-render never clears it.
+  //
+  // Issue #112: the six column filters and the status filter now have
+  // SERVER-SIDE parity (gui_server.py's _row_matches_extra_filters mirrors
+  // deviceMatchesFilters below condition-for-condition) -- a prerequisite
+  // for paging the table, because a page filtered only on what the server
+  // understood would silently disagree with the filter bar. deviceOffset/
+  // devTotal/DEV_PAGE_SIZE (below) are that paging; SELECTED is prerequisite
+  // 2, selection keyed by device_id rather than by rendered DOM row, so a
+  // bulk action still hits exactly the ids the operator meant after a page
+  // turns, a filter changes, or a poll re-renders.
   var LAST_DEVICES = [];
   var LAST_DEV_NOW = 0;
+  var DEV_PAGE_SIZE = 200;
+  var devOffset = 0;   // start of the CURRENTLY LOADED page, within the filtered set
+  var devTotal = 0;    // server's total match count for the current filter (all pages)
+  // device_id -> true. Populated by row/header checkboxes and by
+  // selectAllMatchingDevices() (the real "every matching device" action);
+  // never scraped from '#dev-rows .mark:checked', which -- once the table is
+  // paged -- reflects only the page currently in the DOM.
+  var SELECTED = Object.create(null);
   // device_id -> the most relevant retained onboard/undeploy job (facelift
   // carried fix #2, step/elapsed in the status cell). Refreshed alongside
   // the devices table from the EXISTING GET /api/onboard/jobs listing
@@ -121,6 +140,19 @@
       peer: val('dev-filter-peer'),
       status: val('dev-filter-status')
     };
+  }
+  // The SAME filter state as a GET /api/devices query string (q/
+  // management_type/platform/cred/telemetry/peer/status) -- the wire names
+  // _device_filter_params (gui_server.py) reads. Kept as one function so a
+  // filter added to deviceFilterState() above can never be forgotten here.
+  function deviceFilterQuery(f) {
+    var names = { q: 'q', managementType: 'management_type', platform: 'platform',
+                  cred: 'cred', telemetry: 'telemetry', peer: 'peer', status: 'status' };
+    var parts = [];
+    Object.keys(names).forEach(function (key) {
+      if (f[key]) parts.push(names[key] + '=' + encodeURIComponent(f[key]));
+    });
+    return parts.join('&');
   }
 
   // ONE derivation of the Status cell, read by the row renderer AND by the
@@ -584,9 +616,22 @@
     location.hash = '#devices';
   }
 
-  // Re-render from the devices already in hand -- filtering must not wait on
-  // (or fire) a network round trip.
-  function applyDeviceFilters() { renderDevices(LAST_DEVICES, LAST_DEV_NOW); }
+  // A filter or search change now means the match set itself changed
+  // server-side (issue #112 prerequisite 1 made that possible), so this
+  // returns to page one and re-fetches rather than re-rendering the page
+  // already in hand -- the OLD behavior, back when every filter ran
+  // client-side over the whole fleet already in memory. Debounced: the q
+  // box fires on every keystroke ('input', not 'change'), and a fetch per
+  // keystroke would hammer the server on a fast typist.
+  var applyDeviceFiltersTimer = null;
+  function applyDeviceFilters() {
+    if (applyDeviceFiltersTimer) clearTimeout(applyDeviceFiltersTimer);
+    applyDeviceFiltersTimer = setTimeout(function () {
+      applyDeviceFiltersTimer = null;
+      devOffset = 0;
+      refreshDevices();
+    }, 250);
+  }
 
   function telemetryCell(d) {
     if (d.telemetry_enabled === false) {
@@ -1115,11 +1160,38 @@
       devStatus.textContent = 'Device refresh unavailable; retrying…';
     });
   }
+  // A pending status filter (Overview's "Needs attention" routing) must land
+  // on the control before devicesPageQuery() builds the query from it --
+  // filtering is server-side now (issue #112), so there is no client-side
+  // "rows already in hand" left to re-filter the old way, after the fetch.
+  function applyPendingDevFilter() {
+    if (PENDING_DEV_FILTER === null) return;
+    var sel = document.getElementById('dev-filter-status');
+    if (sel) sel.value = PENDING_DEV_FILTER;
+    PENDING_DEV_FILTER = null;
+    devOffset = 0;
+  }
+  function devicesPageQuery() {
+    var q = deviceFilterQuery(deviceFilterState());
+    return (q ? q + '&' : '') + 'limit=' + DEV_PAGE_SIZE + '&offset=' + devOffset;
+  }
+  // The page came back empty while matches exist elsewhere -- the fleet
+  // shrank, or a filter/refresh moved this page's devices off the end.
+  // Snap back to page one rather than stranding the operator on a dead page;
+  // devTotal>0 with a non-empty offset=0 page always holds (a page is at
+  // least one row), so a caller retrying on `true` recurses at most once.
+  function devicesPageWentEmpty(devs) {
+    if (devs.length || devOffset <= 0 || devTotal <= 0) return false;
+    devOffset = 0;
+    return true;
+  }
   async function refreshDevices() {
     var mine = ++devicesRefreshGeneration;
     if (devicesRefreshController) devicesRefreshController.abort();
     devicesRefreshController = new AbortController();
     var signal = devicesRefreshController.signal;
+    applyPendingDevFilter();
+    var devicesQuery = devicesPageQuery();
     // Optional job listing -- decoupled from the other four fetches below
     // via its own .then/.catch (Task 7's refreshOverview pattern); see the
     // full rationale where its result is consumed, past credOpts below.
@@ -1128,7 +1200,7 @@
     }).catch(function () { return null; });
     var results;
     try {
-      results = await Promise.all([fetch('/api/devices', { signal: signal }), fetch('/api/images', { signal: signal }), fetch('/api/credentials', { signal: signal }), fetch('/api/peer-policy', { signal: signal }), jobsPromise]);
+      results = await Promise.all([fetch('/api/devices?' + devicesQuery, { signal: signal }), fetch('/api/images', { signal: signal }), fetch('/api/credentials', { signal: signal }), fetch('/api/peer-policy', { signal: signal }), jobsPromise]);
     } catch (e) {
       // Superseding a refresh is expected; callers must not see an unhandled
       // AbortError. Other failures still reach their caller/status handling.
@@ -1143,6 +1215,9 @@
     peerPolicy = nextPolicy;
     var devs = dbody.devices || [];
     var devNow = dbody.now || Date.now() / 1000;   // server clock for last_seen freshness
+    devTotal = dbody.total || 0;
+    devOffset = dbody.offset || 0;
+    if (devicesPageWentEmpty(devs)) return refreshDevices();
     var imgs = ir.ok ? ((await ir.json()).images || []) : [];
     imageListOk = ir.ok;
     imageIds = imgs.map(function (i) { return i.id; });
@@ -1186,12 +1261,7 @@
     LAST_DEVICES = devs;
     LAST_DEV_NOW = devNow;
     syncDeviceFilterOptions();
-    if (PENDING_DEV_FILTER !== null) {
-      var statusSel = document.getElementById('dev-filter-status');
-      if (statusSel) statusSel.value = PENDING_DEV_FILTER;
-      PENDING_DEV_FILTER = null;
-    }
-    renderDevices(devs, devNow);
+    renderDevices(devs, devNow, devTotal);
   }
 
   // Populate the credential filter from the profiles that actually exist,
@@ -1243,15 +1313,15 @@
       return f && f.value !== '';
     });
   }
-  function renderDevices(devs, devNow) {
+  function renderDevices(devs, devNow, total) {
     var filters = deviceFilterState();
-    var total = devs.length;
+    // devs is already the server's own page for this exact filter (issue
+    // #112 prerequisite 1 -- gui_server.py's _row_matches_extra_filters
+    // mirrors deviceMatchesFilters condition-for-condition), so this is a
+    // defensive RE-check, not the primary filter any more: it can only ever
+    // narrow an already-matching page, never explain away a row the
+    // server's own `total` already counted as a match.
     devs = devs.filter(function (d) { return deviceMatchesFilters(d, filters, devNow); });
-    // keep batch checkbox selections across the periodic re-render
-    var marked = Object.create(null);
-    document.querySelectorAll('#dev-rows .mark:checked').forEach(function (cb) {
-      marked[cb.getAttribute('data-id')] = true;
-    });
     document.getElementById('dev-rows').innerHTML = devs.length ? devs.map(function (d) {
       var rowIds = rowAssignedIds(d);
       var assignLabel = rowIds.length ? (rowIds.length + ' image(s)') : '— assign —';
@@ -1282,7 +1352,7 @@
         : (managementType + managementTypeDetail);
       return '<tr data-id="' + esc(d.device_id) + '">' +
         '<td><input type="checkbox" class="mark" data-id="' + esc(d.device_id) + '" aria-label="Select ' + esc(d.device_id) + '"' +
-        (marked[d.device_id] ? ' checked' : '') + '></td>' +
+        (SELECTED[d.device_id] ? ' checked' : '') + '></td>' +
         '<td class="dev-id">' + esc(d.device_id) + '</td><td class="machine">' + dash(d.device_ip) + '</td>' +
         '<td class="machine">' + dash(d.model || d.heartbeat_model) + '</td>' +
         '<td>' + esc(managementTypeLabel) + '</td>' +
@@ -1333,7 +1403,16 @@
     document.querySelectorAll('#dev-rows .peer-quarantine').forEach(function (btn) {
       btn.addEventListener('click', function () { setQuarantine(btn); });
     });
-    document.getElementById('mark-all').checked = false;
+    // The header checkbox can only ever speak for the page in the DOM right
+    // now (issue #112 prerequisite 2 -- a paged table cannot let "select
+    // all" silently mean "select everything" when only a page is loaded):
+    // checked when every rendered row is in SELECTED, indeterminate when
+    // some but not all are, unchecked otherwise. #sel-scope-all (wired in
+    // updateSelBar) is the one control that means "every matching device".
+    var markAll = document.getElementById('mark-all');
+    var selectedOnPage = devs.filter(function (d) { return !!SELECTED[d.device_id]; }).length;
+    markAll.checked = devs.length > 0 && selectedOnPage === devs.length;
+    markAll.indeterminate = selectedOnPage > 0 && selectedOnPage < devs.length;
     // The filter bar's Total (Magnetic Filter bar > Anatomy, "<number> +
     // results"). One readout, in the bar the filters live in: the page used
     // to carry two, "N devices" up in the table-level toolbar and "showing X
@@ -1347,9 +1426,27 @@
     document.getElementById('dev-count').textContent =
       (devs.length === total ? String(total) : devs.length + ' of ' + total) +
       ' result' + (total === 1 ? '' : 's');
+    updateDevPager(total);
     updateMoreFiltersSummary();
     updateFilterBarState();
     updateSelBar();
+  }
+  // Prev/Next paging over the CURRENT filter's match set (issue #112 step
+  // 3 -- the table only pages once prerequisites 1 and 2 above hold). Hidden
+  // entirely when everything fits on one page, so an unpaged fleet reads
+  // exactly as it always did.
+  function updateDevPager(total) {
+    var pager = document.getElementById('dev-pager');
+    if (!pager) return;
+    pager.hidden = total <= DEV_PAGE_SIZE;
+    var pages = Math.max(1, Math.ceil(total / DEV_PAGE_SIZE));
+    var page = Math.floor(devOffset / DEV_PAGE_SIZE) + 1;
+    var pos = document.getElementById('dev-page-pos');
+    if (pos) pos.textContent = 'Page ' + page + ' of ' + pages;
+    var prev = document.getElementById('dev-page-prev');
+    if (prev) prev.disabled = devOffset <= 0;
+    var next = document.getElementById('dev-page-next');
+    if (next) next.disabled = devOffset + DEV_PAGE_SIZE >= total;
   }
   // ---- Device deployment details (per-row ⓘ) ----
   // The panel lives OUTSIDE #dev-rows so the 10s table re-render never
@@ -1593,6 +1690,33 @@
   // drawer to open while the first is still loading -- so Tab must be free
   // to leave it for the rest of the page. Focus still moves in on open and
   // is restored to the opener above.
+  // "Forget host key" (issue #84): a re-imaged/replaced device presents a
+  // new SSH host key and accept-new mode then refuses every session with a
+  // changed-key error. This clears the stale entry from the persistent
+  // known_hosts so the NEXT session re-verifies and re-pins the new key --
+  // it does not disable verification. State-changing, so it goes through
+  // jpost (session + CSRF) and is audited server-side.
+  document.getElementById('di-forget-host-key').addEventListener('click', async function () {
+    var id = deployInfoDev;
+    if (!id) return;
+    if (!confirm('Forget the recorded SSH host key for ' + id + '?\n\n' +
+                 'Only do this if the device was legitimately re-imaged or ' +
+                 'replaced. The next session will trust and record whatever ' +
+                 'key that device presents.')) return;
+    var status = document.getElementById('di-forget-host-key-status');
+    status.textContent = 'Forgetting…';
+    var r = await jpost('/api/devices/' + encodeURIComponent(id) + '/forget-host-key', {});
+    if (deployInfoDev !== id) return;   // the drawer moved to another device meanwhile
+    if (r.ok) {
+      var body = await r.json();
+      status.textContent = 'Host key forgotten for ' + (body.peer || id) +
+        '. The next session will re-pin its new key.';
+    } else {
+      var err = null;
+      try { err = (await r.json()).error; } catch (e) { }
+      status.textContent = 'Forget host key failed: ' + (err || r.status);
+    }
+  });
   // ---- Per-job onboard log panels ----
   // One panel PER JOB in #onboard-logs — its own <pre>, its own EventSource,
   // its own close/abort — so two concurrent onboards never merge into (or
@@ -1688,17 +1812,29 @@
     return { telemetry: !t || t.checked,
              telemetry_stream: !!(s && s.checked) };
   }
+  // The header checkbox can only ever mean "every row on THIS page" -- once
+  // the table pages (issue #112 step 3), a page is a fraction of what the
+  // filter matches, and silently treating "select all" as "select the
+  // fleet" is exactly the ambiguity prerequisite 2 rules out. Selecting
+  // every device the filter matches, not just what is loaded, is
+  // selectAllMatchingDevices() below, offered explicitly via #sel-scope-all.
   document.getElementById('mark-all').addEventListener('change', function (e) {
-    document.querySelectorAll('#dev-rows .mark').forEach(function (cb) { cb.checked = e.target.checked; });
+    document.querySelectorAll('#dev-rows .mark').forEach(function (cb) {
+      var id = cb.getAttribute('data-id');
+      if (e.target.checked) SELECTED[id] = true; else delete SELECTED[id];
+      cb.checked = e.target.checked;
+    });
     updateSelBar();
   });
-  // Bulk bar's "Select all N filtered devices" (spec §5 scope copy, below in
-  // updateSelBar) is a shortcut INTO the header checkbox's own machinery,
-  // not a second selection path: check it and replay its change handler.
+  // Bulk bar's "Select all N matching devices" (spec §5 scope copy, below in
+  // updateSelBar): walks every page of the CURRENT filter server-side and
+  // adds every id it returns to SELECTED. This is a REAL fetch, not a
+  // shortcut into the header checkbox -- the header checkbox only ever sees
+  // the page in the DOM, so replaying its change handler here would have
+  // silently selected "this page" while the button claims "every matching
+  // device" (the exact defect issue #112 flags).
   document.getElementById('sel-scope-all').addEventListener('click', function () {
-    var markAll = document.getElementById('mark-all');
-    markAll.checked = true;
-    markAll.dispatchEvent(new Event('change'));
+    selectAllMatchingDevices();
   });
   // ---- menus / selection bar (toolbar rework, spec 2026-08-12) ----
   // CSP-safe popovers: static hidden panels toggled by their trigger; a click
@@ -1862,22 +1998,29 @@
       }).join('');
   })();
   function updateSelBar() {
-    var m = document.querySelectorAll('#dev-rows .mark').length;
-    var n = document.querySelectorAll('#dev-rows .mark:checked').length;
+    // n is the REAL selection size -- every device_id in SELECTED, which
+    // survives paging, filtering and a poll's re-render (issue #112
+    // prerequisite 2). m is the server's own total for the CURRENT filter,
+    // never the rendered row count: under paging those two only agree once
+    // the filter fits on one page, and using the DOM count here is exactly
+    // how "select all" used to come to silently mean "select this page".
+    var n = Object.keys(SELECTED).length;
+    var m = devTotal;
     document.getElementById('sel-bar').hidden = n === 0;
     document.getElementById('sel-count').textContent = n + ' selected';
-    // Scope copy (spec §5): names whether the checked set IS the whole
-    // filtered table or only part of it, and -- when it's only part --
-    // offers a one-click way to the rest. The click just flips #mark-all
-    // and replays that checkbox's OWN change handler (above), so this never
-    // grows a second copy of the select-all logic.
+    // Scope copy (spec §5, revised for paging): names whether the selection
+    // IS every device the filter matches or only part of it, and -- when
+    // it's only part -- offers a one-click way to the rest. Unlike before
+    // paging existed, that click can no longer be a shortcut into the
+    // header checkbox (#mark-all only ever reaches the page in the DOM) --
+    // it runs selectAllMatchingDevices(), a real walk of every page.
     var scopeText = document.getElementById('sel-scope-text');
     var scopeAll = document.getElementById('sel-scope-all');
     var allSelected = n > 0 && n === m;
     scopeText.hidden = !allSelected;
-    if (allSelected) scopeText.textContent = '· All ' + m + ' filtered devices selected';
-    scopeAll.hidden = allSelected || n === 0;
-    if (!scopeAll.hidden) scopeAll.textContent = '· Select all ' + m + ' filtered devices';
+    if (allSelected) scopeText.textContent = '· All ' + m + ' matching devices selected';
+    scopeAll.hidden = allSelected || n === 0 || m <= n;
+    if (!scopeAll.hidden) scopeAll.textContent = '· Select all ' + m + ' matching devices';
     // The count lives in the bar's own indicator (Magnetic Table > Bulk
     // action bar: "An indicator displays the number of selected rows"), so
     // the buttons stop restating it. They used to read "Start onboard (3)"
@@ -1906,9 +2049,13 @@
     if (n === 0) BULK_MODALS.forEach(closeModal);
   }
   document.getElementById('dev-rows').addEventListener('change', function (e) {
-    if (e.target.classList.contains('mark')) updateSelBar();
+    if (!e.target.classList.contains('mark')) return;
+    var id = e.target.getAttribute('data-id');
+    if (e.target.checked) SELECTED[id] = true; else delete SELECTED[id];
+    updateSelBar();
   });
   document.getElementById('sel-clear').addEventListener('click', function () {
+    SELECTED = Object.create(null);
     document.querySelectorAll('#dev-rows .mark:checked').forEach(function (cb) { cb.checked = false; });
     document.getElementById('mark-all').checked = false;
     updateSelBar();
@@ -2080,9 +2227,51 @@
   });
 
   // ---- bulk row actions (adopt / delete / assign credential) ----
+  // Every bulk action reads the SELECTED id set, never the checked DOM rows
+  // (issue #112 prerequisite 2): '#dev-rows .mark:checked' only ever holds
+  // the page currently rendered, so once the table pages that scrape would
+  // silently mean "this page" instead of whatever the operator actually
+  // checked across however many pages they visited.
   function selectedIds() {
-    return Array.prototype.map.call(document.querySelectorAll('#dev-rows .mark:checked'),
-      function (cb) { return cb.getAttribute('data-id'); });
+    return Object.keys(SELECTED);
+  }
+  // The one way to select every device the CURRENT FILTER matches, not just
+  // what happens to be loaded (issue #112 prerequisite 2's other half): a
+  // real walk of every server page for the active filter, adding each id it
+  // returns to SELECTED. Wired to #sel-scope-all's click, above.
+  var selectAllMatchingBusy = false;
+  async function selectAllMatchingDevices() {
+    if (selectAllMatchingBusy) return;
+    selectAllMatchingBusy = true;
+    var scopeAll = document.getElementById('sel-scope-all');
+    var savedLabel = scopeAll.textContent;
+    scopeAll.disabled = true;
+    scopeAll.textContent = '· Selecting…';
+    try {
+      var base = deviceFilterQuery(deviceFilterState());
+      // The server's own page cap (gui_server.MAX_PAGE_LIMIT) -- the widest
+      // page it will ever hand back, so this walks the fewest requests a
+      // filtered set of any size can be collected in.
+      var batch = 1000;
+      var offset = 0, total = null;
+      while (total === null || offset < total) {
+        var qs = (base ? base + '&' : '') + 'limit=' + batch + '&offset=' + offset;
+        var r;
+        try { r = await fetch('/api/devices?' + qs); } catch (e) { break; }
+        if (!r.ok) break;
+        var body = await r.json();
+        total = typeof body.total === 'number' ? body.total : 0;
+        var got = body.devices || [];
+        got.forEach(function (d) { SELECTED[d.device_id] = true; });
+        if (!got.length) break;   // never spin forever on an unexpected reply
+        offset += got.length;
+      }
+    } finally {
+      selectAllMatchingBusy = false;
+      scopeAll.disabled = false;
+      scopeAll.textContent = savedLabel;
+      renderDevices(LAST_DEVICES, LAST_DEV_NOW, devTotal);
+    }
   }
   // Every selected-action shares one lock. Without it a delete could fire while
   // an onboard batch is still starting, removing inventory out from under a
@@ -2301,7 +2490,7 @@
   // which is the exact thing the lock exists to prevent.
   async function forSelected(label, ids, fn, opts) {
     opts = opts || {};
-    var failed = [];
+    var failed = [], failedIds = [];
     try {
       await Promise.all(ids.map(async function (id) {
         try {
@@ -2310,8 +2499,9 @@
             var reason = '';
             try { reason = (await r.json()).error || ''; } catch (e2) { }
             failed.push(reason ? id + ' (' + reason + ')' : id);
+            failedIds.push(id);
           }
-        } catch (e) { failed.push(id); }
+        } catch (e) { failed.push(id); failedIds.push(id); }
       }));
     } finally {
       if (opts.ownsBulkLock !== false) setBulkBusy(false);
@@ -2319,6 +2509,10 @@
     devStatus.textContent = label + ' ' + (ids.length - failed.length) + '/' +
       ids.length + ' device(s)' + (failed.length ? '; failed: ' + failed.join(', ') : '');
     refreshDevices();
+    // Bare ids that did NOT succeed -- callers that need to know which of
+    // `ids` actually went through (delete-selected, so a removed device
+    // does not linger in SELECTED forever) diff `ids` against this.
+    return failedIds;
   }
   // Shared by the per-row assign button and the bulk toolbar action: POST
   // the SAME ordered image_ids body to every device id, sequentially,
@@ -2358,10 +2552,19 @@
     var ids = claimSelection();
     if (!ids) return;
     if (!confirm(delWarning(ids))) { setBulkBusy(false); return; }
-    await forSelected('Deleted', ids, function (id) {
+    var failedIds = await forSelected('Deleted', ids, function (id) {
       return fetch('/api/devices/' + encodeURIComponent(id),
                    { method: 'DELETE', headers: csrfHdr() });
     });
+    // A deleted device cannot stay "selected" forever -- SELECTED is keyed
+    // by device_id and outlives paging/filtering/refresh (issue #112
+    // prerequisite 2), so nothing else would ever clear it. Ids that failed
+    // to delete stay selected; the operator can see them in the status line
+    // and retry.
+    ids.forEach(function (id) {
+      if (failedIds.indexOf(id) === -1) delete SELECTED[id];
+    });
+    updateSelBar();
   });
   // ---- Devices: filter wiring ----
   // The Status options are generated from the same list the cell derives from,
@@ -2406,6 +2609,18 @@
         if (el) el.value = '';
       });
       applyDeviceFilters();
+    });
+  })();
+  (function () {
+    var prev = document.getElementById('dev-page-prev');
+    var next = document.getElementById('dev-page-next');
+    if (prev) prev.addEventListener('click', function () {
+      devOffset = Math.max(0, devOffset - DEV_PAGE_SIZE);
+      refreshDevices();
+    });
+    if (next) next.addEventListener('click', function () {
+      devOffset += DEV_PAGE_SIZE;
+      refreshDevices();
     });
   })();
 
@@ -2491,6 +2706,7 @@
     // just one device's set would silently DROP an image from the rest on
     // Apply. The intersection is the only starting point Apply cannot
     // change anyone's assignment by surprise from.
+    // An id off the current page reads as [] here -- fails safe (#112).
     var sets = ids.map(function (id) {
       var d = LAST_DEVICES.filter(function (x) { return x.device_id === id; })[0] || {};
       return rowAssignedIds(d);
@@ -2556,7 +2772,11 @@
       return;
     }
     var pid = raw === CRED_CLEAR ? '' : raw;
-    var count = document.querySelectorAll('#dev-rows .mark:checked').length;
+    // The confirm text and the action it confirms must count the SAME set --
+    // selectedIds() (SELECTED), not the checked rows in the DOM, which under
+    // paging can be only a fraction of the real selection the claim below
+    // actually fires against (issue #112 prerequisite 2).
+    var count = selectedIds().length;
     if (!pid && !confirm('Clear the credential on ' + count + ' selected device(s)?\n\n' +
         'Onboard and undeploy are refused for a device without a credential ' +
         'until one is assigned again. Profiles themselves are not deleted.')) return;

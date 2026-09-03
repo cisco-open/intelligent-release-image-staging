@@ -347,7 +347,7 @@ verification](operations.md#image-verification).
 
 | Route | Body / result |
 | --- | --- |
-| `GET /api/devices` | `{devices: [...], now, total, offset, limit, revision}` — the inventory view plus the server clock, so the UI computes freshness server-clock-to-server-clock. `total` is the size of the whole (filtered) projection and `limit` is `null` unless a page was asked for, so a caller can always tell a page from the fleet. Optional `limit` (1…1000, clamped and echoed), `offset` (≥ 0) and `q` (case-insensitive substring over `device_id`, `device_ip`, `model` and `heartbeat_model` — the console's own search fields) page and filter it; a page is sorted by `device_id`, while the unpaged response keeps its long-standing store order. A malformed or non-positive `limit`/`offset` is a 400 rather than a silent default. `revision` is the fleet store revision behind the same read: a client walking pages compares it to tell a coherent walk from one that raced a fleet edit, and re-walks if it changed. Row order carries no meaning for the actions built on the projection — those are keyed by `device_id`. |
+| `GET /api/devices` | `{devices: [...], now, total, offset, limit, revision}` — the inventory view plus the server clock, so the UI computes freshness server-clock-to-server-clock. `total` is the size of the whole (filtered) projection and `limit` is `null` unless a page was asked for, so a caller can always tell a page from the fleet. Optional `limit` (1…1000, clamped and echoed) and `offset` (≥ 0) page it; a malformed or non-positive `limit`/`offset` is a 400 rather than a silent default. A page is sorted by `device_id`, while the unpaged response keeps its long-standing store order. `revision` is the fleet store revision behind the same read: a client walking pages compares it to tell a coherent walk from one that raced a fleet edit, and re-walks if it changed. Row order carries no meaning for the actions built on the projection — those are keyed by `device_id`. Optional filters narrow the projection *before* it is paged, so `total` always reflects every filter together, not just the page: `q` (case-insensitive substring over `device_id`, `device_ip`, `model` and `heartbeat_model`), `management_type` (a device's classified type, or `legacy` for one stored as the unclassified `legacy_routed`), `platform` (the Agent install choice; `__none` matches an unset one), `cred` (a credential profile id; `__none` matches none assigned), `telemetry` (`on` / `off` / `unknown` — tri-state, `unknown` for a device that has never heartbeated), `peer` (`quarantined` / `not-quarantined`, read from the same peer-policy assignment set `GET /api/peer-policy` exposes), and `status` — one of the Status column's own keys (`onboarding`, `undeploying`, `waiting-heartbeat`, `onboard-failed`, `undeploy-failed`, `deployed`, `placement-failed`, `image-failed`, `copying`, `staging`, `unassigned`, `enrolled`, `not-enrolled`), the freshness modifier `offline` (last heartbeat 600s+ old), or the `__attention` rollup (any row at the Status column's negative/severe/warning level). Every filter is the same rule the console's own filter bar and Status column use — see [Paging and selection at fleet scale](console.md#paging-and-selection-at-fleet-scale) — so a page can never disagree with what the filter bar promises. An unrecognized filter value matches zero rows rather than erroring, the same as a `q` that matches nothing. |
 | `POST /api/devices` | Creates or updates one inventory row; returns `{device: ...}`. |
 | `DELETE /api/devices/<id>` | Retires the device: revokes its credentials first, then clears peer-policy assignment, inventory row, and catalog state. `{deleted: <bool>, degraded: [...]}` — 200 when cleanup was complete, 207 when part of it failed (`degraded` names the areas), 500 `{deleted: false, error: "secret revoke failed"}` when the revoke could not be persisted, in which case nothing was changed. Endpoint rows are retained until they age out. See [Retiring a device](operations.md#retiring-a-device). |
 | `GET /api/devices/export-csv`, `GET /api/devices/example-csv` | The inventory as `devices.csv`, and a blank example. |
@@ -358,6 +358,7 @@ verification](operations.md#image-verification).
 | `GET /api/devices/<id>/deployment` | `{record, total}` — the deployment record that best describes the device (the active one, else the teardown-authorizing one, else the newest) plus the stored-record count; `record` is `null` when none exists. Read-only — feeds the deployment-details panel. |
 | `POST /api/devices/<id>/assign` | `{image_ids: [...]}` sets the device's ordered, up-to-ten-image approved set (an empty array unassigns); the singular `{image_id: <id or null>}` is the pre-multi-image compat shape and always means a one-element set. 400 for more than ten ids, a duplicate, or an id not in the catalog; 400 `image_quarantined` with the blocking verdict if one of the ids is currently quarantined by the Cisco Bulk Hash reconciler (see [Image verification](#image-verification)). See [Policy schema](#policy-schema). |
 | `POST /api/devices/<id>/credential`, `.../platform` | Sets the credential profile, or the platform (Agent install choice) and storage target; each returns `{ok: true}`. |
+| `POST /api/devices/<id>/forget-host-key` | Removes the device's entry from the persistent SSH known_hosts accept-new mode records into (`lab/iris-ssh-policy.sh`) — for a device that was re-imaged or replaced and now fails every session with a changed-key error. `{ok: true, peer: <device_ip>}` on success, including when nothing was recorded (already effectively forgotten). 400 `{error: ...}` when the device has no `device_ip` on record or the removal itself fails. Audited as `device_forget_host_key` (device id, actor, and the peer address). Only the persistent accept-new file is touched — an `IRIS_SSH_HOST_KEY` pin or an operator-supplied `IRIS_SSH_KNOWN_HOSTS` file is untouched. The next session re-verifies and pins the device's new key; this never disables verification. See [Operations → Forgetting a device's SSH host key](operations.md#forgetting-a-devices-ssh-host-key). |
 | `POST /api/devices/<id>/request-report` | Requests a fresh telemetry report; `{ok: true, expires_at}`, or 429 while one is already pending. |
 | `POST /api/devices/<id>/adopt` | Requires `{"acknowledge_adopt": true}`; returns `{record_id}`. 409 when the device already has an active deployment record; routers cannot be adopted. |
 | `POST /api/devices/<id>/onboard`, `POST /api/devices/<id>/undeploy` | Starts the job; `{job_id}`. 409 when the device is busy with the opposite action. Undeploy also answers 409 when the device has no deployment record — send `{"force": true}` to run it anyway, which removes only the IRIS-named agent footprint and leaves operator-owned network state (VLAN/SVI, VirtualPortGroup, NAT) untouched, audited as `undeploy_forced`. A `503` naming an unreadable `deployment_records.json` is a different answer: the records cannot be read at all, so whether this device has a deployment is unknown — repair the file rather than adopting the device. |
@@ -632,6 +633,13 @@ place renamed to `<name>.json.migrated`. There is nothing to run by hand, and
 nothing is deleted. A migration that cannot read its source document fails
 closed and leaves the document exactly where it is.
 
+Migration also leaves a deliberately-invalid placeholder at each retired
+legacy path, so that a **rollback** to a release from before this migration
+refuses to start against what it would otherwise read as an empty fleet,
+rather than silently serving one — see [Rollback after the shard
+migration](operations.md#rollback-after-the-shard-migration) for the
+recovery procedure and what it does and does not restore.
+
 Whole-fleet reads — the console's device and assignment tables, the telemetry
 sidecar's per-pass snapshots, the tracker's blocklist derivation, and a device
 purge — still read every row, which costs what the single document cost,
@@ -847,6 +855,25 @@ A device that has not yet received the bundle ignores `plans` and keeps minting
 its own `transfer_id`, so its plans emit `planned` and never `seeding_started`.
 There is deliberately **no** fallback that promotes a plan from a report bearing
 some other transfer's id.
+
+## Device container environment variables
+
+Cadence jitter and overload backoff (issue #59 — see [Device agents →
+Cadence jitter and overload
+backoff](device-agents.md#cadence-jitter-and-overload-backoff)) are tuned by
+these variables. They are deploy-time knobs like `IRIS_TICK_SECONDS`,
+`IRIS_RPC_PORT` and `IRIS_MAX_PEERS`: IOx/XR set them as numbered
+`run-opts -e` Docker options at `app-hosting install`/activation time (never
+baked into the image), and Guest Shell/router set them in the shell
+environment `bootstrap.sh` runs under. None of these are `server/`
+Compose/container variables — they never reach the `iris` server container.
+
+| Variable | Default | Platform | Effect |
+| --- | --- | --- | --- |
+| `IRIS_TICK_JITTER_PCT` | `10` | IOx, XR | Dithers every ordinary tick by ±this percent of `IRIS_TICK_SECONDS`. |
+| `IRIS_STARTUP_JITTER` | `1` (on) | IOx, XR | Spreads the first tick after container start across the whole `IRIS_TICK_SECONDS` window. `0` disables it. |
+| `IRIS_TICK_BACKOFF_MAX` | `600` (seconds) | IOx, XR, Guest Shell, router | Cap on the exponential backoff applied after a tick's agent process fails outright. |
+| `IRIS_TICK_JITTER_MAX` | `8` (seconds) | Guest Shell, router | Bound (0..N-1, uniform) on the per-tick sleep `bootstrap.sh` takes before contacting the catalog. The EEM timer's own 60s period is unaffected — IOS owns that clock. |
 
 ## Device agent config keys
 

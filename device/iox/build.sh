@@ -91,6 +91,24 @@ IOXCLIENT="${IOXCLIENT:-ioxclient}"
 [ -r "$PACKAGE_DESCRIPTOR" ] \
   || { echo "!! package descriptor not readable: $PACKAGE_DESCRIPTOR" >&2; exit 1; }
 
+# Staleness guard (issue #72): this build bakes in device/agent AS IT SITS IN
+# THIS CHECKOUT ($REPO) -- a worktree that has fallen behind main under
+# device/agent, device/verify_image.py or device/iox ships an older agent
+# with nothing in the built image saying so. See
+# tools/agent-source-freshness.sh for the full rationale and the
+# IRIS_REQUIRE_FRESH_AGENT / IRIS_ALLOW_STALE_AGENT_ACK knobs. Sourcing is
+# ITSELF best-effort: a checkout old enough to predate this guard (exactly
+# the stale-worktree case it exists to catch) has no
+# tools/agent-source-freshness.sh to source, and that absence must degrade
+# to "the check is skipped," never to a raw "No such file or directory"
+# abort that masks every error after it.
+if [ -r "$REPO/tools/agent-source-freshness.sh" ]; then
+  # shellcheck source=tools/agent-source-freshness.sh
+  . "$REPO/tools/agent-source-freshness.sh"
+  iris_check_agent_freshness "$REPO" "device/agent device/verify_image.py device/iox" \
+    || exit 1
+fi
+
 CTX="$(mktemp -d)"
 trap 'rm -rf "$CTX"' EXIT
 mkdir -p "$CTX/agent" "$CTX/agent_bin" "$OUT"

@@ -119,6 +119,21 @@ PKG_VERSION="$(cat "$REPO/VERSION" 2>/dev/null || echo 0.0.0)"
 [ -r "$DOCKERFILE" ] || { echo "!! missing $DOCKERFILE (device/xr/Dockerfile -- build Task 1 first)" >&2; exit 1; }
 [ -r "$ENTRYPOINT" ] || { echo "!! missing $ENTRYPOINT (device/xr/entrypoint.sh -- build Task 1 first)" >&2; exit 1; }
 
+# Staleness guard (issue #72, same mechanism device/iox/build.sh guards
+# against): this build bakes in device/agent AS IT SITS IN THIS CHECKOUT
+# ($REPO) -- a worktree that has fallen behind main under device/agent,
+# device/verify_image.py or device/xr ships an older agent with nothing in
+# the built RPM saying so. See tools/agent-source-freshness.sh. Sourcing is
+# ITSELF best-effort -- a checkout old enough to predate this guard has no
+# tools/agent-source-freshness.sh to source, and that must degrade to "the
+# check is skipped," never to a raw "No such file or directory" abort.
+if [ -r "$REPO/tools/agent-source-freshness.sh" ]; then
+  # shellcheck source=tools/agent-source-freshness.sh
+  . "$REPO/tools/agent-source-freshness.sh"
+  iris_check_agent_freshness "$REPO" "device/agent device/verify_image.py device/xr" \
+    || exit 1
+fi
+
 CTX="$(mktemp -d)"
 trap 'rm -rf "$CTX"' EXIT
 mkdir -p "$CTX/agent" "$CTX/agent_bin" "$OUT"

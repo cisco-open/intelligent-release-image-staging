@@ -315,11 +315,13 @@ def test_legacy_devices_document_is_migrated_on_first_use(tmp_path):
     store = catalog.CatalogStore(str(tmp_path))
     assert store.get_device("d2")["stage_state"] == "staging"
     assert {d["device_id"] for d in store.list_devices()} == {"d1", "d2"}
-    # The document is renamed, never deleted, and the shards now hold it.
-    assert not os.path.exists(path)
+    # The original is renamed, never deleted, and the shards now hold it.
     with open(path + ".migrated") as f:
         assert json.load(f) == legacy
     assert keyed_state.read_all(path) == legacy
+    # The legacy path itself still exists -- as the rollback guard, not the
+    # original document (see the migration/rollback tests below).
+    assert os.path.exists(path)
 
 
 def test_legacy_endpoint_document_is_migrated_on_first_use(tmp_path):
@@ -329,8 +331,8 @@ def test_legacy_endpoint_document_is_migrated_on_first_use(tmp_path):
         json.dump({"schema": 1, "updated_at": 1000.0, "principals": rows}, f)
     fresh = peer_endpoints.fresh_endpoints(path, now=1000.0)
     assert set(fresh) == set(rows)
-    assert not os.path.exists(path)
     assert os.path.exists(path + ".migrated")
+    assert os.path.exists(path)              # rollback guard, not the doc
 
 
 def test_an_unreadable_legacy_document_fails_closed_and_is_left_alone(tmp_path):
@@ -359,3 +361,107 @@ def test_a_corrupt_legacy_endpoint_row_is_never_laundered_into_a_shard(tmp_path)
     assert os.path.exists(path)
     assert not os.path.exists(path + ".migrated")
     assert not os.path.exists(keyed_state.shard_dir(path))
+
+
+# ---------------------------------------------------------------------------
+# Rollback guard: after migration, code from before it must refuse to start
+# rather than silently present an empty fleet (issue filed against this
+# migration: the legacy reader treats a MISSING document as {}, and the
+# rename-away used to make every migrated document look exactly like that).
+# ---------------------------------------------------------------------------
+
+def _legacy_style_read(path):
+    """The pre-#51/#52/#53/#56/#58 whole-fleet reader's exact contract
+    (``catalog.CatalogStore._read`` / ``peer_endpoints._load`` before this
+    migration): a MISSING file is the empty store; an EXISTING file that
+    cannot be parsed as JSON, or whose top level is not a dict, raises. This
+    is deliberately reimplemented here rather than imported -- it no longer
+    exists in this codebase, and the whole point is to prove what *that*
+    code, unchanged, does when pointed at a post-migration data directory."""
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("state file unreadable: %s (%s)"
+                           % (path, type(exc).__name__))
+    if not isinstance(data, dict):
+        raise RuntimeError("state file is not a JSON object: %s" % path)
+    return data
+
+
+def test_rollback_onto_a_migrated_devices_store_refuses_rather_than_empty(
+        tmp_path):
+    legacy = {"d1": {"device_id": "d1", "last_seen": 1.0,
+                     "stage_state": "ready"}}
+    path = str(tmp_path / "devices.json")
+    with open(path, "w") as f:
+        json.dump(legacy, f)
+    catalog.CatalogStore(str(tmp_path)).get_device("d1")   # migrates
+    assert os.path.exists(path + ".migrated")
+
+    # This is the bug as filed: without the guard, the legacy path is simply
+    # gone, and the pre-migration reader's FileNotFoundError branch returns
+    # {} -- a fleet with no devices -- instead of raising.
+    with pytest.raises(RuntimeError):
+        _legacy_style_read(path)
+
+    # The data is not lost: it is one rename away.
+    with open(path + ".migrated") as f:
+        assert json.load(f) == legacy
+
+
+def test_rollback_onto_a_migrated_endpoint_store_refuses_rather_than_empty(
+        tmp_path):
+    path = str(tmp_path / "peer-endpoints.json")
+    rows = _endpoint_rows(2)
+    doc = {"schema": 1, "updated_at": 1000.0, "principals": rows}
+    with open(path, "w") as f:
+        json.dump(doc, f)
+    peer_endpoints.fresh_endpoints(path, now=1000.0)        # migrates
+    assert os.path.exists(path + ".migrated")
+
+    with pytest.raises(RuntimeError):
+        _legacy_style_read(path)
+
+    with open(path + ".migrated") as f:
+        assert json.load(f) == doc
+
+
+def test_rollback_guard_names_the_migrated_file_for_the_operator(tmp_path):
+    path = str(tmp_path / "devices.json")
+    with open(path, "w") as f:
+        json.dump({"d1": {"device_id": "d1"}}, f)
+    catalog.CatalogStore(str(tmp_path)).get_device("d1")
+    with open(path) as f:
+        guard_text = f.read()
+    # An operator who only sees the exception (pointing at `path`) and cats
+    # the file needs the restore command in front of them, not a second
+    # lookup.
+    assert path + ".migrated" in guard_text
+    assert "mv " in guard_text
+    assert "docs/zensical/operations.md" in guard_text
+
+
+def test_migration_is_one_shot_even_across_process_restarts(tmp_path):
+    """A second KeyedState instance (a fresh process after a restart) must
+    not choke on the rollback guard it finds sitting at the legacy path --
+    it has to recognise the store as already migrated and read straight
+    through to the shards, never re-attempting migration or raising."""
+    legacy = {"d1": {"device_id": "d1", "last_seen": 1.0,
+                     "stage_state": "ready"}}
+    path = str(tmp_path / "devices.json")
+    with open(path, "w") as f:
+        json.dump(legacy, f)
+    catalog.CatalogStore(str(tmp_path)).get_device("d1")   # migrates
+    guard_mtime = os.stat(path).st_mtime_ns
+
+    # A brand new store instance, as a restarted process would construct.
+    store2 = catalog.CatalogStore(str(tmp_path))
+    assert store2.get_device("d1")["stage_state"] == "ready"
+    store2.record_heartbeat("d1", {"stage_state": "staging"}, now=2.0)
+    assert store2.get_device("d1")["stage_state"] == "staging"
+    # The guard was left alone -- not rewritten, not treated as a legacy
+    # document to re-migrate.
+    assert os.stat(path).st_mtime_ns == guard_mtime

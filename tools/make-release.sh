@@ -68,6 +68,7 @@ SHIP=(
   tools/apply-assignments.sh tools/get-ioxclient.sh
   tools/stage-iox-package.sh tools/provision-iox-packages.sh
   tools/build-xr-package.sh tools/check-package-freshness.sh
+  tools/agent-source-freshness.sh
   tools/start-compose-server.sh tools/make-release.sh
   tools/aria2c-patches tools/aria2c-build
   # The IOS-XE and IOS-XR transports the install/undeploy recipes call, and

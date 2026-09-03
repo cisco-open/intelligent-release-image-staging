@@ -2033,6 +2033,49 @@ class OnboardService:
                 pass
         return {"cancelled": cancelled, "aborted": aborted}
 
+    def forget_host_key(self, device_id):
+        """Remove device_id's SSH host key from the PERSISTENT known_hosts
+        lab/iris-ssh-policy.sh's default (accept-new) mode records first
+        contact into. Console action for the IRIS-11-001 follow-up: a
+        re-imaged or replaced device presents a new host key and every
+        session then fails with a changed-key error -- correct
+        trust-on-first-use behaviour, but with no way to clear the stale
+        entry short of reaching inside the state volume by hand.
+
+        Only the persistent accept-new file is touched. IRIS_SSH_HOST_KEY
+        (a per-device pin) and IRIS_SSH_KNOWN_HOSTS (an operator-supplied
+        file) are not IRIS-managed state and are untouched here -- an
+        operator using either owns clearing it themselves.
+
+        This is a trust decision, so it is deliberate (one device, on
+        request) and the caller is expected to audit it; this method itself
+        performs no audit write. Returns (True, peer) on success (including
+        "nothing was recorded for this peer" -- already effectively
+        forgotten), (False, message) otherwise. Never raises.
+
+        The next session re-verifies and re-pins the peer's NEW key on first
+        contact -- the same trust-on-first-use flow a brand-new device gets,
+        never a switch to unverified connections."""
+        dev = self.fleet.get_device(device_id) if self.fleet else None
+        if dev is None:
+            return False, "no such device"
+        peer = (dev.get("device_ip") or "").strip()
+        if not peer:
+            return False, "device has no device_ip on record"
+        policy_script = os.path.join(self.repo_root, "lab", "iris-ssh-policy.sh")
+        try:
+            proc = subprocess.run(
+                ["bash", "-c",
+                 'set -e; . "$1"; iris_ssh_forget "$2"',
+                 "iris-ssh-forget", policy_script, peer],
+                capture_output=True, text=True, env=dict(os.environ), timeout=15)
+        except Exception as exc:
+            return False, "could not run iris-ssh-policy.sh: %s" % exc
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip()
+            return False, detail or ("iris_ssh_forget exited %d" % proc.returncode)
+        return True, peer
+
     def _reap_overdue(self, now):
         """Ids of the RUNNING jobs whose deadline (measured from started_at,
         never from the queue stamp) has passed and whose reaping is due:

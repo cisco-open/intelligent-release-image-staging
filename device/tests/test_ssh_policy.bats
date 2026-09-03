@@ -182,3 +182,61 @@ STUBEOF
   [ -f "$IRIS_STATE/ssh/needs-enable/u@192.0.2.10" ] || return 1
   [ -z "$(find "$TMPDIR" -maxdepth 1 -name 'iris-needsenable-*' -print -quit)" ]
 }
+
+# ---- iris_ssh_forget: the console's "forget one device's host key" action (issue #84) ----
+#
+# accept-new mode (above) is correct trust-on-first-use, but a re-imaged or
+# replaced device then fails every session with a changed-key error, and the
+# persistent known_hosts holding the stale entry lives inside the state
+# volume. iris_ssh_forget is what server/gui_onboard.py's forget_host_key
+# shells out to.
+
+@test "iris_ssh_forget removes only the named peer's entry from the persistent known_hosts" {
+  mkdir -p "$IRIS_STATE/ssh"
+  printf '192.0.2.10 ssh-ed25519 AAAAOLD==\n192.0.2.20 ssh-ed25519 AAAAOTHER==\n' \
+    > "$IRIS_STATE/ssh/known_hosts"
+  run bash -c ". '$LAB/iris-ssh-policy.sh' && iris_ssh_forget 192.0.2.10"
+  [ "$status" -eq 0 ] || return 1
+  ! grep -q '192.0.2.10' "$IRIS_STATE/ssh/known_hosts" || return 1
+  grep -q '192.0.2.20' "$IRIS_STATE/ssh/known_hosts"
+}
+
+@test "iris_ssh_forget succeeds when nothing was recorded for the peer (already forgotten)" {
+  run bash -c ". '$LAB/iris-ssh-policy.sh' && iris_ssh_forget 192.0.2.10"
+  [ "$status" -eq 0 ]
+}
+
+@test "iris_ssh_forget succeeds against an existing file with no matching entry" {
+  mkdir -p "$IRIS_STATE/ssh"
+  printf '192.0.2.20 ssh-ed25519 AAAAOTHER==\n' > "$IRIS_STATE/ssh/known_hosts"
+  run bash -c ". '$LAB/iris-ssh-policy.sh' && iris_ssh_forget 192.0.2.10"
+  [ "$status" -eq 0 ] || return 1
+  grep -q '192.0.2.20' "$IRIS_STATE/ssh/known_hosts"
+}
+
+@test "the very next accept-new session re-pins the peer's new key after a forget" {
+  mkdir -p "$IRIS_STATE/ssh"
+  printf '192.0.2.10 ssh-ed25519 AAAAOLD==\n' > "$IRIS_STATE/ssh/known_hosts"
+  run bash -c ". '$LAB/iris-ssh-policy.sh' && iris_ssh_forget 192.0.2.10"
+  [ "$status" -eq 0 ] || return 1
+  # the device's session policy is unchanged by a forget: still accept-new
+  # against the same persistent file, never /dev/null, never
+  # StrictHostKeyChecking=no -- a forget re-arms trust-on-first-use, it does
+  # not disable verification.
+  run_dev
+  [ "$status" -eq 0 ] || return 1
+  grep -q -- '-o StrictHostKeyChecking=accept-new' "$ARGV_LOG" || return 1
+  ! grep -q 'UserKnownHostsFile=/dev/null' "$ARGV_LOG" || return 1
+  [ -f "$IRIS_STATE/ssh/known_hosts" ]
+}
+
+@test "iris_ssh_forget never touches an operator-supplied IRIS_SSH_KNOWN_HOSTS file" {
+  mkdir -p "$IRIS_STATE/ssh"
+  printf '192.0.2.10 ssh-ed25519 AAAAOLD==\n' > "$IRIS_STATE/ssh/known_hosts"
+  operator_file="$BATS_TEST_TMPDIR/operator-known-hosts"
+  printf '192.0.2.10 ssh-ed25519 AAAAOPERATORPINNED==\n' > "$operator_file"
+  run env IRIS_SSH_KNOWN_HOSTS="$operator_file" \
+    bash -c ". '$LAB/iris-ssh-policy.sh' && iris_ssh_forget 192.0.2.10"
+  [ "$status" -eq 0 ] || return 1
+  grep -q '192.0.2.10' "$operator_file"
+}

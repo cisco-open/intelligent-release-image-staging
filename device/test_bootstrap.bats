@@ -22,6 +22,10 @@ setup() {
   printf '#!/usr/bin/env bash\nexit 1\n' > "$BIN/pgrep"
   printf '#!/usr/bin/env bash\necho "$@" >> "%s/pkill.log"\n' "$TMP" > "$BIN/pkill"
   chmod +x "$BIN/pgrep" "$BIN/pkill"
+  # tests above this line are not about cadence jitter/backoff (issue #59):
+  # keep them fast and deterministic by disabling the pre-agent jitter sleep.
+  # The jitter/backoff tests below override this explicitly.
+  export IRIS_TICK_JITTER_MAX=0
 }
 
 teardown() { rm -rf "$TMP"; }
@@ -148,4 +152,90 @@ teardown() { rm -rf "$TMP"; }
   # ...and the next tick will read the bundled bootstrap
   cmp -s "$SRC/bootstrap.sh" "$BUNDLE/bootstrap.sh"
   [ ! -e "$SRC/bootstrap.sh.new" ]
+}
+
+# ---------------------------------------------------------------------------
+# Cadence jitter + failure backoff (issue #59)
+#
+# The EEM watchdog fires this script on IOS's own fixed 60s clock, so a fleet
+# installed or reloaded together keeps every device's timer in the same
+# phase indefinitely -- amplifying every tick into a fleet-wide burst of
+# policy GETs, heartbeats, and tracker re-announces. bootstrap.sh (a) sleeps
+# a small per-device jitter before the actual catalog contact, and (b) skips
+# that contact for a while after the agent fails outright, easing off an
+# overloaded or unreachable server without the EEM timer's own cadence
+# changing (steps 0-4, local upkeep, still run every tick).
+# ---------------------------------------------------------------------------
+
+@test "bootstrap sleeps a bounded per-tick jitter before invoking the agent" {
+  printf 'rpc_secret = SAME\n' > "$STAGE/iris-agent.conf"
+  printf 'SAME\n' > "$STAGE/rpc-secret"
+  mkdir -p "$STAGE/agent"
+  printf 'open(r"%s/agent-invoked", "w").write("ran")\n' "$TMP" \
+    > "$STAGE/agent/iris_agent.py"
+  # record the jitter sleep's argument instead of actually waiting
+  printf '#!/usr/bin/env bash\necho "$1" >> "%s/sleep.log"\n' "$TMP" > "$BIN/sleep"
+  chmod +x "$BIN/sleep"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" IRIS_TICK_JITTER_MAX=8 \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/agent-invoked" ]
+  [ -f "$TMP/sleep.log" ]
+  jitter="$(cat "$TMP/sleep.log")"
+  [ "$jitter" -ge 0 ] && [ "$jitter" -lt 8 ]
+}
+
+@test "IRIS_TICK_JITTER_MAX=0 skips the jitter sleep entirely" {
+  printf 'rpc_secret = SAME\n' > "$STAGE/iris-agent.conf"
+  printf 'SAME\n' > "$STAGE/rpc-secret"
+  mkdir -p "$STAGE/agent"
+  printf 'open(r"%s/agent-invoked", "w").write("ran")\n' "$TMP" \
+    > "$STAGE/agent/iris_agent.py"
+  printf '#!/usr/bin/env bash\necho "$1" >> "%s/sleep.log"\n' "$TMP" > "$BIN/sleep"
+  chmod +x "$BIN/sleep"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" IRIS_TICK_JITTER_MAX=0 \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/agent-invoked" ]
+  [ ! -f "$TMP/sleep.log" ]
+}
+
+@test "a failed agent tick opens a backoff window that skips the NEXT tick's catalog contact" {
+  printf 'rpc_secret = SAME\n' > "$STAGE/iris-agent.conf"
+  printf 'SAME\n' > "$STAGE/rpc-secret"
+  mkdir -p "$STAGE/agent"
+  # counts real invocations, then always fails -- like an unreachable/overloaded catalog
+  printf 'import sys\nwith open(r"%s/agent-invocations", "a") as f: f.write("x")\nsys.exit(1)\n' \
+    "$TMP" > "$STAGE/agent/iris_agent.py"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" IRIS_TICK_JITTER_MAX=0 \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 1 ]
+  [ "$(wc -c < "$TMP/agent-invocations")" -eq 1 ]
+  [ -f "$STAGE/.iris-tick-backoff" ]
+  read -r skip_until streak < "$STAGE/.iris-tick-backoff"
+  [ "$streak" -eq 1 ]
+  [ "$skip_until" -gt "$(date +%s)" ]
+
+  # the NEXT tick (EEM fires again 60s later, well inside the backoff window)
+  # must skip catalog contact -- no second agent invocation -- and say so.
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" IRIS_TICK_JITTER_MAX=0 \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"backing off catalog contact"* ]]
+  [ "$(wc -c < "$TMP/agent-invocations")" -eq 1 ]
+}
+
+@test "a successful agent tick clears a stale backoff window" {
+  printf 'rpc_secret = SAME\n' > "$STAGE/iris-agent.conf"
+  printf 'SAME\n' > "$STAGE/rpc-secret"
+  mkdir -p "$STAGE/agent"
+  printf 'open(r"%s/agent-invoked", "w").write("ran")\n' "$TMP" \
+    > "$STAGE/agent/iris_agent.py"
+  # a backoff window that already expired, from a streak of 3 prior failures
+  printf '%s %s\n' "$(( $(date +%s) - 5 ))" 3 > "$STAGE/.iris-tick-backoff"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" IRIS_TICK_JITTER_MAX=0 \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/agent-invoked" ]
+  [ ! -f "$STAGE/.iris-tick-backoff" ]
 }

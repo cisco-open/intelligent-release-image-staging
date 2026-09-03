@@ -443,7 +443,10 @@ discarded, so "connection refused", "no matching key exchange method" and
 "host key changed" can be told apart. A changed key is reported with the
 `known_hosts` path and the `ssh-keygen -R <ip> -f <file>` command to clear it
 when a device was legitimately re-imaged -- and a note to treat it as a
-possible interception otherwise.
+possible interception otherwise. The console's **Forget host key** action
+(`POST /api/devices/<id>/forget-host-key`) runs the equivalent removal
+without shell access to the state volume, and is audited either way -- see
+[Operations → Forgetting a device's SSH host key](operations.md#forgetting-a-devices-ssh-host-key).
 
 ### On-device agent sessions
 

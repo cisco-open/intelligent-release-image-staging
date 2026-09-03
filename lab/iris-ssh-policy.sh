@@ -49,6 +49,11 @@
 #   iris_ssh_explain FILE PEER   reads ssh's captured stderr from FILE and
 #                          prints hints to stderr. Never fails.
 #   iris_ssh_cleanup       removes the temporary known_hosts a pin created.
+#   iris_ssh_forget PEER   removes PEER's entry from the PERSISTENT
+#                          known_hosts accept-new mode records into (see
+#                          below). Never touches an IRIS_SSH_HOST_KEY pin or
+#                          an operator-supplied IRIS_SSH_KNOWN_HOSTS file --
+#                          neither is IRIS-managed state.
 
 iris_ssh_policy() {
   local peer="$1"
@@ -117,5 +122,43 @@ iris_ssh_explain() {
 iris_ssh_cleanup() {
   [ -n "${IRIS_SSH_TMP_KNOWN_HOSTS:-}" ] && rm -f "$IRIS_SSH_TMP_KNOWN_HOSTS"
   IRIS_SSH_TMP_KNOWN_HOSTS=""
+  return 0
+}
+
+# A re-imaged or replaced device presents a NEW host key; accept-new mode
+# (the default above) then refuses every session with a changed-key error --
+# correct trust-on-first-use behaviour, but the persistent known_hosts lives
+# inside the IRIS state volume, which an operator does not always have shell
+# access to. This is what the console's "forget host key" action (issue #84)
+# calls, and what the ssh-keygen -R hint in iris_ssh_explain above is for
+# when running by hand.
+#
+# Idempotent and narrowly scoped: only the SAME persistent file accept-new
+# mode reads/writes ($IRIS_SSH_STATE_DIR/known_hosts, default
+# $IRIS_STATE/ssh/known_hosts) is touched, and only PEER's own entry is
+# removed -- every other device's pinned trust is untouched. A peer with
+# nothing recorded (already forgotten, or never contacted) is success, not an
+# error: the point is "no stale entry", and there already is none. The very
+# NEXT session re-verifies and re-pins PEER's new key on first contact -- the
+# same trust-on-first-use flow a brand-new device gets. This never sets
+# StrictHostKeyChecking=no and never touches a pinned (IRIS_SSH_HOST_KEY) or
+# operator-supplied (IRIS_SSH_KNOWN_HOSTS) file -- neither is IRIS-managed
+# state, and forgetting a key an operator pinned deliberately would be a
+# console action erasing an explicit operator decision, not a stale cache.
+iris_ssh_forget() {
+  local peer="$1"
+  local dir="${IRIS_SSH_STATE_DIR:-${IRIS_STATE:-$HOME/.iris}/ssh}"
+  local file="$dir/known_hosts"
+  [ -e "$file" ] || return 0   # nothing ever recorded -- already "forgotten"
+  # ssh-keygen -R's own exit status is not a reliable success signal across
+  # OpenSSH versions (some report failure when nothing matched); verify the
+  # outcome directly instead. Entries here are always PLAIN (accept-new never
+  # sets HashKnownHosts), the same format iris_ssh_policy's pinned mode
+  # writes, so a literal match is exact.
+  ssh-keygen -R "$peer" -f "$file" >/dev/null 2>&1
+  if grep -qF -- "$peer " "$file" 2>/dev/null; then
+    echo "IRIS ssh: failed to remove $peer from $file" >&2
+    return 1
+  fi
   return 0
 }

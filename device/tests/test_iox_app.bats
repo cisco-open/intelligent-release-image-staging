@@ -180,7 +180,10 @@ _ALIVE='ARIA2_PID=$$; proc_stat "$$"; ARIA2_START="$PROC_START"'
 @test "entrypoint.sh tracks agent and sleep children for prompt TERM handling" {
   grep -q 'python3 "\$AGENT" --once &' "$ENTRYPOINT"
   grep -q 'AGENT_PID=\$!' "$ENTRYPOINT"
-  grep -q 'sleep "\$TICK" &' "$ENTRYPOINT"
+  # sleep_for (issue #59) replaces a bare "$TICK": every ordinary tick is
+  # jittered, and a failed tick backs off -- see next_tick_sleep -- but the
+  # tracked-child TERM-handling shape this test guards is unchanged.
+  grep -q 'sleep "\$sleep_for" &' "$ENTRYPOINT"
   grep -q 'SLEEP_PID=\$!' "$ENTRYPOINT"
   grep -q 'kill "\$pid"' "$ENTRYPOINT"
   grep -q 'wait "\$pid"' "$ENTRYPOINT"

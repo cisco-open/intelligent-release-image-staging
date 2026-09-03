@@ -772,6 +772,13 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
 /* Total, per Filter bar > Anatomy. Secondary text, not a control, so it
    reads as a readout of the bar rather than another thing to click. */
 .filter-total { font-size:12px; line-height:18px; color:var(--text-secondary); white-space:nowrap; }
+/* Prev/Next paging readout (issue #112 step 3), styled as a natural
+   continuation of .filter-total rather than a separate control cluster.
+   :not([hidden]) -- the element carries `hidden` when unpaged, and a bare
+   `.dev-pager { display:flex }` would outrank the UA [hidden] rule and keep
+   it on screen regardless (test_every_hidden_toggled_element_survives_its_
+   display_rule; the same bug the setup nudge shipped with once). */
+.dev-pager:not([hidden]) { display:flex; align-items:center; gap:8px; white-space:nowrap; }
 /* Button group, right-aligned: 8px between the primary/secondary buttons
    (Button > Button group > Sizes, medium). */
 .table-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; flex:0 0 auto; }

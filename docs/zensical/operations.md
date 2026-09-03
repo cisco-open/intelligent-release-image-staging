@@ -205,6 +205,40 @@ order of cleanup cannot accidentally re-permit it. Re-onboarding clears the
 device's old endpoint rows before the fresh credential becomes usable, and aborts
 without minting if that clear fails.
 
+## Forgetting a device's SSH host key
+
+Every SSH/scp session IRIS opens itself — device transports, the installers'
+stage-host push, the XR RPM scp — verifies the peer per
+[Security → Device SSH host keys](security.md#device-ssh-host-keys).
+By default that is trust-on-first-use: the first session records the peer's
+host key into a persistent `known_hosts` under the IRIS state volume, and
+every later session must present the same one.
+
+A device that is re-imaged or replaced presents a **new** host key, and every
+session against it then fails with a changed-key error — correct behavior
+(the alternative would be silently trusting a possibly-different box), but
+with nothing recorded to distinguish "legitimately re-imaged" from "someone
+else answering at that address" beyond the operator's own judgment, and the
+persistent `known_hosts` file lives inside the state volume, which the
+operator does not always have shell access to reach directly.
+
+**Console:** open the device's deployment details drawer and use **Forget
+host key**. This is a trust decision, so it asks for confirmation, and it is
+audited (`device_forget_host_key`, naming the device and the console user)
+either way. See [Reference → Devices](reference.md#devices) for the
+underlying route.
+
+**From a shell with access to the state volume:** the hint
+`iris_ssh_explain` already prints on a changed-key failure works directly —
+`ssh-keygen -R '<device_ip>' -f '<state>/ssh/known_hosts'`.
+
+Either path only clears the stale entry; it does not disable verification.
+The very next session re-verifies and pins whatever key the device now
+presents, the same trust-on-first-use flow a brand-new device gets. Neither
+path touches `IRIS_SSH_HOST_KEY` (a per-device pin) or an operator-supplied
+`IRIS_SSH_KNOWN_HOSTS` file — clearing either of those, if set, is the
+operator's own decision.
+
 ## Backups
 
 Back up the Docker volumes that hold `/var/lib/iris` and `/etc/iris`, plus the offline age identity (the host key file `IRIS_AGE_KEY_FILE_HOST` points at) required to decrypt secrets, plus the `iris-images` uploads volume — console-uploaded images live there, and a restore without it loses them. Image binaries under the read-only import root and generated artifacts stay in their normal external storage path.
@@ -576,6 +610,71 @@ the manifest — version, terminal state, path containment, digest and info-hash
 agreement, and that the named image directory matches the current catalog —
 before any file or aria2 call. Recovery leaves maintenance frozen and keeps the
 manifest as evidence in either outcome.
+
+## Rollback after the shard migration
+
+See [Keyed per-device state](reference.md#keyed-per-device-state) for what
+the migration does. This is what to do if you roll the server back to a
+release from before it.
+
+Every whole-fleet document under `IRIS_STATE` — `devices.json`,
+`policy.json`, `pull_requests.json`, `telemetry.json`, `report_ledger.json`,
+`transfer-attestations.json`, `peer-endpoints.json` — is migrated into a
+`<name>.d/` shard directory the first time the running server touches that
+store, normally on the container's first restart after an upgrade past the
+shard migration. Migration is automatic, one-shot per store, and never
+deletes anything: the original document is renamed to `<name>.json.migrated`
+and left in place next to its shard directory.
+
+**A rollback to a pre-migration release refuses to start rather than run
+with an empty fleet.** Code from before the migration reads a *missing*
+`devices.json` (and the same for every other store above) as an empty store
+— no devices, no policy, no telemetry — and a rename-away is exactly what
+that code would have found once migration renamed the document to
+`.migrated`. To close that off, migration leaves a placeholder file at each
+legacy path instead of leaving nothing: deliberately not valid JSON, so it
+trips the same fail-closed check that release already has for a *corrupt*
+state file (`state file unreadable: ...` / `state file is not a JSON
+object: ...` in the server log, or `EndpointStoreError` for
+`peer-endpoints.json`), and the affected requests fail instead of quietly
+succeeding against an empty fleet. The placeholder file itself is plain
+text — `cat` it — and names the exact `.migrated` file to restore.
+
+To roll back:
+
+1. Stop the server (`docker compose down`, or the equivalent for your
+   deployment).
+2. List which stores were actually migrated — only a store the new release
+   touched has one:
+   ```
+   ls <state>/*.json.migrated
+   ```
+3. For each one, restore the original document over the placeholder:
+   ```
+   mv <state>/devices.json.migrated <state>/devices.json
+   mv <state>/policy.json.migrated <state>/policy.json
+   mv <state>/pull_requests.json.migrated <state>/pull_requests.json
+   mv <state>/telemetry.json.migrated <state>/telemetry.json
+   mv <state>/report_ledger.json.migrated <state>/report_ledger.json
+   mv <state>/transfer-attestations.json.migrated <state>/transfer-attestations.json
+   mv <state>/peer-endpoints.json.migrated <state>/peer-endpoints.json
+   ```
+4. Start the pre-migration release.
+
+**What this does not recover.** The restored document is a snapshot from the
+moment of migration, not from the moment of rollback. Any write the *new*
+(sharded) release made in between — a heartbeat, a policy change, a
+telemetry report, an endpoint announce — lives only in the `<name>.d/` shard
+directory, and migration never folds later shard writes back into
+`<name>.json.migrated`. A rollback shortly after the upgrade, before devices
+have reported again, loses nothing; a rollback after the fleet has run on
+the new release for a while reverts every migrated store to its state at
+migration time. The shard directories are left in place by this procedure —
+pre-migration code never reads or writes them — so nothing already on disk
+is destroyed, but a device's activity between migration and rollback will
+not be visible to the older release. If that gap matters for your fleet,
+back up `<state>` (see [Backups](#backups)) before rolling back, and keep it
+until you have confirmed you will not need to reconcile against it.
 
 ## Recovery checklist
 

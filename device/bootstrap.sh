@@ -28,6 +28,33 @@ export STAGE_DIR="${STAGE_DIR:-$STAGE}"
 export IRIS_AGENT_CONF="${IRIS_AGENT_CONF:-$STAGE/iris-agent.conf}"
 export IRIS_AGENT_STATE="${IRIS_AGENT_STATE:-$STAGE/iris-agent.state}"
 
+# --- cadence jitter + failure backoff (issue #59) -------------------------
+# The EEM watchdog fires this script every 60s on IOS's own clock -- fixed,
+# not ours to jitter -- so a fleet installed or reloaded together keeps every
+# device's timer in the same phase indefinitely: that is what turns an
+# ordinary tick into a fleet-wide burst of policy GETs, heartbeats, and
+# tracker re-announces. Two independent, small guards:
+#   * JITTER_MAX: a per-tick sleep (0..JITTER_MAX-1s, uniform) right before
+#     step 5 spreads the ACTUAL catalog contact within the tick, so
+#     simultaneous EEM fires do not turn into a simultaneous burst.
+#   * BACKOFF_FILE: after the agent fails outright (catalog unreachable,
+#     timed out, or a non-2xx status -- the same shape a saturated server
+#     produces), step 5 is SKIPPED on some ticks, exponentially longer up to
+#     BACKOFF_MAX, without the EEM timer's own cadence changing. Steps 0-4
+#     (local bundle/aria2c/log upkeep) still run every tick regardless --
+#     only catalog contact backs off. Bounded well inside the token's
+#     multi-day refresh slack (iris_agent.py's needs_refresh docstring), so
+#     a run of skipped ticks never strands the device.
+JITTER_MAX="${IRIS_TICK_JITTER_MAX:-8}"
+BACKOFF_MAX="${IRIS_TICK_BACKOFF_MAX:-600}"
+BACKOFF_FILE="$STAGE/.iris-tick-backoff"
+
+# rand_below N -- uniform 0..N-1. python3 is already a hard dependency of
+# step 5 below.
+rand_below() {
+  python3 -c 'import random,sys; print(random.randrange(int(sys.argv[1])))' "$1"
+}
+
 # 0. collect freshly dropped files into OUR (guest-owned) working dir
 mkdir -p "$STAGE" || { echo "IRIS-BOOTSTRAP: cannot create stage directory $STAGE" >&2; exit 1; }
 for f in bundle.tgz iris-agent.conf rpc-secret iris-catalog.pem; do
@@ -119,9 +146,38 @@ if [ -f "$STAGE/rotate-logs.sh" ]; then
     || echo "IRIS-BOOTSTRAP: log rotation failed; continuing so the agent still heartbeats" >&2
 fi
 
-# 5. run the agent control plane once
+# 5. run the agent control plane once -- jittered, and skipped while backing
+#    off from a recent failure (see the block near the top of this script).
 if [ -f "$STAGE/agent/iris_agent.py" ]; then
-  exec python3 "$STAGE/agent/iris_agent.py" --once
+  now="$(date +%s)"
+  skip_until=0; streak=0
+  if [ -f "$BACKOFF_FILE" ]; then
+    read -r skip_until streak < "$BACKOFF_FILE" 2>/dev/null || { skip_until=0; streak=0; }
+  fi
+  case "$skip_until" in ''|*[!0-9]*) skip_until=0 ;; esac
+  case "$streak" in ''|*[!0-9]*) streak=0 ;; esac
+  if [ "$now" -lt "$skip_until" ]; then
+    echo "IRIS-BOOTSTRAP: backing off catalog contact for $((skip_until - now))s more (failure streak $streak)"
+    exit 0
+  fi
+  jitter="$(rand_below "$JITTER_MAX" 2>/dev/null || echo 0)"
+  [ "$jitter" -le 0 ] || sleep "$jitter"
+  # Not `exec`: this process needs the exit status back to update the
+  # backoff file below, so it must remain a plain wait-able child call.
+  python3 "$STAGE/agent/iris_agent.py" --once
+  agent_status=$?
+  if [ "$agent_status" -eq 0 ]; then
+    rm -f "$BACKOFF_FILE"
+  else
+    streak=$((streak + 1))
+    [ "$streak" -le 10 ] || streak=10   # 2**10 * 60s is already far past BACKOFF_MAX
+    mult=1; i=0
+    while [ "$i" -lt "$streak" ]; do mult=$((mult * 2)); i=$((i + 1)); done
+    delay=$((60 * mult))
+    [ "$delay" -le "$BACKOFF_MAX" ] || delay="$BACKOFF_MAX"
+    printf '%s %s\n' "$(($(date +%s) + delay))" "$streak" > "$BACKOFF_FILE"
+  fi
+  exit "$agent_status"
 fi
 [ "$bundle_updated" -eq 0 ] || {
   echo "IRIS-BOOTSTRAP: unpacked bundle lacks $STAGE/agent/iris_agent.py" >&2

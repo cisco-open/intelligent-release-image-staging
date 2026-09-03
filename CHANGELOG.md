@@ -55,6 +55,26 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   against 280 ms and 5.99 MiB for the whole fleet, on the same host and run.
   See
   [Reference → Devices](docs/zensical/reference.md).
+- **The Devices console now uses that paged projection instead of fetching
+  the whole fleet on every 10-second poll.** Two prerequisites had to land
+  first, because a truncated table an operator reads as the complete fleet
+  is worse than a slow one: `GET /api/devices` now accepts every one of the
+  filter bar's six column filters — `management_type`, `platform`, `cred`,
+  `telemetry`, `peer` and `status` (plus the existing `q`) — server-side,
+  condition-for-condition the same as the console's own client-side
+  derivation, so a page can never disagree with what the filter bar
+  promises; and bulk-action selection is now tracked by device ID in a set
+  that survives paging, filtering and the periodic poll, rather than
+  scraped from whichever checkboxes happen to be rendered. The header
+  checkbox now only ever selects the page on screen (its label says so); a
+  new **Select all N matching devices** control performs a real walk of
+  every remaining page under the active filter and states plainly once
+  every matching device is selected, rather than ever silently meaning
+  "this page." The table itself pages at 200 rows once a filter's match
+  count exceeds that, with Previous/Next controls and a "Page X of Y"
+  readout; `/api/overview`'s attention rollup keeps fetching the whole,
+  unfiltered fleet, since its aggregates are fleet-wide by definition. See
+  [Console → Paging and selection at fleet scale](docs/zensical/console.md#paging-and-selection-at-fleet-scale).
 - **The transfer-lifecycle store's bounds are now numbers an operator can
   read.** The durable plan store counts every row and record its two bounds
   (`MAX_PLANS`, a week of retention) cost, but nothing read those counters, so
@@ -70,8 +90,72 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   omitted whole when the store is absent or unreadable rather than published as
   zeros — a missing store is not an empty one. Names and meanings are in
   [Observability → Metrics names](docs/zensical/observability.md#metrics-names-operator-contract).
+- **Device agent ticks are now jittered and back off on failure, instead of
+  every device polling on the exact same 60s clock.** A fleet installed or
+  restarted together kept every device's tick in lockstep — Guest Shell's EEM
+  timer fires on IOS's own fixed clock, and the IOx/XR container supervisors
+  slept a flat `IRIS_TICK_SECONDS` — turning an ordinary tick into a
+  fleet-wide burst of policy GETs, heartbeats and tracker re-announces.
+  `device/iox/entrypoint.sh` and `device/xr/entrypoint.sh` now dither every
+  ordinary tick by ±10% of the tick length (`IRIS_TICK_JITTER_PCT`), spread
+  their first tick across the whole tick window once at startup
+  (`IRIS_STARTUP_JITTER`), and back off exponentially, capped at
+  `IRIS_TICK_BACKOFF_MAX` (default 600s), after the agent process fails
+  outright — the same shape an unreachable or overloaded catalog produces.
+  `device/bootstrap.sh` (Guest Shell and router) cannot move the EEM timer
+  itself, so it sleeps a small bounded jitter (`IRIS_TICK_JITTER_MAX`,
+  default 0-7s) before contacting the catalog each tick and, after a failed
+  tick, skips catalog contact on a run of future ticks under the same
+  exponential/capped backoff — local bundle/aria2c/log upkeep still runs
+  every tick regardless. All defaults stay comfortably inside the catalog
+  token's multi-day refresh slack, so a run of jittered or backed-off ticks
+  never strands a device. See [Device agents → Cadence jitter and overload
+  backoff](docs/zensical/device-agents.md#cadence-jitter-and-overload-backoff).
+- **The console can now forget a device's stale SSH host key.** First
+  contact correctly records a device's SSH host key into a persistent
+  `known_hosts` (trust-on-first-use), but a device that is later re-imaged
+  or replaced presents a new key and every session then fails with a
+  changed-key error — with no way to clear the stale entry short of shell
+  access to the state volume. `POST /api/devices/<id>/forget-host-key`
+  (console: the deployment-details drawer's **Forget host key** button)
+  removes just that device's entry from the persistent `known_hosts`;
+  `lab/iris-ssh-policy.sh` gained the underlying `iris_ssh_forget` function.
+  It touches only the persistent accept-new file — never an
+  `IRIS_SSH_HOST_KEY` pin or an operator-supplied `IRIS_SSH_KNOWN_HOSTS` —
+  and the next session re-verifies and pins the device's new key rather than
+  disabling verification. Always audited (`device_forget_host_key`, naming
+  the device and the actor), success or failure. See
+  [Operations → Forgetting a device's SSH host
+  key](docs/zensical/operations.md#forgetting-a-devices-ssh-host-key).
+- **`device/iox/build.sh` and `tools/build-xr-package.sh` now warn — or, on
+  request, refuse — when the checkout they run from is stale.** Both bake in
+  `device/agent` (and their own `device/<platform>` tree) exactly as it sits
+  in whatever worktree the script happens to run from, with no check against
+  `main`. A worktree left behind after `main` moved on then silently shipped
+  an older agent, with nothing in the built image saying so — confirmed still
+  live, and exactly how a stale candidate worktree corrupted a size
+  comparison (three worktrees pinned at an older commit while the baseline
+  moved on). Both scripts now source the new
+  `tools/agent-source-freshness.sh` and warn on stderr, naming the missing
+  commits, whenever the checkout is behind `main`/`origin/main` under the
+  relevant paths; `IRIS_REQUIRE_FRESH_AGENT=1` turns that into a hard build
+  failure, and `IRIS_ALLOW_STALE_AGENT_ACK=1` builds anyway under that
+  setting. Best-effort only — silent outside a git checkout or when no
+  reference branch resolves, and never blocks a checkout already at or ahead
+  of it. See [Development → Embedded agent
+  packages](docs/zensical/development.md#embedded-agent-packages).
 
 ### Fixed
+- **`lab/device-run.sh` refuses the interactive install-subsystem commands.**
+  `install remove inactive` and its siblings wait on a `[y/n]` prompt, and
+  this transport feeds stdin ahead of the prompt: the answer lands nowhere,
+  the session drops while the operation is still open, and the switch then
+  refuses every later install operation until it is reloaded, with nothing in
+  `show install log` to explain it. A lab Catalyst sat wedged that way for six
+  days. The commands are now refused before the device is dialled, with a
+  message naming the EEM-applet idiom that does work — the one IRIS's own
+  reclaim path has always used. Read-only `show install ...` is unaffected,
+  because diagnosing a wedged switch needs it.
 - **The tracker, catalog, console, artifact server and metrics listeners now
   bound how many requests they handle at once.** `ThreadingHTTPServer` spawns
   one OS thread per accepted connection with no cap, so a burst of slow
@@ -143,6 +227,20 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   use and left in place renamed `<name>.json.migrated` — no operator step. See
   [Reference → Keyed per-device
   state](docs/zensical/reference.md#keyed-per-device-state).
+- **A rollback to a release from before the shard migration above no longer
+  starts against a silently empty fleet.** Once a store is migrated, code
+  from before it reads the now-absent `devices.json` (and the other six
+  whole-fleet documents) as an empty store rather than an error — so a
+  rollback would have shown no devices, no policy and no telemetry, with the
+  real data intact but undiscoverable one rename away under
+  `<name>.json.migrated`. Migration now leaves a deliberately-invalid
+  placeholder at each retired legacy path instead of leaving nothing, so that
+  same pre-migration code's existing fail-closed handling of a *corrupt*
+  state file trips instead, and the placeholder names the exact `.migrated`
+  file and command to restore it. See [Operations → Rollback after the shard
+  migration](docs/zensical/operations.md#rollback-after-the-shard-migration)
+  for the recovery procedure and what it does not restore (writes made by the
+  new release since migration).
 - **The tracker's endpoint map no longer evicts a live device at full fleet
   size.** Its capacity was 10,000 — the same number as the supported device
   count — but the map also holds the `service:seeder` principal, so a full

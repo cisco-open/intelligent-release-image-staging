@@ -230,6 +230,54 @@ The agent loop is deliberately boring:
    the bind mount, so the agent only attests it.
 8. Report health, progress, and errors.
 
+## Cadence jitter and overload backoff
+
+Guest Shell's EEM watchdog and the IOx/XR container supervisors all drive the
+agent on a nominal 60-second tick. Left exactly synchronized, a fleet that is
+bulk-installed or reloaded together keeps every device's tick in the same
+phase indefinitely — turning an ordinary tick into a fleet-wide burst of
+policy GETs, heartbeats, and tracker re-announces. Three independent,
+bounded guards spread that out, sized to smooth *arrival*, not to compensate
+for a slow catalog — the per-device cost of a policy/heartbeat round trip is
+now a fixed, small constant regardless of fleet size (see [Reference → Keyed
+per-device state](reference.md#keyed-per-device-state)):
+
+- **Steady-state dither (IOx/XR only).** `device/iox/entrypoint.sh` and
+  `device/xr/entrypoint.sh` vary every ordinary tick by ±10% of
+  `IRIS_TICK_SECONDS` (54–66s at the 60s default, via `IRIS_TICK_JITTER_PCT`)
+  — enough that devices which started in the same second drift apart over a
+  handful of ticks, small enough that the *average* cadence, and so token
+  refresh and assignment convergence latency, barely moves. Guest Shell
+  cannot move the EEM timer's own period (IOS owns that clock), so
+  `device/bootstrap.sh` instead sleeps a small bounded jitter
+  (`IRIS_TICK_JITTER_MAX`, default 0–7s) immediately before contacting the
+  catalog each tick — the EEM timer still fires every 60s, but the actual
+  request lands at a different offset within it per device.
+- **Startup jitter (IOx/XR only).** The first tick after a container starts
+  is spread across the whole tick window (`IRIS_STARTUP_JITTER`, on by
+  default) — the case the steady-state dither only corrects gradually: many
+  containers restarting in the same second (a platform-wide app-hosting
+  restart, say) get their first catalog contact spread out instead of firing
+  together. Set it to `0` for a single-device debug session watching for the
+  first tick.
+- **Failure backoff.** After a tick fails outright — the catalog unreachable,
+  timed out, or answering a non-2xx status, the same shape a saturated
+  server produces — the next contact backs off exponentially, capped at
+  `IRIS_TICK_BACKOFF_MAX` (600s by default), instead of retrying on the
+  ordinary cadence. IOx/XR skip the whole tick (`next_tick_sleep` in
+  `entrypoint.sh`); Guest Shell/router cannot skip an EEM-fired tick, so
+  `bootstrap.sh` instead skips only step 5 (catalog contact) while local
+  bundle/aria2c/log upkeep (steps 0–4) keeps running every tick, recording
+  the backoff deadline and failure streak in
+  `$STAGE/.iris-tick-backoff`. A success immediately clears the streak and
+  resumes ordinary cadence. The cap is comfortably inside the catalog
+  token's multi-day refresh slack, so a run of backed-off ticks never
+  strands a device.
+
+All of these are tuning knobs, not protocol values — see [Reference →
+Device container environment variables](reference.md#device-container-environment-variables)
+for defaults and ranges.
+
 ## Verification gates
 
 IRIS uses two checks because the server and device have different capabilities:

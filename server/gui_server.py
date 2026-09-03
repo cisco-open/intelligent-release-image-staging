@@ -381,6 +381,53 @@ def _swarm_page(body, limit, offset):
                 peers_offset=offset, peers_limit=limit)
 
 
+# ---- server-side filter parity for the Devices table (issue #112) --------
+# The console's filter bar offers seven controls: free-text q (already
+# server-side, above) plus six column filters -- management type, agent
+# install (platform), credential, telemetry, peer-quarantine and status --
+# and app.js filters every one of them client-side over the whole fleet
+# (deviceMatchesFilters, webroot/app.js). A paged table can only offer a
+# filter the server can also apply -- otherwise a page would silently
+# disagree with what the filter bar promises. _device_filter_params reads
+# the six off the query string; Handler._row_matches_extra_filters (below,
+# next to _row_matches_q) applies them, deliberately mirroring
+# deviceMatchesFilters condition-for-condition so the two can never decide
+# a row differently.
+_DEVICE_FILTER_PARAM_NAMES = ("management_type", "platform", "cred",
+                              "telemetry", "peer", "status")
+
+
+def _device_filter_params(qs):
+    """{name: value} for every column filter present and non-blank in *qs*.
+    Absent/blank means "no opinion", same as the dropdown's own "<field>:
+    any" option -- there is nothing to validate here; a value naming no real
+    option (a stale bookmark, a hand-edited URL) simply matches zero rows,
+    exactly like an empty-fleet q."""
+    out = {}
+    for name in _DEVICE_FILTER_PARAM_NAMES:
+        raw = (qs.get(name) or [None])[0]
+        if raw:
+            out[name] = raw
+    return out
+
+
+# Mirrors app.js's STATUS_LEVELS (the 12-level Magnetic mapping) just far
+# enough to answer "is this row's status one of negative/severe/warning" for
+# the __attention rollup filter -- the console still owns the full label/
+# icon rendering.
+_STATUS_LEVELS = {
+    "onboarding": "progress", "undeploying": "progress",
+    "copying": "progress", "staging": "progress",
+    "waiting-heartbeat": "info",
+    "onboard-failed": "negative", "undeploy-failed": "negative",
+    "placement-failed": "negative",
+    "deployed": "positive", "enrolled": "positive",
+    "image-failed": "warning",
+    "unassigned": "inactive", "not-enrolled": "inactive",
+    "offline": "inactive",
+}
+
+
 # ---- persisted deploy logs (written by OnboardService._persist_log) -------
 # Filename: <finished_at>-<sanitized device>-<action>-<jobid>.log; first line
 # is a "# job=... device=<raw id> ..." header. The header is authoritative
@@ -890,6 +937,18 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     device_id for device_id, acl in doc.get("assignments", {}).items()
                     if acl == peer_policy.RESERVED_QUARANTINE),
                 "enforcement": enforcement}
+
+    def quarantine_assignment_ids():
+        """The bare set of device ids under quarantine intent -- what the
+        console's peer-policy filter (?peer=quarantined/not-quarantined)
+        needs, without policy_view()'s enforcement-status read. Read ONLY
+        when a caller actually asks for the peer filter (_device_page), so a
+        /api/devices poll that never touches it costs nothing extra."""
+        auth_path, lkg_path, _ = policy_paths()
+        result = peer_policy.load_policy(auth_path, lkg_path)
+        return {device_id for device_id, acl in
+                result.document.get("assignments", {}).items()
+                if acl == peer_policy.RESERVED_QUARANTINE}
 
     class Handler(BaseHTTPRequestHandler):
         timeout = 60  # socket inactivity timeout (s): a stalled upload frees its thread
@@ -1492,7 +1551,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 q = (qs.get("q") or [None])[0]
                 if q is not None:
                     q = q.strip().lower() or None
-                rows, total, revision = self._device_page(limit, offset, q)
+                filters = _device_filter_params(qs)
+                rows, total, revision = self._device_page(limit, offset, q, filters)
                 # "now" rides along so last_seen freshness is computed
                 # server-clock-to-server-clock in the UI (skewed lab VMs).
                 # total/revision ride along on EVERY response, paged or not:
@@ -1786,12 +1846,14 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             aggregates and the unpaginated /api/devices are defined by."""
             return self._device_page()[0]
 
-        def _device_page(self, limit=None, offset=0, q=None):
+        def _device_page(self, limit=None, offset=0, q=None, filters=None):
             """(rows, total, revision) for the merged device projection.
 
-            *limit*/*offset* page it and *q* filters it (see _row_matches_q);
-            with all three at their defaults this is the full fleet in store
-            order, byte for byte what the console has always received.
+            *limit*/*offset* page it; *q* and *filters* (see _row_matches_q
+            and _row_matches_extra_filters -- the six column filters the
+            issue #112 prerequisite requires parity for) narrow it. With
+            everything at its default this is the full fleet in store order,
+            exactly what the console has always received.
 
             The page and the revision stamping it come from ONE fleet read
             (FleetStore.snapshot), so a client walking pages can tell a
@@ -1805,8 +1867,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             reason about "the next 200". Sorting is deliberately NOT applied
             to the unpaginated call, whose order is long-established.
             """
+            filters = filters or {}
             revision, devs = fleet.snapshot() if fleet else (0, [])
-            paging = limit is not None or offset or q is not None
+            active_filter = q is not None or bool(filters)
+            paging = limit is not None or offset or active_filter
             if paging:
                 devs.sort(key=lambda d: str(d.get("device_id") or ""))
             hb = {d.get("device_id"): d for d in (catalog.list_devices()
@@ -1819,7 +1883,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             # the file per call, which multiplies badly on the polled endpoints
             policies = catalog.list_policies() if catalog else {}
 
-            if q is None:
+            if not active_filter:
                 # Nothing to count that the inventory does not already know,
                 # so merge ONLY the rows this page returns: at fleet scale
                 # the merge and the JSON encoding of the rows nobody asked
@@ -1830,12 +1894,20 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 return ([self._merge_device_row(d, policies, hb, jobs)
                          for d in window], total, revision)
 
-            # A filter reaches merged fields (heartbeat_model), so every row
-            # is merged to be counted; only the window is retained.
+            # A filter reaches merged fields (heartbeat_model, status), so
+            # every row is merged to be counted; only the window is
+            # retained. The peer-quarantine assignment set is read at most
+            # ONCE per call, and only when the peer filter is actually used.
+            quarantined_ids = (quarantine_assignment_ids()
+                               if "peer" in filters else None)
+            now = time.time()
             rows, total = [], 0
             for d in devs:
                 row = self._merge_device_row(d, policies, hb, jobs)
-                if not self._row_matches_q(row, q):
+                if q is not None and not self._row_matches_q(row, q):
+                    continue
+                if filters and not self._row_matches_extra_filters(
+                        row, filters, now, quarantined_ids):
                     continue
                 total += 1
                 if total > offset and (limit is None or len(rows) < limit):
@@ -1852,6 +1924,135 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                            ("device_id", "device_ip", "model",
                             "heartbeat_model")).lower()
             return q in hay
+
+        def _row_matches_extra_filters(self, row, filters, now, quarantined_ids):
+            """Server-side mirror of app.js deviceMatchesFilters (everything
+            besides q, which _row_matches_q already covers) -- kept
+            condition-for-condition in step with it so a paged, filtered
+            table can never disagree with what the filter bar promises
+            (issue #112 prerequisite 1). quarantined_ids is the peer-policy
+            quarantine-assignment set, or None when the peer filter is not
+            in play (it is never consulted in that case)."""
+            mtype = filters.get("management_type")
+            if mtype:
+                # Mirrors managementTypeLabel/deviceMatchesFilters' own
+                # legacy_routed/legacy equivalence: the wire value for an
+                # unclassified device is always the truthy "legacy_routed".
+                raw = row.get("management_type")
+                actual = "legacy" if (raw == "legacy_routed" or not raw) else raw
+                if actual != mtype:
+                    return False
+            platform = filters.get("platform")
+            if platform:
+                plat = row.get("platform") or ""
+                if platform == "__none":
+                    if plat != "":
+                        return False
+                elif plat != platform:
+                    return False
+            cred = filters.get("cred")
+            if cred:
+                c = row.get("credential_profile_id") or ""
+                if cred == "__none":
+                    if c != "":
+                        return False
+                elif c != cred:
+                    return False
+            telemetry = filters.get("telemetry")
+            if telemetry:
+                # Same tri-state as the console's telemetryCell/filter:
+                # "on" only once the device has actually reported it.
+                if row.get("telemetry_enabled") is False:
+                    tel = "off"
+                elif (row.get("telemetry_enabled") is True
+                      or isinstance(row.get("telemetry_stream_enabled"), bool)):
+                    tel = "on"
+                else:
+                    tel = "unknown"
+                if tel != telemetry:
+                    return False
+            peer = filters.get("peer")
+            if peer:
+                q = ("quarantined"
+                     if row.get("device_id") in (quarantined_ids or ())
+                     else "not-quarantined")
+                if q != peer:
+                    return False
+            status = filters.get("status")
+            if status:
+                if status == "offline":
+                    if not self._device_is_offline(row, now):
+                        return False
+                elif status == "__attention":
+                    key = self._device_status_key(row)
+                    level = self._device_status_level(row, key)
+                    if level not in ("negative", "severe", "warning"):
+                        return False
+                elif self._device_status_key(row) != status:
+                    return False
+            return True
+
+        def _device_status_key(self, row):
+            """Server-side mirror of app.js deviceStatus()'s KEY derivation,
+            order and conditions copied verbatim -- the human label/detail/
+            css class stay a pure rendering concern the console still owns
+            alone; only the KEY, which the status filter and the
+            __attention rollup need to test against, is duplicated here."""
+            onboard_finished_at = row.get("onboard_finished_at")
+            last_seen = row.get("last_seen")
+            job_fresh = bool(onboard_finished_at) and (
+                not last_seen or last_seen < onboard_finished_at)
+            onboard_state = row.get("onboard_state")
+            onboard_action = row.get("onboard_action")
+            if onboard_state in ("queued", "running"):
+                return "undeploying" if onboard_action == "undeploy" else "onboarding"
+            if onboard_state == "done" and onboard_action == "onboard" and job_fresh:
+                return "waiting-heartbeat"
+            if onboard_state == "error" and job_fresh:
+                return ("undeploy-failed" if onboard_action == "undeploy"
+                        else "onboard-failed")
+            assigned_ids = self._row_assigned_ids(row)
+            errored_ids = [iid for iid in (row.get("errored_image_ids") or [])
+                          if iid in assigned_ids]
+            if (assigned_ids and not errored_ids and
+                    all(self._row_has_staged(row, iid) for iid in assigned_ids)):
+                return "deployed"
+            if errored_ids:
+                return "image-failed"
+            if row.get("stage_error"):
+                return "placement-failed"
+            if row.get("stage_state") == "transferring_to_ios":
+                return "copying"
+            if row.get("stage_state") == "unassigned":
+                return "unassigned"
+            if row.get("stage_state"):
+                return "staging"
+            if last_seen and not assigned_ids:
+                return "unassigned"
+            if last_seen:
+                return "enrolled"
+            return "not-enrolled"
+
+        @staticmethod
+        def _device_status_level(row, key):
+            """The Magnetic status LEVEL for a status key -- mirrors app.js
+            statusDisplay()'s severity override for image-failed (ratio of
+            errored to assigned images, >=0.5 is 'severe' else 'warning')
+            and falls back to _STATUS_LEVELS otherwise."""
+            if key == "image-failed":
+                assigned = Handler._row_assigned_ids(row)
+                errored = [iid for iid in (row.get("errored_image_ids") or [])
+                          if iid in assigned]
+                ratio = (len(errored) / len(assigned)) if assigned else 0
+                return "severe" if ratio >= 0.5 else "warning"
+            return _STATUS_LEVELS.get(key, "inactive")
+
+        @staticmethod
+        def _device_is_offline(row, now):
+            """Mirrors app.js deviceIsOffline: a device with a heartbeat that
+            is 10+ minutes stale by the SAME server clock every response
+            already carries (row's own last_seen against *now*)."""
+            return bool(row.get("last_seen")) and (now - row["last_seen"]) >= 600
 
         @staticmethod
         def _merge_device_row(d, policies, hb, jobs):
@@ -3224,6 +3425,36 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                                          plat or "(auto)"),
                            actor=actor)
                 self._json(200, {"ok": True}); return
+            if path.startswith("/api/devices/") and path.endswith("/forget-host-key"):
+                # A device that was re-imaged or replaced presents a NEW SSH
+                # host key; lab/iris-ssh-policy.sh's accept-new mode (correct
+                # trust-on-first-use) then refuses every session with a
+                # changed-key error, and the persistent known_hosts recording
+                # the stale entry lives inside the IRIS state volume -- not
+                # somewhere an operator always has shell access to. This is
+                # a trust decision, so it is deliberate (one device, on
+                # request from the console) and always audited -- never a
+                # silent removal.
+                if fleet is None or onboard is None:
+                    self._json(404, {"error": "not found"}); return
+                did = unquote(path[len("/api/devices/"):-len("/forget-host-key")])
+                dev = fleet.get_device(did)
+                if dev is None:
+                    self._json(404, {"error": "no such device"}); return
+                ok, detail = onboard.forget_host_key(did)
+                if not ok:
+                    self._audit("device_forget_host_key", "device",
+                               action="forget-host-key", target=did,
+                               actor=actor, result="fail", detail=detail)
+                    self._json(400, {"error": detail}); return
+                # detail is the peer address on success -- name it in the
+                # audit trail alongside the device id and the actor, and the
+                # console's own confirmation.
+                self._audit("device_forget_host_key", "device",
+                           action="forget-host-key", target=did, actor=actor,
+                           detail="host key forgotten for %s; the next "
+                                  "session re-pins on first contact" % detail)
+                self._json(200, {"ok": True, "peer": detail}); return
             if path.startswith("/api/devices/") and path.endswith("/request-report"):
                 did = unquote(path[len("/api/devices/"):-len("/request-report")])
                 if not did.strip():

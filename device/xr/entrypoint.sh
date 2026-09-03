@@ -49,6 +49,27 @@ CONF="${IRIS_AGENT_CONF:-$WORK_DIR/iris-agent.conf}"
 STATE="${IRIS_AGENT_STATE:-$WORK_DIR/iris-agent.state}"
 RPC_PORT="${IRIS_RPC_PORT:-6800}"
 TICK="${IRIS_TICK_SECONDS:-60}"
+# Bounded per-device cadence jitter + failure backoff (issue #59): a fleet of
+# containers that starts, or restarts, together must not re-poll the catalog
+# in lockstep -- that is exactly what turns an ordinary tick into a
+# fleet-wide burst of policy GETs, heartbeats, and tracker re-announces.
+#   * JITTER_PCT dithers every ordinary tick +/-10% of TICK (54-66s at the
+#     60s default): enough that devices which started in the same second
+#     drift apart over a handful of ticks, small enough that the AVERAGE
+#     cadence -- and so token refresh / assignment convergence latency --
+#     barely moves.
+#   * a startup jitter (applied once, below, before the first tick) covers
+#     the worse case directly: many containers starting in the same second
+#     get their FIRST tick spread across the whole TICK window instead of
+#     firing together.
+#   * BACKOFF_MAX bounds the OTHER case -- the agent process itself failing
+#     outright (catalog unreachable, timed out, or answering a non-2xx
+#     status, the same shape a saturated server produces). See
+#     next_tick_sleep below. Comfortably inside the token's multi-day
+#     refresh slack (iris_agent.py's needs_refresh docstring), so a run of
+#     backed-off ticks never strands the device.
+JITTER_PCT="${IRIS_TICK_JITTER_PCT:-10}"
+BACKOFF_MAX="${IRIS_TICK_BACKOFF_MAX:-600}"
 MAX_PEERS="${IRIS_MAX_PEERS:-10}"
 ARIA2="/opt/iris/bin/aria2c"
 AGENT="/opt/iris/agent/iris_agent.py"
@@ -375,8 +396,38 @@ rpc_healthy() {
   rpc_probe "$1" || return 1
 }
 
+# rand_below N -- uniform 0..N-1. Shells out to python3, which is already a
+# hard dependency of every tick below: this avoids relying on $RANDOM, a
+# bash/ksh extension not all Alpine ash/busybox builds provide.
+rand_below() {
+  python3 -c 'import random,sys; print(random.randrange(int(sys.argv[1])))' "$1"
+}
+
+# next_tick_sleep FAIL_STREAK -- seconds to sleep before the next tick.
+#   FAIL_STREAK=0 (the ordinary path): TICK dithered by +/-JITTER_PCT%, see
+#   the block above.
+#   FAIL_STREAK>0: the tick that just ran failed outright (see the loop
+#   below). Back off exponentially from TICK, capped at BACKOFF_MAX, still
+#   jittered the same way so a batch of devices that failed together does
+#   not retry together either.
+next_tick_sleep() {
+  streak="${1:-0}"
+  base="$TICK"
+  if [ "$streak" -gt 0 ]; then
+    [ "$streak" -le 10 ] || streak=10   # 2**10 * TICK is already far past BACKOFF_MAX
+    mult=1; i=0
+    while [ "$i" -lt "$streak" ]; do mult=$((mult * 2)); i=$((i + 1)); done
+    base=$((TICK * mult))
+    [ "$base" -le "$BACKOFF_MAX" ] || base="$BACKOFF_MAX"
+  fi
+  spread=$(( (base * JITTER_PCT) / 100 ))
+  [ "$spread" -gt 0 ] || spread=1
+  echo $((base - spread + $(rand_below $((spread * 2 + 1)))))
+}
+
 AGENT_PID=""
 SLEEP_PID=""
+FAIL_STREAK=0
 
 stop_agent() {
   trap - TERM INT
@@ -393,6 +444,22 @@ stop_agent() {
 trap stop_agent TERM INT
 
 echo "IRIS-ENTRYPOINT: starting; stage=$STAGE_DIR conf=$CONF tick=${TICK}s"
+
+# Spread a fleet-wide simultaneous restart across the whole tick window
+# before the FIRST tick -- the case the steady-state dither above only
+# corrects gradually. IRIS_STARTUP_JITTER=0 skips it (a single-device debug
+# session watching for the first tick to fire).
+if [ "${IRIS_STARTUP_JITTER:-1}" != "0" ] && [ "$TICK" -gt 0 ]; then
+  startup_jitter="$(rand_below "$TICK")"
+  if [ "$startup_jitter" -gt 0 ]; then
+    echo "IRIS-ENTRYPOINT: startup jitter ${startup_jitter}s"
+    sleep "$startup_jitter" &
+    SLEEP_PID=$!
+    wait "$SLEEP_PID" || true
+    SLEEP_PID=""
+  fi
+fi
+
 cur=""
 while true; do
   want="$(read_secret)"
@@ -410,10 +477,16 @@ while true; do
   AGENT_PID=$!
   if ! wait "$AGENT_PID"; then
     echo "IRIS-ENTRYPOINT: agent tick returned non-zero"
+    FAIL_STREAK=$((FAIL_STREAK + 1))
+  else
+    FAIL_STREAK=0
   fi
   AGENT_PID=""
 
-  sleep "$TICK" &
+  sleep_for="$(next_tick_sleep "$FAIL_STREAK")"
+  [ "$FAIL_STREAK" -eq 0 ] \
+    || echo "IRIS-ENTRYPOINT: backing off ${sleep_for}s (failure streak $FAIL_STREAK)"
+  sleep "$sleep_for" &
   SLEEP_PID=$!
   wait "$SLEEP_PID" || true
   SLEEP_PID=""

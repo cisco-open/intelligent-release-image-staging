@@ -118,3 +118,38 @@ STUBEOF
     "printf 'show clock\n' | bash '$RUN' 192.0.2.10"
   [ "$status" -eq 23 ]
 }
+
+# --- interactive install-subsystem commands are refused (#120) -------------
+# `install remove inactive` waits on a [y/n] prompt. This transport feeds
+# stdin ahead of the prompt, so the answer is lost and the session drops while
+# the operation is still open; the switch then refuses every later install
+# operation until it is reloaded, with nothing in `show install log` to say
+# why. stk03-fiab2 sat wedged that way for six days. IRIS's own reclaim path
+# drives the command from an EEM applet with pattern "[y/n]" instead.
+
+@test "an interactive install command is refused before any connection" {
+  run bash -c 'printf "install remove inactive\n" | DEVICE_USER=u DEVICE_PASS=p \
+      "'"$BATS_TEST_DIRNAME"'/../../lab/device-run.sh" 192.0.2.99'
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"refusing an interactive install-subsystem command"* ]]
+  [[ "$output" == *"EEM applet"* ]]        # names the idiom that does work
+  [[ "$output" != *"Connection"* ]]        # never dialled the device
+}
+
+@test "the refusal is not fooled by a do- prefix or leading whitespace" {
+  for cmd in "do install add file flash:x.bin" "   install activate" \
+             "INSTALL COMMIT" "install rollback to committed"; do
+    run bash -c 'printf "%s\n" "$1" | DEVICE_USER=u DEVICE_PASS=p \
+        "'"$BATS_TEST_DIRNAME"'/../../lab/device-run.sh" 192.0.2.99' _ "$cmd"
+    [ "$status" -eq 2 ]
+  done
+}
+
+@test "read-only show install commands are still allowed through" {
+  # The guard must not block looking, only mutating -- diagnosing a wedged
+  # switch needs `show install log` to work.
+  run bash -c 'printf "show install log\n" | DEVICE_USER=u DEVICE_PASS=p \
+      "'"$BATS_TEST_DIRNAME"'/../../lab/device-run.sh" 192.0.2.99'
+  [ "$status" -ne 2 ]
+  [[ "$output" != *"refusing an interactive install-subsystem command"* ]]
+}
